@@ -760,3 +760,83 @@ def encode_keys(layout: SortKeyLayout, lo: Int, hi: Int) raises -> KeyBlock:
     _ = cursors^
     _ = lengths^
     return block^
+
+
+def _string_prefixes(
+    column: StringColumn,
+    c: SortKeyColumn,
+    first: Int,
+    count: Int,
+    out: Pointer[UInt64, MutAnyOrigin],
+):
+    """The first eight key bytes of string rows: the null/valid byte, then
+    up to seven bytes of the value encoded as `_encode_varchar` does and
+    its delimiter, zeros after (a lower bound of what follows)."""
+    var rows = _Bytes(column)
+    var nulls = c.nulls and column.null_count() > 0
+    var flip = UInt8(0xFF) if c.descending else UInt8(0)
+    for i in range(count):
+        var row = first + i
+        if nulls and not column._valid(row):
+            out[unsafe_offset=i] = UInt64(c.null_byte) << 56
+            continue
+        var word = UInt64(c.valid_byte) << 56
+        var bytes = rows.get(row)
+        var n = len(bytes)
+        for j in range(7):
+            var byte: UInt8
+            if j < n:
+                byte = (bytes.unsafe_ptr()[unsafe_offset=j] + 1) ^ flip
+            elif j == n:
+                byte = flip
+            else:
+                break
+            word |= UInt64(byte) << UInt64(48 - 8 * j)
+        out[unsafe_offset=i] = word
+
+
+def key_prefixes(
+    layout: SortKeyLayout, lo: Int, hi: Int, mut out: List[UInt64]
+) raises -> Bool:
+    """For rows [lo, hi), a lower bound of each key's first word (the
+    record's `part0`) from the first key column alone, as unsigned
+    integers; False when the first column gives none (binary keys). A
+    row whose bound exceeds a boundary key's first word is worse than
+    that key: CheckBoundaryValues on the first sort column."""
+    ref c = layout.columns[0]
+    var n = hi - lo
+    if c.encoding == _ENC_BLOB or c.encoding == _ENC_ROW:
+        return False
+    out = List[UInt64](length=max(1, n), fill=0)
+    var at = Pointer[UInt64, MutAnyOrigin](
+        unsafe_from_address=Int(out.unsafe_ptr())
+    )
+    if c.encoding == _ENC_VARCHAR:
+        for piece in _for_parts(c.series, lo, hi):
+            _string_prefixes(
+                piece[0]._data[StringColumn],
+                c,
+                piece[1],
+                piece[2],
+                at.unsafe_offset(piece[3]),
+            )
+        return True
+    # A fixed-width value encodes into at most 17 bytes: three words a row.
+    var scratch = List[UInt64](length=max(1, 3 * n), fill=0)
+    var base = Int(scratch.unsafe_ptr())
+    var cursors = List[Int](unsafe_uninit_length=max(1, n))
+    for i in range(n):
+        cursors[i] = base + 24 * i
+    var cursor = Pointer[Int, MutAnyOrigin](
+        unsafe_from_address=Int(cursors.unsafe_ptr())
+    )
+    for piece in _for_parts(c.series, lo, hi):
+        _encode_part(
+            piece[0], c, piece[1], piece[2], cursor.unsafe_offset(piece[3])
+        )
+    var words = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=base)
+    for i in range(n):
+        at[unsafe_offset=i] = byte_swap(words[unsafe_offset=3 * i])
+    _ = cursors^
+    _ = scratch^
+    return True

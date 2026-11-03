@@ -43,6 +43,7 @@ from dataframe.sorting.sort_key import (
     KeyBlock,
     SortKeyLayout,
     encode_keys,
+    key_prefixes,
 )
 
 # topn_optimizer.cpp, TopN::CanOptimize: a limit over this many rows and
@@ -337,8 +338,17 @@ struct _TopNJob[W: Int, VAR: Bool](Job):
             unsafe_from_address=self.layout
         )[]
         var at = self.lo
+        var prefixes = List[UInt64]()
         while at < self.hi:
             var end = min(self.hi, at + STANDARD_VECTOR_SIZE)
+            if key_prefixes(
+                layout, at, end, prefixes
+            ) and not self.heap.can_enter[Self.W, Self.VAR](
+                prefixes, end - at
+            ):
+                # No row of the vector can be in the result.
+                at = end
+                continue
             var block = encode_keys(layout, at, end)
             self.heap.sink[Self.W, Self.VAR](block)
             self.heap.publish[Self.W, Self.VAR](self.boundary)

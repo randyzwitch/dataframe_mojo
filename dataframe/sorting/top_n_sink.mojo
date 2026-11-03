@@ -15,6 +15,7 @@ from dataframe.sorting.sort_key import (
     KeyBlock,
     SortKeyLayout,
     encode_keys,
+    key_prefixes,
 )
 from dataframe.sorting.algorithms import SortKeys
 from dataframe.sorting.top_n import TopNBoundary, TopNHeap
@@ -93,8 +94,15 @@ struct TopNSink(Movable):
         var matches = List[Int]()
         var at = 0
         var n = frame.height()
+        var prefixes = List[UInt64]()
         while at < n:
             var end = min(n, at + STANDARD_VECTOR_SIZE)
+            if key_prefixes(
+                self.layout, at, end, prefixes
+            ) and not self.heap.can_enter[W, VAR](prefixes, end - at):
+                # No row of the vector can be in the result.
+                at = end
+                continue
             var block = encode_keys(self.layout, at, end)
             _sink_rows[W, VAR](self.heap, block, self.payload_rows, matches)
             _ = block^

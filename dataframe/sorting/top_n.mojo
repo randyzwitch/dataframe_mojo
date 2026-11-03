@@ -333,6 +333,33 @@ struct TopNHeap(Movable):
             shared.publish[W, VAR](self.keys[W, VAR]().get(0))
         self.view.refresh[W, VAR](shared)
 
+    def bound_word[W: Int, VAR: Bool](self) -> Tuple[Bool, UInt64]:
+        """The first key word no entering row can exceed: the full heap's
+        worst key's, or the shared boundary's when tighter."""
+        var has = False
+        var word = UInt64.MAX
+        if self.full():
+            has = True
+            word = self.keys[W, VAR]().part0(0)
+        if self.view.version != 0:
+            has = True
+            word = min(word, self.view.rec[0])
+        return (has, word)
+
+    def can_enter[
+        W: Int, VAR: Bool
+    ](self, prefixes: List[UInt64], count: Int) -> Bool:
+        """CheckBoundaryValues on a vector's first sort column: whether
+        any row's first key word can be at or below the bound (`prefixes`
+        bound each row's from below)."""
+        var bound = self.bound_word[W, VAR]()
+        if not bound[0]:
+            return True
+        for i in range(count):
+            if prefixes[i] <= bound[1]:
+                return True
+        return False
+
     def payloads[W: Int, VAR: Bool](self) -> List[Int]:
         var k = self.keys[W, VAR]()
         var rows = List[Int](capacity=self.size)
