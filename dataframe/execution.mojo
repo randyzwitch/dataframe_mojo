@@ -129,17 +129,8 @@ from .categorical import (
     decode,
     encode,
     gather,
-    sort_ranks as categorical_sort_ranks,
 )
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
-from dataframe.kernels.hashing import (
-    RowKeys,
-    _encode_dense,
-    _encode_dense_chunks,
-    encode_rows,
-    encode_rows_parallel,
-)
-from dataframe.kernels.partition import encode_partitioned, low_cardinality
 from dataframe.kernels.distinct import distinct_counts
 from .window import window_op, interpolate_by_op, rolling_by_op
 from dataframe.kernels.fusion import fused
@@ -153,7 +144,7 @@ from dataframe.storage.column import (
 )
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.text.predicates import _flip
-from .series import Series, sort_indices
+from .series import Series
 from .sequence import select_sequence
 from dataframe.kernels.binary import (
     binary,
@@ -3116,39 +3107,23 @@ def _full[
     return result^
 
 
-def _dense_partitions(keys: List[Series]) raises -> Optional[RowKeys]:
-    """Partition ids by direct lookup for one integer key whose values span
-    few enough integers; None otherwise."""
-    if len(keys) != 1:
-        return None
-    return _encode_dense(keys[0], True) if not keys[0].is_chunked() else (
-        _encode_dense_chunks(keys[0], True)
-    )
-
-
-# Imported here, not with the others: a recorded process-failure diagnostic
-# in tests/tooling/suite_policy.mojo names a line number above.
-from dataframe.aggregation.hash_table import key_supported, table_row_keys
 from dataframe.kernels.gather import take_parallel
 from .parallel import configured_workers
-from .window_layout import PartitionLayout, keyed_layout, partition_layout
-
-
-# Rows per block of a window's work: DuckDB evaluates windows in vectors of
-# STANDARD_VECTOR_SIZE (2048) rows and gives each thread whole blocks.
-comptime _WINDOW_BLOCK = 2048
+from .window_sort import WindowLayout, window_layout
 
 
 struct WindowLayouts(Movable):
-    """Partition layouts for a frame's window expressions. Expressions
-    using the same keys in a `with_columns` share one row layout."""
+    """Window layouts for a frame's window expressions. Expressions with the
+    same partition and order keys in a `with_columns` share one sorted
+    layout, as DuckDB's PhysicalWindow evaluates every window function of
+    one partitioning and ordering over one sort."""
 
     var keys: List[String]
-    var layouts: List[PartitionLayout]
+    var layouts: List[WindowLayout]
 
     def __init__(out self):
         self.keys = List[String]()
-        self.layouts = List[PartitionLayout]()
+        self.layouts = List[WindowLayout]()
 
     def find(self, keys: String) -> Int:
         for k in range(len(self.keys)):
@@ -3157,42 +3132,61 @@ struct WindowLayouts(Movable):
         return -1
 
 
-def _partition_ids(keys: List[Series], height: Int) raises -> RowKeys:
-    """Partition ids of `keys`' rows: consistent, not in first-occurrence
-    order (#387)."""
-    # Few distinct keys encode row ranges and merge (#336); many encode one
-    # hash bucket at a time. One thread numbering 5M partition keys was
-    # most of H2O q8 at k2.
-    var workers = worker_count(height)
-    # One integer key over a small span numbers by direct lookup in one
-    # pass, faster than either parallel route (TPC-DS q51's 611K item keys:
-    # 8 ms partitioned).
-    var dense = _dense_partitions(keys)
-    if dense:
-        return dense.take()
-    if workers <= 1:
-        # On one thread, the aggregate table's hashing numbers partitions
-        # without a row-encoded copy of string keys (TPC-DS q47's four
-        # string partition keys: three quarters of its window step went to
-        # encoding them).
-        var supported = True
-        for key in keys:
-            supported = supported and key_supported(key)
-        if supported:
-            return table_row_keys(keys)
-        return encode_rows(keys, nulls_equal=True)
-    if low_cardinality(keys):
-        return encode_rows_parallel(keys, True, workers)
-    return encode_partitioned(keys, workers, nulls_equal=True)
+def _layout_key(node: Node) -> String:
+    """What a window's layout depends on: its partition keys, and its order
+    keys with their direction and null placement."""
+    var key = node.text2 + "\x1f"
+    if node.min_count > 0:
+        key += node.text + "\x1f" + String(node.integer & 3)
+    return key^
+
+
+def _layout_index(
+    node: Node, columns: List[Series], height: Int, cache_address: Int
+) raises -> Int:
+    """The index of `node`'s layout in the cache at `cache_address`, built
+    on first use."""
+    var cache = Pointer[WindowLayouts, MutAnyOrigin](
+        unsafe_from_address=cache_address
+    )
+    var key = _layout_key(node)
+    var at = cache[].find(key)
+    if at >= 0:
+        return at
+    var partition_keys = List[Series]()
+    if (node.integer & OVER_GLOBAL) == 0:
+        for name in split_names(node.text2):
+            for column in columns:
+                if column.name() == name:
+                    partition_keys.append(column.copy())
+    var order_keys = List[Series]()
+    if node.min_count > 0:
+        for name in split_names(node.text):
+            for column in columns:
+                if column.name() == name:
+                    order_keys.append(column.copy())
+    var descending = List[Bool](
+        length=len(order_keys), fill=(node.integer & 1) != 0
+    )
+    var nulls_last = List[Bool](
+        length=len(order_keys), fill=(node.integer & 2) != 0
+    )
+    cache[].keys.append(key)
+    cache[].layouts.append(
+        window_layout(
+            partition_keys, order_keys, descending, nulls_last, height
+        )
+    )
+    return len(cache[].layouts) - 1
 
 
 def _crosses_partitions(bound: BoundExpr, keys: String) -> Bool:
     """Whether a nested over() in `bound` can see rows outside one
     partition of `keys`: a global one, or one partitioned without every
     key. A nested over() partitioned by all of them (perhaps more) splits
-    each partition further, so a run of whole partitions holds its rows,
-    as DuckDB evaluates a window whose partition keys extend another's
-    within the other's sorted partitions."""
+    each partition further, so a hash group holds its rows, as DuckDB
+    evaluates a window whose partition keys extend another's within the
+    other's sorted partitions."""
     var outer = split_names(keys)
     for node in bound.expr._nodes:
         if node.op != OVER:
@@ -3210,9 +3204,9 @@ def _crosses_partitions(bound: BoundExpr, keys: String) -> Bool:
 
 
 struct _OverJob(Job):
-    """One run of whole partitions, contiguous in the layout, evaluated on
-    its own: the rows [lo, hi) of the gathered columns, partitions
-    [first, last)."""
+    """One hash group of the layout, evaluated on its own: the rows
+    [lo, hi) of the gathered columns, partitions [first, last) (the
+    GETDATA stage of one WindowHashGroup)."""
 
     var inner: BoundExpr
     var columns: List[Series]
@@ -3248,17 +3242,23 @@ struct _OverJob(Job):
     def run(mut self) raises:
         var starts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.starts)
         var rows = self.hi - self.lo
+        var whole = (
+            self.lo == 0
+            and len(self.columns) > 0
+            and rows == len(self.columns[0])
+        )
         var part = List[Series](capacity=len(self.columns))
         for column in self.columns:
-            part.append(column.slice(self.lo, rows))
-        # The run's partitions, numbered from 0 in layout order.
-        var groups = List[Int](length=rows, fill=0)
+            part.append(column.copy() if whole else column.slice(self.lo, rows))
+        # The group's partitions, numbered from 0 in layout order.
+        var groups = List[Int](unsafe_uninit_length=rows)
+        var ids = groups.unsafe_ptr()
         for g in range(self.first, self.last):
             for k in range(
                 starts[unsafe_offset=g] - self.lo,
                 starts[unsafe_offset=g + 1] - self.lo,
             ):
-                groups[k] = g - self.first
+                ids[unsafe_offset=k] = g - self.first
         self.result = evaluate(
             self.inner,
             part,
@@ -3270,40 +3270,16 @@ struct _OverJob(Job):
         )
 
 
-def _over_contiguous[
-    width: Int
-](
-    bound: BoundExpr,
-    index: Int,
-    columns: List[Series],
-    layout: PartitionLayout,
-    height: Int,
-    lanes: Int,
-    batch_size: Int,
-) raises -> Optional[Series]:
-    """Evaluate `over()` on contiguous partitions, processing runs of
-    partitions in parallel. Return None when the rows make a single run,
-    which the row-order route can evaluate directly."""
-    ref node = bound.expr._nodes[index]
-    # Runs of whole partitions of about a quarter of a worker's share.
-    var target = max(_WINDOW_BLOCK, (height + 4 * lanes - 1) // (4 * lanes))
-    var cuts = List[Int]()
-    cuts.append(0)
-    var since = 0
-    for g in range(layout.count):
-        if layout.starts[g] - since >= target:
-            cuts.append(g)
-            since = layout.starts[g]
-    cuts.append(layout.count)
-    if len(cuts) <= 2:
-        return None
-    # The columns the expression reads, gathered into layout order.
-    var probe = bind(subtree(bound.expr, node.left), columns)
+def _used_columns(
+    bound: BoundExpr, node_left: Int, columns: List[Series]
+) raises -> List[Bool]:
+    """Which columns the expression under an over() reads, a nested
+    over()'s partition and order columns included."""
+    var probe = bind(subtree(bound.expr, node_left), columns)
     var used = List[Bool](length=len(columns), fill=False)
     for source in probe.sources:
         if source >= 0:
             used[source] = True
-    # A nested over() finds its partition and order columns by name.
     for nested in probe.expr._nodes:
         if nested.op != OVER:
             continue
@@ -3314,66 +3290,7 @@ def _over_contiguous[
             for c in range(len(columns)):
                 if columns[c].name() == name:
                     used[c] = True
-    var reads = List[Series]()
-    for c in range(len(columns)):
-        if used[c]:
-            reads.append(columns[c].copy())
-    var gathered = reads.copy() if layout.in_place else take_parallel(
-        reads, layout.order.copy(), lanes
-    )
-    var inner = bind(subtree(bound.expr, node.left), gathered)
-    var jobs = List[_OverJob](capacity=len(cuts) - 1)
-    for r in range(len(cuts) - 1):
-        jobs.append(
-            _OverJob(
-                inner,
-                gathered,
-                Int(layout.starts.unsafe_ptr()),
-                cuts[r],
-                cuts[r + 1],
-                layout.starts[cuts[r]],
-                layout.starts[cuts[r + 1]],
-                batch_size,
-            )
-        )
-    run_jobs(jobs)
-    var parts = List[Series](capacity=len(jobs))
-    for k in range(len(jobs)):
-        parts.append(jobs[k].result.copy())
-    var dtype = parts[0].dtype()
-    for k in range(len(parts)):
-        if parts[k].dtype() != dtype:
-            parts[k] = parts[k].cast(dtype)
-    var combined = Series._from_chunks(parts)
-    combined._name = parts[0].name()
-    # Row results go back to row order; one value per partition is spread
-    # to its rows.
-    if inner.shape() == ROWS and layout.in_place:
-        return combined.rechunk()
-    var rows = layout.inverse.copy() if inner.shape() == ROWS else (
-        layout.ids.copy()
-    )
-    var spread = take_parallel([combined^], rows^, lanes)
-    return spread[0].copy()
-
-
-def _ordered_window_rows(
-    node: Node, columns: List[Series], ids: List[Int]
-) raises -> List[Int]:
-    var ranks = List[List[Int]]()
-    ranks.append(ids.copy())
-    for name in split_names(node.text):
-        for column in columns:
-            if column.name() == name:
-                var key = categorical_sort_ranks(
-                    column
-                ) if column.dtype().is_categorical() else column.copy()
-                ranks.append(
-                    key._sort_ranks(
-                        (node.integer & 1) != 0, (node.integer & 2) != 0
-                    )
-                )
-    return sort_indices(ranks)
+    return used^
 
 
 def _over_mapped[
@@ -3384,41 +3301,43 @@ def _over_mapped[
     index: Int,
     height: Int,
     batch_size: Int,
+    layout: WindowLayout,
 ) raises -> Series:
+    """over() with the join or explode mapping: each partition's result in
+    the order partitions first appear in the input."""
     ref node = bound.expr._nodes[index]
     var inner = bind(subtree(bound.expr, node.left), columns)
-    var keys = List[Series]()
-    if (node.integer & OVER_GLOBAL) == 0:
-        for name in split_names(node.text2):
-            for column in columns:
-                if column.name() == name:
-                    keys.append(column.copy())
-    var ids = List[Int](length=height, fill=0)
-    var count = 1 if height > 0 else 0
-    if len(keys) > 0:
-        var encoded = _partition_ids(keys, height)
-        ids = encoded.ids.copy()
-        count = encoded.count()
-    var rows = List[List[Int]](length=count, fill=List[Int]())
-    if node.min_count > 0:
-        var order = _ordered_window_rows(node, columns, ids)
-        for row in order:
-            rows[ids[row]].append(row)
-    else:
-        for row in range(height):
-            rows[ids[row]].append(row)
-    var parts = List[Series](capacity=count)
-    for group in rows:
-        var input = List[Series](capacity=len(columns))
-        for column in columns:
-            input.append(column.take(group))
+    var gathered = columns.copy() if layout.in_place else take_parallel(
+        columns, layout.order.copy(), configured_workers()
+    )
+    # Partitions by their first input row.
+    var first = List[Int](length=height, fill=-1)
+    for p in range(layout.count):
+        var lowest = height
+        for k in range(layout.starts[p], layout.starts[p + 1]):
+            lowest = min(lowest, layout.order[k])
+        first[lowest] = p
+    var appearance = List[Int](length=layout.count, fill=0)
+    var sequence = List[Int](capacity=layout.count)
+    for row in range(height):
+        if first[row] >= 0:
+            appearance[first[row]] = len(sequence)
+            sequence.append(first[row])
+    var parts = List[Series](capacity=layout.count)
+    for p in sequence:
+        var lo = layout.starts[p]
+        var rows = layout.starts[p + 1] - lo
+        var input = List[Series](capacity=len(gathered))
+        for column in gathered:
+            input.append(column.slice(lo, rows))
         var local = bind(subtree(bound.expr, node.left), input)
-        var value = evaluate[width](
-            local, input, len(group), batch_size=batch_size
-        )
+        var value = evaluate[width](local, input, rows, batch_size=batch_size)
         if value.dtype() != bound.dtypes[node.left]:
             value = value.cast(bound.dtypes[node.left])
         parts.append(value^)
+    var ids = List[Int](capacity=height)
+    for row in range(height):
+        ids.append(appearance[layout.row_partition[row]])
     var prototype = parts[0].slice(0, 0) if len(parts) > 0 else _empty_output(
         inner, columns, len(inner.expr._nodes) - 1
     )
@@ -3444,116 +3363,103 @@ def _over[
     batch_size: Int,
     layouts: Int = 0,
 ) raises -> Series:
-    """Evaluate a node's child per partition and align results to rows."""
+    """Evaluate a node's child per partition and align results to rows.
+
+    DuckDB's PhysicalWindow: the rows are hash-partitioned and each hash
+    group sorted by partition and order keys (`window_layout`); the columns
+    the child reads are gathered into that order once; hash groups are
+    evaluated in parallel, each on its own whole partitions; and results go
+    back to row order through the inverse permutation."""
     ref node = bound.expr._nodes[index]
     var inner = bind(subtree(bound.expr, node.left), columns)
-    if (node.integer & OVER_MAPPING_MASK) != 0:
-        return _over_mapped[width](bound, columns, index, height, batch_size)
-    if inner.shape() == SCALAR:
+    var mapped = (node.integer & OVER_MAPPING_MASK) != 0
+    if inner.shape() == SCALAR and not mapped:
         var scalar = evaluate[width](
             inner, columns, height, batch_size=batch_size
         )
         return scalar._broadcast(height)
-    var keys = List[Series]()
-    if (node.integer & OVER_GLOBAL) == 0:
-        for part in split_names(node.text2):
-            for column in columns:
-                if column.name() == part:
-                    keys.append(column.copy())
-    if node.min_count > 0:
-        # Sort row positions by partition then by the requested keys. The
-        # stable frame sorter preserves input order on ties. Gather all
-        # columns so nested windows retain their own key dependencies.
-        var ids = List[Int](length=height, fill=0)
-        var count = 1 if height > 0 else 0
-        if len(keys) > 0:
-            var encoded = _partition_ids(keys, height)
-            ids = encoded.ids.copy()
-            count = encoded.count()
-        var order = _ordered_window_rows(node, columns, ids)
-        var inverse = List[Int](length=height, fill=0)
-        var ordered_ids = List[Int](capacity=height)
-        for at in range(height):
-            inverse[order[at]] = at
-            ordered_ids.append(ids[order[at]])
-        var gathered = take_parallel(columns, order^, configured_workers())
-        var ordered_inner = bind(subtree(bound.expr, node.left), gathered)
-        var result = evaluate[width](
-            ordered_inner,
-            gathered,
-            height,
-            batch_size=batch_size,
-            grouped=True,
-            groups=ordered_ids,
-            group_count=count,
-        )
-        return result.take(inverse if inner.shape() == ROWS else ids)
-    # Whole partitions laid out contiguously and evaluated many at once,
-    # when the rows fill more than one block per thread. A nested over()
-    # that partitions across these partitions keeps the row-order route.
-    var lanes = min(configured_workers(), height // _WINDOW_BLOCK)
-    if lanes > 1 and not _crosses_partitions(inner, node.text2):
-        var owned = WindowLayouts()
-        var cache = Pointer[WindowLayouts, MutAnyOrigin](
-            unsafe_from_address=layouts if layouts
-            != 0 else Int(Pointer(to=owned))
-        )
-        var at = cache[].find(node.text2)
-        if at < 0:
-            var dense = _dense_partitions(keys)
-            cache[].keys.append(node.text2)
-            if dense:
-                var ids = dense.take()
-                cache[].layouts.append(
-                    partition_layout(ids.ids.copy(), ids.count(), lanes)
-                )
-            else:
-                cache[].layouts.append(keyed_layout(keys, lanes))
-            at = len(cache[].layouts) - 1
-        var done = _over_contiguous[width](
-            bound,
-            index,
-            columns,
-            cache[].layouts[at],
-            height,
-            lanes,
-            batch_size,
+    var owned = WindowLayouts()
+    var cache_address = layouts if layouts != 0 else Int(Pointer(to=owned))
+    var at = _layout_index(node, columns, height, cache_address)
+    var cache = Pointer[WindowLayouts, MutAnyOrigin](
+        unsafe_from_address=cache_address
+    )
+    ref layout = cache[].layouts[at]
+    if mapped:
+        var result = _over_mapped[width](
+            bound, columns, index, height, batch_size, layout
         )
         _ = owned^
-        if done:
-            trace_path("window.contiguous")
-            return done.take()
-    # Partition ids from the frame's layout of these keys when one was
-    # made for another expression; computed otherwise.
-    var ids = List[Int]()
-    var count = 0
-    if layouts != 0:
-        var cache = Pointer[WindowLayouts, MutAnyOrigin](
-            unsafe_from_address=layouts
-        )
-        var at = cache[].find(node.text2)
-        if at >= 0:
-            ids = cache[].layouts[at].ids.copy()
-            count = cache[].layouts[at].count
-    if count == 0 and height > 0:
-        var partitions = _partition_ids(keys, height)
-        count = partitions.count()
-        ids = partitions.ids.copy()
-    # A nested over() reads the same rows, so it shares the frame's
-    # layouts (the contiguous route's runs read slices, and pass none).
-    var result = evaluate[width](
-        inner,
-        columns,
-        height,
-        batch_size=batch_size,
-        grouped=True,
-        groups=ids,
-        group_count=count,
-        layouts=layouts,
-    )
-    if inner.shape() == ROWS:
         return result^
-    return result.take(ids)
+    var lanes = configured_workers()
+    var used = _used_columns(bound, node.left, columns)
+    var reads = List[Series]()
+    for c in range(len(columns)):
+        if used[c]:
+            reads.append(columns[c].copy())
+    var gathered = reads.copy() if layout.in_place else take_parallel(
+        reads, layout.order.copy(), lanes
+    )
+    var local = bind(subtree(bound.expr, node.left), gathered)
+    # Hash groups in parallel, unless a nested over() reaches across
+    # partitions: then all rows are evaluated together.
+    var groups = len(layout.group_parts) - 1
+    var jobs = List[_OverJob](capacity=max(groups, 1))
+    if groups <= 1 or _crosses_partitions(local, node.text2):
+        jobs.append(
+            _OverJob(
+                local,
+                gathered,
+                Int(layout.starts.unsafe_ptr()),
+                0,
+                layout.count,
+                0,
+                height,
+                batch_size,
+            )
+        )
+    else:
+        for g in range(groups):
+            var first = layout.group_parts[g]
+            var last = layout.group_parts[g + 1]
+            jobs.append(
+                _OverJob(
+                    local,
+                    gathered,
+                    Int(layout.starts.unsafe_ptr()),
+                    first,
+                    last,
+                    layout.starts[first],
+                    layout.starts[last],
+                    batch_size,
+                )
+            )
+    if len(jobs) == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    var parts = List[Series](capacity=len(jobs))
+    for k in range(len(jobs)):
+        parts.append(jobs[k].result.copy())
+    var dtype = parts[0].dtype()
+    for k in range(len(parts)):
+        if parts[k].dtype() != dtype:
+            parts[k] = parts[k].cast(dtype)
+    var combined = parts[0].copy() if len(parts) == 1 else Series._from_chunks(
+        parts
+    )
+    combined._name = parts[0].name()
+    # Row results go back to row order; one value per partition is spread
+    # to its rows.
+    if local.shape() == ROWS and layout.in_place:
+        _ = owned^
+        return combined.rechunk() if combined.is_chunked() else combined^
+    var rows = layout.inverse.copy() if local.shape() == ROWS else (
+        layout.row_partition.copy()
+    )
+    _ = owned^
+    var spread = take_parallel([combined^], rows^, lanes)
+    return spread[0].copy()
 
 
 def _sequence_emit[
@@ -3723,6 +3629,125 @@ def _sequence_value[
     return evaluate[width](lowered, prepared, length, batch_size=batch_size)
 
 
+def _grouped_int_range[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    index: Int,
+    height: Int,
+    batch_size: Int,
+    ids: List[Int],
+    count: Int,
+) raises -> Optional[Series]:
+    """int_range per group, each group's bounds evaluated as one value per
+    group, in one pass over the rows; None when a bound is row-valued or
+    some group's range is not as long as the group (the rows can then not
+    take it in place)."""
+    ref node = bound.expr._nodes[index]
+    var ends = List[List[Int64]]()
+    for child in [node.left, node.right]:
+        var sub = bind(subtree(bound.expr, child), columns)
+        if sub.shape() == ROWS:
+            return None
+        # A scalar bound is one value; an aggregate one, one per group.
+        var value = evaluate[width](
+            sub, columns, height, batch_size=batch_size
+        ) if sub.shape() == SCALAR else evaluate[width](
+            sub,
+            columns,
+            height,
+            batch_size=batch_size,
+            grouped=True,
+            groups=ids,
+            group_count=count,
+        )
+        if sub.shape() == SCALAR and len(value) > 1:
+            value = value.slice(0, 1)
+        if len(value) != count and len(value) != 1:
+            return None
+        if value.null_count() > 0:
+            raise Error("int_range bounds must each be one non-null integer")
+        value = value.cast(DataType.INT64).rechunk()
+        ref column = value._data[Column[Int64]]
+        var values = List[Int64](capacity=count)
+        for g in range(count):
+            values.append(column._get(g if len(value) == count else 0))
+        ends.append(values^)
+    var step = node.integer
+    var sizes = List[Int](length=count, fill=0)
+    var ip = ids.unsafe_ptr()
+    for row in range(height):
+        sizes[ip[unsafe_offset=row]] += 1
+    for g in range(count):
+        var first = ends[0][g].cast[DType.int128]()
+        var stop = ends[1][g].cast[DType.int128]()
+        var span = stop - first if step > 0 else first - stop
+        var magnitude = (step if step > 0 else -step).cast[DType.int128]()
+        var length = (span + magnitude - 1) // magnitude if span > 0 else 0
+        if length != Int128(sizes[g]):
+            return None
+    var seen = List[Int64](length=count, fill=0)
+    var out = List[Int64](unsafe_uninit_length=height)
+    var op = out.unsafe_ptr()
+    var sp = seen.unsafe_ptr()
+    var fp = ends[0].unsafe_ptr()
+    for row in range(height):
+        var g = ip[unsafe_offset=row]
+        op[unsafe_offset=row] = fp[unsafe_offset=g] + step * sp[unsafe_offset=g]
+        sp[unsafe_offset=g] += 1
+    return Series(bound.expr._name, Column[Int64](out^))
+
+
+def _lower_grouped[
+    width: Int
+](
+    bound: BoundExpr,
+    index: Int,
+    mut columns: List[Series],
+    mut nodes: List[Node],
+    height: Int,
+    batch_size: Int,
+    ids: List[Int],
+    count: Int,
+) raises -> Int:
+    """Replace every int_range in `bound` by its grouped values (a column
+    appended to `columns`), as `_sequence_emit` lowers sequences of one
+    group. -1 when some sequence cannot be lowered."""
+    var node = bound.expr._nodes[index].copy()
+    if node.op == INT_RANGE:
+        var value = _grouped_int_range[width](
+            bound, columns, index, height, batch_size, ids, count
+        )
+        if not value:
+            return -1
+        var name = String("\x1fsequence:") + String(len(columns))
+        columns.append(value.take().renamed(name))
+        nodes.append(_node(COL, text=name))
+        return len(nodes) - 1
+    if is_sequence(node.op) or (
+        node.op == OVER and (node.integer & OVER_EXPLODE) != 0
+    ):
+        return -1
+    var children = node_children(node)
+    for k in range(len(children)):
+        children[k] = _lower_grouped[width](
+            bound,
+            children[k],
+            columns,
+            nodes,
+            height,
+            batch_size,
+            ids,
+            count,
+        )
+        if children[k] < 0:
+            return -1
+    _set_node_children(node, children)
+    nodes.append(node^)
+    return len(nodes) - 1
+
+
 def _sequence_grouped[
     width: Int
 ](
@@ -3733,6 +3758,34 @@ def _sequence_grouped[
     ids: List[Int],
     count: Int,
 ) raises -> Series:
+    # int_range bounds that are one value per group make each group's range
+    # in one pass; the rest of the expression is then row-wise per group.
+    var prepared = columns.copy()
+    var nodes = List[Node]()
+    if (
+        _lower_grouped[width](
+            bound,
+            len(bound.expr._nodes) - 1,
+            prepared,
+            nodes,
+            height,
+            batch_size,
+            ids,
+            count,
+        )
+        >= 0
+    ):
+        trace_path("sequence.grouped_ranges")
+        var lowered = bind(Expr(nodes^, bound.expr._name), prepared)
+        return evaluate[width](
+            lowered,
+            prepared,
+            height,
+            batch_size=batch_size,
+            grouped=True,
+            groups=ids,
+            group_count=count,
+        )
     var rows = List[List[Int]](length=count, fill=List[Int]())
     for row in range(height):
         rows[ids[row]].append(row)

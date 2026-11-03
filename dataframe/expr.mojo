@@ -1888,7 +1888,9 @@ struct Expr(Copyable):
 
         Ranks start at 1; average gives Float64, the rest Int64. Ordinal
         breaks ties by row order. NaN is the largest value, as in sort: it
-        ranks after the numbers ascending and before them descending.
+        ranks after the numbers ascending and before them descending. A
+        struct (`as_struct`) ranks by its fields in turn, a null field
+        below any value, which is how to rank by several columns.
         """
         return self._window(RANK, reverse=descending, text=method)
 

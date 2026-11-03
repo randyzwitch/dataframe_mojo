@@ -54,9 +54,23 @@ from dataframe.text.parse import parse_float64
 from dataframe.aggregation.reducer import quantile_of, _checked_product
 from .decimal import check_limit, pow10, precision_limit
 from dataframe.aggregation.scalar_states import WideInt
-from .series import Series, FixedElements, sort_indices
+from .series import Series, FixedElements
 from dataframe.kernels.rank import rank_numeric
-from dataframe.kernels.packed_sort import packed_arg_sort
+from .window_segment_tree import (
+    FrameState,
+    SegmentTree,
+    evaluate_frames,
+    INT_SUM,
+    FLOAT_SUM,
+    RANK_MIN,
+    RANK_MAX,
+)
+from .window_sort import (
+    PARTITION_START,
+    PEER_START,
+    mark_changes,
+    sort_key_rows,
+)
 from std.collections import Optional
 from std.math import isnan, floor, sqrt, isfinite
 
@@ -269,16 +283,95 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
         var fast = rank_numeric(input, ids, node.text, node.min_count == 1)
         if fast:
             return fast.value().copy()
+    var parts = _contiguous(len(input), ids)
+    if len(parts.order) == 0:
+        return _window_ranges(node, input, parts.starts)
+    # Partitions laid out one after another, evaluated, and put back.
+    var result = _window_ranges(node, input.take(parts.order), parts.starts)
+    var inverse = List[Int](unsafe_uninit_length=len(parts.order))
+    for k in range(len(parts.order)):
+        inverse[parts.order[k]] = k
+    return result.take(inverse)
+
+
+struct _Contiguous(Movable):
+    """Partitions as row ranges: `starts` bounds each partition's rows in
+    `order` (rows grouped by partition, input order within one), or in the
+    rows themselves when `order` is empty (the ids never decrease, as in a
+    window's sorted layout)."""
+
+    var order: List[Int]
+    var starts: List[Int]
+
+    def __init__(out self, var order: List[Int], var starts: List[Int]):
+        self.order = order^
+        self.starts = starts^
+
+
+def _contiguous(n: Int, ids: List[Int]) -> _Contiguous:
+    """Row ranges of the partitions `ids` gives (no ids: one partition)."""
+    var starts = List[Int]()
+    starts.append(0)
+    if len(ids) == 0 or n == 0:
+        if n > 0:
+            starts.append(n)
+        return _Contiguous(List[Int](), starts^)
+    var ip = ids.unsafe_ptr()
+    var sorted = True
+    var count = 0
+    for i in range(n):
+        count = max(count, ip[unsafe_offset=i] + 1)
+        if i > 0 and ip[unsafe_offset=i] < ip[unsafe_offset=i - 1]:
+            sorted = False
+    if sorted:
+        for i in range(1, n):
+            if ip[unsafe_offset=i] != ip[unsafe_offset=i - 1]:
+                starts.append(i)
+        starts.append(n)
+        return _Contiguous(List[Int](), starts^)
+    # A stable counting sort by id.
+    var at = List[Int](length=count + 1, fill=0)
+    for i in range(n):
+        at[ip[unsafe_offset=i] + 1] += 1
+    for g in range(count):
+        at[g + 1] += at[g]
+    for g in range(1, count + 1):
+        if at[g] != at[g - 1]:
+            starts.append(at[g])
+    var order = List[Int](unsafe_uninit_length=n)
+    for i in range(n):
+        var g = ip[unsafe_offset=i]
+        order[at[g]] = i
+        at[g] += 1
+    return _Contiguous(order^, starts^)
+
+
+def _range_lists(starts: List[Int]) -> List[List[Int]]:
+    """Each partition's rows, for the kernels that take row lists."""
+    var groups = List[List[Int]](capacity=len(starts) - 1)
+    for p in range(len(starts) - 1):
+        var rows = List[Int](capacity=starts[p + 1] - starts[p])
+        for row in range(starts[p], starts[p + 1]):
+            rows.append(row)
+        groups.append(rows^)
+    return groups^
+
+
+def _window_ranges(
+    node: Node, input: Series, starts: List[Int]
+) raises -> Series:
+    """`window_op` over partitions that are row ranges."""
     var n = len(input)
     var valid = validity(input)
-    var groups = partitions(n, ids)
     var op = node.op
     var reverse = node.min_count == 1
+    var parts = len(starts) - 1
     if op == CUM_COUNT:
         var counts = List[Int64](length=n, fill=0)
-        for rows in groups:
+        for p in range(parts):
             var running = Int64(0)
-            for row in _ordered(rows, reverse):
+            for j in range(starts[p], starts[p + 1]):
+                var row = starts[p + 1] - 1 - (j - starts[p]) if reverse else j
                 if valid[row]:
                     running += 1
                 counts[row] = running
@@ -287,10 +380,11 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
         var is_int = input._data.isa[Column[Int64]]()
         var ints = List[Int64](length=n if is_int else 0, fill=0)
         var floats = List[Float64](length=0 if is_int else n, fill=0)
-        for rows in groups:
+        for p in range(parts):
             var int_total = Int64(0)
             var float_total = Float64(0)
-            for row in _ordered(rows, reverse):
+            for j in range(starts[p], starts[p + 1]):
+                var row = starts[p + 1] - 1 - (j - starts[p]) if reverse else j
                 if not valid[row]:
                     continue
                 if is_int:
@@ -305,27 +399,33 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
             return Series("", Column[Int64](ints^, valid))
         return Series("", Column[Float64](floats^, valid))
     if op == INTERPOLATE:
-        return _interpolate(input, groups, node.text)
+        return _interpolate(input, _range_lists(starts), node.text)
     if op == CUT or op == QCUT:
-        return _bins(input, groups, node)
+        return _bins(input, _range_lists(starts), node)
     if op == RANK:
-        return _rank(input, groups, node.text, reverse)
+        return _rank(input, starts, node.text, reverse)
     if op == ROLLING_STD or op == ROLLING_VAR:
-        return _rolling_moments(input, valid, groups, node)
-    if op == ROLLING_SUM or op == ROLLING_MEAN:
-        return _rolling_sum(input, valid, groups, node)
+        return _rolling_moments(input, valid, _range_lists(starts), node)
+    if (
+        op == ROLLING_SUM
+        or op == ROLLING_MEAN
+        or op == ROLLING_MIN
+        or op == ROLLING_MAX
+    ):
+        return _rolling_frames(input, valid, starts, node)
     # The remaining operations gather a source row per output row.
     var source = List[Int](length=n, fill=-1)
     var ranks = List[Int]()
-    if op == CUM_MIN or op == CUM_MAX or op == ROLLING_MIN or op == ROLLING_MAX:
+    if op == CUM_MIN or op == CUM_MAX:
         ranks = input._sort_ranks(False, True)
-    var take_max = op == CUM_MAX or op == ROLLING_MAX
+    var take_max = op == CUM_MAX
     var nan = List[Bool]()
     if len(ranks) > 0 and input.dtype().is_float():
         nan = _nan_rows(input, valid)
     var has_nan = len(nan) > 0
-    for rows in groups:
-        var m = len(rows)
+    for p in range(parts):
+        var first = starts[p]
+        var m = starts[p + 1] - first
         if op == SHIFT:
             var k = Int(node.integer)
             if (node.min_count & SHIFT_IGNORE_NULLS) != 0 and k != 0:
@@ -333,7 +433,8 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
                 # Record the current row after selecting its source so a NULL
                 # output row still looks strictly before/after itself.
                 var history = List[Int](capacity=m)
-                for row in _ordered(rows, k < 0):
+                for j in range(m):
+                    var row = first + (m - 1 - j if k < 0 else j)
                     var seen = len(history)
                     if k > 0:
                         if k <= seen:
@@ -348,10 +449,11 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
                 for j in range(m):
                     var from_index = j - k
                     if from_index >= 0 and from_index < m:
-                        source[rows[j]] = rows[from_index]
+                        source[first + j] = first + from_index
         elif op == CUM_MIN or op == CUM_MAX:
             var best = -1
-            for row in _ordered(rows, reverse):
+            for j in range(m):
+                var row = first + (m - 1 - j if reverse else j)
                 if valid[row]:
                     if has_nan and nan[row]:
                         # Skipped, unless nothing but NaN has come.
@@ -364,34 +466,12 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
                     ):
                         best = row
                     source[row] = best
-        elif op == ROLLING_MIN or op == ROLLING_MAX:
-            var window = Int(node.integer)
-            var needed = window if node.floating < 0 else Int(node.floating)
-            for j in range(m):
-                var best = -1
-                var nan_row = -1
-                var count = 0
-                for k in range(max(0, j - window + 1), j + 1):
-                    var row = rows[k]
-                    if not valid[row]:
-                        continue
-                    count += 1
-                    if has_nan and nan[row]:
-                        nan_row = row
-                    if best < 0 or (
-                        ranks[row]
-                        > ranks[best] if take_max else ranks[row]
-                        < ranks[best]
-                    ):
-                        best = row
-                if count >= needed and count > 0:
-                    # A NaN in the window is the result, as in Polars.
-                    source[rows[j]] = nan_row if nan_row >= 0 else best
         else:
             var limit = Int(node.integer)
             var last = -1
             var distance = 0
-            for row in _ordered(rows, op == BACKWARD_FILL):
+            for j in range(m):
+                var row = first + (m - 1 - j if op == BACKWARD_FILL else j)
                 if valid[row]:
                     last = row
                     distance = 0
@@ -907,156 +987,152 @@ def _bins(input: Series, groups: List[List[Int]], node: Node) raises -> Series:
     return Series("", StructColumn([breaks^, labels^]))
 
 
-def _rolling_sum(
-    input: Series, valid: List[Bool], groups: List[List[Int]], node: Node
+def _rolling_frames(
+    input: Series, valid: List[Bool], starts: List[Int], node: Node
 ) raises -> Series:
+    """rolling_sum, rolling_mean, rolling_min and rolling_max: each row's
+    frame is the window_size rows ending at it within its partition (ROWS
+    BETWEEN window_size - 1 PRECEDING AND CURRENT ROW), combined from a
+    segment tree over the partitions (DuckDB's WindowSegmentTree). Fewer
+    than min_samples valid values (default window_size) give null."""
     var n = len(input)
     var window = Int(node.integer)
     var needed = window if node.floating < 0 else Int(node.floating)
-    var integer_sum = (
-        node.op == ROLLING_SUM and input._data.isa[Column[Int64]]()
-    )
-    var ints = List[Int64](length=n if integer_sum else 0, fill=0)
-    var floats = List[Float64](length=0 if integer_sum else n, fill=0)
+    var begins = List[Int](unsafe_uninit_length=n)
+    var ends = List[Int](unsafe_uninit_length=n)
+    for p in range(len(starts) - 1):
+        for j in range(starts[p], starts[p + 1]):
+            begins[j] = max(starts[p], j - window + 1)
+            ends[j] = j + 1
+    var flags = Int(valid.unsafe_ptr())
     var out_valid = List[Bool](length=n, fill=False)
-    for rows in groups:
-        for j in range(len(rows)):
-            var count = 0
-            var wide = WideInt(0)
-            var total = Float64(0)
-            for k in range(max(0, j - window + 1), j + 1):
-                var row = rows[k]
-                if not valid[row]:
-                    continue
-                count += 1
-                if integer_sum:
-                    wide += (
-                        input._data[Column[Int64]]
-                        ._get(row)
-                        .cast[DType.int128]()
-                    )
-                else:
-                    total += _numeric(input, row)
-            if count < needed or count == 0:
+    if node.op == ROLLING_MIN or node.op == ROLLING_MAX:
+        var ranks = input._sort_ranks(False, True)
+        var nan = List[Bool]()
+        if input.dtype().is_float():
+            nan = _nan_rows(input, valid)
+        var nans = Int(nan.unsafe_ptr()) if len(nan) > 0 else 0
+        var rank_ptr = Int(ranks.unsafe_ptr())
+        var source = List[Int](length=n, fill=-1)
+        var states: List[FrameState]
+        if node.op == ROLLING_MIN:
+            var tree = SegmentTree[RANK_MIN](n, flags, 0, 0, rank_ptr, nans)
+            states = evaluate_frames(tree, begins, ends)
+        else:
+            var tree = SegmentTree[RANK_MAX](n, flags, 0, 0, rank_ptr, nans)
+            states = evaluate_frames(tree, begins, ends)
+        for j in range(n):
+            ref state = states[j]
+            if state.count >= needed and state.count > 0:
+                # A NaN in the window is the result, as in Polars.
+                source[j] = state.nan if state.nan >= 0 else state.row
+        _ = ranks^
+        _ = nan^
+        return input.take_or_null(source)
+    if node.op == ROLLING_SUM and input._data.isa[Column[Int64]]():
+        var contiguous = input.rechunk()
+        ref column = contiguous._data[Column[Int64]]
+        var tree = SegmentTree[INT_SUM](n, flags, Int(column._ptr()), 0, 0, 0)
+        var states = evaluate_frames(tree, begins, ends)
+        var out = List[Int64](length=n, fill=0)
+        for j in range(n):
+            ref state = states[j]
+            if state.count < needed or state.count == 0:
                 continue
-            var row = rows[j]
-            out_valid[row] = True
-            if integer_sum:
-                if wide > WideInt(9223372036854775807) or wide < WideInt(
-                    -9223372036854775808
-                ):
-                    raise Error("Int64 rolling_sum overflow")
-                ints[row] = wide.cast[DType.int64]()
-            elif node.op == ROLLING_MEAN:
-                floats[row] = total / Float64(count)
-            else:
-                floats[row] = total
-    if integer_sum:
-        return Series("", Column[Int64](ints^, out_valid))
-    return Series("", Column[Float64](floats^, out_valid))
+            if state.wide > Int128(Int64.MAX) or state.wide < Int128(Int64.MIN):
+                raise Error("Int64 rolling_sum overflow")
+            out_valid[j] = True
+            out[j] = state.wide.cast[DType.int64]()
+        _ = contiguous^
+        return Series("", Column[Int64](out^, out_valid))
+    var floats = List[Float64](unsafe_uninit_length=n)
+    for j in range(n):
+        floats[j] = _numeric(input, j) if valid[j] else Float64(0)
+    var tree = SegmentTree[FLOAT_SUM](
+        n, flags, 0, Int(floats.unsafe_ptr()), 0, 0
+    )
+    var states = evaluate_frames(tree, begins, ends)
+    var out = List[Float64](length=n, fill=0)
+    for j in range(n):
+        ref state = states[j]
+        if state.count < needed or state.count == 0:
+            continue
+        out_valid[j] = True
+        out[j] = (
+            state.real / Float64(state.count) if node.op
+            == ROLLING_MEAN else state.real
+        )
+    _ = floats^
+    return Series("", Column[Float64](out^, out_valid))
 
 
 def _rank(
-    input: Series, groups: List[List[Int]], method: String, descending: Bool
+    input: Series, starts: List[Int], method: String, descending: Bool
 ) raises -> Series:
-    if input._data.isa[StringColumn]():
-        var fast = _rank_strings(
-            input._data[StringColumn], groups, method, descending
-        )
-        if fast:
-            return fast.take()
+    """Rank within each partition (row ranges) from peer boundaries, as
+    DuckDB's rank executors do: the rows are sorted by partition and value
+    (the fields of a struct in turn), runs of equal values are peers, and
+    each method reads its rank off the run. Nulls rank as null, and
+    ordinal breaks ties by row order (the sort is stable)."""
     var n = len(input)
+    var ids = List[Int64](unsafe_uninit_length=n)
+    for p in range(len(starts) - 1):
+        for j in range(starts[p], starts[p + 1]):
+            ids[j] = Int64(p)
+    var present = validity(input)
+    var keys = List[Series]()
+    keys.append(Series("", Column[Int64](ids^)))
+    var descending_flags = List[Bool]()
+    descending_flags.append(False)
+    # Null rows sort first within their partition, apart from every value.
+    var nulls = List[Int64](unsafe_uninit_length=n)
+    for j in range(n):
+        nulls[j] = Int64(0) if present[j] else Int64(-1)
+    keys.append(Series("", Column[Int64](nulls^)))
+    descending_flags.append(False)
+    if input.dtype().is_struct():
+        var structs = input.struct_column()
+        for k in range(structs.field_count()):
+            keys.append(structs.field(k))
+            descending_flags.append(descending)
+    else:
+        keys.append(input.copy())
+        descending_flags.append(descending)
+    # A struct field's nulls are its smallest values (Polars).
+    var nulls_last = List[Bool](length=len(keys), fill=descending)
+    nulls_last[0] = False
+    nulls_last[1] = False
+    var order = sort_key_rows(keys, descending_flags, nulls_last)
+    var sorted = List[Series](capacity=len(keys))
+    for key in keys:
+        sorted.append(key.take(order))
+    var flags = List[UInt8](length=n, fill=0)
+    var address = Int(flags.unsafe_ptr())
+    mark_changes(sorted[0], address, 0, n, PARTITION_START)
+    for k in range(len(sorted)):
+        mark_changes(sorted[k], address, 0, n, PEER_START)
+    if n > 0:
+        flags[0] = PARTITION_START | PEER_START
+    var fp = flags.unsafe_ptr()
     var average = method == "average"
     var ints = List[Int64](length=0 if average else n, fill=0)
     var floats = List[Float64](length=n if average else 0, fill=0)
     var out_valid = List[Bool](length=n, fill=False)
-    for rows in groups:
-        var part = input.take(rows)
-        var dense = part._sort_ranks(descending, True)
-        var order = sort_indices([dense.copy()])
-        var present = validity(part)
-        var start = 0
-        var dense_rank = 0
-        while start < len(order):
-            var end = start + 1
-            while end < len(order) and dense[order[end]] == dense[order[start]]:
-                end += 1
-            if present[order[start]]:
-                dense_rank += 1
-                for position in range(start, end):
-                    var row = rows[order[position]]
-                    out_valid[row] = True
-                    if average:
-                        floats[row] = Float64(start + 1 + end) / 2
-                    elif method == "min":
-                        ints[row] = Int64(start + 1)
-                    elif method == "max":
-                        ints[row] = Int64(end)
-                    elif method == "dense":
-                        ints[row] = Int64(dense_rank)
-                    else:
-                        ints[row] = Int64(position + 1)
-            start = end
-    if average:
-        return Series("", Column[Float64](floats^, out_valid))
-    return Series("", Column[Int64](ints^, out_valid))
-
-
-def _rank_strings(
-    column: StringColumn,
-    groups: List[List[Int]],
-    method: String,
-    descending: Bool,
-) raises -> Optional[Series]:
-    """Reuse the packed sort's stable partition/string order when supported."""
-    var ids = List[Int64](length=len(column), fill=0)
-    var count = 0
-    for group in range(len(groups)):
-        for row in groups[group]:
-            ids[row] = Int64(group)
-            count += 1
-    if count != len(column):
-        return None
-    var partitions = Column[Int64](ids^)
-    var order = packed_arg_sort(
-        [Series("", partitions.copy()), Series("", column.copy())],
-        [False, descending],
-        [True, True],
-    )
-    if not order:
-        return None
-    return _rank_string_order(column, partitions, order.take(), method)
-
-
-def _rank_string_order(
-    column: StringColumn, ids: Column[Int64], order: List[Int], method: String
-) raises -> Series:
-    """Assign ranks from a stable order by (partition, string, source row)."""
-    var average = method == "average"
-    var ints = List[Int64](length=0 if average else len(column), fill=0)
-    var floats = List[Float64](length=len(column) if average else 0, fill=0)
-    var valid = List[Bool](length=len(column), fill=False)
+    var base = 0
     var start = 0
-    while start < len(order):
-        var base = start
-        var end_group = start + 1
-        while end_group < len(order) and ids._get(order[end_group]) == ids._get(
-            order[base]
-        ):
-            end_group += 1
-        var dense = 0
-        while start < end_group and column._valid(order[start]):
-            var end = start + 1
-            while (
-                end < end_group
-                and column._valid(order[end])
-                and column._get(order[end]) == column._get(order[start])
-            ):
-                end += 1
+    var dense = 0
+    while start < n:
+        if (fp[unsafe_offset=start] & PARTITION_START) != 0:
+            base = start
+            dense = 0
+        var end = start + 1
+        while end < n and (fp[unsafe_offset=end] & PEER_START) == 0:
+            end += 1
+        if present[order[start]]:
             dense += 1
             for position in range(start, end):
                 var row = order[position]
-                valid[row] = True
+                out_valid[row] = True
                 if average:
                     floats[row] = Float64(start + 1 + end - 2 * base) / 2
                 elif method == "min":
@@ -1067,11 +1143,13 @@ def _rank_string_order(
                     ints[row] = Int64(dense)
                 else:
                     ints[row] = Int64(position - base + 1)
-            start = end
-        start = end_group
+        else:
+            # Nulls come first in a partition; ranks count from after them.
+            base = end
+        start = end
     if average:
-        return Series("", Column[Float64](floats^, valid))
-    return Series("", Column[Int64](ints^, valid))
+        return Series("", Column[Float64](floats^, out_valid))
+    return Series("", Column[Int64](ints^, out_valid))
 
 
 def _rolling_moments(
