@@ -679,6 +679,10 @@ struct _DictionaryKeys(Movable):
     dictionary identity."""
 
     var identity: Int
+    # The dictionary's offsets and bytes, by address (each read through
+    # its shared pointer cost an atomic count a row on every worker).
+    var offsets: Int
+    var bytes: Int
     var done: List[Bool]
     var keys: List[UInt64]
     var first: List[UInt64]
@@ -688,6 +692,8 @@ struct _DictionaryKeys(Movable):
 
     def __init__(out self):
         self.identity = 0
+        self.offsets = 0
+        self.bytes = 0
         self.done = List[Bool]()
         self.keys = List[UInt64]()
         self.first = List[UInt64]()
@@ -702,6 +708,8 @@ struct _DictionaryKeys(Movable):
         var identity = Int(Pointer(to=dictionary))
         if identity != self.identity:
             self.identity = identity
+            self.offsets = Int(dictionary.offsets.unsafe_ptr())
+            self.bytes = Int(dictionary.bytes.unsafe_ptr())
             var n = len(dictionary)
             self.done = List[Bool](length=n, fill=False)
             self.keys = List[UInt64](length=n, fill=0)
@@ -715,15 +723,19 @@ struct _DictionaryKeys(Movable):
     def _entry(mut self, strings: StringColumn, code: Int):
         """Entry `code`'s hash key and words: as `_hash_column` and
         `_string_words` give them for the same string."""
-        ref dictionary = strings._codes.value()[].dtype.dictionary()[]
-        var start = Int(dictionary.offsets[code])
-        var length = Int(dictionary.offsets[code + 1]) - start
-        var bytes = dictionary.bytes.unsafe_ptr().unsafe_offset(start)
+        var offsets = Pointer[Int64, ImmutAnyOrigin](
+            unsafe_from_address=self.offsets
+        )
+        var start = Int(offsets[unsafe_offset=code])
+        var length = Int(offsets[unsafe_offset=code + 1]) - start
+        var bytes = Pointer[UInt8, MutAnyOrigin](
+            unsafe_from_address=self.bytes + start
+        )
         self.keys[code] = _hash_bytes(
             Span[UInt8, ImmutAnyOrigin](
-                unsafe_ptr=bytes.unsafe_mut_cast[False]().unsafe_origin_cast[
-                    ImmutAnyOrigin
-                ](),
+                unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                    unsafe_from_address=self.bytes + start
+                ),
                 length=length,
             )
         )
@@ -737,7 +749,7 @@ struct _DictionaryKeys(Movable):
                 tail |= UInt64(bytes[unsafe_offset=b]) << UInt64(8 * (b - 4))
             self.second[code] = tail
         else:
-            self.second[code] = UInt64(Int(bytes))
+            self.second[code] = UInt64(self.bytes + start)
         self.done[code] = True
 
     def write(
@@ -1068,6 +1080,13 @@ struct AggregateSink(Movable):
             var by_codes = keys[c]._data.isa[StringColumn]() and Bool(
                 keys[c]._data[StringColumn]._codes
             )
+            if by_codes:
+                # DuckDB's TryAddDictionaryGroups: a stored dictionary's
+                # entries are looked up once only while it holds fewer
+                # than MAX_DICTIONARY_SIZE_THRESHOLD (20,000); a larger one
+                # is hashed row by row like any string.
+                ref held = keys[c]._data[StringColumn]._codes.value()[]
+                by_codes = len(held.dtype.dictionary()[]) < 20_000
             coded.append(by_codes)
             if by_codes:
                 self.dictionaries[c].start(keys[c]._data[StringColumn])
