@@ -31,7 +31,7 @@ from dataframe.storage.buffer import _Buffer, _BufferData
 from std.collections import Optional
 from std.math import isnan
 from std.ffi import external_call
-from std.memory import Pointer, bitcast
+from std.memory import ArcPointer, Pointer, bitcast
 
 from dataframe.aggregation.reducer import (
     Reducer,
@@ -2453,6 +2453,8 @@ struct _KeyColumn(Movable):
     var values: _ValueColumn
     var w: Int
     var bit: UInt64
+    # The key's field metadata, kept by its groups' column.
+    var metadata: Optional[ArcPointer[List[UInt8]]]
 
     def __init__(
         out self,
@@ -2467,6 +2469,7 @@ struct _KeyColumn(Movable):
         )
         self.w = w
         self.bit = bit
+        self.metadata = template._field_metadata
 
     def scan(mut self, groups: _Groups, lo: Int, hi: Int, held: _HeldBuffers):
         """Groups [lo, hi)'s keys from their rows."""
@@ -2481,4 +2484,7 @@ struct _KeyColumn(Movable):
 
     def column(deinit self) raises -> Series:
         """The finished key column."""
-        return self.values^.column()
+        var metadata = self.metadata^
+        var column = self.values^.column()
+        column._field_metadata = metadata^
+        return column^
