@@ -23,11 +23,7 @@ from dataframe.kernels.comparison_sort import (
     _prefix_buckets,
     comparison_arg_sort,
 )
-from dataframe.kernels.packed_sort import (
-    packed_arg_sort,
-    _sort_heavy,
-)
-from dataframe.kernels.row_sort import row_arg_sort
+from dataframe.sorting.sort import sort_rows
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.support.parallel_key_reference import (
     ScalarParallelOrder,
@@ -274,33 +270,20 @@ def test_parallel_prefix_bucket_eligibility_fallback_and_full_string_ties_match_
                 Series("s", Column[String](strings^)),
             ]
             assert_equal(
-                row_arg_sort(columns, [descending, False], [True, True]),
+                sort_rows(
+                    columns,
+                    [descending, False],
+                    [True, True],
+                    maintain_order=True,
+                ),
                 expected,
             )
     _ = setting^
 
 
-def test_parallel_packed_heavy_buckets_and_string_settling_preserve_complete_stable_permutations() raises:
+def test_parallel_sort_runs_merge_into_complete_stable_permutations() raises:
+    # Several runs (one per row group) merged across several partitions.
     var setting = WorkerSetting(4)
-    # Invoke the heavy-bucket run/merge kernel itself. Public large examples
-    # alone cannot prove that a particular bucket crossed its threshold.
-    var data = List[UInt64]()
-    var expected_words = List[UInt64]()
-    data.append(UInt64.MAX)
-    for row in range(65537):
-        var value = (UInt64((row * 7919) % 31) << 32) | UInt64(row)
-        data.append(value)
-        expected_words.append(value)
-    data.append(UInt64.MAX)
-    sort(expected_words)
-    var scratch = List[UInt64](length=len(data), fill=0)
-    var pool = Pool(4)
-    _sort_heavy[DType.uint64](pool, data, scratch, 1, 65538, 4)
-    pool.release()
-    assert_equal(data[0], UInt64.MAX)
-    assert_equal(data[65538], UInt64.MAX)
-    for row in range(65537):
-        assert_equal(data[row + 1], expected_words[row])
     var n = 196609
     assert_true(worker_count(n) > 1)
     for skew in [False, True]:
@@ -323,17 +306,16 @@ def test_parallel_packed_heavy_buckets_and_string_settling_preserve_complete_sta
                         "s", Column[Int64](secondary.copy())
                     )
                 )
-                var actual = packed_arg_sort(
-                    columns, [descending, False], [True, True]
-                )
-                assert_true(
-                    Bool(actual),
-                    "bounded integer and final string keys must pack",
+                var actual = sort_rows(
+                    columns,
+                    [descending, False],
+                    [True, True],
+                    maintain_order=True,
                 )
                 var expected = scalar_parallel_rows(
                     n, ScalarParallelOrder(257, skew, descending, string_key)
                 )
-                assert_equal(actual.take(), expected)
+                assert_equal(actual, expected)
     _ = setting^
 
 
@@ -403,7 +385,7 @@ def test_parallel_rank_word_buckets_validate_domain_cutoff_skew_fallback_and_rad
     _ = setting^
 
 
-def test_row_prefix_long_string_remainders_precede_later_numeric_keys_in_parallel_merge_fallback() raises:
+def test_long_string_keys_precede_later_numeric_keys_across_sorted_runs() raises:
     var setting = WorkerSetting(4)
     var n = 32769
     var text = List[String]()
@@ -428,9 +410,8 @@ def test_row_prefix_long_string_remainders_precede_later_numeric_keys_in_paralle
         Series("s", Column[String](text^)),
         Series("k", Column[Int64](numbers^)),
     ]
-    assert_true(
-        not packed_arg_sort(columns, [False, True], [True, True]),
-        "nonfinal over-prefix string must reject packed encoding",
+    assert_equal(
+        sort_rows(columns, [False, True], [True, True], maintain_order=True),
+        expected,
     )
-    assert_equal(row_arg_sort(columns, [False, True], [True, True]), expected)
     _ = setting^
