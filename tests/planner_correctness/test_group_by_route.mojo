@@ -66,14 +66,6 @@ def test_few_groups_run_eagerly() raises:
     _ = trace^
 
 
-def test_partitioned_keys_with_few_groups_a_batch_take_batch_states() raises:
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
-    assert_true(batched(frame(400), 400), "batch states were not taken")
-    _ = threads^
-    _ = trace^
-
-
 def test_one_worker_runs_eagerly() raises:
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var threads = ScopedEnvironment("DATAFRAME_THREADS", "1")

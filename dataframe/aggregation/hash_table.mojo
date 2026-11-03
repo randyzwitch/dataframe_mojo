@@ -647,9 +647,13 @@ def aggregate_layout(
         var words = addressed.copy()
         words.append(False)
         if _width(inputs[s]) == 2:
-            var part = inputs[s].chunks()[0].copy() if inputs[
-                s
-            ].is_chunked() else inputs[s].copy()
+            var part = (
+                inputs[s]
+                .chunks()[0]
+                .copy() if inputs[s]
+                .is_chunked() else inputs[s]
+                .copy()
+            )
             words.append(part._data.isa[StringColumn]())
         if len(words) > 64:
             raise Error("aggregate table: more than 64 key words")
