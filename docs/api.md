@@ -458,14 +458,14 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Lexicographic sort by several columns, one direction; equal keys in no particular order unless `maintain_order`.
 - `def sort(self, by: String, descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
   Single-column sort. NaNs follow non-null numbers. Rows with equal keys come out in no particular order unless `maintain_order` keeps their input order.
-- `def arg_sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> List[Int]`
-  Row order of a stable sort; equal keys keep input order.
-- `def arg_sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
+- `def arg_sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> List[Int]`
+  Row order of the sort: DuckDB's sort over normalized keys (`dataframe.sorting`). Equal keys come in no particular order unless `maintain_order` keeps their input order.
+- `def arg_sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> List[Int]`
 - `def top_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
   The k rows with greatest values by `by` (ascending when `reverse=True`).
 - `def top_k(self, k: Int, by: String, *, reverse: Bool = False) -> Self`
 - `def bottom_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
-  The k rows that sort(by) would put first (sort(by, descending=True) with reverse=True); nulls rank last.
+  The k rows that sort(by) would put first (sort(by, descending=True) with reverse=True); nulls rank last, and equal keys keep input order.
 - `def bottom_k(self, k: Int, by: String, *, reverse: Bool = False) -> Self`
 - `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
@@ -2092,7 +2092,7 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def take(self, indices: List[Int]) -> Self`
 - `def take_or_null(self, indices: List[Int]) -> Self`
 - `def argsort(self, descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
-  Stable sort order: ranks are resolved once, then merged by Int.
+  Stable sort order (`dataframe.sorting`, keeping input order among equal values).
 - `def slice(self, offset: Int, length: Int) -> Self`
 - `def full_null(var name: String, dtype: DataType, length: Int) -> Self`
   A column of `length` nulls with the requested dtype.

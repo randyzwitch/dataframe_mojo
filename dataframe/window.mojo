@@ -56,7 +56,7 @@ from .decimal import check_limit, pow10, precision_limit
 from dataframe.aggregation.scalar_states import WideInt
 from .series import Series, FixedElements, sort_indices
 from dataframe.kernels.rank import rank_numeric
-from dataframe.kernels.packed_sort import packed_arg_sort
+from dataframe.sorting.sort import sort_rows
 from std.collections import Optional
 from std.math import isnan, floor, sqrt, isfinite
 
@@ -960,9 +960,7 @@ def _rank(
     input: Series, groups: List[List[Int]], method: String, descending: Bool
 ) raises -> Series:
     if input._data.isa[StringColumn]():
-        var fast = _rank_strings(
-            input._data[StringColumn], groups, method, descending
-        )
+        var fast = _rank_strings(input, groups, method, descending)
         if fast:
             return fast.take()
     var n = len(input)
@@ -1003,12 +1001,14 @@ def _rank(
 
 
 def _rank_strings(
-    column: StringColumn,
+    input: Series,
     groups: List[List[Int]],
     method: String,
     descending: Bool,
 ) raises -> Optional[Series]:
-    """Reuse the packed sort's stable partition/string order when supported."""
+    """Ranks from the stable sort by (partition, value): text sorts as
+    text, binary as bytes."""
+    ref column = input._data[StringColumn]
     var ids = List[Int64](length=len(column), fill=0)
     var count = 0
     for group in range(len(groups)):
@@ -1018,14 +1018,13 @@ def _rank_strings(
     if count != len(column):
         return None
     var partitions = Column[Int64](ids^)
-    var order = packed_arg_sort(
-        [Series("", partitions.copy()), Series("", column.copy())],
+    var order = sort_rows(
+        [Series("", partitions.copy()), input.copy()],
         [False, descending],
         [True, True],
+        maintain_order=True,
     )
-    if not order:
-        return None
-    return _rank_string_order(column, partitions, order.take(), method)
+    return _rank_string_order(column, partitions, order, method)
 
 
 def _rank_string_order(
