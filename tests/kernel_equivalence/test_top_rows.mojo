@@ -3,7 +3,10 @@
 from std.math import isnan
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series, col
-from dataframe.packed_sort import chunked_top_rows, packed_top_rows
+from dataframe.kernels.packed_sort import (
+    chunked_top_rows,
+    packed_top_rows,
+)
 from dataframe.parallel import configured_workers
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.support.parallel_key_reference import (

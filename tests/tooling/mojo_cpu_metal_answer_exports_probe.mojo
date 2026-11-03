@@ -5,7 +5,7 @@ Set DATAFRAME_BENCH_ANSWER_EXPORT_PREFIX to a fresh owned output prefix.
 from std.os import getenv
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series, StringColumn, read_parquet
-from dataframe.json_value import JsonValue
+from dataframe.json.value import JsonValue
 from metal_suite_answer_exports import export_answer, schema_receipt
 
 

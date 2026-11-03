@@ -3,8 +3,8 @@
 from std.math import abs
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, when
-from dataframe.approx_distinct import CardinalitySketch
-from dataframe.aggregate import Reducer
+from dataframe.kernels.approx_distinct import CardinalitySketch
+from dataframe.aggregation.reducer import Reducer
 from dataframe.expr import APPROX_N_UNIQUE, SUM
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.reduction_types_reference import (

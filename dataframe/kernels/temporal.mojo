@@ -5,7 +5,7 @@ the logical types from the binder, so their inputs may carry either tag.
 """
 from dataframe.storage.column import Column
 from dataframe.storage.boolean import BoolColumn
-from dataframe.calendar import civil_from_days, days_in_month, is_leap
+from dataframe.time.calendar import civil_from_days, days_in_month, is_leap
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.dtype import DataType
 from dataframe.expr import (
@@ -57,7 +57,7 @@ from dataframe.series import Series
 from dataframe.kernels.binary import fit_mask, _joined_numeric_bits, _apply_mask
 from dataframe.kernels.numeric_input import _NumericInput
 from dataframe.kernels.physical_input import _has_physical_storage
-from dataframe.temporal import (
+from dataframe.time.temporal import (
     NANOS_PER_DAY,
     PreparedFormat,
     default_format,
@@ -89,8 +89,8 @@ from dataframe.temporal import (
     ambiguous_code,
     non_existent_code,
 )
-from dataframe.timezone import TimeZone
-from dataframe.temporal_fields import field_projection
+from dataframe.time.timezone import TimeZone
+from dataframe.time.fields import field_projection
 
 
 def temporal_binary(

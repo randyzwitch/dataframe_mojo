@@ -291,7 +291,7 @@ own their values independently.
 One CSV output field. Names and dtypes are always explicit.
 
 Temporal fields take an optional strftime-style format; an empty format
-means ISO 8601 (see dataframe/temporal.mojo).
+means ISO 8601 (see dataframe/time/temporal.mojo).
 
 - `def __init__(out self, name: String, dtype: DataType, nullable: Bool = True, format: String = "")`
 - `def int64(name: String, nullable: Bool = True) -> Self`
@@ -750,7 +750,7 @@ duration arithmetic act on the UTC instant. Nulls propagate.
 - `def total_seconds(self) -> Expr`
 - `def total_milliseconds(self) -> Expr`
 - `def strftime(self, format: String) -> Expr`
-  Format as text; see dataframe/temporal.mojo for directives.
+  Format as text; see dataframe/time/temporal.mojo for directives.
 - `def replace_time_zone(self, time_zone: String, ambiguous: String = "raise", non_existent: String = "raise") -> Expr`
   Read each datetime's wall-clock time as local time in `time_zone` (empty makes it naive), keeping the wall time and changing the instant. `ambiguous` ("raise", "earliest", "latest", "null") picks between the two instants when clocks fall back; `non_existent` ("raise", "null") handles times skipped when clocks spring forward.
 - `def convert_time_zone(self, time_zone: String) -> Expr`

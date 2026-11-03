@@ -10,8 +10,8 @@ from dataframe.frame import (
     _dense_right_int64_rows,
     _PROGRESSION_PARALLEL_KEY_BYTES,
 )
-from dataframe.join_fuse import FusedJoin
-from dataframe.join_hash import direct_hash_join_rows
+from dataframe.kernels.join_fuse import FusedJoin
+from dataframe.kernels.join_hash import direct_hash_join_rows
 from dataframe.parallel import Pool, worker_count
 from tests.support.join_worker_setting import JoinWorkers
 

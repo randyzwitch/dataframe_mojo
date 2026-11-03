@@ -5,7 +5,7 @@ from std.math import isnan
 from std.testing import assert_equal, assert_true
 from dataframe import BoolColumn, Column, DataFrame, DataType, Series
 from dataframe.parallel import worker_count
-from dataframe.partition import low_cardinality
+from dataframe.kernels.partition import low_cardinality
 from tests.support.lifecycle_jobs import WorkerSetting
 
 

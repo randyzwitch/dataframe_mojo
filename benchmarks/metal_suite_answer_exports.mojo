@@ -5,7 +5,7 @@ explicit diagnostics and cannot change a query comparison into a passing case.
 """
 from std.os import getenv
 from dataframe import DataFrame, DataType, write_parquet
-from dataframe.json_value import json_quote
+from dataframe.json.value import json_quote
 
 
 def dtype_receipt(dtype: DataType) -> String:

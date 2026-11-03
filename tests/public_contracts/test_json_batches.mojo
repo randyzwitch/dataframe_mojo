@@ -10,7 +10,7 @@ from dataframe import (
     col,
     as_struct,
 )
-from dataframe.string_column import StringBuilder
+from dataframe.storage.string import StringBuilder
 from tests.support.group_strategy_reference import ScopedEnvironment
 from tests.public_contracts.test_text_functions import _source
 

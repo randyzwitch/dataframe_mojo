@@ -2,8 +2,8 @@
 # contract-group: kernel.row_ops
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import BoolColumn, Column, DataType, Series
-from dataframe.column import gather_scalars
-from dataframe.gather import (
+from dataframe.kernels.scalar_gather import gather_scalars
+from dataframe.kernels.gather import (
     true_rows,
     _MaskJob,
     float_compare_rows,
@@ -12,7 +12,7 @@ from dataframe.gather import (
     can_filter_aligned_chunks,
 )
 from dataframe.expr import ADD, SUB, MUL, DIV, FLOORDIV, MOD, POW, EQ, LT, GT
-from dataframe.expr_kernels import (
+from dataframe.kernels.binary import (
     _numeric_int,
     _vector_int,
     _numeric_float,

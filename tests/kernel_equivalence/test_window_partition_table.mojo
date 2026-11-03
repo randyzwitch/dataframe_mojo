@@ -7,7 +7,7 @@ and a mean over a partition and a rank within one."""
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Series, col, lit
-from dataframe.aggregate_table import table_row_keys
+from dataframe.aggregation.hash_table import table_row_keys
 from tests.support.group_strategy_reference import ScopedEnvironment
 
 comptime ROWS = 4_000

@@ -4,8 +4,8 @@ from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
 from dataframe import BoolColumn, Column, DataFrame, DataType, Series
 from dataframe.dtype import CategoricalDictionary
-from dataframe.string_column import StringColumn
-from dataframe.hashing import (
+from dataframe.storage.string import StringColumn
+from dataframe.kernels.hashing import (
     RowKeys,
     encode_rows,
     column_codes,
@@ -15,8 +15,14 @@ from dataframe.hashing import (
     _encode_categorical,
     _U64Codes,
 )
-from dataframe.row_sort import row_arg_sort, row_top_rows
-from dataframe.packed_sort import packed_arg_sort, packed_top_rows
+from dataframe.kernels.row_sort import (
+    row_arg_sort,
+    row_top_rows,
+)
+from dataframe.kernels.packed_sort import (
+    packed_arg_sort,
+    packed_top_rows,
+)
 from dataframe.categorical import (
     decode,
     sort_ranks,
