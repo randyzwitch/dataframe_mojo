@@ -718,45 +718,51 @@ def plan_stream_execute(
                 built.height() >= 524288
             ):
                 # A semi or anti join whose built right side turned out
-                # large: run the left too (a known table's rows are only
-                # read), and decide from both real sizes, as DuckDB does. A left at most a quarter of the
-                # right is joined eagerly, hashing the left (PDS-H q4:
-                # about 57K orders against 3.8M late lineitem rows);
-                # otherwise the stream continues from the left's rows.
-                # Either way both results replace their nodes in a copy
-                # of the plan, so neither side runs twice.
-                var left_frame = self._execute(
-                    node.left, False, True, batch_size
-                )
-                var plan = self.copy()
-                if 4 * left_frame.height() <= built.height():
-                    var joined = left_frame.join(
-                        built,
-                        left_on=node.names,
-                        right_on=node.right_keys,
-                        how="semi" if node.how == JOIN_SEMI else "anti",
+                # large decides from both real sizes, as DuckDB does: a
+                # left at most a quarter of the right is joined eagerly,
+                # hashing the left (PDS-H q4: about 57K orders against
+                # 3.8M late lineitem rows); otherwise the stream goes on
+                # probing the right's index. A left whose height is
+                # known (a table, or a side run before) is only read.
+                # One that must run is run here, and both results
+                # replace their nodes in a copy of the plan, so neither
+                # side runs twice; that copy's left then has a known
+                # height, so the stream it restarts goes on from here
+                # rather than deciding again.
+                var left_rows = plan_known_height(self, node.left)
+                if left_rows < 0 or 4 * left_rows <= built.height():
+                    var left_frame = self._execute(
+                        node.left, False, True, batch_size
                     )
-                    plan._frames.append(joined^)
-                    plan._schemas.append(Optional[CsvSchema]())
-                    plan._nodes[cursor] = _frame_scan_node(
-                        slot=len(plan._frames) - 1
+                    var plan = self.copy()
+                    if 4 * left_frame.height() <= built.height():
+                        var joined = left_frame.join(
+                            built,
+                            left_on=node.names,
+                            right_on=node.right_keys,
+                            how="semi" if node.how == JOIN_SEMI else "anti",
+                        )
+                        plan._frames.append(joined^)
+                        plan._schemas.append(Optional[CsvSchema]())
+                        plan._nodes[cursor] = _frame_scan_node(
+                            slot=len(plan._frames) - 1
+                        )
+                    else:
+                        plan._frames.append(left_frame^)
+                        plan._schemas.append(Optional[CsvSchema]())
+                        plan._nodes.append(
+                            _frame_scan_node(slot=len(plan._frames) - 1)
+                        )
+                        plan._nodes[cursor].left = len(plan._nodes) - 1
+                        plan._frames.append(built^)
+                        plan._schemas.append(Optional[CsvSchema]())
+                        plan._nodes.append(
+                            _frame_scan_node(slot=len(plan._frames) - 1)
+                        )
+                        plan._nodes[cursor].right = len(plan._nodes) - 1
+                    return _stream_after_materialization(
+                        plan, index, batch_size, sink
                     )
-                else:
-                    plan._frames.append(left_frame^)
-                    plan._schemas.append(Optional[CsvSchema]())
-                    plan._nodes.append(
-                        _frame_scan_node(slot=len(plan._frames) - 1)
-                    )
-                    plan._nodes[cursor].left = len(plan._nodes) - 1
-                    plan._frames.append(built^)
-                    plan._schemas.append(Optional[CsvSchema]())
-                    plan._nodes.append(
-                        _frame_scan_node(slot=len(plan._frames) - 1)
-                    )
-                    plan._nodes[cursor].right = len(plan._nodes) - 1
-                return _stream_after_materialization(
-                    plan, index, batch_size, sink
-                )
             # The build finished: one chunk per column, and its keys'
             # hash index, unless a prefetch made the same one already.
             var keys = List[String]()
