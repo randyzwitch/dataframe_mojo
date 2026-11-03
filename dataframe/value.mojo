@@ -1,5 +1,5 @@
 """A runtime-tagged scalar for row access and single-cell results."""
-from .wkb import _wkb_display
+from dataframe.geo.wkb import _wkb_display
 from std.collections import Optional
 from std.memory import ArcPointer
 
@@ -7,7 +7,7 @@ from .dtype import DataType
 from dataframe.storage.nested import _Box
 from dataframe.storage.string import StringColumn, escape_bytes
 from .series import Series
-from .temporal import format as format_temporal
+from dataframe.time.temporal import format as format_temporal
 from .decimal import format_decimal
 
 

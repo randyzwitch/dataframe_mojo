@@ -25,7 +25,7 @@ from dataframe import (
     import_arrow_series,
     all_horizontal,
 )
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.coverage_compare import assert_frame
 

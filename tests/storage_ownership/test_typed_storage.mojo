@@ -23,7 +23,7 @@ from dataframe import (
     import_arrow_series,
 )
 from dataframe.io.arrow import _export_series
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.lifecycle_stream import array_release, schema_release, at
 from tests.support.selection_types_reference import (
     SELECTION_TYPES,

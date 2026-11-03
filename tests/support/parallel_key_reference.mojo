@@ -1,6 +1,6 @@
 """Independent typed ordering and partition membership for parallel kernels."""
 from std.math import isnan
-from dataframe.comparison_sort import KeyOrder
+from dataframe.kernels.comparison_sort import KeyOrder
 
 
 def parallel_value(row: Int) -> Float64:

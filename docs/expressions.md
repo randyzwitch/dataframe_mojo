@@ -359,7 +359,7 @@ Temporal casts: to and from Int64 (the stored value), to and from String
 and between datetime or duration units (finer is exact and checked, coarser
 floors).
 
-String parsing shares `dataframe/parse.mojo` with `read_csv`, so a string casts
+String parsing shares `dataframe/text/parse.mojo` with `read_csv`, so a string casts
 exactly when the same text would load from CSV: no surrounding whitespace, an
 optional sign, and only explicit infinity spellings. Casting numbers and
 Booleans to string and back reproduces them exactly, including `-0.0` and NaN.
@@ -863,7 +863,7 @@ when a key expression reuses a column's name. Output columns are the keys in the
 order given, then the aggregates.
 
 Keys compare exactly per column through a shared row-key layer
-(`dataframe/hashing.mojo`): each column is mapped to dense codes and the codes
+(`dataframe/kernels/hashing.mojo`): each column is mapped to dense codes and the codes
 are combined column by column, so there is no string concatenation and no
 reliance on hash uniqueness. A null is a key value of its own column: rows group
 together only when their nulls fall in the same key columns. Float64 keys treat

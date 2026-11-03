@@ -86,7 +86,7 @@ from ..expr import (
     col,
 )
 from ..frame import DataFrame, concat
-from ..geospatial_metadata import geoparquet_metadata
+from dataframe.geo.metadata import geoparquet_metadata
 from ..categorical import decode_contiguous
 from dataframe.storage.column import Column
 from ..dtype import DataType

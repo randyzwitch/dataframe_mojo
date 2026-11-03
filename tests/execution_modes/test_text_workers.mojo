@@ -13,7 +13,7 @@ from dataframe import (
     when,
 )
 from dataframe.parallel import worker_count, _helpers
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.support.numeric_model import INTEGER_DTYPES, FLOAT_DTYPES
 

@@ -5,7 +5,7 @@ from dataframe.storage.column import Column
 from dataframe.storage.boolean import BoolColumn
 from ..dtype import DataType
 from dataframe.text.parse import parse_integer, parse_float64
-from ..temporal import parse
+from dataframe.time.temporal import parse
 
 
 def read_dbf(

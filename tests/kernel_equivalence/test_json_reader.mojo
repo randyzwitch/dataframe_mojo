@@ -1,8 +1,14 @@
 """Shared strict JSON scanning, tape offsets, and legacy metadata behavior."""
 # contract-group: kernel.json
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe.json_reader import JsonReader, json_bytes
-from dataframe.json_value import JsonValue, json_quote
+from dataframe.json.reader import (
+    JsonReader,
+    json_bytes,
+)
+from dataframe.json.value import (
+    JsonValue,
+    json_quote,
+)
 
 
 def test_json_tape_preserves_source_offsets_and_subtree_boundaries() raises:

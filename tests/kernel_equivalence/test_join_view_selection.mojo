@@ -23,7 +23,7 @@ from dataframe import (
 )
 from dataframe.categorical import decode
 from dataframe.dtype import CategoricalDictionary
-from dataframe.string_column import StringCodes
+from dataframe.storage.string import StringCodes
 from dataframe.value import AnyValue
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,

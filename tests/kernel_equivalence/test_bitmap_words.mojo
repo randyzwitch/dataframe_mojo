@@ -2,10 +2,14 @@
 # contract-group: kernel.row_ops
 from std.testing import assert_equal
 from dataframe import Series
-from dataframe.bool_column import BoolColumn
-from dataframe.column import _append_bits
+from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.column import _append_bits
 from dataframe.expr import AND, OR, XOR
-from dataframe.expr_kernels import _logical_bits, _logical, _not_bits
+from dataframe.kernels.binary import (
+    _logical_bits,
+    _logical,
+    _not_bits,
+)
 from tests.support.boolean_word_reference import truth_column, truth_state
 
 

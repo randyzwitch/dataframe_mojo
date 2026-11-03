@@ -2,7 +2,7 @@
 from std.testing import assert_raises, assert_true, assert_equal
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from dataframe.decimal import pow10
-from dataframe.hashing import _encode_dense
+from dataframe.kernels.hashing import _encode_dense
 from tests.support.lifecycle_jobs import WorkerSetting
 from tests.public_contracts.test_checked_decimal_feed_order import (
     feed_expression,

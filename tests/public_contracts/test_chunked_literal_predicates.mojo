@@ -16,7 +16,7 @@ from dataframe.expr import STR_STARTS_WITH, STR_ENDS_WITH, STR_CONTAINS, _node
 from dataframe.text.kernels import string_op
 from dataframe.text.regex_adapter import compile_pattern
 from dataframe.parallel import worker_count
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.coverage_compare import assert_frame
 from tests.support.group_strategy_reference import ScopedEnvironment
 

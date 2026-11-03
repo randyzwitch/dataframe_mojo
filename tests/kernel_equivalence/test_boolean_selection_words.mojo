@@ -2,8 +2,8 @@
 # contract-group: kernel.row_ops
 from std.testing import assert_equal
 from dataframe import Column, DataFrame, DataType, Series, col, lit
-from dataframe.bool_column import BoolColumn
-from dataframe.expr_kernels import (
+from dataframe.storage.boolean import BoolColumn
+from dataframe.kernels.binary import (
     _fill_null_bools,
     _keep_nulls_bits,
     _keep_nulls_bools,

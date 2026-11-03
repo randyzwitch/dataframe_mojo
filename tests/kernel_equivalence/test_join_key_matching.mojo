@@ -7,12 +7,12 @@ with NaN and signed zero, Bool and Int128 keys, and a null in each key."""
 from std.testing import assert_equal
 
 from dataframe import BoolColumn, Column, Series, StringColumn
-from dataframe.aggregate import float_key
-from dataframe.join_hash import (
+from dataframe.aggregation.reducer import float_key
+from dataframe.kernels.join_hash import (
     direct_hash_join_rows,
     direct_hash_semi_anti_rows,
 )
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 
 # Longer than a batch of probe rows (1024), and not a multiple of one.
 comptime PROBE = 2_500

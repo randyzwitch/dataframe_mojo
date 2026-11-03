@@ -5,8 +5,11 @@ from std.testing import assert_equal, assert_true, assert_raises
 
 from dataframe.parallel import Job, run_jobs
 from dataframe.regex import Matcher, Regex
-from dataframe.regex_cache import _PatternCache, cached_pattern
-from dataframe.regex_kernels import compile_pattern
+from dataframe.text.regex_cache import (
+    _PatternCache,
+    cached_pattern,
+)
+from dataframe.text.regex_adapter import compile_pattern
 
 
 def _address(regex: Regex) -> Int:

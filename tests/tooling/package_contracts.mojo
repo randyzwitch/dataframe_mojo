@@ -1,7 +1,7 @@
 """Compile a consumer outside the checkout and exercise packaged identity."""
 from std.sys import argv
 from std.testing import assert_true
-from dataframe.json_value import JsonValue
+from dataframe.json.value import JsonValue
 from tests.tooling.contract_runner import (
     capture,
     command_text,
