@@ -553,9 +553,7 @@ struct GroupBy(Copyable):
                 changed = True
             elif counted:
                 var rows = count_rows_by(expression, self._keys[0].name())
-                changed = changed or len(rows._nodes) != len(
-                    expression._nodes
-                )
+                changed = changed or len(rows._nodes) != len(expression._nodes)
                 prepared.append(rows^)
             else:
                 prepared.append(expression.copy())

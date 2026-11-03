@@ -162,7 +162,9 @@ def models(rows: Int, groups: Int, start: Int) -> List[Model]:
     return out^
 
 
-def assert_text(value: AnyValue, valid: Bool, expected: String, what: String) raises:
+def assert_text(
+    value: AnyValue, valid: Bool, expected: String, what: String
+) raises:
     if not valid:
         assert_true(value.is_null(), what + " should be null")
         return
@@ -170,7 +172,9 @@ def assert_text(value: AnyValue, valid: Bool, expected: String, what: String) ra
     assert_equal(value.string(), expected, what)
 
 
-def assert_bool(value: AnyValue, valid: Bool, expected: Bool, what: String) raises:
+def assert_bool(
+    value: AnyValue, valid: Bool, expected: Bool, what: String
+) raises:
     if not valid:
         assert_true(value.is_null(), what + " should be null")
         return
@@ -209,10 +213,16 @@ def check(given: DataFrame, rows: Int, groups: Int, start: Int) raises:
         var last = members[len(members) - 1]
         var name = " of group " + String(g)
         assert_text(
-            actual.item(r, "t_first"), text_valid(first), text(first), "t_first" + name
+            actual.item(r, "t_first"),
+            text_valid(first),
+            text(first),
+            "t_first" + name,
         )
         assert_text(
-            actual.item(r, "t_last"), text_valid(last), text(last), "t_last" + name
+            actual.item(r, "t_last"),
+            text_valid(last),
+            text(last),
+            "t_last" + name,
         )
         var low = String("")
         var high = String("")
@@ -268,13 +278,23 @@ def check(given: DataFrame, rows: Int, groups: Int, start: Int) raises:
         else:
             assert_true(yl.is_null(), "y_last null" + name)
         assert_bool(
-            actual.item(r, "b_first"), flag_valid(first), flag(first), "b_first" + name
+            actual.item(r, "b_first"),
+            flag_valid(first),
+            flag(first),
+            "b_first" + name,
         )
         assert_bool(
-            actual.item(r, "b_last"), flag_valid(last), flag(last), "b_last" + name
+            actual.item(r, "b_last"),
+            flag_valid(last),
+            flag(last),
+            "b_last" + name,
         )
-        assert_bool(actual.item(r, "b_min"), bools > 0, not any_false, "b_min" + name)
-        assert_bool(actual.item(r, "b_max"), bools > 0, any_true, "b_max" + name)
+        assert_bool(
+            actual.item(r, "b_min"), bools > 0, not any_false, "b_min" + name
+        )
+        assert_bool(
+            actual.item(r, "b_max"), bools > 0, any_true, "b_max" + name
+        )
         assert_bool(actual.item(r, "b_any"), True, any_true, "b_any" + name)
         assert_bool(
             actual.item(r, "b_all"),

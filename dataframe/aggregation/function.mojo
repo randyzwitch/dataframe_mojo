@@ -85,6 +85,7 @@ comptime _BATCH = 2048
 # Bytes of a sink's arena: two huge pages.
 comptime _ARENA_BYTES = 4 << 20
 
+
 def reaggregable(op: Int) -> Bool:
     """Whether a reduction's state, merged with another group's state,
     gives the state of the union of their rows: a coarser grouping's states
@@ -839,7 +840,9 @@ def _update_column_counts(
         return
     if part._data.isa[Column[Int128]]():
         ref wide = part._data[Column[Int128]]
-        _update_counts(wide._bits[], wide._offset, kind, start, count, rows, base)
+        _update_counts(
+            wide._bits[], wide._offset, kind, start, count, rows, base
+        )
         return
     comptime for t in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[t]
@@ -860,9 +863,7 @@ def _string_order(at: Int, length: Int, state: Int) -> Int:
     var held = _words_at(state)
     var size = Int(held[] & 0xFFFFFFFF)
     var bytes = state + 4 if size <= 12 else Int(held[unsafe_offset=1])
-    var c = Int(
-        external_call["memcmp", Int32](at, bytes, min(length, size))
-    )
+    var c = Int(external_call["memcmp", Int32](at, bytes, min(length, size)))
     if c != 0:
         return c
     return length - size
@@ -903,9 +904,10 @@ def _update_values(
         # A Boolean's word is 1 for true and 2 for false: the flags.
         for k in range(count):
             var at = _words_at(rows[unsafe_offset=k] + base)
-            at[] |= UInt64(4) if nulls[
-                unsafe_offset=k
-            ] != 0 else first_words[unsafe_offset=k]
+            at[] |= (
+                UInt64(4) if nulls[unsafe_offset=k]
+                != 0 else first_words[unsafe_offset=k]
+            )
         return
     if kind == _K_FIRST or kind == _K_LAST:
         var width = slot.width
@@ -1258,9 +1260,7 @@ def _update_states(
             or slot.kind == _K_STRING_MAX
             or slot.kind == _K_LOGIC
         ):
-            _update_values(
-                slot, part, start, count, rows, base, first, scratch
-            )
+            _update_values(slot, part, start, count, rows, base, first, scratch)
             continue
         if slot.kind == _K_WIDE_MIN or slot.kind == _K_WIDE_MAX:
             if part._data.isa[Column[Int64]]():
@@ -1594,7 +1594,11 @@ def combine(slots: List[AggregateFunction], into: Int, other: Int) raises:
 
 
 def _unload(
-    slot: AggregateFunction, groups: _Groups, mut reducer: Reducer, lo: Int, hi: Int
+    slot: AggregateFunction,
+    groups: _Groups,
+    mut reducer: Reducer,
+    lo: Int,
+    hi: Int,
 ) raises:
     """A reduction's states of groups [lo, hi), from their rows into a
     `Reducer` sized for every group, which finishes them as every other
@@ -1793,9 +1797,8 @@ struct _Finalizer(Movable):
             unsafe_uninit_length=n if self.mode == _F_LOGIC else 0
         )
         self.valid = List[Bool](
-            unsafe_uninit_length=n if (
-                direct and self.mode != _F_COUNTS
-            ) or self.mode >= _F_LOGIC else 0
+            unsafe_uninit_length=n if (direct and self.mode != _F_COUNTS)
+            or self.mode >= _F_LOGIC else 0
         )
         self.nulls = False
         self.values = List[_ValueColumn]()
@@ -2447,9 +2450,9 @@ struct _KeyColumn(Movable):
         var stride = groups.stride
         var valid = self.values.valid.unsafe_ptr()
         for g in range(lo, hi):
-            valid[unsafe_offset=g] = at[unsafe_offset=g * stride + 1] & (
-                self.bit
-            ) == 0
+            valid[unsafe_offset=g] = (
+                at[unsafe_offset=g * stride + 1] & (self.bit) == 0
+            )
         self.values.write(at, stride, _HEAD + self.w, lo, hi, held)
 
     def column(deinit self) raises -> Series:
