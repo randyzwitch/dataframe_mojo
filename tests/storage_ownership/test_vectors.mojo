@@ -66,8 +66,9 @@ def test_flat_window_reads_storage_in_place() raises:
     assert_equal(chunk.data[0].vector_type, FLAT_VECTOR)
     assert_equal(chunk.data[0].physical, PHYSICAL_INT64)
     # The window's values are the column's own buffer, not a copy.
-    ref column = arena.columns[handle]._data[Column[Int64]]
-    assert_equal(chunk.data[0].data, Int(column._ptr()) + 8 * 100)
+    var values = Int(arena.columns[handle]._data[Column[Int64]]._ptr())
+    var buffer = arena.columns[handle]._data[Column[Int64]]._data.ptr()
+    assert_equal(chunk.data[0].data, values + 8 * 100)
     var format = chunk.unified(0, arena)
     assert_false(format.sel.is_set())
     for i in range(STANDARD_VECTOR_SIZE):
@@ -79,7 +80,7 @@ def test_flat_window_reads_storage_in_place() raises:
     var back = to_series(chunk, 0, arena, "y", DataType.INT64)
     assert_equal(len(back), STANDARD_VECTOR_SIZE)
     assert_equal(back.name(), "y")
-    assert_true(back._data[Column[Int64]]._data.ptr() == column._data.ptr())
+    assert_true(back._data[Column[Int64]]._data.ptr() == buffer)
     _ = arena^
 
 
