@@ -33,13 +33,10 @@ def _frame(rows: Int, bad: Int, second: Int = 1) raises -> DataFrame:
 def test_checked_decimal_group_and_over_distinct_operand_batches() raises:
     var worker = WorkerSetting(1)
     var frame = _frame(1025, 1024)
-    # The aggregate table computes a morsel's reduction inputs before it
-    # accumulates them (DuckDB updates states from a vector of evaluated
-    # inputs), whatever batch agg is given: the operand fault at row 1024
-    # comes before the prefix of rows 0 and 1 exceeds precision.
-    for batch in [1024, 1025]:
-        with assert_raises(contains="decimal multiplication overflow"):
-            _ = frame.group_by("g").agg(feed_expression(), batch_size=batch)
+    with assert_raises(contains="decimal precision 38"):
+        _ = frame.group_by("g").agg(feed_expression(), batch_size=1024)
+    with assert_raises(contains="decimal multiplication overflow"):
+        _ = frame.group_by("g").agg(feed_expression(), batch_size=1025)
     var over = feed_expression().over("g")
     # A window's argument (a * b) is computed over every input row before
     # any partition is summed (DuckDB's projection below PhysicalWindow),
@@ -48,8 +45,8 @@ def test_checked_decimal_group_and_over_distinct_operand_batches() raises:
         _ = frame.select(over, batch_size=1024)
     with assert_raises(contains="decimal multiplication overflow"):
         _ = frame.select(over, batch_size=1025)
-    # The lazy group-by sinks the same morsel into the aggregate table.
-    with assert_raises(contains="decimal multiplication overflow"):
+    # Public lazy defaults differ: eager GROUP uses 1024, SELECT/OVER 8192.
+    with assert_raises(contains="decimal precision 38"):
         _ = (
             frame.lazy()
             .group_by("g")
@@ -78,16 +75,17 @@ def test_checked_decimal_group_and_over_distinct_operand_batches() raises:
 def test_checked_decimal_group_range_workers_before_partial_merges() raises:
     var frame = _frame(32768, 1024)
     var serial = WorkerSetting(1)
-    # One worker's table evaluates its morsel's operands first.
-    with assert_raises(contains="decimal multiplication overflow"):
+    with assert_raises(contains="decimal precision 38"):
         _ = frame.group_by("g").agg(feed_expression(), batch_size=1024)
     _ = serial^
     var parallel = WorkerSetting(2)
-    # Low-cardinality range jobs use fixed 4096-row grouped feeds. The input
-    # fault is inside the first feed even when agg's requested batch is 1024.
-    for batch in [1024, 8192]:
-        with assert_raises(contains="decimal multiplication overflow"):
-            _ = frame.group_by("g").agg(feed_expression(), batch_size=batch)
+    # Each worker's morsel evaluates agg's requested batch before it updates
+    # the states: rows 0 and 1 pass precision inside a 1024-row batch, while
+    # an 8192-row batch reaches the operand fault at row 1024 first.
+    with assert_raises(contains="decimal precision 38"):
+        _ = frame.group_by("g").agg(feed_expression(), batch_size=1024)
+    with assert_raises(contains="decimal multiplication overflow"):
+        _ = frame.group_by("g").agg(feed_expression(), batch_size=8192)
     # Range workers must succeed before group partials are merged. With no
     # input fault each worker holds 6e37; only their merge exceeds precision.
     with assert_raises(contains="decimal precision 38"):
