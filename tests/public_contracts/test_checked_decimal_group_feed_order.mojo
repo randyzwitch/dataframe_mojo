@@ -38,7 +38,10 @@ def test_checked_decimal_group_and_over_distinct_operand_batches() raises:
     with assert_raises(contains="decimal multiplication overflow"):
         _ = frame.group_by("g").agg(feed_expression(), batch_size=1025)
     var over = feed_expression().over("g")
-    with assert_raises(contains="decimal precision 38"):
+    # A window's argument (a * b) is computed over every input row before
+    # any partition is summed (DuckDB's projection below PhysicalWindow),
+    # so row 1024's product fault comes first at any batch size.
+    with assert_raises(contains="decimal multiplication overflow"):
         _ = frame.select(over, batch_size=1024)
     with assert_raises(contains="decimal multiplication overflow"):
         _ = frame.select(over, batch_size=1025)
