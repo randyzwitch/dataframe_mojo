@@ -50,6 +50,18 @@ comptime PARTITION_START = UInt8(1)
 comptime PEER_START = UInt8(2)
 
 
+def sink_threads(rows: Int) -> Int:
+    """Threads sinking `rows` rows into the window: one per source morsel
+    (DEFAULT_ROW_GROUP_SIZE rows), each hashing its own rows."""
+    return max(
+        1,
+        min(
+            configured_workers(),
+            (rows + DEFAULT_ROW_GROUP_SIZE - 1) // DEFAULT_ROW_GROUP_SIZE,
+        ),
+    )
+
+
 def radix_bits(rows: Int) -> Int:
     """Hash-group radix bits for `rows` rows (HashedSort Rehash)."""
     var bits = _START_BITS
@@ -431,15 +443,7 @@ def window_layout(
     var bounds = List[Int]()
     if len(partition_keys) > 0:
         # HashedSort: radix-partition rows by their keys' hash.
-        # The sink runs a thread per source morsel (DEFAULT_ROW_GROUP_SIZE
-        # rows), each hashing and partitioning its own rows.
-        var sink = max(
-            1,
-            min(
-                workers,
-                (height + DEFAULT_ROW_GROUP_SIZE - 1) // DEFAULT_ROW_GROUP_SIZE,
-            ),
-        )
+        var sink = sink_threads(height)
         var partitioner = Partitioner(partition_keys, sink)
         var bits = radix_bits(height)
         var parts = partitioner.scatter(sink, bucket_count=1 << bits)

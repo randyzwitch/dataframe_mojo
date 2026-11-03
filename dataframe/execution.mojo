@@ -3114,8 +3114,10 @@ from .window_sort import (
     WindowLayout,
     rank_from_layout,
     rank_order_keys,
+    sink_threads,
     window_layout,
 )
+from dataframe.kernels.partition import encode_partitioned
 
 
 # DuckDB's STANDARD_VECTOR_SIZE: window tasks are sized in blocks of it.
@@ -3130,10 +3132,17 @@ struct WindowLayouts(Movable):
 
     var keys: List[String]
     var layouts: List[WindowLayout]
+    # Partition ids (and counts) by partition keys, for constant aggregates.
+    var id_keys: List[String]
+    var ids: List[List[Int]]
+    var counts: List[Int]
 
     def __init__(out self):
         self.keys = List[String]()
         self.layouts = List[WindowLayout]()
+        self.id_keys = List[String]()
+        self.ids = List[List[Int]]()
+        self.counts = List[Int]()
 
     def find(self, keys: String) -> Int:
         for k in range(len(self.keys)):
@@ -3160,6 +3169,64 @@ def _partition_keys(node: Node, columns: List[Series]) -> List[Series]:
                 if column.name() == name:
                     partition_keys.append(column.copy())
     return partition_keys^
+
+
+def _over_constant[
+    width: Int
+](
+    node: Node,
+    argument_expr: Expr,
+    inputs: List[Series],
+    columns: List[Series],
+    height: Int,
+    batch_size: Int,
+    cache_address: Int,
+) raises -> Series:
+    """An aggregate over whole partitions (no ORDER BY, so every row's
+    frame is its partition): DuckDB's WindowConstantAggregator. Each
+    partition is aggregated once and the result is broadcast to its rows;
+    the rows are numbered by partition (hash-partitioned, one dictionary
+    per hash group) and never gathered or sorted."""
+    var cache = Pointer[WindowLayouts, MutAnyOrigin](
+        unsafe_from_address=cache_address
+    )
+    var at = -1
+    for k in range(len(cache[].id_keys)):
+        if cache[].id_keys[k] == node.text2:
+            at = k
+    if at < 0:
+        var keys = _partition_keys(node, columns)
+        var ids: List[Int]
+        var count: Int
+        if len(keys) == 0 or height == 0:
+            ids = List[Int](length=height, fill=0)
+            count = 1 if height > 0 else 0
+        else:
+            var encoded = encode_partitioned(
+                keys, sink_threads(height), nulls_equal=True
+            )
+            count = encoded.count()
+            ids = encoded^.into_ids()
+        cache[].id_keys.append(node.text2)
+        cache[].ids.append(ids^)
+        cache[].counts.append(count)
+        at = len(cache[].id_keys) - 1
+    var local = bind(argument_expr, inputs)
+    var values = evaluate[width](
+        local,
+        inputs,
+        height,
+        batch_size=batch_size,
+        grouped=True,
+        groups=cache[].ids[at],
+        group_count=cache[].counts[at],
+    )
+    var spread = take_parallel(
+        [values^], cache[].ids[at].copy(), configured_workers()
+    )
+    var result = spread[0].copy()
+    result._name = argument_expr._name
+    return result^
 
 
 def _over_rank(
@@ -3320,6 +3387,14 @@ struct _OverJob(Job):
             groups=groups,
             group_count=self.last - self.first,
         )
+
+
+def _has_windows(expr: Expr) -> Bool:
+    """Whether the expression holds a window function or a nested over()."""
+    for node in expr._nodes:
+        if node.op == OVER or is_window(node.op) or is_sequence(node.op):
+            return True
+    return False
 
 
 def _used_columns(expr: Expr, columns: List[Series]) raises -> List[Bool]:
@@ -3528,6 +3603,23 @@ def _over[
             return _over_rank(node, argument_expr, inputs, columns, height)
     var owned = WindowLayouts()
     var cache_address = layouts if layouts != 0 else Int(Pointer(to=owned))
+    if (
+        not mapped
+        and node.min_count == 0
+        and inner.shape() != ROWS
+        and not _has_windows(argument_expr)
+    ):
+        var constant = _over_constant[width](
+            node,
+            argument_expr,
+            inputs,
+            columns,
+            height,
+            batch_size,
+            cache_address,
+        )
+        _ = owned^
+        return constant^
     var at = _layout_index(node, columns, height, cache_address)
     var cache = Pointer[WindowLayouts, MutAnyOrigin](
         unsafe_from_address=cache_address
