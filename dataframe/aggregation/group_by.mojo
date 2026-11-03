@@ -777,7 +777,7 @@ struct GroupBy(Copyable):
         var plain = _plain_inputs(expressions, frame)
         var layout = aggregate_layout(
             empty_keys,
-            table_inputs(frame, keys, expressions) if plain else empty,
+            table_inputs(frame, keys, expressions) if plain else empty.copy(),
             specs,
         )
         var batch = height if plain else batch_size
