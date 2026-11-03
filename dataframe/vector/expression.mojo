@@ -423,38 +423,56 @@ struct VectorExpression(Copyable, Movable):
         """The buffers every node computed in lanes or read in one writes,
         constants filled in (DuckDB's ExpressionState intermediates)."""
         var n = len(self.kinds)
-        self.composed = List[UInt32](length=2 * STANDARD_VECTOR_SIZE, fill=0)
+        self.composed = List[UInt32](
+            unsafe_uninit_length=2 * STANDARD_VECTOR_SIZE
+        )
         for i in range(n):
             var kind = self.kinds[i]
             if kind == _KIND_UNUSED:
                 continue
-            self.valid[i] = List[UInt8](length=STANDARD_VECTOR_SIZE, fill=1)
+            var constant = kind == _KIND_CONSTANT
+            # Only a constant's buffers are read before a load or a kernel
+            # writes them: the rest are left unwritten.
+            if constant:
+                self.valid[i] = List[UInt8](
+                    length=STANDARD_VECTOR_SIZE,
+                    fill=UInt8(1) if self.constant_valid[i] else UInt8(0),
+                )
+            else:
+                self.valid[i] = List[UInt8](
+                    unsafe_uninit_length=STANDARD_VECTOR_SIZE
+                )
             var lane = self.lanes[i]
             if lane == _LANE_INT or lane == _LANE_DECIMAL64:
                 self.lane_ints[i] = List[Int64](
                     length=STANDARD_VECTOR_SIZE, fill=self.ints[i]
+                ) if constant else List[Int64](
+                    unsafe_uninit_length=STANDARD_VECTOR_SIZE
                 )
             elif lane == _LANE_DECIMAL:
                 self.lane_decimals[i] = List[Int128](
                     length=STANDARD_VECTOR_SIZE, fill=self.decimals[i]
+                ) if constant else List[Int128](
+                    unsafe_uninit_length=STANDARD_VECTOR_SIZE
                 )
             elif lane == _LANE_FLOAT:
                 self.lane_floats[i] = List[Float64](
                     length=STANDARD_VECTOR_SIZE, fill=self.floats[i]
+                ) if constant else List[Float64](
+                    unsafe_uninit_length=STANDARD_VECTOR_SIZE
                 )
             elif lane == _LANE_BOOL:
                 self.lane_bools[i] = List[UInt8](
                     length=STANDARD_VECTOR_SIZE,
                     fill=UInt8(1) if self.ints[i] != 0 else UInt8(0),
+                ) if constant else List[UInt8](
+                    unsafe_uninit_length=STANDARD_VECTOR_SIZE
                 )
-            if kind == _KIND_CONSTANT:
+            if constant:
                 self.whole[i] = self.constant_valid[i]
-                if not self.constant_valid[i]:
-                    for k in range(STANDARD_VECTOR_SIZE):
-                        self.valid[i][k] = 0
             if self.bound.expr._nodes[i].op == WHEN:
                 self.when_rows[i] = List[UInt32](
-                    length=4 * STANDARD_VECTOR_SIZE, fill=0
+                    unsafe_uninit_length=4 * STANDARD_VECTOR_SIZE
                 )
         self.ready = True
 
