@@ -2030,11 +2030,12 @@ def _finalize_distinct(
     new sinks of the main table, one per finished partition, on their own
     threads; those sinks join `sinks`, and the main finish merges their
     counts into the groups."""
+    # The workers' sinks; the new sinks join the list after them.
     var workers = len(sinks)
     for d in range(len(layout.distinct)):
         var slot = layout.distinct[d]
-        var tables = List[AggregateSink](capacity=len(sinks))
-        for j in range(len(sinks)):
+        var tables = List[AggregateSink](capacity=workers)
+        for j in range(workers):
             tables.append(sinks[j].distinct.take(d))
         var pairs = aggregate_finish(tables, layout.distinct_layout(d))
         var nulls = layout.templates[slot].integer == 0
