@@ -130,3 +130,59 @@ def test_every_row_matching_keeps_its_order() raises:
         assert_equal(
             sorted.item(r, "v").int64(), 10 * sorted.item(r, "k").int64()
         )
+
+
+def test_keys_spanning_the_whole_int64_range_join_in_every_kind() raises:
+    # Random 64-bit ids span more than 2**63 (Int64.MIN and Int64.MAX
+    # among them): a signed `most - least` overflows, which once sized
+    # the direct slots from a negative span.
+    var probe_keys = List[Int64]()
+    var build_keys = List[Int64]()
+    var x = UInt64(0x9E3779B97F4A7C15)
+    for row in range(300):
+        x ^= x << 13
+        x ^= x >> 7
+        x ^= x << 17
+        probe_keys.append(Int64(Int(x)))
+        if row % 2 == 0:
+            build_keys.append(Int64(Int(x)))
+        else:
+            build_keys.append(Int64(Int(~x)))
+    probe_keys[0] = Int64.MIN
+    build_keys[0] = Int64.MIN
+    build_keys[1] = Int64.MAX
+    var ids = List[Int64]()
+    for row in range(300):
+        ids.append(Int64(row))
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64](probe_keys.copy())),
+            Series("id", Column[Int64](ids.copy())),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("bk", Column[Int64](build_keys.copy())),
+            Series("v", Column[Int64](ids.copy())),
+        ]
+    )
+    var expected: List[Int] = [150, 300, 300, 450, 150, 150]
+    var kinds: List[String] = ["inner", "left", "right", "full", "semi", "anti"]
+    for k in range(len(kinds)):
+        var how = kinds[k]
+        for lazy in [False, True]:
+            var out = (
+                left.lazy()
+                .join(right.lazy(), left_on=["k"], right_on=["bk"], how=how)
+                .collect() if lazy else left.join(
+                    right, left_on=["k"], right_on=["bk"], how=how
+                )
+            )
+            assert_equal(out.height(), expected[k])
+            if how != "inner":
+                continue
+            for r in range(out.height()):
+                var id = Int(out.item(r, "id").int64())
+                var v = Int(out.item(r, "v").int64())
+                assert_equal(out.item(r, "k").int64(), build_keys[v])
+                assert_equal(probe_keys[id], build_keys[v])

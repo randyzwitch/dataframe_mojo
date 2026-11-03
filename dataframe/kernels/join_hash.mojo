@@ -1606,19 +1606,22 @@ def _perfect_slots(key: Series) -> Optional[Tuple[Int64, List[Int32]]]:
         var v = values[unsafe_offset=i]
         least = min(least, v)
         most = max(most, v)
-    if most - least >= Int64(_PERFECT_SPAN):
+    # The span in unsigned arithmetic: keys spread over more than 2**63
+    # (random 64-bit ids) overflow a signed `most - least`.
+    var span = UInt64(most) - UInt64(least)
+    if span >= UInt64(_PERFECT_SPAN):
         return None
     # The slots must stay in cache while every probe row reads one at
     # random: no larger than the hash table they replace (about 16 bytes
     # a build row), or within half a core's L2 cache. A few hundred keys
     # spread over a wide span would otherwise miss on nearly every probe.
-    var slot_bytes = 4 * (Int(most - least) + 1)
+    var slot_bytes = 4 * (Int(span) + 1)
     if slot_bytes > max(16 * n, _l2_cache_bytes() // 2):
         return None
-    var slots = List[Int32](length=Int(most - least) + 1, fill=-1)
+    var slots = List[Int32](length=Int(span) + 1, fill=-1)
     var table = slots.unsafe_ptr()
     for i in range(n):
-        var at = Int(values[unsafe_offset=i] - least)
+        var at = Int(UInt64(values[unsafe_offset=i]) - UInt64(least))
         if table[unsafe_offset=at] >= 0:
             return None
         table[unsafe_offset=at] = Int32(i)
