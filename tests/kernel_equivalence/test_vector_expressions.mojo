@@ -1,6 +1,6 @@
 """Expressions over data chunks against the eager evaluator: comparisons of
 integers, floats, decimals, dates and strings, Kleene AND / OR, NOT and null
-tests, arithmetic and casts in lanes, and nodes left to the at-rest
+tests and IN lists, arithmetic and casts in lanes, and nodes left to the at-rest
 evaluator, over flat chunks and over dictionaries through a selection, with
 nulls. A filter's selection and a projection's column equal filtering and
 projecting the frame eagerly."""
@@ -69,6 +69,9 @@ def predicates() raises -> List[Expr]:
         col("day") < lit("1970-03-01").cast(DataType.DATE),
         col("s").str().starts_with("k1") | col("a").is_not_null(),
         col("s").is_null() & (col("a") > lit(Int64(0))),
+        col("s").is_in(["k1", "a longer key 3", "absent"]),
+        col("b").is_in([lit(Int32(1)), lit(Int32(4)), lit(Int32(16))])
+        | col("a").is_in([lit(Int64(-50)), lit(Int64(7))]),
     ]
 
 

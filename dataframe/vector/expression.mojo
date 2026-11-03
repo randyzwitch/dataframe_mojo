@@ -43,6 +43,7 @@ from dataframe.expr import (
     EQ,
     GE,
     GT,
+    INT_IS_IN,
     IS_NOT_NULL,
     IS_NULL,
     LE,
@@ -51,6 +52,7 @@ from dataframe.expr import (
     NE,
     NOT,
     OR,
+    STR_IS_IN,
     SUB,
     Expr,
     subtree,
@@ -63,6 +65,7 @@ from dataframe.kernels.binary import (
     checked_add,
 )
 from dataframe.series import Series
+from dataframe.text.predicates import decode_values
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
@@ -300,6 +303,9 @@ struct VectorExpression(Copyable, Movable):
     var whole: List[Bool]
     var formats: List[UnifiedVectorFormat]
     var by_chunk_row: List[Bool]
+    # IN lists, per node: integer values, or string_t over `held`.
+    var member_ints: List[List[Int64]]
+    var member_strings: List[List[StringT]]
     # The composed selection `_entries` writes.
     var composed: List[UInt32]
     var scratch: DataChunk
@@ -335,6 +341,10 @@ struct VectorExpression(Copyable, Movable):
             ),
         )
         self.by_chunk_row = List[Bool](length=n, fill=False)
+        self.member_ints = List[List[Int64]](length=n, fill=List[Int64]())
+        self.member_strings = List[List[StringT]](
+            length=n, fill=List[StringT]()
+        )
         self.composed = List[UInt32](length=2 * STANDARD_VECTOR_SIZE, fill=0)
         self.scratch = DataChunk(n)
         self._plan(self.root)
@@ -401,8 +411,12 @@ struct VectorExpression(Copyable, Movable):
                     or node.op == IS_NULL
                     or node.op == IS_NOT_NULL
                 )
+                or node.op == STR_IS_IN
+                or node.op == INT_IS_IN
             ):
                 self.lanes[index] = _LANE_BOOL
+                if node.op == STR_IS_IN or node.op == INT_IS_IN:
+                    self._members(index)
             else:
                 self.lanes[index] = _lane(dtype)
             self._plan(node.left)
@@ -449,6 +463,17 @@ struct VectorExpression(Copyable, Movable):
             )
         if node.op == IS_NULL or node.op == IS_NOT_NULL:
             return node.left >= 0 and node.right < 0
+        if node.op == STR_IS_IN:
+            return (
+                node.left >= 0
+                and node.right < 0
+                and self.bound.dtypes[node.left] == DataType.STRING
+            )
+        if node.op == INT_IS_IN:
+            if node.left < 0 or node.right >= 0:
+                return False
+            var input = self.bound.dtypes[node.left]
+            return input.is_integer() and input != DataType.UINT64
         return False
 
     def _constant(mut self, index: Int) raises -> Bool:
@@ -672,6 +697,8 @@ struct VectorExpression(Copyable, Movable):
             self._not(index, left, count)
         elif op == IS_NULL or op == IS_NOT_NULL:
             self._null_test(index, left, rows, count, op == IS_NULL)
+        elif op == STR_IS_IN or op == INT_IS_IN:
+            self._is_in(index, left, rows, count)
         else:
             self._compute(index, count)
 
@@ -773,7 +800,25 @@ struct VectorExpression(Copyable, Movable):
                 unsafe_from_address=validity.bits
             )
             var offset = validity.offset
-            if entries == 0:
+            if entries == 0 and offset & 7 == 0:
+                # A byte of the bitmap spread to eight flags at a time.
+                var lanes = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
+                var from_byte = offset >> 3
+                var whole_bytes = count >> 3
+                for j in range(whole_bytes):
+                    var byte = bits[unsafe_offset=from_byte + j]
+                    var spread = (SIMD[DType.uint8, 8](byte) & lanes).ne(
+                        SIMD[DType.uint8, 8](0)
+                    )
+                    flags.unsafe_offset(8 * j).unsafe_store(
+                        spread.cast[DType.uint8]()
+                    )
+                for k in range(8 * whole_bytes, count):
+                    var b = offset + k
+                    flags[unsafe_offset=k] = (
+                        bits[unsafe_offset=b >> 3] >> UInt8(b & 7)
+                    ) & 1
+            elif entries == 0:
                 for k in range(count):
                     var b = offset + k
                     flags[unsafe_offset=k] = (
@@ -942,33 +987,97 @@ struct VectorExpression(Copyable, Movable):
                     x[unsafe_offset=k] & y[unsafe_offset=k]
                 ) if is_and else (x[unsafe_offset=k] | y[unsafe_offset=k])
             return
+        # Branch-free bytes (0 or 1): a side known true is valid and set,
+        # one known false is valid and clear.
         var pv = self.valid[left].unsafe_ptr()
         var qv = self.valid[right].unsafe_ptr()
         var o = self.valid[index].unsafe_ptr()
-        var any_null = False
+        var lw8 = UInt8(1) if lw else UInt8(0)
+        var rw8 = UInt8(1) if rw else UInt8(0)
+        var all_valid = UInt8(1)
         for k in range(count):
-            var p = lw or pv[unsafe_offset=k] != 0
-            var q = rw or qv[unsafe_offset=k] != 0
-            var a = p and x[unsafe_offset=k] != 0
-            var b = q and y[unsafe_offset=k] != 0
-            var value = False
-            var valid = False
+            var p = pv[unsafe_offset=k] | lw8
+            var q = qv[unsafe_offset=k] | rw8
+            var xa = x[unsafe_offset=k] & 1
+            var yb = y[unsafe_offset=k] & 1
+            var a = p & xa
+            var b = q & yb
+            var value: UInt8
+            var valid: UInt8
             if is_and:
-                if (p and not a) or (q and not b):
-                    valid = True
-                elif p and q:
-                    valid = True
-                    value = True
+                value = a & b
+                valid = (p & q) | (p & (xa ^ 1)) | (q & (yb ^ 1))
             else:
-                if a or b:
-                    valid = True
-                    value = True
-                elif p and q:
-                    valid = True
-            out[unsafe_offset=k] = UInt8(1) if value else UInt8(0)
-            o[unsafe_offset=k] = UInt8(1) if valid else UInt8(0)
-            any_null = any_null or not valid
-        self.whole[index] = not any_null
+                value = a | b
+                valid = (p & q) | a | b
+            out[unsafe_offset=k] = value
+            o[unsafe_offset=k] = valid
+            all_valid &= valid
+        self.whole[index] = all_valid == 1
+
+    def _members(mut self, index: Int) raises:
+        """An IN list's values, parsed once: integers, or string_t over a
+        column this expression holds."""
+        var op = self.bound.expr._nodes[index].op
+        var text = self.bound.expr._nodes[index].text
+        if op == INT_IS_IN:
+            var values = List[Int64]()
+            for part in text.split(","):
+                values.append(Int64(atol(part)))
+            self.member_ints[index] = values^
+            return
+        var values = decode_values(text)
+        var held = Series("", StringColumn(values))
+        ref strings = held._data[StringColumn]
+        var entries = List[StringT](capacity=len(values))
+        for i in range(len(values)):
+            var text = strings._get(i)
+            entries.append(
+                StringT.make(Int(text.unsafe_ptr()), text.byte_length())
+            )
+        self.held.append(held^)
+        self.member_strings[index] = entries^
+
+    def _is_in(
+        mut self, index: Int, left: Int, rows: SelectionVector, count: Int
+    ):
+        """Whether each value is one of the IN list's; null stays null (the
+        column kernels' `is_in_literals` and `integer_is_in`)."""
+        var target = Pointer[UInt8, MutAnyOrigin](
+            unsafe_from_address=Int(self.lane_bools[index].unsafe_ptr())
+        )
+        self.whole[index] = self.whole[left]
+        if not self.whole[left]:
+            var a = self.valid[left].unsafe_ptr()
+            var o = self.valid[index].unsafe_ptr()
+            for k in range(count):
+                o[unsafe_offset=k] = a[unsafe_offset=k]
+        if self.bound.expr._nodes[index].op == INT_IS_IN:
+            var x = self.lane_ints[left].unsafe_ptr()
+            var wanted = self.member_ints[index].unsafe_ptr()
+            var n = len(self.member_ints[index])
+            for k in range(count):
+                var value = x[unsafe_offset=k]
+                var found = UInt8(0)
+                for j in range(n):
+                    found |= UInt8(value == wanted[unsafe_offset=j])
+                target[unsafe_offset=k] = found
+            return
+        var entries = self._entries(left, rows, count, 0)
+        var at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=entries)
+        var data = self.formats[left].data
+        var members = Int(self.member_strings[index].unsafe_ptr())
+        var n = len(self.member_strings[index])
+        for k in range(count):
+            var found = UInt8(0)
+            var entry = data + 16 * (
+                k if entries == 0 else Int(at[unsafe_offset=k])
+            )
+            for j in range(n):
+                if string_equals(entry, members + 16 * j):
+                    found = 1
+                    break
+            target[unsafe_offset=k] = found
 
     def _not(mut self, index: Int, left: Int, count: Int):
         var x = self.lane_bools[left].unsafe_ptr()
