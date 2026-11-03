@@ -132,6 +132,7 @@ from std.collections import (
 from std.memory import (
     ArcPointer,
     Pointer,
+    bitcast,
 )
 
 
@@ -256,11 +257,6 @@ struct _PerfectSinkJob(Job):
         var arena = Pointer[_ValueArena, MutAnyOrigin](
             unsafe_from_address=Int(Pointer(to=self.values[0]))
         )
-        var width = len(self.layout.addressed)
-        var words = List[List[UInt64]](capacity=width)
-        for _ in range(width):
-            words.append(List[UInt64](length=_BATCH, fill=0))
-        var nulls = List[UInt64](length=_BATCH, fill=0)
         var slots = List[Int](length=_BATCH, fill=0)
         var rows = List[Int](length=_BATCH, fill=0)
         var scratch = List[UInt64](length=3 * _BATCH, fill=0)
@@ -279,22 +275,6 @@ struct _PerfectSinkJob(Job):
             for lo in range(0, length, _BATCH):
                 var count = min(_BATCH, length - lo)
                 perfect_slots(self.keys, self.perfect, at + lo, count, slots)
-                var null_at = nulls.unsafe_ptr()
-                for k in range(count):
-                    null_at[unsafe_offset=k] = 0
-                var w = 0
-                for c in range(len(key_part)):
-                    var second = w + 1 if _width(key_part[c]) == 2 else w
-                    _column_words(
-                        key_part[c],
-                        lo,
-                        count,
-                        Int(words[w].unsafe_ptr()),
-                        Int(words[second].unsafe_ptr()),
-                        Int(null_at),
-                        UInt64(1) << UInt64(c),
-                    )
-                    w = second + 1
                 var slot_at = slots.unsafe_ptr()
                 var row_at = rows.unsafe_ptr()
                 for k in range(count):
@@ -305,12 +285,10 @@ struct _PerfectSinkJob(Job):
                     )
                     if row[] != 0:
                         continue
-                    # The slot's first row: its keys, and where it began.
+                    # The slot's first row; its keys are the slot's own bits,
+                    # written when the slots are read out.
                     row[] = 1
-                    row[unsafe_offset=1] = null_at[unsafe_offset=k]
                     row[unsafe_offset=2] = UInt64(at + lo + k)
-                    for v in range(width):
-                        row[unsafe_offset=3 + v] = words[v][k]
                 _update_states(
                     self.layout.slots,
                     inputs,
@@ -325,6 +303,32 @@ struct _PerfectSinkJob(Job):
                 )
             at += length
         self.groups.append(groups^)
+
+
+def _perfect_keys(
+    perfect: PerfectLayout,
+    keys: Int,
+    slot: Int,
+    row: Pointer[UInt64, MutAnyOrigin],
+):
+    """A perfect hash slot's keys written into its group row as key words
+    (DuckDB's perfect hash aggregate rebuilds the group values from the
+    slot when it scans): each key's bits less one, plus its minimum, or
+    null when its bits are zero."""
+    var nulls = UInt64(0)
+    var top = perfect.bits
+    for k in range(keys):
+        var shift = perfect.shifts[k]
+        var width = top - shift
+        top = shift
+        var part = (slot >> shift) & ((1 << width) - 1)
+        if part == 0:
+            nulls |= UInt64(1) << UInt64(k)
+            row[unsafe_offset=3 + k] = 0
+            continue
+        var value = perfect.minima[k] + Int64(part - 1)
+        row[unsafe_offset=3 + k] = bitcast[DType.uint64](value)
+    row[unsafe_offset=1] = nulls
 
 
 def _plain_inputs(expressions: List[Expr], frame: DataFrame) -> Bool:
@@ -836,7 +840,10 @@ struct GroupBy(Copyable):
                 )[]
                 != 0
             ):
-                _ = final.copy_row(merged.at(g))
+                var row = Pointer[UInt64, MutAnyOrigin](
+                    unsafe_from_address=final.at(final.copy_row(merged.at(g)))
+                )
+                _perfect_keys(perfect.value(), len(keys), g, row)
         var held = _HeldBuffers()
         var result = groups_result(final, layout, held)
         _ = jobs^
