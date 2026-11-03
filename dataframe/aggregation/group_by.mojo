@@ -176,6 +176,10 @@ def _encode_parallel(keys: List[Series], workers: Int) raises -> RowKeys:
     return RowKeys(ids^, representatives^)
 
 
+# Rows a perfect hash aggregate gives slots at a time. Their slots (8
+# bytes each) take 128 KB, within a core's L2, so every reduction reads
+# them back from cache, as DuckDB updates each aggregate from one vector's
+# group addresses before it takes the next vector.
 comptime _PERFECT_WINDOW = 16384
 
 
