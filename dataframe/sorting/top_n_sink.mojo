@@ -16,10 +16,12 @@ from dataframe.sorting.sort_key import (
     SortKeyLayout,
     encode_keys,
     key_prefixes,
+    encode_selected,
 )
 from dataframe.sorting.algorithms import SortKeys
 from dataframe.sorting.top_n import TopNBoundary, TopNHeap
 from dataframe.table_filter import DynamicFilterData, set_dynamic_value
+from std.collections import Optional
 from std.memory import ArcPointer
 
 
@@ -107,13 +109,19 @@ struct TopNSink(Movable):
         var prefixes = List[UInt64]()
         while at < n:
             var end = min(n, at + STANDARD_VECTOR_SIZE)
-            if key_prefixes(
-                self.layout, at, end, prefixes
-            ) and not self.heap.can_enter[W, VAR](prefixes, end - at):
+            var block: KeyBlock
+            var entering = Optional[List[Int]]()
+            if key_prefixes(self.layout, at, end, prefixes):
+                entering = self.heap.entering[W, VAR](prefixes, end - at)
+            if entering and len(entering.value()) == 0:
                 # No row of the vector can be in the result.
                 at = end
                 continue
-            var block = encode_keys(self.layout, at, end)
+            if entering and len(entering.value()) < end - at:
+                # Sort keys for the rows that pass alone.
+                block = encode_selected(self.layout, at, entering.value())
+            else:
+                block = encode_keys(self.layout, at, end)
             _sink_rows[W, VAR](self.heap, block, self.payload_rows, matches)
             _ = block^
             at = end

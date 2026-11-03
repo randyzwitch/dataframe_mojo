@@ -15,6 +15,7 @@ with the same result as DuckDB's column-by-column comparison.
 
 The operator's sink over a stream of chunks is `top_n_sink.TopNSink`.
 """
+from std.collections import Optional
 from std.atomic import Atomic
 from std.ffi import external_call
 from std.memory import Pointer, unsafe_memcpy
@@ -354,19 +355,20 @@ struct TopNHeap(Movable):
             word = min(word, self.view.rec[0])
         return (has, word)
 
-    def can_enter[
+    def entering[
         W: Int, VAR: Bool
-    ](self, prefixes: List[UInt64], count: Int) -> Bool:
-        """CheckBoundaryValues on a vector's first sort column: whether
-        any row's first key word can be at or below the bound (`prefixes`
-        bound each row's from below)."""
+    ](self, prefixes: List[UInt64], count: Int) -> Optional[List[Int]]:
+        """CheckBoundaryValues on a vector's leading sort columns: the rows
+        whose first key word can be at or below the bound (`prefixes`
+        bound each row's from below); None when there is no bound yet."""
         var bound = self.bound_word[W, VAR]()
         if not bound[0]:
-            return True
+            return None
+        var rows = List[Int]()
         for i in range(count):
             if prefixes[i] <= bound[1]:
-                return True
-        return False
+                rows.append(i)
+        return rows^
 
     def payloads[W: Int, VAR: Bool](self) -> List[Int]:
         var k = self.keys[W, VAR]()

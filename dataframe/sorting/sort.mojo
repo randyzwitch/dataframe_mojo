@@ -23,6 +23,7 @@ Callers come through `sort_rows`, which picks the top-N for a limit as
 DuckDB's TopN optimizer does (topn_optimizer.cpp: a full sort once the
 limit is over 5,000 rows and 0.7% of the input).
 """
+from std.collections import Optional
 from std.ffi import external_call
 from std.memory import Pointer, unsafe_memcpy
 
@@ -44,6 +45,8 @@ from dataframe.sorting.sort_key import (
     SortKeyLayout,
     encode_keys,
     key_prefixes,
+    encode_selected,
+    has_row_key,
 )
 
 # topn_optimizer.cpp, TopN::CanOptimize: a limit over this many rows and
@@ -339,15 +342,24 @@ struct _TopNJob[W: Int, VAR: Bool](Job):
         )[]
         var at = self.lo
         var prefixes = List[UInt64]()
+        var row_key = has_row_key(layout)
         while at < self.hi:
             var end = min(self.hi, at + STANDARD_VECTOR_SIZE)
-            if key_prefixes(
-                layout, at, end, prefixes
-            ) and not self.heap.can_enter[Self.W, Self.VAR](prefixes, end - at):
+            var block: KeyBlock
+            var entering = Optional[List[Int]]()
+            if key_prefixes(layout, at, end, prefixes):
+                entering = self.heap.entering[Self.W, Self.VAR](
+                    prefixes, end - at
+                )
+            if entering and len(entering.value()) == 0:
                 # No row of the vector can be in the result.
                 at = end
                 continue
-            var block = encode_keys(layout, at, end)
+            if entering and len(entering.value()) < end - at and not row_key:
+                # Sort keys for the rows that pass alone.
+                block = encode_selected(layout, at, entering.value())
+            else:
+                block = encode_keys(layout, at, end)
             self.heap.sink[Self.W, Self.VAR](block)
             _ = self.heap.publish[Self.W, Self.VAR](self.boundary)
             _ = block^

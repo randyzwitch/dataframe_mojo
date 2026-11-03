@@ -891,3 +891,33 @@ def key_prefixes(
     _ = limits^
     _ = scratch^
     return True
+
+
+def has_row_key(layout: SortKeyLayout) -> Bool:
+    for c in layout.columns:
+        if c.encoding == _ENC_ROW:
+            return True
+    return False
+
+
+def encode_selected(
+    layout: SortKeyLayout, lo: Int, selection: List[Int]
+) raises -> KeyBlock:
+    """Records for the rows `lo + selection[i]` alone, as `encode_keys`
+    makes them (the rows CheckBoundaryValues keeps; a layout with the row
+    index as a key encodes whole ranges instead)."""
+    var rows = List[Int](capacity=len(selection))
+    for s in selection:
+        rows.append(lo + s)
+    var sub = layout.copy()
+    for k in range(len(sub.columns)):
+        sub.columns[k].series = layout.columns[k].series.take(rows)
+    sub.rows = len(rows)
+    var block = encode_keys(sub, 0, len(rows))
+    var r = layout.record_words()
+    var records = Pointer[UInt64, MutAnyOrigin](
+        unsafe_from_address=block.address()
+    )
+    for i in range(len(rows)):
+        records[unsafe_offset=i * r + r - 1] = UInt64(rows[i])
+    return block^
