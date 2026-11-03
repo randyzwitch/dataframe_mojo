@@ -31,6 +31,7 @@ from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.kernels.partition import Partitioner, _same_value
+from dataframe.kernels.hashing import encode_rows
 from dataframe.aggregation.reducer import float_key
 from dataframe.parallel import Job, configured_workers, partitions, run_jobs
 from dataframe.series import Series
@@ -286,8 +287,6 @@ struct _GroupSortJob(Job):
     var order: Int
     var flags: Int
     var stable: Bool
-    # Each input row's partition key hash (0: none).
-    var hashes: Int
 
     def __init__(
         out self,
@@ -301,7 +300,6 @@ struct _GroupSortJob(Job):
         order: Int,
         flags: Int,
         stable: Bool,
-        hashes: Int,
     ):
         self.keys = keys.copy()
         self.partition_keys = partition_keys
@@ -313,7 +311,6 @@ struct _GroupSortJob(Job):
         self.order = order
         self.flags = flags
         self.stable = stable
-        self.hashes = hashes
 
     def run(mut self) raises:
         var n = self.hi - self.lo
@@ -323,71 +320,61 @@ struct _GroupSortJob(Job):
         var order = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
         var flags_at = self.flags + self.lo
         var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=flags_at)
-        var group_rows = self.rows + self.lo * size_of[Int]()
         var count = len(self.keys)
+        var mine = List[Int](unsafe_uninit_length=n)
+        var identity = True
         for k in range(n):
-            flags[unsafe_offset=k] = 0
-        var bypass = count == self.partition_keys
-        if bypass and self.hashes != 0:
-            # PartitionKeyTracker: rows that all hash alike may hold one
-            # key; the keys themselves decide.
-            var hashes = Pointer[UInt64, MutAnyOrigin](
-                unsafe_from_address=self.hashes
-            )
-            var first = hashes[unsafe_offset=rows[unsafe_offset=self.lo]]
-            for k in range(1, n):
-                if (
-                    hashes[unsafe_offset=rows[unsafe_offset=self.lo + k]]
-                    != first
-                ):
-                    bypass = False
-                    break
-        if bypass:
-            for c in range(count):
-                mark_changes(
-                    self.keys[c], flags_at, 0, n, PARTITION_START, group_rows
-                )
-            for k in range(1, n):
-                if flags[unsafe_offset=k] != 0:
-                    bypass = False
-                    break
-        if bypass:
-            for k in range(n):
-                order[unsafe_offset=self.lo + k] = rows[
-                    unsafe_offset=self.lo + k
-                ]
-        else:
-            # The sort reads the group's keys; boundaries are then read
-            # through the sorted order from the whole columns.
-            var mine = List[Int](unsafe_uninit_length=n)
-            var identity = True
-            for k in range(n):
-                mine[k] = rows[unsafe_offset=self.lo + k]
-                identity = identity and mine[k] == k
-            var gathered = List[Series](capacity=count)
-            for key in self.keys:
-                gathered.append(
-                    key.copy() if identity
-                    and n == len(key) else key.take(mine)
-                )
-            var perm = sort_key_rows(
-                gathered, self.descending, self.nulls_last, self.stable
-            )
-            for k in range(n):
-                order[unsafe_offset=self.lo + k] = mine[perm[k]]
-            for k in range(n):
-                flags[unsafe_offset=k] = 0
-        var sorted_rows = self.order + self.lo * size_of[Int]()
+            mine[k] = rows[unsafe_offset=self.lo + k]
+            identity = identity and mine[k] == k
+        var whole = identity and n == len(self.keys[0])
+        # The group's partitions numbered by a dictionary of their keys:
+        # partitions need only be contiguous, so the sort orders rows by
+        # that number (one integer) rather than by the key values.
+        var part_keys = List[Series](capacity=self.partition_keys)
         for c in range(self.partition_keys):
-            mark_changes(
-                self.keys[c], flags_at, 0, n, PARTITION_START, sorted_rows
+            part_keys.append(
+                self.keys[c].copy() if whole else self.keys[c].take(mine)
             )
+        var codes = encode_rows(part_keys, nulls_equal=True)
+        var partitions_here = codes.count()
+        var ids = codes^.into_ids()
+        if partitions_here == 1 and count == self.partition_keys:
+            # PartitionKeyTracker::CanBypass: one key and no order keys.
+            for k in range(n):
+                order[unsafe_offset=self.lo + k] = mine[k]
+                flags[unsafe_offset=k] = 0
+            flags[unsafe_offset=0] = PARTITION_START | PEER_START
+            return
+        var sort_keys = List[Series](capacity=1 + count - self.partition_keys)
+        var descending = List[Bool](capacity=1 + count - self.partition_keys)
+        var nulls_last = List[Bool](capacity=1 + count - self.partition_keys)
+        if partitions_here > 1:
+            var wide = List[Int64](unsafe_uninit_length=n)
+            for k in range(n):
+                wide[k] = Int64(ids[k])
+            sort_keys.append(Series("", Column[Int64](wide^)))
+            descending.append(False)
+            nulls_last.append(False)
+        for c in range(self.partition_keys, count):
+            sort_keys.append(
+                self.keys[c].copy() if whole else self.keys[c].take(mine)
+            )
+            descending.append(self.descending[c])
+            nulls_last.append(self.nulls_last[c])
+        var perm = sort_key_rows(
+            sort_keys, descending, nulls_last, self.stable
+        )
+        var previous = -1
         for k in range(n):
-            if flags[unsafe_offset=k] != 0:
-                flags[unsafe_offset=k] = PARTITION_START | PEER_START
+            var at = perm[k]
+            order[unsafe_offset=self.lo + k] = mine[at]
+            flags[unsafe_offset=k] = (
+                PARTITION_START | PEER_START
+            ) if ids[at] != previous else 0
+            previous = ids[at]
+        var sorted_rows = self.order + self.lo * size_of[Int]()
         for c in range(self.partition_keys, count):
             mark_changes(self.keys[c], flags_at, 0, n, PEER_START, sorted_rows)
-        flags[unsafe_offset=0] = PARTITION_START | PEER_START
 
 
 struct _MaskJob(Job):
@@ -484,7 +471,6 @@ def window_layout(
                     Int(order.unsafe_ptr()),
                     Int(flags.unsafe_ptr()),
                     stable,
-                    Int(partitioner.hashes.unsafe_ptr()),
                 )
             )
             bounds.append(cuts[t])
