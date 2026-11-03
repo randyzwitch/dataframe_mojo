@@ -275,9 +275,11 @@ def runs() raises -> DataFrame:
 
 
 def test_a_join_after_a_join_probes_the_kept_rows_in_place() raises:
-    # The first join keeps nine rows in ten as row indices; the second
-    # probes its direct index (perfect hash slots, or a progression)
-    # through them, without gathering its key first.
+    # The first join (inner, semi or anti) keeps its rows as row indices;
+    # the second probes its direct index (perfect hash slots, or a
+    # progression) through them, without gathering its key first. A semi
+    # or anti join is the first join: the cost-based join order runs one
+    # before an inner join its keys do not read, as DuckDB does.
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     for threads in [1, 8]:
         var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
@@ -292,13 +294,13 @@ def test_a_join_after_a_join_probes_the_kept_rows_in_place() raises:
                     var actual = (
                         probe()
                         .lazy()
-                        .join(gate().lazy(), left_on=["a"], right_on=["gk"])
                         .join(
-                            build.lazy(),
-                            left_on=["k"],
-                            right_on=[build_key],
+                            gate().lazy(),
+                            left_on=["a"],
+                            right_on=["gk"],
                             how=how,
                         )
+                        .join(build.lazy(), left_on=["k"], right_on=[build_key])
                         .sort(["a"])
                         .collect(batch_size=batch)
                     )
@@ -310,23 +312,23 @@ def test_a_join_after_a_join_probes_the_kept_rows_in_place() raises:
                     _ = observed^
                     var r = 0
                     for row in range(ROWS):
-                        if not gated(row):
+                        if gated(row) != (how != "anti"):
                             continue
                         var k = key_of(row)
                         var hit = key_valid(row) and (
                             k < RUN_KEYS if progression else has_dimension(k)
                         )
-                        if hit != (how != "anti"):
+                        if not hit:
                             continue
                         assert_equal(integer(actual.item(r, "a")), Int128(row))
-                        assert_equal(
-                            integer(actual.item(r, "tag")), Int128(3 * row)
-                        )
-                        assert_equal(actual.item(r, "s").string(), text_of(row))
                         if how == "inner":
                             assert_equal(
-                                actual.item(r, "name").string(), name_of(k)
+                                integer(actual.item(r, "tag")), Int128(3 * row)
                             )
+                        assert_equal(actual.item(r, "s").string(), text_of(row))
+                        assert_equal(
+                            actual.item(r, "name").string(), name_of(k)
+                        )
                         r += 1
                     assert_equal(actual.height(), r)
         _ = workers^
