@@ -364,11 +364,11 @@ struct VectorExpression(Copyable, Movable):
         )
         self.composed = List[UInt32]()
         self.scratch = DataChunk(n)
-        self._plan(self.root)
-        self._narrow_decimals()
         # Lane buffers are made by each worker's copy when it first
         # evaluates (`_allocate`): the compiled template stays small to copy.
         self.ready = False
+        self._plan(self.root)
+        self._narrow_decimals()
 
     def _allocate(mut self):
         """The buffers every node computed in lanes or read in one writes,
