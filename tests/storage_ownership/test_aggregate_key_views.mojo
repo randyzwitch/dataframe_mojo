@@ -8,7 +8,7 @@ owns, and stay correct after the input is gone."""
 from std.testing import assert_equal, assert_true
 
 from dataframe import DataFrame, Expr, Series, StringColumn, col
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.aggregate_table_reference import (
     aggregate_frame,
     assert_groups,

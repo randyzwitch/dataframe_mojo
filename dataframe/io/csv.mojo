@@ -21,8 +21,8 @@ from ..dtype import DataType, NUMERIC_DTYPES
 from ..categorical import decode
 from ..frame import DataFrame, concat
 from ..series import Series
-from ..temporal import format_in, zone_of
-from ..timezone import TimeZone
+from dataframe.time.temporal import format_in, zone_of
+from dataframe.time.timezone import TimeZone
 from ..decimal import format_decimal
 
 

@@ -2,7 +2,7 @@
 from std.os import getenv
 
 from dataframe import DataFrame, write_parquet
-from dataframe.json_value import json_quote
+from dataframe.json.value import json_quote
 
 
 def export_answer(

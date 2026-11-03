@@ -2,7 +2,7 @@
 # contract-group: storage.chunks
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataType, ListColumn, StructColumn, Series
-from dataframe.column import _pack_bits
+from dataframe.storage.column import _pack_bits
 from tests.support.coverage_compare import assert_value
 
 

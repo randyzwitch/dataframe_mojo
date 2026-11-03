@@ -24,7 +24,7 @@ from dataframe.expr import (
     pack_literals,
 )
 from dataframe.text.kernels import string_op
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from dataframe.parallel import worker_count
 from tests.support.coverage_compare import assert_frame
 from tests.support.group_strategy_reference import ScopedEnvironment

@@ -2,7 +2,7 @@
 # contract-group: expr.temporal
 from std.testing import assert_equal
 from dataframe import Column, DataFrame, DataType, Series, col
-from dataframe.temporal import format, parse
+from dataframe.time.temporal import format, parse
 from tests.public_contracts.test_text_binary import _source as text_source
 
 

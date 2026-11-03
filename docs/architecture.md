@@ -140,9 +140,8 @@ also used by ordinary frame operations and query planning.
 The extracted code still uses the existing `DataFrame` value type and `concat`
 from `frame.mojo`; `GroupingSets` also retains its `LazyGroupingSets` plan type.
 These dependencies preserve the existing representations and operations.
-`frame.mojo` re-exports the moved symbols, and `streaming.mojo` re-exports its
-three existing state helpers for import compatibility. Internal consumers use
-the implementation modules directly. `scripts/check_aggregation_boundaries.py`
+`frame.mojo` re-exports the moved symbols. Internal consumers use the
+implementation modules directly. `scripts/check_aggregation_boundaries.py`
 checks that aggregation does not import frame implementation helpers, streaming
 or execution facades, or accelerator dispatch, and has no internal module cycles.
 
@@ -170,19 +169,17 @@ and prevents imports of frame implementation helpers or higher execution layers.
 The computational aggregation modules share `aggregation/` with the eager and
 streaming orchestration. Their names distinguish the state and table layouts:
 
-| Module | Responsibility | Compatibility import |
-| --- | --- | --- |
-| `scalar_states.mojo` | Mergeable integer, floating, logical and moment states | `dataframe.reductions` |
-| `reducer.mojo` | Typed `Reducer` update/merge/finalize and reduction kernels | `dataframe.aggregate` |
-| `hash_reduce.mojo` | Per-worker high-cardinality Int64 grouped reductions | `dataframe.hash_agg` |
-| `dense.mojo` | Perfect-hash layouts and dense group slots | `dataframe.perfect_aggregate` |
-| `hash_table.mojo` | Radix-partitioned aggregate tables and inline group states | `dataframe.aggregate_table` |
-| `selected_rows.mojo` | Reduction kernels reading inputs through selected row indices | `dataframe.indexed_reduce` |
+| Module | Responsibility |
+| --- | --- |
+| `scalar_states.mojo` | Mergeable integer, floating, logical and moment states |
+| `reducer.mojo` | Typed `Reducer` update/merge/finalize and reduction kernels |
+| `hash_reduce.mojo` | Per-worker high-cardinality Int64 grouped reductions |
+| `dense.mojo` | Perfect-hash layouts and dense group slots |
+| `hash_table.mojo` | Radix-partitioned aggregate tables and inline group states |
+| `selected_rows.mojo` | Reduction kernels reading inputs through selected row indices |
 
-The six compatibility modules re-export their original declarations, including
-private helpers and constants. Engine consumers import the canonical modules;
-contract tests retain legacy imports. The aggregation boundary gate rejects new
-engine dependencies on those facades. Existing dependencies on expression
+Everything imports these modules directly; the old root-level compatibility
+modules were removed. Existing dependencies on expression
 execution and pipeline buffer facts remain; this move preserves algorithms,
 thresholds, state layouts, allocation, ownership and worker behavior.
 
@@ -252,10 +249,8 @@ Storage builders and bitmap helpers stay beside the layouts they construct.
 Bulk fixed-width row gathering lives in `kernels/scalar_gather.mojo`; storage
 does not import that kernel. `Series` calls it directly.
 
-The old root modules re-export their declarations, including private bitmap
-helpers and `_BufferFacts`, preserving type identity and import compatibility.
-Engine/provider consumers import the canonical modules. Tests and examples
-retain legacy imports as compatibility coverage. This extraction changes no
+Everything imports the storage modules directly; the old root-level
+compatibility modules were removed. This extraction changes no
 algorithms, layouts, ownership rules or thresholds.
 
 The storage boundary gate rejects engine imports through old storage facades,
@@ -314,9 +309,8 @@ representations remain data inputs. JSON value/path/decode helpers and general
 Unicode normalization/alphabetic tables are unchanged in this extraction and
 can be organized in focused follow-ups.
 
-Engine consumers import canonical text modules. The old root imports re-export
-the same functions, constants and types; existing tests retain compatibility
-coverage. This is an ownership extraction: error timing, regex caching and
+Everything imports the text modules directly; the old root-level compatibility
+modules were removed. This is an ownership extraction: error timing, regex caching and
 locking, UTF-8 handling, binary encoding, number conversion, null propagation
 and specialized route choices retain their implementations.
 

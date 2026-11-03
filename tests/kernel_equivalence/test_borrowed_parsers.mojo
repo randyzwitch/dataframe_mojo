@@ -3,7 +3,11 @@
 from std.math import isnan
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true
-from dataframe.parse import parse_int64, parse_integer, parse_float64
+from dataframe.text.parse import (
+    parse_int64,
+    parse_integer,
+    parse_float64,
+)
 from tests.support.numeric_model import INTEGER_DTYPES, integer_bounds
 from tests.support.parser_reference import (
     integer_reference,

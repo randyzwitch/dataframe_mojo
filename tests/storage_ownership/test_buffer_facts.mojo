@@ -8,7 +8,7 @@ from std.testing import assert_equal, assert_true, assert_false
 from dataframe import Column, Series
 from dataframe.storage.facts import _BufferFacts
 from dataframe.parallel import Job, Pool, run_jobs
-from dataframe.join_hash import int64_progression
+from dataframe.kernels.join_hash import int64_progression
 from dataframe.kernels.segment_statistics import (
     ensure_statistics,
     series_statistics,

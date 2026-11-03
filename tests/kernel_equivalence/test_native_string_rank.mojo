@@ -2,7 +2,7 @@
 # contract-group: kernel.order_keys
 from std.testing import assert_equal, assert_true
 from dataframe import DataFrame, DataType, Series, StringColumn, col
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from dataframe.window import _rank_strings, _rank
 from tests.support.selection_types_reference import (
     selection_column,
@@ -53,7 +53,7 @@ def test_native_inline_external_string_rank_specialization_and_partition_fallbac
                             )
                             for source in [native.copy(), arrow.copy()]:
                                 var fast = _rank_strings(
-                                    source._data[StringColumn],
+                                    source,
                                     groups,
                                     method,
                                     descending,
@@ -125,7 +125,7 @@ def test_native_inline_external_string_rank_specialization_and_partition_fallbac
                     assert_true(
                         not Bool(
                             _rank_strings(
-                                native._data[StringColumn],
+                                native,
                                 partial,
                                 "ordinal",
                                 False,

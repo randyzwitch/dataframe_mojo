@@ -18,7 +18,7 @@ from dataframe import (
     export_arrow_series,
     import_arrow_series,
 )
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.coverage_compare import assert_frame
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.reduction_types_reference import (

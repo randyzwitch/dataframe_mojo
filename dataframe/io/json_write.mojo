@@ -15,8 +15,12 @@ from dataframe.json.decode import validate_json_dtype
 from dataframe.json.value import json_quote
 from dataframe.json.number import float_text
 from ..decimal import format_decimal
-from ..temporal import PreparedFormat, default_format, format_prepared_in
-from ..timezone import TimeZone
+from dataframe.time.temporal import (
+    PreparedFormat,
+    default_format,
+    format_prepared_in,
+)
+from dataframe.time.timezone import TimeZone
 from dataframe.json.wire import duration_text
 
 comptime _Number = def(Int, Int) thin -> String

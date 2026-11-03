@@ -16,7 +16,7 @@ struct CsvField(Copyable):
     """One CSV output field. Names and dtypes are always explicit.
 
     Temporal fields take an optional strftime-style format; an empty format
-    means ISO 8601 (see dataframe/temporal.mojo).
+    means ISO 8601 (see dataframe/time/temporal.mojo).
     """
 
     var name: String

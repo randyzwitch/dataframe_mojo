@@ -2,7 +2,7 @@
 # contract-group: kernel.reduce
 from std.math import isnan
 from std.testing import assert_equal, assert_true
-from dataframe.aggregate import quantile_in
+from dataframe.aggregation.reducer import quantile_in
 
 
 def _at(counts: List[Int], position: Int) -> Float64:

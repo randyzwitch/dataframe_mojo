@@ -1,12 +1,12 @@
 """Bounded text rendering. Only displayed cells are ever formatted."""
 from .dtype import DataType, NUMERIC_DTYPES
-from .temporal import format as format_temporal
+from dataframe.time.temporal import format as format_temporal
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from .decimal import format_decimal
 from dataframe.storage.string import StringColumn, escape_bytes
 from .series import Series
-from .wkb import _wkb_display
+from dataframe.geo.wkb import _wkb_display
 
 comptime ELLIPSIS = "…"
 

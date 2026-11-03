@@ -21,7 +21,6 @@ from std.collections import Optional
 from std.memory import ArcPointer, Pointer
 
 from dataframe.binding import bind
-from dataframe.decimal import pow10
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.execution import evaluate
 from dataframe.expr import (

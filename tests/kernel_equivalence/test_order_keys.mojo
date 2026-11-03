@@ -4,8 +4,8 @@ from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
 from dataframe import BoolColumn, Column, DataFrame, DataType, Series
 from dataframe.dtype import CategoricalDictionary
-from dataframe.string_column import StringColumn
-from dataframe.hashing import (
+from dataframe.storage.string import StringColumn
+from dataframe.kernels.hashing import (
     RowKeys,
     encode_rows,
     column_codes,
@@ -15,12 +15,10 @@ from dataframe.hashing import (
     _encode_categorical,
     _U64Codes,
 )
-from dataframe.row_sort import row_arg_sort, row_top_rows
-from dataframe.packed_sort import packed_arg_sort, packed_top_rows
+from dataframe.sorting.sort import sort_rows
 from dataframe.categorical import (
     decode,
     sort_ranks,
-    string_sort_ranks,
     unify,
 )
 from tests.support.key_kernel_reference import (
@@ -46,6 +44,33 @@ comptime KEY_INTEGER_DTYPES = (
     DType.uint32,
     DType.uint64,
 )
+
+
+def _rows(
+    keys: List[Series], descending: List[Bool], nulls_last: List[Bool]
+) raises -> List[Int]:
+    """The stable sort order (`maintain_order`)."""
+    return sort_rows(keys, descending, nulls_last, maintain_order=True)
+
+
+def _top(
+    keys: List[Series],
+    descending: List[Bool],
+    nulls_last: List[Bool],
+    k: Int,
+    threads: Int = 0,
+) raises -> List[Int]:
+    """The first k rows of the stable order, through the top-N heap."""
+    if k < 0:
+        raise Error("k must be nonnegative")
+    return sort_rows(
+        keys,
+        descending,
+        nulls_last,
+        maintain_order=True,
+        limit=k,
+        threads=threads,
+    )
 
 
 def assert_key_encoding(
@@ -212,17 +237,13 @@ def integer_sort_keys[D: DType]() raises:
                                 rows, [descending], [nulls_last]
                             )
                             assert_equal(
-                                row_arg_sort(keys, [descending], [nulls_last]),
+                                _rows(keys, [descending], [nulls_last]),
                                 expected,
                             )
-                            var packed = packed_arg_sort(
-                                keys, [descending], [nulls_last]
+                            assert_equal(
+                                _rows(keys, [descending], [nulls_last]),
+                                expected,
                             )
-                            assert_true(
-                                Bool(packed),
-                                "one integer key must fit packed sort",
-                            )
-                            assert_equal(packed.take(), expected)
 
 
 def test_integer_packed_and_general_sort_preserve_exact_width_and_stable_ties() raises:
@@ -286,17 +307,13 @@ def float_key_routes[D: DType]() raises:
                                 rows, [descending], [nulls_last]
                             )
                             assert_equal(
-                                row_arg_sort(keys, [descending], [nulls_last]),
+                                _rows(keys, [descending], [nulls_last]),
                                 expected,
                             )
-                            var packed = packed_arg_sort(
-                                keys, [descending], [nulls_last]
+                            assert_equal(
+                                _rows(keys, [descending], [nulls_last]),
+                                expected,
                             )
-                            assert_true(
-                                Bool(packed),
-                                "one float key must fit packed sort",
-                            )
-                            assert_equal(packed.take(), expected)
 
 
 def test_float_key_ids_and_order_canonicalize_nan_payloads_and_signed_zero() raises:
@@ -365,14 +382,12 @@ def test_composite_key_columns_preserve_boundaries_and_reject_packing_overflow()
                     rows, [desc_a, desc_b], [False, True]
                 )
                 assert_equal(
-                    row_arg_sort(keys, [desc_a, desc_b], [False, True]),
+                    _rows(keys, [desc_a, desc_b], [False, True]),
                     expected,
                 )
-                var packed = packed_arg_sort(
-                    keys, [desc_a, desc_b], [False, True]
+                assert_equal(
+                    _rows(keys, [desc_a, desc_b], [False, True]), expected
                 )
-                assert_true(Bool(packed))
-                assert_equal(packed.take(), expected)
     var u = UInt64.MAX
     var wide = List[List[KeyCell]]()
     var first: List[UInt64] = [0, u, 0, u, 0]
@@ -388,12 +403,8 @@ def test_composite_key_columns_preserve_boundaries_and_reject_packing_overflow()
         Series("a", Column[UInt64](first^)),
         Series("b", Column[UInt64](second^)),
     ]
-    assert_true(
-        not packed_arg_sort(wide_keys, [False, False], [True, True]),
-        "two full UInt64 ranges exceed packed key capacity",
-    )
     assert_equal(
-        row_arg_sort(wide_keys, [False, False], [True, True]),
+        _rows(wide_keys, [False, False], [True, True]),
         expected_order(wide, [False, False], [True, True]),
     )
 
@@ -492,23 +503,21 @@ def test_inline_external_and_common_prefix_strings_have_exact_key_and_sort_seman
                                 rows, [descending], [nulls_last]
                             )
                             assert_equal(
-                                row_arg_sort(
+                                _rows(
                                     [actual_source.copy()],
                                     [descending],
                                     [nulls_last],
                                 ),
                                 expected,
                             )
-                            var packed = packed_arg_sort(
-                                [actual_source.copy()],
-                                [descending],
-                                [nulls_last],
+                            assert_equal(
+                                _rows(
+                                    [actual_source.copy()],
+                                    [descending],
+                                    [nulls_last],
+                                ),
+                                expected,
                             )
-                            assert_true(
-                                Bool(packed),
-                                "a final long string key is packable with full tie comparison",
-                            )
-                            assert_equal(packed.take(), expected)
     # A long string before another key cannot use the packed prefix; the
     # full string must be compared before the later key is considered.
     var texts: List[String] = [
@@ -531,19 +540,15 @@ def test_inline_external_and_common_prefix_strings_have_exact_key_and_sort_seman
         Series("s", Column[String](texts^)),
         Series("i", Column[Int64](number^)),
     ]
-    assert_true(
-        not packed_arg_sort(keys, [False, False], [True, True]),
-        "a non-final long prefix must fall back to complete row comparison",
-    )
     for first in [False, True]:
         for second in [False, True]:
             assert_equal(
-                row_arg_sort(keys, [first, second], [True, True]),
+                _rows(keys, [first, second], [True, True]),
                 expected_order(rows, [first, second], [True, True]),
             )
 
 
-def test_repeated_strings_sort_by_their_ranks_in_string_order() raises:
+def test_repeated_strings_sort_in_string_order() raises:
     # A string key whose values repeat sorts by each value's rank: the
     # ranks keep byte order (embedded NULs, shared long prefixes, Unicode),
     # equal values keep row order, nulls stay null, and a later integer
@@ -559,7 +564,6 @@ def test_repeated_strings_sort_by_their_ranks_in_string_order() raises:
         "prefix0123456789abcdefghijkl-A\x00",
         "abcdefghijklm",
     ]
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     for n in [64, 300]:
         for mode in range(3):
             var values = List[String]()
@@ -582,9 +586,6 @@ def test_repeated_strings_sort_by_their_ranks_in_string_order() raises:
             for ref row in rows:
                 first_keys.append([row[0].copy()])
             var strings = Series("s", Column[String](values^, valid))
-            assert_true(
-                Bool(string_sort_ranks(strings)), "repeated strings rank"
-            )
             for layout in [0, 2]:
                 var frame = DataFrame(
                     [
@@ -594,12 +595,12 @@ def test_repeated_strings_sort_by_their_ranks_in_string_order() raises:
                 )
                 for descending in [False, True]:
                     for nulls_last in [False, True]:
-                        var observed = StrategyTrace()
                         assert_equal(
                             frame.arg_sort(
                                 ["s"],
                                 descending=[descending],
                                 nulls_last=[nulls_last],
+                                maintain_order=True,
                             ),
                             expected_order(
                                 first_keys,
@@ -612,6 +613,7 @@ def test_repeated_strings_sort_by_their_ranks_in_string_order() raises:
                                 ["s", "i"],
                                 descending=[descending, not descending],
                                 nulls_last=[nulls_last, True],
+                                maintain_order=True,
                             ),
                             expected_order(
                                 rows,
@@ -619,22 +621,6 @@ def test_repeated_strings_sort_by_their_ranks_in_string_order() raises:
                                 [nulls_last, True],
                             ),
                         )
-                        assert_true(
-                            "dataframe-path: sort.string_ranks\n"
-                            in observed.text(),
-                            "repeated strings did not sort by their ranks",
-                        )
-                        _ = observed^
-    _ = trace^
-    # Mostly distinct values sort as strings: ranking them would sort as
-    # many strings as the sort itself.
-    var distinct = List[String]()
-    for row in range(2000):
-        distinct.append("value " + String(row * 7919 % 2000))
-    assert_true(
-        not string_sort_ranks(Series("s", Column[String](distinct^))),
-        "distinct strings are not ranked",
-    )
 
 
 def categorical_fixture(n: Int, offset: Int, mode: Int) raises -> Series:
@@ -734,18 +720,19 @@ def test_dictionary_key_specialization_and_decoded_string_views_match_values() r
                                 rows, [descending], [nulls_last]
                             )
                             assert_equal(
-                                row_arg_sort(
+                                _rows(
                                     [ranks.copy()], [descending], [nulls_last]
                                 ),
                                 expected,
                             )
-                            var packed = packed_arg_sort(
-                                [ranks.copy()], [descending], [nulls_last]
-                            )
-                            assert_true(Bool(packed))
-                            assert_equal(packed.take(), expected)
                             assert_equal(
-                                row_arg_sort(
+                                _rows(
+                                    [ranks.copy()], [descending], [nulls_last]
+                                ),
+                                expected,
+                            )
+                            assert_equal(
+                                _rows(
                                     [decoded.copy()], [descending], [nulls_last]
                                 ),
                                 expected,
@@ -828,26 +815,15 @@ def test_boolean_and_decimal_key_fallbacks_preserve_typed_membership_and_order()
                                 decimal_rows, [descending], [nulls_last]
                             )
                             assert_equal(
-                                row_arg_sort(
-                                    [b.copy()], [descending], [nulls_last]
-                                ),
+                                _rows([b.copy()], [descending], [nulls_last]),
                                 expected_bool,
                             )
-                            var packed = packed_arg_sort(
-                                [b.copy()], [descending], [nulls_last]
-                            )
-                            assert_true(Bool(packed))
-                            assert_equal(packed.take(), expected_bool)
-                            assert_true(
-                                not packed_arg_sort(
-                                    [d.copy()], [descending], [nulls_last]
-                                ),
-                                "decimal128 keys must take the general row sort",
+                            assert_equal(
+                                _rows([b.copy()], [descending], [nulls_last]),
+                                expected_bool,
                             )
                             assert_equal(
-                                row_arg_sort(
-                                    [d.copy()], [descending], [nulls_last]
-                                ),
+                                _rows([d.copy()], [descending], [nulls_last]),
                                 expected_decimal,
                             )
 
@@ -864,12 +840,12 @@ def test_key_entry_points_reject_empty_key_sets_and_mismatched_columns() raises:
             True,
         )
     with assert_raises():
-        _ = row_arg_sort(List[Series](), List[Bool](), List[Bool]())
+        _ = _rows(List[Series](), List[Bool](), List[Bool]())
     var keys: List[Series] = [Series("k", Column[Int64]([1, 2]))]
     with assert_raises():
-        _ = row_arg_sort(keys, List[Bool](), [True])
+        _ = _rows(keys, List[Bool](), [True])
     with assert_raises():
-        _ = row_arg_sort(keys, [False], List[Bool]())
+        _ = _rows(keys, [False], List[Bool]())
 
 
 def test_dictionary_unification_preserves_values_and_remaps_only_codes() raises:
@@ -919,12 +895,12 @@ def test_dictionary_unification_preserves_values_and_remaps_only_codes() raises:
         )
     var ranks = sort_ranks(combined)
     assert_equal(
-        row_arg_sort([ranks.copy()], [False], [True]),
+        _rows([ranks.copy()], [False], [True]),
         expected_order(rows, [False], [True]),
     )
 
 
-def test_packed_top_k_matches_stable_full_order_prefix_at_tie_boundaries() raises:
+def test_top_k_matches_stable_full_order_prefix_at_tie_boundaries() raises:
     var strings: List[String] = [
         "common-prefix-0123456789abcdefghijkl-A",
         "common-prefix-0123456789abcdefghijkl-B",
@@ -972,28 +948,24 @@ def test_packed_top_k_matches_stable_full_order_prefix_at_tie_boundaries() raise
                             [nulls_last, not nulls_last],
                         )
                         for k in [0, 1, 3, 7, 8, 9, 64, 65, 66]:
-                            var actual = packed_top_rows(
+                            var actual = _top(
                                 keys,
                                 [descending, not descending],
                                 [nulls_last, not nulls_last],
                                 k,
                                 threads=1,
                             )
-                            assert_true(
-                                Bool(actual),
-                                "supported composite keys must use packed top-k",
-                            )
                             var prefix = List[Int]()
                             for row in range(min(k, n)):
                                 prefix.append(expected[row])
-                            assert_equal(actual.take(), prefix)
+                            assert_equal(actual, prefix)
     with assert_raises():
-        _ = packed_top_rows(
+        _ = _top(
             [Series("k", Column[Int64]([1]))], [False], [True], -1, threads=1
         )
 
 
-def test_row_top_k_matches_stable_full_order_prefix_for_keys_that_do_not_pack() raises:
+def test_top_k_matches_stable_full_order_prefix_for_long_string_and_float_keys() raises:
     # With the 24-byte head, values differ only past the string prefix, so
     # the heap's long-string comparison decides; with the short head every
     # value fits and the word compare alone decides. The float key ties
@@ -1034,10 +1006,10 @@ def test_row_top_k_matches_stable_full_order_prefix_for_keys_that_do_not_pack() 
                         var nulls: List[Bool] = [nulls_last, not nulls_last]
                         var expected = expected_order(
                             rows, order, nulls
-                        ) if n < 100 else row_arg_sort(keys, order, nulls)
+                        ) if n < 100 else _rows(keys, order, nulls)
                         for k in [0, 1, 3, 8, 64, 65, 66, 100]:
                             for threads in [0, 1]:
-                                var actual = row_top_rows(
+                                var actual = _top(
                                     keys, order, nulls, k, threads=threads
                                 )
                                 var prefix = List[Int]()
@@ -1052,15 +1024,15 @@ def test_row_top_k_matches_stable_full_order_prefix_for_keys_that_do_not_pack() 
                     for descending in [False, True]:
                         var order: List[Bool] = [descending, not descending]
                         var nulls: List[Bool] = [not descending, descending]
-                        var expected = row_arg_sort(swapped, order, nulls)
+                        var expected = _rows(swapped, order, nulls)
                         for k in [1, 64, 100, 3000]:
-                            var actual = row_top_rows(swapped, order, nulls, k)
+                            var actual = _top(swapped, order, nulls, k)
                             var prefix = List[Int]()
                             for row in range(min(k, n)):
                                 prefix.append(expected[row])
                             assert_equal(actual, prefix)
     with assert_raises():
-        _ = row_top_rows(
+        _ = _top(
             [Series("k", Column[Int64]([1]))], [False], [True], -1, threads=1
         )
 
@@ -1098,14 +1070,14 @@ def test_decimal_keys_order_by_value_at_every_storage_width() raises:
             for nulls_last in [False, True]:
                 var expected = expected_order(rows, [descending], [nulls_last])
                 assert_equal(
-                    row_arg_sort([key.copy()], [descending], [nulls_last]),
+                    _rows([key.copy()], [descending], [nulls_last]),
                     expected,
                 )
                 var prefix = List[Int]()
                 for row in range(7):
                     prefix.append(expected[row])
                 assert_equal(
-                    row_top_rows(
+                    _top(
                         [key.copy()], [descending], [nulls_last], 7, threads=1
                     ),
                     prefix,

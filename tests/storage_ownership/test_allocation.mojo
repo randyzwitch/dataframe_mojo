@@ -1,7 +1,11 @@
 """Allocation advice preserves initialized bytes and caller-owned writable storage."""
 # contract-group: storage.isolation
 from std.testing import assert_equal
-from dataframe.huge_pages import advise_huge_pages, huge_list, huge_uninit
+from dataframe.storage.allocation import (
+    advise_huge_pages,
+    huge_list,
+    huge_uninit,
+)
 
 
 def test_advised_allocations_preserve_fills_writes_and_unaligned_range_contents() raises:

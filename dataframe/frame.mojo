@@ -1,5 +1,5 @@
 """An eager CPU dataframe with runtime schema and positional row semantics."""
-from .time_windows import (
+from dataframe.time.windows import (
     positive_period,
     closed_sides,
     negate_period,
@@ -10,7 +10,7 @@ from .time_windows import (
     search_time,
     rolling_bounds,
 )
-from .temporal import zone_of, parse_interval
+from dataframe.time.temporal import zone_of, parse_interval
 from .window import partitions as window_partitions
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import pow10
@@ -19,7 +19,7 @@ from std.memory import ArcPointer, Pointer
 from dataframe.storage.boolean import BoolColumn, both_true, true_count
 from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
-from .series import Series, sort_indices
+from .series import Series
 from dataframe.kernels.distinct_statistics import (
     TableStatistics,
     statistics_distinct,
@@ -87,22 +87,12 @@ from .join_type import (
 )
 from dataframe.storage.nested import ListColumn, StructColumn
 from .trace import trace_path
-from dataframe.kernels.row_encode import encodable, encode_sort_keys
 from .categorical import (
     recode,
-    sort_ranks,
-    string_sort_ranks,
     unify,
     union_of,
 )
-from dataframe.kernels.packed_sort import (
-    chunked_top_rows,
-    packed_arg_sort,
-    packed_top_rows,
-)
-
-# A head of a sort at least 1/this of the rows sorts fully (#332).
-comptime _TOP_K_FRACTION = 10
+from dataframe.sorting.sort import sort_rows
 from .value import AnyValue
 from .frame_iter import RowIterator, ColumnIterator, SliceIterator
 from .frame_size import frame_size
@@ -113,7 +103,6 @@ from dataframe.kernels.hashing import (
 )
 from .groups import GroupIndices
 from dataframe.kernels.top_k import top_k_mask
-from dataframe.kernels.row_sort import row_arg_sort, row_top_rows
 from dataframe.kernels.binary import validity
 from .selectors import expand, expand_all
 from .lazy import LazyFrame, _concat_plans
@@ -1375,8 +1364,11 @@ struct DataFrame(Copyable, Sized, Writable):
     ) raises -> Self:
         """Lexicographic sort by several columns, one direction; equal keys
         in no particular order unless `maintain_order`."""
-        _ = maintain_order
-        return self.take(self.arg_sort(by, descending, nulls_last))
+        return self.take(
+            self.arg_sort(
+                by, descending, nulls_last, maintain_order=maintain_order
+            )
+        )
 
     def sort(
         self,
@@ -1388,9 +1380,13 @@ struct DataFrame(Copyable, Sized, Writable):
     ) raises -> Self:
         """Per-column direction and null placement; list lengths match by.
         Equal keys in no particular order unless `maintain_order`."""
-        _ = maintain_order
         return self.take(
-            self.arg_sort(by, descending=descending, nulls_last=nulls_last)
+            self.arg_sort(
+                by,
+                descending=descending,
+                nulls_last=nulls_last,
+                maintain_order=maintain_order,
+            )
         )
 
     def _sort_key_exprs(self, by: List[Expr]) raises -> List[Expr]:
@@ -1454,7 +1450,6 @@ struct DataFrame(Copyable, Sized, Writable):
         nulls_last: List[Bool],
         maintain_order: Bool,
     ) raises -> Self:
-        _ = maintain_order
         if len(descending) != len(keys) or len(nulls_last) != len(keys):
             raise Error("sort needs one descending and nulls_last flag per key")
         if len(keys) == 0:
@@ -1465,7 +1460,10 @@ struct DataFrame(Copyable, Sized, Writable):
         var evaluated = self.with_columns(keys).select(names)
         return self.take(
             evaluated.arg_sort(
-                names, descending=descending, nulls_last=nulls_last
+                names,
+                descending=descending,
+                nulls_last=nulls_last,
+                maintain_order=maintain_order,
             )
         )
 
@@ -1474,11 +1472,14 @@ struct DataFrame(Copyable, Sized, Writable):
         by: List[String],
         descending: Bool = False,
         nulls_last: Bool = True,
+        *,
+        maintain_order: Bool = False,
     ) raises -> List[Int]:
         return self.arg_sort(
             by,
             descending=List[Bool](length=len(by), fill=descending),
             nulls_last=List[Bool](length=len(by), fill=nulls_last),
+            maintain_order=maintain_order,
         )
 
     def arg_sort(
@@ -1487,61 +1488,23 @@ struct DataFrame(Copyable, Sized, Writable):
         *,
         descending: List[Bool],
         nulls_last: List[Bool],
+        maintain_order: Bool = False,
     ) raises -> List[Int]:
-        """Row order of a stable sort; equal keys keep input order."""
-        var ranked = self._categorical_ranks(by)
-        if ranked:
-            return ranked.value().arg_sort(
-                by, descending=descending, nulls_last=nulls_last
-            )
-        for name in by:
-            if self.column(name).dtype().is_nested():
-                raise Error(
-                    "cannot sort by a "
-                    + self.column(name).dtype().name()
-                    + " column: "
-                    + name
-                )
-        if (
-            len(by) > 0
-            and len(descending) == len(by)
-            and len(nulls_last) == len(by)
-        ):
-            var keys = List[Series](capacity=len(by))
-            for name in by:
-                keys.append(self.column(name))
-            # String keys whose values repeat sort by their ranks: each
-            # distinct value is compared once, and the ranks pack with the
-            # other keys where the strings would not.
-            var ranked = keys.copy()
-            var ranked_any = False
-            for k in range(len(ranked)):
-                var ranks = string_sort_ranks(ranked[k])
-                if ranks:
-                    ranked[k] = ranks.take()
-                    ranked_any = True
-            if ranked_any:
-                var packed = packed_arg_sort(ranked, descending, nulls_last)
-                if packed:
-                    trace_path("sort.string_ranks")
-                    return packed.take()
-            var packed = packed_arg_sort(keys, descending, nulls_last)
-            if packed:
-                trace_path("sort.packed")
-                return packed.take()
-        var keys = List[Series]()
-        var fixed = (
-            len(by) > 0
-            and len(descending) == len(by)
-            and len(nulls_last) == len(by)
+        """Row order of the sort: DuckDB's sort over normalized keys
+        (`dataframe.sorting`). Equal keys come in no particular order
+        unless `maintain_order` keeps their input order."""
+        return sort_rows(
+            self._sort_columns(by),
+            descending,
+            nulls_last,
+            maintain_order=maintain_order,
         )
+
+    def _sort_columns(self, by: List[String]) raises -> List[Series]:
+        var keys = List[Series](capacity=len(by))
         for name in by:
             keys.append(self.column(name))
-            fixed = fixed and encodable(keys[len(keys) - 1])
-        if fixed:
-            return sort_indices(encode_sort_keys(keys, descending, nulls_last))
-        trace_path("sort.row_prefix")
-        return row_arg_sort(keys, descending, nulls_last)
+        return keys^
 
     def top_k(
         self, k: Int, by: List[String], *, reverse: Bool = False
@@ -1549,7 +1512,8 @@ struct DataFrame(Copyable, Sized, Writable):
         """The k rows with greatest values by `by` (ascending when
         `reverse=True`).
 
-        Nulls rank last. Selection is about one pass rather than a full sort.
+        Nulls rank last. A top-N heap over the full key, not a sort;
+        equal keys keep input order.
         """
         var n = len(by)
         return self.take(
@@ -1558,6 +1522,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 List[Bool](length=n, fill=not reverse),
                 List[Bool](length=n, fill=True),
                 k,
+                maintain_order=True,
             )
         )
 
@@ -1570,7 +1535,8 @@ struct DataFrame(Copyable, Sized, Writable):
         self, k: Int, by: List[String], *, reverse: Bool = False
     ) raises -> Self:
         """The k rows that sort(by) would put first (sort(by,
-        descending=True) with reverse=True); nulls rank last."""
+        descending=True) with reverse=True); nulls rank last, and equal keys
+        keep input order."""
         var n = len(by)
         return self.take(
             self._arg_sort_head(
@@ -1578,23 +1544,9 @@ struct DataFrame(Copyable, Sized, Writable):
                 List[Bool](length=n, fill=reverse),
                 List[Bool](length=n, fill=True),
                 k,
+                maintain_order=True,
             )
         )
-
-    def _categorical_ranks(self, by: List[String]) raises -> Optional[Self]:
-        """This frame with each categorical sort key replaced by the rank of
-        its value, or None when no key is categorical: codes number values
-        in the order they first appeared, not in sorted order (#106)."""
-        var found = False
-        for name in by:
-            found = found or self.column(name).dtype().is_categorical()
-        if not found:
-            return None
-        var columns = self._columns.copy()
-        for i in range(len(columns)):
-            if columns[i].name() in by and columns[i].dtype().is_categorical():
-                columns[i] = sort_ranks(columns[i])
-        return Self(columns^, height=self._height)
 
     def _arg_sort_head(
         self,
@@ -1603,120 +1555,28 @@ struct DataFrame(Copyable, Sized, Writable):
         nulls_last: List[Bool],
         k: Int,
         threads: Int = 0,
+        *,
+        maintain_order: Bool = True,
     ) raises -> List[Int]:
-        """The first k rows of arg_sort(by, ...), in order (#332).
-
-        `threads` caps the selection's workers (0: the configured count); a
-        streaming batch, already on a worker, passes 1.
-
-
-        Small k selects the rows instead of sorting all of them: with packed
-        keys when they pack, else a heap of row sort words per range
-        (`row_top_rows`). Past a tenth of the rows selection stops paying
-        and the full sort is cut short.
-        """
+        """The first k rows of arg_sort(by, ...), in order: a top-N heap
+        (`sort_rows` with a limit), or the full sort past DuckDB's TopN
+        limit. `threads` caps the sink's threads (0: the configured
+        count); a streaming batch, already on a worker, passes 1."""
         if k < 0:
             raise Error("k must be nonnegative")
-        var ranked = self._categorical_ranks(by)
-        if ranked:
-            return ranked.value()._arg_sort_head(
-                by, descending, nulls_last, k, threads
-            )
-        var take = min(k, self._height)
-        if take * _TOP_K_FRACTION >= self._height:
-            var order = self.arg_sort(
-                by, descending=descending, nulls_last=nulls_last
-            )
-            order.shrink(take)
-            return order^
-        for name in by:
-            if self.column(name).dtype().is_nested():
-                raise Error(
-                    "cannot sort by a "
-                    + self.column(name).dtype().name()
-                    + " column: "
-                    + name
-                )
-        if (
-            len(by) > 0
-            and len(descending) == len(by)
-            and len(nulls_last) == len(by)
-        ):
-            var keys = List[Series](capacity=len(by))
-            for name in by:
-                keys.append(self.column(name))
-            var packed = packed_top_rows(
-                keys, descending, nulls_last, take, threads
-            ) if threads > 0 else chunked_top_rows(
-                keys, descending, nulls_last, take
-            )
-            if packed:
-                trace_path("sort.top_k")
-                return packed.take()
-        var keys = List[Series](capacity=len(by))
-        for name in by:
-            keys.append(self.column(name))
-        trace_path("sort.row_top_k")
-        return row_top_rows(keys, descending, nulls_last, take, threads)
+        return sort_rows(
+            self._sort_columns(by),
+            descending,
+            nulls_last,
+            maintain_order=maintain_order,
+            limit=k,
+            threads=threads,
+        )
 
     def bottom_k(
         self, k: Int, by: String, *, reverse: Bool = False
     ) raises -> Self:
         return self.bottom_k(k, [by], reverse=reverse)
-
-    def _sort_ranks(
-        self,
-        by: List[String],
-        descending: List[Bool],
-        nulls_last: List[Bool],
-    ) raises -> List[List[Int]]:
-        if len(by) == 0:
-            raise Error("sort requires at least one column")
-        if len(descending) != len(by) or len(nulls_last) != len(by):
-            raise Error(
-                "descending and nulls_last must have one entry per sort column"
-            )
-        # Fixed-width keys need no ranking at all: each value maps to an
-        # Int ordered as the value is, in one linear pass, which is what
-        # `sort_indices` compares anyway. Ranking exists to handle strings,
-        # whose order cannot be carried in a fixed-width word.
-        var keys = List[Series](capacity=len(by))
-        var fixed = True
-        for i in range(len(by)):
-            ref column = self._columns[self._index(by[i])]
-            if not encodable(column):
-                fixed = False
-            keys.append(column.copy())
-        if fixed:
-            return encode_sort_keys(keys, descending, nulls_last)
-
-        # Small top-k and window consumers still need rank-compatible
-        # words. Only unsupported keys require a value sort: retain direct
-        # encoding for every other key when one long string/decimal is here.
-        var jobs = List[_RankJob]()
-        var positions = List[Int](length=len(by), fill=-1)
-        for i in range(len(by)):
-            if not encodable(keys[i]):
-                positions[i] = len(jobs)
-                jobs.append(
-                    _RankJob(keys[i].copy(), descending[i], nulls_last[i])
-                )
-        if worker_count(self.height()) > 1:
-            run_jobs(jobs)
-        else:
-            for j in range(len(jobs)):
-                jobs[j].run()
-        var ranks = List[List[Int]]()
-        for i in range(len(by)):
-            if positions[i] >= 0:
-                ranks.append(jobs[positions[i]].ranks.copy())
-            else:
-                var words = encode_sort_keys(
-                    [keys[i].copy()], [descending[i]], [nulls_last[i]]
-                )
-                while len(words) > 0:
-                    ranks.append(words.pop(0))
-        return ranks^
 
     def join_asof(
         self,
@@ -3597,26 +3457,6 @@ def concat(
     types are resolved here, as collect_schema resolves them.
     """
     return _concat_plans(frames, how)
-
-
-struct _RankJob(Job):
-    """Compute one sort key column's dense ranks."""
-
-    var column: Series
-    var descending: Bool
-    var nulls_last: Bool
-    var ranks: List[Int]
-
-    def __init__(
-        out self, var column: Series, descending: Bool, nulls_last: Bool
-    ):
-        self.column = column^
-        self.descending = descending
-        self.nulls_last = nulls_last
-        self.ranks = List[Int]()
-
-    def run(mut self) raises:
-        self.ranks = self.column._sort_ranks(self.descending, self.nulls_last)
 
 
 def _keeps_every_row(mask: BoolColumn) -> Bool:

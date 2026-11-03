@@ -2,7 +2,10 @@
 # contract-group: kernel.json_schema
 from std.testing import assert_equal, assert_raises
 from dataframe.dtype import DataType
-from dataframe.json_reader import JsonReader, json_bytes
+from dataframe.json.reader import (
+    JsonReader,
+    json_bytes,
+)
 from dataframe.io.json_schema import JsonSchema
 
 

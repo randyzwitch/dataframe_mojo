@@ -15,7 +15,7 @@ from dataframe import (
     lit,
     when,
 )
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from dataframe.kernels.cast import cast_series
 from tests.support.coverage_compare import assert_frame
 
