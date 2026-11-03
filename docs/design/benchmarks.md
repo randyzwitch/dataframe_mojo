@@ -526,7 +526,8 @@ Cells already in `DIR/results.json` are skipped, so a matrix can run in
 pieces; `DIR/report.md` has a table per matrix and the worst cells, flagged
 at 1.25x the faster engine. On a shared host, `--wrap-timing` and
 `--wrap-build` take command prefixes for the timed chunks and the runner
-builds. Results stay out of the repository.
+builds; each timed chunk starts no new cell after `--budget` seconds
+(default 480). Results stay out of the repository.
 
 ## Retired benchmarks
 

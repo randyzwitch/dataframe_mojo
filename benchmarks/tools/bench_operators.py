@@ -803,7 +803,7 @@ def report(result):
             "ours op | DuckDB op | Polars op | op ratio | ans | flag |"
         )
         if base:
-            header = header[:-1] + f" {base} |"
+            header += f" {base} |"
         lines += [f"## {matrix}", "", header,
                   "|" + "---|" * (header.count("|") - 1)]
         for cid, entry in rows:
