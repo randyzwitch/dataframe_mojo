@@ -258,6 +258,7 @@ struct _PerfectAggJob(Job):
             at += length
 
 
+@fieldwise_init
 struct GroupingSets(Copyable):
     """A pending `group_by_rollup`, `group_by_cube` or
     `group_by_grouping_sets`; finish it with agg."""
