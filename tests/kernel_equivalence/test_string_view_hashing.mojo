@@ -7,10 +7,10 @@ the second key after an integer."""
 from std.testing import assert_equal
 
 from dataframe import Column, Series, StringColumn
-from dataframe.join_hash import _string_probe_hash
-from dataframe.partition import Partitioner
-from dataframe.string_bytes import _Bytes
-from dataframe.string_view import StringViewBuilder
+from dataframe.kernels.join_hash import _string_probe_hash
+from dataframe.kernels.partition import Partitioner
+from dataframe.text.bytes import _Bytes
+from dataframe.storage.string_view import StringViewBuilder
 
 
 def text_of(row: Int) -> String:

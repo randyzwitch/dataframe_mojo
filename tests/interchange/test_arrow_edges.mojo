@@ -180,7 +180,7 @@ def test_arrow_opaque_metadata_agrees_by_binary_pairs_across_row_operations_and_
 
 
 def test_arrow_boolean_and_string_metadata_survive_actual_parallel_gathers() raises:
-    from dataframe.gather import take_parallel
+    from dataframe.kernels.gather import take_parallel
 
     for kind in range(2):
         var producer = ForeignArrow(1)

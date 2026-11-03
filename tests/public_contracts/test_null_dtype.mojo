@@ -13,7 +13,7 @@ from dataframe import (
     import_arrow_series,
 )
 from dataframe.io.arrow import _read_c_string
-from dataframe.json_decode import decode_json
+from dataframe.json.decode import decode_json
 from tests.support.coverage_generators import offset_layout, chunk_layout
 
 

@@ -18,10 +18,8 @@ of rows with equal partition and order keys starts (its order_mask, the
 peer boundaries). Every partition lies inside one hash group, so groups
 are evaluated independently.
 
-Sorts are stable (ties keep input order), as `over(order_by=...)` keeps
-input order on ties. They go through the frame sort (`DataFrame.arg_sort`);
-the sort port's `sort_rows(..., maintain_order=True, threads=...)` takes
-its place once it lands.
+Sorts are DuckDB's (`dataframe.sorting.sort_rows`), kept stable (ties in
+input order), as `over(order_by=...)` keeps input order on ties.
 """
 from std.memory import Pointer
 
@@ -33,7 +31,7 @@ from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.kernels.partition import Partitioner, _same_value
 from dataframe.parallel import Job, configured_workers, partitions, run_jobs
 from dataframe.series import Series
-from dataframe.frame import DataFrame
+from dataframe.sorting.sort import sort_rows
 from dataframe.kernels.gather import take_parallel
 
 # hashed_sort.cpp, HashedSortGlobalSinkState::Rehash: partitions start at
@@ -162,16 +160,11 @@ def sort_key_rows(
     descending: List[Bool],
     nulls_last: List[Bool],
 ) raises -> List[Int]:
-    """The stable sorted order of the key columns' rows."""
-    var named = List[Series](capacity=len(keys))
-    var names = List[String](capacity=len(keys))
-    for k in range(len(keys)):
-        names.append(String("\x1fk") + String(k))
-        named.append(keys[k].renamed(names[k]))
-    var height = len(keys[0])
-    return DataFrame(named^, height=height).arg_sort(
-        names, descending=descending, nulls_last=nulls_last
-    )
+    """The stable sorted order of the key columns' rows: DuckDB's sort
+    (`sort_rows`) with ties in input order, as over(order_by=...) keeps
+    them. Threads come from the shared budget, so groups sorted on
+    several workers at once share it."""
+    return sort_rows(keys, descending, nulls_last, maintain_order=True)
 
 
 struct _GroupSortJob(Job):

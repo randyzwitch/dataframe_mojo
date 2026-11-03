@@ -12,11 +12,14 @@ from dataframe import (
     col,
 )
 from dataframe.binding import bind, BoundExpr
-from dataframe.hash_agg import hash_aggregate, hash_agg_eligible
+from dataframe.aggregation.hash_reduce import (
+    hash_aggregate,
+    hash_agg_eligible,
+)
 from tests.support.coverage_compare import assert_float
-from dataframe.distinct import distinct_counts
-from dataframe.hash_agg import _moderate_groups
-from dataframe.string_view import StringViewBuilder
+from dataframe.kernels.distinct import distinct_counts
+from dataframe.aggregation.hash_reduce import _moderate_groups
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.lifecycle_jobs import WorkerSetting
 
 

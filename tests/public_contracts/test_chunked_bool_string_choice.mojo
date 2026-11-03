@@ -18,7 +18,7 @@ from dataframe.expr import null
 from dataframe.dtype import CategoricalDictionary
 from dataframe.storage.buffer import _Buffer
 from dataframe.storage.string import StringCodes
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from dataframe.kernels.binary import choose
 from tests.support.coverage_compare import assert_frame
 

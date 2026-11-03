@@ -137,7 +137,7 @@ def test_take_slice_sort_and_empty_projection_match_reference() raises:
         for mode in range(3):
             var model = generated_model(n, 3, mode)
             var frame = generated_frame(n, 3, mode)
-            assert_model(frame.sort("i"), model.sort_i())
+            assert_model(frame.sort("i", maintain_order=True), model.sort_i())
             assert_model(frame.select(List[String]()), model.project([]))
             for start in [-100, -1, 0, 1, 100]:
                 assert_model(frame.slice(start, 7), model.slice(start, 7))

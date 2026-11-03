@@ -295,7 +295,7 @@ only left columns. Empty inputs keep the joined schema; `cross` checks that the
 output row count does not overflow.
 
 Both sides' keys are encoded together by the shared row-key layer
-(`dataframe/hashing.mojo`) and right rows are bucketed by dense key id, so the
+(`dataframe/kernels/hashing.mojo`) and right rows are bucketed by dense key id, so the
 probe does no dictionary lookup. Unsupported join modes or key dtype mismatches
 raise explicitly.
 

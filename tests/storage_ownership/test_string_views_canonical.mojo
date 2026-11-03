@@ -17,7 +17,7 @@ from dataframe import (
     lit,
     read_parquet,
 )
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.parquet_runtime import Observer
 
 comptime ROWS = 3_000

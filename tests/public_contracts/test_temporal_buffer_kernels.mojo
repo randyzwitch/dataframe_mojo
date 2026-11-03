@@ -11,7 +11,7 @@ from dataframe import (
     time,
     business_day_count,
 )
-from dataframe.temporal import format
+from dataframe.time.temporal import format
 from tests.public_contracts.test_temporal import tagged, assert_ticks
 from tests.public_contracts.test_temporal_reporting import reporting_select
 from tests.support.coverage_generators import offset_layout, chunk_layout

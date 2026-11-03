@@ -3,8 +3,8 @@
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, StringColumn
 from dataframe.dtype import NUMERIC_DTYPES
-from dataframe.string_view import StringViewBuilder
-from dataframe.join_hash import (
+from dataframe.storage.string_view import StringViewBuilder
+from dataframe.kernels.join_hash import (
     prepare_hash_index,
     prepared_hash_join_rows,
     prepared_hash_semi_anti_rows,
@@ -15,7 +15,7 @@ from dataframe.join_hash import (
 )
 from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting
-from dataframe.join_fuse import FusedJoin
+from dataframe.kernels.join_fuse import FusedJoin
 from dataframe.frame import (
     _join_range_possible,
     _join_range_rows,

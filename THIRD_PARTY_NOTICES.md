@@ -53,7 +53,7 @@ DEALINGS IN THE SOFTWARE.
 
 ## DuckDB byte hashing
 
-`dataframe/partition.mojo::_hash_bytes` adapts the eight-byte block mixer
+`dataframe/kernels/partition.mojo::_hash_bytes` adapts the eight-byte block mixer
 from DuckDB 1.5.5, `src/common/types/hash.cpp`, revision
 `d8cdaa33fda8df955cc76ef58a280f68f4cd43fa`. The short-string encoding and
 column hash finalizer remain this project's existing implementation.
@@ -85,7 +85,7 @@ partitioning and insertion algorithm in Modular's
 revision `0eeb9c145e2539cb5aab8a3085b4853d27440d26`. This project replaces
 heap-owned spans with a bounded local stack of intervals and uses immutable
 source words with mutable row indices. Quickselect follows this project's
-existing CPU implementation in `dataframe/aggregate.mojo`.
+existing CPU implementation in `dataframe/aggregation/reducer.mojo`.
 
 Copyright (c) 2026, Modular Inc. All rights reserved.
 

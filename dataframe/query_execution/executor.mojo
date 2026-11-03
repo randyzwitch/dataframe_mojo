@@ -338,10 +338,12 @@ def plan_execute_node(
                     descending,
                     nulls_last,
                     sorted.sort_limit(),
+                    maintain_order=sorted.maintain_order,
                 ) if sorted.sort_limit() >= 0 else source.arg_sort(
                     sorted.sort_keys(),
                     descending=descending,
                     nulls_last=nulls_last,
+                    maintain_order=sorted.maintain_order,
                 )
                 return source.select_exprs(node.exprs).take(order)
     # Filter each decoded CSV range before assembling the scan result.
@@ -476,11 +478,18 @@ def plan_execute_node(
         if node.sort_limit() >= 0:
             return input.take(
                 input._arg_sort_head(
-                    node.sort_keys(), descending, nulls_last, node.sort_limit()
+                    node.sort_keys(),
+                    descending,
+                    nulls_last,
+                    node.sort_limit(),
+                    maintain_order=node.maintain_order,
                 )
             )
         return input.sort(
-            node.sort_keys(), descending=descending, nulls_last=nulls_last
+            node.sort_keys(),
+            descending=descending,
+            nulls_last=nulls_last,
+            maintain_order=node.maintain_order,
         )
     if node.kind == SLICE:
         return input.slice(node.slice_offset(), node.slice_length())

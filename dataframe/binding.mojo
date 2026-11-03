@@ -256,7 +256,7 @@ from dataframe.kernels.horizontal import (
     horizontal_result,
     horizontal_supertype,
 )
-from .temporal import (
+from dataframe.time.temporal import (
     ambiguous_code,
     non_existent_code,
     parse_every,

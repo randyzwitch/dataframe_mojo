@@ -15,8 +15,8 @@ from ..dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from .csv_types import CsvField
 from .csv_integer import parse_csv_integer
 from .csv_numeric import parse_csv_float32, parse_csv_float64
-from ..temporal import parse_in, zone_of
-from ..timezone import TimeZone
+from dataframe.time.temporal import parse_in, zone_of
+from dataframe.time.timezone import TimeZone
 from ..decimal import parse_decimal
 
 

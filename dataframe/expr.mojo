@@ -3633,7 +3633,7 @@ struct DtNamespace(Copyable):
         return self.total("milliseconds")
 
     def strftime(self, format: String) -> Expr:
-        """Format as text; see dataframe/temporal.mojo for directives."""
+        """Format as text; see dataframe/time/temporal.mojo for directives."""
         return self._op(DT_STRFTIME, format)
 
     def replace_time_zone(

@@ -47,12 +47,12 @@ from dataframe.storage.column import (
     _validity_bit,
 )
 from ..categorical import encode
-from ..geometry import from_wkb
+from dataframe.geo.geometry import from_wkb
 from dataframe.storage.field_metadata import (
     _append_metadata,
     _has_extension_name,
 )
-from ..geospatial_metadata import apply_geoparquet_metadata
+from dataframe.geo.metadata import apply_geoparquet_metadata
 from ..dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from dataframe.kernels.hashing import encode_string_rows_parallel
 from ..frame import DataFrame

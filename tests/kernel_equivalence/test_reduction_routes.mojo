@@ -3,7 +3,10 @@
 from std.math import abs, sqrt, isnan
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
-from dataframe.aggregate import _sum_ints, _sum_floats
+from dataframe.aggregation.reducer import (
+    _sum_ints,
+    _sum_floats,
+)
 from dataframe.binding import bind, BoundExpr
 from dataframe.execution import (
     _column_stats,
@@ -11,8 +14,14 @@ from dataframe.execution import (
     _direct_numeric_part,
     _new_reducer,
 )
-from dataframe.indexed_reduce import indexed_reductions, reduce_indexed
-from dataframe.reductions import IntSumState, FloatSumState
+from dataframe.aggregation.selected_rows import (
+    indexed_reductions,
+    reduce_indexed,
+)
+from dataframe.aggregation.scalar_states import (
+    IntSumState,
+    FloatSumState,
+)
 from dataframe.expr import SUM, MEAN, COUNT
 from tests.support.numeric_model import (
     INTEGER_DTYPES,

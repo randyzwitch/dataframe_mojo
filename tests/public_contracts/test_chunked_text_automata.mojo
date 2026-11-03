@@ -16,7 +16,7 @@ from dataframe.expr import (
     _node,
     pack_literals,
 )
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from dataframe.text.functions import text_function
 from tests.support.coverage_compare import assert_frame
 

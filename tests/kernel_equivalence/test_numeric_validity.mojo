@@ -15,8 +15,14 @@ from dataframe import (
     mean_horizontal,
 )
 from dataframe.expr import ADD, SUB, MUL, DIV, NEG, ABS
-from dataframe.expr_kernels import binary, unary
-from dataframe.horizontal import _float_fold, _extreme
+from dataframe.kernels.binary import (
+    binary,
+    unary,
+)
+from dataframe.kernels.horizontal import (
+    _float_fold,
+    _extreme,
+)
 from tests.support.coverage_generators import chunk_layout
 
 

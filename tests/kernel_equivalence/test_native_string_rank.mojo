@@ -3,7 +3,7 @@ partition, match independent scalar typed ranks."""
 # contract-group: kernel.order_keys
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, StringColumn, col
-from dataframe.string_view import StringViewBuilder
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.selection_types_reference import (
     selection_column,
     selection_text,

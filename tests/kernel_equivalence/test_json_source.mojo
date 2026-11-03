@@ -1,7 +1,7 @@
 """NDJSON framing across SIMD tails, CRLF and escaped string content."""
 # contract-group: kernel.json_source
 from std.testing import assert_equal, assert_true
-from dataframe.json_reader import json_bytes
+from dataframe.json.reader import json_bytes
 from dataframe.io.json_source import JsonLines
 
 
