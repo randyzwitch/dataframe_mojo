@@ -41,6 +41,7 @@ from dataframe import (
     DataType,
     Expr,
     LazyFrame,
+    as_struct,
     col,
     int_range,
     lit,
@@ -89,9 +90,12 @@ def window(
     if kind == "row_number":
         e = int_range(row_count()) + lit(Int64(1))
     elif kind == "rank":
-        if len(order) != 1:
-            raise Error("unsupported: rank over a multi-column order")
-        e = col(order[0]).rank("min")
+        var fields = List[Expr]()
+        for name in order:
+            fields.append(col(name))
+        e = (col(order[0]) if len(order) == 1 else as_struct(fields)).rank(
+            "min"
+        )
         if len(part) == 0:
             return e.alias("w")
         return e.over(part).alias("w")

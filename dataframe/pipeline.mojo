@@ -20,7 +20,7 @@ from dataframe.storage.buffer import _Buffer, _BufferData
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros, pop_count
 from std.os import getenv
-from std.ffi import _get_global, external_call
+from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 from std.sys import size_of
 from std.time import perf_counter_ns
@@ -107,6 +107,11 @@ from dataframe.storage.allocation import huge_list
 from dataframe.kernels.mask_filter import filter_columns
 from .parallel import Job, run_jobs, worker_count
 from .series import Series
+from dataframe.kernels.segment_statistics import (
+    ensure_statistics,
+    series_statistics,
+)
+from dataframe.storage.statistics import NUMERIC_STATS
 from dataframe.kernels.hashing import encode_rows
 from dataframe.storage.string import StringColumn
 from .trace import trace_path
@@ -501,7 +506,6 @@ def _column_bounds[
     return (any, smallest, largest)
 
 
-comptime _ZONE_ROWS = 2048
 # Rows a worker checks against a bloom filter before it may leave it alone,
 # and the share kept from which it does: DuckDB pauses a bloom filter that
 # keeps a quarter or more of its first 75 vectors
@@ -510,86 +514,27 @@ comptime _BLOOM_TRIAL_ROWS = 75 * 2048
 comptime _BLOOM_PAUSE_SHARE = 0.25
 
 
-def _zones_lock_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
-    var address = external_call["calloc", Int](1, size_of[Atomic[Int64]]())
-    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=address)
-
-
-def _zones_lock_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
-    # Never freed: another operation's pipeline may still take it while
-    # the process exits.
-    pass
-
-
-def _zones_lock() -> ref[MutAnyOrigin] Atomic[Int64]:
-    """The process-wide lock zone maps are filled under."""
-    var address = _get_global[
-        "DATAFRAME_ZONES_LOCK", _zones_lock_init, _zones_lock_keep
-    ]()
-    return Pointer[Atomic[Int64], MutAnyOrigin](
-        unsafe_from_address=Int(address.value())
-    )[]
-
-
 def _ensure_zones(series: Series):
-    """Fill the zone map (`Column._facts`) of each buffer under an
-    integer column (see `_range_key`) that has none, once, before any
-    worker reads it. Pipelines run at once (a union's inputs) may scan one
-    table: a buffer is checked and filled under one process-wide lock, so
-    it is written once, before any pipeline's workers read it, and never
-    again while they do."""
-    ref lock = _zones_lock()
-    while True:
-        var free = Int64(0)
-        if lock.compare_exchange(free, Int64(1)):
-            break
-        _ = external_call["sched_yield", Int32]()
-    var physical = series.dtype().physical()
-    for part in series.chunks():
-        if physical == DataType.INT64:
-            _fill_zones(part._data[Column[Int64]])
-        elif physical == DataType.INT32:
-            _fill_zones(part._data[Column[Int32]])
-    lock.store(0)
-
-
-def _fill_zones[D: DType](column: Column[Scalar[D]]):
-    if column._facts[].zones_ready():
-        return
-    var first_row = column._facts[].first()
-    var last_row = column._facts[].last(len(column._data[]))
-    var blocks = (last_row + _ZONE_ROWS - 1) // _ZONE_ROWS
-    var zones = List[Int64](capacity=2 * blocks)
-    for b in range(blocks):
-        var first = max(b * _ZONE_ROWS, first_row)
-        var last = min((b + 1) * _ZONE_ROWS, last_row)
-        var block = column.copy()
-        block._offset = first
-        block._length = max(0, last - first)
-        var found = _column_bounds(block)
-        if found[0]:
-            zones.append(found[1])
-            zones.append(found[2])
-        else:
-            zones.append(Int64.MAX)
-            zones.append(Int64.MIN)
-    column._facts[].publish_zones(zones^)
+    """Compute the segment statistics of each buffer under an integer
+    column (see `_range_key`) that has none, before any worker reads them
+    (`ensure_statistics`; a loaded table has them already). Without them
+    bounds are read from the rows."""
+    if _range_key(series.dtype()):
+        try:
+            ensure_statistics(series)
+        except:
+            pass
 
 
 def _window_bounds(series: Series) -> Optional[Tuple[Int64, Int64]]:
-    """Bounds on the valid values of an integer column's window, from
-    the zone maps of the blocks it touches (blocks it covers only in part
+    """Bounds on the valid values of an integer column's window, from the
+    statistics of the vectors it touches (vectors it covers only in part
     widen them, never narrow them), or exact when a buffer has none; None
     when it has no valid value."""
     var least = Int64.MAX
     var most = Int64.MIN
-    var physical = series.dtype().physical()
     for part in series.chunks():
-        var found: Tuple[Bool, Int64, Int64]
-        if physical == DataType.INT64:
-            found = _zoned_bounds(part._data[Column[Int64]])
-        else:
-            found = _zoned_bounds(part._data[Column[Int32]])
+        var found = _zoned_bounds(part)
         if found[0]:
             least = min(least, found[1])
             most = max(most, found[2])
@@ -598,22 +543,20 @@ def _window_bounds(series: Series) -> Optional[Tuple[Int64, Int64]]:
     return (least, most)
 
 
-def _zoned_bounds[
-    D: DType
-](column: Column[Scalar[D]]) -> Tuple[Bool, Int64, Int64]:
-    if not column._facts[].zones_ready():
-        return _column_bounds(column)
-    ref zones = column._facts[].zones()
-    if len(column) == 0:
+def _zoned_bounds(part: Series) -> Tuple[Bool, Int64, Int64]:
+    """An unchunked integer window's bounds, from its buffer's statistics
+    when it has them, else from its rows."""
+    if len(part) == 0:
         return (False, Int64.MAX, Int64.MIN)
-    var least = Int64.MAX
-    var most = Int64.MIN
-    var first = column._offset // _ZONE_ROWS
-    var last = (column._offset + len(column) - 1) // _ZONE_ROWS
-    for b in range(first, last + 1):
-        least = min(least, zones[2 * b])
-        most = max(most, zones[2 * b + 1])
-    return (least <= most, least, most)
+    var stats = series_statistics(part)
+    if stats and stats.value().stats_type == NUMERIC_STATS:
+        ref found = stats.value()
+        if not found.has_min_max:
+            return (False, Int64.MAX, Int64.MIN)
+        return (True, Int64(found.int_min), Int64(found.int_max))
+    if part.dtype().physical() == DataType.INT64:
+        return _column_bounds(part._data[Column[Int64]])
+    return _column_bounds(part._data[Column[Int32]])
 
 
 def _range_mask(

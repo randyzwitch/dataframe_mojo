@@ -1,7 +1,9 @@
 """Shared owned or read-only foreign buffers, with explicit writable access."""
+from std.atomic import Atomic
 from std.collections import Optional
 from std.sys import size_of
 from std.memory import ArcPointer, Pointer, Layout, Allocation, alloc, dealloc
+from dataframe.storage.statistics import BaseStatistics
 from dataframe.storage.residence import (
     _DeviceResidence,
     _host_address_or_abort,
@@ -43,6 +45,40 @@ struct _RowSelection(Movable):
         self.shift = shift
 
 
+struct _StatsRecord(Movable):
+    """A buffer's segment statistics (DuckDB keeps them with each column
+    segment): one `BaseStatistics` per `STATISTICS_VECTOR_SIZE` rows of the
+    buffer from its first element, and one per `ROW_GROUP_VECTORS` vectors.
+    They describe the values of buffer rows [first, end) (a borrowed Arrow
+    buffer's declared window) with the validity bitmap they were taken with
+    (`validity`, 0 for none, kept alive by `pin`): a column that pairs the
+    buffer with another bitmap, or reads rows outside them, does not read
+    them."""
+
+    var validity: Int
+    var pin: Optional[_Buffer[UInt8]]
+    var first: Int
+    var end: Int
+    var vectors: List[BaseStatistics]
+    var groups: List[BaseStatistics]
+
+    def __init__(
+        out self,
+        validity: Int,
+        var pin: Optional[_Buffer[UInt8]],
+        first: Int,
+        end: Int,
+        var vectors: List[BaseStatistics],
+        var groups: List[BaseStatistics],
+    ):
+        self.validity = validity
+        self.pin = pin^
+        self.first = first
+        self.end = end
+        self.vectors = vectors^
+        self.groups = groups^
+
+
 struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
     var values: List[Self.T]
     var address: Int
@@ -56,6 +92,9 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
     # because a wider column made every copy slower (TPC-DS q36 9% with
     # it held in the string storage itself).
     var selection: Optional[ArcPointer[_RowSelection]]
+    # The address of a heap `ArcPointer[_StatsRecord]`, 0 until statistics
+    # are published (once; `publish_statistics`).
+    var _stats: Atomic[Int64]
 
     def __init__(out self, var values: List[Self.T]):
         self.values = values^
@@ -64,6 +103,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.owner = None
         self.residence = None
         self.selection = None
+        self._stats = Atomic[Int64](0)
 
     def __init__(
         out self, address: Int, length: Int, owner: ArcPointer[_ForeignOwner]
@@ -74,6 +114,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.owner = owner
         self.residence = None
         self.selection = None
+        self._stats = Atomic[Int64](0)
 
     def __init__(
         out self, length: Int, residence: ArcPointer[_DeviceResidence]
@@ -86,6 +127,38 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.owner = ArcPointer(_ForeignOwner(0, 0))
         self.residence = residence
         self.selection = None
+        self._stats = Atomic[Int64](0)
+
+    def __deinit__(deinit self):
+        _drop_statistics(Int(self._stats.load()))
+
+    def statistics(self) -> Optional[ArcPointer[_StatsRecord]]:
+        """The published statistics, if any."""
+        var address = Int(self._stats.load())
+        if address == 0:
+            return None
+        return Pointer[ArcPointer[_StatsRecord], MutAnyOrigin](
+            unsafe_from_address=address
+        )[].copy()
+
+    def publish_statistics(self, var record: _StatsRecord):
+        """Publish statistics once; a later publisher drops its own. The
+        buffer is immutable while shared, so the values cannot change
+        under them (`writable` drops them before an in-place change)."""
+        var pointer = alloc(
+            Layout[ArcPointer[_StatsRecord]](length=1)
+        ).unsafe_leak()
+        pointer.unsafe_write(ArcPointer(record^))
+        var cell = Pointer(to=self._stats).unsafe_mut_cast[True]()
+        var expected = Int64(0)
+        if not cell[].compare_exchange(expected, Int64(Int(pointer))):
+            _drop_statistics(Int(pointer))
+
+    def _forget_statistics(self):
+        """Only while this buffer has one owner (`_Buffer.writable`)."""
+        var cell = Pointer(to=self._stats).unsafe_mut_cast[True]()
+        _drop_statistics(Int(cell[].load()))
+        cell[].store(0)
 
     def __len__(self) -> Int:
         return self.length if self.owner else len(self.values)
@@ -276,6 +349,9 @@ struct _Buffer[T: Copyable & Deinitable](Copyable, Sized):
     def writable(mut self) -> ref[MutAnyOrigin] List[Self.T]:
         if self._state.count() != 1 or self.is_borrowed():
             self._state = ArcPointer(_BufferData(self._state[].copy()))
+        else:
+            # The values change in place: statistics over them go.
+            self._state[]._forget_statistics()
         return Pointer(to=self._state[].values).unsafe_origin_cast[
             MutAnyOrigin
         ]()[]
@@ -304,6 +380,22 @@ def _release_shared_buffer[T: Copyable & Deinitable](context: Int) abi("C"):
         Allocation[ArcPointer[_BufferData[T]]](
             unsafe_owned_ptr=pointer,
             layout=Layout[ArcPointer[_BufferData[T]]](length=1),
+        )
+    )
+    _ = held^
+
+
+def _drop_statistics(address: Int):
+    if address == 0:
+        return
+    var pointer = Pointer[ArcPointer[_StatsRecord], MutUntrackedOrigin](
+        unsafe_from_address=address
+    )
+    var held = pointer.unsafe_take_pointee()
+    dealloc(
+        Allocation[ArcPointer[_StatsRecord]](
+            unsafe_owned_ptr=pointer,
+            layout=Layout[ArcPointer[_StatsRecord]](length=1),
         )
     )
     _ = held^
