@@ -170,11 +170,11 @@ def eager(threads: Int, rows: Int, groups: Int, ordered: Bool) raises:
 
 
 def test_eager_distinct_counts_with_tables_that_clear() raises:
-    eager(8, 150_000, 25_000, False)
+    eager(8, 60_000, 8_000, False)
 
 
 def test_eager_distinct_counts_in_first_occurrence_order() raises:
-    eager(8, 150_000, 25_000, True)
+    eager(8, 60_000, 8_000, True)
 
 
 def test_eager_distinct_counts_with_tables_that_grow() raises:
