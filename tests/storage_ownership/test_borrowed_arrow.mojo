@@ -523,8 +523,8 @@ def test_borrowed_arrow_struct_parent_and_child_offsets_compose_without_copying(
 
 
 def exercise_declared_window_facts(mut foreign: ForeignArrow) raises:
-    from dataframe.sorted_range import _ascending_cached
-    from dataframe.pipeline import _fill_zones
+    from dataframe.kernels.segment_statistics import ensure_statistics
+    from dataframe.pipeline import _zoned_bounds
 
     var series = import_arrow_series(
         foreign.nodes[0].array, foreign.nodes[0].schema, copy=False
@@ -533,15 +533,19 @@ def exercise_declared_window_facts(mut foreign: ForeignArrow) raises:
     assert_true(column._data.is_borrowed())
     assert_equal(column._facts[].first(), 2)
     assert_equal(column._facts[].last(0), 5)
-    assert_true(_ascending_cached[DType.int64](column))
-    assert_equal(column._facts[].order_state(), 1)
-    _fill_zones(column)
-    assert_equal(column._facts[].zones(), List[Int64]([Int64(10), Int64(30)]))
-    assert_true(_ascending_cached[DType.int64](column.slice(1, 2)))
+    ensure_statistics(series)
+    assert_true(column._data[].statistics())
+    var bounds = _zoned_bounds(series)
+    assert_true(bounds[0])
+    assert_equal(bounds[1], Int64(10))
+    assert_equal(bounds[2], Int64(30))
+    var tail = _zoned_bounds(series.slice(1, 2))
+    assert_equal(tail[1], Int64(10))
+    assert_equal(tail[2], Int64(30))
     _ = series^
 
 
-def test_borrowed_arrow_cached_order_and_zone_bounds_ignore_undeclared_prefix_slots() raises:
+def test_borrowed_arrow_statistics_ignore_undeclared_prefix_slots() raises:
     var foreign = ForeignArrow(1)
     foreign.nodes[0].describe("l", "x", 3, 2)
     foreign.nodes[0].buffer(List[UInt8]())

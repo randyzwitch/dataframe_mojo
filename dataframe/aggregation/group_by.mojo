@@ -3,7 +3,14 @@ from dataframe.aggregation.reducer import (
     Reducer,
 )
 from dataframe.aggregation.hash_table import (
+    AggregateLayout,
+    AggregateSink,
+    _Cursor,
+    _one_chunk,
+    aggregate_finish,
+    aggregate_layout,
     aggregate_table,
+    ReducerSpec,
     key_supported,
     reduction_supported,
     states_supported,
@@ -462,6 +469,83 @@ struct _HashedBucketJob(Job):
         self.firsts = firsts^
 
 
+def _plain_inputs(expressions: List[Expr], frame: DataFrame) -> Bool:
+    """Whether every reduction reads a column of `frame` as it is (or no
+    input), so nothing is evaluated before its states update."""
+    for expression in expressions:
+        ref nodes = expression._nodes
+        for node in nodes:
+            if not is_reduction(node.op):
+                continue
+            for child in [node.left, node.right]:
+                if child < 0:
+                    continue
+                if nodes[child].op != COL or (
+                    nodes[child].text not in frame.columns()
+                ):
+                    return False
+    return True
+
+
+struct _BatchSinkJob(Job):
+    """One worker's morsels into its aggregate table sink, each morsel's
+    reduction inputs evaluated `batch` rows at a time."""
+
+    var frame: DataFrame
+    var keys: List[Series]
+    var expressions: List[Expr]
+    var layout: AggregateLayout
+    var ranges: List[Int]
+    var cursor: _Cursor
+    var workers: Int
+    var batch: Int
+    var sinks: List[AggregateSink]
+
+    def __init__(
+        out self,
+        frame: DataFrame,
+        keys: List[Series],
+        expressions: List[Expr],
+        layout: AggregateLayout,
+        ranges: List[Int],
+        cursor: _Cursor,
+        workers: Int,
+        batch: Int,
+    ):
+        self.frame = frame.copy()
+        self.keys = keys.copy()
+        self.expressions = expressions.copy()
+        self.layout = layout.copy()
+        self.ranges = ranges.copy()
+        self.cursor = cursor.copy()
+        self.workers = workers
+        self.batch = max(1, batch)
+        self.sinks = List[AggregateSink]()
+
+    def run(mut self) raises:
+        var sink = AggregateSink(self.layout, self.workers)
+        var morsels = len(self.ranges) // 2
+        while True:
+            var m = self.cursor.take()
+            if m >= morsels:
+                break
+            var offset = self.ranges[2 * m]
+            var length = self.ranges[2 * m + 1]
+            for lo in range(0, length, self.batch):
+                var start = offset + lo
+                var n = min(self.batch, length - lo)
+                var keys = List[Series](capacity=len(self.keys))
+                for key in self.keys:
+                    keys.append(_one_chunk(key.slice(start, n)))
+                var inputs = table_inputs(
+                    self.frame.slice(start, n), keys, self.expressions
+                )
+                for i in range(len(inputs)):
+                    inputs[i] = _one_chunk(inputs[i])
+                sink.sink(keys, inputs, start)
+        self.sinks.append(sink^)
+
+
 @fieldwise_init
 struct GroupingSets(Copyable):
     """A pending `group_by_rollup`, `group_by_cube` or
@@ -612,7 +696,7 @@ struct GroupBy(Copyable):
         # by an estimate of the groups. The per-range routes below keep the
         # reductions the table has no state for.
         if self._table_supported(expressions):
-            var table = self._agg_table(expressions, workers)
+            var table = self._agg_table(expressions, workers, batch_size)
             if table:
                 return _pack_struct_keys(table.value())
         var ranged = Optional[DataFrame]()
@@ -647,7 +731,7 @@ struct GroupBy(Copyable):
         return True
 
     def _agg_table(
-        self, expressions: List[Expr], workers: Int
+        self, expressions: List[Expr], workers: Int, batch_size: Int
     ) raises -> Optional[DataFrame]:
         """Grouped reductions through the aggregate table: each worker
         hashes its morsels' keys where they are and probes its own table,
@@ -671,7 +755,9 @@ struct GroupBy(Copyable):
                     col(name).first().alias("__key_first_" + String(k))
                 )
         if len(float_keys) > 0:
-            var grouped = self._agg_canonical_table(all_expressions, workers)
+            var grouped = self._agg_canonical_table(
+                all_expressions, workers, batch_size
+            )
             if not grouped:
                 return None
             var frame = grouped.take()
@@ -683,10 +769,10 @@ struct GroupBy(Copyable):
                 )
                 hidden.append(name)
             return frame.drop(hidden)
-        return self._agg_canonical_table(expressions, workers)
+        return self._agg_canonical_table(expressions, workers, batch_size)
 
     def _agg_canonical_table(
-        self, expressions: List[Expr], workers: Int
+        self, expressions: List[Expr], workers: Int, batch_size: Int
     ) raises -> Optional[DataFrame]:
         """`_agg_table` with float keys as their canonical words."""
         var empty_keys = List[Series](capacity=len(self._keys))
@@ -696,10 +782,20 @@ struct GroupBy(Copyable):
             self._frame.clear(), expressions, empty_keys, self._key_names()
         )
         var specs = table_specs(template)
-        var inputs = table_inputs(self._frame, self._keys, expressions)
-        if not states_supported(specs, inputs):
+        var empty = table_inputs(self._frame.clear(), empty_keys, expressions)
+        if not states_supported(specs, empty):
             return None
         trace_path("group_by.aggregate_table")
+        if not _plain_inputs(expressions, self._frame):
+            # Computed reduction inputs are evaluated a batch of
+            # `batch_size` rows at a time, each batch then updating the
+            # states (DuckDB's sink evaluates a DataChunk's inputs, then
+            # UpdateStates): an input error past the batch comes after the
+            # batch's update errors, as the batch size says.
+            return self._agg_batches(
+                expressions, specs, empty, template, workers, batch_size
+            )
+        var inputs = table_inputs(self._frame, self._keys, expressions)
         # Morsels within chunks: the columns' common chunks, or one
         # contiguous copy of each chunked column when they differ.
         var keys = self._keys.copy()
@@ -731,6 +827,61 @@ struct GroupBy(Copyable):
                 at += length
             start = end
         var result = aggregate_table(keys, inputs, specs, ranges, workers)
+        return table_frame(template, result^, self._maintain_order)
+
+    def _agg_batches(
+        self,
+        expressions: List[Expr],
+        specs: List[ReducerSpec],
+        empty: List[Series],
+        template: _StreamReduction,
+        workers: Int,
+        batch_size: Int,
+    ) raises -> Optional[DataFrame]:
+        """The aggregate table over morsels whose reduction inputs are
+        evaluated `batch_size` rows at a time on the workers."""
+        var frame = self._frame.rechunk()
+        var keys = List[Series](capacity=len(self._keys))
+        for key in self._keys:
+            keys.append(key.rechunk() if key.is_chunked() else key.copy())
+        var empty_keys = List[Series](capacity=len(keys))
+        for key in keys:
+            empty_keys.append(key.slice(0, 0))
+        var layout = aggregate_layout(empty_keys, empty, specs)
+        var ranges = List[Int]()
+        var height = frame.height()
+        var morsel = max(4096, min(1 << 16, height // (4 * workers) + 1))
+        var at = 0
+        while at < height:
+            ranges.append(at)
+            ranges.append(min(morsel, height - at))
+            at += morsel
+        var cursor = _Cursor.new()
+        var jobs = List[_BatchSinkJob](capacity=workers)
+        for _ in range(max(1, workers)):
+            jobs.append(
+                _BatchSinkJob(
+                    frame,
+                    keys,
+                    expressions,
+                    layout,
+                    ranges,
+                    cursor,
+                    workers,
+                    batch_size,
+                )
+            )
+        try:
+            run_jobs(jobs)
+        except e:
+            cursor.free()
+            raise e^
+        cursor.free()
+        var sinks = List[AggregateSink](capacity=len(jobs))
+        for j in range(len(jobs)):
+            while len(jobs[j].sinks) > 0:
+                sinks.append(jobs[j].sinks.pop())
+        var result = aggregate_finish(sinks, layout)
         return table_frame(template, result^, self._maintain_order)
 
     def _counts_distinct(self, expressions: List[Expr]) -> Bool:

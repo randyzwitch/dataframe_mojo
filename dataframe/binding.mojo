@@ -1560,7 +1560,11 @@ def bind(
             if shapes[node.left] != ROWS and not is_drop(node.op):
                 raise Error("Window operations require a row-valued input")
             var input = types[node.left]
-            if is_distinct_flag(node.op):
+            if is_distinct_flag(node.op) or (
+                node.op == RANK and input.is_struct()
+            ):
+                # A struct ranks by its fields in turn, as Polars ranks
+                # pl.struct(...) (a multi-column order).
                 if input.is_list():
                     raise Error(
                         op_name(node.op) + " does not support list values"

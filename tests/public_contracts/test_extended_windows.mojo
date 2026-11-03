@@ -531,11 +531,14 @@ def test_extended_windows_reject_nested_and_non_numeric_operations_even_when_emp
                 col("x").cum_count(),
                 col("x").cum_min(),
                 col("x").cum_max(),
-                col("x").rank(),
                 col("x").rolling_min(3, 1),
                 col("x").rolling_max(3, 1),
                 col("x").interpolate("nearest"),
             ]
+            # A struct ranks by its fields (Polars: pl.struct(...).rank());
+            # a list does not rank.
+            if kind == 26:
+                expressions.append(col("x").rank())
             for expression in expressions:
                 with assert_raises():
                     _ = frame.select(expression)
