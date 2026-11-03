@@ -1,4 +1,4 @@
-"""Actual numeric conjunction, sorted-window and selective filter contracts."""
+"""Actual numeric conjunction, table-filter scan and selective filter contracts."""
 # contract-group: kernel.row_ops
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Expr, Series, col, lit, concat
@@ -7,7 +7,8 @@ from dataframe.fused_compare import (
     fused_mask,
     selection_tree,
 )
-from dataframe.sorted_range import sorted_window
+from dataframe.kernels.segment_statistics import ensure_statistics
+from dataframe.table_scan import scan_filtered
 from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting
 
@@ -257,49 +258,64 @@ def ordered_series(n: Int, base: Int, nullable: Bool = False) raises -> Series:
     return Series("x", Column[Int64](values^, valid))
 
 
-def test_sorted_window_order_cache_is_shared_by_views_and_invalidated_by_descending_boundary_reassembly() raises:
+def test_table_filter_scan_prunes_row_groups_of_ordered_data_and_matches_full_filters() raises:
     var setting = WorkerSetting(4)
-    var n = 65537
+    # Three row groups of 122,880 rows and a few rows more.
+    var group = 122880
+    var n = 3 * group + 17
     var source = ordered_series(n, 0)
     var parts: List[Expr] = [
         col("x") >= lit(Int64(3)),
         col("x") <= lit(Int64(9)),
     ]
-    assert_equal(source._data[Column[Int64]]._facts[].order_state(), 0)
-    var first = sorted_window([source.copy()], n, parts)
-    assert_equal(first.used, List[Bool]([True, True]))
-    assert_equal(first.low, 9)
-    assert_equal(first.high, 30)
-    assert_equal(source._data[Column[Int64]]._facts[].order_state(), 1)
+    # Without statistics nothing is pruned.
+    assert_true(not scan_filtered(DataFrame([source.copy()]), parts))
+    ensure_statistics(source)
+    var scanned = scan_filtered(DataFrame([source.copy()]), parts)
+    assert_true(scanned)
+    # Rows 9..29 hold 3..9: only the first row group is read, and both
+    # parts are still evaluated there.
+    assert_equal(scanned.value().ranges, List[Int]([0, group]))
+    assert_equal(len(scanned.value().remaining), 2)
+    # A view reads its buffer's statistics: one inside the first vector
+    # changes nothing, one inside the third keeps no row.
     var view = source.slice(7, 65)
-    assert_equal(
-        Int(view._data[Column[Int64]]._facts.ptr()),
-        Int(source._data[Column[Int64]]._facts.ptr()),
-    )
-    var window = sorted_window([view^], 65, parts)
-    assert_equal(window.low, 2)
-    assert_equal(window.high, 23)
+    assert_true(not scan_filtered(DataFrame([view.copy()]), parts))
+    var far = source.slice(4100, 65)
+    var windowed = scan_filtered(DataFrame([far.copy()]), parts)
+    assert_true(windowed)
+    assert_equal(windowed.value().frame.height(), 0)
     var left = DataFrame([source.copy()])
     var right = DataFrame([ordered_series(n, -100)])
     for rechunked in [False, True]:
         var joined = concat([left.copy(), right.copy()])
         if rechunked:
+            # A merged copy has no statistics of its own.
             joined = joined.rechunk()
-            assert_equal(
-                joined.column("x")._data[Column[Int64]]._facts[].order_state(),
-                0,
-            )
-        var found = sorted_window([joined.column("x")], 2 * n, parts)
-        assert_equal(found.used, List[Bool]([False, False]))
-        assert_equal(found.low, 0)
-        assert_equal(found.high, 2 * n)
         var actual = joined.filter(parts[0].copy() & parts[1])
         assert_equal(actual.height(), 42)
         for row in range(42):
             assert_equal(
                 actual.item(row, "x").int64(), Int64(3 + (row % 21) // 3)
             )
+    # Every row of a row group of one value keeps the equality part.
+    var constant_rows = List[Int64](length=3 * group, fill=Int64(7))
+    for i in range(group):
+        constant_rows[group + i] = Int64(8 + i)
+    var flat = Series("x", Column[Int64](constant_rows^))
+    ensure_statistics(flat)
+    var equal: List[Expr] = [col("x") == lit(Int64(7))]
+    var found = scan_filtered(DataFrame([flat.copy()]), equal)
+    assert_true(found)
+    assert_equal(
+        found.value().ranges, List[Int]([0, group, 2 * group, 3 * group])
+    )
+    assert_equal(len(found.value().remaining), 0)
+    assert_equal(DataFrame([flat^]).filter(equal[0].copy()).height(), 2 * group)
     var nulls = ordered_series(65, 0, True)
-    var miss = sorted_window([nulls^], 65, parts)
-    assert_equal(miss.used, List[Bool]([False, False]))
+    ensure_statistics(nulls)
+    var with_nulls = DataFrame([nulls^]).filter(parts[0].copy() & parts[1])
+    for row in range(with_nulls.height()):
+        var x = with_nulls.item(row, "x").int64()
+        assert_true(x >= 3 and x <= 9)
     _ = setting^

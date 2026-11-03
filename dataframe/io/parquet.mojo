@@ -314,13 +314,17 @@ def read_parquet(
         var selected = Optional[List[String]]()
         if len(columns):
             selected = columns.copy()
-        return read_dataset(
-            DatasetSpec([path], options),
-            True,
-            columns=selected,
-            row_groups=row_groups,
-            use_threads=use_threads,
-        )._with_statistics()
+        return (
+            read_dataset(
+                DatasetSpec([path], options),
+                True,
+                columns=selected,
+                row_groups=row_groups,
+                use_threads=use_threads,
+            )
+            ._with_statistics()
+            ._with_storage_statistics()
+        )
 
     if glob and has_pattern(path):
         return read_parquet(
@@ -348,9 +352,11 @@ def read_parquet(
             if g < 0:
                 raise Error("read_parquet: row group indices must be >= 0")
             groups.append(Int32(g))
-    return _read_with_dfparquet(
-        path, columns, groups, group_count, use_threads
-    )._with_statistics()
+    return (
+        _read_with_dfparquet(path, columns, groups, group_count, use_threads)
+        ._with_statistics()
+        ._with_storage_statistics()
+    )
 
 
 def parquet_row_group_statistics(path: String) raises -> DataFrame:
@@ -956,13 +962,17 @@ def read_parquet(
         var selected = Optional[List[String]]()
         if len(columns):
             selected = columns.copy()
-        return read_dataset(
-            DatasetSpec(paths, options),
-            True,
-            columns=selected,
-            row_groups=row_groups,
-            use_threads=use_threads,
-        )._with_statistics()
+        return (
+            read_dataset(
+                DatasetSpec(paths, options),
+                True,
+                columns=selected,
+                row_groups=row_groups,
+                use_threads=use_threads,
+            )
+            ._with_statistics()
+            ._with_storage_statistics()
+        )
 
     var files = resolve_paths(paths, glob)
     var frames = List[DataFrame](capacity=len(files))
@@ -975,4 +985,4 @@ def read_parquet(
             glob=False,
         )
         frames.append(frame^)
-    return concat(frames)._with_statistics()
+    return concat(frames)._with_statistics()._with_storage_statistics()

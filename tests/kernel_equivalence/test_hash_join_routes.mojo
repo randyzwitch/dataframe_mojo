@@ -17,8 +17,6 @@ from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting
 from dataframe.join_fuse import FusedJoin
 from dataframe.frame import (
-    _join_range_possible,
-    _join_range_rows,
     _smaller_build_join_rows,
     _bounded_int64_join_rows,
     _range_int64_membership_rows,
@@ -114,53 +112,6 @@ def test_all_integer_widths_prepared_probes_hash_on_read_and_preserve_extreme_nu
         comptime D = NUMERIC_DTYPES[k]
         comptime if not D.is_floating_point():
             numeric_probes[D]()
-
-
-def test_range_samples_match_literal_rows_for_offsets_empty_chunks_nulls_and_signed_extremes() raises:
-    for n in [0, 1, 127, 257, 100003]:
-        for offset in [0, 3]:
-            var values = List[Int64](length=offset, fill=Int64.MAX)
-            var valid = List[Bool](length=offset, fill=False)
-            for row in range(n):
-                values.append(
-                    Int64.MIN if row % 17
-                    == 0 else Int64.MAX if row % 19
-                    == 0 else Int64(row % 11 - 5)
-                )
-                valid.append(row % 23 != 3)
-            var key = Series(
-                "k", Column[Int64](values.copy(), valid.copy())
-            ).slice(offset, n)
-            var chunks = Series._from_chunks(
-                [
-                    key.slice(0, 0),
-                    key.slice(0, n // 3),
-                    key.slice(n // 3, n - n // 3),
-                    key.slice(n, 0),
-                ]
-            )
-            var bounds: List[Tuple[Int64, Int64]] = [
-                (Int64(-2), Int64(3)),
-                (Int64.MIN, Int64.MIN),
-                (Int64.MAX, Int64.MAX),
-                (Int64.MIN, Int64.MAX),
-            ]
-            for bound in bounds:
-                var expected = 0
-                var samples = min(256, n)
-                for i in range(samples):
-                    var row = offset + i * (n // samples)
-                    expected += Int(
-                        valid[row]
-                        and values[row] >= bound[0]
-                        and values[row] <= bound[1]
-                    )
-                assert_equal(
-                    _join_range_possible(key, bound[0], bound[1]), expected
-                )
-                assert_equal(
-                    _join_range_possible(chunks, bound[0], bound[1]), expected
-                )
 
 
 def compact_numeric_probes[D: DType]() raises:
@@ -357,7 +308,7 @@ def test_native_and_offsets_strings_prepared_duplicate_groups_reuse_build_and_co
                     )
 
 
-def test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_literal_row() raises:
+def test_bounded_membership_keeps_each_literal_row() raises:
     var n = 8192
     for low in [Int64.MIN + 1, Int64.MAX - 5]:
         for dtype in [
@@ -381,9 +332,6 @@ def test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_li
             var left = Series(
                 "k", Column[Int64]([low, low + 2, 0], [True, True, False])
             ).with_dtype(dtype)
-            var selected = _join_range_rows(left, right)
-            assert_true(Bool(selected))
-            assert_equal(selected.value(), [9, 1003, n - 1])
             var lrows = List[Int]()
             var rrows = List[Int]()
             var unfused = FusedJoin()
@@ -400,22 +348,6 @@ def test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_li
                 if row in [9, 1003, n - 1] and row % 3 != 1:
                     expected = 0 if row % 3 == 0 else 1
                 assert_equal(rrows[row], expected)
-    var left = Series("k", Column[Int64]([7]))
-    var misleading = List[Int64](length=n, fill=7)
-    for row in range(0, n, n // 256):
-        misleading[row] = 0
-    assert_true(
-        not _join_range_rows(left, Series("k", Column[Int64](misleading^)))
-    )
-    var wide = Series("k", Column[Int64]([Int64.MIN, Int64.MAX]))
-    assert_true(not _join_range_rows(wide, left))
-    for input in [
-        Series("k", Column[Int64]([])),
-        Series("k", Column[Int64]([Int64.MAX], [False])),
-    ]:
-        assert_equal(len(_join_range_rows(input, left).value()), 0)
-    var float_key = Series("k", Column[Float64]([7.0]))
-    assert_true(not _join_range_rows(float_key, float_key))
     var build = Series(
         "k", Column[Int64]([-3, -1, -1, 2, 0], [True, True, True, True, False])
     )
@@ -491,7 +423,6 @@ def test_smaller_build_order_restoration_capacity_boundary_and_compact_progressi
         ]
     )
     assert_true(prefer_left_build(left.height(), right.height()))
-    assert_true(not _join_range_rows(left.column("k"), right.column("k")))
     for outer in [False, True]:
         var expected_left = List[Int]()
         var expected_right = List[Int]()
