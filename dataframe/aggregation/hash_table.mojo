@@ -157,7 +157,6 @@ def _stride(hash: UInt64) -> Int:
     return Int((hash >> 59) | 1)
 
 
-
 def key_supported(column: Series) -> Bool:
     """Whether a key column's storage has key words here: any integer,
     float, boolean or string column (temporal, decimal and categorical keys
@@ -492,7 +491,6 @@ struct _Cursor(Copyable, Movable):
 
     def free(self):
         _ = external_call["free", NoneType](self.address)
-
 
 
 struct _SinkBits(Movable):
@@ -1918,7 +1916,6 @@ struct _FinishJob(Job):
             self.keys.append(key_columns.pop(0).column())
 
 
-
 def aggregate_table(
     keys: List[Series],
     inputs: List[Series],
@@ -2311,4 +2308,3 @@ def table_row_keys(keys: List[Series]) raises -> RowKeys:
     swap(representatives, sink.representatives)
     _ = sink^
     return RowKeys(ids^, representatives^)
-

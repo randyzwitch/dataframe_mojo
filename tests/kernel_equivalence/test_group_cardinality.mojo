@@ -158,5 +158,3 @@ struct HashStats(Copyable, Movable):
         self.float_most = -Float64("inf")
         self.nan = False
         self.numbers = 0
-
-

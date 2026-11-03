@@ -355,9 +355,7 @@ struct GroupBy(Copyable):
                 changed = True
             elif counted:
                 var rows = count_rows_by(expression, self._keys[0].name())
-                changed = changed or len(rows._nodes) != len(
-                    expression._nodes
-                )
+                changed = changed or len(rows._nodes) != len(expression._nodes)
                 prepared.append(rows^)
             else:
                 prepared.append(expression.copy())
@@ -440,6 +438,41 @@ struct GroupBy(Copyable):
         updating its states by group; partitions of the groups then merge
         across workers in parallel (`aggregate_table.mojo`). None when some reduction's
         state does not fit inline in a group row."""
+        # A float key's words are canonical (-0.0 and 0.0, or two NaNs, are
+        # one group), so its group shows its first row's value, as DuckDB's
+        # rows keep the value they were made from: each float key's first
+        # value comes from a FIRST state and replaces the key column.
+        var float_keys = List[Int]()
+        var all_expressions = expressions.copy()
+        for k in range(len(self._keys)):
+            var name = self._keys[k].name()
+            if (
+                self._keys[k].dtype().is_float()
+                and name in self._frame.columns()
+            ):
+                float_keys.append(k)
+                all_expressions.append(
+                    col(name).first().alias("__key_first_" + String(k))
+                )
+        if len(float_keys) > 0:
+            var grouped = self._agg_canonical_table(all_expressions, workers)
+            if not grouped:
+                return None
+            var frame = grouped.take()
+            var hidden = List[String]()
+            for k in float_keys:
+                var name = "__key_first_" + String(k)
+                frame = frame.with_column(
+                    frame.column(name).renamed(self._keys[k].name())
+                )
+                hidden.append(name)
+            return frame.drop(hidden)
+        return self._agg_canonical_table(expressions, workers)
+
+    def _agg_canonical_table(
+        self, expressions: List[Expr], workers: Int
+    ) raises -> Optional[DataFrame]:
+        """`_agg_table` with float keys as their canonical words."""
         var empty_keys = List[Series](capacity=len(self._keys))
         for key in self._keys:
             empty_keys.append(key.slice(0, 0))
