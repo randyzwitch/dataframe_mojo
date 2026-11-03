@@ -7,6 +7,7 @@ from dataframe.planning.node_builders import (
 )
 from dataframe.planning.cost.aggregation import (
     plan_sampled_groups,
+    plan_batch_states_win,
     plan_row_number_shape,
 )
 

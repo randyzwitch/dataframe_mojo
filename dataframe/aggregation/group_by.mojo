@@ -88,6 +88,8 @@ from dataframe.parallel import (
 from dataframe.kernels.partition import (
     Partitioner,
     encode_bucket,
+    low_cardinality,
+    small_key_product,
 )
 from dataframe.aggregation.dense import (
     PerfectLayout,
@@ -732,3 +734,10 @@ def group_by_workers(height: Int) -> Int:
     morsel of `_MORSEL_ROWS`, at most the configured threads (DuckDB runs at
     most one thread per row group)."""
     return max(1, min(configured_workers(), -(-height // _MORSEL_ROWS)))
+
+
+def range_states(keys: List[Series]) raises -> Bool:
+    """Whether the keys have few values (`low_cardinality`) or form few
+    groups (`small_key_product`), by their sampled tests; read by the
+    planner's batch-states decision (`plan_batch_states_win`)."""
+    return low_cardinality(keys) or small_key_product(keys)

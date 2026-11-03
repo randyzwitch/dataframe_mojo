@@ -140,6 +140,7 @@ from dataframe.planning.model import (
     WITH_COLUMNS,
 )
 from dataframe.planning.cost.aggregation import (
+    plan_batch_states_win,
     plan_row_number_shape,
     plan_sampled_groups,
 )
