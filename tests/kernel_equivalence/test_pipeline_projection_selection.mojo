@@ -1,7 +1,8 @@
 """A pipeline's select of bare columns (renamed, reordered, some dropped)
-keeps the morsel's selection instead of gathering the kept rows, and later
-steps read through it: a filter (composing a mask with a mask, and narrowing
-a join's row indices), a join and the grouped sink must give the scalar
+references its input vectors, dictionaries through the filter's selection
+included, instead of gathering the kept rows, and later steps read through
+them: a filter (merging a selection into a selection, and narrowing a
+join's row lists), a join and the grouped sink must give the scalar
 model's groups, for dense and sparse selections and several worker counts."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_true
@@ -80,7 +81,7 @@ def check(keep: Int) raises:
         .collect()
     )
     assert_true(
-        "dataframe-path: pipeline.projection_selection\n" in observed.text(),
+        "dataframe-path: pipeline.vector_projection\n" in observed.text(),
         "the select did not keep the selection",
     )
     _ = observed^
