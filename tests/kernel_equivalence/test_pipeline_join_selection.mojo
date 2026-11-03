@@ -1,8 +1,7 @@
-"""A pipeline's join step against a scalar model. Where each probe row
-matches at most once, the step keeps the probe side's columns where they are
-under a selection (row indices for sparse selections, a mask for dense
-ones) and gathers only the build side's columns; a repeated build key makes
-it gather every column at the repeated rows. Inner, semi and anti joins run
+"""A pipeline's join step against a scalar model. Through a prepared
+index the step keeps every column a dictionary over where it is: the probe
+side's through the matched probe rows (repeated where a build key repeats),
+the build side's through the matched build rows. Inner, semi and anti joins run
 on fresh morsels and after dense and sparse filters, with nullable keys,
 unmatched keys, a suffixed name and uncoalesced keys, for several worker
 counts and batch sizes. A join after a join probes a direct index (perfect
@@ -177,7 +176,7 @@ def test_inner_semi_and_anti_steps_match_scalar_rows_for_every_mode() raises:
                         .collect(batch_size=batch)
                     )
                     assert_true(
-                        "dataframe-path: pipeline.join_selection\n"
+                        "dataframe-path: pipeline.join_dictionary\n"
                         in observed.text(),
                         "the join did not keep a selection",
                     )
