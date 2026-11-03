@@ -209,15 +209,22 @@ def join_frames(
             keep_order=keep_order,
         ).drop(helpers)
     var keep_right_keys = not coalesce and how != JOIN_SEMI and how != JOIN_ANTI
+    # A coalesced right join keeps the right keys, under their names and
+    # in their places among the right columns, after the left's other
+    # columns, as Polars' right join (a left join with the sides
+    # swapped) names them: the left keys are what it drops.
+    var right_coalesced = how == JOIN_RIGHT and coalesce
     var right_output = List[Int]()
     var right_names = List[String]()
     if how != JOIN_SEMI and how != JOIN_ANTI:
         var names = Dict[String, Bool]()
-        for column in self._columns:
-            names[column.name()] = True
+        for c in range(self.width()):
+            if right_coalesced and c in left_keys:
+                continue
+            names[self._columns[c].name()] = True
         var left_names = names.copy()
         for i in range(right.width()):
-            if not keep_right_keys and i in right_keys:
+            if not keep_right_keys and not right_coalesced and i in right_keys:
                 continue
             var name = right._columns[i].name()
             if name in left_names:
@@ -575,9 +582,7 @@ def join_frames(
     var left_rows = List[Int]()
     var right_rows = List[Int]()
     var direct_right = False
-    if self.height() == 0 and (
-        how == JOIN_FULL or (how == JOIN_RIGHT and keep_right_keys)
-    ):
+    if self.height() == 0 and (how == JOIN_FULL or how == JOIN_RIGHT):
         # No probe rows: every build row comes out once, in order, beside
         # null probe columns, with nothing hashed or gathered (a
         # pipeline's unmatched build rows join an empty probe side, as
@@ -586,8 +591,10 @@ def join_frames(
         var columns = List[Series](capacity=self.width() + len(right_output))
         for c in range(self.width()):
             ref column = self._columns[c]
+            if right_coalesced and c in left_keys:
+                continue
             var key = -1
-            if not keep_right_keys:
+            if not keep_right_keys and not right_coalesced:
                 for k in range(len(left_keys)):
                     if left_keys[k] == c:
                         key = right_keys[k]
@@ -764,17 +771,26 @@ def join_frames(
                     if not right_matched[j]:
                         left_rows.append(-1)
                         right_rows.append(j)
-    if how == JOIN_RIGHT and keep_right_keys:
-        # Right keys kept apart: every left column, keys included, as
-        # the left rows have them (null where none matched), then the
-        # right columns, keys among them.
+    if how == JOIN_RIGHT:
+        # Every left column, as the left rows have them (null where none
+        # matched), but the keys of a coalesced join, then the right
+        # columns, keys among them.
         var gather_workers = worker_count(len(left_rows))
         var left_sources = List[Series](capacity=self.width())
         for c in range(self.width()):
-            left_sources.append(self._columns[c].copy())
-        var columns = take_parallel(
-            left_sources, left_rows.copy(), gather_workers, or_null=True
-        )
+            if not (right_coalesced and c in left_keys):
+                left_sources.append(self._columns[c].copy())
+        var left_identity = len(left_rows) == self.height()
+        if left_identity:
+            for i in range(len(left_rows)):
+                if left_rows[i] != i:
+                    left_identity = False
+                    break
+        var columns = left_sources^
+        if not left_identity:
+            columns = take_parallel(
+                columns, left_rows.copy(), gather_workers, or_null=True
+            )
         var right_sources = List[Series]()
         for c in right_output:
             right_sources.append(right._columns[c].copy())
@@ -783,57 +799,6 @@ def join_frames(
         )
         for k in range(len(right_output)):
             columns.append(gathered[k].renamed(right_names[k]))
-        return DataFrame(columns^, height=len(left_rows))
-    if how == JOIN_RIGHT:
-        # Every output row has a right row. Its key is the coalesced key
-        # even when no left row matched, so never gather a left key or
-        # choose between duplicate key columns after materialization.
-        var gather_workers = worker_count(len(left_rows))
-        var left_sources = List[Series]()
-        for c in range(self.width()):
-            if c not in left_keys:
-                left_sources.append(self._columns[c].copy())
-        var left_identity = len(left_rows) == self.height()
-        if left_identity:
-            for i in range(len(left_rows)):
-                if left_rows[i] != i:
-                    left_identity = False
-                    break
-        var left_gathered = left_sources^
-        if not left_identity:
-            left_gathered = take_parallel(
-                left_gathered,
-                left_rows.copy(),
-                gather_workers,
-                or_null=True,
-            )
-        var right_sources = List[Series]()
-        for k in range(len(right_keys)):
-            right_sources.append(right._columns[right_keys[k]].copy())
-        for c in right_output:
-            right_sources.append(right._columns[c].copy())
-        var right_gathered = take_parallel(
-            right_sources, right_rows^, gather_workers, or_null=False
-        )
-        var columns = List[Series](capacity=self.width() + len(right_output))
-        var left_source = 0
-        for c in range(self.width()):
-            var key = -1
-            for k in range(len(left_keys)):
-                if left_keys[k] == c:
-                    key = k
-                    break
-            if key >= 0:
-                columns.append(
-                    right_gathered[key].renamed(self._columns[c].name())
-                )
-            else:
-                columns.append(left_gathered[left_source].copy())
-                left_source += 1
-        for k in range(len(right_output)):
-            columns.append(
-                right_gathered[len(right_keys) + k].renamed(right_names[k])
-            )
         return DataFrame(columns^, height=len(left_rows))
     # Assembling the output is about half of a join, and it used to
     # gather one column at a time on the calling thread. take_parallel
