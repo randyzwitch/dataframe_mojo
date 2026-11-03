@@ -289,7 +289,11 @@ def _collect(mut stream: _ArrowArrayStream) raises -> DataFrame:
         # concat unifies differing categorical dictionaries and retains
         # the imported arrays as chunks. IPC preserves declared decimals;
         # Parquet's smallest-physical-decimal adapter does not apply here.
-        var result = concat(_align_nested(frames))._with_statistics()
+        var result = (
+            concat(_align_nested(frames))
+            ._with_statistics()
+            ._with_storage_statistics()
+        )
         _release_stream(stream)
         return result^
     except error:

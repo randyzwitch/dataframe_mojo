@@ -285,10 +285,13 @@ when they are not already in key order.
 Output columns are the left columns, then the right non-key columns in right
 schema order. Right names that collide with left names gain `suffix`; any
 remaining collision raises before any work is done. Key columns keep their left
-names and positions. For `right` and `full` joins their values come from
-whichever side is present, so a right-only row still shows its key. A right
-join retains the right input's key values (including the sign of zero), while
-using the left key names; a full join uses left keys for matched rows. With
+names and positions. A coalesced `right` join is the mirror image, as in
+Polars: the left's non-key columns, then every right column in right schema
+order, its keys included under their right names (and their values, including
+the sign of zero); right names that collide with the left's non-key names gain
+`suffix`. For a `full` join the keys' values come from whichever side is
+present, so a right-only row still shows its key; matched rows use the left
+keys. With
 `how="full", coalesce=False`, left keys are null for right-only rows and the
 right key columns are kept as ordinary right columns. `semi` and `anti` return
 only left columns. Empty inputs keep the joined schema; `cross` checks that the

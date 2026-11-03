@@ -53,7 +53,12 @@ def test_mixed_categorical_string_keys_share_value_identity_in_both_directions()
             for how in ["inner", "left", "right", "full", "semi", "anti"]:
                 var pairs = nested_loop_pairs(lr, rr, how)
                 var actual = l.join(r, on="k", how=how)
-                var names: List[String] = ["k", "p"]
+                # A right join keeps its right key, among the right
+                # columns (Polars).
+                var names: List[String] = [
+                    "p",
+                    "k",
+                ] if how == "right" else ["k", "p"]
                 if how != "semi" and how != "anti":
                     names.append("q")
                 assert_equal(actual.columns(), names)
