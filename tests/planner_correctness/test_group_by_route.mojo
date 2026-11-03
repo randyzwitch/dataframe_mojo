@@ -37,12 +37,13 @@ def batched(t: DataFrame, groups: Int) raises -> Bool:
     """Whether the query took batch states; its answer checked against the
     eager group-by's."""
     var observed = StrategyTrace()
-    # A string maximum keeps the plan off the pipelines' aggregate table.
+    # A position of the maximum has no aggregate table state, which keeps
+    # the plan off the pipelines' aggregate table.
     var rows = (
         t.lazy()
         .with_columns((col("v") * lit(Int64(2))).alias("w"))
         .group_by("k")
-        .agg([col("s").max().alias("top"), col("w").sum().alias("total")])
+        .agg([col("v").arg_max().alias("top"), col("w").sum().alias("total")])
         .collect(batch_size=BATCH)
     )
     var took = "dataframe-path: stream.batch_states\n" in observed.text()
@@ -50,7 +51,7 @@ def batched(t: DataFrame, groups: Int) raises -> Bool:
     var eager = (
         t.with_columns((col("v") * lit(Int64(2))).alias("w"))
         .group_by("k")
-        .agg([col("s").max().alias("top"), col("w").sum().alias("total")])
+        .agg([col("v").arg_max().alias("top"), col("w").sum().alias("total")])
     )
     assert_true(eager.height() == groups)
     assert_frame(rows.sort("k"), eager.sort("k"))
