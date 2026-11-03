@@ -53,7 +53,7 @@ def test_native_inline_external_string_rank_specialization_and_partition_fallbac
                             )
                             for source in [native.copy(), arrow.copy()]:
                                 var fast = _rank_strings(
-                                    source._data[StringColumn],
+                                    source,
                                     groups,
                                     method,
                                     descending,
@@ -125,7 +125,7 @@ def test_native_inline_external_string_rank_specialization_and_partition_fallbac
                     assert_true(
                         not Bool(
                             _rank_strings(
-                                native._data[StringColumn],
+                                native,
                                 partial,
                                 "ordinal",
                                 False,

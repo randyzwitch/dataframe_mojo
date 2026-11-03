@@ -1391,20 +1391,13 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     def argsort(
         self, descending: Bool = False, nulls_last: Bool = True
     ) raises -> List[Int]:
-        """Stable sort order: ranks are resolved once, then merged by Int."""
-        from .categorical import sort_ranks
-        from dataframe.kernels.packed_sort import packed_arg_sort
+        """Stable sort order (`dataframe.sorting`, keeping input order
+        among equal values)."""
+        from dataframe.sorting.sort import sort_rows
 
-        if self._dtype.is_categorical():
-            return sort_ranks(self).argsort(descending, nulls_last)
-
-        if not self._dtype.is_nested():
-            var packed = packed_arg_sort(
-                [self.copy()], [descending], [nulls_last]
-            )
-            if packed:
-                return packed.take()
-        return sort_indices([self._sort_ranks(descending, nulls_last)])
+        return sort_rows(
+            [self.copy()], [descending], [nulls_last], maintain_order=True
+        )
 
     def _sort_ranks(
         self, descending: Bool, nulls_last: Bool
