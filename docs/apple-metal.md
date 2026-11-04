@@ -92,6 +92,11 @@ New fused projections have separate `fused_reductions:` calibration keys;
 without a measurement they stay on CPU in automatic mode. Float64 input
 columns and other operators continue to run on CPU.
 
+Float32 range predicates use ordered integer keys when a bound is near
+zero, preserving subnormal comparisons, signed-zero equality and NaN
+exclusion even when Metal's floating comparisons flush denormals. Normal
+bounds retain native floating comparisons.
+
 The explicit-copy reference path packs unaligned validity windows in bytes
 and SIMD batches. It does not copy an entire unaligned bitmap one bit at a
 time. These operations live in `dataframe_metal`; CPU storage helpers are

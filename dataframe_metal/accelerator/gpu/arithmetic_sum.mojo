@@ -1,4 +1,5 @@
 """Fused native binary arithmetic and reduction, without a temporary column."""
+from .float_predicate import float_in_range
 from std.memory import Pointer
 from max.gpu import global_idx, thread_idx, block_idx
 from max.gpu.primitives import block
@@ -95,9 +96,9 @@ def arithmetic_partials(
                 kept = _valid(predicate_bits, predicate_offset, row)
             if predicate_tag == 2:
                 var p = predicate.unsafe_bitcast[Float32]()[unsafe_offset=row]
-                var above = p >= low_float if inclusive & 1 else p > low_float
-                var below = p <= high_float if inclusive & 2 else p < high_float
-                kept = kept & above & below
+                kept = kept & float_in_range(
+                    p, low_float, high_float, inclusive
+                )
             else:
                 var p = read_integer(predicate, predicate_tag, row)
                 kept = kept & (p >= low_bound) & (p <= high_bound)
