@@ -605,6 +605,25 @@ struct _GroupSortJob(Job):
                 flags[unsafe_offset=k] = 0
             flags[unsafe_offset=0] = PARTITION_START | PEER_START
             return
+        if count == self.partition_keys:
+            # No order keys: the sort key is the dense partition number
+            # alone, so it sorts by counting (stable, rows in input order).
+            var at = List[Int](length=partitions_here + 1, fill=0)
+            for k in range(n):
+                at[ids[k] + 1] += 1
+            for g in range(partitions_here):
+                at[g + 1] += at[g]
+            for k in range(n):
+                flags[unsafe_offset=k] = 0
+            for g in range(partitions_here):
+                flags[unsafe_offset=at[g]] = PARTITION_START | PEER_START
+            for k in range(n):
+                var to = at[ids[k]]
+                at[ids[k]] = to + 1
+                order[unsafe_offset=self.lo + to] = rows[
+                    unsafe_offset=self.lo + k
+                ]
+            return
         var sort_keys = List[Series](capacity=1 + count - self.partition_keys)
         var descending = List[Bool](capacity=1 + count - self.partition_keys)
         var nulls_last = List[Bool](capacity=1 + count - self.partition_keys)
