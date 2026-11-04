@@ -200,11 +200,17 @@ def test_float_decimal_date_and_string_statistics() raises:
     ]
     for p in predicates:
         _ = _check_sound(frame, p)
-    # The NaN vector rules nothing out on the float column.
+    # A NaN is greater than no number: the vector holding one keeps no row
+    # of `f > 100`, but `f < 100` does not keep all of its rows.
     var f = table_filters([col("f") > lit(100.0)], frame._columns)
     var stats = window_statistics(frame.column("f"))
     assert_equal(
         check_statistics(f.filters[0], stats.value().record[].vectors[2]),
+        FILTER_ALWAYS_FALSE,
+    )
+    var below = table_filters([col("f") < lit(100.0)], frame._columns)
+    assert_equal(
+        check_statistics(below.filters[0], stats.value().record[].vectors[2]),
         NO_PRUNING_POSSIBLE,
     )
     assert_equal(
