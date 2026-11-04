@@ -12,7 +12,7 @@ from dataframe import (
     concat,
     lit,
 )
-from dataframe_metal.handoff import plan_region
+from dataframe_metal.handoff import execute_timed, plan_region
 from dataframe_metal.metal import MetalRuntime
 from tests.support.group_strategy_reference import ScopedEnvironment
 from tests.support.metal_outcomes import require_metal
@@ -163,6 +163,48 @@ def test_metal_handoff_reads_sliced_and_chunked_columns() raises:
             _close(
                 plan.collect(accelerator=runtime), plan.collect(engine="cpu")
             )
+
+
+# requires: metal
+def test_metal_chunk_batches_preserve_independent_owners_and_bitmap_offsets() raises:
+    var runtime = require_metal()
+    var parts = List[DataFrame]()
+    # Separate allocations, mixed absent/present bitmaps and every bit offset.
+    # No source chunk may be released before the batched device work completes.
+    for i in range(64):
+        var source = _columns(1200 + i, i % 3 != 0)
+        parts.append(source.slice(i % 8 + 1, 1003 + i))
+    var frame = concat(parts)
+    assert_equal(frame.column("i").n_chunks(), 64)
+    for name in ["i", "l", "f"]:
+        var empty_bound = (
+            9_000_000_000_000_000 if name == "l" else 1_000_000_000
+        )
+        var plans: List[LazyFrame] = [
+            frame.lazy().select(col(name).sum()),
+            frame.lazy()
+            .filter((col(name) > -100) & (col(name) <= 700))
+            .select(col(name).sum(min_count=1)),
+            frame.lazy()
+            .filter(col(name) > empty_bound)
+            .select(col(name).sum(min_count=1)),
+        ]
+        for plan in plans:
+            assert_true("HANDOFF metal" in plan.explain(accelerator=runtime))
+            var expected = plan.collect(engine="cpu")
+            _close(plan.collect(accelerator=runtime), expected)
+            _close(execute_timed(plan)[0], expected)
+            _close(execute_timed(plan, zero_copy=False)[0], expected)
+    # The exact Int64 total requires cancellation across distinct chunks.
+    var extremes = concat(
+        [
+            DataFrame([Series("l", Column[Int64]([Int64.MIN, 0]))]),
+            DataFrame([Series("l", Column[Int64]([Int64.MAX, 0]))]),
+        ]
+    )
+    var plan = extremes.lazy().select(col("l").sum())
+    _close(plan.collect(accelerator=runtime), plan.collect(engine="cpu"))
+    _close(execute_timed(plan)[0], plan.collect(engine="cpu"))
 
 
 # requires: metal
