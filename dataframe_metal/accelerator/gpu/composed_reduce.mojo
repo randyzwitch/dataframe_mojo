@@ -59,20 +59,32 @@ def float_value(
     reuse_left: Bool,
     reuse_right: Bool,
     row: Int,
-) -> Float32:
+) -> Tuple[Float32, Bool]:
     var a = literal if side == 1 else (
         pf if reuse_left else left.unsafe_bitcast[Float32]()[unsafe_offset=row]
     )
     if op == UInt32(COL):
-        return a
+        return (a, False)
     var b = literal if side == 2 else (
         pf if reuse_right else right.unsafe_bitcast[Float32]()[
             unsafe_offset=row
         ]
     )
-    return a + b if op == UInt32(ADD) else (
+    # Metal may flush subnormal operands/results during arithmetic. Reading
+    # raw column bits into exact bins is safe, but arithmetic needs CPU
+    # adjudication when the device cannot preserve gradual underflow.
+    var ar = bitcast[DType.uint32](a) & 0x7FFF_FFFF
+    var br = bitcast[DType.uint32](b) & 0x7FFF_FFFF
+    var ae = ar >> 23
+    var be = br >> 23
+    var tiny = (ar != 0 and ae == 0) or (br != 0 and be == 0)
+    var underflow = (ar != 0 and br != 0 and ae + be <= 127) if op == UInt32(
+        MUL
+    ) else ((ar != 0 and ae <= 24) or (br != 0 and be <= 24))
+    var result = a + b if op == UInt32(ADD) else (
         a - b if op == UInt32(SUB) else a * b
     )
+    return (result, tiny or underflow)
 
 
 @always_inline
@@ -238,7 +250,8 @@ def composed_partials[
                                 Bool(reuse_r[field]),
                                 row,
                             )
-                            exact.add[field](value)
+                            fault |= UInt32(value[1]) << 1
+                            exact.add[field](value[0])
                     else:
                         # COUNT of arithmetic must still check integer errors.
                         if (sum_flags & (UInt32(1) << UInt32(field))) or ops[
@@ -278,7 +291,8 @@ def composed_partials[
                                 Bool(reuse_r[field]),
                                 row,
                             )
-                            var adjusted = value - fc[field]
+                            fault |= UInt32(value[1]) << 1
+                            var adjusted = value[0] - fc[field]
                             var next = fs[field] + adjusted
                             fc[field] = (next - fs[field]) - adjusted
                             fs[field] = next
