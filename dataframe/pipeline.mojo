@@ -3230,6 +3230,7 @@ def _top_scan_filter(
     descending: List[Bool],
     nulls_last: List[Bool],
     scan_key: Bool,
+    maintain_order: Bool,
 ) raises -> _TopScanFilter:
     """The dynamic filter for a TopN whose first sort column is read from
     the source unchanged (`scan_key`): `c < boundary` ascending and
@@ -3246,7 +3247,9 @@ def _top_scan_filter(
     if column_domain(dtype) < 0:
         return none^
     var op: Int
-    if len(names) == 1:
+    # `maintain_order` makes the source place a last key: a row tied on
+    # the first key may still enter, so the comparison keeps ties.
+    if len(names) == 1 and not maintain_order:
         op = COMPARE_GREATERTHAN if descending[0] else COMPARE_LESSTHAN
     else:
         op = COMPARE_GREATERTHANOREQUALTO if descending[
@@ -4032,7 +4035,13 @@ def _run_pipeline(
     var cursor = _Cursor.new()
     var boundary = TopNBoundary.new() if top > 0 else TopNBoundary.none()
     var top_filter = _top_scan_filter(
-        frame, top, top_names, top_descending, top_nulls_last, top_scan_key
+        frame,
+        top,
+        top_names,
+        top_descending,
+        top_nulls_last,
+        top_scan_key,
+        top_maintain_order,
     )
     top_filter.reordered = Bool(top_ranges)
     var key_ranges = _key_ranges(frame, steps, joins[])
