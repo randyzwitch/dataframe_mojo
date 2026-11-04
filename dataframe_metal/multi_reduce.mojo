@@ -207,7 +207,10 @@ def _run[
                 scope.synchronize()
             except:
                 pass
+            _ = owners^
             raise error^
+        # Explicit last use keeps typed reservations alive through the drain.
+        _ = owners^
         _check_ran(np)
         timings.kernel_ns = Int(perf_counter_ns()) - started
         started = Int(perf_counter_ns())
