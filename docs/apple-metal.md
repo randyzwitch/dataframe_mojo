@@ -64,6 +64,28 @@ integer intermediate overflow is detected even if a final sum would cancel.
 Overflow and non-finite Float32 partials use CPU adjudication. These shapes
 have separate `arithmetic_sum:` calibration keys; nested expressions,
 division and mixed-dtype arithmetic remain on CPU.
+Arithmetic expressions can also appear inside SUM, COUNT and MEAN in the
+same projection as column aggregates, for example:
+
+```mojo
+frame.lazy().filter(col("p") > 0).select_exprs([
+    (col("price") * col("quantity")).sum().alias("sales"),
+    col("discount").sum().alias("discount"),
+    col("quantity").count().alias("quantity_count"),
+])
+```
+
+Up to four distinct aggregate values share one scan and range predicate.
+Repeated SUM/COUNT/MEAN of an identical expression share its computed value
+and reduction state; expressions using different operators or literals retain
+separate states. Four binary expressions may read eight distinct value
+columns plus an independent predicate column. Operands retain the same dtype,
+literal and null rules as the single arithmetic SUM. COUNT checks integer
+intermediate overflow even when no sum is requested. Float32 means use the
+same exact-bin finish and CPU-order proof described above. These projections
+use `composed_reductions:v1:` calibration keys. The existing single arithmetic
+SUM and pure column aggregate paths keep their specialized kernels.
+
 New fused projections have separate `fused_reductions:` calibration keys;
 without a measurement they stay on CPU in automatic mode. Float64 input
 columns and other operators continue to run on CPU.
