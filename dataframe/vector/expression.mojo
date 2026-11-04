@@ -2617,6 +2617,33 @@ def _select_compare_op[
                             )
                             << UInt64(j)
                         )
+        elif n == 64:
+            # Through a selection: eight values gathered, compared at once.
+            comptime for g in range(8):
+                var x = SIMD[D, 8]()
+                var valid = SIMD[DType.uint8, 8](1)
+                comptime for l in range(8):
+                    var j = 8 * g + l
+                    var row = (
+                        Int(
+                            from_rows[unsafe_offset=k + j]
+                        ) if through_rows else k
+                        + j
+                    )
+                    var entry = Int(
+                        sel[unsafe_offset=row]
+                    ) if through_sel else row
+                    x[l] = data[unsafe_offset=entry]
+                    if nullable:
+                        var c = offset + entry
+                        valid[l] = (
+                            bits[unsafe_offset=c >> 3] >> UInt8(c & 7)
+                        ) & 1
+                var byte = (
+                    (_holds[D, OP, 8](x, value).cast[DType.uint8]() & valid)
+                    * weights
+                ).reduce_add()
+                mask |= UInt64(byte) << UInt64(8 * g)
         else:
             for j in range(n):
                 var row = (
