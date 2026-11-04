@@ -26,6 +26,7 @@ to compute (`rows`, a selection over the chunk, or every row) and computes
 each node for exactly those rows, in order. A dropped row is never
 computed, so it never raises.
 """
+from std.bit import count_trailing_zeros
 from std.math import ceil, floor
 from std.memory import Pointer, unsafe_memcpy
 
@@ -2539,6 +2540,24 @@ def _select_compare[
     return _select_compare_op[D, GE](format, rows, count, value, target)
 
 
+@always_inline
+def _holds[
+    D: DType, OP: Int, W: Int
+](x: SIMD[D, W], value: Scalar[D]) -> SIMD[DType.bool, W]:
+    comptime if OP == EQ:
+        return x.eq(SIMD[D, W](value))
+    elif OP == NE:
+        return x.ne(SIMD[D, W](value))
+    elif OP == LT:
+        return x.lt(SIMD[D, W](value))
+    elif OP == LE:
+        return x.le(SIMD[D, W](value))
+    elif OP == GT:
+        return x.gt(SIMD[D, W](value))
+    else:
+        return x.ge(SIMD[D, W](value))
+
+
 def _select_compare_op[
     D: DType, OP: Int
 ](
@@ -2548,42 +2567,80 @@ def _select_compare_op[
     value: Scalar[D],
     target: SelectionVector,
 ) -> Int:
+    """64 rows at a time: the comparison as a bit mask (eight lanes a
+    compare when the rows are contiguous), validity bits ANDed in, then
+    the set bits written out as rows."""
     var data = Pointer[Scalar[D], MutAnyOrigin](unsafe_from_address=format.data)
     var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=target.data)
     var sel = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=format.sel.data)
     var from_rows = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=rows.data)
     var through_rows = rows.is_set()
     var through_sel = format.sel.is_set()
+    var contiguous = not through_rows and not through_sel
     var bits = Pointer[UInt8, MutAnyOrigin](
         unsafe_from_address=format.validity.bits
     )
     var nullable = not format.validity.all_valid()
     var offset = format.validity.offset
+    var weights = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
     var kept = 0
-    for k in range(count):
-        var row = Int(from_rows[unsafe_offset=k]) if through_rows else k
-        var entry = Int(sel[unsafe_offset=row]) if through_sel else row
-        var x = data[unsafe_offset=entry]
-        var keep: Bool
-        comptime if OP == EQ:
-            keep = x == value
-        elif OP == NE:
-            keep = x != value
-        elif OP == LT:
-            keep = x < value
-        elif OP == LE:
-            keep = x <= value
-        elif OP == GT:
-            keep = x > value
+    var k = 0
+    while k < count:
+        var n = min(64, count - k)
+        var mask = UInt64(0)
+        if contiguous and n == 64:
+            comptime for g in range(8):
+                var x = data.unsafe_offset(k + 8 * g).load[width=8]()
+                var byte = (
+                    _holds[D, OP, 8](x, value).cast[DType.uint8]() * weights
+                ).reduce_add()
+                mask |= UInt64(byte) << UInt64(8 * g)
+            if nullable:
+                var b = offset + k
+                if b & 7 == 0:
+                    var v = UInt64(0)
+                    comptime for g in range(8):
+                        v |= UInt64(bits[unsafe_offset=(b >> 3) + g]) << UInt64(
+                            8 * g
+                        )
+                    mask &= v
+                else:
+                    for j in range(64):
+                        var c = b + j
+                        mask &= ~(
+                            UInt64(
+                                1
+                                - (
+                                    (bits[unsafe_offset=c >> 3] >> UInt8(c & 7))
+                                    & 1
+                                )
+                            )
+                            << UInt64(j)
+                        )
         else:
-            keep = x >= value
-        if nullable:
-            var b = offset + entry
-            keep = (
-                keep and ((bits[unsafe_offset=b >> 3] >> UInt8(b & 7)) & 1) == 1
-            )
-        out[unsafe_offset=kept] = UInt32(row)
-        kept += Int(keep)
+            for j in range(n):
+                var row = (
+                    Int(from_rows[unsafe_offset=k + j]) if through_rows else k
+                    + j
+                )
+                var entry = Int(sel[unsafe_offset=row]) if through_sel else row
+                var keep = _holds[D, OP, 1](data[unsafe_offset=entry], value)[0]
+                if nullable:
+                    var c = offset + entry
+                    keep = (
+                        keep
+                        and ((bits[unsafe_offset=c >> 3] >> UInt8(c & 7)) & 1)
+                        == 1
+                    )
+                mask |= UInt64(Int(keep)) << UInt64(j)
+        while mask != 0:
+            var j = Int(count_trailing_zeros(mask))
+            out[unsafe_offset=kept] = from_rows[
+                unsafe_offset=k + j
+            ] if through_rows else UInt32(k + j)
+            kept += 1
+            mask &= mask - 1
+        k += 64
     return kept
 
 
