@@ -66,6 +66,12 @@ from .frame import (
     _rows_mask,
     concat,
 )
+from dataframe.aggregation.ungrouped import (
+    UngroupedLayout,
+    UngroupedSink,
+    ungrouped_finish,
+    ungrouped_layout,
+)
 from dataframe.aggregation.state import (
     _StreamReduction,
     chunks_frame,
@@ -1385,6 +1391,10 @@ struct _ChunkRunner(Movable):
     # Whether to stop at a step that leaves no row (a pipeline's morsel),
     # or to run on so the output has every step's columns.
     var stop_empty: Bool
+    # An ungrouped aggregate sink (`ungrouped.mojo`), when the pipeline
+    # ends in one: the last step's chunks are sunk into its states, and
+    # nothing is collected.
+    var ungrouped: List[UngroupedSink]
 
     def __init__(
         out self,
@@ -1420,6 +1430,7 @@ struct _ChunkRunner(Movable):
         self.source = DataChunk()
         self.counts = List[Int](length=3 * len(steps) + 1, fill=0)
         self.stop_empty = stop_empty
+        self.ungrouped = List[UngroupedSink]()
 
     def begin_morsel(mut self):
         """Drop the previous morsel's columns."""
@@ -1455,6 +1466,10 @@ struct _ChunkRunner(Movable):
                 stop += 1
             columns = self._vector_steps(columns, at, stop)
             at = stop
+        if len(self.ungrouped) > 0 and columns.height > 0:
+            # A join's output (or the source, with no steps) cut into
+            # chunks for the ungrouped sink.
+            columns = self._vector_steps(columns, n, n)
         return columns^
 
     def _compiled(mut self, s: Int) raises:
@@ -1499,7 +1514,11 @@ struct _ChunkRunner(Movable):
                 if step.output.count == 0:
                     empty = True
                     break
-            if not empty:
+            if empty:
+                continue
+            if stop == n and len(self.ungrouped) > 0:
+                self.ungrouped[0].sink(input[], self.arena)
+            else:
                 collector.append(input[], self.arena)
         return collector.finish(self.arena)
 
@@ -3133,6 +3152,8 @@ struct _PipelineJob(Job):
                 self._derive_sets()
                 return
             var k = self.first_morsel + taken
+            if len(self.runner.ungrouped) > 0:
+                self.runner.ungrouped[0].begin(k)
             var offset = self.ranges[][2 * taken]
             var length = self.ranges[][2 * taken + 1]
             self.runner.begin_morsel()
@@ -4298,6 +4319,15 @@ def _run_pipeline(
                 templates,
             )
         )
+    # An ungrouped reduce sink: each worker's states updated from the
+    # last step's chunks (DuckDB's `PhysicalUngroupedAggregate`).
+    var ungrouped = Optional[UngroupedLayout]()
+    if len(keys) == 0 and len(expressions) > 0 and top == 0:
+        ungrouped = ungrouped_layout(schemas[][len(steps)], expressions)
+    if ungrouped:
+        trace_path("pipeline.ungrouped_sink")
+        for w in range(len(jobs)):
+            jobs[w].runner.ungrouped.append(UngroupedSink(ungrouped.value()))
     # An outer join's unmatched build rows run after every morsel of the
     # source (`_emit_unmatched`), and the workers finish after them.
     for step in steps:
@@ -4496,6 +4526,11 @@ def _run_pipeline(
             ordered,
             workers,
         )
+    if ungrouped:
+        var sinks = List[UngroupedSink](capacity=len(jobs))
+        for j in range(len(jobs)):
+            sinks.append(jobs[j].runner.ungrouped.pop())
+        return ungrouped_finish(ungrouped.value(), sinks)
     if len(expressions) > 0:
         var merged = List[_StreamReduction]()
         for j in range(len(jobs)):
