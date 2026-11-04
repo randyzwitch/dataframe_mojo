@@ -26,7 +26,7 @@ to compute (`rows`, a selection over the chunk, or every row) and computes
 each node for exactly those rows, in order. A dropped row is never
 computed, so it never raises.
 """
-from std.bit import count_trailing_zeros
+from std.bit import count_trailing_zeros, pop_count
 from std.math import ceil, floor
 from std.memory import Pointer, unsafe_memcpy
 
@@ -2624,22 +2624,36 @@ def _select_compare_op[
                     + j
                 )
                 var entry = Int(sel[unsafe_offset=row]) if through_sel else row
-                var keep = _holds[D, OP, 1](data[unsafe_offset=entry], value)[0]
+                # Bitwise, not `and`: a short-circuit is a branch on the
+                # comparison, which a filter's data makes unpredictable.
+                var keep = UInt64(
+                    Int(_holds[D, OP, 1](data[unsafe_offset=entry], value)[0])
+                )
                 if nullable:
                     var c = offset + entry
-                    keep = (
-                        keep
-                        and ((bits[unsafe_offset=c >> 3] >> UInt8(c & 7)) & 1)
-                        == 1
+                    keep &= UInt64(
+                        (bits[unsafe_offset=c >> 3] >> UInt8(c & 7)) & 1
                     )
-                mask |= UInt64(Int(keep)) << UInt64(j)
-        while mask != 0:
-            var j = Int(count_trailing_zeros(mask))
-            out[unsafe_offset=kept] = from_rows[
-                unsafe_offset=k + j
-            ] if through_rows else UInt32(k + j)
-            kept += 1
-            mask &= mask - 1
+                mask |= keep << UInt64(j)
+        if pop_count(mask) >= 16:
+            # Dense: every row written, the slot advancing by its bit
+            # (SelectGenericLoop's branch-free form).
+            if through_rows:
+                for j in range(n):
+                    out[unsafe_offset=kept] = from_rows[unsafe_offset=k + j]
+                    kept += Int((mask >> UInt64(j)) & 1)
+            else:
+                for j in range(n):
+                    out[unsafe_offset=kept] = UInt32(k + j)
+                    kept += Int((mask >> UInt64(j)) & 1)
+        else:
+            while mask != 0:
+                var j = Int(count_trailing_zeros(mask))
+                out[unsafe_offset=kept] = from_rows[
+                    unsafe_offset=k + j
+                ] if through_rows else UInt32(k + j)
+                kept += 1
+                mask &= mask - 1
         k += 64
     return kept
 
