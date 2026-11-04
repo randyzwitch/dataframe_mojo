@@ -1200,37 +1200,49 @@ def _update_comoment(
     count: Int,
     rows: Pointer[Int, _],
     base: Int,
+    scratch: Int,
 ) raises:
     """A batch's (x, y) pairs into their groups' co-moment states; a pair
-    with a null on either side is dropped."""
-    var xs = List[Float64](unsafe_uninit_length=count)
-    var ys = List[Float64](unsafe_uninit_length=count)
-    var xv = List[Bool](unsafe_uninit_length=count)
-    var yv = List[Bool](unsafe_uninit_length=count)
-    _load_floats(x, start, count, Int(xs.unsafe_ptr()), Int(xv.unsafe_ptr()))
-    _load_floats(y, start, count, Int(ys.unsafe_ptr()), Int(yv.unsafe_ptr()))
+    with a null on either side is dropped. The pairs are loaded into
+    `scratch` (three vectors of words: x values, y values, then both
+    validity flags), allocated once per sink."""
+    var xs = Pointer[Float64, MutAnyOrigin](unsafe_from_address=scratch)
+    var ys = Pointer[Float64, MutAnyOrigin](
+        unsafe_from_address=scratch + 8 * _BATCH
+    )
+    var xv = Pointer[Bool, MutAnyOrigin](
+        unsafe_from_address=scratch + 16 * _BATCH
+    )
+    var yv = Pointer[Bool, MutAnyOrigin](
+        unsafe_from_address=scratch + 17 * _BATCH
+    )
+    _load_floats(x, start, count, Int(xs), Int(xv))
+    _load_floats(y, start, count, Int(ys), Int(yv))
     for k in range(count):
-        if not (xv[k] and yv[k]):
+        if not (xv[unsafe_offset=k] and yv[unsafe_offset=k]):
             continue
         var at = _words_at(rows[unsafe_offset=k] + base)
         var n = at[unsafe_offset=0] + 1
         var mean_x = bitcast[DType.float64](at[unsafe_offset=1])
         var mean_y = bitcast[DType.float64](at[unsafe_offset=2])
-        var dx = xs[k] - mean_x
+        var dx = xs[unsafe_offset=k] - mean_x
         mean_x += dx / Float64(n)
-        var dy = ys[k] - mean_y
+        var dy = ys[unsafe_offset=k] - mean_y
         mean_y += dy / Float64(n)
         at[unsafe_offset=0] = n
         at[unsafe_offset=1] = bitcast[DType.uint64](mean_x)
         at[unsafe_offset=2] = bitcast[DType.uint64](mean_y)
         at[unsafe_offset=3] = bitcast[DType.uint64](
-            bitcast[DType.float64](at[unsafe_offset=3]) + dx * (ys[k] - mean_y)
+            bitcast[DType.float64](at[unsafe_offset=3])
+            + dx * (ys[unsafe_offset=k] - mean_y)
         )
         at[unsafe_offset=4] = bitcast[DType.uint64](
-            bitcast[DType.float64](at[unsafe_offset=4]) + dx * (xs[k] - mean_x)
+            bitcast[DType.float64](at[unsafe_offset=4])
+            + dx * (xs[unsafe_offset=k] - mean_x)
         )
         at[unsafe_offset=5] = bitcast[DType.uint64](
-            bitcast[DType.float64](at[unsafe_offset=5]) + dy * (ys[k] - mean_y)
+            bitcast[DType.float64](at[unsafe_offset=5])
+            + dy * (ys[unsafe_offset=k] - mean_y)
         )
 
 
@@ -1296,7 +1308,9 @@ def _update_states(
                 )
             continue
         if slot.kind == _K_COMOMENT:
-            _update_comoment(part, inputs[slot.k], start, count, rows, base)
+            _update_comoment(
+                part, inputs[slot.k], start, count, rows, base, scratch
+            )
             continue
         if slot.kind == _K_TOP_ROWS:
             var placed = False
