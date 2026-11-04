@@ -207,9 +207,14 @@ def _run[
                 scope.synchronize()
             except:
                 pass
+            _ = (hp^, lp^, sp^, cp^, np^, bp^, xp^)
+            _ = (high^, low^, sums^, compensation^, counts^, bins^, specials^)
+            _ = (segments^, empty^)
             _ = owners^
             raise error^
         # Explicit last use keeps typed reservations alive through the drain.
+        _ = (high^, low^, sums^, compensation^, counts^, bins^, specials^)
+        _ = (segments^, empty^)
         _ = owners^
         _check_ran(np)
         timings.kernel_ns = Int(perf_counter_ns()) - started
