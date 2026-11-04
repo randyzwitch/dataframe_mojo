@@ -6,12 +6,11 @@ directly above it, and the projection or aggregation the executor offered.
 runs an accepted region and returns its columns. A declined region runs
 on the CPU in the same query.
 
-Accepted today: `select(col(c).sum())` over filters that compare `c` with
-untyped numeric literals (`>`, `>=`, `<`, `<=`, `==`, joined by `&`), where
-`c` is Int32, Int64 or Float32. A one-chunk column is read in place (`wrap_native`): Apple silicon shares
-memory, so nothing is copied. Float64 and wider work stays on the CPU:
-Apple GPUs have no 64-bit floating point, and emulating it would be slower
-than the CPU.
+Accepted today: native numeric sums, counts and means over filters comparing
+one numeric column with untyped numeric literals (`>`, `>=`, `<`, `<=`,
+`==`, joined by `&`). The input columns are independently Int32, Int64 or
+Float32. Native chunks are read in place (`wrap_native`): Apple silicon
+shares memory, so nothing is copied. Float64 input stays on the CPU.
 """
 from max.gpu.host import DeviceBuffer
 from std.time import perf_counter_ns
@@ -24,6 +23,8 @@ from dataframe.placement import load_costs
 from dataframe.series import Series
 from .filter_plan import FilterSum, plan_region
 from .cross_sum import reduce_cross
+from .multi_plan import plan_bundle, bundle_key
+from .multi_reduce import execute_bundle
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
     _place_chunks,
@@ -51,7 +52,7 @@ def supports(region: LazyFrame) -> Bool:
     comptime if not METAL_TARGET:
         return False
     try:
-        return Bool(plan_region(region))
+        return Bool(plan_region(region)) or Bool(plan_bundle(region))
     except:
         return False
 
@@ -77,9 +78,14 @@ def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
     `rows` input rows, in nanoseconds; -1 when it has no measured cost."""
     try:
         var accepted = plan_region(region)
-        if not accepted:
-            return (String(), Float64(-1))
-        var key = operator_key(accepted.value())
+        var key = String()
+        if accepted:
+            key = operator_key(accepted.value())
+        else:
+            var bundle = plan_bundle(region)
+            if not bundle:
+                return (String(), Float64(-1))
+            key = bundle_key(bundle.value())
         var costs = load_costs("accel")
         var cost = costs.get(key)
         if not cost:
@@ -457,7 +463,7 @@ def _execute_on_device(
 ) raises -> Tuple[DataFrame, HandoffTimings]:
     var accepted = plan_region(region)
     if not accepted:
-        raise Error("Metal unsupported [handoff]: region was not accepted")
+        return execute_bundle(region, zero_copy)
     var plan = accepted.take()
     var timings = HandoffTimings()
     var frame = region._plan._frames[
