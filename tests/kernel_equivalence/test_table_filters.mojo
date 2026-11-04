@@ -348,14 +348,14 @@ def test_nan_in_one_vector_of_a_row_group_is_never_answered_from_bounds() raises
         var lazy = (
             frame.lazy()
             .filter(p.copy())
-            .select([col("x").count().alias("n")])
+            .select_exprs([col("x").count().alias("n")])
             .collect()
         )
         assert_equal(lazy.item(0, "n").int64(), Int64(expected), "lazy")
     # `x < 20` keeps every number but no NaN row: the row group and the
     # NaN vectors are not ALWAYS_TRUE, the vector of NaN alone keeps none.
     var lt = table_filters([col("x") < lit(20.0)], frame._columns)
-    var stats = window_statistics(frame.column("x")).value()
+    var stats = window_statistics(frame.column("x")).value().copy()
     assert_equal(
         check_statistics(lt.filters[0], stats.record[].groups[0]),
         NO_PRUNING_POSSIBLE,
