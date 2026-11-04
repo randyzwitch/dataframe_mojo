@@ -1323,8 +1323,8 @@ def plan_stream_execute(
         )
         if order:
             trace_path("pipeline.top_row_group_order")
-            top = top - skip + order.value().offset
-            skip = order.value().offset
+            top = top - skip + order.value().remaining_offset
+            skip = order.value().remaining_offset
             top_ranges = order.value().ranges.copy()
     var rows_per_batch = batch_size
     if (

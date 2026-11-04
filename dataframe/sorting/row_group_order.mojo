@@ -383,11 +383,11 @@ def _offset_after_pruning(
 @fieldwise_init
 struct RowGroupOrder(Copyable, Movable):
     """The scan order: `ranges` are (offset, length) pairs of the row
-    groups to read, in order; `offset` is the limit's offset after the
+    groups to read, in order; `remaining_offset` is the limit's offset after the
     row groups it covered were dropped."""
 
     var ranges: List[Int]
-    var offset: Int
+    var remaining_offset: Int
 
 
 def orderable(dtype: DataType) -> Bool:

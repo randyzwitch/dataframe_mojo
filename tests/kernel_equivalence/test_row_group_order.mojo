@@ -101,7 +101,7 @@ def test_blocks_in_reverse_order_prune_to_one_row_group() raises:
         frame.column("k"), False, True, 10, 1000 + ROW_GROUP_ROWS, True
     )
     # The offset covers the two best row groups: both are dropped.
-    assert_equal(offset_order.value().offset, 0)
+    assert_equal(offset_order.value().remaining_offset, 0)
     assert_equal(offset_order.value().ranges[0], (GROUPS - 2) * ROW_GROUP_ROWS)
     _check(frame, "k", "blocks")
 
