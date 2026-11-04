@@ -51,7 +51,8 @@ def test_erased_native_views_keep_typed_reservations_through_completion() raises
         read.unsafe_ptr(), tail.values.create_sub_buffer[DType.int32](0, 2)
     )
     scope.synchronize()
-    assert_equal(read, List[Int32]([2, 3]))
+    assert_equal(read[0], Int32(2))
+    assert_equal(read[1], Int32(3))
     _ = tail^
     _ = owners^
     assert_equal(scope.info()[0], 0)
