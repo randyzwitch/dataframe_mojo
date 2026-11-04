@@ -1,4 +1,5 @@
 """Public lazy query construction and backend dispatch."""
+from dataframe.aggregation.expressions import count_rows_by
 from dataframe.io.file_sources import has_pattern, resolve_paths
 from dataframe.io.dataset_options import DatasetOptions, DatasetSpec
 from dataframe.io.sinks import FileSink
@@ -3118,11 +3119,12 @@ struct LazyGroupBy(Copyable):
         var grouped = self._grouped(reads, every_column)
         var prepared = List[Expr](capacity=len(exprs))
         for expression in exprs:
-            prepared.append(
-                expression.implode() if group_sequence_rows(
-                    expression
-                ) else expression.copy()
-            )
+            if group_sequence_rows(expression):
+                prepared.append(expression.implode())
+            elif len(grouped[1]) > 0:
+                prepared.append(count_rows_by(expression, grouped[1][0]))
+            else:
+                prepared.append(expression.copy())
         var plan = grouped[0]._push(
             _aggregate_node(
                 exprs=prepared,

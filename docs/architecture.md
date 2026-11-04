@@ -173,9 +173,9 @@ streaming orchestration. Their names distinguish the state and table layouts:
 | --- | --- |
 | `scalar_states.mojo` | Mergeable integer, floating, logical and moment states |
 | `reducer.mojo` | Typed `Reducer` update/merge/finalize and reduction kernels |
-| `hash_reduce.mojo` | Per-worker high-cardinality Int64 grouped reductions |
 | `dense.mojo` | Perfect-hash layouts and dense group slots |
-| `hash_table.mojo` | Radix-partitioned aggregate tables and inline group states |
+| `hash_table.mojo` | Radix-partitioned aggregate tables: sinks, distinct tables and finish |
+| `function.mojo` | `AggregateFunction` states inline in group rows: update, combine, finalize |
 | `selected_rows.mojo` | Reduction kernels reading inputs through selected row indices |
 
 Everything imports these modules directly; the old root-level compatibility
