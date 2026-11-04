@@ -316,9 +316,13 @@ def number_partitions(
     Returns the count."""
     var hashes = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes_address)
     var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=rows_address)
+    # The hash's low bits chose the hash group, so slots come from its
+    # high bits after a multiplicative mix.
     var slots_count = 16
+    var shift = UInt64(60)
     while slots_count < 2 * n:
         slots_count *= 2
+        shift -= 1
     var mask = UInt64(slots_count - 1)
     var slots = List[Int](length=slots_count, fill=-1)
     var first_rows = List[Int]()
@@ -326,7 +330,7 @@ def number_partitions(
     for k in range(n):
         var row = rows[unsafe_offset=k]
         var hash = hashes[unsafe_offset=row]
-        var at = Int(hash & mask)
+        var at = Int((hash * 0x9E3779B97F4A7C15) >> shift)
         while True:
             var slot = slots[at]
             if slot < 0:
