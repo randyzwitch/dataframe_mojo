@@ -102,6 +102,18 @@ def _reference(rows: Int, nulls: Bool, mode: Int) raises -> DataFrame:
                 ),
             ]
         )
+    if mode == 3:
+        return DataFrame(
+            [
+                Series("integer", Column[Int32]([Int32(integer)])),
+                Series("sum", Column[Float32]([Float32(Float64(integer) / 4)])),
+                Series("count", Column[Int64]([count])),
+                Series(
+                    "mean",
+                    Column[Float64]([Float64(integer) / Float64(4 * count)]),
+                ),
+            ]
+        )
     return DataFrame(
         [
             Series("sales", Column[Float32]([Float32(sales)])),
@@ -109,6 +121,29 @@ def _reference(rows: Int, nulls: Bool, mode: Int) raises -> DataFrame:
             Series("count", Column[Int64]([quantity_count])),
         ]
     )
+
+
+def _expressions(mode: Int) -> List[Expr]:
+    if mode == 0:
+        return [col("i").sum().alias("sum")]
+    if mode == 1:
+        return [
+            col("i").sum().alias("sum"),
+            col("i").count().alias("count"),
+            col("i").mean().alias("mean"),
+        ]
+    if mode == 3:
+        return [
+            col("i").sum().alias("integer"),
+            col("a").sum().alias("sum"),
+            col("a").count().alias("count"),
+            col("a").mean().alias("mean"),
+        ]
+    return [
+        (col("a") * col("b")).sum().alias("sales"),
+        col("d").sum().alias("discount"),
+        col("b").count().alias("count"),
+    ]
 
 
 def main() raises:
@@ -130,22 +165,8 @@ def main() raises:
             var base = _table(rows, nulls)
             for chunks in [1, 8]:
                 var frame = _chunks(base, chunks)
-                for mode in range(3):
-                    var expressions: List[Expr]
-                    if mode == 0:
-                        expressions = [col("i").sum().alias("sum")]
-                    elif mode == 1:
-                        expressions = [
-                            col("i").sum().alias("sum"),
-                            col("i").count().alias("count"),
-                            col("i").mean().alias("mean"),
-                        ]
-                    else:
-                        expressions = [
-                            (col("a") * col("b")).sum().alias("sales"),
-                            col("d").sum().alias("discount"),
-                            col("b").count().alias("count"),
-                        ]
+                for mode in range(4):
+                    var expressions = _expressions(mode)
                     var plan = (
                         frame.lazy()
                         .filter(col("p") > 0)

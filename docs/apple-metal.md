@@ -128,10 +128,10 @@ python3 scripts/metal_calibration.py build/metal-capture.jsonl --output-dir buil
 export DATAFRAME_HANDOFF_CALIBRATION=/absolute/path/printed/by/the/fitter.json
 ```
 
-The built-in capture uses 50M, 75M and 100M rows, three representative operator
+The built-in capture uses 50M, 75M and 100M rows, four representative operator
 shapes, contiguous/eight-chunk inputs and independent nullable masks. Optional
 row counts follow the repetition count. It checks answers against a periodic
-scalar oracle, alternates CPU/Metal timing order and records unsupported or
+scalar oracle, includes mixed Float32-mean bundles, alternates CPU/Metal timing order and records unsupported or
 CPU-adjudicated cases explicitly. Every Metal timing requires direct GPU
 execution. These are development calibration workloads, not external-suite
 performance results.
