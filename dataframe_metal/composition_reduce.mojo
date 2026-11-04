@@ -257,8 +257,12 @@ def _run[
         _check_ran(np)
         _check_ran(fp)
         for fault in fp:
-            if fault:
+            if fault & 1:
                 raise data_fault("integer arithmetic expression overflow")
+            if fault & 2:
+                raise data_fault(
+                    "float32 arithmetic needs CPU gradual underflow"
+                )
         timings.kernel_ns = Int(perf_counter_ns()) - started
         started = Int(perf_counter_ns())
         for field in range(nf):

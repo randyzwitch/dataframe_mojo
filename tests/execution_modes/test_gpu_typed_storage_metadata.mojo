@@ -325,7 +325,6 @@ def test_composed_exact_float_prefixes_cover_all_arities_and_wide_bins() raises:
     for floating in [
         Float32(1.5),
         Float32.MAX_FINITE,
-        bitcast[DType.float32](UInt32(1)),
     ]:
         var frame = DataFrame(
             [
@@ -368,3 +367,37 @@ def test_composed_exact_float_prefixes_cover_all_arities_and_wide_bins() raises:
                             .equals(expected.column(name)),
                             True,
                         )
+
+
+# requires: metal
+def test_composed_float32_arithmetic_adjudicates_gradual_underflow() raises:
+    from dataframe import Expr, col, lit
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    for bits in [UInt32(1), UInt32(0x00800000), UInt32(0x00800001)]:
+        var frame = DataFrame(
+            [Series("f", Column[Float32]([bitcast[DType.float32](bits)]))]
+        )
+        var expressions: List[Expr]
+        if bits == 1:
+            expressions = [col("f") + 0, col("f") * 1]
+        elif bits == 0x00800000:
+            expressions = [col("f") * lit(Float32(0.5))]
+        else:
+            expressions = [
+                col("f") - lit(bitcast[DType.float32](UInt32(0x00800000)))
+            ]
+        for expression in expressions:
+            var plan = frame.lazy().select_exprs(
+                [
+                    expression.mean().alias("mean"),
+                    col("f").count().alias("count"),
+                ]
+            )
+            var expected = plan.collect(engine="cpu")
+            with assert_raises(contains="CPU gradual underflow"):
+                _ = execute_timed(plan)
+            assert_equal(
+                plan.collect(accelerator=runtime).equals(expected), True
+            )
