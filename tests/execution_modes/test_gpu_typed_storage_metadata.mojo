@@ -314,3 +314,57 @@ def test_native_float32_views_retain_one_owner_and_readback_checks_budget() rais
     assert_equal(native.has_errors(), False)
     assert_equal(native.retained_bytes(), 12)
     assert_equal(infallible.transfers()[0], 12)
+
+
+# requires: metal
+def test_composed_exact_float_prefixes_cover_all_arities_and_wide_bins() raises:
+    from dataframe import Expr, col
+    from dataframe_metal.handoff import execute_timed
+
+    _ = require_metal()
+    for floating in [
+        Float32(1.5),
+        Float32.MAX_FINITE,
+        bitcast[DType.float32](UInt32(1)),
+    ]:
+        var frame = DataFrame(
+            [
+                Series(
+                    "f", Column[Float32]([floating, floating], [True, False])
+                ),
+                Series("i", Column[Int32]([10, 20])),
+                Series("l", Column[Int64]([4_000_000_000, 8_000_000_000])),
+            ]
+        )
+        for arity in range(1, 5):
+            for floats in range(1, arity + 1):
+                var expressions = List[Expr]()
+                # Present integer fields first to exercise alias remapping.
+                for field in range(arity - 1, -1, -1):
+                    var name = String("f") if field < floats else (
+                        String("i") if field % 2 else String("l")
+                    )
+                    expressions.append(
+                        (col(name) + field).mean().alias("mean" + String(field))
+                    )
+                expressions.append((col("f") + 0).count().alias("count"))
+                var plan = frame.lazy().select_exprs(expressions)
+                var expected = plan.collect(engine="cpu")
+                for zero_copy in [True, False]:
+                    var actual = execute_timed(plan, zero_copy=zero_copy)
+                    assert_equal(actual[0].columns(), expected.columns())
+                    for name in expected.columns():
+                        assert_equal(
+                            actual[0].item(0, name).is_null(),
+                            expected.item(0, name).is_null(),
+                        )
+                        assert_equal(
+                            actual[0].column(name).dtype(),
+                            expected.column(name).dtype(),
+                        )
+                        assert_equal(
+                            actual[0]
+                            .column(name)
+                            .equals(expected.column(name)),
+                            True,
+                        )
