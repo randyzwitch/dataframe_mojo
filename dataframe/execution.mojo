@@ -3114,10 +3114,9 @@ from .window_sort import (
     WindowLayout,
     rank_from_layout,
     rank_order_keys,
-    sink_threads,
+    partition_ids,
     window_layout,
 )
-from dataframe.kernels.partition import encode_partitioned
 
 
 # DuckDB's STANDARD_VECTOR_SIZE: window tasks are sized in blocks of it.
@@ -3186,7 +3185,7 @@ def _over_constant[
     frame is its partition): DuckDB's WindowConstantAggregator. Each
     partition is aggregated once and the result is broadcast to its rows;
     the rows are numbered by partition (hash-partitioned, one dictionary
-    per hash group) and never gathered or sorted."""
+    per task of hash groups) and never gathered or sorted."""
     var cache = Pointer[WindowLayouts, MutAnyOrigin](
         unsafe_from_address=cache_address
     )
@@ -3202,11 +3201,8 @@ def _over_constant[
             ids = List[Int](length=height, fill=0)
             count = 1 if height > 0 else 0
         else:
-            var encoded = encode_partitioned(
-                keys, sink_threads(height), nulls_equal=True
-            )
-            count = encoded.count()
-            ids = encoded^.into_ids()
+            ids = List[Int]()
+            count = partition_ids(keys, height, ids)
         cache[].id_keys.append(node.text2)
         cache[].ids.append(ids^)
         cache[].counts.append(count)

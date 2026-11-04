@@ -303,6 +303,150 @@ def _rows_equal(keys: List[Series], a: Int, b: Int) -> Bool:
     return True
 
 
+def number_partitions(
+    keys: List[Series],
+    hashes_address: Int,
+    rows_address: Int,
+    n: Int,
+    mut ids: List[Int],
+) -> Int:
+    """Number the partitions of n rows (rows[k] for k < n) by a dictionary
+    of their keys, probed with the sink's row hashes (`hashes_address`, by
+    input row); ids[k] gets row k's number, in first-occurrence order.
+    Returns the count."""
+    var hashes = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes_address)
+    var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=rows_address)
+    var slots_count = 16
+    while slots_count < 2 * n:
+        slots_count *= 2
+    var mask = UInt64(slots_count - 1)
+    var slots = List[Int](length=slots_count, fill=-1)
+    var first_rows = List[Int]()
+    var first_hashes = List[UInt64]()
+    for k in range(n):
+        var row = rows[unsafe_offset=k]
+        var hash = hashes[unsafe_offset=row]
+        var at = Int(hash & mask)
+        while True:
+            var slot = slots[at]
+            if slot < 0:
+                slots[at] = len(first_rows)
+                ids[k] = len(first_rows)
+                first_rows.append(row)
+                first_hashes.append(hash)
+                break
+            if first_hashes[slot] == hash and _rows_equal(
+                keys, first_rows[slot], row
+            ):
+                ids[k] = slot
+                break
+            at = Int((UInt64(at) + 1) & mask)
+    return len(first_rows)
+
+
+struct _NumberJob(Job):
+    """Number one task's partitions (consecutive hash groups) and write
+    each row's global partition index: the first pass numbers, the second
+    (with `base` set) writes."""
+
+    var keys: List[Series]
+    var hashes: Int
+    var rows: Int
+    var lo: Int
+    var hi: Int
+    var ids: List[Int]
+    var count: Int
+    var base: Int
+    var out: Int
+
+    def __init__(
+        out self, keys: List[Series], hashes: Int, rows: Int, lo: Int, hi: Int
+    ):
+        self.keys = keys.copy()
+        self.hashes = hashes
+        self.rows = rows
+        self.lo = lo
+        self.hi = hi
+        self.ids = List[Int]()
+        self.count = 0
+        self.base = -1
+        self.out = 0
+
+    def run(mut self) raises:
+        var n = self.hi - self.lo
+        var rows = self.rows + self.lo * size_of[Int]()
+        if self.base < 0:
+            self.ids = List[Int](unsafe_uninit_length=n)
+            self.count = number_partitions(
+                self.keys, self.hashes, rows, n, self.ids
+            )
+            return
+        var at = Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)
+        var out = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.out)
+        for k in range(n):
+            out[unsafe_offset=at[unsafe_offset=k]] = self.base + self.ids[k]
+
+
+def _task_cuts(bounds: List[Int], height: Int) -> List[Int]:
+    """Cut hash groups (their row bounds) into tasks of about equal rows,
+    each at least one STANDARD_VECTOR_SIZE block, as CreateTaskList sizes
+    window tasks in blocks per thread."""
+    var blocks = (height + STANDARD_VECTOR_SIZE - 1) // STANDARD_VECTOR_SIZE
+    var tasks = max(1, min(configured_workers(), blocks))
+    var share = (height + tasks - 1) // tasks
+    var cuts = List[Int]()
+    cuts.append(0)
+    for b in range(1, len(bounds) - 1):
+        var at = bounds[b]
+        if at < height and at - cuts[len(cuts) - 1] >= share:
+            cuts.append(at)
+    cuts.append(height)
+    return cuts^
+
+
+def partition_ids(
+    keys: List[Series], height: Int, mut ids: List[Int]
+) raises -> Int:
+    """Each row's partition index (ids, by input row) and the partition
+    count, with no sort: the window sink's hash partitioning, then one
+    dictionary per task of consecutive hash groups, for aggregates over
+    whole partitions (WindowConstantAggregator)."""
+    ids = List[Int](unsafe_uninit_length=height)
+    if height == 0:
+        return 0
+    var sink = sink_threads(height)
+    var partitioner = Partitioner(keys, sink)
+    var parts = partitioner.scatter(sink, bucket_count=1 << radix_bits(height))
+    var cuts = _task_cuts(parts.bounds, height)
+    var jobs = List[_NumberJob](capacity=len(cuts) - 1)
+    for t in range(len(cuts) - 1):
+        jobs.append(
+            _NumberJob(
+                partitioner.keys,
+                Int(partitioner.hashes.unsafe_ptr()),
+                Int(parts.order.unsafe_ptr()),
+                cuts[t],
+                cuts[t + 1],
+            )
+        )
+    if len(jobs) == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    var total = 0
+    for j in range(len(jobs)):
+        jobs[j].base = total
+        jobs[j].out = Int(ids.unsafe_ptr())
+        total += jobs[j].count
+    if len(jobs) == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    _ = parts^
+    _ = partitioner^
+    return total
+
+
 def sort_key_rows(
     keys: List[Series],
     descending: List[Bool],
@@ -376,43 +520,16 @@ struct _GroupSortJob(Job):
             mine[k] = rows[unsafe_offset=self.lo + k]
             identity = identity and mine[k] == k
         var whole = identity and n == len(self.keys[0])
-        # The group's partitions numbered by a dictionary of their keys,
-        # probed with the sink's row hashes: partitions need only be
-        # contiguous, so the sort orders rows by that number (one integer)
-        # rather than by the key values.
-        var hashes = Pointer[UInt64, MutAnyOrigin](
-            unsafe_from_address=self.hashes
-        )
-        var slots_count = 16
-        while slots_count < 2 * n:
-            slots_count *= 2
-        var mask = UInt64(slots_count - 1)
-        var slots = List[Int](length=slots_count, fill=-1)
-        var first_rows = List[Int]()
-        var first_hashes = List[UInt64]()
+        # The group's partitions numbered by a dictionary of their keys:
+        # partitions need only be contiguous, so the sort orders rows by
+        # that number (one integer) rather than by the key values.
         var part_keys = List[Series](capacity=self.partition_keys)
         for c in range(self.partition_keys):
             part_keys.append(self.keys[c].copy())
         var ids = List[Int](unsafe_uninit_length=n)
-        for k in range(n):
-            var row = mine[k]
-            var hash = hashes[unsafe_offset=row]
-            var at = Int(hash & mask)
-            while True:
-                var slot = slots[at]
-                if slot < 0:
-                    slots[at] = len(first_rows)
-                    ids[k] = len(first_rows)
-                    first_rows.append(row)
-                    first_hashes.append(hash)
-                    break
-                if first_hashes[slot] == hash and _rows_equal(
-                    part_keys, first_rows[slot], row
-                ):
-                    ids[k] = slot
-                    break
-                at = Int((UInt64(at) + 1) & mask)
-        var partitions_here = len(first_rows)
+        var partitions_here = number_partitions(
+            part_keys, self.hashes, Int(mine.unsafe_ptr()), n, ids
+        )
         if partitions_here == 1 and count == self.partition_keys:
             # PartitionKeyTracker::CanBypass: one key and no order keys.
             for k in range(n):
@@ -522,16 +639,7 @@ def window_layout(
         # tasks in blocks per thread). A task takes consecutive hash groups
         # and sorts their rows together: every partition lies in one hash
         # group, so the task's range is a hash group of the layout.
-        var blocks = (height + STANDARD_VECTOR_SIZE - 1) // STANDARD_VECTOR_SIZE
-        var tasks = max(1, min(workers, blocks))
-        var share = (height + tasks - 1) // tasks
-        var cuts = List[Int]()
-        cuts.append(0)
-        for b in range(1, parts.buckets()):
-            var at = parts.bounds[b]
-            if at < height and at - cuts[len(cuts) - 1] >= share:
-                cuts.append(at)
-        cuts.append(height)
+        var cuts = _task_cuts(parts.bounds, height)
         var jobs = List[_GroupSortJob](capacity=len(cuts) - 1)
         for t in range(len(cuts) - 1):
             jobs.append(
