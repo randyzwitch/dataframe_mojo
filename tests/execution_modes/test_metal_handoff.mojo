@@ -8,6 +8,7 @@ from dataframe import (
     Column,
     DataFrame,
     DataType,
+    Expr,
     LazyFrame,
     Series,
     col,
@@ -675,7 +676,7 @@ def test_metal_arithmetic_sums_match_cpu_with_literals_nulls_and_chunks() raises
                 var input = frame.with_column(
                     base.column(name).slice(0, 10003).renamed("other")
                 )
-                var expressions = [
+                var expressions: List[Expr] = [
                     col(name) + col("other"),
                     col(name) - col("other"),
                     col(name) * 2,
