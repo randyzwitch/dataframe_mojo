@@ -2983,6 +2983,22 @@ def _copy_rows(source: Int, target: Int, count: Int):
         )
 
 
+@always_inline
+def _advance(
+    p: Pointer[UInt8, MutAnyOrigin], size: Int, start: Int, points: Int
+) -> Int:
+    """The byte `points` UTF-8 code points after byte `start`, clipped to
+    `size`."""
+    var at = start
+    var left = points
+    while left > 0 and at < size:
+        at += 1
+        while at < size and (p[unsafe_offset=at] & 0xC0) == 0x80:
+            at += 1
+        left -= 1
+    return at
+
+
 def _pick_values[
     T: DType
 ](left: Int, right: Int, valid: Int, target: Int, count: Int):
