@@ -351,7 +351,7 @@ struct VectorExpression(Copyable, Movable):
     var composed: List[UInt32]
     # Select: per comparison node, the column child it compares with a
     # constant directly at the column's own type (-1: evaluated in lanes);
-    # per AND / OR node, the selections its children write.
+    # per AND node, the selection its left child writes.
     var direct: List[Int]
     # Per AND node of two such comparisons on one column: that column
     # (a range, selected in one pass as DuckDB's BETWEEN), else -1.
@@ -2218,47 +2218,35 @@ struct VectorExpression(Copyable, Movable):
         target: SelectionVector,
     ) raises -> Int:
         """Select for node `index` (ExpressionExecutor::Select): AND narrows
-        the rows one child after the other (SelectAnd); OR takes the rows
-        either child keeps, the second run only on the rows the first
-        dropped, merged back in row order (SelectOr); a comparison of a
+        the rows one child after the other (SelectAnd), a lower and upper
+        bound on one column in one pass (BETWEEN); a comparison of a
         column with a constant runs over the column's vector; anything
-        else is evaluated in lanes and its true rows kept."""
+        else, OR included, is evaluated in lanes and its true rows kept."""
         if count == 0:
             return 0
         var op = self.bound.expr._nodes[index].op
-        if self.kinds[index] == _KIND_LANE and (op == AND or op == OR):
+        if self.kinds[index] == _KIND_LANE and op == AND:
+            # SelectAnd: the right child only on the rows the left keeps.
+            # An OR is evaluated in lanes over the rows and compacted once:
+            # SelectOr's passes over the rows each child drops, and the
+            # merge back into row order, measured slower on TPC-DS q28.
+            if self.ranges[index] >= 0:
+                var ranged = self._select_range_of(
+                    index, input, arena, rows, count, target
+                )
+                if ranged >= 0:
+                    return ranged
             var left = self.bound.expr._nodes[index].left
             var right = self.bound.expr._nodes[index].right
             if len(self.select_rows[index]) == 0:
                 self.select_rows[index] = List[UInt32](
-                    unsafe_uninit_length=3 * STANDARD_VECTOR_SIZE
+                    unsafe_uninit_length=STANDARD_VECTOR_SIZE
                 )
-            var base = Int(self.select_rows[index].unsafe_ptr())
-            var first = SelectionVector(base)
-            if op == AND:
-                if self.ranges[index] >= 0:
-                    var ranged = self._select_range_of(
-                        index, input, arena, rows, count, target
-                    )
-                    if ranged >= 0:
-                        return ranged
-                var kept = self._select(left, input, arena, rows, count, first)
-                return self._select(right, input, arena, first, kept, target)
-            var dropped = SelectionVector(base + 4 * STANDARD_VECTOR_SIZE)
-            var second = SelectionVector(base + 8 * STANDARD_VECTOR_SIZE)
-            var taken = self._select(left, input, arena, rows, count, first)
-            if taken == count:
-                _copy_rows(first.data, target.data, taken)
-                return taken
-            var others = _complement(
-                rows, count, first.data, taken, dropped.data
+            var first = SelectionVector(
+                Int(self.select_rows[index].unsafe_ptr())
             )
-            var more = self._select(
-                right, input, arena, dropped, others, second
-            )
-            return _merge_rows(
-                first.data, taken, second.data, more, target.data
-            )
+            var kept = self._select(left, input, arena, rows, count, first)
+            return self._select(right, input, arena, first, kept, target)
         var column = self.direct[index]
         if column >= 0:
             return self._select_direct(
@@ -2828,78 +2816,6 @@ def _select_compare_op[
                 mask &= mask - 1
         k += 64
     return kept
-
-
-def _copy_rows(source: Int, target: Int, count: Int):
-    if count > 0 and source != target:
-        unsafe_memcpy(
-            dest=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=target),
-            src=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=source),
-            count=4 * count,
-        )
-
-
-def _complement(
-    rows: SelectionVector, count: Int, kept: Int, taken: Int, target: Int
-) -> Int:
-    """The rows among `rows` (ascending) not in the `taken` ascending rows
-    at `kept`, in order: SelectOr's false selection."""
-    var from_rows = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=rows.data)
-    var a = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=kept)
-    var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=target)
-    var j = 0
-    var n = 0
-    for k in range(count):
-        var row = from_rows[unsafe_offset=k] if rows.is_set() else UInt32(k)
-        if j < taken and a[unsafe_offset=j] == row:
-            j += 1
-            continue
-        out[unsafe_offset=n] = row
-        n += 1
-    return n
-
-
-def _merge_rows(a: Int, na: Int, b: Int, nb: Int, target: Int) -> Int:
-    """Two disjoint ascending row lists merged in order into `target`."""
-    var x = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=a)
-    var y = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=b)
-    var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=target)
-    var i = 0
-    var j = 0
-    var n = 0
-    while i < na and j < nb:
-        if x[unsafe_offset=i] < y[unsafe_offset=j]:
-            out[unsafe_offset=n] = x[unsafe_offset=i]
-            i += 1
-        else:
-            out[unsafe_offset=n] = y[unsafe_offset=j]
-            j += 1
-        n += 1
-    while i < na:
-        out[unsafe_offset=n] = x[unsafe_offset=i]
-        i += 1
-        n += 1
-    while j < nb:
-        out[unsafe_offset=n] = y[unsafe_offset=j]
-        j += 1
-        n += 1
-    return n
-
-
-@always_inline
-def _advance(
-    p: Pointer[UInt8, MutAnyOrigin], size: Int, start: Int, points: Int
-) -> Int:
-    """The byte `points` UTF-8 code points after byte `start`, clipped to
-    `size`."""
-    var at = start
-    var left = points
-    while left > 0 and at < size:
-        at += 1
-        while at < size and (p[unsafe_offset=at] & 0xC0) == 0x80:
-            at += 1
-        left -= 1
-    return at
 
 
 def _pick_values[
