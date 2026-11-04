@@ -294,7 +294,8 @@ def _strings_equal(strings: StringColumn, a: Int, b: Int) -> Bool:
 def _rows_equal(keys: List[Series], a: Int, b: Int) -> Bool:
     """Rows a and b hold equal partition keys (nulls equal, NaN one value,
     -0.0 equal to 0.0)."""
-    for key in keys:
+    for c in range(len(keys)):
+        ref key = keys[c]
         if key._data.isa[StringColumn]():
             if not _strings_equal(key._data[StringColumn], a, b):
                 return False
@@ -314,10 +315,45 @@ def number_partitions(
     of their keys, probed with the sink's row hashes (`hashes_address`, by
     input row); ids[k] gets row k's number, in first-occurrence order.
     Returns the count."""
+    # One integer key compares its values directly; any other keys
+    # compare through `_rows_equal`.
+    if len(keys) == 1:
+        comptime for t in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[t]
+            comptime if not D.is_floating_point():
+                if keys[0]._data.isa[Column[Scalar[D]]]():
+                    return _number_partitions[D, False](
+                        keys,
+                        keys[0]._data[Column[Scalar[D]]],
+                        hashes_address,
+                        rows_address,
+                        n,
+                        ids,
+                    )
+    return _number_partitions[DType.int64, True](
+        keys,
+        Column[Scalar[DType.int64]](List[Int64]()),
+        hashes_address,
+        rows_address,
+        n,
+        ids,
+    )
+
+
+def _number_partitions[
+    D: DType, GENERIC: Bool
+](
+    keys: List[Series],
+    column: Column[Scalar[D]],
+    hashes_address: Int,
+    rows_address: Int,
+    n: Int,
+    mut ids: List[Int],
+) -> Int:
     var hashes = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes_address)
     var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=rows_address)
-    # The hash's low bits chose the hash group, so slots come from its
-    # high bits after a multiplicative mix.
+    # The hash's top bits chose the hash group, so slots come from a
+    # multiplicative mix of the whole hash.
     var slots_count = 16
     var shift = UInt64(60)
     while slots_count < 2 * n:
@@ -339,11 +375,21 @@ def number_partitions(
                 first_rows.append(row)
                 first_hashes.append(hash)
                 break
-            if first_hashes[slot] == hash and _rows_equal(
-                keys, first_rows[slot], row
-            ):
-                ids[k] = slot
-                break
+            if first_hashes[slot] == hash:
+                var same: Bool
+                comptime if GENERIC:
+                    same = _rows_equal(keys, first_rows[slot], row)
+                else:
+                    var other = first_rows[slot]
+                    var u = column._valid(other)
+                    same = u == column._valid(row) and (
+                        not u
+                        or column._ptr()[unsafe_offset=other]
+                        == column._ptr()[unsafe_offset=row]
+                    )
+                if same:
+                    ids[k] = slot
+                    break
             at = Int((UInt64(at) + 1) & mask)
     return len(first_rows)
 
