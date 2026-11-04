@@ -47,6 +47,12 @@ The common path uses three bins for values whose significant bits fit between
 detects any contribution outside that window and retries with all nine bins;
 large finite values and subnormals retain the same supported semantics. The
 kernel also specializes for the number of distinct aggregate fields.
+For projections containing a Float32 mean, a schema-only remap packs Float32
+fields into a prefix while preserving output order and aliases. Exact-bin
+registers and block reductions are compiled only for that prefix; integer
+fields keep their native integer reductions. These projections use the
+`exact_float:typed_v1` calibration revision so earlier measurements are not
+reused for the specialized kernels.
 
 A single SUM may reduce a binary `+`, `-` or `*` expression, for example
 `(col("price") * col("quantity")).sum()`. Both columns must have the same

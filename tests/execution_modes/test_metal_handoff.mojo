@@ -305,6 +305,14 @@ def test_metal_bundle_shares_states_and_accepts_mixed_native_types() raises:
     assert_equal(len(bundle.value().fields), 3)
     assert_equal(len(bundle.value().outputs), 4)
     assert_true(bundle.value().precise_float)
+    assert_equal(bundle.value().fields[0].column, "f")
+    assert_equal(bundle.value().fields[1].column, "i")
+    assert_equal(bundle.value().fields[2].column, "l")
+    assert_equal(bundle.value().outputs[0].field, 1)
+    assert_equal(bundle.value().outputs[1].field, 1)
+    assert_equal(bundle.value().outputs[2].field, 2)
+    assert_equal(bundle.value().outputs[3].field, 0)
+    assert_true(bundle_key(bundle.value()).endswith(":exact_float:typed_v1"))
     var filtered = plan_bundle(
         frame.lazy()
         .filter(col("i") > 0)
@@ -492,6 +500,47 @@ def test_metal_bundle_count_only_and_all_supported_field_arities() raises:
         _close_bundle(
             plan.collect(accelerator=runtime), plan.collect(engine="cpu")
         )
+    # Every compact float-prefix specialization, with integer-first output
+    # ordering and duplicate SUM/COUNT/MEAN states, must preserve CPU results.
+    var typed = frame.with_column(
+        Series("g", Column[Float32]([3, -2, 1], [True, False, True]))
+    )
+    typed = typed.with_column(Series("h", Column[Float32]([-4, 2, 8])))
+    typed = typed.with_column(
+        Series("k", Column[Float32]([1, 0, -1], [False, True, True]))
+    )
+    var integers = [String("i"), String("l"), String("j")]
+    var floats = [String("f"), String("g"), String("h"), String("k")]
+    for arity in range(1, 5):
+        for float_count in range(1, arity + 1):
+            var expressions = List[Expr]()
+            var names = List[String]()
+            for i in range(arity - float_count):
+                names.append(integers[i].copy())
+            for i in range(float_count):
+                names.append(floats[i].copy())
+            for name in names:
+                expressions.append(col(name).mean().alias("m" + name))
+                expressions.append(col(name).count().alias("c" + name))
+                expressions.append(col(name).sum(min_count=3).alias("s" + name))
+            var plan = typed.lazy().select_exprs(expressions)
+            var expected = plan.collect(engine="cpu")
+            _close_bundle(execute_timed(plan)[0], expected)
+            _close_bundle(execute_timed(plan, zero_copy=False)[0], expected)
+            var wide = typed.copy()
+            for i in range(float_count):
+                wide = wide.with_column(
+                    Series(
+                        floats[i],
+                        Column[Float32](
+                            List[Float32](length=3, fill=Float32.MAX_FINITE)
+                        ),
+                    )
+                )
+            var wide_plan = wide.lazy().select_exprs(expressions)
+            _close_bundle(
+                execute_timed(wide_plan)[0], wide_plan.collect(engine="cpu")
+            )
     # The exact Int64 total requires cancellation across distinct chunks.
     var extremes = concat(
         [
