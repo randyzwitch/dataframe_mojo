@@ -13,6 +13,43 @@ from dataframe_metal.accelerator.gpu.typed_storage import (
     _NativeReservation,
 )
 from tests.support.metal_outcomes import require_metal
+from dataframe_metal.exact_float import finish_float_bins
+from std.memory import bitcast
+
+
+def test_float32_exact_bins_normalize_carries_sign_and_rounding() raises:
+    var bins = List[Int128](length=9, fill=0)
+    bins[4] = Int128(1) << 21
+    assert_equal(finish_float_bins(bins, False, False, False), Float64(1))
+    bins[4] = -bins[4]
+    assert_equal(finish_float_bins(bins, False, False, False), Float64(-1))
+    bins = List[Int128](length=9, fill=0)
+    bins[0] = -Int128(4294967295)
+    bins[1] = 1
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64(bitcast[DType.float32](UInt32(1))),
+    )
+    bins = List[Int128](length=9, fill=0)
+    bins[7] = Int128(0xE0000000) * 2
+    bins[8] = Int128(0x1FFFFF) * 2
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64(Float32.MAX_FINITE) * 2,
+    )
+    bins = List[Int128](length=9, fill=0)
+    bins[1] = Int128(1) << 21
+    bins[0] = 1
+    var scale = bitcast[DType.float64](UInt64(1023 - 149) << 52)
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64(Int64(1) << 53) * scale,
+    )
+    bins[0] = 3
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64((Int64(1) << 53) + 4) * scale,
+    )
 
 
 def test_native_bitmap_append_matches_bits_at_every_alignment_and_vector_tail() raises:
