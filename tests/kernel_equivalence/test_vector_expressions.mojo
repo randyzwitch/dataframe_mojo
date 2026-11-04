@@ -72,6 +72,8 @@ def predicates() raises -> List[Expr]:
         col("s").is_null() & (col("a") > lit(Int64(0))),
         col("s").is_in(["k1", "a longer key 3", "absent"]),
         (lit(Int64(-10)) <= col("a")) & (col("a") < lit(Int64(10))),
+        col("f").is_between(lit(-2.0), lit(3.0), closed="none")
+        | col("a").is_between(lit(Int64(20)), lit(Int64(30))),
         (
             (col("price") >= lit("100.00").cast(DataType.decimal(7, 2)))
             & (col("price") <= lit("300.00").cast(DataType.decimal(7, 2)))
