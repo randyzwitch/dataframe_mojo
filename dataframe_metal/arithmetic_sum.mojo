@@ -151,8 +151,13 @@ def _run(
                 scope.synchronize()
             except:
                 pass
+            _ = (hp^, lp^, sp^, cp^, np^, fp^)
+            _ = (high^, low^, sums^, comp^, counts^, faults^)
+            _ = (segments^, empty^)
             _ = owners^
             raise error^
+        _ = (high^, low^, sums^, comp^, counts^, faults^)
+        _ = (segments^, empty^)
         _ = owners^
         _check_ran(np)
         timings.kernel_ns = Int(perf_counter_ns()) - started
