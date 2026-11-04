@@ -2938,18 +2938,18 @@ def _emit(
     n: Int,
     k: Int,
     rows: SelectionVector,
-    out: Pointer[UInt32, MutAnyOrigin],
+    dest: Pointer[UInt32, MutAnyOrigin],
     start: Int,
 ) -> Int:
     """The rows of a 64-row block (from `k`) whose bits are set in `mask`,
-    appended to `out` from `start`; where the next one goes. A dense mask
+    appended to `dest` from `start`; where the next one goes. A dense mask
     writes every row branch-free, a sparse one walks its set bits."""
     var at = start
     var from_rows = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=rows.data)
     var through = rows.is_set()
     if pop_count(mask) >= 16:
         for j in range(n):
-            out[unsafe_offset=at] = from_rows[
+            dest[unsafe_offset=at] = from_rows[
                 unsafe_offset=k + j
             ] if through else UInt32(k + j)
             at += Int((mask >> UInt64(j)) & 1)
@@ -2957,7 +2957,7 @@ def _emit(
     var m = mask
     while m != 0:
         var j = Int(count_trailing_zeros(m))
-        out[unsafe_offset=at] = from_rows[
+        dest[unsafe_offset=at] = from_rows[
             unsafe_offset=k + j
         ] if through else UInt32(k + j)
         at += 1
