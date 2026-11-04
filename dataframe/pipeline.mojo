@@ -2712,13 +2712,9 @@ struct _PipelineJob(Job):
         schemas: ArcPointer[List[DataFrame]],
         templates: ArcPointer[List[Optional[_VectorStep]]],
     ) raises:
-        var scan = Optional[ScanFilterInfo]()
-        if len(steps) > 0 and steps[0].kind == STEP_FILTER:
-            scan = scan_filter_info(frame[], conjuncts(steps[0].exprs[0]))
         self.runner = _ChunkRunner(
             steps, schemas, joins, indexes, True, templates
         )
-        self.runner.scan = scan^
         self.key_ranges = key_ranges.copy()
         self.bloom_checked = List[Int](length=len(key_ranges), fill=0)
         self.bloom_kept = List[Int](length=len(key_ranges), fill=0)
@@ -4115,6 +4111,11 @@ def _run_pipeline(
     # One job per morsel at most: a tiny source (PDS-H q2's five-row
     # region frame) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
+    # The source's table filters with their answers per vector, found once
+    # for every worker's chunk loop.
+    var scan = Optional[ScanFilterInfo]()
+    if len(steps) > 0 and steps[0].kind == STEP_FILTER:
+        scan = scan_filter_info(frame, conjuncts(steps[0].exprs[0]))
     var jobs = List[_PipelineJob](capacity=job_count)
     for _ in range(job_count):
         jobs.append(
@@ -4149,6 +4150,9 @@ def _run_pipeline(
                 templates,
             )
         )
+    if scan:
+        for w in range(len(jobs)):
+            jobs[w].runner.scan = scan.copy()
     # An outer join's unmatched build rows run after every morsel of the
     # source (`_emit_unmatched`), and the workers finish after them.
     for step in steps:
