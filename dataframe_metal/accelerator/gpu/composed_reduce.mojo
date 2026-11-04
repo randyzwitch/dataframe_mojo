@@ -4,6 +4,7 @@ Metadata contains only scalar values and input-slot indices. Device pointers
 are real buffer arguments selected once before scanning, never CPU address
 integers or a per-row expression-tree interpreter.
 """
+from .float_predicate import float_in_range
 from std.memory import Pointer, bitcast
 from std.utils.static_tuple import StaticTuple
 from max.gpu import global_idx, thread_idx, block_idx
@@ -219,11 +220,9 @@ def composed_partials[
                 kept = _valid(predicate_bits, predicate_offset, row)
             if predicate_tag == 2:
                 pf = predicate.unsafe_bitcast[Float32]()[unsafe_offset=row]
-                var above = pf >= low_float if inclusive & 1 else pf > low_float
-                var below = (
-                    pf <= high_float if inclusive & 2 else pf < high_float
+                kept = kept & float_in_range(
+                    pf, low_float, high_float, inclusive
                 )
-                kept = kept & above & below
             else:
                 pi = read_integer(predicate, predicate_tag, row)
                 kept = kept & (pi >= low_bound) & (pi <= high_bound)

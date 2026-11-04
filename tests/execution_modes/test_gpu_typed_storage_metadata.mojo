@@ -401,3 +401,121 @@ def test_composed_float32_arithmetic_adjudicates_gradual_underflow() raises:
             assert_equal(
                 plan.collect(accelerator=runtime).equals(expected), True
             )
+
+
+def test_float32_range_keys_match_float64_order_at_underflow_and_specials() raises:
+    from dataframe_metal.accelerator.gpu.float_predicate import float_in_range
+
+    var patterns = List[UInt32]()
+    for bits in [
+        0,
+        0x80000000,
+        1,
+        0x80000001,
+        0x007FFFFF,
+        0x807FFFFF,
+        0x00800000,
+        0x80800000,
+        0x3F800000,
+        0xBF800000,
+        0x7F800000,
+        0xFF800000,
+        0x7FC12345,
+        0xFFC12345,
+    ]:
+        patterns.append(UInt32(bits))
+    for v in patterns:
+        for lo in patterns:
+            for hi in patterns:
+                for inclusive in range(4):
+                    var value = bitcast[DType.float32](v)
+                    var low = bitcast[DType.float32](lo)
+                    var high = bitcast[DType.float32](hi)
+                    var x = Float64(value)
+                    var a = Float64(low)
+                    var b = Float64(high)
+                    var above = x >= a if inclusive & 1 else x > a
+                    var below = x <= b if inclusive & 2 else x < b
+                    assert_equal(
+                        float_in_range(value, low, high, UInt32(inclusive)),
+                        above and below,
+                    )
+
+
+# requires: metal
+def test_float32_underflow_predicates_match_cpu_in_all_reduction_paths() raises:
+    from dataframe import Expr, col, lit
+    from dataframe_metal.handoff import execute_timed
+
+    _ = require_metal()
+    var values = List[Float32]()
+    var integers = List[Int32]()
+    var floats = List[Float32]()
+    for bits in [
+        0,
+        0x80000000,
+        1,
+        0x80000001,
+        0x007FFFFF,
+        0x807FFFFF,
+        0x00800000,
+        0x80800000,
+        0x3F800000,
+        0xBF800000,
+        0x7F800000,
+        0xFF800000,
+        0x7FC12345,
+    ]:
+        values.append(bitcast[DType.float32](UInt32(bits)))
+        integers.append(Int32(len(integers) + 1))
+        floats.append(Float32(len(floats) + 1) / 4)
+    var frame = DataFrame(
+        [
+            Series("p", Column[Float32](values^)),
+            Series("i", Column[Int32](integers^)),
+            Series("f", Column[Float32](floats^)),
+        ]
+    )
+    var tiny = Expr(Float64(bitcast[DType.float32](UInt32(1))))
+    var negative_tiny = Expr(
+        Float64(bitcast[DType.float32](UInt32(0x80000001)))
+    )
+    for predicate in [
+        col("p") > 0,
+        col("p") >= 0,
+        col("p") < 0,
+        col("p") <= 0,
+        col("p") == 0,
+        col("p") > tiny,
+        col("p") == tiny,
+        col("p") < negative_tiny,
+        (col("p") >= negative_tiny) & (col("p") <= tiny),
+    ]:
+        var query = frame.lazy().filter(predicate)
+        for mode in range(5):
+            var expressions: List[Expr]
+            if mode == 0:
+                expressions = [col("i").sum().alias("s")]
+            elif mode == 1:
+                expressions = [
+                    col("i").sum().alias("s"),
+                    col("i").count().alias("c"),
+                    col("i").mean().alias("m"),
+                ]
+            elif mode == 2:
+                expressions = [
+                    col("f").mean().alias("m"),
+                    col("i").count().alias("c"),
+                ]
+            elif mode == 3:
+                expressions = [(col("i") * 1).sum().alias("s")]
+            else:
+                expressions = [
+                    (col("f") + 1).mean().alias("m"),
+                    col("i").count().alias("c"),
+                ]
+            var plan = query.select_exprs(expressions)
+            var expected = plan.collect(engine="cpu")
+            for zero_copy in [True, False]:
+                var actual = execute_timed(plan, zero_copy=zero_copy)
+                assert_equal(actual[0].equals(expected), True)
