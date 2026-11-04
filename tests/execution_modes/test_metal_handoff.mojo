@@ -616,15 +616,22 @@ def test_metal_handoff_float32_nan_and_explain_and_profile() raises:
     )
 
 
-def _calibrate(path: String, cpu_row_ns: Float64, accel_row_ns: Float64) raises:
-    """A calibration for the filtered Int32 sum alone; other keys are left
-    unmeasured, so they stay on the CPU."""
-    var text = String(
-        '{"operators": {"filter_sum:int32:filtered": {"cpu": {"fixed_ns":'
-        ' 1000, "row_ns": '
+def _calibrate(
+    path: String, cpu_row_ns: Float64, accel_row_ns: Float64, plan: LazyFrame
+) raises:
+    from dataframe.json.value import json_quote
+    from dataframe_metal.calibration import identity_json, shape_key
+    from dataframe_metal.handoff import region_key
+
+    var key = shape_key(plan, region_key(plan))
+    var text = String('{"schema_version":1,"identity":') + identity_json()
+    text += (
+        ',"operators":{'
+        + json_quote(key)
+        + ':{"min_rows":1,"max_rows":1000000000,"cpu":{"fixed_ns":1000,"row_ns":'
     )
-    text += String(cpu_row_ns) + '}, "accel": {"fixed_ns": 2000000,'
-    text += ' "row_ns": ' + String(accel_row_ns) + "}}}}"
+    text += String(cpu_row_ns) + '},"accel":{"fixed_ns":2000000,"row_ns":'
+    text += String(accel_row_ns) + "}}}}"
     with open(path, "w") as target:
         target.write(text)
 
@@ -640,6 +647,16 @@ def test_metal_automatic_placement_follows_measured_costs() raises:
     var unset = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", "")
     assert_false("\nPLACE " in plan.explain(engine="auto"))
     _ = unset^
+    from dataframe_metal.accelerator.gpu.identity import runtime_build_id
+
+    if not runtime_build_id().startswith("dataframe-mojo-metal-v2;cpu="):
+        var path = String("build/test-handoff-development-calibration.json")
+        _calibrate(path, 50.0, 0.1, plan)
+        var rejected = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
+        assert_true("no measured cost" in plan.explain(engine="auto"))
+        assert_false("accel from" in plan.explain(engine="auto"))
+        assert_true(plan.collect(engine="auto").equals(expected))
+        return
     for accel_cheaper in [True, False]:
         # Metal at 0.1 ns/row against the CPU's 50 is estimated faster from
         # about 40,000 rows; at 100 ns/row it never is. A process reads a
@@ -647,7 +664,7 @@ def test_metal_automatic_placement_follows_measured_costs() raises:
         var path = String("build/test-handoff-calibration-") + (
             "cheap.json" if accel_cheaper else "dear.json"
         )
-        _calibrate(path, 50.0, 0.1 if accel_cheaper else 100.0)
+        _calibrate(path, 50.0, 0.1 if accel_cheaper else 100.0, plan)
         var calibrated = ScopedEnvironment(
             "DATAFRAME_HANDOFF_CALIBRATION", path
         )
@@ -1036,3 +1053,81 @@ def test_metal_composition_checks_overflow_empty_and_exact_float_retry() raises:
     _close_bundle(
         nonfinite.collect(accelerator=runtime), nonfinite.collect(engine="cpu")
     )
+
+
+def test_metal_calibration_validates_all_identity_dimensions_and_layouts() raises:
+    from dataframe.json.value import JsonValue
+    from dataframe_metal.calibration import validate_identity, shape_key
+    from dataframe_metal.handoff import region_key
+
+    var current = JsonValue(
+        '{"runtime_build_id":"dataframe-mojo-metal-v2;cpu=a;metal=b","device":"M1","host":"h;thermal=0","workers":8}'
+    )
+    var valid = JsonValue(
+        '{"schema_version":1,"identity":' + current.canonical() + "}"
+    )
+    assert_equal(validate_identity(valid, current), String())
+    for identity in [
+        '{"runtime_build_id":"changed","device":"M1","host":"h;thermal=0","workers":8}',
+        '{"runtime_build_id":"dataframe-mojo-metal-v2;cpu=a;metal=b","device":"M2","host":"h;thermal=0","workers":8}',
+        '{"runtime_build_id":"dataframe-mojo-metal-v2;cpu=a;metal=b","device":"M1","host":"h;thermal=1","workers":8}',
+        '{"runtime_build_id":"dataframe-mojo-metal-v2;cpu=a;metal=b","device":"M1","host":"h;thermal=0","workers":4}',
+    ]:
+        var wrong = JsonValue(
+            '{"schema_version":1,"identity":' + identity + "}"
+        )
+        assert_true(Bool(validate_identity(wrong, current)))
+    assert_true(Bool(validate_identity(JsonValue('{"operators":{}}'), current)))
+    var frame = _frame()
+    var plain = frame.lazy().select(col("i").sum())
+    var key = shape_key(plain, region_key(plain))
+    var nullable = (
+        frame.with_column(
+            Series("i", Column[Int32]([1, 5, 9], [True, False, True]))
+        )
+        .lazy()
+        .select(col("i").sum())
+    )
+    assert_false(key == shape_key(nullable, region_key(nullable)))
+    var chunked = (
+        DataFrame(
+            [
+                Series._from_chunks(
+                    [
+                        frame.column("i").slice(0, 1),
+                        frame.column("i").slice(1, 2),
+                    ]
+                )
+            ]
+        )
+        .lazy()
+        .select(col("i").sum())
+    )
+    assert_false(key == shape_key(chunked, region_key(chunked)))
+
+
+# requires: metal
+def test_metal_calibration_rejects_overwritten_cached_models_and_outside_rows() raises:
+    _ = require_metal()
+    from dataframe_metal.accelerator.gpu.identity import runtime_build_id
+    from dataframe_metal.calibration import measured_cost, shape_key
+    from dataframe_metal.handoff import region_key
+
+    if not runtime_build_id().startswith("dataframe-mojo-metal-v2;cpu="):
+        return
+    var plan = (
+        _columns(100_000, False)
+        .lazy()
+        .filter(col("i") > 0)
+        .select(col("i").sum())
+    )
+    var path = String("build/test-handoff-cache-coherence.json")
+    _calibrate(path, 50, 0.1, plan)
+    var configured = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
+    var key = shape_key(plan, region_key(plan))
+    assert_true(measured_cost(key, 100_000) > 0)
+    assert_equal(measured_cost(key, 0), Float64(-1))
+    assert_equal(measured_cost(key, 1_000_000_001), Float64(-1))
+    _calibrate(path, 0.01, 100, plan)
+    assert_equal(measured_cost(key, 100_000), Float64(-1))
+    assert_true("no measured cost" in plan.explain(engine="auto"))
