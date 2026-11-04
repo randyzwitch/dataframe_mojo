@@ -97,6 +97,7 @@ from dataframe.parallel import (
 )
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
+from dataframe.sorting.row_group_order import orderable, row_group_order
 from dataframe.pipeline import (
     _ORDER_COLUMN,
     _top_flags,
@@ -1295,6 +1296,36 @@ def plan_stream_execute(
                         and len(e._nodes) == 1
                     ):
                         top_scan_key = False
+    # RowGroupPruner: a table scan under ORDER BY ... LIMIT on a column it
+    # reads unchanged is read in its row groups' statistics order, and the
+    # row groups that cannot reach the limit are dropped; a filter between
+    # them (or the scan's table filters) leaves the order alone but
+    # prunes nothing. Dropped leading row groups shorten the offset.
+    var top_ranges = Optional[List[Int]]()
+    if (
+        top_scan_key
+        and source.kind == SCAN_FRAME
+        and top - skip > 0
+        and top_names[0] in input.columns()
+        and orderable(input.column(top_names[0]).dtype())
+    ):
+        var prune = True
+        for operation in operations:
+            if operation.kind == FILTER:
+                prune = False
+        var order = row_group_order(
+            input.column(top_names[0]),
+            top_descending[0],
+            top_nulls_last[0],
+            top - skip,
+            skip,
+            prune,
+        )
+        if order:
+            trace_path("pipeline.top_row_group_order")
+            top = top - skip + order.value().offset
+            skip = order.value().offset
+            top_ranges = order.value().ranges.copy()
     var rows_per_batch = batch_size
     if (
         len(shared_joins[]) > 0
@@ -1425,6 +1456,7 @@ def plan_stream_execute(
             top_nulls_last=top_nulls_last,
             top_maintain_order=top_maintain_order,
             top_scan_key=top_scan_key,
+            top_ranges=top_ranges,
             table=decision.uses_aggregate_table(),
             set_masks=set_masks,
             finish_steps=_steps_of(finish_operations),

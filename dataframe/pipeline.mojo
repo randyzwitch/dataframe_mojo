@@ -3123,6 +3123,10 @@ struct _PipelineJob(Job):
                 var h = output.height()
                 var places = List[Int64](capacity=h)
                 var base = Int64(k) << 40
+                if self.top_filter.reordered:
+                    # A row group's rows (at most ROW_GROUP_ROWS, no
+                    # join) after its source row.
+                    base = Int64(offset) << 20
                 for r in range(h):
                     places.append(base + Int64(r))
                 output = output.with_column(
@@ -3214,6 +3218,9 @@ struct _TopScanFilter(Copyable, Movable):
     var info: Optional[ArcPointer[ScanFilterInfo]]
     var dynamic: Optional[ArcPointer[DynamicFilterData]]
     var op: Int
+    # The source is read in its row groups' statistics order: rows are
+    # placed by their source row, not by the morsel's turn.
+    var reordered: Bool
 
 
 def _top_scan_filter(
@@ -3230,7 +3237,7 @@ def _top_scan_filter(
     DuckDB ORs `IS NULL` for nulls first; a statistics check cannot keep
     a vector's nulls apart, so a nulls-first key pushes nothing. Columns
     whose order is not their storage's (categoricals) push nothing."""
-    var none = _TopScanFilter(None, None, 0)
+    var none = _TopScanFilter(None, None, 0, False)
     if top <= 0 or not scan_key or len(names) == 0 or not nulls_last[0]:
         return none^
     if names[0] not in frame.columns():
@@ -3249,7 +3256,7 @@ def _top_scan_filter(
     var filters = TableFilterSet()
     filters.push_dynamic(names[0], dynamic)
     var info = ScanFilterInfo(filters, [frame.column(names[0])])
-    return _TopScanFilter(ArcPointer(info^), dynamic, op)
+    return _TopScanFilter(ArcPointer(info^), dynamic, op, False)
 
 
 def _vectors_kept(
@@ -3582,6 +3589,7 @@ def run_pipeline(
     top_nulls_last: List[Bool] = List[Bool](),
     top_maintain_order: Bool = False,
     top_scan_key: Bool = False,
+    top_ranges: Optional[List[Int]] = None,
     table: Bool = False,
     set_masks: List[List[Int64]] = List[List[Int64]](),
     finish_steps: List[Step] = List[Step](),
@@ -3625,6 +3633,7 @@ def run_pipeline(
         top_nulls_last,
         top_maintain_order,
         top_scan_key,
+        top_ranges,
         table,
         set_masks,
         finish_steps,
@@ -3656,6 +3665,7 @@ def run_pipeline(
             List[Bool](),
             False,
             False,
+            None,
             False,
             List[List[Int64]](),
             List[Step](),
@@ -3865,6 +3875,7 @@ def _run_pipeline(
     top_nulls_last: List[Bool],
     top_maintain_order: Bool,
     top_scan_key: Bool,
+    top_ranges: Optional[List[Int]],
     table: Bool,
     set_masks: List[List[Int64]],
     finish_steps: List[Step],
@@ -3932,8 +3943,13 @@ def _run_pipeline(
         else:
             trace_path("pipeline.group_collect")
     var shared = ArcPointer(frame.copy())
+    # A top-N's row groups in their statistics order (RowGroupReorderer):
+    # workers take them in turn, one row group each, as DuckDB's
+    # NextParallelScan hands out the reorderer's next row group.
     var ranges = ArcPointer(
-        _morsel_ranges(frame, max(1, morsel_rows), max(1, workers))
+        top_ranges.value().copy() if top_ranges else _morsel_ranges(
+            frame, max(1, morsel_rows), max(1, workers)
+        )
     )
     # Grouping sets: which come from another set's group rows. Largest
     # first, each takes the smallest earlier source whose keys hold its own,
@@ -4018,6 +4034,7 @@ def _run_pipeline(
     var top_filter = _top_scan_filter(
         frame, top, top_names, top_descending, top_nulls_last, top_scan_key
     )
+    top_filter.reordered = Bool(top_ranges)
     var key_ranges = _key_ranges(frame, steps, joins[])
     if len(key_ranges) > 0:
         trace_path("pipeline.key_range")
