@@ -113,9 +113,9 @@ def _numeric_vector[
             found = True
         i += 1
     comptime if is_float:
-        # A NaN compares greater than every number (Polars' total order):
-        # no finite bound holds it.
-        if saw_nan or not found:
+        # NaN is kept apart from the bounds (`check_float_zonemap`).
+        stats.has_nan = saw_nan
+        if not found:
             return stats
         stats.has_min_max = True
         stats.float_min = Float64(low)
