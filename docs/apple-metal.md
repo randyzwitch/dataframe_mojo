@@ -18,8 +18,16 @@ with untyped numeric literals (`>`, `>=`, `<`, `<=`, `==`, joined by `&`),
 where `c` is Int32, Int64 or Float32. Results equal the CPU's: integer
 sums are exact and raise the CPU's overflow error; Float32 sums use Kahan
 compensation per GPU thread and can differ from the CPU in the last bits.
-A one-chunk column is read in place, without a copy. Float64 and every
-other operator run on the CPU.
+Native column chunks and their validity bitmaps are read in place, without
+coalescing or copying their values. Each chunk retains its own value and
+bit offsets. The reductions queue into separate partial-result ranges and
+share one final synchronization and readback; chunk count does not multiply
+the full reduction grid. Float64 and every other operator run on the CPU.
+
+The explicit-copy reference path packs unaligned validity windows in bytes
+and SIMD batches. It does not copy an entire unaligned bitmap one bit at a
+time. These operations live in `dataframe_metal`; CPU storage helpers are
+unchanged.
 
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
 every node it supports. `engine="auto"` places each such node by measured

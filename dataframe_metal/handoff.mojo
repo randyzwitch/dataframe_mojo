@@ -13,6 +13,7 @@ memory, so nothing is copied. Float64 and wider work stays on the CPU:
 Apple GPUs have no 64-bit floating point, and emulating it would be slower
 than the CPU.
 """
+from max.gpu.host import DeviceBuffer
 from std.utils.numerics import inf, isnan
 from std.time import perf_counter_ns
 
@@ -265,10 +266,30 @@ def _place[
     """The column on the device: its own memory wrapped in place when
     `zero_copy` and the column is one chunk, else a copy."""
     if zero_copy:
-        var wrapped = wrap_native[dtype](scope, series)
+        var wrapped = wrap_native[dtype](scope, series, wrap_validity=True)
         if wrapped:
             return wrapped.take()
     return upload_native[dtype](scope, series)
+
+
+def _place_chunks[
+    dtype: DType
+](scope: Scope, series: Series, zero_copy: Bool) raises -> List[
+    NativeColumn[dtype]
+]:
+    """Keep native chunks separate, including their own bitmap offsets.
+
+    The caller keeps `series` alive through the batched reduction's final
+    synchronization. Explicit copy mode remains a coalesced reference path.
+    """
+    var columns = List[NativeColumn[dtype]]()
+    if zero_copy:
+        for part in series.chunks():
+            if len(part):
+                columns.append(_place[dtype](scope, part, True))
+    else:
+        columns.append(_place[dtype](scope, series, False))
+    return columns^
 
 
 def _check_ran(counts: List[UInt32]) raises:
@@ -287,33 +308,40 @@ def _partials(rows: Int) -> Int:
     return max(1, min(MAX_PARTIALS, (rows + BLOCK_SIZE - 1) // BLOCK_SIZE))
 
 
-def _integer_launch[
+def _chunk_partials(rows: Int, total_rows: Int) -> Int:
+    """Share the grid budget across chunks instead of multiplying it.
+
+    A small floor keeps a chunk's launch parallel; short chunks still use
+    only the blocks their rows need. A single chunk keeps the original grid.
+    """
+    var share = (rows * MAX_PARTIALS + total_rows - 1) // total_rows
+    return min(_partials(rows), max(64, share))
+
+
+def _enqueue_integer[
     dtype: DType, nullable: Bool, filtered: Bool
 ](
     plan: FilterSum,
     column: NativeColumn[dtype],
     scope: Scope,
     partials: Int,
-) raises -> Tuple[List[Int64], List[UInt64], List[UInt32]]:
-    """One `integer_partials` launch and its partials, read back."""
+    offset: Int,
+    high: DeviceBuffer[DType.int64],
+    low: DeviceBuffer[DType.uint64],
+    counts: DeviceBuffer[DType.uint32],
+    empty_bits: DeviceBuffer[DType.uint8],
+) raises:
+    """Queue one chunk; its owners and output roots survive the final wait."""
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
-        var ctx = scope.context()
-        var high = ctx.enqueue_create_buffer[DType.int64](partials)
-        var low = ctx.enqueue_create_buffer[DType.uint64](partials)
-        var counts = ctx.enqueue_create_buffer[DType.uint32](partials)
-        # Every block overwrites its count; one left at the sentinel means
-        # the launch did not run (`_check_ran`).
-        ctx.enqueue_memset(counts, UInt32.MAX)
-        var values = column.values()
         var bits = (
-            column.validity()
-            .value()
-            .copy() if nullable else (ctx.enqueue_create_buffer[DType.uint8](1))
+            column.validity().value().copy() if nullable else empty_bits.copy()
         )
-        ctx.enqueue_function[integer_partials[dtype, nullable, filtered]](
-            values,
+        scope.context().enqueue_function[
+            integer_partials[dtype, nullable, filtered]
+        ](
+            column.values(),
             UInt32(column.value_offset),
             bits,
             UInt32(column.validity_bit_offset),
@@ -324,19 +352,113 @@ def _integer_launch[
             high,
             low,
             counts,
+            UInt32(offset),
             grid_dim=partials,
             block_dim=BLOCK_SIZE,
         )
         scope.record_launches(1)
-        var high_parts = List[Int64](length=partials, fill=0)
-        var low_parts = List[UInt64](length=partials, fill=0)
-        var count_parts = List[UInt32](length=partials, fill=0)
-        ctx.enqueue_copy(high_parts.unsafe_ptr(), high)
-        ctx.enqueue_copy(low_parts.unsafe_ptr(), low)
-        ctx.enqueue_copy(count_parts.unsafe_ptr(), counts)
-        scope.synchronize()
+
+
+def _integer_launch[
+    dtype: DType
+](
+    plan: FilterSum,
+    columns: List[NativeColumn[dtype]],
+    scope: Scope,
+) raises -> Tuple[
+    List[Scalar[DType.int64]], List[Scalar[DType.uint64]], List[UInt32]
+]:
+    """Queue all chunks into disjoint partial ranges; read back once.
+
+    Keep every input, scratch buffer and host readback owner alive until
+    synchronization, including when queueing or synchronization raises.
+    """
+    comptime if not METAL_TARGET:
+        raise Error("Metal hand-off requires an Apple Metal compilation target")
+    else:
+        var ctx = scope.context()
+        var total_rows = 0
+        for column in columns:
+            total_rows += column.length
+        var total_parts = 0
+        for column in columns:
+            total_parts += _chunk_partials(column.length, total_rows)
+        var high = ctx.enqueue_create_buffer[DType.int64](total_parts)
+        var low = ctx.enqueue_create_buffer[DType.uint64](total_parts)
+        var counts = ctx.enqueue_create_buffer[DType.uint32](total_parts)
+        var empty_bits = ctx.enqueue_create_buffer[DType.uint8](1)
+        var first_parts = List[Scalar[DType.int64]](length=total_parts, fill=0)
+        var second_parts = List[Scalar[DType.uint64]](
+            length=total_parts, fill=0
+        )
+        var count_parts = List[UInt32](length=total_parts, fill=0)
+        try:
+            ctx.enqueue_memset(counts, UInt32.MAX)
+            var offset = 0
+            for column in columns:
+                var partials = _chunk_partials(column.length, total_rows)
+                if column.has_validity():
+                    if plan.filtered:
+                        _enqueue_integer[dtype, True, True](
+                            plan,
+                            column,
+                            scope,
+                            partials,
+                            offset,
+                            high,
+                            low,
+                            counts,
+                            empty_bits,
+                        )
+                    else:
+                        _enqueue_integer[dtype, True, False](
+                            plan,
+                            column,
+                            scope,
+                            partials,
+                            offset,
+                            high,
+                            low,
+                            counts,
+                            empty_bits,
+                        )
+                elif plan.filtered:
+                    _enqueue_integer[dtype, False, True](
+                        plan,
+                        column,
+                        scope,
+                        partials,
+                        offset,
+                        high,
+                        low,
+                        counts,
+                        empty_bits,
+                    )
+                else:
+                    _enqueue_integer[dtype, False, False](
+                        plan,
+                        column,
+                        scope,
+                        partials,
+                        offset,
+                        high,
+                        low,
+                        counts,
+                        empty_bits,
+                    )
+                offset += partials
+            ctx.enqueue_copy(first_parts.unsafe_ptr(), high)
+            ctx.enqueue_copy(second_parts.unsafe_ptr(), low)
+            ctx.enqueue_copy(count_parts.unsafe_ptr(), counts)
+            scope.synchronize()
+        except error:
+            try:
+                scope.synchronize()
+            except:
+                pass
+            raise error^
         _check_ran(count_parts)
-        return (high_parts^, low_parts^, count_parts^)
+        return (first_parts^, second_parts^, count_parts^)
 
 
 def _integer_sum[
@@ -352,33 +474,15 @@ def _integer_sum[
     if len(series) == 0:
         return (Int128(0), 0)
     var started = Int(perf_counter_ns())
-    var column = _place[dtype](scope, series, zero_copy)
+    var columns = _place_chunks[dtype](scope, series, zero_copy)
     timings.upload_ns = Int(perf_counter_ns()) - started
     started = Int(perf_counter_ns())
-    var partials = _partials(column.length)
-    var parts: Tuple[List[Int64], List[UInt64], List[UInt32]]
-    if column.has_validity():
-        if plan.filtered:
-            parts = _integer_launch[dtype, True, True](
-                plan, column, scope, partials
-            )
-        else:
-            parts = _integer_launch[dtype, True, False](
-                plan, column, scope, partials
-            )
-    elif plan.filtered:
-        parts = _integer_launch[dtype, False, True](
-            plan, column, scope, partials
-        )
-    else:
-        parts = _integer_launch[dtype, False, False](
-            plan, column, scope, partials
-        )
+    var parts = _integer_launch[dtype](plan, columns, scope)
     timings.kernel_ns = Int(perf_counter_ns()) - started
     started = Int(perf_counter_ns())
     var total = Int128(0)
     var count = 0
-    for p in range(partials):
+    for p in range(len(parts[0])):
         comptime if split_total[dtype]():
             total += (parts[0][p].cast[DType.int128]() << 32) + parts[1][
                 p
@@ -386,38 +490,33 @@ def _integer_sum[
         else:
             total += parts[0][p].cast[DType.int128]()
         count += Int(parts[2][p])
-    _ = column^
+    _ = columns^
     timings.finish_ns = Int(perf_counter_ns()) - started
     return (total, count)
 
 
-def _float32_launch[
+def _enqueue_float32[
     nullable: Bool, filtered: Bool
 ](
     plan: FilterSum,
     column: NativeColumn[DType.float32],
     scope: Scope,
     partials: Int,
-) raises -> Tuple[List[Float32], List[Float32], List[UInt32]]:
-    """One `float32_partials` launch and its partials, read back."""
+    offset: Int,
+    sums: DeviceBuffer[DType.float32],
+    compensations: DeviceBuffer[DType.float32],
+    counts: DeviceBuffer[DType.uint32],
+    empty_bits: DeviceBuffer[DType.uint8],
+) raises:
+    """Queue one chunk; its owners and output roots survive the final wait."""
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
-        var ctx = scope.context()
-        var sums = ctx.enqueue_create_buffer[DType.float32](partials)
-        var compensations = ctx.enqueue_create_buffer[DType.float32](partials)
-        var counts = ctx.enqueue_create_buffer[DType.uint32](partials)
-        # Every block overwrites its count; one left at the sentinel means
-        # the launch did not run (`_check_ran`).
-        ctx.enqueue_memset(counts, UInt32.MAX)
-        var values = column.values()
         var bits = (
-            column.validity()
-            .value()
-            .copy() if nullable else (ctx.enqueue_create_buffer[DType.uint8](1))
+            column.validity().value().copy() if nullable else empty_bits.copy()
         )
-        ctx.enqueue_function[float32_partials[nullable, filtered]](
-            values,
+        scope.context().enqueue_function[float32_partials[nullable, filtered]](
+            column.values(),
             UInt32(column.value_offset),
             bits,
             UInt32(column.validity_bit_offset),
@@ -429,19 +528,115 @@ def _float32_launch[
             sums,
             compensations,
             counts,
+            UInt32(offset),
             grid_dim=partials,
             block_dim=BLOCK_SIZE,
         )
         scope.record_launches(1)
-        var sum_parts = List[Float32](length=partials, fill=0)
-        var compensation_parts = List[Float32](length=partials, fill=0)
-        var count_parts = List[UInt32](length=partials, fill=0)
-        ctx.enqueue_copy(sum_parts.unsafe_ptr(), sums)
-        ctx.enqueue_copy(compensation_parts.unsafe_ptr(), compensations)
-        ctx.enqueue_copy(count_parts.unsafe_ptr(), counts)
-        scope.synchronize()
+
+
+def _float32_launch(
+    plan: FilterSum,
+    columns: List[NativeColumn[DType.float32]],
+    scope: Scope,
+) raises -> Tuple[
+    List[Scalar[DType.float32]], List[Scalar[DType.float32]], List[UInt32]
+]:
+    """Queue all chunks into disjoint partial ranges; read back once.
+
+    Keep every input, scratch buffer and host readback owner alive until
+    synchronization, including when queueing or synchronization raises.
+    """
+    comptime if not METAL_TARGET:
+        raise Error("Metal hand-off requires an Apple Metal compilation target")
+    else:
+        var ctx = scope.context()
+        var total_rows = 0
+        for column in columns:
+            total_rows += column.length
+        var total_parts = 0
+        for column in columns:
+            total_parts += _chunk_partials(column.length, total_rows)
+        var sums = ctx.enqueue_create_buffer[DType.float32](total_parts)
+        var compensations = ctx.enqueue_create_buffer[DType.float32](
+            total_parts
+        )
+        var counts = ctx.enqueue_create_buffer[DType.uint32](total_parts)
+        var empty_bits = ctx.enqueue_create_buffer[DType.uint8](1)
+        var first_parts = List[Scalar[DType.float32]](
+            length=total_parts, fill=0
+        )
+        var second_parts = List[Scalar[DType.float32]](
+            length=total_parts, fill=0
+        )
+        var count_parts = List[UInt32](length=total_parts, fill=0)
+        try:
+            ctx.enqueue_memset(counts, UInt32.MAX)
+            var offset = 0
+            for column in columns:
+                var partials = _chunk_partials(column.length, total_rows)
+                if column.has_validity():
+                    if plan.filtered:
+                        _enqueue_float32[True, True](
+                            plan,
+                            column,
+                            scope,
+                            partials,
+                            offset,
+                            sums,
+                            compensations,
+                            counts,
+                            empty_bits,
+                        )
+                    else:
+                        _enqueue_float32[True, False](
+                            plan,
+                            column,
+                            scope,
+                            partials,
+                            offset,
+                            sums,
+                            compensations,
+                            counts,
+                            empty_bits,
+                        )
+                elif plan.filtered:
+                    _enqueue_float32[False, True](
+                        plan,
+                        column,
+                        scope,
+                        partials,
+                        offset,
+                        sums,
+                        compensations,
+                        counts,
+                        empty_bits,
+                    )
+                else:
+                    _enqueue_float32[False, False](
+                        plan,
+                        column,
+                        scope,
+                        partials,
+                        offset,
+                        sums,
+                        compensations,
+                        counts,
+                        empty_bits,
+                    )
+                offset += partials
+            ctx.enqueue_copy(first_parts.unsafe_ptr(), sums)
+            ctx.enqueue_copy(second_parts.unsafe_ptr(), compensations)
+            ctx.enqueue_copy(count_parts.unsafe_ptr(), counts)
+            scope.synchronize()
+        except error:
+            try:
+                scope.synchronize()
+            except:
+                pass
+            raise error^
         _check_ran(count_parts)
-        return (sum_parts^, compensation_parts^, count_parts^)
+        return (first_parts^, second_parts^, count_parts^)
 
 
 def _float32_sum(
@@ -455,31 +650,21 @@ def _float32_sum(
     if len(series) == 0:
         return (Float64(0), 0)
     var started = Int(perf_counter_ns())
-    var column = _place[DType.float32](scope, series, zero_copy)
+    var columns = _place_chunks[DType.float32](scope, series, zero_copy)
     timings.upload_ns = Int(perf_counter_ns()) - started
     started = Int(perf_counter_ns())
-    var partials = _partials(column.length)
-    var parts: Tuple[List[Float32], List[Float32], List[UInt32]]
-    if column.has_validity():
-        if plan.filtered:
-            parts = _float32_launch[True, True](plan, column, scope, partials)
-        else:
-            parts = _float32_launch[True, False](plan, column, scope, partials)
-    elif plan.filtered:
-        parts = _float32_launch[False, True](plan, column, scope, partials)
-    else:
-        parts = _float32_launch[False, False](plan, column, scope, partials)
+    var parts = _float32_launch(plan, columns, scope)
     timings.kernel_ns = Int(perf_counter_ns()) - started
     started = Int(perf_counter_ns())
     var total = Float64(0)
     var count = 0
-    for p in range(partials):
+    for p in range(len(parts[0])):
         total += (
             parts[0][p].cast[DType.float64]()
             - parts[1][p].cast[DType.float64]()
         )
         count += Int(parts[2][p])
-    _ = column^
+    _ = columns^
     timings.finish_ns = Int(perf_counter_ns()) - started
     return (total, count)
 
@@ -488,8 +673,8 @@ def execute_timed(
     region: LazyFrame, zero_copy: Bool = True
 ) raises -> Tuple[DataFrame, HandoffTimings]:
     """Run an accepted region on Metal and report where the time went.
-    With `zero_copy` (the default) the GPU reads a one-chunk column in
-    place; without it the column is copied, for comparison."""
+    With `zero_copy` (the default) the GPU reads every native chunk and
+    its bitmap in place; without it the column is copied, for comparison."""
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
