@@ -137,11 +137,14 @@ def _run[
                 scope.synchronize()
             except:
                 pass
+            _ = (hp^, lp^, sp^, cp^, np^)
+            _ = (high^, low^, sums^, compensations^, counts^, empty^)
             _ = aligned_values^
             _ = aligned_predicates^
             raise error^
         # Mojo destroys owners after their last use. Pin their reservations
         # through both the normal drain and the exception drain.
+        _ = (high^, low^, sums^, compensations^, counts^, empty^)
         _ = aligned_values^
         _ = aligned_predicates^
         _check_ran(np)
