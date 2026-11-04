@@ -3,12 +3,20 @@ from dataframe.aggregation.reducer import (
     Reducer,
 )
 from dataframe.aggregation.hash_table import (
+    AggregateLayout,
+    AggregateSink,
+    _Cursor,
+    _one_chunk,
+    aggregate_finish,
+    aggregate_layout,
     aggregate_table,
+    ReducerSpec,
     key_supported,
     reduction_supported,
     states_supported,
 )
 from dataframe.aggregation.expressions import (
+    count_rows_by,
     _bind_all,
     _stream_reductions,
 )
@@ -62,10 +70,6 @@ from dataframe.kernels.gather import (
     can_filter_aligned_chunks,
     take_parallel,
     take_sorted_chunked,
-)
-from dataframe.aggregation.hash_reduce import (
-    hash_agg_eligible,
-    hash_aggregate,
 )
 from dataframe.kernels.hashing import (
     RowKeys,
@@ -465,6 +469,83 @@ struct _HashedBucketJob(Job):
         self.firsts = firsts^
 
 
+def _plain_inputs(expressions: List[Expr], frame: DataFrame) -> Bool:
+    """Whether every reduction reads a column of `frame` as it is (or no
+    input), so nothing is evaluated before its states update."""
+    for expression in expressions:
+        ref nodes = expression._nodes
+        for node in nodes:
+            if not is_reduction(node.op):
+                continue
+            for child in [node.left, node.right]:
+                if child < 0:
+                    continue
+                if nodes[child].op != COL or (
+                    nodes[child].text not in frame.columns()
+                ):
+                    return False
+    return True
+
+
+struct _BatchSinkJob(Job):
+    """One worker's morsels into its aggregate table sink, each morsel's
+    reduction inputs evaluated `batch` rows at a time."""
+
+    var frame: DataFrame
+    var keys: List[Series]
+    var expressions: List[Expr]
+    var layout: AggregateLayout
+    var ranges: List[Int]
+    var cursor: _Cursor
+    var workers: Int
+    var batch: Int
+    var sinks: List[AggregateSink]
+
+    def __init__(
+        out self,
+        frame: DataFrame,
+        keys: List[Series],
+        expressions: List[Expr],
+        layout: AggregateLayout,
+        ranges: List[Int],
+        cursor: _Cursor,
+        workers: Int,
+        batch: Int,
+    ):
+        self.frame = frame.copy()
+        self.keys = keys.copy()
+        self.expressions = expressions.copy()
+        self.layout = layout.copy()
+        self.ranges = ranges.copy()
+        self.cursor = cursor.copy()
+        self.workers = workers
+        self.batch = max(1, batch)
+        self.sinks = List[AggregateSink]()
+
+    def run(mut self) raises:
+        var sink = AggregateSink(self.layout, self.workers)
+        var morsels = len(self.ranges) // 2
+        while True:
+            var m = self.cursor.take()
+            if m >= morsels:
+                break
+            var offset = self.ranges[2 * m]
+            var length = self.ranges[2 * m + 1]
+            for lo in range(0, length, self.batch):
+                var start = offset + lo
+                var n = min(self.batch, length - lo)
+                var keys = List[Series](capacity=len(self.keys))
+                for key in self.keys:
+                    keys.append(_one_chunk(key.slice(start, n)))
+                var inputs = table_inputs(
+                    self.frame.slice(start, n), keys, self.expressions
+                )
+                for i in range(len(inputs)):
+                    inputs[i] = _one_chunk(inputs[i])
+                sink.sink(keys, inputs, start)
+        self.sinks.append(sink^)
+
+
 @fieldwise_init
 struct GroupingSets(Copyable):
     """A pending `group_by_rollup`, `group_by_cube` or
@@ -547,10 +628,17 @@ struct GroupBy(Copyable):
     ) raises -> DataFrame:
         var prepared = List[Expr](capacity=len(expressions))
         var changed = False
+        var counted = len(self._keys) > 0 and (
+            self._keys[0].name() in self._frame.columns()
+        )
         for expression in expressions:
             if group_sequence_rows(expression):
                 prepared.append(expression.implode())
                 changed = True
+            elif counted:
+                var rows = count_rows_by(expression, self._keys[0].name())
+                changed = changed or len(rows._nodes) != len(expression._nodes)
+                prepared.append(rows^)
             else:
                 prepared.append(expression.copy())
         if changed:
@@ -591,7 +679,7 @@ struct GroupBy(Copyable):
         # 3.5 ms while seven threads idled.
         var height = self._frame.height()
         var workers = group_by_workers(height)
-        if _stream_reductions(expressions) and not self._many_distinct(
+        if _stream_reductions(expressions) and not self._counts_distinct(
             expressions
         ):
             var perfect = self._agg_perfect(expressions, key_names, workers)
@@ -607,22 +695,15 @@ struct GroupBy(Copyable):
         # however many there are. Neither DuckDB nor Polars picks a route
         # by an estimate of the groups. The per-range routes below keep the
         # reductions the table has no state for.
-        if workers > 1 and self._table_supported(expressions):
-            var table = self._agg_table(expressions, workers)
+        if self._table_supported(expressions):
+            var table = self._agg_table(expressions, workers, batch_size)
             if table:
                 return _pack_struct_keys(table.value())
-        if (
-            workers > 1
-            and len(self._keys) == 1
-            and not whole
-            and hash_agg_eligible(self._keys[0], bound, self._frame._columns)
-        ):
-            return _pack_struct_keys(self._agg_hash(bound, workers))
         var ranged = Optional[DataFrame]()
         if (
             workers > 1
             and _stream_reductions(expressions)
-            and not self._many_distinct(expressions)
+            and not self._counts_distinct(expressions)
         ):
             ranged = self._agg_ranges(expressions, key_names, workers, whole)
         if ranged:
@@ -650,13 +731,50 @@ struct GroupBy(Copyable):
         return True
 
     def _agg_table(
-        self, expressions: List[Expr], workers: Int
+        self, expressions: List[Expr], workers: Int, batch_size: Int
     ) raises -> Optional[DataFrame]:
         """Grouped reductions through the aggregate table: each worker
         hashes its morsels' keys where they are and probes its own table,
         updating its states by group; partitions of the groups then merge
         across workers in parallel (`aggregate_table.mojo`). None when some reduction's
         state does not fit inline in a group row."""
+        # A float key's words are canonical (-0.0 and 0.0, or two NaNs, are
+        # one group), so its group shows its first row's value, as DuckDB's
+        # rows keep the value they were made from: each float key's first
+        # value comes from a FIRST state and replaces the key column.
+        var float_keys = List[Int]()
+        var all_expressions = expressions.copy()
+        for k in range(len(self._keys)):
+            var name = self._keys[k].name()
+            if (
+                self._keys[k].dtype().is_float()
+                and name in self._frame.columns()
+            ):
+                float_keys.append(k)
+                all_expressions.append(
+                    col(name).first().alias("__key_first_" + String(k))
+                )
+        if len(float_keys) > 0:
+            var grouped = self._agg_canonical_table(
+                all_expressions, workers, batch_size
+            )
+            if not grouped:
+                return None
+            var frame = grouped.take()
+            var hidden = List[String]()
+            for k in float_keys:
+                var name = "__key_first_" + String(k)
+                frame = frame.with_column(
+                    frame.column(name).renamed(self._keys[k].name())
+                )
+                hidden.append(name)
+            return frame.drop(hidden)
+        return self._agg_canonical_table(expressions, workers, batch_size)
+
+    def _agg_canonical_table(
+        self, expressions: List[Expr], workers: Int, batch_size: Int
+    ) raises -> Optional[DataFrame]:
+        """`_agg_table` with float keys as their canonical words."""
         var empty_keys = List[Series](capacity=len(self._keys))
         for key in self._keys:
             empty_keys.append(key.slice(0, 0))
@@ -664,10 +782,20 @@ struct GroupBy(Copyable):
             self._frame.clear(), expressions, empty_keys, self._key_names()
         )
         var specs = table_specs(template)
-        var inputs = table_inputs(self._frame, self._keys, expressions)
-        if not states_supported(specs, inputs):
+        var empty = table_inputs(self._frame.clear(), empty_keys, expressions)
+        if not states_supported(specs, empty):
             return None
         trace_path("group_by.aggregate_table")
+        if not _plain_inputs(expressions, self._frame):
+            # Computed reduction inputs are evaluated a batch of
+            # `batch_size` rows at a time, each batch then updating the
+            # states (DuckDB's sink evaluates a DataChunk's inputs, then
+            # UpdateStates): an input error past the batch comes after the
+            # batch's update errors, as the batch size says.
+            return self._agg_batches(
+                expressions, specs, empty, template, workers, batch_size
+            )
+        var inputs = table_inputs(self._frame, self._keys, expressions)
         # Morsels within chunks: the columns' common chunks, or one
         # contiguous copy of each chunked column when they differ.
         var keys = self._keys.copy()
@@ -701,60 +829,68 @@ struct GroupBy(Copyable):
         var result = aggregate_table(keys, inputs, specs, ranges, workers)
         return table_frame(template, result^, self._maintain_order)
 
-    def _agg_hash(
-        self, bound: List[BoundExpr], workers: Int
-    ) raises -> DataFrame:
-        """Many groups of one Int64 key: states updated in place per worker
-        range, then merged by hash part (`hash_agg.mojo`), with no column
-        gathered into bucket order."""
-        trace_path("group_by.hash_agg")
-        var parts = hash_aggregate(
-            self._keys[0], bound, self._frame._columns, workers
-        )
-        ref firsts = parts[0]
-        var columns = List[Series](capacity=len(bound) + 1)
-        columns.append(self._keys[0].take(firsts))
-        for j in range(len(bound)):
-            var pieces = List[Series](capacity=len(parts[1]))
-            for p in range(len(parts[1])):
-                pieces.append(parts[1][p][j].copy())
-            var merged = Series._from_chunks(pieces).rechunk()
-            columns.append(merged.renamed(bound[j].expr._name))
-        var grouped = DataFrame(columns^, height=len(firsts))
-        if not self._maintain_order:
-            return grouped^
-        return grouped.take(sort_indices([firsts.copy()]))
+    def _agg_batches(
+        self,
+        expressions: List[Expr],
+        specs: List[ReducerSpec],
+        empty: List[Series],
+        template: _StreamReduction,
+        workers: Int,
+        batch_size: Int,
+    ) raises -> Optional[DataFrame]:
+        """The aggregate table over morsels whose reduction inputs are
+        evaluated `batch_size` rows at a time on the workers."""
+        var frame = self._frame.rechunk()
+        var keys = List[Series](capacity=len(self._keys))
+        for key in self._keys:
+            keys.append(key.rechunk() if key.is_chunked() else key.copy())
+        var empty_keys = List[Series](capacity=len(keys))
+        for key in keys:
+            empty_keys.append(key.slice(0, 0))
+        var layout = aggregate_layout(empty_keys, empty, specs)
+        var ranges = List[Int]()
+        var height = frame.height()
+        var morsel = max(4096, min(1 << 16, height // (4 * workers) + 1))
+        var at = 0
+        while at < height:
+            ranges.append(at)
+            ranges.append(min(morsel, height - at))
+            at += morsel
+        var cursor = _Cursor.new()
+        var jobs = List[_BatchSinkJob](capacity=workers)
+        for _ in range(max(1, workers)):
+            jobs.append(
+                _BatchSinkJob(
+                    frame,
+                    keys,
+                    expressions,
+                    layout,
+                    ranges,
+                    cursor,
+                    workers,
+                    batch_size,
+                )
+            )
+        try:
+            run_jobs(jobs)
+        except e:
+            cursor.free()
+            raise e^
+        cursor.free()
+        var sinks = List[AggregateSink](capacity=len(jobs))
+        for j in range(len(jobs)):
+            while len(jobs[j].sinks) > 0:
+                sinks.append(jobs[j].sinks.pop())
+        var result = aggregate_finish(sinks, layout)
+        return table_frame(template, result^, self._maintain_order)
 
-    def _many_distinct(self, expressions: List[Expr]) raises -> Bool:
-        """Whether some `n_unique` reads many distinct values (#336).
-
-        Per-range sets of (group, value) pairs merge on one thread, which
-        is cheap only when values repeat: grouping IsRefresh by RegionID's
-        3,586 values takes 57 ms that way and 75 ms through the whole-frame
-        path's hash partitions, while UserID's 1.5M values take 314 ms and
-        87 ms. A sample of evenly spaced rows tells them apart: at most a
-        tenth of it distinct (RegionID shows 9%, SearchPhrase 14%, UserID
-        all) keeps the ranges. Any input that is not a column is assumed
-        to have many values.
-        """
-        var height = self._frame.height()
-        var sample = min(height, 4096)
-        if sample == 0:
-            return False
-        var rows = List[Int](capacity=sample)
-        for k in range(sample):
-            rows.append(k * height // sample)
+    def _counts_distinct(self, expressions: List[Expr]) -> Bool:
+        """Whether some expression counts distinct values: the aggregate
+        table counts them in its distinct tables (`AggregateSink.distinct`),
+        which the per-worker and per-range states do not have."""
         for expression in expressions:
-            ref nodes = expression._nodes
-            for node in nodes:
-                if node.op != N_UNIQUE:
-                    continue
-                ref input = nodes[node.left]
-                if input.op != COL:
-                    return True
-                var picked = self._frame.column(input.text).take(rows)
-                var distinct = encode_rows([picked^], nulls_equal=True).count()
-                if 10 * distinct > sample:
+            for node in expression._nodes:
+                if node.op == N_UNIQUE:
                     return True
         return False
 

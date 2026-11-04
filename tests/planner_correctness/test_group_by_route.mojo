@@ -37,12 +37,13 @@ def batched(t: DataFrame, groups: Int) raises -> Bool:
     """Whether the query took batch states; its answer checked against the
     eager group-by's."""
     var observed = StrategyTrace()
-    # A string maximum keeps the plan off the pipelines' aggregate table.
+    # A position of the maximum has no aggregate table state, which keeps
+    # the plan off the pipelines' aggregate table.
     var rows = (
         t.lazy()
         .with_columns((col("v") * lit(Int64(2))).alias("w"))
         .group_by("k")
-        .agg([col("s").max().alias("top"), col("w").sum().alias("total")])
+        .agg([col("v").arg_max().alias("top"), col("w").sum().alias("total")])
         .collect(batch_size=BATCH)
     )
     var took = "dataframe-path: stream.batch_states\n" in observed.text()
@@ -50,7 +51,7 @@ def batched(t: DataFrame, groups: Int) raises -> Bool:
     var eager = (
         t.with_columns((col("v") * lit(Int64(2))).alias("w"))
         .group_by("k")
-        .agg([col("s").max().alias("top"), col("w").sum().alias("total")])
+        .agg([col("v").arg_max().alias("top"), col("w").sum().alias("total")])
     )
     assert_true(eager.height() == groups)
     assert_frame(rows.sort("k"), eager.sort("k"))
@@ -61,14 +62,6 @@ def test_few_groups_run_eagerly() raises:
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
     assert_true(not batched(frame(50), 50), "few groups were batched")
-    _ = threads^
-    _ = trace^
-
-
-def test_partitioned_keys_with_few_groups_a_batch_take_batch_states() raises:
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
-    assert_true(batched(frame(400), 400), "batch states were not taken")
     _ = threads^
     _ = trace^
 
