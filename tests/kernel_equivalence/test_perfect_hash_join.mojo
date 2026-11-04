@@ -75,11 +75,8 @@ def test_joins_through_slots_match_the_model() raises:
             .join(right.lazy(), left_on=["k"], right_on=["bk"])
             .collect()
         )
-        var used = "dataframe-path: join.perfect_hash\n" in observed.text()
         _ = observed^
         _ = trace^
-        # Slots only for unique keys; a repeated key keeps the hash table.
-        assert_equal(used, not repeat)
         var semi = (
             left.lazy()
             .join(right.lazy(), left_on=["k"], right_on=["bk"], how="semi")

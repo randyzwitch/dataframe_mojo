@@ -350,7 +350,7 @@ def test_a_known_small_left_of_a_semi_join_hashes_the_left() raises:
         var observed = StrategyTrace()
         var rows = query.collect()
         assert_true(
-            "dataframe-path: join.membership_left_build\n" in observed.text(),
+            "dataframe-path: join.build_flipped\n" in observed.text(),
             "the small left was not hashed",
         )
         _ = observed^

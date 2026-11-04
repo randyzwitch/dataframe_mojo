@@ -14,8 +14,8 @@ from dataframe.frame import (
 from dataframe.io.csv import (
     CsvSchema,
 )
-from dataframe.kernels.join_hash import (
-    PreparedHashIndex,
+from dataframe.joins.hash_table import (
+    JoinHashTable,
 )
 from dataframe.planning.model import (
     HANDOFF_OFF,
@@ -88,21 +88,18 @@ struct FinishAbove(Movable):
 
 
 struct _ReadyIndex(Copyable, Movable):
-    """A prefetched build side's hash index: the keys it hashes and the
-    probe rows bound it was made for (`finish_build`)."""
+    """A prefetched build side's hash table and the keys it hashes
+    (`finish_build`)."""
 
     var keys: List[String]
-    var probe_rows: Int
-    var index: PreparedHashIndex
+    var index: JoinHashTable
 
     def __init__(
         out self,
         keys: List[String],
-        probe_rows: Int,
-        var index: PreparedHashIndex,
+        var index: JoinHashTable,
     ):
         self.keys = keys.copy()
-        self.probe_rows = probe_rows
         self.index = index^
 
 

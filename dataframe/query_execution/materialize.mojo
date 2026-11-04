@@ -378,11 +378,9 @@ def plan_prefetch_breakers(
     would have made the same one."""
     var ahead = self._prefetched.value()
     var wanted = List[Int]()
-    # A build side's keys, and the bound on the rows that will probe it,
-    # as the stream prepares its index (none for the source or a cross
-    # join).
+    # A build side's keys, as the stream prepares its table (none for the
+    # source or a cross join).
     var keys = List[List[String]]()
-    var probe_rows = List[Int]()
     var probe = top
     while probe >= 0:
         ref step = self._nodes[probe]
@@ -398,7 +396,6 @@ def plan_prefetch_breakers(
                     keys.append(step.right_keys.copy())
                 else:
                     keys.append(List[String]())
-                probe_rows.append(plan_height_bound(self, step.left))
             probe = step.left
         else:
             break
@@ -410,7 +407,6 @@ def plan_prefetch_breakers(
     ):
         wanted.append(probe)
         keys.append(List[String]())
-        probe_rows.append(-1)
     if len(wanted) < 2:
         return
     trace_path("stream.prefetch_breakers")
@@ -423,7 +419,6 @@ def plan_prefetch_breakers(
                 True,
                 batch_size,
                 keys[k],
-                probe_rows[k],
             )
         )
     run_jobs(jobs)
@@ -431,5 +426,5 @@ def plan_prefetch_breakers(
         ahead[][wanted[k]] = jobs[k].result.copy()
         if jobs[k].built and self._prefetched_indexes:
             self._prefetched_indexes.value()[][wanted[k]] = _ReadyIndex(
-                keys[k], probe_rows[k], jobs[k].built.value().copy()
+                keys[k], jobs[k].built.value().copy()
             )

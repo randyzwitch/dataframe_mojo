@@ -37,7 +37,7 @@ from dataframe.io.parquet import (
     parquet_row_group_statistics,
     read_parquet,
 )
-from dataframe.kernels.join_hash import (
+from dataframe.kernels.join_keys import (
     prefer_left_build,
 )
 from dataframe.join_type import (

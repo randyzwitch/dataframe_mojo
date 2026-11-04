@@ -76,11 +76,9 @@ from dataframe.io.parquet import (
     _pruned_row_groups,
     parquet_row_group_statistics,
 )
-from dataframe.kernels.join_hash import (
-    PreparedHashIndex,
+from dataframe.joins.hash_table import JoinHashTable
+from dataframe.kernels.join_keys import (
     prefer_left_build,
-    prepare_progression_index,
-    serves_probe,
 )
 from dataframe.join_type import (
     JOIN_ANTI,
@@ -423,7 +421,7 @@ def plan_stream_execute(
     # The plan node of each operation, for the execution report.
     var operation_nodes = List[Int]()
     var joins = List[DataFrame]()
-    var indexes = List[Optional[PreparedHashIndex]]()
+    var indexes = List[Optional[JoinHashTable]]()
     var reduced = plan_reduce_by_probe_keys(self, cursor, index, batch_size)
     if reduced:
         return reduced^
@@ -484,7 +482,7 @@ def plan_stream_execute(
             operations.append(node.copy())
             operation_nodes.append(cursor)
         elif _stream_join(node):
-            var prepared = Optional[PreparedHashIndex]()
+            var prepared = Optional[JoinHashTable]()
             # A left input that can only be small next to a large known
             # right may be the side to hash: decline streaming, so the
             # plan runs eagerly and `DataFrame.join` builds on the smaller
@@ -578,25 +576,11 @@ def plan_stream_execute(
                 # physical reversal does not increase the materialized
                 # join output over the existing batch bound. Keep larger
                 # left inputs on the bounded streaming executor.
-                # A directly available progression already has a cheaper
-                # compact lookup. Validate once and retain its prepared
-                # state instead of falling back to eager progression scans.
-                ref build_node = self._nodes[node.right]
-                if build_node.kind == SCAN_FRAME and len(node.right_keys) == 1:
-                    var sources: List[Series] = [
-                        self._frames[build_node.source_slot()][
-                            node.right_keys[0]
-                        ].copy()
-                    ]
-                    prepared = prepare_progression_index(sources)
-                if not prepared:
-                    break
+                break
             var operation = node.copy()
             operation.set_join_build_slot(len(joins))
             var algorithm = String(
-                "progression" if prepared else (
-                    "cross" if node.how == JOIN_CROSS else "eager_hash"
-                )
+                "cross" if node.how == JOIN_CROSS else "eager_hash"
             )
             var built = self._execute(node.right, False, True, batch_size)
             # The index a prefetch made with this build, if any.
@@ -779,20 +763,13 @@ def plan_stream_execute(
             # The build finished: one chunk per column, and its keys'
             # hash index, unless a prefetch made the same one already.
             var keys = List[String]()
-            if not prepared and node.how != JOIN_CROSS and len(node.names):
+            if node.how != JOIN_CROSS and len(node.names):
                 keys = node.right_keys.copy()
-            if (
-                len(keys) > 0
-                and ready
-                and ready.value().keys == keys
-                and serves_probe(
-                    ready.value().index, ready.value().probe_rows, bound
-                )
-            ):
+            if len(keys) > 0 and ready and ready.value().keys == keys:
                 prepared = ready.value().index.copy()
                 algorithm = "hash_index"
                 keys = List[String]()
-            var finished = finish_build(built, keys, bound)
+            var finished = finish_build(built, keys)
             if finished:
                 prepared = finished^
                 algorithm = "hash_index"

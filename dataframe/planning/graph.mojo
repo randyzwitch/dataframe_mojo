@@ -20,7 +20,7 @@ from dataframe.aggregation.expressions import (
 from dataframe.io.csv import (
     CsvSchema,
 )
-from dataframe.kernels.join_hash import (
+from dataframe.kernels.join_keys import (
     int64_progression,
 )
 from dataframe.join_order import (

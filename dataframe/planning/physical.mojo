@@ -38,7 +38,7 @@ from dataframe.frame import (
 from dataframe.io.csv import (
     CsvSchema,
 )
-from dataframe.kernels.join_hash import (
+from dataframe.kernels.join_keys import (
     _PERFECT_SPAN,
 )
 from dataframe.join_order import (
