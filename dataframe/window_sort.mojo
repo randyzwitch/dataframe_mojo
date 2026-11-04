@@ -352,17 +352,20 @@ def _number_partitions[
 ) -> Int:
     var hashes = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes_address)
     var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=rows_address)
-    # The hash's top bits chose the hash group, so slots come from a
-    # multiplicative mix of the whole hash.
-    var slots_count = 16
-    var shift = UInt64(60)
-    while slots_count < 2 * n:
-        slots_count *= 2
-        shift -= 1
+    # A table of partition numbers, grown (rehashing the stored hashes)
+    # to stay at most half full: it holds one slot per partition, not per
+    # row, so it stays in cache. The hash's top bits chose the hash group,
+    # so slots come from a multiplicative mix of the whole hash.
+    var slots_count = 256
+    var shift = UInt64(56)
     var mask = UInt64(slots_count - 1)
     var slots = List[Int](length=slots_count, fill=-1)
     var first_rows = List[Int]()
     var first_hashes = List[UInt64]()
+    var first_values = List[Scalar[D]]()
+    var first_valid = List[Bool]()
+    var values = column._ptr()
+    var bits = len(column._bits[]) != 0
     for k in range(n):
         var row = rows[unsafe_offset=k]
         var hash = hashes[unsafe_offset=row]
@@ -374,18 +377,30 @@ def _number_partitions[
                 ids[k] = len(first_rows)
                 first_rows.append(row)
                 first_hashes.append(hash)
+                comptime if not GENERIC:
+                    first_values.append(values[unsafe_offset=row])
+                    first_valid.append(not bits or column._valid(row))
+                if 2 * len(first_rows) > slots_count:
+                    slots_count *= 2
+                    shift -= 1
+                    mask = UInt64(slots_count - 1)
+                    slots = List[Int](length=slots_count, fill=-1)
+                    for id in range(len(first_hashes)):
+                        var to = Int(
+                            (first_hashes[id] * 0x9E3779B97F4A7C15) >> shift
+                        )
+                        while slots[to] >= 0:
+                            to = Int((UInt64(to) + 1) & mask)
+                        slots[to] = id
                 break
             if first_hashes[slot] == hash:
                 var same: Bool
                 comptime if GENERIC:
                     same = _rows_equal(keys, first_rows[slot], row)
                 else:
-                    var other = first_rows[slot]
-                    var u = column._valid(other)
-                    same = u == column._valid(row) and (
-                        not u
-                        or column._ptr()[unsafe_offset=other]
-                        == column._ptr()[unsafe_offset=row]
+                    var u = not bits or column._valid(row)
+                    same = u == first_valid[slot] and (
+                        not u or first_values[slot] == values[unsafe_offset=row]
                     )
                 if same:
                     ids[k] = slot
