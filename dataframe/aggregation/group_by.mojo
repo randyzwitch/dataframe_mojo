@@ -824,33 +824,31 @@ struct GroupBy(Copyable):
                 )
                 if row[unsafe_offset=2] < into[unsafe_offset=2]:
                     into[unsafe_offset=2] = row[unsafe_offset=2]
-        # DuckDB's `Scan`: the occupied slots in slot order.
-        var occupied = 0
+        # The occupied slots, read out in the order of their first rows,
+        # as every other eager route gives its groups (DuckDB's `Scan` takes
+        # slot order; at most 2^12 slots, so the sort is small).
+        var occupied = List[UInt128]()
         for g in range(merged.count()):
-            if (
-                Pointer[UInt64, MutAnyOrigin](
-                    unsafe_from_address=merged.at(g)
-                )[]
-                != 0
-            ):
-                occupied += 1
+            var row = Pointer[UInt64, MutAnyOrigin](
+                unsafe_from_address=merged.at(g)
+            )
+            if row[] != 0:
+                occupied.append(
+                    (UInt128(row[unsafe_offset=2]) << 64) | UInt128(g)
+                )
+        sort(occupied)
         var final = _Groups(
             len(layout.addressed),
             layout.addressed.copy(),
             layout.state_words,
-            occupied,
+            len(occupied),
         )
-        for g in range(merged.count()):
-            if (
-                Pointer[UInt64, MutAnyOrigin](
-                    unsafe_from_address=merged.at(g)
-                )[]
-                != 0
-            ):
-                var row = Pointer[UInt64, MutAnyOrigin](
-                    unsafe_from_address=final.at(final.copy_row(merged.at(g)))
-                )
-                _perfect_keys(perfect.value(), len(keys), g, row)
+        for entry in occupied:
+            var g = Int(UInt64(entry & 0xFFFFFFFFFFFFFFFF))
+            var row = Pointer[UInt64, MutAnyOrigin](
+                unsafe_from_address=final.at(final.copy_row(merged.at(g)))
+            )
+            _perfect_keys(perfect.value(), len(keys), g, row)
         var held = _HeldBuffers()
         var result = groups_result(final, layout, held)
         _ = jobs^
