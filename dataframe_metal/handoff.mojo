@@ -14,29 +14,22 @@ Apple GPUs have no 64-bit floating point, and emulating it would be slower
 than the CPU.
 """
 from max.gpu.host import DeviceBuffer
-from std.utils.numerics import inf, isnan
 from std.time import perf_counter_ns
 
 from dataframe.storage.column import Column
 from dataframe.dtype import DataType
-from dataframe.expr import (
-    AND,
-    COL,
-    EQ,
-    Expr,
-    GE,
-    GT,
-    LE,
-    LIT_FLOAT,
-    LIT_INT,
-    LT,
-    SUM,
-    UNTYPED,
-)
 from dataframe.frame import DataFrame
-from dataframe.lazy import FILTER, LazyFrame, SCAN_FRAME, SELECT
+from dataframe.lazy import LazyFrame
 from dataframe.placement import load_costs
 from dataframe.series import Series
+from .filter_plan import FilterSum, plan_region
+from .cross_sum import reduce_cross
+from .accelerator.gpu.reduction_inputs import (
+    HandoffTimings,
+    _place_chunks,
+    _check_ran,
+    _chunk_partials,
+)
 from .accelerator.faults import data_fault
 from .accelerator.gpu.filter_sum import (
     BLOCK_SIZE,
@@ -52,162 +45,6 @@ from .accelerator.gpu.typed_storage import (
     wrap_native,
 )
 
-# Blocks per launch; a grid stride covers longer columns.
-comptime MAX_PARTIALS = 1024
-
-
-struct FilterSum(Copyable, Movable):
-    """An accepted `select(col(c).sum())` over range filters on `c`."""
-
-    var column: String
-    var output: String
-    var dtype: DataType
-    var min_count: Int
-    var filtered: Bool
-    # Integer columns: the inclusive range kept.
-    var low: Int64
-    var high: Int64
-    # Float32 columns: the range kept, with bit 0 making `low_float`
-    # inclusive and bit 1 `high_float`.
-    var low_float: Float32
-    var high_float: Float32
-    var inclusive: UInt32
-
-    def __init__(out self, column: String, output: String, dtype: DataType):
-        self.column = column
-        self.output = output
-        self.dtype = dtype
-        self.min_count = 0
-        self.filtered = False
-        self.low = Int64.MIN
-        self.high = Int64.MAX
-        self.low_float = -inf[DType.float32]()
-        self.high_float = inf[DType.float32]()
-        self.inclusive = 3
-
-    def _narrow(mut self, op: Int, integer: Int64, floating: Float64) -> Bool:
-        """Keep only values satisfying `c <op> literal`; False when the
-        literal cannot be represented exactly in the column's type."""
-        self.filtered = True
-        if self.dtype == DataType.FLOAT32:
-            var bound = floating.cast[DType.float32]()
-            if isnan(bound) or bound.cast[DType.float64]() != floating:
-                return False
-            if op == GT or op == GE or op == EQ:
-                var exclusive = op == GT
-                if bound > self.low_float or (
-                    bound == self.low_float and exclusive
-                ):
-                    self.low_float = bound
-                    self.inclusive = (self.inclusive & 2) | (
-                        UInt32(0) if exclusive else UInt32(1)
-                    )
-            if op == LT or op == LE or op == EQ:
-                var exclusive = op == LT
-                if bound < self.high_float or (
-                    bound == self.high_float and exclusive
-                ):
-                    self.high_float = bound
-                    self.inclusive = (self.inclusive & 1) | (
-                        UInt32(0) if exclusive else UInt32(2)
-                    )
-            return True
-        var lowest = Int64(Int32.MIN) if self.dtype == DataType.INT32 else (
-            Int64.MIN
-        )
-        var highest = Int64(Int32.MAX) if self.dtype == DataType.INT32 else (
-            Int64.MAX
-        )
-        if integer < lowest or integer > highest:
-            return False
-        if op == GT:
-            if integer == highest:
-                self.low = highest
-                self.high = lowest
-                return True
-            self.low = max(self.low, integer + 1)
-        elif op == GE:
-            self.low = max(self.low, integer)
-        elif op == LT:
-            if integer == lowest:
-                self.low = highest
-                self.high = lowest
-                return True
-            self.high = min(self.high, integer - 1)
-        elif op == LE:
-            self.high = min(self.high, integer)
-        else:
-            self.low = max(self.low, integer)
-            self.high = min(self.high, integer)
-        return True
-
-
-def _predicate(mut plan: FilterSum, predicate: Expr, at: Int) raises -> Bool:
-    """Narrow `plan` by the predicate subtree rooted at node `at`."""
-    ref node = predicate._nodes[at]
-    if node.op == AND:
-        return _predicate(plan, predicate, node.left) and _predicate(
-            plan, predicate, node.right
-        )
-    if not (
-        node.op == GT
-        or node.op == GE
-        or node.op == LT
-        or node.op == LE
-        or node.op == EQ
-    ):
-        return False
-    ref left = predicate._nodes[node.left]
-    ref right = predicate._nodes[node.right]
-    if left.op != COL or left.text != plan.column:
-        return False
-    if right.text != UNTYPED:
-        return False
-    if right.op == LIT_INT:
-        if plan.dtype == DataType.FLOAT32:
-            return plan._narrow(node.op, 0, Float64(right.integer))
-        return plan._narrow(node.op, right.integer, 0)
-    if right.op == LIT_FLOAT and plan.dtype == DataType.FLOAT32:
-        return plan._narrow(node.op, 0, right.floating)
-    return False
-
-
-def plan_region(region: LazyFrame) raises -> Optional[FilterSum]:
-    """The accepted shape of `region`, or None to leave it on the CPU."""
-    var nodes = len(region._plan._nodes)
-    if nodes < 2 or region._plan._nodes[0].kind != SCAN_FRAME:
-        return None
-    ref root = region._plan._nodes[nodes - 1]
-    if root.kind != SELECT or len(root.exprs) != 1:
-        return None
-    ref total = root.exprs[0]
-    if len(total._nodes) != 2:
-        return None
-    if total._nodes[0].op != COL or total._nodes[1].op != SUM:
-        return None
-    var name = total._nodes[0].text
-    var frame = region._plan._frames[
-        region._plan._nodes[0].source_slot()
-    ].copy()
-    if name not in frame.columns():
-        return None
-    var dtype = frame.column(name).dtype()
-    if not (
-        dtype == DataType.INT32
-        or dtype == DataType.INT64
-        or dtype == DataType.FLOAT32
-    ):
-        return None
-    var plan = FilterSum(name, total._name, dtype)
-    plan.min_count = total._nodes[1].min_count
-    for i in range(1, nodes - 1):
-        ref node = region._plan._nodes[i]
-        if node.kind != FILTER or len(node.exprs) != 1:
-            return None
-        if not _predicate(plan, node.exprs[0], len(node.exprs[0]._nodes) - 1):
-            return None
-    return plan^
-
 
 def supports(region: LazyFrame) -> Bool:
     """Whether Metal runs `region`; never raises."""
@@ -221,6 +58,13 @@ def supports(region: LazyFrame) -> Bool:
 
 def operator_key(plan: FilterSum) -> String:
     """The calibration key of an accepted region (`dataframe.placement`)."""
+    if plan.filter_column != plan.column:
+        return (
+            "cross_filter_sum:"
+            + plan.filter_dtype.name()
+            + ":"
+            + plan.dtype.name()
+        )
     return (
         "filter_sum:"
         + plan.dtype.name()
@@ -243,79 +87,6 @@ def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
         return (key^, cost.value().ns(rows))
     except:
         return (String(), Float64(-1))
-
-
-struct HandoffTimings(Copyable, Movable):
-    """Where one hand-off spent its time, in nanoseconds."""
-
-    var context_ns: Int
-    var upload_ns: Int
-    var kernel_ns: Int
-    var finish_ns: Int
-
-    def __init__(out self):
-        self.context_ns = 0
-        self.upload_ns = 0
-        self.kernel_ns = 0
-        self.finish_ns = 0
-
-
-def _place[
-    dtype: DType
-](scope: Scope, series: Series, zero_copy: Bool) raises -> NativeColumn[dtype]:
-    """The column on the device: its own memory wrapped in place when
-    `zero_copy` and the column is one chunk, else a copy."""
-    if zero_copy:
-        var wrapped = wrap_native[dtype](scope, series, wrap_validity=True)
-        if wrapped:
-            return wrapped.take()
-    return upload_native[dtype](scope, series)
-
-
-def _place_chunks[
-    dtype: DType
-](scope: Scope, series: Series, zero_copy: Bool) raises -> List[
-    NativeColumn[dtype]
-]:
-    """Keep native chunks separate, including their own bitmap offsets.
-
-    The caller keeps `series` alive through the batched reduction's final
-    synchronization. Explicit copy mode remains a coalesced reference path.
-    """
-    var columns = List[NativeColumn[dtype]]()
-    if zero_copy:
-        for part in series.chunks():
-            if len(part):
-                columns.append(_place[dtype](scope, part, True))
-    else:
-        columns.append(_place[dtype](scope, series, False))
-    return columns^
-
-
-def _check_ran(counts: List[UInt32]) raises:
-    """Raise unless every block wrote its count: a block holds fewer than
-    2**31 rows, so the sentinel can only remain where a block never ran."""
-    for count in counts:
-        if count == UInt32.MAX:
-            raise Error(
-                "Mojo GPU hand-off kernel did not complete on the device"
-            )
-
-
-def _partials(rows: Int) -> Int:
-    """Blocks to launch for `rows` rows: one per BLOCK_SIZE rows, capped
-    at MAX_PARTIALS, with a grid stride covering the rest."""
-    return max(1, min(MAX_PARTIALS, (rows + BLOCK_SIZE - 1) // BLOCK_SIZE))
-
-
-def _chunk_partials(rows: Int, total_rows: Int) -> Int:
-    """Share the grid budget across chunks instead of multiplying it.
-
-    A small floor keeps a chunk's launch parallel; short chunks still use
-    only the blocks their rows need. A single chunk keeps the original grid.
-    """
-    var share = (rows * MAX_PARTIALS + total_rows - 1) // total_rows
-    return min(_partials(rows), max(64, share))
 
 
 def _enqueue_integer[
@@ -699,14 +470,18 @@ def _execute_on_device(
     var scope = Scope(service=shared_service())
     _ = scope.context()
     timings.context_ns = Int(perf_counter_ns()) - started
-    var output: Series
-    if plan.dtype == DataType.FLOAT32:
+    var integer = Int128(0)
+    var floating = Float64(0)
+    var count = 0
+    if plan.filter_column != plan.column:
+        var result = reduce_cross(plan, frame, scope, zero_copy, timings)
+        integer = result[0]
+        floating = result[1]
+        count = result[2]
+    elif plan.dtype == DataType.FLOAT32:
         var result = _float32_sum(plan, series, scope, zero_copy, timings)
-        var valid = result[1] >= plan.min_count
-        output = Series(
-            plan.output,
-            Column[Float32]([result[0].cast[DType.float32]()], [valid]),
-        )
+        floating = result[0]
+        count = result[1]
     else:
         var result: Tuple[Int128, Int]
         if plan.dtype == DataType.INT32:
@@ -717,22 +492,27 @@ def _execute_on_device(
             result = _integer_sum[DType.int64](
                 plan, series, scope, zero_copy, timings
             )
-        var total = result[0]
-        var valid = result[1] >= plan.min_count
-        if plan.dtype == DataType.INT32:
-            if total > Int128(Int32.MAX) or total < Int128(Int32.MIN):
-                raise data_fault("int32 expression sum overflow")
-            output = Series(
-                plan.output,
-                Column[Int32]([total.cast[DType.int32]()], [valid]),
-            )
-        else:
-            if total > Int128(Int64.MAX) or total < Int128(Int64.MIN):
-                raise data_fault("int64 expression sum overflow")
-            output = Series(
-                plan.output,
-                Column[Int64]([total.cast[DType.int64]()], [valid]),
-            )
+        integer = result[0]
+        count = result[1]
+    var valid = count >= plan.min_count
+    var output: Series
+    if plan.dtype == DataType.FLOAT32:
+        output = Series(
+            plan.output,
+            Column[Float32]([floating.cast[DType.float32]()], [valid]),
+        )
+    elif plan.dtype == DataType.INT32:
+        if integer > Int128(Int32.MAX) or integer < Int128(Int32.MIN):
+            raise data_fault("int32 expression sum overflow")
+        output = Series(
+            plan.output, Column[Int32]([integer.cast[DType.int32]()], [valid])
+        )
+    else:
+        if integer > Int128(Int64.MAX) or integer < Int128(Int64.MIN):
+            raise data_fault("int64 expression sum overflow")
+        output = Series(
+            plan.output, Column[Int64]([integer.cast[DType.int64]()], [valid])
+        )
     scope.mark_success()
     return (DataFrame([output^]), timings^)
 

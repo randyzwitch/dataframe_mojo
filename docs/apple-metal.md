@@ -13,9 +13,11 @@ var placed = plan.collect()  # engine="auto": by measured cost, see below
 print(plan.explain(accelerator=MetalRuntime()))  # HANDOFF metal: ...
 ```
 
-**Supported so far:** `select(col(c).sum())` over filters that compare `c`
-with untyped numeric literals (`>`, `>=`, `<`, `<=`, `==`, joined by `&`),
-where `c` is Int32, Int64 or Float32. Results equal the CPU's: integer
+**Supported so far:** `select(col(c).sum())` over filters that compare one
+column `p` with untyped numeric literals (`>`, `>=`, `<`, `<=`, `==`, joined
+by `&`). The value column `c` and predicate column `p` may differ; each can
+independently be Int32, Int64 or Float32. All nine type pairs are supported,
+including columns with different chunk boundaries. Results equal the CPU's: integer
 sums are exact and raise the CPU's overflow error; Float32 sums use Kahan
 compensation per GPU thread and can differ from the CPU in the last bits.
 Native column chunks and their validity bitmaps are read in place, without
@@ -28,6 +30,14 @@ The explicit-copy reference path packs unaligned validity windows in bytes
 and SIMD batches. It does not copy an entire unaligned bitmap one bit at a
 time. These operations live in `dataframe_metal`; CPU storage helpers are
 unchanged.
+
+For example, a range on an Int32 quantity column can filter a Float32 revenue
+sum. Predicate nulls discard rows; value nulls are skipped by the sum. The
+columns' chunk boundaries are intersected into native views, without making
+a filtered column or coalescing either input. A query with predicates on
+multiple distinct columns remains on CPU. Cross-column sums use distinct
+`cross_filter_sum:<predicate dtype>:<value dtype>` calibration keys; the
+single-column estimates are not reused for these larger memory reads.
 
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
 every node it supports. `engine="auto"` places each such node by measured

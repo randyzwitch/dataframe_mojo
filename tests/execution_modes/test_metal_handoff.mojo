@@ -12,7 +12,7 @@ from dataframe import (
     concat,
     lit,
 )
-from dataframe_metal.handoff import execute_timed, plan_region
+from dataframe_metal.handoff import execute_timed, operator_key, plan_region
 from dataframe_metal.metal import MetalRuntime
 from tests.support.group_strategy_reference import ScopedEnvironment
 from tests.support.metal_outcomes import require_metal
@@ -72,7 +72,6 @@ def test_metal_declines_float64_strings_and_other_shapes() raises:
         frame.lazy().select(col("d").sum()),
         frame.lazy().select(col("i").mean()),
         frame.lazy().select_exprs([col("i").sum(), col("l").sum()]),
-        frame.lazy().filter(col("l") > 2).select(col("i").sum()),
         frame.lazy().filter(col("i") != 2).select(col("i").sum()),
         frame.lazy().filter(col("i") > lit(Int64(2))).select(col("i").sum()),
         frame.lazy().filter(col("i") > 2.5).select(col("i").sum()),
@@ -119,6 +118,96 @@ def _columns(rows: Int, nulls: Bool) raises -> DataFrame:
             Series("f", Column[Float32](floats^, valid^)),
         ]
     )
+
+
+def _cross_columns(rows: Int, nulls: Bool) raises -> DataFrame:
+    var ints = List[Int32]()
+    var longs = List[Int64]()
+    var floats = List[Float32]()
+    var iv = List[Bool]()
+    var lv = List[Bool]()
+    var fv = List[Bool]()
+    for row in range(rows):
+        ints.append(Int32((row * 7) % 19 - 9))
+        longs.append(Int64((row * 13) % 23 - 11) * 4_000_000_000)
+        floats.append(Float32((row * 17) % 29 - 14) / 8)
+        iv.append(not nulls or row % 11 != 3)
+        lv.append(not nulls or row % 13 != 5)
+        fv.append(not nulls or row % 17 != 7)
+    return DataFrame(
+        [
+            Series("i", Column[Int32](ints^, iv)),
+            Series("l", Column[Int64](longs^, lv)),
+            Series("f", Column[Float32](floats^, fv)),
+        ]
+    )
+
+
+def test_metal_accepts_cross_column_ranges_and_separates_cost_keys() raises:
+    var frame = _frame()
+    for value in ["i", "l", "f"]:
+        for predicate in ["i", "l", "f"]:
+            var plan = (
+                frame.lazy().filter(col(predicate) > 2).select(col(value).sum())
+            )
+            var accepted = plan_region(plan)
+            assert_true(Bool(accepted))
+            assert_equal(accepted.value().column, value)
+            assert_equal(accepted.value().filter_column, predicate)
+            assert_equal(
+                accepted.value().filter_dtype, frame.column(predicate).dtype()
+            )
+            assert_true(
+                operator_key(accepted.value()).startswith(
+                    "filter_sum:" if value == predicate else "cross_filter_sum:"
+                )
+            )
+    assert_false(
+        Bool(
+            plan_region(
+                frame.lazy()
+                .filter((col("i") > 0) & (col("l") > 0))
+                .select(col("f").sum())
+            )
+        )
+    )
+
+
+# requires: metal
+def test_metal_cross_column_types_nulls_and_unrelated_chunk_boundaries() raises:
+    var runtime = require_metal()
+    for nulls in [False, True]:
+        var whole = _cross_columns(13_001, nulls)
+        var chunked = List[Series]()
+        for name in ["i", "l", "f"]:
+            var split = 19 if name == "i" else (2503 if name == "l" else 101)
+            chunked.append(
+                Series._from_chunks(
+                    [
+                        whole.column(name).slice(5, split),
+                        whole.column(name).slice(5 + split, 7),
+                        whole.column(name).slice(12 + split, 10003 - split - 7),
+                    ]
+                )
+            )
+        for frame in [whole.slice(5, 10003), DataFrame(chunked^)]:
+            for predicate in ["i", "l", "f"]:
+                for value in ["i", "l", "f"]:
+                    for threshold in [0, 1_000_000_000]:
+                        var plan = (
+                            frame.lazy()
+                            .filter(col(predicate) > threshold)
+                            .select(col(value).sum(min_count=1).alias("total"))
+                        )
+                        assert_true(
+                            "HANDOFF metal" in plan.explain(accelerator=runtime)
+                        )
+                        var expected = plan.collect(engine="cpu")
+                        _close(plan.collect(accelerator=runtime), expected)
+                        _close(execute_timed(plan)[0], expected)
+                        _close(
+                            execute_timed(plan, zero_copy=False)[0], expected
+                        )
 
 
 # requires: metal
