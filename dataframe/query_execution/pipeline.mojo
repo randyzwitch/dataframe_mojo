@@ -98,6 +98,11 @@ from dataframe.parallel import (
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
 from dataframe.sorting.row_group_order import orderable, row_group_order
+from dataframe.query_execution.late_materialization import (
+    LATE_MATERIALIZATION_MAX_ROWS,
+    late_fetch,
+    late_materialization_plan,
+)
 from dataframe.pipeline import (
     _ORDER_COLUMN,
     _top_flags,
@@ -1377,6 +1382,30 @@ def plan_stream_execute(
         var step_nodes = List[PlanNode](capacity=step_count)
         for k in range(step_count):
             step_nodes.append(operations[k].copy())
+        # LateMaterialization: a top-N of at most 50 rows over filters and
+        # projections on a table scan runs on the columns its order and
+        # filters read plus the row id; the other columns are fetched for
+        # its rows afterwards.
+        var pipe_input = input.copy()
+        var late_operations = Optional[List[PlanNode]]()
+        if (
+            top > 0
+            and limit >= 0
+            and limit <= LATE_MATERIALIZATION_MAX_ROWS
+            and source.kind == SCAN_FRAME
+            and len(shared_joins[]) == 0
+            and len(keys) == 0
+            and len(expressions) == 0
+            and not grouping
+        ):
+            var late = late_materialization_plan(
+                input.columns(), step_nodes, top_names
+            )
+            if late:
+                trace_path("pipeline.late_materialization")
+                late_operations = step_nodes.copy()
+                pipe_input = input.select(late.value().columns)
+                step_nodes = late.value().operations.copy()
         var set_frames = List[DataFrame]()
         var set_indices = List[List[Int]]()
         var set_masks = List[List[Int64]]()
@@ -1436,7 +1465,7 @@ def plan_stream_execute(
         for n in finish_nodes:
             finish_operations.append(self._nodes[n].copy())
         var piped_result = run_pipeline(
-            input,
+            pipe_input,
             _steps_of(step_nodes),
             shared_joins,
             shared_indexes,
@@ -1457,6 +1486,7 @@ def plan_stream_execute(
             top_maintain_order=top_maintain_order,
             top_scan_key=top_scan_key,
             top_ranges=top_ranges,
+            top_row_ids=Bool(late_operations),
             table=decision.uses_aggregate_table(),
             set_masks=set_masks,
             finish_steps=_steps_of(finish_operations),
@@ -1499,6 +1529,10 @@ def plan_stream_execute(
             piped_result = DataFrame(columns^)
         if top > 0:
             piped_result = piped_result.slice(skip, limit)
+        if late_operations:
+            piped_result = late_fetch(
+                input, piped_result, late_operations.value()
+            )
         if len(row_names) > 0:
             # The groups' build row numbers back to the key values,
             # merging the groups whose rows hold the same values.

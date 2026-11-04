@@ -198,6 +198,8 @@ def _flush_groups() -> Int:
 # within the morsel's output), so ties come out as a stable sort of the
 # whole input would place them, whichever worker held them.
 comptime _ORDER_COLUMN = "__pipeline_order"
+# A late-materialized top-N scan's row id column (DuckDB's `rowid`).
+comptime ROW_ID_COLUMN = "__dataframe_row_id"
 # The constant key a grouping sets' grand total groups by (the aggregate
 # table needs a key column); dropped from that set's result.
 comptime _TOTAL_KEY = "__grouping_total"
@@ -2901,6 +2903,8 @@ struct _PipelineJob(Job):
                     self._consume(output, k, offset, length)
                 continue
             var morsel = self.frame[].slice(offset, length)
+            if self.top_filter.row_ids:
+                morsel = morsel.with_column(_row_ids(offset, length))
             if self.first_step > 0:
                 # An outer join's unmatched build rows: the source's key
                 # ranges and top-k bound do not apply to them.
@@ -3221,6 +3225,8 @@ struct _TopScanFilter(Copyable, Movable):
     # The source is read in its row groups' statistics order: rows are
     # placed by their source row, not by the morsel's turn.
     var reordered: Bool
+    # The scan adds each row's row id (late materialization).
+    var row_ids: Bool
 
 
 def _top_scan_filter(
@@ -3238,7 +3244,7 @@ def _top_scan_filter(
     DuckDB ORs `IS NULL` for nulls first; a statistics check cannot keep
     a vector's nulls apart, so a nulls-first key pushes nothing. Columns
     whose order is not their storage's (categoricals) push nothing."""
-    var none = _TopScanFilter(None, None, 0, False)
+    var none = _TopScanFilter(None, None, 0, False, False)
     if top <= 0 or not scan_key or len(names) == 0 or not nulls_last[0]:
         return none^
     if names[0] not in frame.columns():
@@ -3259,7 +3265,15 @@ def _top_scan_filter(
     var filters = TableFilterSet()
     filters.push_dynamic(names[0], dynamic)
     var info = ScanFilterInfo(filters, [frame.column(names[0])])
-    return _TopScanFilter(ArcPointer(info^), dynamic, op, False)
+    return _TopScanFilter(ArcPointer(info^), dynamic, op, False, False)
+
+
+def _row_ids(offset: Int, length: Int) -> Series:
+    """Rows [offset, offset + length)'s row ids: the scan's `rowid`."""
+    var ids = List[Int64](unsafe_uninit_length=length)
+    for i in range(length):
+        ids[i] = Int64(offset + i)
+    return Series(ROW_ID_COLUMN, Column[Int64](ids^))
 
 
 def _vectors_kept(
@@ -3593,6 +3607,7 @@ def run_pipeline(
     top_maintain_order: Bool = False,
     top_scan_key: Bool = False,
     top_ranges: Optional[List[Int]] = None,
+    top_row_ids: Bool = False,
     table: Bool = False,
     set_masks: List[List[Int64]] = List[List[Int64]](),
     finish_steps: List[Step] = List[Step](),
@@ -3637,6 +3652,7 @@ def run_pipeline(
         top_maintain_order,
         top_scan_key,
         top_ranges,
+        top_row_ids,
         table,
         set_masks,
         finish_steps,
@@ -3669,6 +3685,7 @@ def run_pipeline(
             False,
             False,
             None,
+            False,
             False,
             List[List[Int64]](),
             List[Step](),
@@ -3879,6 +3896,7 @@ def _run_pipeline(
     top_maintain_order: Bool,
     top_scan_key: Bool,
     top_ranges: Optional[List[Int]],
+    top_row_ids: Bool,
     table: Bool,
     set_masks: List[List[Int64]],
     finish_steps: List[Step],
@@ -3889,8 +3907,14 @@ def _run_pipeline(
     empty otherwise."""
     trace_path("pipeline.run")
     # Every step's input columns and the output, typed once, and the
-    # row-local steps compiled once for every worker.
-    var schemas = ArcPointer(_step_schemas(frame, steps, joins[]))
+    # row-local steps compiled once for every worker. A late-materialized
+    # top-N's scan adds its row id column to every morsel.
+    var schema_frame = frame.clear()
+    if top_row_ids:
+        schema_frame = schema_frame.with_column(
+            Series(ROW_ID_COLUMN, Column[Int64](List[Int64]()))
+        )
+    var schemas = ArcPointer(_step_schemas(schema_frame, steps, joins[]))
     var templates = ArcPointer(_compile_steps(steps, schemas[]))
     # The aggregate table's layout, from the steps' output types (an
     # empty frame through every step) when it takes this reduction.
@@ -4044,6 +4068,7 @@ def _run_pipeline(
         top_maintain_order,
     )
     top_filter.reordered = Bool(top_ranges)
+    top_filter.row_ids = top_row_ids
     var key_ranges = _key_ranges(frame, steps, joins[])
     if len(key_ranges) > 0:
         trace_path("pipeline.key_range")
