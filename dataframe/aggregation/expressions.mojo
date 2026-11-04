@@ -26,6 +26,7 @@ from dataframe.expr import (
     OVER,
     PRODUCT,
     QUANTILE,
+    ROW_LEN,
     SELECTOR,
     SKEW,
     STD,
@@ -34,6 +35,9 @@ from dataframe.expr import (
     is_reduction,
     is_sequence,
     is_window,
+    Node,
+    _set_node_children,
+    col,
     node_children,
     subtree,
 )
@@ -69,6 +73,42 @@ def _column_names(expr: Expr) -> List[String]:
         if node.op == COL and node.text not in names:
             names.append(node.text)
     return names^
+
+
+def count_rows_by(expression: Expr, key: String) -> Expr:
+    """`expression` with each `len()` (a count of the group's rows, DuckDB's
+    `count_star`) as `col(key).len()`, a reduction with a state in the
+    aggregate table: every row has a value of the key, null or not, so the
+    counts are the same. Unchanged when it has none, or when the result is
+    no streaming reduction (`len()` inside a window or a sequence)."""
+    var found = False
+    for node in expression._nodes:
+        if node.op == ROW_LEN:
+            found = True
+    if not found:
+        return expression.copy()
+    var counted = col(key).len()
+    var nodes = List[Node](capacity=len(expression._nodes) + 1)
+    var place = List[Int](capacity=len(expression._nodes))
+    for j in range(len(expression._nodes)):
+        var node = expression._nodes[j].copy()
+        if node.op == ROW_LEN:
+            nodes.append(counted._nodes[0].copy())
+            var length = counted._nodes[1].copy()
+            length.left = len(nodes) - 1
+            nodes.append(length^)
+        else:
+            var children = node_children(node)
+            for c in range(len(children)):
+                children[c] = place[children[c]]
+            _set_node_children(node, children)
+            nodes.append(node^)
+        place.append(len(nodes) - 1)
+    var rewritten = expression.copy()
+    rewritten._nodes = nodes^
+    if not _stream_reductions([rewritten.copy()]):
+        return expression.copy()
+    return rewritten^
 
 
 def _row_local(exprs: List[Expr]) -> Bool:

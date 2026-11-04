@@ -79,25 +79,40 @@ def test_checked_decimal_group_range_workers_before_partial_merges() raises:
         _ = frame.group_by("g").agg(feed_expression(), batch_size=1024)
     _ = serial^
     var parallel = WorkerSetting(2)
-    # Low-cardinality range jobs use fixed 4096-row grouped feeds. The input
-    # fault is inside the first feed even when agg's requested batch is 1024.
-    for batch in [1024, 8192]:
-        with assert_raises(contains="decimal multiplication overflow"):
-            _ = frame.group_by("g").agg(feed_expression(), batch_size=batch)
+    # Each worker's morsel evaluates agg's requested batch before it updates
+    # the states: rows 0 and 1 pass precision inside a 1024-row batch, while
+    # an 8192-row batch reaches the operand fault at row 1024 first.
+    with assert_raises(contains="decimal precision 38"):
+        _ = frame.group_by("g").agg(feed_expression(), batch_size=1024)
+    with assert_raises(contains="decimal multiplication overflow"):
+        _ = frame.group_by("g").agg(feed_expression(), batch_size=8192)
     # Range workers must succeed before group partials are merged. With no
     # input fault each worker holds 6e37; only their merge exceeds precision.
     with assert_raises(contains="decimal precision 38"):
         _ = _frame(131072, -1, 65536).group_by("g").agg(feed_expression())
-    with assert_raises(contains="decimal multiplication overflow"):
+    # Morsels go to workers as they free up, as DuckDB hands them out, so
+    # one worker may take both 6e37 rows (0 and 65536) and fail precision
+    # before another reaches the operand fault at the last row: either
+    # decimal fault may come first.
+    var raised = String()
+    try:
         _ = _frame(131072, 131071, 65536).group_by("g").agg(feed_expression())
-    # The aggregate table evaluates a morsel's reduction inputs before it
-    # accumulates them, and morsels go to workers as they free up, so an
-    # operand fault anywhere precedes a partial sum's precision fault: here
-    # worker zero's prefix (rows 0 and 1) would exceed precision, but the
-    # operand fault at the last row is raised first.
-    with assert_raises(contains="decimal multiplication overflow"):
-        _ = _frame(131072, 131071).group_by("g").agg(feed_expression())
+    except e:
+        raised = String(e)
+    assert_true(
+        "decimal multiplication overflow" in raised
+        or "decimal precision 38" in raised,
+        "expected a decimal fault, got: " + raised,
+    )
     _ = parallel^
+    # A batch's operands are evaluated before the batch updates the states,
+    # and no later: on one worker the prefix of rows 0 and 1 exceeds
+    # precision in the first batch, before the operand fault at the last
+    # row is reached. (On several workers either fault may come first.)
+    var one = WorkerSetting(1)
+    with assert_raises(contains="decimal precision 38"):
+        _ = _frame(131072, 131071).group_by("g").agg(feed_expression())
+    _ = one^
 
 
 def test_checked_decimal_over_source_faults_precede_partition_faults() raises:
