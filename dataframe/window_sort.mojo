@@ -31,7 +31,6 @@ from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.kernels.partition import Partitioner, _same_value
-from dataframe.kernels.hashing import encode_rows
 from dataframe.aggregation.reducer import float_key
 from dataframe.parallel import Job, configured_workers, partitions, run_jobs
 from dataframe.series import Series
@@ -258,6 +257,52 @@ def mark_changes(
             flags[unsafe_offset=k] |= bit
 
 
+@always_inline
+def _strings_equal(strings: StringColumn, a: Int, b: Int) -> Bool:
+    """Rows a and b of a string column hold equal values (nulls equal)."""
+    var u = strings._valid(a)
+    if u != strings._valid(b):
+        return False
+    if not u:
+        return True
+    if strings._is_view_storage():
+        ref views = strings._view_storage.value()
+        var x = views._view_unchecked(strings._offset + a)
+        var y = views._view_unchecked(strings._offset + b)
+        if x.length != y.length or x.prefix != y.prefix:
+            return False
+        if x.is_inline():
+            return x.buffer_index == y.buffer_index and x.offset == y.offset
+        var p = views._get_unchecked(strings._offset + a).as_bytes()
+        var q = views._get_unchecked(strings._offset + b).as_bytes()
+        return (
+            external_call["memcmp", Int32](
+                Int(p.unsafe_ptr()), Int(q.unsafe_ptr()), len(p)
+            )
+            == 0
+        )
+    var p = strings._row_bytes(a)
+    var q = strings._row_bytes(b)
+    return len(p) == len(q) and (
+        external_call["memcmp", Int32](
+            Int(p.unsafe_ptr()), Int(q.unsafe_ptr()), len(p)
+        )
+        == 0
+    )
+
+
+def _rows_equal(keys: List[Series], a: Int, b: Int) -> Bool:
+    """Rows a and b hold equal partition keys (nulls equal, NaN one value,
+    -0.0 equal to 0.0)."""
+    for key in keys:
+        if key._data.isa[StringColumn]():
+            if not _strings_equal(key._data[StringColumn], a, b):
+                return False
+        elif not _same_value(key, a, b):
+            return False
+    return True
+
+
 def sort_key_rows(
     keys: List[Series],
     descending: List[Bool],
@@ -287,6 +332,8 @@ struct _GroupSortJob(Job):
     var order: Int
     var flags: Int
     var stable: Bool
+    # Each input row's partition key hash (the sink's).
+    var hashes: Int
 
     def __init__(
         out self,
@@ -300,6 +347,7 @@ struct _GroupSortJob(Job):
         order: Int,
         flags: Int,
         stable: Bool,
+        hashes: Int,
     ):
         self.keys = keys.copy()
         self.partition_keys = partition_keys
@@ -311,6 +359,7 @@ struct _GroupSortJob(Job):
         self.order = order
         self.flags = flags
         self.stable = stable
+        self.hashes = hashes
 
     def run(mut self) raises:
         var n = self.hi - self.lo
@@ -327,17 +376,43 @@ struct _GroupSortJob(Job):
             mine[k] = rows[unsafe_offset=self.lo + k]
             identity = identity and mine[k] == k
         var whole = identity and n == len(self.keys[0])
-        # The group's partitions numbered by a dictionary of their keys:
-        # partitions need only be contiguous, so the sort orders rows by
-        # that number (one integer) rather than by the key values.
+        # The group's partitions numbered by a dictionary of their keys,
+        # probed with the sink's row hashes: partitions need only be
+        # contiguous, so the sort orders rows by that number (one integer)
+        # rather than by the key values.
+        var hashes = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=self.hashes
+        )
+        var slots_count = 16
+        while slots_count < 2 * n:
+            slots_count *= 2
+        var mask = UInt64(slots_count - 1)
+        var slots = List[Int](length=slots_count, fill=-1)
+        var first_rows = List[Int]()
+        var first_hashes = List[UInt64]()
         var part_keys = List[Series](capacity=self.partition_keys)
         for c in range(self.partition_keys):
-            part_keys.append(
-                self.keys[c].copy() if whole else self.keys[c].take(mine)
-            )
-        var codes = encode_rows(part_keys, nulls_equal=True)
-        var partitions_here = codes.count()
-        var ids = codes^.into_ids()
+            part_keys.append(self.keys[c].copy())
+        var ids = List[Int](unsafe_uninit_length=n)
+        for k in range(n):
+            var row = mine[k]
+            var hash = hashes[unsafe_offset=row]
+            var at = Int(hash & mask)
+            while True:
+                var slot = slots[at]
+                if slot < 0:
+                    slots[at] = len(first_rows)
+                    ids[k] = len(first_rows)
+                    first_rows.append(row)
+                    first_hashes.append(hash)
+                    break
+                if first_hashes[slot] == hash and _rows_equal(
+                    part_keys, first_rows[slot], row
+                ):
+                    ids[k] = slot
+                    break
+                at = Int((UInt64(at) + 1) & mask)
+        var partitions_here = len(first_rows)
         if partitions_here == 1 and count == self.partition_keys:
             # PartitionKeyTracker::CanBypass: one key and no order keys.
             for k in range(n):
@@ -471,6 +546,7 @@ def window_layout(
                     Int(order.unsafe_ptr()),
                     Int(flags.unsafe_ptr()),
                     stable,
+                    Int(partitioner.hashes.unsafe_ptr()),
                 )
             )
             bounds.append(cuts[t])
