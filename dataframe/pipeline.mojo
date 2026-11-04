@@ -4322,7 +4322,7 @@ def _run_pipeline(
     # An ungrouped reduce sink: each worker's states updated from the
     # last step's chunks (DuckDB's `PhysicalUngroupedAggregate`).
     var ungrouped = Optional[UngroupedLayout]()
-    if len(keys) == 0 and len(expressions) > 0 and top == 0:
+    if len(keys) == 0 and len(expressions) > 0 and top <= 0:
         ungrouped = ungrouped_layout(schemas[][len(steps)], expressions)
     if ungrouped:
         trace_path("pipeline.ungrouped_sink")
