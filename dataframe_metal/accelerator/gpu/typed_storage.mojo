@@ -11,7 +11,7 @@ from std.memory import ArcPointer, Pointer
 from std.sys import size_of
 from std.utils import Variant
 from dataframe import Column, DataType, Series
-from dataframe.storage.column import _append_bits, _copy_bits
+from dataframe.storage.column import _copy_bits
 from dataframe_metal.accelerator.faults import data_fault
 from .query_scope import Scope, checked_add, checked_mul
 
@@ -745,16 +745,19 @@ def allocate_native_column[
 
 def wrap_native[
     dtype: DType
-](scope: Scope, series: Series) raises -> Optional[NativeColumn[dtype]]:
+](
+    scope: Scope, series: Series, *, wrap_validity: Bool = False
+) raises -> Optional[NativeColumn[dtype]]:
     """The column's own memory made visible to the device, without a copy.
 
     On unified memory the GPU can read the CPU's buffer in place. Metal maps
     only whole pages, so this wraps the pages that hold the values and keeps
     the first value's offset in the view (`value_offset`); those pages are
-    mapped because the values live in them. The validity bitmap, a
-    thirty-second of the values at most, is copied. None for a chunked or
-    empty column, which `upload_native` copies instead. Keep `series` alive
-    until the device work that reads the view is synchronized.
+    mapped because the values live in them. With `wrap_validity`, the same
+    mapping preserves the bitmap's own page and bit offsets without a copy
+    or a wait. Otherwise the validity bitmap is copied. None for a chunked
+    or empty column. Keep `series` alive until the device work that reads
+    the view is synchronized.
     """
     var logical = series.dtype()
     if series.is_chunked() or len(series) == 0:
@@ -783,17 +786,27 @@ def wrap_native[
     if column.null_count() > 0:
         bit_offset = column.validity_offset() % 8
         var validity_bytes = (bit_offset + rows + 7) // 8
-        validity = Optional[DeviceBuffer[DType.uint8]](
-            ctx.enqueue_create_buffer[DType.uint8](validity_bytes)
+        var source = column.unsafe_validity().unsafe_offset(
+            column.validity_offset() // 8
         )
-        ctx.enqueue_copy(
-            validity.value(),
-            column.unsafe_validity().unsafe_offset(
-                column.validity_offset() // 8
-            ),
-        )
-        scope.record_upload(validity_bytes)
-        scope.synchronize()
+        if wrap_validity:
+            var bit_address = Int(source)
+            var bit_base = bit_address - bit_address % page
+            var bit_length = (
+                (checked_add(bit_address - bit_base, validity_bytes) + page - 1)
+                // page
+                * page
+            )
+            validity = ctx.wrap_host_memory[DType.uint8](
+                Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bit_base),
+                bit_length,
+            )
+            bit_offset += (bit_address - bit_base) * 8
+        else:
+            validity = ctx.enqueue_create_buffer[DType.uint8](validity_bytes)
+            ctx.enqueue_copy(validity.value(), source)
+            scope.record_upload(validity_bytes)
+            scope.synchronize()
     var owner = ArcPointer(
         _NativeColumnOwner[dtype](scope, values^, validity^, None, None)
     )
@@ -810,6 +823,62 @@ def upload_native[
         raise Error("Native Bool upload is not implemented")
     else:
         return _upload_native_unpacked[dtype](scope, series)
+
+
+def _append_native_bits(
+    mut bits: List[UInt8],
+    length: Int,
+    incoming: Span[UInt8, _],
+    offset: Int,
+    count: Int,
+):
+    """Append an arbitrary bitmap window in bytes, including unaligned input.
+
+    At most seven prefix and seven tail bits are copied individually. Once
+    the destination is byte aligned, adjacent source loads shift the bitmap
+    sixteen bytes at a time without reading beyond the source window.
+    """
+    if count == 0:
+        return
+    bits.resize((length + count + 7) // 8, 0)
+    if length % 8:
+        bits[length // 8] &= (UInt8(1) << UInt8(length % 8)) - 1
+    var consumed = 0
+    while consumed < count and (length + consumed) % 8:
+        var source_bit = offset + consumed
+        if (incoming[source_bit // 8] >> UInt8(source_bit % 8)) & 1:
+            var target_bit = length + consumed
+            bits[target_bit // 8] |= UInt8(1) << UInt8(target_bit % 8)
+        consumed += 1
+    var source_byte = (offset + consumed) // 8
+    var target_byte = (length + consumed) // 8
+    var shift = UInt8((offset + consumed) % 8)
+    var full_bytes = (count - consumed) // 8
+    var source = incoming.unsafe_ptr().unsafe_offset(source_byte)
+    var target = bits.unsafe_ptr().unsafe_offset(target_byte)
+    var byte = 0
+    while byte + 16 <= full_bytes:
+        var values = source.unsafe_offset(byte).unsafe_load[width=16]()
+        if shift:
+            values = (values >> shift) | (
+                source.unsafe_offset(byte + 1).unsafe_load[width=16]()
+                << (UInt8(8) - shift)
+            )
+        target.unsafe_offset(byte).unsafe_store(values)
+        byte += 16
+    while byte < full_bytes:
+        var value = source[unsafe_offset=byte] >> shift
+        if shift:
+            value |= source[unsafe_offset=byte + 1] << (UInt8(8) - shift)
+        target[unsafe_offset=byte] = value
+        byte += 1
+    consumed += full_bytes * 8
+    while consumed < count:
+        var source_bit = offset + consumed
+        if (incoming[source_bit // 8] >> UInt8(source_bit % 8)) & 1:
+            var target_bit = length + consumed
+            bits[target_bit // 8] |= UInt8(1) << UInt8(target_bit % 8)
+        consumed += 1
 
 
 def _upload_native_unpacked[
@@ -885,15 +954,19 @@ def _upload_native_unpacked[
             ref source_bits = column._bits[]
             if len(source_bits) == 0:
                 var needed = checked_add(appended + len(column), 7) // 8
-                packed_bits.resize(needed, 0)
-                for row in range(len(column)):
-                    var bit = appended + row
-                    packed_bits[bit // 8] |= UInt8(1) << UInt8(bit % 8)
+                packed_bits.resize(needed, 255)
+                if len(column) and appended % 8:
+                    packed_bits[appended // 8] |= UInt8(255) << UInt8(
+                        appended % 8
+                    )
+                var end = appended + len(column)
+                if end % 8:
+                    packed_bits[needed - 1] &= (UInt8(1) << UInt8(end % 8)) - 1
             else:
-                _append_bits(
+                _append_native_bits(
                     packed_bits,
                     appended,
-                    source_bits,
+                    source_bits.span(),
                     column.validity_offset(),
                     len(column),
                 )

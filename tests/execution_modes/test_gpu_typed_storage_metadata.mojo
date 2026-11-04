@@ -8,9 +8,76 @@ from dataframe_metal.accelerator.gpu.typed_storage import (
     check_native_column_capacity,
     upload_float32,
     readback_float32,
+    wrap_native,
+    _append_native_bits,
     _NativeReservation,
 )
 from tests.support.metal_outcomes import require_metal
+
+
+def test_native_bitmap_append_matches_bits_at_every_alignment_and_vector_tail() raises:
+    var source = List[UInt8]()
+    for i in range(64):
+        source.append(UInt8((i * 37 + 93) % 256))
+    for prefix in range(8):
+        for offset in range(16):
+            for count in [
+                0,
+                1,
+                7,
+                8,
+                9,
+                15,
+                16,
+                17,
+                127,
+                128,
+                129,
+                255,
+                256,
+                257,
+            ]:
+                var bits = List[UInt8](length=(prefix + 7) // 8, fill=255)
+                var expected = List[UInt8](
+                    length=(prefix + count + 7) // 8, fill=0
+                )
+                for i in range(prefix):
+                    if i % 3 != 1:
+                        expected[0] |= UInt8(1) << UInt8(i)
+                    else:
+                        bits[0] &= ~(UInt8(1) << UInt8(i))
+                var before = bits.copy()
+                for i in range(count):
+                    if (
+                        source[(offset + i) // 8] >> UInt8((offset + i) % 8)
+                    ) & 1:
+                        expected[(prefix + i) // 8] |= UInt8(1) << UInt8(
+                            (prefix + i) % 8
+                        )
+                _append_native_bits(bits, prefix, source, offset, count)
+                assert_equal(bits, before if count == 0 else expected)
+
+
+# requires: metal
+def test_native_wrapped_validity_preserves_page_and_bit_offsets_without_uploads() raises:
+    _ = require_metal()
+    var values = List[Float32]()
+    var valid = List[Bool]()
+    for i in range(400_013):
+        values.append(Float32(i % 31))
+        valid.append(i % 11 != 3)
+    var source = Series("x", Column[Float32](values^, valid))
+    # Cross bitmap pages and exercise each possible first-bit offset.
+    for offset in [1, 7, 32_771, 262_149]:
+        var view = source.slice(offset, 1003)
+        var scope = Scope()
+        var wrapped = wrap_native[DType.float32](
+            scope, view, wrap_validity=True
+        )
+        assert_equal(Bool(wrapped), True)
+        var restored = Series("x", readback_float32(wrapped.value()))
+        assert_equal(restored.equals(view), True)
+        assert_equal(scope.transfers()[0], 0)
 
 
 def test_native_float32_column_capacity_includes_only_present_sidecars() raises:

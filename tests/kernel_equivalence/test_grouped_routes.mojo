@@ -189,7 +189,7 @@ def test_grouped_native_eligibility_rejects_computed_logical_and_ungrouped_input
                 assert_equal(state.count, Int64(0))
 
 
-def test_partitioned_indexed_and_gathered_reducers_keep_distinct_source_owners_and_complete_literal_groups() raises:
+def test_reductions_with_and_without_table_states_over_chunked_sources_complete_literal_groups() raises:
     var n = 32017
     var groups = 2003
     var ks = List[Int64]()
@@ -238,25 +238,7 @@ def test_partitioned_indexed_and_gathered_reducers_keep_distinct_source_owners_a
         col("s").n_unique().alias("unique_s"),
     ]
     var grouped = frame.group_by("k", maintain_order=True)
-    var bound = _bind_all(expressions, frame._columns)
-    var preparation = grouped._partitioned_references(bound)
-    assert_equal(
-        preparation[0],
-        [True, True, True, True, False, True, False, False, False, False],
-    )
-    assert_equal(len(preparation[1]), 2)
-    assert_equal(len(preparation[2]), 2)
-    assert_equal(preparation[1][0].name(), "x")
-    assert_equal(preparation[1][1].name(), "y")
-    assert_equal(preparation[2][0].name(), "y")
-    assert_equal(preparation[2][1].name(), "s")
-    assert_true(
-        Int(preparation[1][0]._chunked.value().ptr())
-        == Int(frame.column("x")._chunked.value().ptr())
-    )
-    var actual = grouped._agg_partitioned(
-        expressions, bound, 127, 4, whole=False
-    )
+    var actual = grouped.agg(expressions, batch_size=127)
     assert_equal(actual.height(), groups)
     var firsts = List[Int]()
     for group in range(groups):

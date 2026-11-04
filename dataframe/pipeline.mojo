@@ -66,6 +66,21 @@ from .frame import (
     _rows_mask,
     concat,
 )
+from dataframe.sorting.top_n import TopNBoundary
+from dataframe.sorting.top_n_sink import TopNSink
+from dataframe.storage.statistics import (
+    STATISTICS_VECTOR_SIZE,
+    COMPARE_GREATERTHAN,
+    COMPARE_GREATERTHANOREQUALTO,
+    COMPARE_LESSTHAN,
+    COMPARE_LESSTHANOREQUALTO,
+)
+from dataframe.table_filter import (
+    DynamicFilterData,
+    TableFilterSet,
+    column_domain,
+)
+from dataframe.table_scan import ScanFilterInfo
 from dataframe.aggregation.state import (
     _StreamReduction,
     chunks_frame,
@@ -178,17 +193,16 @@ def _flush_groups() -> Int:
     return _FLUSH_GROUPS
 
 
-# The column a top-k sink adds to its candidates: the row's place in the
-# source's order (morsel sequence, then row within the morsel's output),
-# the last sort key, so ties come out as a stable sort of the whole input
-# would place them, whichever worker held them.
+# The column a top-k sink adds as its last key when the sort keeps input
+# order: the row's place in the source's order (morsel sequence, then row
+# within the morsel's output), so ties come out as a stable sort of the
+# whole input would place them, whichever worker held them.
 comptime _ORDER_COLUMN = "__pipeline_order"
+# A late-materialized top-N scan's row id column (DuckDB's `rowid`).
+comptime ROW_ID_COLUMN = "__dataframe_row_id"
 # The constant key a grouping sets' grand total groups by (the aggregate
 # table needs a key column); dropped from that set's result.
 comptime _TOTAL_KEY = "__grouping_total"
-# Candidate rows a worker holds before folding them to the k best: the
-# fold's setup is worth about this many rows of comparisons.
-comptime _FOLD_ROWS = 8192
 
 
 @fieldwise_init
@@ -262,151 +276,6 @@ def _row_counted(
         if name not in valued:
             only_counted.append(name)
     return (rewritten^, valued^, only_counted^)
-
-
-comptime _BOUND_NONE = 0
-comptime _BOUND_INT = 1
-comptime _BOUND_FLOAT = 2
-
-
-struct _TopBound(Copyable, Movable):
-    """The first sort key's value at a streamed top-k's k-th row so far.
-
-    A row whose key is worse than it (after it in the sort's direction)
-    cannot enter the top k, so a batch keeps only rows at or better than
-    the bound when at most one in eight are, ties included (later keys decide those) and nulls included
-    (wherever the sort puts them). Integer-backed keys (integers, dates,
-    datetimes, durations) compare as Int64, floats as Float64 with NaN
-    kept; other dtypes get no bound.
-    """
-
-    var kind: Int
-    var name: String
-    var descending: Bool
-    var integer: Int64
-    var floating: Float64
-
-    def __init__(out self):
-        self.kind = _BOUND_NONE
-        self.name = String()
-        self.descending = False
-        self.integer = 0
-        self.floating = 0.0
-
-    def __init__(
-        out self, candidates: DataFrame, name: String, descending: Bool, k: Int
-    ) raises:
-        """The bound from `candidates`, sorted best first, once it holds
-        `k` rows; none before then or when its k-th key is null."""
-        self = Self()
-        if candidates.height() < k or k <= 0:
-            return
-        var key = candidates.column(name)
-        if key.is_chunked():
-            key = key.rechunk()
-        comptime for d in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[d]
-            if key._data.isa[Column[Scalar[D]]]():
-                ref column = key._data[Column[Scalar[D]]]
-                if not column._valid(k - 1):
-                    return
-                var value = column._get(k - 1)
-                comptime if D.is_floating_point():
-                    self.floating = Float64(value)
-                    if self.floating != self.floating:
-                        # A NaN bound compares false with every number:
-                        # take none, which is always safe.
-                        return
-                    self.kind = _BOUND_FLOAT
-                elif D == DType.uint64:
-                    return
-                else:
-                    self.integer = Int64(value)
-                    self.kind = _BOUND_INT
-                self.name = name
-                self.descending = descending
-                return
-
-    def rows(self, frame: DataFrame) raises -> Optional[List[Int]]:
-        """The rows of `frame` that can still enter the top k, or None
-        when every row can (or the batch lacks the key)."""
-        if frame.height() == 0 or self.name not in frame.columns():
-            return None
-        var key = frame.column(self.name)
-        if key.is_chunked():
-            key = key.rechunk()
-        var rows = List[Int]()
-        comptime for d in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[d]
-            if key._data.isa[Column[Scalar[D]]]():
-                ref column = key._data[Column[Scalar[D]]]
-                var values = column.unsafe_values()
-                var nulls = column.null_count() > 0
-                for i in range(len(column)):
-                    if nulls and not column._valid(i):
-                        rows.append(i)
-                        continue
-                    var value = values.unsafe_offset(i)[]
-                    var ok: Bool
-                    comptime if D.is_floating_point():
-                        var x = Float64(value)
-                        ok = x != x or (
-                            x
-                            >= self.floating if self.descending else x
-                            <= self.floating
-                        )
-                    elif D == DType.uint64:
-                        ok = True
-                    else:
-                        var x = Int64(value)
-                        ok = (
-                            x
-                            >= self.integer if self.descending else x
-                            <= self.integer
-                        )
-                    if ok:
-                        rows.append(i)
-                if len(rows) == frame.height():
-                    return None
-                return rows^
-        return None
-
-
-comptime _ZONE_SOME = 0
-comptime _ZONE_NONE = 1
-comptime _ZONE_ALL = 2
-
-
-def _zoned_top(frame: DataFrame, bound: _TopBound) raises -> Int:
-    """Whether a morsel's rows can enter a top-k, from the zone maps of
-    its integer key's buffers and row-group statistics: `_ZONE_NONE` when
-    every value is worse
-    than the bound and no row is null (nulls always pass), `_ZONE_ALL`
-    when every value passes, `_ZONE_SOME` otherwise or without a usable
-    range. A morsel no row of which can enter is skipped unread
-    (ClickBench q26 compared all 10M event times with the bound and kept
-    2%)."""
-    if bound.name not in frame.columns():
-        return _ZONE_SOME
-    var key = frame.column(bound.name)
-    if not _range_key(key.dtype()):
-        return _ZONE_SOME
-    var bounds = _window_bounds(key)
-    if not bounds:
-        return _ZONE_SOME
-    var low = bounds.value()[0]
-    var high = bounds.value()[1]
-    if bound.descending:
-        if high < bound.integer and key.null_count() == 0:
-            return _ZONE_NONE
-        if low >= bound.integer:
-            return _ZONE_ALL
-    else:
-        if low > bound.integer and key.null_count() == 0:
-            return _ZONE_NONE
-        if high <= bound.integer:
-            return _ZONE_ALL
-    return _ZONE_SOME
 
 
 @fieldwise_init
@@ -1668,89 +1537,6 @@ def _float_order(value: Float64) -> Int64:
     return bits if bits >= 0 else bits ^ Int64(0x7FFFFFFFFFFFFFFF)
 
 
-@fieldwise_init
-struct _SharedBound(Copyable, Movable):
-    """The tightest top-k bound any worker has found, shared by all: a
-    worker folding its candidates publishes its k-th key, and every
-    worker narrows its next morsel by the tightest bound. Two atomics:
-    whether a bound is
-    set, and the key as an Int64 that orders as the key does."""
-
-    var address: Int
-
-    @staticmethod
-    def new() -> _SharedBound:
-        return _SharedBound(
-            external_call["calloc", Int](2, size_of[Atomic[Int64]]())
-        )
-
-    def _slot(self, k: Int) -> Pointer[Atomic[Int64], MutAnyOrigin]:
-        return Pointer[Atomic[Int64], MutAnyOrigin](
-            unsafe_from_address=self.address + k * size_of[Atomic[Int64]]()
-        )
-
-    def publish(self, bound: _TopBound):
-        if bound.kind == _BOUND_NONE:
-            return
-        var key = bound.integer if bound.kind == _BOUND_INT else _float_order(
-            bound.floating
-        )
-        var value = self._slot(1)
-        var state = self._slot(0)
-        while True:
-            var set = state[].load()
-            var current = value[].load()
-            if set != 0:
-                var tighter = (
-                    key > current if bound.descending else key < current
-                )
-                if not tighter:
-                    return
-                if value[].compare_exchange(current, key):
-                    return
-                continue
-            # Unset: store the key, then the flag; a reader sees the flag
-            # only after the key.
-            if value[].compare_exchange(current, key):
-                state[].store(1)
-                return
-
-    def tighten(
-        self,
-        mut bound: _TopBound,
-        name: String,
-        descending: Bool,
-        floating: Bool,
-    ):
-        """Adopt the shared bound into `bound` when it is tighter."""
-        if self._slot(0)[].load() == 0:
-            return
-        var key = self._slot(1)[].load()
-        if bound.kind != _BOUND_NONE:
-            var mine = (
-                bound.integer if bound.kind
-                == _BOUND_INT else _float_order(bound.floating)
-            )
-            var tighter = key > mine if descending else key < mine
-            if not tighter:
-                return
-        bound.name = name
-        bound.descending = descending
-        if floating:
-            bound.kind = _BOUND_FLOAT
-            bound.floating = bitcast[DType.float64](_float_order_inverse(key))
-        else:
-            bound.kind = _BOUND_INT
-            bound.integer = key
-
-    def free(self):
-        _ = external_call["free", NoneType](self.address)
-
-
-def _float_order_inverse(key: Int64) -> Int64:
-    return key if key >= 0 else key ^ Int64(0x7FFFFFFFFFFFFFFF)
-
-
 def _plain_op(op: Int) -> Bool:
     """A reduction `_reduce_ints`/`_reduce_floats` update in place."""
     return op in [
@@ -2756,23 +2542,20 @@ struct _PipelineJob(Job):
     # selections over the source frame rather than their rows.
     var filter_only: Bool
     var batch_size: Int
-    # Top-k sink (a materialize sink keeping the k best rows by the sort
-    # keys): this worker's candidates in `parts`, their row count, and
-    # the running bound on the first key once k candidates are held
-    # (`bounded`: the key is an input column no step rewrites, so the
-    # bound narrows a morsel before any step reads it).
+    # Top-N sink (PhysicalTopN): this worker's heap over the output's
+    # sort keys (made at its first chunk), the boundary every worker's
+    # full heap shares, and whether ties keep the input order (the
+    # source place is then the last key).
     var top: Int
     var top_names: List[String]
     var top_descending: List[Bool]
     var top_nulls_last: List[Bool]
-    var bounded: Bool
-    var candidate_rows: Int
-    # Candidate rows that trigger the next fold; doubles after each.
-    var fold_at: Int
-    var bound: _TopBound
-    var shared_bound: _SharedBound
-    # Whether the first sort key is a float (the shared bound's key kind).
-    var floating_key: Bool
+    var top_maintain_order: Bool
+    var topn: List[TopNSink]
+    var boundary: TopNBoundary
+    # The scan's dynamic filter on the first sort column (DuckDB's TopN
+    # filter pushdown), when that column is the source's own.
+    var top_filter: _TopScanFilter
     # Materialize sink: the morsels' frames and their sequence numbers.
     var parts: List[DataFrame]
     var sequences: List[Int]
@@ -2853,9 +2636,9 @@ struct _PipelineJob(Job):
         top_names: List[String],
         top_descending: List[Bool],
         top_nulls_last: List[Bool],
-        bounded: Bool,
-        shared_bound: _SharedBound,
-        floating_key: Bool,
+        top_maintain_order: Bool,
+        boundary: TopNBoundary,
+        top_filter: _TopScanFilter,
         layout: List[AggregateLayout],
         sets: List[List[Int]],
         set_masks: List[List[Int64]],
@@ -2899,16 +2682,14 @@ struct _PipelineJob(Job):
         self.derive_order = derive_order.copy()
         self.sinks = List[AggregateSink]()
         self.workers = workers
-        self.shared_bound = shared_bound.copy()
-        self.floating_key = floating_key
+        self.boundary = boundary
+        self.top_filter = top_filter.copy()
+        self.top_maintain_order = top_maintain_order
+        self.topn = List[TopNSink]()
         self.top = top
         self.top_names = top_names.copy()
         self.top_descending = top_descending.copy()
         self.top_nulls_last = top_nulls_last.copy()
-        self.bounded = bounded
-        self.candidate_rows = 0
-        self.fold_at = 4 * max(1, top)
-        self.bound = _TopBound()
         self.frame = frame.copy()
         self.cursor = cursor
         self.ranges = ranges.copy()
@@ -3019,26 +2800,6 @@ struct _PipelineJob(Job):
             self.sinks[s].sink(keys, inputs, k << 32)
         self.rows += rows
 
-    def _fold_candidates(mut self) raises:
-        """Fold this worker's candidates into a size-k heap, and
-        tighten the bound from the k-th, shared with every worker."""
-        var merged = _top_rows(
-            concat(self.parts),
-            self.top_names,
-            self.top_descending,
-            self.top_nulls_last,
-            self.top,
-            1,
-            False,
-        )
-        self.candidate_rows = merged.height()
-        if self.bounded:
-            self.bound = _TopBound(
-                merged, self.top_names[0], self.top_descending[0], self.top
-            )
-            self.shared_bound.publish(self.bound)
-        self.parts = [merged^]
-
     def _key_mask(
         mut self, frame: DataFrame
     ) raises -> Tuple[Bool, Optional[BoolColumn]]:
@@ -3126,10 +2887,6 @@ struct _PipelineJob(Job):
                 self.counts = self.runner.counts.copy()
                 if not self.finishes:
                     return
-                # The worker's leftover candidates folded to k, so the
-                # finish sorts at most k rows a worker.
-                if self.top > 0 and self.candidate_rows > self.top:
-                    self._fold_candidates()
                 self._derive_sets()
                 return
             var k = self.first_morsel + taken
@@ -3146,6 +2903,8 @@ struct _PipelineJob(Job):
                     self._consume(output, k, offset, length)
                 continue
             var morsel = self.frame[].slice(offset, length)
+            if self.top_filter.row_ids:
+                morsel = morsel.with_column(_row_ids(offset, length))
             if self.first_step > 0:
                 # An outer join's unmatched build rows: the source's key
                 # ranges and top-k bound do not apply to them.
@@ -3155,6 +2914,17 @@ struct _PipelineJob(Job):
                     self._consume(output, k, offset, length)
                 continue
             self.runner.counts[0] += length
+            var vectors = Optional[List[Int]]()
+            if self.top_filter.info:
+                # The TopN's dynamic filter against the scan's vector
+                # statistics (CheckZonemapSegments): vectors it rules out
+                # are not read.
+                vectors = _vectors_kept(
+                    self.top_filter.info.value()[], offset, length
+                )
+                if vectors and len(vectors.value()) == 0:
+                    trace_path("pipeline.top_dynamic_skip")
+                    continue
             var keyed = self._key_mask(morsel)
             if not keyed[0]:
                 continue
@@ -3163,30 +2933,8 @@ struct _PipelineJob(Job):
                 rows = _mask_rows(
                     keyed[1].value(), true_count(keyed[1].value())
                 )
-            if self.top > 0 and self.bounded:
-                self.shared_bound.tighten(
-                    self.bound,
-                    self.top_names[0],
-                    self.top_descending[0],
-                    self.floating_key,
-                )
-            if self.top > 0 and self.bound.kind != _BOUND_NONE:
-                var zoned = _ZONE_SOME
-                if self.bound.kind == _BOUND_INT:
-                    zoned = _zoned_top(morsel, self.bound)
-                if zoned == _ZONE_NONE:
-                    # No row of the morsel can enter: it is read no
-                    # further.
-                    trace_path("pipeline.top_zone_skip")
-                    continue
-                if zoned == _ZONE_SOME:
-                    # The rows that can still enter the top k start the
-                    # morsel's selection, read through it whatever share
-                    # it keeps (the bound is DuckDB's dynamic filter on
-                    # the top-k's key).
-                    var kept = self.bound.rows(morsel)
-                    if kept:
-                        rows = _intersect_rows(rows, kept.take())
+            if vectors:
+                rows = _rows_in_vectors(rows, vectors.value(), length)
             var source = _Columns.of_frame(self.runner.arena, morsel)
             if rows:
                 if len(rows.value()) == 0:
@@ -3375,51 +3123,40 @@ struct _PipelineJob(Job):
                     p += 1
         elif self.top > 0:
             var output = columns.whole(self.runner.arena, schema)
-            var h = output.height()
-            var places = List[Int64](capacity=h)
-            var base = Int64(k) << 40
-            for r in range(h):
-                places.append(base + Int64(r))
-            output = output.with_column(
-                Series(_ORDER_COLUMN, Column[Int64](places^))
-            )
-            self.candidate_rows += h
-            self.parts.append(output^)
-            # Folds come at doubling candidate counts, from a few rows
-            # past k up to a few thousand: the first folds are cheap
-            # and tighten the shared bound fast (a bound from 40 rows
-            # kept 10% of ClickBench q26's rows; from 8K rows, 0.1%),
-            # and the fold's setup per call (dense ranks of a string
-            # key) is then paid once per thousands of rows, not per
-            # morsel (650 folds cost q26 44 ms).
-            if self.candidate_rows > self.fold_at and len(self.parts) > 1:
-                self._fold_candidates()
-                self.fold_at = min(_FOLD_ROWS, 2 * self.fold_at)
+            if self.top_maintain_order:
+                var h = output.height()
+                var places = List[Int64](capacity=h)
+                var base = Int64(k) << 40
+                if self.top_filter.reordered:
+                    # A row group's rows (at most ROW_GROUP_ROWS, no
+                    # join) after its source row.
+                    base = Int64(offset) << 20
+                for r in range(h):
+                    places.append(base + Int64(r))
+                output = output.with_column(
+                    Series(_ORDER_COLUMN, Column[Int64](places^))
+                )
+            if len(self.topn) == 0:
+                self.topn.append(
+                    TopNSink(
+                        output,
+                        _top_keys(self.top_names, self.top_maintain_order),
+                        _top_flags(
+                            self.top_descending, self.top_maintain_order
+                        ),
+                        _top_flags(
+                            self.top_nulls_last, self.top_maintain_order
+                        ),
+                        self.top,
+                        self.boundary,
+                        self.top_filter.dynamic,
+                        self.top_filter.op,
+                    )
+                )
+            self.topn[0].sink(output)
         else:
             self.parts.append(columns.whole(self.runner.arena, schema))
             self.sequences.append(k)
-
-
-def _intersect_rows(
-    rows: Optional[List[Int]], var other: List[Int]
-) -> Optional[List[Int]]:
-    """The rows in both ascending lists (`rows` None: every row)."""
-    if not rows:
-        return other^
-    ref mine = rows.value()
-    var result = List[Int](capacity=min(len(mine), len(other)))
-    var i = 0
-    var j = 0
-    while i < len(mine) and j < len(other):
-        if mine[i] == other[j]:
-            result.append(mine[i])
-            i += 1
-            j += 1
-        elif mine[i] < other[j]:
-            i += 1
-        else:
-            j += 1
-    return result^
 
 
 def _mask_rows(mask: BoolColumn, count: Int) -> List[Int]:
@@ -3459,63 +3196,124 @@ def _unchunked(column: Series) raises -> Series:
     return column.rechunk()
 
 
-def _top_rows(
-    candidates: DataFrame,
-    names: List[String],
-    descending: List[Bool],
-    nulls_last: List[Bool],
-    k: Int,
-    threads: Int,
-    by_place: Bool,
-) raises -> DataFrame:
-    """The k best candidate rows in order. The selection is stable, so ties
-    keep the candidates' order; `by_place` sorts ties by the hidden source
-    place instead, for candidates from several workers. A worker's own
-    candidates are already in source order (it takes morsels in sequence
-    order and a fold keeps tied rows in order), so its folds leave the
-    place out: as a second key it turned a one-string-key sort into a
-    two-key one, which the packed selection does not take, and ranked
-    every string per fold (ClickBench q25: 32 -> 250 ms). With several keys, the rows are first cut to those whose first
-    key is at or better than the k-th best first key (a numeric key, no
-    null there): later keys only settle ties, so ranking a string key over
-    every candidate (what a multi-key selection does) is spared for all
-    but the tied rows, as a lexicographic heap compares them."""
-    var pool = candidates.copy()
-    if len(names) > 1 and pool.height() > k:
-        var first = pool.take(
-            pool._arg_sort_head(
-                [names[0]], [descending[0]], [nulls_last[0]], k, threads
-            )
-        )
-        var bound = _TopBound(first, names[0], descending[0], k)
-        if bound.kind != _BOUND_NONE:
-            var kept = bound.rows(pool)
-            if kept:
-                pool = pool.take(kept.value())
-    if not by_place:
-        return pool.take(
-            pool._arg_sort_head(names, descending, nulls_last, k, threads)
-        )
-    return pool.take(
-        pool._arg_sort_head(
-            _with_order(names),
-            _with_false(descending),
-            _with_false(nulls_last),
-            k,
-            threads,
-        )
-    )
-
-
-def _with_order(names: List[String]) -> List[String]:
+def _top_keys(names: List[String], maintain_order: Bool) -> List[String]:
+    """A top-N's keys: the sort's, then the source place when ties keep
+    input order."""
     var out = names.copy()
-    out.append(_ORDER_COLUMN)
+    if maintain_order:
+        out.append(_ORDER_COLUMN)
     return out^
 
 
-def _with_false(flags: List[Bool]) -> List[Bool]:
+def _top_flags(flags: List[Bool], maintain_order: Bool) -> List[Bool]:
     var out = flags.copy()
-    out.append(False)
+    if maintain_order:
+        out.append(False)
+    return out^
+
+
+@fieldwise_init
+struct _TopScanFilter(Copyable, Movable):
+    """A TopN's dynamic filter on its first sort column, pushed into the
+    scan (`TopN::PushdownDynamicFilters`): `info` checks it against the
+    source's statistics, `dynamic` is the shared constant the sinks set,
+    `op` its comparison."""
+
+    var info: Optional[ArcPointer[ScanFilterInfo]]
+    var dynamic: Optional[ArcPointer[DynamicFilterData]]
+    var op: Int
+    # The source is read in its row groups' statistics order: rows are
+    # placed by their source row, not by the morsel's turn.
+    var reordered: Bool
+    # The scan adds each row's row id (late materialization).
+    var row_ids: Bool
+
+
+def _top_scan_filter(
+    frame: DataFrame,
+    top: Int,
+    names: List[String],
+    descending: List[Bool],
+    nulls_last: List[Bool],
+    scan_key: Bool,
+    maintain_order: Bool,
+) raises -> _TopScanFilter:
+    """The dynamic filter for a TopN whose first sort column is read from
+    the source unchanged (`scan_key`): `c < boundary` ascending and
+    `c > boundary` descending, `<=` / `>=` with later keys to settle ties.
+    DuckDB ORs `IS NULL` for nulls first; a statistics check cannot keep
+    a vector's nulls apart, so a nulls-first key pushes nothing. Columns
+    whose order is not their storage's (categoricals) push nothing."""
+    var none = _TopScanFilter(None, None, 0, False, False)
+    if top <= 0 or not scan_key or len(names) == 0 or not nulls_last[0]:
+        return none^
+    if names[0] not in frame.columns():
+        return none^
+    var dtype = frame.column(names[0]).dtype()
+    if column_domain(dtype) < 0:
+        return none^
+    var op: Int
+    # `maintain_order` makes the source place a last key: a row tied on
+    # the first key may still enter, so the comparison keeps ties.
+    if len(names) == 1 and not maintain_order:
+        op = COMPARE_GREATERTHAN if descending[0] else COMPARE_LESSTHAN
+    else:
+        op = COMPARE_GREATERTHANOREQUALTO if descending[
+            0
+        ] else COMPARE_LESSTHANOREQUALTO
+    var dynamic = ArcPointer(DynamicFilterData(dtype, op))
+    var filters = TableFilterSet()
+    filters.push_dynamic(names[0], dynamic)
+    var info = ScanFilterInfo(filters, [frame.column(names[0])])
+    return _TopScanFilter(ArcPointer(info^), dynamic, op, False, False)
+
+
+def _row_ids(offset: Int, length: Int) -> Series:
+    """Rows [offset, offset + length)'s row ids: the scan's `rowid`."""
+    var ids = List[Int64](unsafe_uninit_length=length)
+    for i in range(length):
+        ids[i] = Int64(offset + i)
+    return Series(ROW_ID_COLUMN, Column[Int64](ids^))
+
+
+def _vectors_kept(
+    info: ScanFilterInfo, offset: Int, length: Int
+) raises -> Optional[List[Int]]:
+    """The starts (within the morsel) of the 2,048-row vectors the filter
+    does not rule out; None when it rules none out."""
+    var kept = List[Int]()
+    var ruled_out = False
+    var at = 0
+    while at < length:
+        var end = min(length, at + STATISTICS_VECTOR_SIZE)
+        if info.skip(offset + at, offset + end):
+            ruled_out = True
+        else:
+            kept.append(at)
+        at = end
+    if not ruled_out:
+        return None
+    return kept^
+
+
+def _rows_in_vectors(
+    rows: Optional[List[Int]], vectors: List[Int], length: Int
+) -> List[Int]:
+    """The rows of `rows` (None: every row of the morsel) inside the kept
+    vectors."""
+    var out = List[Int]()
+    if not rows:
+        for start in vectors:
+            for r in range(start, min(length, start + STATISTICS_VECTOR_SIZE)):
+                out.append(r)
+        return out^
+    ref mine = rows.value()
+    var v = 0
+    for r in mine:
+        while v < len(vectors) and vectors[v] + STATISTICS_VECTOR_SIZE <= r:
+            v += 1
+        if v < len(vectors) and vectors[v] <= r:
+            out.append(r)
     return out^
 
 
@@ -3806,7 +3604,10 @@ def run_pipeline(
     top_names: List[String] = List[String](),
     top_descending: List[Bool] = List[Bool](),
     top_nulls_last: List[Bool] = List[Bool](),
-    bounded: Bool = False,
+    top_maintain_order: Bool = False,
+    top_scan_key: Bool = False,
+    top_ranges: Optional[List[Int]] = None,
+    top_row_ids: Bool = False,
     table: Bool = False,
     set_masks: List[List[Int64]] = List[List[Int64]](),
     finish_steps: List[Step] = List[Step](),
@@ -3848,7 +3649,10 @@ def run_pipeline(
         top_names,
         top_descending,
         top_nulls_last,
-        bounded,
+        top_maintain_order,
+        top_scan_key,
+        top_ranges,
+        top_row_ids,
         table,
         set_masks,
         finish_steps,
@@ -3878,6 +3682,9 @@ def run_pipeline(
             List[String](),
             List[Bool](),
             List[Bool](),
+            False,
+            False,
+            None,
             False,
             False,
             List[List[Int64]](),
@@ -4086,7 +3893,10 @@ def _run_pipeline(
     top_names: List[String],
     top_descending: List[Bool],
     top_nulls_last: List[Bool],
-    bounded: Bool,
+    top_maintain_order: Bool,
+    top_scan_key: Bool,
+    top_ranges: Optional[List[Int]],
+    top_row_ids: Bool,
     table: Bool,
     set_masks: List[List[Int64]],
     finish_steps: List[Step],
@@ -4097,8 +3907,14 @@ def _run_pipeline(
     empty otherwise."""
     trace_path("pipeline.run")
     # Every step's input columns and the output, typed once, and the
-    # row-local steps compiled once for every worker.
-    var schemas = ArcPointer(_step_schemas(frame, steps, joins[]))
+    # row-local steps compiled once for every worker. A late-materialized
+    # top-N's scan adds its row id column to every morsel.
+    var schema_frame = frame.clear()
+    if top_row_ids:
+        schema_frame = schema_frame.with_column(
+            Series(ROW_ID_COLUMN, Column[Int64](List[Int64]()))
+        )
+    var schemas = ArcPointer(_step_schemas(schema_frame, steps, joins[]))
     var templates = ArcPointer(_compile_steps(steps, schemas[]))
     # The aggregate table's layout, from the steps' output types (an
     # empty frame through every step) when it takes this reduction.
@@ -4154,8 +3970,13 @@ def _run_pipeline(
         else:
             trace_path("pipeline.group_collect")
     var shared = ArcPointer(frame.copy())
+    # A top-N's row groups in their statistics order (RowGroupReorderer):
+    # workers take them in turn, one row group each, as DuckDB's
+    # NextParallelScan hands out the reorderer's next row group.
     var ranges = ArcPointer(
-        _morsel_ranges(frame, max(1, morsel_rows), max(1, workers))
+        top_ranges.value().copy() if top_ranges else _morsel_ranges(
+            frame, max(1, morsel_rows), max(1, workers)
+        )
     )
     # Grouping sets: which come from another set's group rows. Largest
     # first, each takes the smallest earlier source whose keys hold its own,
@@ -4236,13 +4057,18 @@ def _run_pipeline(
             if primary_count < len(sets):
                 trace_path("pipeline.group_table_derived_sets")
     var cursor = _Cursor.new()
-    var shared_bound = _SharedBound.new()
-    var floating_key = False
-    if top > 0 and len(top_names) > 0 and top_names[0] in frame.columns():
-        floating_key = frame.column(top_names[0]).dtype().physical() in (
-            DataType.FLOAT64,
-            DataType.FLOAT32,
-        )
+    var boundary = TopNBoundary.new() if top > 0 else TopNBoundary.none()
+    var top_filter = _top_scan_filter(
+        frame,
+        top,
+        top_names,
+        top_descending,
+        top_nulls_last,
+        top_scan_key,
+        top_maintain_order,
+    )
+    top_filter.reordered = Bool(top_ranges)
+    top_filter.row_ids = top_row_ids
     var key_ranges = _key_ranges(frame, steps, joins[])
     if len(key_ranges) > 0:
         trace_path("pipeline.key_range")
@@ -4252,15 +4078,6 @@ def _run_pipeline(
             break
     for r in key_ranges:
         _ensure_zones(frame.column(r.column))
-    # A top-k on an integer key reads each morsel's key range from the
-    # zone maps before comparing its rows with the bound (`_zoned_top`).
-    if (
-        top > 0
-        and len(top_names) > 0
-        and top_names[0] in frame.columns()
-        and _range_key(frame.column(top_names[0]).dtype())
-    ):
-        _ensure_zones(frame.column(top_names[0]))
     # One job per morsel at most: a tiny source (PDS-H q2's five-row
     # region frame) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
@@ -4282,9 +4099,9 @@ def _run_pipeline(
                 top_names,
                 top_descending,
                 top_nulls_last,
-                bounded,
-                shared_bound,
-                floating_key,
+                top_maintain_order,
+                boundary,
+                top_filter,
                 layout,
                 sets,
                 set_masks,
@@ -4311,10 +4128,10 @@ def _run_pipeline(
         _emit_unmatched(jobs, steps, joins, indexes, batch_size)
     except e:
         cursor.free()
-        shared_bound.free()
+        boundary.free()
         raise e
     cursor.free()
-    shared_bound.free()
+    boundary.free()
     counts = List[Int](length=3 * len(steps) + 1, fill=0)
     for j in range(len(jobs)):
         for i in range(len(counts)):
@@ -4512,13 +4329,15 @@ def _run_pipeline(
         return merged[0].finish()
     # Morsels in source order: each worker's parts are in the order it
     # took them, so a merge by sequence over the workers' lists orders all.
-    # A top-k's candidates have no order to keep.
+    # A top-N's are its workers' heaps, each sorted (Finalize).
     var parts = List[DataFrame]()
     var next = List[Int](length=len(jobs), fill=0)
     if top > 0:
         for j in range(len(jobs)):
-            for part in jobs[j].parts:
-                parts.append(part.copy())
+            if len(jobs[j].topn) > 0:
+                var part = jobs[j].topn[0].finish()
+                if part.height() > 0:
+                    parts.append(part^)
     while top <= 0:
         var best = -1
         var best_sequence = 0
@@ -4536,13 +4355,22 @@ def _run_pipeline(
         var empty = schemas[][len(steps)].copy()
         return empty^
     if top > 0:
-        # Every worker's candidates, sorted once to the k best, ties by
-        # their place in the source.
+        # Combine: the workers' heaps into one top-N.
         var merged = parts[0].copy() if len(parts) == 1 else concat(parts)
-        merged = _top_rows(
-            merged, top_names, top_descending, top_nulls_last, top, 0, True
-        )
-        return merged.drop([_ORDER_COLUMN])
+        if len(parts) > 1:
+            var names = _top_keys(top_names, top_maintain_order)
+            merged = merged.take(
+                merged._arg_sort_head(
+                    names,
+                    _top_flags(top_descending, top_maintain_order),
+                    _top_flags(top_nulls_last, top_maintain_order),
+                    top,
+                    maintain_order=False,
+                )
+            )
+        if top_maintain_order:
+            merged = merged.drop([_ORDER_COLUMN])
+        return merged^
     if len(parts) == 1:
         return parts[0].copy()
     return concat(parts)
