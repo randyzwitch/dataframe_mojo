@@ -3,12 +3,20 @@ from dataframe.aggregation.reducer import (
     Reducer,
 )
 from dataframe.aggregation.hash_table import (
+    AggregateLayout,
+    AggregateSink,
+    _Cursor,
+    _one_chunk,
+    aggregate_finish,
+    aggregate_layout,
     aggregate_table,
+    ReducerSpec,
     key_supported,
     reduction_supported,
     states_supported,
 )
 from dataframe.aggregation.expressions import (
+    count_rows_by,
     _bind_all,
     _stream_reductions,
 )
@@ -62,10 +70,6 @@ from dataframe.kernels.gather import (
     can_filter_aligned_chunks,
     take_parallel,
     take_sorted_chunked,
-)
-from dataframe.aggregation.hash_reduce import (
-    hash_agg_eligible,
-    hash_aggregate,
 )
 from dataframe.kernels.hashing import (
     RowKeys,
@@ -181,51 +185,6 @@ def _encode_parallel(keys: List[Series], workers: Int) raises -> RowKeys:
     return RowKeys(ids^, representatives^)
 
 
-struct _RangeAggJob(Job):
-    """Reduce rows [start, end) into mergeable per-group state."""
-
-    var frame: DataFrame
-    var keys: List[Series]
-    var expressions: List[Expr]
-    var key_names: Dict[String, Bool]
-    var start: Int
-    var end: Int
-    var budget: Int
-    # None when the range held more groups than the budget.
-    var state: Optional[_StreamReduction]
-
-    def __init__(
-        out self,
-        frame: DataFrame,
-        keys: List[Series],
-        expressions: List[Expr],
-        key_names: Dict[String, Bool],
-        start: Int,
-        end: Int,
-        budget: Int,
-    ):
-        self.frame = frame.copy()
-        self.keys = keys.copy()
-        self.expressions = expressions.copy()
-        self.key_names = key_names.copy()
-        self.start = start
-        self.end = end
-        self.budget = budget
-        self.state = None
-
-    def run(mut self) raises:
-        var length = self.end - self.start
-        var frame = self.frame.slice(self.start, length)
-        var keys = List[Series](capacity=len(self.keys))
-        for key in self.keys:
-            keys.append(key.slice(self.start, length))
-        var state = _StreamReduction(
-            frame, self.expressions, keys, self.key_names
-        )
-        if state.keys.height() <= self.budget:
-            self.state = state^
-
-
 # Rows a perfect hash aggregate gives slots at a time. Their slots (8
 # bytes each) take 128 KB, within a core's L2, so every reduction reads
 # them back from cache, as DuckDB updates each aggregate from one vector's
@@ -312,157 +271,81 @@ struct _PerfectAggJob(Job):
             at += length
 
 
-struct _BucketJob(Job):
-    """Group one hash bucket on its own: encode its keys, evaluate the
-    aggregates, and remember each group's first row for reordering."""
+def _plain_inputs(expressions: List[Expr], frame: DataFrame) -> Bool:
+    """Whether every reduction reads a column of `frame` as it is (or no
+    input), so nothing is evaluated before its states update."""
+    for expression in expressions:
+        ref nodes = expression._nodes
+        for node in nodes:
+            if not is_reduction(node.op):
+                continue
+            for child in [node.left, node.right]:
+                if child < 0:
+                    continue
+                if nodes[child].op != COL or (
+                    nodes[child].text not in frame.columns()
+                ):
+                    return False
+    return True
 
+
+struct _BatchSinkJob(Job):
+    """One worker's morsels into its aggregate table sink, each morsel's
+    reduction inputs evaluated `batch` rows at a time."""
+
+    var frame: DataFrame
     var keys: List[Series]
-    var columns: List[Series]
     var expressions: List[Expr]
-    var batch_size: Int
-    var height: Int
-    # Workers for the encode; 1 inside a batch, more when run on the caller.
-    var encoders: Int
-    var result: List[Series]
-    var firsts: List[Int]
+    var layout: AggregateLayout
+    var ranges: List[Int]
+    var cursor: _Cursor
+    var workers: Int
+    var batch: Int
+    var sinks: List[AggregateSink]
 
     def __init__(
         out self,
-        var keys: List[Series],
-        var columns: List[Series],
-        expressions: List[Expr],
-        batch_size: Int,
-        height: Int,
-        encoders: Int = 1,
-    ):
-        self.keys = keys^
-        self.columns = columns^
-        self.expressions = expressions.copy()
-        self.batch_size = batch_size
-        self.height = height
-        self.encoders = encoders
-        self.result = List[Series]()
-        self.firsts = List[Int]()
-
-    def run(mut self) raises:
-        var groups = _encode_parallel(
-            self.keys, self.encoders
-        ) if self.encoders > 1 else encode_rows(self.keys, nulls_equal=True)
-        for key in self.keys:
-            self.result.append(key.take(groups.representatives))
-        # Bind against this bucket's columns so source indices line up.
-        var bound = _bind_all(self.expressions, self.columns)
-        for expression in bound:
-            self.result.append(
-                evaluate(
-                    expression,
-                    self.columns,
-                    self.height,
-                    batch_size=self.batch_size,
-                    grouped=True,
-                    groups=groups.ids,
-                    group_count=groups.count(),
-                )
-            )
-        self.firsts = groups.representatives.copy()
-
-
-struct _HashedBucketJob(Job):
-    """Group one hash bucket from the partitioner's key hashes (#334): the
-    keys stay in the source columns, compared in place on a hash match, and
-    only the aggregated columns were gathered into bucket order."""
-
-    var keys: List[Series]
-    var hashes: Int
-    var order: Int
-    var lo: Int
-    var hi: Int
-    var columns: List[Series]
-    var expressions: List[Expr]
-    var batch_size: Int
-    var sources: List[Series]
-    var indexed: List[Bool]
-    var result: List[Series]
-    var firsts: List[Int]
-
-    def __init__(
-        out self,
+        frame: DataFrame,
         keys: List[Series],
-        hashes: Int,
-        order: Int,
-        lo: Int,
-        hi: Int,
-        var columns: List[Series],
         expressions: List[Expr],
-        batch_size: Int,
-        sources: List[Series],
-        indexed: List[Bool],
+        layout: AggregateLayout,
+        ranges: List[Int],
+        cursor: _Cursor,
+        workers: Int,
+        batch: Int,
     ):
+        self.frame = frame.copy()
         self.keys = keys.copy()
-        self.hashes = hashes
-        self.order = order
-        self.lo = lo
-        self.hi = hi
-        self.columns = columns^
         self.expressions = expressions.copy()
-        self.batch_size = batch_size
-        self.sources = sources.copy()
-        self.indexed = indexed.copy()
-        self.result = List[Series]()
-        self.firsts = List[Int]()
+        self.layout = layout.copy()
+        self.ranges = ranges.copy()
+        self.cursor = cursor.copy()
+        self.workers = workers
+        self.batch = max(1, batch)
+        self.sinks = List[AggregateSink]()
 
     def run(mut self) raises:
-        ref hashes = Pointer[List[UInt64], MutAnyOrigin](
-            unsafe_from_address=self.hashes
-        )[]
-        ref order = Pointer[List[Int], MutAnyOrigin](
-            unsafe_from_address=self.order
-        )[]
-        var ids = List[Int]()
-        var firsts = List[Int]()
-        encode_bucket(
-            self.keys,
-            Span(hashes)[self.lo : self.hi],
-            Span(order)[self.lo : self.hi],
-            ids,
-            firsts,
-            exact_hashes=True,
-        )
-        for key in self.keys:
-            self.result.append(key.take(firsts))
-        var rows = order.unsafe_ptr().unsafe_offset(self.lo)
-        for i in range(len(self.expressions)):
-            if self.indexed[i]:
-                var expression = bind(self.expressions[i], self.sources)
-                var result: Series
-                if indexed_reductions([expression.copy()], self.sources):
-                    result = reduce_indexed(
-                        expression, self.sources, rows, ids, len(firsts)
-                    )
-                else:
-                    result = reduce_indexed_batches(
-                        expression,
-                        self.sources,
-                        rows,
-                        ids,
-                        len(firsts),
-                        self.batch_size,
-                    )
-                self.result.append(result.renamed(self.expressions[i]._name))
-            else:
-                var expression = bind(self.expressions[i], self.columns)
-                self.result.append(
-                    evaluate(
-                        expression,
-                        self.columns,
-                        self.hi - self.lo,
-                        batch_size=self.batch_size,
-                        grouped=True,
-                        groups=ids,
-                        group_count=len(firsts),
-                    )
+        var sink = AggregateSink(self.layout, self.workers)
+        var morsels = len(self.ranges) // 2
+        while True:
+            var m = self.cursor.take()
+            if m >= morsels:
+                break
+            var offset = self.ranges[2 * m]
+            var length = self.ranges[2 * m + 1]
+            for lo in range(0, length, self.batch):
+                var start = offset + lo
+                var n = min(self.batch, length - lo)
+                var keys = List[Series](capacity=len(self.keys))
+                for key in self.keys:
+                    keys.append(_one_chunk(key.slice(start, n)))
+                var inputs = table_inputs(
+                    self.frame.slice(start, n), keys, self.expressions
                 )
-        self.firsts = firsts^
+                for i in range(len(inputs)):
+                    inputs[i] = _one_chunk(inputs[i])
+                sink.sink(keys, inputs, start)
+        self.sinks.append(sink^)
 
 
 @fieldwise_init
@@ -547,10 +430,17 @@ struct GroupBy(Copyable):
     ) raises -> DataFrame:
         var prepared = List[Expr](capacity=len(expressions))
         var changed = False
+        var counted = len(self._keys) > 0 and (
+            self._keys[0].name() in self._frame.columns()
+        )
         for expression in expressions:
             if group_sequence_rows(expression):
                 prepared.append(expression.implode())
                 changed = True
+            elif counted:
+                var rows = count_rows_by(expression, self._keys[0].name())
+                changed = changed or len(rows._nodes) != len(expression._nodes)
+                prepared.append(rows^)
             else:
                 prepared.append(expression.copy())
         if changed:
@@ -591,49 +481,24 @@ struct GroupBy(Copyable):
         # 3.5 ms while seven threads idled.
         var height = self._frame.height()
         var workers = group_by_workers(height)
-        if _stream_reductions(expressions) and not self._many_distinct(
+        if _stream_reductions(expressions) and not self._counts_distinct(
             expressions
         ):
             var perfect = self._agg_perfect(expressions, key_names, workers)
             if perfect:
                 return perfect.take()
-        var result: DataFrame
-        # Keys are unchanged throughout this aggregation. Reuse the sampled
-        # preference across hash, range and partitioned strategy selection.
-        var whole = low_cardinality(self._keys) if workers > 1 else False
         # Keys of a small dense domain went to the perfect hash above, as
         # DuckDB's do; any other grouping goes through the aggregate table
         # whatever its number of groups, whose per-thread tables adapt to
         # however many there are. Neither DuckDB nor Polars picks a route
-        # by an estimate of the groups. The per-range routes below keep the
-        # reductions the table has no state for.
-        if workers > 1 and self._table_supported(expressions):
-            var table = self._agg_table(expressions, workers)
+        # by an estimate of the groups. An expression the table has no
+        # state for is evaluated over the groups, as Polars evaluates an
+        # expression over its group tuples.
+        if self._table_supported(expressions):
+            var table = self._agg_table(expressions, workers, batch_size)
             if table:
                 return _pack_struct_keys(table.value())
-        if (
-            workers > 1
-            and len(self._keys) == 1
-            and not whole
-            and hash_agg_eligible(self._keys[0], bound, self._frame._columns)
-        ):
-            return _pack_struct_keys(self._agg_hash(bound, workers))
-        var ranged = Optional[DataFrame]()
-        if (
-            workers > 1
-            and _stream_reductions(expressions)
-            and not self._many_distinct(expressions)
-        ):
-            ranged = self._agg_ranges(expressions, key_names, workers, whole)
-        if ranged:
-            result = ranged.take()
-        elif workers > 1:
-            result = self._agg_partitioned(
-                expressions, bound, batch_size, workers, whole
-            )
-        else:
-            result = self._agg_whole(bound, batch_size)
-        return _pack_struct_keys(result)
+        return _pack_struct_keys(self._agg_whole(bound, batch_size))
 
     def _table_supported(self, expressions: List[Expr]) raises -> Bool:
         """Whether the aggregate table (`aggregate_table.mojo`) groups these
@@ -650,13 +515,50 @@ struct GroupBy(Copyable):
         return True
 
     def _agg_table(
-        self, expressions: List[Expr], workers: Int
+        self, expressions: List[Expr], workers: Int, batch_size: Int
     ) raises -> Optional[DataFrame]:
         """Grouped reductions through the aggregate table: each worker
         hashes its morsels' keys where they are and probes its own table,
         updating its states by group; partitions of the groups then merge
         across workers in parallel (`aggregate_table.mojo`). None when some reduction's
         state does not fit inline in a group row."""
+        # A float key's words are canonical (-0.0 and 0.0, or two NaNs, are
+        # one group), so its group shows its first row's value, as DuckDB's
+        # rows keep the value they were made from: each float key's first
+        # value comes from a FIRST state and replaces the key column.
+        var float_keys = List[Int]()
+        var all_expressions = expressions.copy()
+        for k in range(len(self._keys)):
+            var name = self._keys[k].name()
+            if (
+                self._keys[k].dtype().is_float()
+                and name in self._frame.columns()
+            ):
+                float_keys.append(k)
+                all_expressions.append(
+                    col(name).first().alias("__key_first_" + String(k))
+                )
+        if len(float_keys) > 0:
+            var grouped = self._agg_canonical_table(
+                all_expressions, workers, batch_size
+            )
+            if not grouped:
+                return None
+            var frame = grouped.take()
+            var hidden = List[String]()
+            for k in float_keys:
+                var name = "__key_first_" + String(k)
+                frame = frame.with_column(
+                    frame.column(name).renamed(self._keys[k].name())
+                )
+                hidden.append(name)
+            return frame.drop(hidden)
+        return self._agg_canonical_table(expressions, workers, batch_size)
+
+    def _agg_canonical_table(
+        self, expressions: List[Expr], workers: Int, batch_size: Int
+    ) raises -> Optional[DataFrame]:
+        """`_agg_table` with float keys as their canonical words."""
         var empty_keys = List[Series](capacity=len(self._keys))
         for key in self._keys:
             empty_keys.append(key.slice(0, 0))
@@ -664,10 +566,20 @@ struct GroupBy(Copyable):
             self._frame.clear(), expressions, empty_keys, self._key_names()
         )
         var specs = table_specs(template)
-        var inputs = table_inputs(self._frame, self._keys, expressions)
-        if not states_supported(specs, inputs):
+        var empty = table_inputs(self._frame.clear(), empty_keys, expressions)
+        if not states_supported(specs, empty):
             return None
         trace_path("group_by.aggregate_table")
+        if not _plain_inputs(expressions, self._frame):
+            # Computed reduction inputs are evaluated a batch of
+            # `batch_size` rows at a time, each batch then updating the
+            # states (DuckDB's sink evaluates a DataChunk's inputs, then
+            # UpdateStates): an input error past the batch comes after the
+            # batch's update errors, as the batch size says.
+            return self._agg_batches(
+                expressions, specs, empty, template, workers, batch_size
+            )
+        var inputs = table_inputs(self._frame, self._keys, expressions)
         # Morsels within chunks: the columns' common chunks, or one
         # contiguous copy of each chunked column when they differ.
         var keys = self._keys.copy()
@@ -687,9 +599,7 @@ struct GroupBy(Copyable):
             ends.append(self._frame.height())
         var ranges = List[Int]()
         var start = 0
-        var morsel = max(
-            4096, min(1 << 16, self._frame.height() // (4 * workers) + 1)
-        )
+        var morsel = _MORSEL_ROWS
         for end in ends:
             var at = start
             while at < end:
@@ -701,60 +611,68 @@ struct GroupBy(Copyable):
         var result = aggregate_table(keys, inputs, specs, ranges, workers)
         return table_frame(template, result^, self._maintain_order)
 
-    def _agg_hash(
-        self, bound: List[BoundExpr], workers: Int
-    ) raises -> DataFrame:
-        """Many groups of one Int64 key: states updated in place per worker
-        range, then merged by hash part (`hash_agg.mojo`), with no column
-        gathered into bucket order."""
-        trace_path("group_by.hash_agg")
-        var parts = hash_aggregate(
-            self._keys[0], bound, self._frame._columns, workers
-        )
-        ref firsts = parts[0]
-        var columns = List[Series](capacity=len(bound) + 1)
-        columns.append(self._keys[0].take(firsts))
-        for j in range(len(bound)):
-            var pieces = List[Series](capacity=len(parts[1]))
-            for p in range(len(parts[1])):
-                pieces.append(parts[1][p][j].copy())
-            var merged = Series._from_chunks(pieces).rechunk()
-            columns.append(merged.renamed(bound[j].expr._name))
-        var grouped = DataFrame(columns^, height=len(firsts))
-        if not self._maintain_order:
-            return grouped^
-        return grouped.take(sort_indices([firsts.copy()]))
+    def _agg_batches(
+        self,
+        expressions: List[Expr],
+        specs: List[ReducerSpec],
+        empty: List[Series],
+        template: _StreamReduction,
+        workers: Int,
+        batch_size: Int,
+    ) raises -> Optional[DataFrame]:
+        """The aggregate table over morsels whose reduction inputs are
+        evaluated `batch_size` rows at a time on the workers."""
+        var frame = self._frame.rechunk()
+        var keys = List[Series](capacity=len(self._keys))
+        for key in self._keys:
+            keys.append(key.rechunk() if key.is_chunked() else key.copy())
+        var empty_keys = List[Series](capacity=len(keys))
+        for key in keys:
+            empty_keys.append(key.slice(0, 0))
+        var layout = aggregate_layout(empty_keys, empty, specs)
+        var ranges = List[Int]()
+        var height = frame.height()
+        var morsel = _MORSEL_ROWS
+        var at = 0
+        while at < height:
+            ranges.append(at)
+            ranges.append(min(morsel, height - at))
+            at += morsel
+        var cursor = _Cursor.new()
+        var jobs = List[_BatchSinkJob](capacity=workers)
+        for _ in range(max(1, workers)):
+            jobs.append(
+                _BatchSinkJob(
+                    frame,
+                    keys,
+                    expressions,
+                    layout,
+                    ranges,
+                    cursor,
+                    workers,
+                    batch_size,
+                )
+            )
+        try:
+            run_jobs(jobs)
+        except e:
+            cursor.free()
+            raise e^
+        cursor.free()
+        var sinks = List[AggregateSink](capacity=len(jobs))
+        for j in range(len(jobs)):
+            while len(jobs[j].sinks) > 0:
+                sinks.append(jobs[j].sinks.pop())
+        var result = aggregate_finish(sinks, layout)
+        return table_frame(template, result^, self._maintain_order)
 
-    def _many_distinct(self, expressions: List[Expr]) raises -> Bool:
-        """Whether some `n_unique` reads many distinct values (#336).
-
-        Per-range sets of (group, value) pairs merge on one thread, which
-        is cheap only when values repeat: grouping IsRefresh by RegionID's
-        3,586 values takes 57 ms that way and 75 ms through the whole-frame
-        path's hash partitions, while UserID's 1.5M values take 314 ms and
-        87 ms. A sample of evenly spaced rows tells them apart: at most a
-        tenth of it distinct (RegionID shows 9%, SearchPhrase 14%, UserID
-        all) keeps the ranges. Any input that is not a column is assumed
-        to have many values.
-        """
-        var height = self._frame.height()
-        var sample = min(height, 4096)
-        if sample == 0:
-            return False
-        var rows = List[Int](capacity=sample)
-        for k in range(sample):
-            rows.append(k * height // sample)
+    def _counts_distinct(self, expressions: List[Expr]) -> Bool:
+        """Whether some expression counts distinct values: the aggregate
+        table counts them in its distinct tables (`AggregateSink.distinct`),
+        which the per-worker and per-range states do not have."""
         for expression in expressions:
-            ref nodes = expression._nodes
-            for node in nodes:
-                if node.op != N_UNIQUE:
-                    continue
-                ref input = nodes[node.left]
-                if input.op != COL:
-                    return True
-                var picked = self._frame.column(input.text).take(rows)
-                var distinct = encode_rows([picked^], nulls_equal=True).count()
-                if 10 * distinct > sample:
+            for node in expression._nodes:
+                if node.op == N_UNIQUE:
                     return True
         return False
 
@@ -854,292 +772,6 @@ struct GroupBy(Copyable):
             rows=height,
         )
         return reduction.finish()
-
-    def _agg_ranges(
-        self,
-        expressions: List[Expr],
-        key_names: Dict[String, Bool],
-        workers: Int,
-        whole: Bool,
-    ) raises -> Optional[DataFrame]:
-        """Reduce each worker's row range to per-group state, then merge.
-
-        Every row-local reduction the streaming executor supports keeps a
-        mergeable state (see _StreamReduction), so this serves any list of
-        them over any key types. Ranges are zero-copy slices; no column is
-        gathered. Private states must stay small for the serial merge, so
-        only low-cardinality keys qualify, and any range holding more groups
-        than the budget falls back to hash partitioning. Groups keep
-        first-occurrence order, as the whole-frame path does.
-        """
-        var height = self._frame.height()
-        var budget = max(1, 1_000_000 // (workers * len(expressions)))
-        # The same sampled estimate that picks whole-frame encoding over
-        # hash partitioning: every range of a high-cardinality key would
-        # hold most groups, and merging those states serially loses.
-        if not (whole or small_key_product(self._keys)):
-            return None
-        var bounds = partitions(height, workers, 64)
-        var jobs = List[_RangeAggJob](capacity=workers)
-        for w in range(workers):
-            jobs.append(
-                _RangeAggJob(
-                    self._frame,
-                    self._keys,
-                    expressions,
-                    key_names,
-                    bounds[w],
-                    bounds[w + 1],
-                    budget,
-                )
-            )
-        run_jobs(jobs)
-        for w in range(len(jobs)):
-            if not jobs[w].state:
-                return None
-        var merged = jobs[0].state.take()
-        for w in range(1, len(jobs)):
-            merged.merge(jobs[w].state.value())
-        trace_path("group_by.ranges")
-        return merged.finish()
-
-    def _referenced(self, bound: List[BoundExpr]) -> List[Series]:
-        """The frame columns the aggregates read, in frame order; every
-        column if a selector is still unexpanded."""
-        var wanted = Dict[String, Bool]()
-        var everything = False
-        for expression in bound:
-            for node in expression.expr._nodes:
-                if node.op == COL:
-                    wanted[node.text] = True
-                elif node.op == SELECTOR:
-                    everything = True
-        var columns = List[Series]()
-        for column in self._frame._columns:
-            if everything or column.name() in wanted:
-                columns.append(column.copy())
-        return columns^
-
-    def _partitioned_references(
-        self, bound: List[BoundExpr]
-    ) -> Tuple[List[Bool], List[Series], List[Series]]:
-        """Per-expression capabilities and distinct indexed/gathered sources.
-
-        A column shared by both routes intentionally appears in both lists;
-        a supported-only source never enters the full-column gather.
-        """
-        var indexed = List[Bool]()
-        var fallback = List[BoundExpr]()
-        var direct = List[BoundExpr]()
-        for expression in bound:
-            var capable = _stream_reductions(
-                [expression.expr.copy()]
-            ) or indexed_reductions([expression.copy()], self._frame._columns)
-            # Categorical evaluation decodes/re-encodes dictionary values;
-            # nested expressions have their own preparation requirements.
-            # Keep those on the ordinary evaluator, independently of other
-            # aggregates in the same request.
-            for dtype in expression.dtypes:
-                if dtype.is_categorical() or dtype.is_nested():
-                    capable = False
-            for i in range(len(expression.expr._nodes)):
-                if (
-                    expression.expr._nodes[i].op == COL
-                    and expression.sources[i] >= 0
-                ):
-                    var dtype = self._frame._columns[
-                        expression.sources[i]
-                    ].dtype()
-                    if dtype.is_categorical() or dtype.is_nested():
-                        capable = False
-            indexed.append(capable)
-            if capable:
-                direct.append(expression.copy())
-            else:
-                fallback.append(expression.copy())
-        return (indexed^, self._referenced(direct), self._referenced(fallback))
-
-    def _agg_partitioned(
-        self,
-        expressions: List[Expr],
-        bound: List[BoundExpr],
-        batch_size: Int,
-        workers: Int,
-        whole: Bool,
-    ) raises -> DataFrame:
-        """Group by hash bucket in parallel; see dataframe/partition.mojo.
-
-        Each bucket holds a disjoint set of keys, so buckets are encoded
-        and reduced independently and their outputs concatenated. Output
-        order is bucket order unless maintain_order, which sorts groups by
-        their first input row afterwards (O(groups), not O(rows)).
-
-        A bucket holding several times its share of rows (a skewed key)
-        would serialize the batch, so such buckets run on the calling
-        thread, where their reduce can use the pool, and only the light
-        buckets are jobs.
-        """
-        var height = self._frame.height()
-        # A sampled estimate decides whether scattering is worth its gather;
-        # on a low-cardinality key the serial encode it replaces is cheap.
-        if whole:
-            return self._agg_whole(bound, batch_size)
-        trace_path("group_by.partitioned")
-        # Hashing, scattering and encoding a composite key cost 50 to 80 ns
-        # a row of thread time, against under 1 ns for the scans the shared
-        # 64K-row floor is sized for, so this route divides finer: 180K
-        # rows of TPC-DS q39 (45K groups) took 15 ms on the floor's two
-        # workers, the same at any thread count.
-        var threads = max(
-            workers,
-            min(configured_workers(), height // _PARTITION_ROWS_PER_WORKER),
-        )
-        var partitioner = Partitioner(self._keys, threads)
-        var parts = partitioner.scatter(threads, with_hashes=True)
-        var buckets = parts.buckets()
-        var referenced = self._referenced(bound)
-        # Heavy: a bucket big enough to serialize the batch on its own. It
-        # must be large relative to the frame, not only to its share, or
-        # low cardinality (few occupied buckets) would count as heavy.
-        var heavy_rows = max(height // 8, 4 * height // buckets)
-        var any_heavy = False
-        for b in range(buckets):
-            if parts.bounds[b + 1] - parts.bounds[b] > heavy_rows:
-                any_heavy = True
-        if not any_heavy:
-            # Encode each bucket from the key hashes. Plain reductions read
-            # values at their source rows; others gather values into bucket
-            # order first.
-            var preparation = self._partitioned_references(bound)
-            var indexed = preparation[0].copy()
-            var sources = preparation[1].copy()
-            var gathered_sources = preparation[2].copy()
-            var any_indexed = False
-            var any_fallback = False
-            for capable in indexed:
-                any_indexed = any_indexed or capable
-                any_fallback = any_fallback or not capable
-            for i in range(len(sources)):
-                if sources[i].is_chunked():
-                    sources[i] = sources[i].rechunk()
-            if any_indexed:
-                trace_path("group_by.partitioned.indexed")
-            if any_indexed and any_fallback:
-                trace_path("group_by.partitioned.mixed")
-            # Only aggregates the indexed readers cannot serve need their
-            # sources in bucket order. With none, there is nothing to
-            # gather and no reason to copy the row order for it.
-            var values = List[Series]()
-            if len(gathered_sources) > 0:
-                values = take_parallel(
-                    gathered_sources, parts.order.copy(), threads
-                )
-            var jobs = List[_HashedBucketJob]()
-            for b in range(buckets):
-                var lo = parts.bounds[b]
-                var hi = parts.bounds[b + 1]
-                if hi == lo:
-                    continue
-                var bucket_columns = List[Series](capacity=len(values))
-                for column in values:
-                    bucket_columns.append(column.slice(lo, hi - lo))
-                jobs.append(
-                    _HashedBucketJob(
-                        partitioner.keys,
-                        Int(Pointer(to=parts.hashes)),
-                        Int(Pointer(to=parts.order)),
-                        lo,
-                        hi,
-                        bucket_columns^,
-                        expressions,
-                        batch_size,
-                        sources,
-                        indexed,
-                    )
-                )
-            run_jobs(jobs)
-            var frames = List[DataFrame](capacity=len(jobs))
-            var starts = List[Int]()
-            var runs = List[Int]()
-            runs.append(0)
-            for j in range(len(jobs)):
-                frames.append(
-                    DataFrame(jobs[j].result.copy(), height=len(jobs[j].firsts))
-                )
-                for row in jobs[j].firsts:
-                    starts.append(row)
-                runs.append(len(starts))
-            _ = partitioner^
-            _ = parts^
-            var grouped = concat(frames)
-            if not self._maintain_order:
-                return grouped^
-            # Each bucket's groups are already in first-row order (its
-            # rows were scattered in input order), so the whole order is
-            # a merge of the buckets' runs, not a sort: 45K groups of
-            # TPC-DS q39 took 2.4 ms to sort and 0.2 ms to merge.
-            return grouped.take(_merge_ascending_runs(starts, runs))
-        var sources = List[Series](capacity=len(self._keys) + len(referenced))
-        for key in self._keys:
-            sources.append(key.copy())
-        for column in referenced:
-            sources.append(column.copy())
-        var gathered = take_parallel(sources, parts.order.copy(), threads)
-        var keys = List[Series](capacity=len(self._keys))
-        var columns = List[Series](capacity=len(referenced))
-        for i in range(len(gathered)):
-            if i < len(self._keys):
-                keys.append(gathered[i].copy())
-            else:
-                columns.append(gathered[i].copy())
-        var light = List[_BucketJob]()
-        var light_offsets = List[Int]()
-        var done = List[_BucketJob]()
-        var done_offsets = List[Int]()
-        for b in range(buckets):
-            var lo = parts.bounds[b]
-            var hi = parts.bounds[b + 1]
-            if hi == lo:
-                continue
-            var bucket_keys = List[Series](capacity=len(keys))
-            for key in keys:
-                bucket_keys.append(key.slice(lo, hi - lo))
-            var bucket_columns = List[Series](capacity=len(columns))
-            for column in columns:
-                bucket_columns.append(column.slice(lo, hi - lo))
-            var heavy = hi - lo > heavy_rows
-            var job = _BucketJob(
-                bucket_keys^,
-                bucket_columns^,
-                expressions,
-                batch_size,
-                hi - lo,
-                worker_count(hi - lo) if heavy else 1,
-            )
-            if heavy:
-                # On the caller, so its encode and reduce can use the pool.
-                job.run()
-                done.append(job^)
-                done_offsets.append(lo)
-            else:
-                light.append(job^)
-                light_offsets.append(lo)
-        run_jobs(light)
-        while len(light) > 0:
-            done.append(light.pop(0))
-            done_offsets.append(light_offsets.pop(0))
-
-        var frames = List[DataFrame](capacity=len(done))
-        var firsts = List[Int]()
-        for j in range(len(done)):
-            var groups = len(done[j].firsts)
-            frames.append(DataFrame(done[j].result.copy(), height=groups))
-            for r in done[j].firsts:
-                firsts.append(parts.order[done_offsets[j] + r])
-        var result = concat(frames)
-        if not self._maintain_order:
-            return result^
-        return result.take(sort_indices([firsts^]))
 
     def _agg_whole(
         self, bound: List[BoundExpr], batch_size: Int
@@ -1276,22 +908,20 @@ def _reduce_column(
     raise Error("Unknown group reduction: " + reduction)
 
 
-# Rows a worker in the hash-partitioned group-by: about 1 ms of work each.
-comptime _PARTITION_ROWS_PER_WORKER = 16384
+# Rows a worker takes at a time: DuckDB's DEFAULT_ROW_GROUP_SIZE, the unit
+# its table scans hand to threads.
+comptime _MORSEL_ROWS = 122_880
 
 
 def group_by_workers(height: Int) -> Int:
-    """Workers the eager group-by (`GroupBy.agg`) divides `height` rows
-    among: the shared floor, or one per `_PARTITION_ROWS_PER_WORKER` rows
-    of hashing and encoding."""
-    return max(
-        worker_count(height),
-        min(configured_workers(), height // _PARTITION_ROWS_PER_WORKER),
-    )
+    """Workers the eager group-by divides `height` rows among: one per
+    morsel of `_MORSEL_ROWS`, at most the configured threads (DuckDB runs at
+    most one thread per row group)."""
+    return max(1, min(configured_workers(), -(-height // _MORSEL_ROWS)))
 
 
 def range_states(keys: List[Series]) raises -> Bool:
-    """Whether the eager group-by keeps groups of `keys` in each worker's
-    private state over its own rows (the whole-frame and range routes, by
-    their sampled tests) rather than hash-partitioning every row first."""
+    """Whether the keys have few values (`low_cardinality`) or form few
+    groups (`small_key_product`), by their sampled tests; read by the
+    planner's batch-states decision (`plan_batch_states_win`)."""
     return low_cardinality(keys) or small_key_product(keys)

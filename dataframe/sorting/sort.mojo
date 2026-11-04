@@ -23,6 +23,7 @@ Callers come through `sort_rows`, which picks the top-N for a limit as
 DuckDB's TopN optimizer does (topn_optimizer.cpp: a full sort once the
 limit is over 5,000 rows and 0.7% of the input).
 """
+from std.collections import Optional
 from std.ffi import external_call
 from std.memory import Pointer, unsafe_memcpy
 
@@ -36,12 +37,16 @@ from dataframe.sorting.algorithms import (
     pdqsort_branchless,
     vergesort,
 )
+from dataframe.sorting.top_n import TopNBoundary, TopNHeap
 from dataframe.sorting.sort_key import (
     DEFAULT_ROW_GROUP_SIZE,
     STANDARD_VECTOR_SIZE,
     KeyBlock,
     SortKeyLayout,
     encode_keys,
+    key_prefixes,
+    encode_selected,
+    has_row_key,
 )
 
 # topn_optimizer.cpp, TopN::CanOptimize: a limit over this many rows and
@@ -307,185 +312,63 @@ def _sorted_rows[
 # ===----------------------------------------------------------------------=== #
 
 
-struct _KeyArena(Movable):
-    """StringHeap for the heap's variable keys: blocks never move, so a
-    key's address stays valid while the arena lives."""
-
-    var blocks: List[List[UInt8]]
-    var used: Int
-
-    def __init__(out self):
-        self.blocks = List[List[UInt8]]()
-        self.used = 0
-
-    def add(mut self, address: Int, size: Int) -> Int:
-        comptime BLOCK = 1 << 16
-        if len(self.blocks) == 0 or self.used + size > len(
-            self.blocks[len(self.blocks) - 1]
-        ):
-            self.blocks.append(
-                List[UInt8](unsafe_uninit_length=max(BLOCK, size))
-            )
-            self.used = 0
-        var block = Int(self.blocks[len(self.blocks) - 1].unsafe_ptr())
-        var at = block + self.used
-        unsafe_memcpy(
-            dest=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=at),
-            src=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=address),
-            count=size,
-        )
-        self.used += size
-        return at
-
-
-struct TopNHeap[W: Int, VAR: Bool](Movable):
-    """TopNHeap: a max-heap of the best `heap_size` key records seen (the
-    worst on top), each with its row."""
-
-    comptime K = SortKeys[Self.W, Self.VAR]
-    var heap_size: Int
-    var records: List[UInt64]
-    var size: Int
-    var arena: _KeyArena
-    # Entries added since the last Reduce (heap_data's size in DuckDB).
-    var added: Int
-
-    def __init__(out self, heap_size: Int):
-        self.heap_size = heap_size
-        self.records = List[UInt64](
-            length=max(1, (heap_size + 1) * Self.K.R), fill=0
-        )
-        self.size = 0
-        self.arena = _KeyArena()
-        self.added = 0
-
-    def keys(self) -> Self.K:
-        return Self.K(Int(self.records.unsafe_ptr()))
-
-    def reduce_threshold(self) -> Int:
-        return max(STANDARD_VECTOR_SIZE * 5, 2 * self.heap_size)
-
-    @always_inline
-    def should_add(self, rec: Rec) -> Bool:
-        """EntryShouldBeAdded."""
-        if self.heap_size == 0:
-            return False
-        if self.size < self.heap_size:
-            return True
-        return Self.K.less(rec, self.keys().get(0))
-
-    def _sift_up(self, i_in: Int):
-        var k = self.keys()
-        var i = i_in
-        var value = k.get(i)
-        while i > 0:
-            var parent = (i - 1) // 2
-            var p = k.get(parent)
-            if not Self.K.less(p, value):
-                break
-            k.put(i, p)
-            i = parent
-        k.put(i, value)
-
-    def _sift_down(self, i_in: Int):
-        var k = self.keys()
-        var i = i_in
-        var value = k.get(i)
-        while True:
-            var child = 2 * i + 1
-            if child >= self.size:
-                break
-            var c = k.get(child)
-            if child + 1 < self.size:
-                var right = k.get(child + 1)
-                if Self.K.less(c, right):
-                    child += 1
-                    c = right
-            if not Self.K.less(value, c):
-                break
-            k.put(i, c)
-            i = child
-        k.put(i, value)
-
-    def add(mut self, var rec: Rec):
-        """AddEntryToHeap: replace the worst entry once full."""
-        comptime if Self.VAR:
-            rec[2] = UInt64(self.arena.add(Int(rec[2]), Int(rec[1])))
-        self.added += 1
-        if self.size >= self.heap_size:
-            self.keys().put(0, rec)
-            self._sift_down(0)
-            return
-        self.keys().put(self.size, rec)
-        self.size += 1
-        self._sift_up(self.size - 1)
-
-    def sink(mut self, block: KeyBlock):
-        """Sink: every record of a chunk that beats the heap's worst."""
-        var k = Self.K(block.address())
-        for i in range(block.count):
-            var rec = k.get(i)
-            if self.should_add(rec):
-                self.add(rec)
-
-    def reduce(mut self):
-        """Reduce: past the threshold, keep only the live entries' keys."""
-        comptime if Self.VAR:
-            if self.added < self.reduce_threshold():
-                return
-            var arena = _KeyArena()
-            var k = self.keys()
-            for i in range(self.size):
-                var rec = k.get(i)
-                rec[2] = UInt64(arena.add(Int(rec[2]), Int(rec[1])))
-                k.put(i, rec)
-            self.arena = arena^
-        self.added = self.size
-
-    def finalize(self):
-        """Finalize: the entries in key order."""
-        pdqsort_branchless(self.keys(), 0, self.size)
-
-    def combine(mut self, other: Self):
-        """Combine: another thread's sorted heap, best first, until an
-        entry can no longer enter."""
-        var k = other.keys()
-        for i in range(other.size):
-            var rec = k.get(i)
-            if not self.should_add(rec):
-                break
-            self.add(rec)
-        self.reduce()
-
-
 struct _TopNJob[W: Int, VAR: Bool](Job):
     """One thread's top-N Sink over rows [lo, hi), a vector at a time, and
-    its Finalize."""
+    its Finalize; full heaps share their boundary."""
 
     var layout: Int
     var lo: Int
     var hi: Int
-    var heap: TopNHeap[Self.W, Self.VAR]
+    var heap: TopNHeap
+    var boundary: TopNBoundary
 
-    def __init__(out self, layout: Int, lo: Int, hi: Int, limit: Int):
+    def __init__(
+        out self,
+        layout: Int,
+        lo: Int,
+        hi: Int,
+        limit: Int,
+        boundary: TopNBoundary,
+    ):
         self.layout = layout
         self.lo = lo
         self.hi = hi
-        self.heap = TopNHeap[Self.W, Self.VAR](limit)
+        self.heap = TopNHeap(limit, SortKeys[Self.W, Self.VAR].R)
+        self.boundary = boundary
 
     def run(mut self) raises:
         ref layout = Pointer[SortKeyLayout, MutAnyOrigin](
             unsafe_from_address=self.layout
         )[]
         var at = self.lo
+        var prefixes = List[UInt64]()
+        var row_key = has_row_key(layout)
         while at < self.hi:
             var end = min(self.hi, at + STANDARD_VECTOR_SIZE)
-            var block = encode_keys(layout, at, end)
-            self.heap.sink(block)
-            self.heap.reduce()
+            var block: KeyBlock
+            var entering = Optional[List[Int]]()
+            if key_prefixes(layout, at, end, prefixes):
+                entering = self.heap.entering[Self.W, Self.VAR](
+                    prefixes, end - at
+                )
+            if entering and len(entering.value()) == 0:
+                # No row of the vector can be in the result.
+                at = end
+                continue
+            if entering and len(entering.value()) < end - at and not row_key:
+                # Sort keys for the rows that pass alone.
+                block = encode_selected(layout, at, entering.value())
+            else:
+                block = encode_keys(layout, at, end)
+            self.heap.sink[Self.W, Self.VAR](block)
+            _ = self.heap.publish[Self.W, Self.VAR](self.boundary)
             _ = block^
             at = end
-        self.heap.finalize()
+            if self.heap.added >= self.heap.reduce_threshold():
+                # Reduce: the payload is the row itself, so only the
+                # keys' bytes are compacted.
+                self.heap.compact_keys[Self.W, Self.VAR]()
+        self.heap.finalize[Self.W, Self.VAR]()
 
 
 def _top_rows[
@@ -494,30 +377,33 @@ def _top_rows[
     var n = layout.rows
     var threads = _sink_threads(n, threads_cap)
     var bounds = partitions(n, threads, STANDARD_VECTOR_SIZE)
+    var boundary = TopNBoundary.new() if threads > 1 else TopNBoundary.none()
     var jobs = List[_TopNJob[W, VAR]](capacity=threads)
     var layout_address = Int(Pointer(to=layout))
     for t in range(threads):
         if bounds[t] < bounds[t + 1]:
             jobs.append(
                 _TopNJob[W, VAR](
-                    layout_address, bounds[t], bounds[t + 1], limit
+                    layout_address, bounds[t], bounds[t + 1], limit, boundary
                 )
             )
-    if len(jobs) > 1:
-        run_jobs(jobs)
-    elif len(jobs) == 1:
-        jobs[0].run()
+    try:
+        if len(jobs) > 1:
+            run_jobs(jobs)
+        elif len(jobs) == 1:
+            jobs[0].run()
+    except e:
+        boundary.free()
+        raise e^
+    boundary.free()
     var order = List[Int]()
     if len(jobs) == 0:
         return order^
-    var heap = TopNHeap[W, VAR](limit)
+    var heap = TopNHeap(limit, SortKeys[W, VAR].R)
     for j in range(len(jobs)):
-        heap.combine(jobs[j].heap)
-    heap.finalize()
-    order = List[Int](capacity=heap.size)
-    var k = heap.keys()
-    for i in range(heap.size):
-        order.append(k.payload(i))
+        heap.combine[W, VAR](jobs[j].heap)
+    heap.finalize[W, VAR]()
+    order = heap.payloads[W, VAR]()
     _ = jobs^
     _ = heap^
     return order^

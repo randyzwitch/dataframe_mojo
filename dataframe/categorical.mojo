@@ -257,7 +257,12 @@ def unify(mut first: Series, mut second: Series) raises:
 def sort_ranks(values: Series) raises -> Series:
     """Codes replaced by each value's rank in sorted order, as a plain
     UInt32 column: sorting by it sorts by the values."""
-    var dictionary = values.dtype().dictionary()
+    return codes_to_ranks(values, dictionary_ranks(values.dtype()))
+
+
+def dictionary_ranks(dtype: DataType) raises -> List[UInt32]:
+    """Each code's rank among the dictionary's values in sorted order."""
+    var dictionary = dtype.dictionary()
     var count = len(dictionary[])
     var order = List[Int](capacity=count)
     for code in range(count):
@@ -270,6 +275,12 @@ def sort_ranks(values: Series) raises -> Series:
     var rank = List[UInt32](length=count, fill=0)
     for position in range(count):
         rank[order[position]] = UInt32(position)
+    return rank^
+
+
+def codes_to_ranks(values: Series, rank: List[UInt32]) raises -> Series:
+    """A categorical column's codes mapped through `rank`
+    (`dictionary_ranks` of its dtype), as a plain UInt32 column."""
     var flat = values.rechunk() if values.is_chunked() else values.copy()
     ref column = flat._data[Column[UInt32]]
     var n = len(column)

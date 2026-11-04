@@ -95,8 +95,18 @@ from dataframe.parallel import (
     configured_workers,
     run_jobs,
 )
+from dataframe.sorting.top_n import TopNBoundary
+from dataframe.sorting.top_n_sink import TopNSink
+from dataframe.sorting.row_group_order import orderable, row_group_order
+from dataframe.query_execution.late_materialization import (
+    LATE_MATERIALIZATION_MAX_ROWS,
+    late_fetch,
+    late_materialization_plan,
+)
 from dataframe.pipeline import (
-    _TopBound,
+    _ORDER_COLUMN,
+    _top_flags,
+    _top_keys,
     _ensure_zones,
     _range_key,
     _window_bounds,
@@ -387,6 +397,7 @@ def plan_stream_execute(
     # order, so ties keep the stable sort's order.
     var top = -1
     var top_node = -1
+    var top_maintain_order = False
     var top_names = List[String]()
     var top_descending = List[Bool]()
     var top_nulls_last = List[Bool]()
@@ -398,14 +409,16 @@ def plan_stream_execute(
     ):
         top = self._nodes[cursor].sort_limit()
         top_node = cursor
+        top_maintain_order = self._nodes[cursor].maintain_order
         top_names = self._nodes[cursor].names.copy()
         var n = len(top_names)
         for k in range(n):
             top_descending.append(self._nodes[cursor].sort_descending(k))
             top_nulls_last.append(self._nodes[cursor].sort_nulls_last(k))
         cursor = self._nodes[cursor].left
-    var candidates = List[DataFrame]()
-    var candidate_rows = 0
+    # A streamed top-N's sink, made at its first batch.
+    var topn = List[TopNSink]()
+    var top_batches = 0
     var operations = List[PlanNode]()
     # The plan node of each operation, for the execution report.
     var operation_nodes = List[Int]()
@@ -1270,12 +1283,11 @@ def plan_stream_execute(
     # 3.8M rows against 1.5M-row builds: 186 -> 148 ms). They grow only
     # while every worker still gets a batch: a 150K-row customer table
     # in one batch ran on one worker (q10, q13 and q22 were 7-23% slower).
-    # A top-k bounds its first key once it holds k rows, when that key
-    # is read from the input as it is: no join, and no operation that
-    # writes a column of that name.
-    var bound = _TopBound()
-    var bounded = top > 0 and len(shared_joins[]) == 0
-    if bounded:
+    # A TopN pushes a dynamic filter into the scan when its first sort
+    # column is read from the source as it is: no join, and no operation
+    # that writes a column of that name.
+    var top_scan_key = top > 0 and len(shared_joins[]) == 0
+    if top_scan_key:
         for operation in operations:
             if operation.kind == WITH_COLUMNS or operation.kind == SELECT:
                 for e in operation.exprs:
@@ -1288,7 +1300,37 @@ def plan_stream_execute(
                         and r.value()[0] == e._name
                         and len(e._nodes) == 1
                     ):
-                        bounded = False
+                        top_scan_key = False
+    # RowGroupPruner: a table scan under ORDER BY ... LIMIT on a column it
+    # reads unchanged is read in its row groups' statistics order, and the
+    # row groups that cannot reach the limit are dropped; a filter between
+    # them (or the scan's table filters) leaves the order alone but
+    # prunes nothing. Dropped leading row groups shorten the offset.
+    var top_ranges = Optional[List[Int]]()
+    if (
+        top_scan_key
+        and source.kind == SCAN_FRAME
+        and top - skip > 0
+        and top_names[0] in input.columns()
+        and orderable(input.column(top_names[0]).dtype())
+    ):
+        var prune = True
+        for operation in operations:
+            if operation.kind == FILTER:
+                prune = False
+        var order = row_group_order(
+            input.column(top_names[0]),
+            top_descending[0],
+            top_nulls_last[0],
+            top - skip,
+            skip,
+            prune,
+        )
+        if order:
+            trace_path("pipeline.top_row_group_order")
+            top = top - skip + order.value().remaining_offset
+            skip = order.value().remaining_offset
+            top_ranges = order.value().ranges.copy()
     var rows_per_batch = batch_size
     if (
         len(shared_joins[]) > 0
@@ -1340,6 +1382,30 @@ def plan_stream_execute(
         var step_nodes = List[PlanNode](capacity=step_count)
         for k in range(step_count):
             step_nodes.append(operations[k].copy())
+        # LateMaterialization: a top-N of at most 50 rows over filters and
+        # projections on a table scan runs on the columns its order and
+        # filters read plus the row id; the other columns are fetched for
+        # its rows afterwards.
+        var pipe_input = input.copy()
+        var late_operations = Optional[List[PlanNode]]()
+        if (
+            top > 0
+            and limit >= 0
+            and limit <= LATE_MATERIALIZATION_MAX_ROWS
+            and source.kind == SCAN_FRAME
+            and len(shared_joins[]) == 0
+            and len(keys) == 0
+            and len(expressions) == 0
+            and not grouping
+        ):
+            var late = late_materialization_plan(
+                input.columns(), step_nodes, top_names
+            )
+            if late:
+                trace_path("pipeline.late_materialization")
+                late_operations = step_nodes.copy()
+                pipe_input = input.select(late.value().columns)
+                step_nodes = late.value().operations.copy()
         var set_frames = List[DataFrame]()
         var set_indices = List[List[Int]]()
         var set_masks = List[List[Int64]]()
@@ -1399,7 +1465,7 @@ def plan_stream_execute(
         for n in finish_nodes:
             finish_operations.append(self._nodes[n].copy())
         var piped_result = run_pipeline(
-            input,
+            pipe_input,
             _steps_of(step_nodes),
             shared_joins,
             shared_indexes,
@@ -1417,7 +1483,10 @@ def plan_stream_execute(
             top_names=top_names,
             top_descending=top_descending,
             top_nulls_last=top_nulls_last,
-            bounded=bounded,
+            top_maintain_order=top_maintain_order,
+            top_scan_key=top_scan_key,
+            top_ranges=top_ranges,
+            top_row_ids=Bool(late_operations),
             table=decision.uses_aggregate_table(),
             set_masks=set_masks,
             finish_steps=_steps_of(finish_operations),
@@ -1460,6 +1529,10 @@ def plan_stream_execute(
             piped_result = DataFrame(columns^)
         if top > 0:
             piped_result = piped_result.slice(skip, limit)
+        if late_operations:
+            piped_result = late_fetch(
+                input, piped_result, late_operations.value()
+            )
         if len(row_names) > 0:
             # The groups' build row numbers back to the key values,
             # merging the groups whose rows hold the same values.
@@ -1642,7 +1715,6 @@ def plan_stream_execute(
             job.collect_only = collecting
             job.keep_frame = undecided
             job.projection = projection.copy()
-            job.bound = bound.copy()
             jobs.append(job^)
         if len(jobs) == 0:
             break
@@ -1742,9 +1814,32 @@ def plan_stream_execute(
             elif len(expressions):
                 acc.absorb(jobs[i].take_reduced(), jobs[i].rows)
             elif top >= 0:
-                # The job has already cut its batch to its first rows.
-                candidate_rows += jobs[i].frame.height()
-                candidates.append(jobs[i].frame.copy())
+                # The job has already cut its batch to its first rows
+                # (its own top-N); they combine into the stream's.
+                var batch = jobs[i].frame.copy()
+                if top_maintain_order:
+                    # Batches arrive in input order: the batch number
+                    # and row are the place that settles ties.
+                    var places = List[Int64](capacity=batch.height())
+                    var base = Int64(top_batches) << 40
+                    for r in range(batch.height()):
+                        places.append(base + Int64(r))
+                    batch = batch.with_column(
+                        Series(_ORDER_COLUMN, Column[Int64](places^))
+                    )
+                top_batches += 1
+                if len(topn) == 0:
+                    topn.append(
+                        TopNSink(
+                            batch,
+                            _top_keys(top_names, top_maintain_order),
+                            _top_flags(top_descending, top_maintain_order),
+                            _top_flags(top_nulls_last, top_maintain_order),
+                            top,
+                            TopNBoundary.none(),
+                        )
+                    )
+                topn[0].sink(batch)
             else:
                 var part = jobs[i].frame.copy()
                 var dropped = min(skip, part.height())
@@ -1776,17 +1871,6 @@ def plan_stream_execute(
                 acc.pending_groups[0] += part.group_count()
                 acc.pending[0].append(part^)
         acc.merge(False)
-        if top >= 0 and len(candidates) > 1 and candidate_rows > 4 * top:
-            var merged = concat(candidates)
-            merged = merged.take(
-                merged._arg_sort_head(
-                    top_names, top_descending, top_nulls_last, top
-                )
-            )
-            candidate_rows = merged.height()
-            if bounded:
-                bound = _TopBound(merged, top_names[0], top_descending[0], top)
-            candidates = [merged^]
         if len(csv):
             csv[0].discard()
         if limit == 0 and top < 0:
@@ -1858,14 +1942,11 @@ def plan_stream_execute(
             swap(parts, acc.states)
             result = _finish_parts(parts^)
     elif top >= 0:
-        if len(candidates) > 0:
-            var merged = concat(candidates)
-            merged = merged.take(
-                merged._arg_sort_head(
-                    top_names, top_descending, top_nulls_last, top
-                )
-            )
-            result = merged.slice(skip, limit)
+        if len(topn) > 0:
+            var best = topn[0].finish()
+            if top_maintain_order:
+                best = best.drop([_ORDER_COLUMN])
+            result = best.slice(skip, limit)
     elif len(outputs):
         result = concat(outputs)
     if (

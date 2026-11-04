@@ -34,7 +34,7 @@ from std.bit import byte_swap
 from std.memory import Pointer, bitcast
 from std.sys import bit_width_of
 
-from dataframe.categorical import sort_ranks
+from dataframe.categorical import codes_to_ranks, dictionary_ranks
 from dataframe.dtype import DataType
 from dataframe.series import Series
 from dataframe.sorting.algorithms import SkaInfo
@@ -81,6 +81,8 @@ struct SortKeyColumn(Copyable, Movable):
     var nulls: Bool
     # Strings: the longest value's bytes.
     var max_length: Int
+    # A categorical key: each code's rank, by which its rows sort.
+    var ranks: List[UInt32]
 
     def constant_size(self) -> Bool:
         return self.encoding != _ENC_VARCHAR and self.encoding != _ENC_BLOB
@@ -160,7 +162,13 @@ struct SortKeyLayout(Copyable, Movable):
         descending: List[Bool],
         nulls_last: List[Bool],
         maintain_order: Bool,
+        *,
+        statistics: Bool = True,
     ) raises:
+        """`statistics=False` lays the key out from the column types alone,
+        for keys whose rows arrive later in chunks (`rebind`): a string
+        key's length is unknown, so the key is variable, and every column
+        may hold nulls."""
         if len(keys) == 0:
             raise Error("sort requires at least one column")
         if len(descending) != len(keys) or len(nulls_last) != len(keys):
@@ -173,18 +181,23 @@ struct SortKeyLayout(Copyable, Movable):
             var column = keys[k].copy()
             if len(column) != rows:
                 raise Error("sort key columns must have the same length")
+            var ranks = List[UInt32]()
             if column.dtype().is_categorical():
-                column = sort_ranks(column)
+                ranks = dictionary_ranks(column.dtype())
+                column = codes_to_ranks(column, ranks)
             var encoding = _encoding_of(column)
             var null_byte = _NULL_FIRST_BYTE
             var valid_byte = _NULL_LAST_BYTE
             if nulls_last[k]:
                 null_byte = _NULL_LAST_BYTE
                 valid_byte = _NULL_FIRST_BYTE
-            var nulls = column.null_count() > 0
-            var longest = _longest(column) if (
-                encoding[0] == _ENC_VARCHAR or encoding[0] == _ENC_BLOB
-            ) else 0
+            var nulls = not statistics or column.null_count() > 0
+            var longest = (
+                _longest(column) if (
+                    encoding[0] == _ENC_VARCHAR or encoding[0] == _ENC_BLOB
+                )
+                and statistics else 0
+            )
             columns.append(
                 SortKeyColumn(
                     column^,
@@ -195,6 +208,7 @@ struct SortKeyLayout(Copyable, Movable):
                     valid_byte,
                     nulls,
                     longest,
+                    ranks^,
                 )
             )
         if maintain_order:
@@ -208,6 +222,7 @@ struct SortKeyLayout(Copyable, Movable):
                     _NULL_LAST_BYTE,
                     False,
                     0,
+                    List[UInt32](),
                 )
             )
         # TupleDataLayout::Initialize(orders): the widest key, and the null
@@ -240,7 +255,11 @@ struct SortKeyLayout(Copyable, Movable):
                     sort_width += 1 + c.width
             else:
                 all_constant = False
-                if c.encoding == _ENC_VARCHAR and sort_width >= 0:
+                if (
+                    c.encoding == _ENC_VARCHAR
+                    and sort_width >= 0
+                    and statistics
+                ):
                     sort_width += 1 + c.max_length + 1
                 else:
                     sort_width = -1
@@ -269,6 +288,20 @@ struct SortKeyLayout(Copyable, Movable):
 
     def record_words(self) -> Int:
         return 4 if self.variable else self.words + 1
+
+    def rebind(mut self, keys: List[Series]) raises:
+        """The same key over other rows: `keys` are the key columns of a
+        new chunk, of the types the layout was made for."""
+        if len(keys) == 0:
+            self.rows = 0
+            return
+        self.rows = len(keys[0])
+        for k in range(len(keys)):
+            var column = keys[k].copy()
+            if column.dtype().is_categorical():
+                # The chunk's codes through the ranks found once.
+                column = codes_to_ranks(column, self.columns[k].ranks)
+            self.columns[k].series = column^
 
 
 @always_inline
@@ -736,4 +769,155 @@ def encode_keys(layout: SortKeyLayout, lo: Int, hi: Int) raises -> KeyBlock:
             rec[unsafe_offset=w] = UInt64(lo + i)
     _ = cursors^
     _ = lengths^
+    return block^
+
+
+def _string_prefixes(
+    column: StringColumn,
+    c: SortKeyColumn,
+    first: Int,
+    count: Int,
+    cursors: Pointer[Int, MutAnyOrigin],
+    limits: Pointer[Int, MutAnyOrigin],
+):
+    """String rows encoded as `_encode_strings` does, from each value's
+    length and first four bytes alone (an Arrow view holds them inline, as
+    DuckDB's string_t its prefix): a longer value's remaining bytes are
+    left zero, a lower bound, and its row stops there."""
+    var rows = _Bytes(column)
+    var nulls = c.nulls and column.null_count() > 0
+    var flip = UInt8(0xFF) if c.descending else UInt8(0)
+    for i in range(count):
+        var at = cursors[unsafe_offset=i]
+        var limit = limits[unsafe_offset=i]
+        if at >= limit:
+            continue
+        var row = first + i
+        var out_bytes = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=at)
+        if nulls and not column._valid(row):
+            out_bytes[] = c.null_byte
+            cursors[unsafe_offset=i] = at + 1
+            continue
+        out_bytes[] = c.valid_byte
+        var head = rows.head(row)
+        var n = Int(head & 0xFFFFFFFF)
+        var room = limit - at - 1
+        var shown = min(n, 4)
+        for j in range(min(shown, room)):
+            out_bytes[unsafe_offset=1 + j] = (
+                UInt8((head >> UInt64(32 + 8 * j)) & 0xFF) + 1
+            ) ^ flip
+        if n < 4:
+            if n < room:
+                out_bytes[unsafe_offset=1 + n] = flip
+            cursors[unsafe_offset=i] = min(at + n + 2, limit)
+        else:
+            cursors[unsafe_offset=i] = limit
+
+
+def key_prefixes(
+    layout: SortKeyLayout, lo: Int, hi: Int, mut prefixes: List[UInt64]
+) raises -> Bool:
+    """For rows [lo, hi), a lower bound of each key's first word (the
+    record's `part0`), as unsigned integers: the key columns encoded up to
+    the word's eighth byte, zeros past a binary column. A row whose bound
+    exceeds a boundary key's first word is worse than that key:
+    CheckBoundaryValues, over the leading sort columns."""
+    var n = hi - lo
+    if n <= 0:
+        return False
+    if layout.columns[0].encoding == _ENC_BLOB:
+        return False
+    prefixes = List[UInt64](length=n, fill=0)
+    # A row's slot: the word, and room for a fixed-width value (at most
+    # 17 bytes) started before the word's end.
+    comptime SLOT = 32
+    var scratch = List[UInt64](length=n * SLOT // 8, fill=0)
+    var base = Int(scratch.unsafe_ptr())
+    var cursors = List[Int](unsafe_uninit_length=n)
+    var limits = List[Int](unsafe_uninit_length=n)
+    for i in range(n):
+        cursors[i] = base + SLOT * i
+        limits[i] = base + SLOT * i + 8
+    var cursor = Pointer[Int, MutAnyOrigin](
+        unsafe_from_address=Int(cursors.unsafe_ptr())
+    )
+    var limit = Pointer[Int, MutAnyOrigin](
+        unsafe_from_address=Int(limits.unsafe_ptr())
+    )
+    for c in layout.columns:
+        if c.encoding == _ENC_BLOB:
+            break
+        var open = False
+        for i in range(n):
+            if cursors[i] < limits[i]:
+                open = True
+                break
+        if not open:
+            break
+        if c.encoding == _ENC_ROW:
+            for i in range(n):
+                var at = cursors[i]
+                if at < limits[i]:
+                    _store_be[DType.uint64](at, UInt64(lo + i))
+                    cursors[i] = at + 8
+        elif c.encoding == _ENC_VARCHAR:
+            for piece in _for_parts(c.series, lo, hi):
+                _string_prefixes(
+                    piece[0]._data[StringColumn],
+                    c,
+                    piece[1],
+                    piece[2],
+                    cursor.unsafe_offset(piece[3]),
+                    limit.unsafe_offset(piece[3]),
+                )
+        else:
+            # Rows already past the word write into their slot's spare
+            # room, which is never read.
+            for piece in _for_parts(c.series, lo, hi):
+                _encode_part(
+                    piece[0],
+                    c,
+                    piece[1],
+                    piece[2],
+                    cursor.unsafe_offset(piece[3]),
+                )
+        for i in range(n):
+            cursors[i] = min(cursors[i], limits[i])
+    var words = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=base)
+    for i in range(n):
+        prefixes[i] = byte_swap(words[unsafe_offset=SLOT // 8 * i])
+    _ = cursors^
+    _ = limits^
+    _ = scratch^
+    return True
+
+
+def has_row_key(layout: SortKeyLayout) -> Bool:
+    for c in layout.columns:
+        if c.encoding == _ENC_ROW:
+            return True
+    return False
+
+
+def encode_selected(
+    layout: SortKeyLayout, lo: Int, selection: List[Int]
+) raises -> KeyBlock:
+    """Records for the rows `lo + selection[i]` alone, as `encode_keys`
+    makes them (the rows CheckBoundaryValues keeps; a layout with the row
+    index as a key encodes whole ranges instead)."""
+    var rows = List[Int](capacity=len(selection))
+    for s in selection:
+        rows.append(lo + s)
+    var sub = layout.copy()
+    for k in range(len(sub.columns)):
+        sub.columns[k].series = layout.columns[k].series.take(rows)
+    sub.rows = len(rows)
+    var block = encode_keys(sub, 0, len(rows))
+    var r = layout.record_words()
+    var records = Pointer[UInt64, MutAnyOrigin](
+        unsafe_from_address=block.address()
+    )
+    for i in range(len(rows)):
+        records[unsafe_offset=i * r + r - 1] = UInt64(rows[i])
     return block^
