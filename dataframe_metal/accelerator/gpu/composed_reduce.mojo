@@ -221,7 +221,7 @@ def composed_partials[
         rights[field] = input_pointer(
             Int(ri) - 1, v0, v1, v2, v3, v4, v5, v6, v7
         )
-        var width = 8 if field >= float_fields + int32_fields else 4
+        comptime width = 8 if field >= float_fields + int32_fields else 4
         if li != 0:
             lefts[field] = lefts[field].unsafe_offset(row_base * width)
         if ri != 0:
