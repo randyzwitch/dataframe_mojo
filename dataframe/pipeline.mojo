@@ -68,6 +68,7 @@ from .frame import (
     _rows_mask,
     concat,
 )
+from dataframe.aggregation.table_sink import TableSink, TableSinkLayout
 from dataframe.aggregation.ungrouped import (
     UngroupedLayout,
     UngroupedSink,
@@ -76,6 +77,7 @@ from dataframe.aggregation.ungrouped import (
 )
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
+from dataframe.vector.sink import Sink
 from dataframe.storage.statistics import (
     STATISTICS_VECTOR_SIZE,
     COMPARE_GREATERTHAN,
@@ -1373,6 +1375,12 @@ struct _ChunkRunner(Movable):
     # The layout every worker's sink is made from, on its own thread
     # when its job starts.
     var ungrouped_layout: List[ArcPointer[UngroupedLayout]]
+    # A grouped aggregate table sink (`table_sink.mojo`), likewise: the
+    # last step's chunks go into the worker's table; its layout, and the
+    # workers every table is sized for.
+    var table: List[TableSink]
+    var table_layout: List[ArcPointer[TableSinkLayout]]
+    var table_workers: Int
     # The source's table filters, and the source row of the morsel's first
     # row while the morsel's own rows run (-1 otherwise): a chunk whose
     # vector the filters' statistics rule out is not read (DuckDB's
@@ -1416,12 +1424,49 @@ struct _ChunkRunner(Movable):
         self.stop_empty = stop_empty
         self.ungrouped = List[UngroupedSink]()
         self.ungrouped_layout = List[ArcPointer[UngroupedLayout]]()
+        self.table = List[TableSink]()
+        self.table_layout = List[ArcPointer[TableSinkLayout]]()
+        self.table_workers = 1
         self.scan = None
         self.scan_offset = -1
 
     def begin_morsel(mut self):
         """Drop the previous morsel's columns."""
         self.arena.truncate(self.held)
+
+    def sinks_chunks(self) -> Bool:
+        """Whether the pipeline ends in a sink taking its chunks (`Sink`),
+        so nothing is collected."""
+        return len(self.ungrouped) > 0 or len(self.table) > 0
+
+    def begin_sink(mut self, morsel: Int) raises:
+        """Morsel `morsel`'s rows come next: the worker's local sink state,
+        made on its own thread at its first morsel (`GetLocalSinkState`),
+        numbers them from the morsel's."""
+        if len(self.ungrouped_layout) > 0:
+            if len(self.ungrouped) == 0:
+                self.ungrouped.append(UngroupedSink(self.ungrouped_layout[0][]))
+            self.ungrouped[0].begin(morsel)
+        elif len(self.table_layout) > 0:
+            if len(self.table) == 0:
+                self.table.append(
+                    TableSink(self.table_layout[0][], self.table_workers)
+                )
+            self.table[0].begin(morsel)
+
+    def release_sink(mut self):
+        """The worker's run is over: only its sink's states outlive it."""
+        if len(self.ungrouped) > 0:
+            self.ungrouped[0].release()
+        if len(self.table) > 0:
+            self.table[0].release()
+
+    def _sink(mut self, mut chunk: DataChunk) raises:
+        """One output chunk into the worker's sink."""
+        if len(self.ungrouped) > 0:
+            _sink_chunk(self.ungrouped[0], chunk, self.arena)
+        else:
+            _sink_chunk(self.table[0], chunk, self.arena)
 
     def schema(self, at: Int) -> DataFrame:
         return self.schemas[][at].copy()
@@ -1481,13 +1526,13 @@ struct _ChunkRunner(Movable):
                 end += 1
             columns = self._vector_steps(columns, at, end)
             at = end
-        if stop == n and len(self.ungrouped) > 0 and columns.height > 0:
-            if self.ungrouped[0].counts_only():
+        if stop == n and self.sinks_chunks() and columns.height > 0:
+            if len(self.ungrouped) > 0 and self.ungrouped[0].counts_only():
                 # Row counts read no column: the rows are only counted.
                 self.ungrouped[0].sink_rows(columns.height)
                 return _Columns()
             # A join's output (or the source, with no steps) cut into
-            # chunks for the ungrouped sink.
+            # chunks for the sink.
             columns = self._vector_steps(columns, n, n)
         return columns^
 
@@ -1594,8 +1639,8 @@ struct _ChunkRunner(Movable):
                     break
             if empty:
                 continue
-            if stop == n and len(self.ungrouped) > 0:
-                self.ungrouped[0].sink(input[], self.arena)
+            if stop == n and self.sinks_chunks():
+                self._sink(input[])
             else:
                 collector.append(input[], self.arena)
         return collector.finish(self.arena)
@@ -1698,6 +1743,22 @@ struct _ChunkRunner(Movable):
         if result.width() != output.width():
             raise Error("pipeline join: output columns differ from its schema")
         return result^
+
+
+def _sink_chunk[
+    S: Sink
+](mut sink: S, mut chunk: DataChunk, mut arena: ColumnArena) raises:
+    """One chunk into a worker's local sink state (DuckDB's `Sink`)."""
+    sink.sink(chunk, arena)
+
+
+def _combined[S: Sink](var locals: List[S]) raises -> List[S]:
+    """Every worker's local sink state combined into the global state
+    (DuckDB's `Combine`), in worker order."""
+    var combined = List[S]()
+    while len(locals) > 0:
+        locals.pop(0).combine(combined)
+    return combined^
 
 
 def _steps_over_frame(
@@ -3099,20 +3160,11 @@ struct _PipelineJob(Job):
                 self.counts = self.runner.counts.copy()
                 if not self.finishes:
                     return
-                if len(self.runner.ungrouped) > 0:
-                    # Only the states outlive the worker's run.
-                    self.runner.ungrouped[0].release()
+                self.runner.release_sink()
                 self._derive_sets()
                 return
             var k = self.first_morsel + taken
-            if len(self.runner.ungrouped_layout) > 0:
-                if len(self.runner.ungrouped) == 0:
-                    # The worker's ungrouped sink, made on its own thread
-                    # when it takes its first morsel.
-                    self.runner.ungrouped.append(
-                        UngroupedSink(self.runner.ungrouped_layout[0][])
-                    )
-                self.runner.ungrouped[0].begin(k)
+            self.runner.begin_sink(k)
             var offset = self.ranges[][2 * taken]
             var length = self.ranges[][2 * taken + 1]
             self.runner.begin_morsel()
@@ -3208,7 +3260,7 @@ struct _PipelineJob(Job):
         var made = 0
         var skipped = 0
         if len(self.topn) > 0:
-            self.topn[0].new_morsel()
+            self.topn[0].begin(k)
         for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
             var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
             if direct and (self.top_filter.info or self.runner.scan):
@@ -3243,7 +3295,7 @@ struct _PipelineJob(Job):
                 continue
             if len(self.topn) == 0:
                 self._sink_top(self.runner.output_schema(), k, offset, 0)
-            self.topn[0].sink_chunk(chunk[], self.runner.arena)
+            _sink_chunk(self.topn[0], chunk[], self.runner.arena)
         if skipped > 0:
             # Once a morsel: tracing reads the environment.
             trace_path("pipeline.top_dynamic_skip_vector")
@@ -3337,28 +3389,7 @@ struct _PipelineJob(Job):
             self._sink_sets(columns, k)
             return
         if len(self.layout) > 0:
-            # The aggregate table: the morsel's keys and reduction
-            # inputs into this worker's sink, no matter how many groups
-            # (its tables adapt), with strings compared in place.
-            var source = columns.frame(
-                self.runner.arena, schema, self._table_reads()
-            ) if _reads(self.expressions) else columns.whole(
-                self.runner.arena, schema
-            )
-            var keys = List[Series](capacity=len(self.keys))
-            for name in self.keys:
-                keys.append(canonical_labels(_unchunked(source.column(name))))
-            var inputs = table_inputs(source, keys, self.expressions)
-            for i in range(len(inputs)):
-                inputs[i] = _unchunked(inputs[i])
-            if len(self.sinks) == 0:
-                self.sinks.append(AggregateSink(self.layout[0], self.workers))
-            # First rows numbered by morsel, then by row of its output
-            # (a join's may outgrow the morsel), so the table orders
-            # groups the same whichever worker took which morsel.
-            self.sinks[0].sink(keys, inputs, k << 32)
-            self.rows += len(keys[0])
-            return
+            raise Error("pipeline: the aggregate table takes chunks")
         if (
             len(self.keys) > 0
             and len(self.expressions) > 0
@@ -4460,6 +4491,25 @@ def _run_pipeline(
         trace_path("pipeline.ungrouped_sink")
         for w in range(len(jobs)):
             jobs[w].runner.ungrouped_layout.append(ungrouped[0])
+    # The aggregate table (one grouping): each worker's table takes the
+    # last step's chunks (`PhysicalHashAggregate::Sink`).
+    if len(layout) > 0 and len(sets) == 0:
+        var empty = schemas[][len(steps)].copy()
+        var empty_keys = List[Series](capacity=len(keys))
+        for name in keys:
+            empty_keys.append(empty.column(name))
+        var table_layout = ArcPointer(
+            TableSinkLayout(
+                layout[0],
+                empty,
+                keys,
+                expressions,
+                table_inputs(empty, empty_keys, expressions),
+            )
+        )
+        for w in range(len(jobs)):
+            jobs[w].runner.table_layout.append(table_layout)
+            jobs[w].runner.table_workers = workers
     if scan:
         for w in range(len(jobs)):
             jobs[w].runner.scan = scan.copy()
@@ -4536,10 +4586,14 @@ def _run_pipeline(
         # An empty frame of the steps' output types the caller's null keys.
         return set_empty[0].copy()
     if len(layout) > 0:
-        var sinks = List[AggregateSink]()
+        var locals = List[TableSink]()
         for j in range(len(jobs)):
-            if len(jobs[j].sinks) > 0:
-                sinks.append(jobs[j].sinks.pop())
+            if len(jobs[j].runner.table) > 0:
+                locals.append(jobs[j].runner.table.pop())
+        var combined = _combined(locals^)
+        var sinks = List[AggregateSink](capacity=len(combined))
+        while len(combined) > 0:
+            sinks.append(combined.pop(0).take_table())
         # Long key strings live in the sinks' heaps until the finish has
         # read them out.
         var finished: DataFrame
@@ -4677,7 +4731,8 @@ def _run_pipeline(
         for j in range(len(jobs)):
             if len(jobs[j].runner.ungrouped) > 0:
                 sinks.append(jobs[j].runner.ungrouped.pop())
-        return ungrouped_finish(ungrouped[0][], sinks)
+        var combined = _combined(sinks^)
+        return ungrouped_finish(ungrouped[0][], combined)
     if len(expressions) > 0:
         var merged = List[_StreamReduction]()
         for j in range(len(jobs)):
@@ -4698,11 +4753,15 @@ def _run_pipeline(
     var parts = List[DataFrame]()
     var next = List[Int](length=len(jobs), fill=0)
     if top > 0:
+        var locals = List[TopNSink]()
         for j in range(len(jobs)):
             if len(jobs[j].topn) > 0:
-                var part = jobs[j].topn[0].finish()
-                if part.height() > 0:
-                    parts.append(part^)
+                locals.append(jobs[j].topn.pop())
+        var heaps = _combined(locals^)
+        for h in range(len(heaps)):
+            var part = heaps[h].finish()
+            if part.height() > 0:
+                parts.append(part^)
     while top <= 0:
         var best = -1
         var best_sequence = 0
