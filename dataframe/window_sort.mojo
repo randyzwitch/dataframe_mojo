@@ -635,7 +635,14 @@ struct _GroupSortJob(Job):
         var sort_keys = List[Series](capacity=1 + count - self.partition_keys)
         var descending = List[Bool](capacity=1 + count - self.partition_keys)
         var nulls_last = List[Bool](capacity=1 + count - self.partition_keys)
-        if partitions_here > 1:
+        if partitions_here > 1 and partitions_here <= Int(UInt32.MAX):
+            # Four bytes hold the partition numbers, so the sort's records
+            # stay narrow.
+            var narrow = List[UInt32](unsafe_uninit_length=n)
+            for k in range(n):
+                narrow[k] = UInt32(ids[k])
+            sort_keys.append(Series("", Column[UInt32](narrow^)))
+        elif partitions_here > 1:
             var wide = List[Int64](unsafe_uninit_length=n)
             for k in range(n):
                 wide[k] = Int64(ids[k])
