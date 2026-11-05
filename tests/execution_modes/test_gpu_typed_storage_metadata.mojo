@@ -899,6 +899,7 @@ def test_composed_batch_metadata_preserves_local_and_output_block_ranges() raise
     from std.memory import Pointer
     from dataframe_metal.accelerator.gpu.composed_reduce import (
         segment_info,
+        static_segment_info,
         META_WORDS,
     )
 
@@ -921,11 +922,21 @@ def test_composed_batch_metadata_preserves_local_and_output_block_ranges() raise
         assert_equal(result[1], group - bases[i])
         assert_equal(result[2], group)
         assert_equal(result[3], starts[i])
+        var specialized = static_segment_info[True](pointer, UInt32.MAX, group)
+        assert_equal(specialized[1], result[1])
+        assert_equal(specialized[2], result[2])
+        assert_equal(specialized[3], result[3])
     for i in range(3):
         var result = segment_info(pointer, UInt32(2 + i * META_WORDS), 1)
         assert_equal(result[1], 1)
         assert_equal(result[2], bases[i] + 1)
         assert_equal(result[3], 0)
+        var specialized = static_segment_info[False](
+            pointer, UInt32(2 + i * META_WORDS), 1
+        )
+        assert_equal(specialized[1], result[1])
+        assert_equal(specialized[2], result[2])
+        assert_equal(specialized[3], result[3])
     _ = words^
 
 
