@@ -345,8 +345,8 @@ on CPU.
 Each side uses an affine fit to per-scale sample medians. Negative-coefficient
 boundary cases are refitted instead of clamping the intercept of an overly
 steep line. The Metal decision estimate includes one switching margin: at
-least 5%, or twice the median relative error in the paired speedup fit when
-that is larger. Typical Metal costs and the applied margin remain in the
+least 5%, increased by within-scale paired timing variation and by any
+overstatement of GPU speedup at a measured scale. Typical Metal costs and the applied margin remain in the
 profile for inspection. Thus small advantages prefer CPU, while one timing
 outlier does not veto a clear repeated win.
 

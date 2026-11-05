@@ -167,17 +167,23 @@ def fit(records):
         pipeline = next(iter(pipeline_keys))
         cpu_model = _typical(cpu)
         accel_model = _typical(accel)
-        # One margin on the *relative* fit, not two unrelated worst cases.
-        errors = [
-            abs(
-                (c / a)
-                / (_ns(cpu_model, e["rows"]) / _ns(accel_model, e["rows"]))
-                - 1
-            )
-            for e in entries
-            for c, a in zip(e["cpu_ns"], e["accel_ns"])
-        ]
-        margin = max(0.05, 2 * median(errors))
+        # Separate within-scale timing noise from systematic fit optimism.
+        # Robust scale medians protect against individual timing outliers;
+        # no consistently slower measured scale may be fitted as a GPU win.
+        errors = []
+        optimism = 1.0
+        for n in rows:
+            paired = [
+                c / a
+                for e in entries
+                if e["rows"] == n
+                for c, a in zip(e["cpu_ns"], e["accel_ns"])
+            ]
+            observed = median(paired)
+            predicted = _ns(cpu_model, n) / _ns(accel_model, n)
+            optimism = max(optimism, predicted / observed)
+            errors.extend(abs(r / observed - 1) for r in paired)
+        margin = max(0.05, optimism * (1 + 2 * median(errors)) - 1)
         if key.startswith("pipeline:"):
             raise ValueError(
                 "region key uses the reserved CPU pipeline namespace"

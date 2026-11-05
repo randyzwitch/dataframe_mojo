@@ -46,6 +46,10 @@ each pipeline with them (`dataframe/planning/device_placement.mojo`).
 | `pipeline_costs` | `(pipeline, device, features) -> Tuple[Float64, Float64]` | Matched CPU/device nanosecond estimates for the same physical workload. A negative CPU value keeps the generic CPU calibration. If several devices supply valid CPU estimates, the planner uses their minimum. The explicit-runtime trait defaults to `(-1, pipeline_estimate(...))`, preserving existing backends. Both planning and execution-time placement use this pair. |
 | `run_pipeline` | `(pipeline: LazyFrame, device: Int) raises -> DataFrame` | Run an accepted pipeline. Inputs may be host or device buffers (`dataframe/storage/residence.mojo`); outputs may stay on the device as device buffers. |
 
+Replacement provider modules must export `pipeline_costs`. A provider without
+matched CPU measurements can return `(-1, pipeline_estimate(...))`; existing
+explicit `AcceleratorBackend` classes inherit that behavior automatically.
+
 The core calls the whole-plan functions for `engine="accel"`, the hand-off
 functions from the CPU executor when a provider runs a plan through it, and
 the device functions for `engine="auto"`. No provider chooses a whole plan's

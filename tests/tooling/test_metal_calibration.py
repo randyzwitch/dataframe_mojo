@@ -85,6 +85,22 @@ class MetalCalibrationTests(unittest.TestCase):
                 choose_gpu,
             )
 
+    def test_a_consistently_losing_scale_is_not_hidden_by_the_fit(self):
+        records = self.captures()
+        for entry in records:
+            cpu = 2 * entry["rows"] + 100
+            entry["cpu_ns"] = [cpu] * 3
+            entry["accel_ns"] = [
+                cpu * (1.2 if entry["rows"] == 1000 else 1 / 1.5)
+            ] * 3
+        model = fit(records)["regions"][records[0]["key"]]
+        cpu = model["cpu"]
+        gpu = model["accel"]
+        self.assertGreaterEqual(
+            gpu["fixed_ns"] + 1000 * gpu["row_ns"],
+            cpu["fixed_ns"] + 1000 * cpu["row_ns"],
+        )
+
     def test_cannot_mix_builds_devices_or_thread_budgets(self):
         for field, value in [
             ("runtime_build_id", "changed"),
