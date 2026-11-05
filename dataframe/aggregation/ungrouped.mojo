@@ -10,6 +10,7 @@ folded into its state a vector at a time through the unified vector format
 rows are combined at the end (`Combine`) and finalized once (`Finalize`).
 """
 from std.math import isnan
+from std.sys import size_of
 from std.memory import Pointer, bitcast
 
 from dataframe.aggregation.function import (
@@ -46,13 +47,20 @@ from dataframe.aggregation.state import (
 from dataframe.decimal import check_limit, precision_limit
 from dataframe.expr import (
     CORR,
+    COUNT,
     COV,
     Expr,
     LEN,
+    MAX,
+    MEAN,
+    MIN,
     N_UNIQUE,
+    SUM,
+    WHEN,
     is_reduction,
     subtree,
 )
+from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
 from dataframe.series import Series, Storage
 from dataframe.storage.column import Column
@@ -61,10 +69,15 @@ from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
     _NUMERIC_STORAGE,
+    _from_unified,
     to_series,
 )
-from dataframe.vector.expression import VectorExpression
-from dataframe.vector.types import UnifiedVectorFormat, physical_of
+from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
+from dataframe.vector.types import (
+    SelectionVector,
+    UnifiedVectorFormat,
+    physical_of,
+)
 
 
 struct UngroupedLayout(Copyable, Movable):
@@ -74,30 +87,49 @@ struct UngroupedLayout(Copyable, Movable):
 
     var layout: AggregateLayout
     var expressions: List[Optional[VectorExpression]]
+    # Per input, an aggregate filter (DuckDB's `FILTER (WHERE ...)`): an
+    # input `when(c).then(x)` with no otherwise, into a reduction that
+    # skips nulls, is `x` over the rows where `c` holds, so `expressions`
+    # computes `x` and the filter selects the rows.
+    var filters: List[Optional[VectorExpression]]
     var types: List[Series]
     var reductions: List[Expr]
     var schema: DataFrame
+    # The template's result names, types and output expressions.
+    var names: List[String]
+    var dtypes: List[DataType]
+    var outputs: List[Expr]
 
     def __init__(out self, *, copy: Self):
         self.layout = copy.layout.copy()
         self.expressions = copy.expressions.copy()
+        self.filters = copy.filters.copy()
         self.types = copy.types.copy()
         self.reductions = copy.reductions.copy()
         self.schema = copy.schema.copy()
+        self.names = copy.names.copy()
+        self.dtypes = copy.dtypes.copy()
+        self.outputs = copy.outputs.copy()
 
     def __init__(
         out self,
         var layout: AggregateLayout,
         var expressions: List[Optional[VectorExpression]],
+        var filters: List[Optional[VectorExpression]],
         var types: List[Series],
         reductions: List[Expr],
         var schema: DataFrame,
+        template: _StreamReduction,
     ):
         self.layout = layout^
         self.expressions = expressions^
+        self.filters = filters^
         self.types = types^
         self.reductions = reductions.copy()
         self.schema = schema^
+        self.names = template.names.copy()
+        self.dtypes = template.dtypes.copy()
+        self.outputs = template.outputs.copy()
 
     def template(self) raises -> _StreamReduction:
         """The reductions over no rows: names, result types, outputs."""
@@ -115,12 +147,14 @@ def ungrouped_layout(
         return None
     var inputs = List[Optional[Expr]]()
     var seconds = List[Optional[Expr]]()
+    var ops = List[Int]()
     for expression in expressions:
         for node in expression._nodes:
             if not is_reduction(node.op):
                 continue
             if not reduction_supported(node.op) or node.op == N_UNIQUE:
                 return None
+            ops.append(node.op)
             if node.left < 0:
                 if node.op != LEN:
                     return None
@@ -140,13 +174,47 @@ def ungrouped_layout(
         return None
     var layout = aggregate_layout(List[Series](), typed, specs)
     var compiled = List[Optional[VectorExpression]](capacity=len(inputs))
-    for input in inputs:
-        if input:
-            compiled.append(VectorExpression(input.value(), empty._columns))
-        else:
+    var filters = List[Optional[VectorExpression]](capacity=len(inputs))
+    for i in range(len(inputs)):
+        if not inputs[i]:
             compiled.append(None)
+            filters.append(None)
+            continue
+        ref input = inputs[i].value()
+        ref root = input._nodes[len(input._nodes) - 1]
+        if (
+            i < len(ops)
+            and root.op == WHEN
+            and root.extra < 0
+            and ops[i] in [SUM, MEAN, COUNT, MIN, MAX]
+            and layout.slots[i].kind
+            in [
+                _K_COUNT,
+                _K_INT_SUM,
+                _K_NARROW_SUM,
+                _K_FLOAT_SUM,
+                _K_DECIMAL_SUM,
+                _K_MIN,
+                _K_MAX,
+            ]
+        ):
+            filters.append(
+                VectorExpression(subtree(input, root.left), empty._columns)
+            )
+            compiled.append(
+                VectorExpression(subtree(input, root.right), empty._columns)
+            )
+            continue
+        compiled.append(VectorExpression(input, empty._columns))
+        filters.append(None)
     return UngroupedLayout(
-        layout^, compiled^, typed^, expressions, empty.copy()
+        layout^,
+        compiled^,
+        filters^,
+        typed^,
+        expressions,
+        empty.copy(),
+        template,
     )
 
 
@@ -163,8 +231,12 @@ struct UngroupedSink(Movable):
     var slots: List[AggregateFunction]
     var groups: _Groups
     var expressions: List[Optional[VectorExpression]]
+    var filters: List[Optional[VectorExpression]]
     var types: List[Series]
     var output: DataChunk
+    # A filter's kept rows, and those rows through the input's selection.
+    var kept: List[UInt32]
+    var through: List[UInt32]
     var arena: _ValueArena
     # Every row of a batch updates the one state row.
     var rows: List[Int]
@@ -184,11 +256,15 @@ struct UngroupedSink(Movable):
             at[unsafe_offset=w] = 0
         self.groups.n = 1
         self.expressions = shared.expressions.copy()
+        self.filters = shared.filters.copy()
         self.types = shared.types.copy()
+        self.kept = List[UInt32](length=_BATCH, fill=0)
+        self.through = List[UInt32](length=_BATCH, fill=0)
         self.output = DataChunk(len(shared.expressions))
         self.arena = _ValueArena()
         self.rows = List[Int](length=_BATCH, fill=self.groups.at(0))
-        self.scratch = List[UInt64](length=18 * _BATCH, fill=0)
+        # Made by the first table update that needs it.
+        self.scratch = List[UInt64]()
         self.discard = List[UInt64](length=self.groups.stride + 8, fill=0)
         self.held = List[Series]()
         self.count = 0
@@ -219,16 +295,112 @@ struct UngroupedSink(Movable):
             if kind == _K_LEN:
                 _words(state + 8 * offset)[] += UInt64(n)
                 continue
-            if _simple_update(
-                self.slots[s],
-                self.output.unified(s, arena),
-                n,
-                state + 8 * offset,
-            ):
+            var format = self.output.unified(s, arena)
+            if self.filters[s]:
+                self._filtered(s, chunk, arena, format, state + 8 * offset)
+                continue
+            if _simple_update(self.slots[s], format, n, state + 8 * offset):
                 continue
             self._update(s, n, arena)
         self.count += n
         self.sequence += n
+
+    def _scratch(mut self) -> Int:
+        """The address of the table update's scratch vectors (values,
+        validity and a second input's, `_update_states`)."""
+        if len(self.scratch) == 0:
+            self.scratch = List[UInt64](length=18 * _BATCH, fill=0)
+        return Int(self.scratch.unsafe_ptr())
+
+    def _filtered(
+        mut self,
+        s: Int,
+        mut chunk: DataChunk,
+        mut arena: ColumnArena,
+        format: UnifiedVectorFormat,
+        state: Int,
+    ) raises:
+        """State s updated from its input's rows its filter keeps
+        (DuckDB's `AggregateFilterData::ApplyFilter` before the update)."""
+        var through = self.through.unsafe_ptr()
+        var kept = 0
+        if self.filters[s].value().root_kind() == _KIND_COLUMN:
+            var condition = chunk.unified(
+                self.filters[s].value().root_column(), arena
+            )
+            if (
+                not condition.sel.is_set()
+                and condition.validity.all_valid()
+                and _flat_update(
+                    self.slots[s], format, condition.data, chunk.count, state
+                )
+            ):
+                return
+            # A Boolean column: its vector read in place, each row kept
+            # when true and valid, no lanes loaded.
+            var flags = Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=condition.data
+            )
+            var whole = condition.validity.all_valid()
+            for k in range(chunk.count):
+                var r = condition.sel.get_index(k)
+                var keep = flags[unsafe_offset=r] != 0
+                if not whole:
+                    keep = keep and condition.validity.row_is_valid_unsafe(r)
+                through[unsafe_offset=kept] = UInt32(format.sel.get_index(k))
+                kept += Int(keep)
+        else:
+            kept = (
+                self.filters[s]
+                .value()
+                .select(
+                    chunk,
+                    arena,
+                    SelectionVector(),
+                    chunk.count,
+                    SelectionVector(Int(self.kept.unsafe_ptr())),
+                )
+            )
+            var rows = self.kept.unsafe_ptr()
+            for k in range(kept):
+                through[unsafe_offset=k] = UInt32(
+                    format.sel.get_index(Int(rows[unsafe_offset=k]))
+                )
+        if kept == 0:
+            return
+        var selected = UnifiedVectorFormat(
+            SelectionVector(Int(through)),
+            format.data,
+            format.validity,
+            format.physical,
+        )
+        if _simple_update(self.slots[s], selected, kept, state):
+            return
+        # A value of a type the simple updates do not read: its kept rows
+        # as a column, through the table's update.
+        var column = _from_unified(selected, kept, "")
+        if column.dtype() != self.types[s].dtype():
+            column = column.with_dtype(self.types[s].dtype())
+        var one = List[AggregateFunction]()
+        one.append(self.slots[s].copy())
+        var lone = List[Series]()
+        lone.append(column^)
+        _update_states(
+            one,
+            lone,
+            0,
+            kept,
+            Pointer[Int, MutAnyOrigin](
+                unsafe_from_address=Int(self.rows.unsafe_ptr())
+            ),
+            self.groups.states_at,
+            self.sequence,
+            Pointer[_ValueArena, MutAnyOrigin](
+                unsafe_from_address=Int(Pointer(to=self.arena))
+            ),
+            Int(self.discard.unsafe_ptr()),
+            self._scratch(),
+        )
 
     def _update(mut self, s: Int, n: Int, mut arena: ColumnArena) raises:
         """State s through the aggregate table's update, its input (and a
@@ -271,8 +443,19 @@ struct UngroupedSink(Movable):
                     unsafe_from_address=Int(Pointer(to=self.arena))
                 ),
                 Int(self.discard.unsafe_ptr()),
-                Int(self.scratch.unsafe_ptr()),
+                self._scratch(),
             )
+
+    def release(mut self):
+        """Free everything but the states and the inputs they point into,
+        on the worker's own thread when its run ends."""
+        self.expressions = List[Optional[VectorExpression]]()
+        self.filters = List[Optional[VectorExpression]]()
+        self.output = DataChunk()
+        self.scratch = List[UInt64]()
+        self.kept = List[UInt32]()
+        self.through = List[UInt32]()
+        self.rows = List[Int]()
 
     def combine_into(self, mut other: UngroupedSink) raises:
         """These states folded into `other`'s (DuckDB's `Combine`)."""
@@ -291,15 +474,14 @@ def ungrouped_finish(
 ) raises -> DataFrame:
     """Every worker's states combined and finalized into one row (DuckDB's
     `Combine` and `Finalize`)."""
-    var template = shared.template()
     if len(sinks) == 0:
-        return template.finish()
+        return shared.template().finish()
     while len(sinks) > 1:
         var other = sinks.pop()
         other.combine_into(sinks[0])
     if sinks[0].count == 0:
         # No row survived: the reductions of an empty frame.
-        return template.finish()
+        return shared.template().finish()
     var all_held = List[List[Series]]()
     all_held.append(sinks[0].held.copy())
     var held = _HeldBuffers(all_held)
@@ -313,9 +495,9 @@ def ungrouped_finish(
     var reduction = _StreamReduction(
         keys=DataFrame(List[Series](), height=1),
         states=states^,
-        names=template.names,
-        dtypes=template.dtypes,
-        outputs=template.outputs,
+        names=shared.names,
+        dtypes=shared.dtypes,
+        outputs=shared.outputs,
         grouped=False,
         firsts=[0],
         rows=sinks[0].count,
@@ -323,6 +505,117 @@ def ungrouped_finish(
     var result = reduction.finish()
     _ = held^
     return result^
+
+
+def _flat_update(
+    slot: AggregateFunction,
+    format: UnifiedVectorFormat,
+    flags: Int,
+    count: Int,
+    state: Int,
+) -> Bool:
+    """A flat vector with every row valid folded into a count or sum
+    state a SIMD block at a time, each row kept where its byte at `flags`
+    is set (an aggregate filter's flat Boolean vector; 0 keeps every row).
+    False for any other vector or state. Integer sums take inputs of at
+    most 32 bits, whose 2048-row totals fit 64-bit lanes."""
+    if format.sel.is_set() or not format.validity.all_valid():
+        return False
+    var kind = slot.kind
+    var at = _words(state)
+    if kind == _K_COUNT:
+        if flags == 0:
+            at[] += UInt64(count)
+        else:
+            at[] += UInt64(_kept_rows(flags, count))
+        return True
+    if kind != _K_FLOAT_SUM and kind != _K_INT_SUM and kind != _K_NARROW_SUM:
+        return False
+    comptime for k in range(len(_NUMERIC_STORAGE)):
+        comptime D = _NUMERIC_STORAGE[k]
+        comptime if D.is_floating_point() or (
+            D.is_integral() and size_of[Scalar[D]]() <= 4
+        ):
+            if format.physical == physical_of[D]():
+                var seen = count if flags == 0 else _kept_rows(flags, count)
+                comptime if D.is_floating_point():
+                    var total = _block_sum[D, DType.float64](
+                        format.data, flags, count
+                    )
+                    at[] = bitcast[DType.uint64](
+                        bitcast[DType.float64](at[]) + total
+                    )
+                    at[unsafe_offset=1] += UInt64(seen)
+                else:
+                    var total = _block_sum[D, DType.int64](
+                        format.data, flags, count
+                    )
+                    if kind == _K_NARROW_SUM:
+                        at[] += bitcast[DType.uint64](total)
+                        at[unsafe_offset=1] += UInt64(seen)
+                    elif kind == _K_INT_SUM:
+                        var sum = (
+                            UInt128(at[unsafe_offset=1]) << 64
+                        ) | UInt128(at[])
+                        sum += bitcast[DType.uint128](
+                            total.cast[DType.int128]()
+                        )
+                        at[] = UInt64(sum)
+                        at[unsafe_offset=1] = UInt64(sum >> 64)
+                        at[unsafe_offset=2] += UInt64(seen)
+                    else:
+                        return False
+                return True
+    return False
+
+
+def _kept_rows(flags: Int, count: Int) -> Int:
+    """How many of `count` bytes at `flags` are set."""
+    comptime W = 32
+    var bytes = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=flags)
+    var total = SIMD[DType.uint32, W](0)
+    var k = 0
+    while k + W <= count:
+        total += (
+            bytes.unsafe_offset(k)
+            .unsafe_load[width=W]()
+            .ne(0)
+            .cast[DType.uint32]()
+        )
+        k += W
+    var kept = Int(total.reduce_add())
+    while k < count:
+        kept += Int(bytes[unsafe_offset=k] != 0)
+        k += 1
+    return kept
+
+
+def _block_sum[
+    D: DType, A: DType
+](data: Int, flags: Int, count: Int) -> Scalar[A]:
+    """The sum, in type A, of `count` values at `data`, only those whose
+    byte at `flags` is set when `flags` is not 0."""
+    comptime W = 8
+    var values = Pointer[Scalar[D], MutAnyOrigin](unsafe_from_address=data)
+    var bytes = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=flags)
+    var total = SIMD[A, W](0)
+    var k = 0
+    if flags == 0:
+        while k + W <= count:
+            total += values.unsafe_offset(k).unsafe_load[width=W]().cast[A]()
+            k += W
+    else:
+        while k + W <= count:
+            var x = values.unsafe_offset(k).unsafe_load[width=W]().cast[A]()
+            var keep = bytes.unsafe_offset(k).unsafe_load[width=W]().ne(0)
+            total += keep.select(x, SIMD[A, W](0))
+            k += W
+    var result = total.reduce_add()
+    while k < count:
+        if flags == 0 or bytes[unsafe_offset=k] != 0:
+            result += values[unsafe_offset=k].cast[A]()
+        k += 1
+    return result
 
 
 def _simple_update(
@@ -335,6 +628,8 @@ def _simple_update(
     `simple_update`): counts, sums, decimal sums and numeric extremes,
     accumulated in registers and stored once. False for any other state
     or input, which the caller updates through the table's update."""
+    if _flat_update(slot, format, 0, count, state):
+        return True
     var kind = slot.kind
     var at = _words(state)
     var sel = format.sel
