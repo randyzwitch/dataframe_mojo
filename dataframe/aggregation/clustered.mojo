@@ -168,8 +168,8 @@ struct ClusteredRuns(Movable):
     @always_inline
     def _finish_run(mut self, mut st: _SlotTab, s: UInt64) -> Int:
         var idx = _idx(s)
-        var cnt = (st.slice + _cursor(s)) - self.starts[idx]
-        self.counts[idx] = cnt
+        var cnt = (st.slice + _cursor(s)) - self.starts.unsafe_ptr()[unsafe_offset=idx]
+        self.counts.unsafe_ptr()[unsafe_offset=idx] = cnt
         if idx >= st.group_base + st.hot_n_runs:
             # Sequential runs allocate from the cursor's seq region.
             st.seq += cnt
@@ -181,15 +181,15 @@ struct ClusteredRuns(Movable):
     def _new_run(mut self, mut st: _SlotTab, gid: UInt64, start: Int) -> UInt64:
         var idx = st.group_base + st.n_runs
         st.n_runs += 1
-        self.starts[idx] = st.slice + start
-        self.gids[idx] = gid
+        self.starts.unsafe_ptr()[unsafe_offset=idx] = st.slice + start
+        self.gids.unsafe_ptr()[unsafe_offset=idx] = gid
         return _slot(start, idx, gid)
 
     @always_inline
     def _flush(mut self, mut st: _SlotTab, s: UInt64):
         if _idx(s) < st.group_base + st.hot_n_runs:
             # A hot key's slot goes back into the table.
-            self.slots[st.tab + _slot_hash(_gid(s))] = s
+            self.slots.unsafe_ptr()[unsafe_offset=st.tab + _slot_hash(_gid(s))] = s
         else:
             _ = self._finish_run(st, s)
 
@@ -198,16 +198,16 @@ struct ClusteredRuns(Movable):
         mut self, mut st: _SlotTab, gid: UInt64, pos: Int
     ) -> UInt64:
         var hash = _slot_hash(gid)
-        var s = self.slots[st.tab + hash]
+        var s = self.slots.unsafe_ptr()[unsafe_offset=st.tab + hash]
         if s == FREE_SLOT:
             s = self._new_run(st, gid, st.n_runs * _HALF_VEC)
         elif _gid(s) != gid:
             # A collision: the old run closes, the new one continues in
             # the same region.
             s = self._new_run(st, gid, self._finish_run(st, s))
-        self.arena[st.slice + _cursor(s)] = UInt32(pos)
+        self.arena.unsafe_ptr()[unsafe_offset=st.slice + _cursor(s)] = UInt32(pos)
         s += 1
-        self.slots[st.tab + hash] = s
+        self.slots.unsafe_ptr()[unsafe_offset=st.tab + hash] = s
         return s
 
     def _mixed_loop(
@@ -225,12 +225,12 @@ struct ClusteredRuns(Movable):
             var gid = UInt64(groups[unsafe_offset=pos]) & _GID_MASK
             if _gid(cur) != gid:
                 self._flush(st, cur)
-                var s = self.slots[st.tab + _slot_hash(gid)]
+                var s = self.slots.unsafe_ptr()[unsafe_offset=st.tab + _slot_hash(gid)]
                 if s != FREE_SLOT and _gid(s) == gid:
                     cur = s
                 else:
                     cur = self._new_run(st, gid, st.seq - st.slice)
-            self.arena[st.slice + _cursor(cur)] = UInt32(pos)
+            self.arena.unsafe_ptr()[unsafe_offset=st.slice + _cursor(cur)] = UInt32(pos)
             cur += 1
         if lo < hi:
             self._flush(st, cur)
@@ -250,18 +250,18 @@ struct ClusteredRuns(Movable):
             if _gid(cur) != gid:
                 self._flush(st, cur)
                 cur = self._new_run(st, gid, st.seq - st.slice)
-            self.arena[st.slice + _cursor(cur)] = UInt32(pos)
+            self.arena.unsafe_ptr()[unsafe_offset=st.slice + _cursor(cur)] = UInt32(pos)
             cur += 1
         if lo < hi:
             self._flush(st, cur)
 
     def _free_table(mut self, mut st: _SlotTab):
         for i in range(st.hot_n_runs):
-            var hash = _slot_hash(self.gids[st.group_base + i])
-            var s = self.slots[st.tab + hash]
+            var hash = _slot_hash(self.gids.unsafe_ptr()[unsafe_offset=st.group_base + i])
+            var s = self.slots.unsafe_ptr()[unsafe_offset=st.tab + hash]
             if s != FREE_SLOT:
                 _ = self._finish_run(st, s)
-                self.slots[st.tab + hash] = FREE_SLOT
+                self.slots.unsafe_ptr()[unsafe_offset=st.tab + hash] = FREE_SLOT
 
     def _try_clustered(mut self, groups: Pointer[Int, _], count: Int) -> Bool:
         self.tuples_in_large = 0
@@ -323,9 +323,9 @@ struct ClusteredRuns(Movable):
         if st2.n_runs > 0 and st1.n_runs < _HALF_VEC:
             # The second cursor's runs move down after the first's.
             for r in range(st2.n_runs):
-                self.starts[st1.n_runs + r] = self.starts[_HALF_VEC + r]
-                self.gids[st1.n_runs + r] = self.gids[_HALF_VEC + r]
-                self.counts[st1.n_runs + r] = self.counts[_HALF_VEC + r]
+                self.starts.unsafe_ptr()[unsafe_offset=st1.n_runs + r] = self.starts.unsafe_ptr()[unsafe_offset=_HALF_VEC + r]
+                self.gids.unsafe_ptr()[unsafe_offset=st1.n_runs + r] = self.gids.unsafe_ptr()[unsafe_offset=_HALF_VEC + r]
+                self.counts.unsafe_ptr()[unsafe_offset=st1.n_runs + r] = self.counts.unsafe_ptr()[unsafe_offset=_HALF_VEC + r]
         self.n_runs = st1.n_runs + st2.n_runs
         # At least 80% of the rows in runs long enough to pay.
         return 5 * self.tuples_in_large >= 4 * count

@@ -280,10 +280,14 @@ struct _PerfectSinkJob(Job):
             )
             for i in range(len(inputs)):
                 inputs[i] = _one_chunk(inputs[i])
+            # The batch's slots at once: the keys are cut once a batch,
+            # not once a vector.
+            if len(slots) < length:
+                slots = List[Int](length=length, fill=0)
+            perfect_slots(self.keys, self.perfect, at, length, slots)
             for lo in range(0, length, _BATCH):
                 var count = min(_BATCH, length - lo)
-                perfect_slots(self.keys, self.perfect, at + lo, count, slots)
-                var slot_at = slots.unsafe_ptr()
+                var slot_at = slots.unsafe_ptr().unsafe_offset(lo)
                 var row_at = rows.unsafe_ptr()
                 if clustering.try_build(slot_at, count):
                     self._update_clustered(
@@ -295,7 +299,7 @@ struct _PerfectSinkJob(Job):
                         base,
                         stride,
                         groups.states_at,
-                        slots,
+                        Int(slot_at),
                         rows,
                         arena,
                         Int(discard.unsafe_ptr()),
@@ -339,7 +343,7 @@ struct _PerfectSinkJob(Job):
         base: Int,
         stride: Int,
         states_at: Int,
-        slots: List[Int],
+        slot_at: Int,
         mut rows: List[Int],
         arena: Pointer[_ValueArena, MutAnyOrigin],
         discard: Int,
@@ -387,8 +391,9 @@ struct _PerfectSinkJob(Job):
             ):
                 continue
             if not addressed:
+                var slot = Pointer[Int, MutAnyOrigin](unsafe_from_address=slot_at)
                 for k in range(count):
-                    rows[k] = base + row_bytes * slots[k]
+                    rows[k] = base + row_bytes * slot[unsafe_offset=k]
                 addressed = True
             var one = List[AggregateFunction]()
             one.append(slot.copy())
@@ -953,7 +958,7 @@ struct GroupBy(Copyable):
             )
             _perfect_keys(perfect.value(), len(keys), g, row)
         var held = _HeldBuffers()
-        var result = groups_result(final, layout, held)
+        var result = groups_result(final, layout, held, workers)
         _ = jobs^
         return table_frame(template, result^, self._maintain_order)
 

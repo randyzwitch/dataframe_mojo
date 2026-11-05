@@ -2070,30 +2070,82 @@ def _scan_groups(
         keys.append(key_columns.pop(0).column())
 
 
+struct _ScanJob(Job):
+    """One partition of merged groups read out (`_scan_groups`) on its own
+    thread."""
+
+    var part: _Groups
+    var layout: Int
+    var held: Int
+    var states: List[Reducer]
+    var keys: List[Series]
+    var firsts: List[Int]
+    var top_rows: List[Int]
+
+    def __init__(out self, var part: _Groups, layout: Int, held: Int):
+        self.part = part^
+        self.layout = layout
+        self.held = held
+        self.states = List[Reducer]()
+        self.keys = List[Series]()
+        self.firsts = List[Int]()
+        self.top_rows = List[Int]()
+
+    def take_states(deinit self) -> List[Reducer]:
+        return self.states^
+
+    def run(mut self) raises:
+        ref layout = Pointer[AggregateLayout, MutAnyOrigin](
+            unsafe_from_address=self.layout
+        )[]
+        ref held = Pointer[_HeldBuffers, MutAnyOrigin](
+            unsafe_from_address=self.held
+        )[]
+        _scan_groups(
+            self.part,
+            layout.slots,
+            layout.templates,
+            layout.key_templates,
+            held,
+            self.states,
+            self.keys,
+            self.firsts,
+            self.top_rows,
+        )
+
+
 def groups_result(
-    final: _Groups, layout: AggregateLayout, held: _HeldBuffers
+    final: _Groups, layout: AggregateLayout, held: _HeldBuffers, parts: Int
 ) raises -> AggregateResult:
     """Merged groups (a perfect hash aggregate's occupied slots) read out
-    as one partition of a result, as the finish reads each of its own."""
+    as up to `parts` consecutive partitions of a result, each read on its
+    own thread, as the finish reads each of its own."""
     var result = AggregateResult()
-    var states = List[Reducer]()
-    var keys = List[Series]()
-    var firsts = List[Int]()
-    _scan_groups(
-        final,
-        layout.slots,
-        layout.templates,
-        layout.key_templates,
-        held,
-        states,
-        keys,
-        firsts,
-        result.top_rows,
-    )
-    result.merged = final.count()
-    result.firsts.append(firsts^)
-    result.states.append(states^)
-    result.keys.append(keys^)
+    var n = final.count()
+    var count = max(1, min(parts, n))
+    var jobs = List[_ScanJob](capacity=count)
+    for p in range(count):
+        var lo = n * p // count
+        var hi = n * (p + 1) // count
+        var part = _Groups(
+            final.width(), final.addressed.copy(), layout.state_words, hi - lo
+        )
+        for g in range(lo, hi):
+            _ = part.copy_row(final.at(g))
+        jobs.append(
+            _ScanJob(
+                part^, Int(Pointer(to=layout)), Int(Pointer(to=held))
+            )
+        )
+    run_jobs(jobs)
+    while len(jobs) > 0:
+        var job = jobs.pop(0)
+        for row in job.top_rows:
+            result.top_rows.append(row)
+        result.firsts.append(job.firsts.copy())
+        result.keys.append(job.keys.copy())
+        result.states.append(job^.take_states())
+    result.merged = n
     return result^
 
 
