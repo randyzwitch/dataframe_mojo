@@ -204,11 +204,17 @@ def test_float_decimal_date_and_string_statistics() raises:
     ]
     for p in predicates:
         _ = _check_sound(frame, p)
-    # The NaN vector rules nothing out on the float column.
+    # A NaN is greater than no number: the vector holding one keeps no row
+    # of `f > 100`, but `f < 100` does not keep all of its rows.
     var f = table_filters([col("f") > lit(100.0)], frame._columns)
     var stats = window_statistics(frame.column("f"))
     assert_equal(
         check_statistics(f.filters[0], stats.value().record[].vectors[2]),
+        FILTER_ALWAYS_FALSE,
+    )
+    var below = table_filters([col("f") < lit(100.0)], frame._columns)
+    assert_equal(
+        check_statistics(below.filters[0], stats.value().record[].vectors[2]),
         NO_PRUNING_POSSIBLE,
     )
     assert_equal(
@@ -344,3 +350,92 @@ def test_pipeline_skips_ruled_out_vectors_and_matches_a_frame_without_statistics
             )
         _ = workers^
     _ = trace^
+
+
+def _group_answers_sound(frame: DataFrame, predicate: Expr) raises:
+    """The row group's merged statistics agree with the predicate's values
+    on every row of the group."""
+    var set = table_filters([predicate.copy()], frame._columns)
+    assert_equal(len(set.filters), 1, "a table filter for the predicate")
+    var found = window_statistics(frame.column(set.filters[0].column))
+    assert_true(found)
+    var answer = check_statistics(
+        set.filters[0], found.value().record[].groups[0]
+    )
+    var counts = _counts(frame, predicate)
+    if answer == FILTER_ALWAYS_FALSE or answer == FILTER_FALSE_OR_NULL:
+        assert_equal(counts[0], 0, "group always false")
+    elif answer == FILTER_ALWAYS_TRUE:
+        assert_equal(counts[1] + counts[2], 0, "group always true")
+    elif answer == FILTER_TRUE_OR_NULL:
+        assert_equal(counts[1], 0, "group true or null")
+
+
+def test_nan_in_one_vector_of_a_row_group_is_never_answered_from_bounds() raises:
+    # Four vectors of one row group, numbers 0..19.5; one NaN in the
+    # second vector, and a third vector of NaN only.
+    var nan = Float64(0.0) / Float64(0.0)
+    var n = 4 * STATISTICS_VECTOR_SIZE
+    var values = List[Float64]()
+    for row in range(n):
+        values.append(Float64(row % 40) / 2.0)
+    values[STATISTICS_VECTOR_SIZE + 7] = nan
+    for row in range(2 * STATISTICS_VECTOR_SIZE, 3 * STATISTICS_VECTOR_SIZE):
+        values[row] = nan
+    var x = Series("x", Column[Float64](values^))
+    ensure_statistics(x)
+    var group = series_statistics(x)
+    assert_true(group)
+    assert_true(group.value().has_nan, "the row group keeps the NaN")
+    var frame = DataFrame([x^])
+    var plain = _without_statistics(frame)
+    var predicates: List[Expr] = [
+        col("x") < lit(20.0),
+        col("x") <= lit(19.5),
+        col("x") > lit(-1.0),
+        col("x") >= lit(0.0),
+        col("x") == lit(5.0),
+        col("x") != lit(25.0),
+        col("x") != lit(5.0),
+        col("x").is_between(lit(-1.0), lit(100.0)),
+        col("x").is_not_null(),
+        col("x") > lit(100.0),
+        col("x") < lit(-1.0),
+    ]
+    for p in predicates:
+        _group_answers_sound(frame, p)
+        _ = _check_sound(frame, p)
+        var expected = plain.filter(p.copy()).height()
+        assert_equal(frame.filter(p.copy()).height(), expected, "eager")
+        var lazy = (
+            frame.lazy()
+            .filter(p.copy())
+            .select_exprs([col("x").count().alias("n")])
+            .collect()
+        )
+        assert_equal(lazy.item(0, "n").int64(), Int64(expected), "lazy")
+    # `x < 20` keeps every number but no NaN row: the row group and the
+    # NaN vectors are not ALWAYS_TRUE, the vector of NaN alone keeps none.
+    var lt = table_filters([col("x") < lit(20.0)], frame._columns)
+    var stats = window_statistics(frame.column("x")).value().copy()
+    assert_equal(
+        check_statistics(lt.filters[0], stats.record[].groups[0]),
+        NO_PRUNING_POSSIBLE,
+    )
+    assert_equal(
+        check_statistics(lt.filters[0], stats.record[].vectors[0]),
+        FILTER_ALWAYS_TRUE,
+    )
+    assert_equal(
+        check_statistics(lt.filters[0], stats.record[].vectors[1]),
+        NO_PRUNING_POSSIBLE,
+    )
+    assert_equal(
+        check_statistics(lt.filters[0], stats.record[].vectors[2]),
+        FILTER_ALWAYS_FALSE,
+    )
+    var ne = table_filters([col("x") != lit(25.0)], frame._columns)
+    assert_equal(
+        check_statistics(ne.filters[0], stats.record[].groups[0]),
+        FILTER_ALWAYS_TRUE,
+    )

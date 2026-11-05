@@ -13,13 +13,56 @@ var placed = plan.collect()  # engine="auto": by measured cost, see below
 print(plan.explain(accelerator=MetalRuntime()))  # HANDOFF metal: ...
 ```
 
-**Supported so far:** `select(col(c).sum())` over filters that compare `c`
-with untyped numeric literals (`>`, `>=`, `<`, `<=`, `==`, joined by `&`),
-where `c` is Int32, Int64 or Float32. Results equal the CPU's: integer
+**Supported so far:** `select(col(c).sum())` over filters that compare one
+column `p` with untyped numeric literals (`>`, `>=`, `<`, `<=`, `==`, joined
+by `&`). The value column `c` and predicate column `p` may differ; each can
+independently be Int32, Int64 or Float32. All nine type pairs are supported,
+including columns with different chunk boundaries. Results equal the CPU's: integer
 sums are exact and raise the CPU's overflow error; Float32 sums use Kahan
 compensation per GPU thread and can differ from the CPU in the last bits.
-A one-chunk column is read in place, without a copy. Float64 and every
-other operator run on the CPU.
+Native column chunks and their validity bitmaps are read in place, without
+coalescing or copying their values. Each chunk retains its own value and
+bit offsets. The reductions queue into separate partial-result ranges and
+share one final synchronization and readback; chunk count does not multiply
+the full reduction grid.
+
+One projection can also combine `sum`, `count` and `mean` over up to four
+distinct Int32, Int64 or Float32 columns, with the same optional range filter.
+Aliases of the same input share their sum and non-null count. A single GPU
+scan evaluates the predicate once and accumulates every requested field;
+different input chunk boundaries are intersected into native views. Count
+returns Int64, mean returns Float64, and sums preserve their input dtype and
+`min_count`. Empty means are null; empty counts are zero. Integer means do
+not overflow merely because a same-dtype sum would overflow.
+
+Float32 means accumulate exact integer exponent bins on the GPU and finish
+in Float64 on the host, without GPU Float64 arithmetic. If the finite input's
+significant-bit span and count cannot prove the CPU's Float64 additions
+exact, the CPU adjudicates the result in its own accumulation order. This
+preserves the CPU's behavior for extreme dynamic ranges and cancellation.
+Compensated Float32 sums with non-finite partials also use CPU adjudication,
+including finite inputs whose GPU partials overflow Float32.
+The common path uses three bins for values whose significant bits fit between
+2**-53 and 2**43, such as ordinary prices and sensor readings. A device flag
+detects any contribution outside that window and retries with all nine bins;
+large finite values and subnormals retain the same supported semantics. The
+kernel also specializes for the number of distinct aggregate fields.
+New fused projections have separate `fused_reductions:` calibration keys;
+without a measurement they stay on CPU in automatic mode. Float64 input
+columns and other operators continue to run on CPU.
+
+The explicit-copy reference path packs unaligned validity windows in bytes
+and SIMD batches. It does not copy an entire unaligned bitmap one bit at a
+time. These operations live in `dataframe_metal`; CPU storage helpers are
+unchanged.
+
+For example, a range on an Int32 quantity column can filter a Float32 revenue
+sum. Predicate nulls discard rows; value nulls are skipped by the sum. The
+columns' chunk boundaries are intersected into native views, without making
+a filtered column or coalescing either input. A query with predicates on
+multiple distinct columns remains on CPU. Cross-column sums use distinct
+`cross_filter_sum:<predicate dtype>:<value dtype>` calibration keys; the
+single-column estimates are not reused for these larger memory reads.
 
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
 every node it supports. `engine="auto"` places each such node by measured

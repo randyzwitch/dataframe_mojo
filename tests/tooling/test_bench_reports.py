@@ -213,7 +213,7 @@ class BenchmarkReports(unittest.TestCase):
 
     def test_instrumentation_includes_nested_and_other_operator_names(self):
         paths = bench.instrumented_paths()
-        self.assertIn("group_by.partitioned.indexed", paths)
+        self.assertIn("group_by.aggregate_table", paths)
         self.assertIn("lazy.join_order", paths)
         self.assertIn("rank.one_sort", paths)
 
