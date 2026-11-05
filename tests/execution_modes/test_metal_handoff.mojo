@@ -1127,6 +1127,42 @@ def test_metal_calibration_validates_all_identity_dimensions_and_layouts() raise
         .select(col("i").sum())
     )
     assert_false(key == shape_key(chunked, region_key(chunked)))
+    var independent = (
+        DataFrame(
+            [
+                Series._from_chunks(
+                    [
+                        Series("i", Column[Int32]([1])),
+                        Series("i", Column[Int32]([2, 3])),
+                    ]
+                )
+            ]
+        )
+        .lazy()
+        .select(col("i").sum())
+    )
+    assert_false(
+        shape_key(chunked, region_key(chunked))
+        == shape_key(independent, region_key(independent))
+    )
+    var different_geometry = (
+        DataFrame(
+            [
+                Series._from_chunks(
+                    [
+                        frame.column("i").slice(0, 2),
+                        frame.column("i").slice(2, 1),
+                    ]
+                )
+            ]
+        )
+        .lazy()
+        .select(col("i").sum())
+    )
+    assert_false(
+        shape_key(chunked, region_key(chunked))
+        == shape_key(different_geometry, region_key(different_geometry))
+    )
 
 
 # requires: metal

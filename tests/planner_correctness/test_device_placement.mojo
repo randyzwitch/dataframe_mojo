@@ -30,7 +30,8 @@ from dataframe.planning.device_placement import (
     plan_pipelines,
     solve_placement,
 )
-from dataframe.lazy_api import _solve_devices
+from dataframe.lazy_api import _solve_devices, _decide_at_start
+from dataframe.placement import load_costs
 from tests.support.group_strategy_reference import ScopedEnvironment
 from std.atomic import Atomic
 from std.memory import ArcPointer, Pointer, unsafe_memcpy
@@ -647,3 +648,70 @@ def test_a_unit_is_placed_again_when_it_starts() raises:
     assert_equal(runs.pipelines, 1)
     _ = calibrated^
     _ = runs^
+
+
+@fieldwise_init
+struct MatchedCosts(AcceleratorBackend):
+    var cpu_ns: Float64
+    var accel_ns: Float64
+
+    def execute(self, plan: LazyFrame) raises -> Tuple[Frame, Frame]:
+        raise Error("not used")
+
+    def describe(self, plan: LazyFrame) -> String:
+        return "matched costs"
+
+    def devices(self) -> List[DeviceInfo]:
+        return [DeviceInfo("matched", 0, "Matched", 1, -1)]
+
+    def transfer_model(self, device: Int) -> TransferModel:
+        return TransferModel.shared_memory()
+
+    def pipeline_supports(self, pipeline: LazyFrame, device: Int) -> Bool:
+        return True
+
+    def pipeline_costs(
+        self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
+    ) -> Tuple[Float64, Float64]:
+        return (self.cpu_ns, self.accel_ns)
+
+
+def test_matched_cpu_costs_override_coarse_models_at_plan_and_execution_time() raises:
+    var frames = sources()
+    var query = frames[0].lazy().filter(col("v") > 1).select(col("v").sum())
+    var plan = query._optimized()
+    var cuts = plan_pipeline_cuts(plan._plan)
+    assert_equal(len(cuts), 1)
+    for scenario in range(3):
+        var path = (
+            "build/test-device-placement-matched-" + String(scenario) + ".json"
+        )
+        var generic = Float64(10) if scenario == 0 else Float64(1e6)
+        calibrate(path, [cuts[0].key.copy()], generic)
+        var environment = ScopedEnvironment(
+            "DATAFRAME_HANDOFF_CALIBRATION", path
+        )
+        var matched = Float64(1e6) if scenario == 0 else (
+            Float64(10) if scenario == 1 else Float64(-1)
+        )
+        var device = MatchedCosts(matched, 1000)
+        var solved = _solve_devices(plan, device, device.devices())
+        var expected = matched if matched >= 0 else generic + 5 * Float64(
+            solved.units[0].features.input_rows
+        )
+        assert_equal(solved.problem.run_ns[0][CPU], expected)
+        assert_equal(solved.placement.devices[0], 0 if scenario == 1 else 1)
+        var unit = solved.units[0].copy()
+        var region = unit.region.copy()
+        var chosen = _decide_at_start(
+            device,
+            device.devices(),
+            solved.problem,
+            unit,
+            0,
+            region,
+            load_costs("cpu"),
+        )
+        assert_equal(solved.problem.run_ns[0][CPU], expected)
+        assert_equal(chosen.devices[0], 0 if scenario == 1 else 1)
+        _ = environment^
