@@ -2,8 +2,15 @@
 from dataframe.aggregation.reducer import (
     Reducer,
 )
+from dataframe.aggregation.clustered import (
+    ClusteredRuns,
+    update_clustered,
+    update_clustered_pair,
+)
 from dataframe.aggregation.function import (
+    AggregateFunction,
     _BATCH,
+    _K_COMOMENT,
     _Groups,
     _HeldBuffers,
     _ValueArena,
@@ -261,6 +268,7 @@ struct _PerfectSinkJob(Job):
         var rows = List[Int](length=_BATCH, fill=0)
         var scratch = List[UInt64](length=3 * _BATCH, fill=0)
         var discard = List[UInt64](length=stride + 8, fill=0)
+        var clustering = ClusteredRuns()
         var at = self.start
         while at < self.end:
             var length = min(self.batch, self.end - at)
@@ -277,6 +285,23 @@ struct _PerfectSinkJob(Job):
                 perfect_slots(self.keys, self.perfect, at + lo, count, slots)
                 var slot_at = slots.unsafe_ptr()
                 var row_at = rows.unsafe_ptr()
+                if clustering.try_build(slot_at, count):
+                    self._update_clustered(
+                        clustering,
+                        inputs,
+                        lo,
+                        count,
+                        at,
+                        base,
+                        stride,
+                        groups.states_at,
+                        slots,
+                        rows,
+                        arena,
+                        Int(discard.unsafe_ptr()),
+                        Int(scratch.unsafe_ptr()),
+                    )
+                    continue
                 for k in range(count):
                     var address = base + 8 * stride * slot_at[unsafe_offset=k]
                     row_at[unsafe_offset=k] = address
@@ -303,6 +328,84 @@ struct _PerfectSinkJob(Job):
                 )
             at += length
         self.groups.append(groups^)
+
+    def _update_clustered(
+        self,
+        runs: ClusteredRuns,
+        inputs: List[Series],
+        lo: Int,
+        count: Int,
+        at: Int,
+        base: Int,
+        stride: Int,
+        states_at: Int,
+        slots: List[Int],
+        mut rows: List[Int],
+        arena: Pointer[_ValueArena, MutAnyOrigin],
+        discard: Int,
+        scratch: Int,
+    ) raises:
+        """A clustered chunk's rows into their slots' states, a run at a
+        time (DuckDB's `PerfectAggregateHashTable::AddChunkClustered`):
+        each run marks its slot and keeps its first row, then each
+        reduction updates the run's state once; a reduction with no
+        clustered update takes the chunk's rows one by one."""
+        var row_bytes = 8 * stride
+        var positions = runs.arena.unsafe_ptr()
+        for r in range(runs.n_runs):
+            var row = Pointer[UInt64, MutAnyOrigin](
+                unsafe_from_address=base + Int(runs.gids[r]) * row_bytes
+            )
+            # A run's positions rise, so its first is its earliest row.
+            var first = UInt64(
+                at + lo + Int(positions[unsafe_offset=runs.starts[r]])
+            )
+            if row[] == 0:
+                row[] = 1
+                row[unsafe_offset=2] = first
+            elif first < row[unsafe_offset=2]:
+                row[unsafe_offset=2] = first
+        var addressed = False
+        for s in range(len(self.layout.slots)):
+            ref slot = self.layout.slots[s]
+            var state = 8 * (states_at + slot.offset)
+            if slot.kind == _K_COMOMENT:
+                update_clustered_pair(
+                    inputs[s],
+                    inputs[slot.k],
+                    lo,
+                    count,
+                    runs,
+                    base,
+                    row_bytes,
+                    state,
+                    scratch,
+                )
+                continue
+            if update_clustered(
+                slot, inputs[s], lo, count, runs, base, row_bytes, state
+            ):
+                continue
+            if not addressed:
+                for k in range(count):
+                    rows[k] = base + row_bytes * slots[k]
+                addressed = True
+            var one = List[AggregateFunction]()
+            one.append(slot.copy())
+            var lone = List[Series]()
+            lone.append(inputs[s].copy())
+            _update_states(
+                one,
+                lone,
+                lo,
+                count,
+                rows.unsafe_ptr(),
+                states_at,
+                at,
+                arena,
+                discard,
+                scratch,
+            )
 
 
 def _perfect_keys(
