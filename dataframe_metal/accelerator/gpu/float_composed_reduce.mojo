@@ -134,11 +134,15 @@ def float_composed_partials[
             if predicate_nullable:
                 kept = _valid(predicate_bits, predicate_offset, row)
             comptime if native_predicate == 0:
-                var pi = predicate_values.unsafe_bitcast[Int32]()[unsafe_offset=row]
+                var pi = predicate_values.unsafe_bitcast[Int32]()[
+                    unsafe_offset=row
+                ]
                 kept = kept & (pi >= low_int32) & (pi <= high_int32)
             else:
                 if predicate_tag == 2:
-                    pf = predicate_values.unsafe_bitcast[Float32]()[unsafe_offset=row]
+                    pf = predicate_values.unsafe_bitcast[Float32]()[
+                        unsafe_offset=row
+                    ]
                     kept = kept & float_in_range(
                         pf, low_float, high_float, inclusive
                     )
