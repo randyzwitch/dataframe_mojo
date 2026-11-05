@@ -1241,3 +1241,147 @@ def test_metal_calibration_corpus_checks_shared_arithmetic_mean_and_both_null_ma
                 assert_equal(len(matched.value().fields), 2)
                 assert_true(matched.value().precise_float)
                 _check(plan.collect(engine="cpu"), _reference(rows, nulls, 4))
+
+
+def _typed_composition_cases() raises -> List[LazyFrame]:
+    var columns = List[Series]()
+    var valid = List[Bool]([True, False, True])
+    for i in range(4):
+        columns.append(Series("i" + String(i), Column[Int32]([1, 2, 3], valid)))
+        columns.append(
+            Series(
+                "l" + String(i),
+                Column[Int64](
+                    [
+                        (Int64(1) << 40) + 1,
+                        (Int64(1) << 40) + 2,
+                        (Int64(1) << 40) + 3,
+                    ],
+                    valid,
+                ),
+            )
+        )
+        columns.append(
+            Series("f" + String(i), Column[Float32]([1, 2, 3], valid))
+        )
+    columns.append(Series("p", Column[Int32]([1, 1, 1])))
+    var frame = DataFrame(columns^)
+    var result = List[LazyFrame]()
+    for arity in range(1, 5):
+        for floats in range(arity + 1):
+            for narrow in range(arity - floats + 1):
+                var names = List[String]()
+                for i in range(floats):
+                    names.append("f" + String(i))
+                for i in range(narrow):
+                    names.append("i" + String(i))
+                for i in range(arity - floats - narrow):
+                    names.append("l" + String(i))
+                for means in [False, True]:
+                    var expressions = List[Expr]()
+                    for i in range(arity - 1, -1, -1):
+                        var name = names[i].copy()
+                        var value = col(name) + 1
+                        if name.startswith("l"):
+                            value = col(name) + lit(Int64(1))
+                        elif name.startswith("f"):
+                            value = col(name) + lit(Float32(1))
+                        expressions.append(value.sum().alias("s_" + name))
+                        expressions.append(value.count().alias("c_" + name))
+                        if means:
+                            expressions.append(value.mean().alias("m_" + name))
+                    result.append(
+                        frame.lazy()
+                        .filter(col("p") > 0)
+                        .select_exprs(expressions)
+                    )
+    return result^
+
+
+def test_composed_schema_packs_native_types_and_remaps_all_output_aliases() raises:
+    from dataframe_metal.composition_plan import (
+        plan_composition,
+        single_float_composition,
+        composition_key,
+    )
+
+    var cases = _typed_composition_cases()
+    assert_equal(len(cases), 68)
+    for query in cases:
+        var matched = plan_composition(query)
+        assert_true(Bool(matched))
+        ref plan = matched.value()
+        var rank = -1
+        for field in plan.fields:
+            var current = 0 if field.dtype == DataType.FLOAT32 else (
+                1 if field.dtype == DataType.INT32 else 2
+            )
+            assert_true(current >= rank)
+            rank = current
+        ref expressions = query._plan._nodes[len(query._plan._nodes) - 1].exprs
+        for i in range(len(plan.outputs)):
+            assert_equal(
+                plan.fields[plan.outputs[i].field].left,
+                expressions[i]._nodes[0].text,
+            )
+        if not single_float_composition(plan):
+            assert_true(
+                composition_key(plan).startswith(
+                    "composed_reductions:v2:typed_fields:"
+                )
+            )
+
+
+# requires: metal
+def test_composed_typed_native_fields_match_cpu_across_all_arities() raises:
+    _ = require_metal()
+    var runtime = MetalRuntime()
+    for query in _typed_composition_cases():
+        var expected = query.collect(engine="cpu")
+        _close_bundle(execute_timed(query)[0], expected)
+        _close_bundle(execute_timed(query, zero_copy=False)[0], expected)
+        _close_bundle(query.collect(accelerator=runtime), expected)
+
+
+# requires: metal
+def test_composed_typed_native_float_sums_adjudicate_underflow_without_affecting_counts() raises:
+    _ = require_metal()
+    var runtime = MetalRuntime()
+    var tiny = bitcast[DType.float32](UInt32(1))
+    var frame = DataFrame(
+        [
+            Series("i", Column[Int32]([1, 2])),
+            Series("f", Column[Float32]([tiny, tiny])),
+            Series("l", Column[Int64]([3, 4])),
+        ]
+    )
+    var query = frame.lazy().select_exprs(
+        [
+            (col("i") + 1).sum().alias("i"),
+            col("f").sum().alias("f"),
+            col("l").count().alias("n"),
+        ]
+    )
+    with assert_raises(contains="gradual underflow"):
+        _ = execute_timed(query)
+    var actual = query.collect(accelerator=runtime)
+    assert_true(actual.equals(query.collect(engine="cpu")))
+    assert_equal(
+        bitcast[DType.uint32](actual.item(0, "f").float32()), UInt32(2)
+    )
+    var count = frame.lazy().select_exprs(
+        [
+            (col("i") + 1).sum().alias("i"),
+            col("f").count().alias("f"),
+            col("l").count().alias("n"),
+        ]
+    )
+    assert_true(execute_timed(count)[0].equals(count.collect(engine="cpu")))
+    var mean = frame.lazy().select_exprs(
+        [
+            (col("i") + 1).sum().alias("i"),
+            col("f").mean().alias("f"),
+            col("l").count().alias("n"),
+        ]
+    )
+    assert_true(execute_timed(mean)[0].equals(mean.collect(engine="cpu")))

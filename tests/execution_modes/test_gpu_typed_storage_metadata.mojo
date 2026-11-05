@@ -1104,7 +1104,7 @@ def test_composed_adjacent_slices_batch_one_launch_with_original_segment_grids()
         var matched = plan_composition(query)
         var scope = Scope()
         var timings = HandoffTimings()
-        var measured = _run[False, False, 2, 0, True](
+        var measured = _run[False, False, 2, 0, True, 0](
             matched.value(), frame, scope, True, timings
         )
         assert_equal(Float32(measured[1][0]), expected.item(0, "s").float32())

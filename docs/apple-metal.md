@@ -83,7 +83,14 @@ columns plus an independent predicate column. Operands retain the same dtype,
 literal and null rules as the single arithmetic SUM. COUNT checks integer
 intermediate overflow even when no sum is requested. Float32 means use the
 same exact-bin finish and CPU-order proof described above. These projections
-use `composed_reductions:v1:` calibration keys. Subnormal arithmetic operands
+use `composed_reductions:v2:typed_fields:` calibration keys for the general
+composition kernel; the compact all-Float32 kernel retains its v1 keys.
+A schema-only remap groups Float32, Int32 and Int64 fields while preserving
+output aliases and order. Native dtype branches and reduction states are
+compiled for those groups, including Int64 accumulation for narrow integers
+and split upper/lower words for Int64. COUNT-only fields omit unused sum
+collectives while retaining checked integer expression evaluation.
+Subnormal arithmetic operands
 and possible gradual underflow use CPU adjudication because Metal arithmetic
 can flush these values to zero before reduction. The existing single arithmetic
 SUM and pure column aggregate paths keep their specialized kernels.
@@ -105,6 +112,18 @@ transformations in the Metal backend; the CPU optimizer is unchanged.
 New fused projections have separate `fused_reductions:` calibration keys;
 without a measurement they stay on CPU in automatic mode. Float64 input
 columns and other operators continue to run on CPU.
+
+A projection can also combine native `min` and `max` over up to four
+distinct Int32, Int64 or Float32 columns, with the same optional range
+predicate. Aliases and MIN/MAX on the same column share a scan and reduction
+state. Empty or all-null inputs return typed nulls. Float32 extrema compare
+ordered integer keys, preserving subnormals and infinities without floating
+arithmetic on the GPU. NaNs are skipped when a numeric value exists;
+all-NaN fields and extrema tied between opposite zero signs use CPU
+adjudication to preserve the CPU's payload and tie behavior. Arithmetic
+MIN/MAX and projections mixing extrema with SUM/COUNT/MEAN continue to run
+on CPU. These regions use `native_extrema:v1:` calibration keys and remain
+on CPU in automatic mode until measured for the current build and layout.
 
 Float32 range predicates use ordered integer keys when a bound is near
 zero, preserving subnormal comparisons, signed-zero equality and NaN
