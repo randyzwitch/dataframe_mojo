@@ -41,6 +41,7 @@ def _run[
     float_fields: Int,
     fast: Bool,
     int32_fields: Int,
+    native_predicate: Int = -1,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -248,7 +249,7 @@ def _run[
                     segment[0].rows, frame.height()
                 )
                 comptime kernel_batched = float_composed_partials[
-                    wide, arity, float_fields, batched=True
+                    wide, arity, float_fields, native_predicate, batched=True
                 ] if fast else composed_partials[
                     precise,
                     wide,
@@ -258,7 +259,7 @@ def _run[
                     batched=True,
                 ]
                 comptime kernel_separate = float_composed_partials[
-                    wide, arity, float_fields, batched=False
+                    wide, arity, float_fields, native_predicate, batched=False
                 ] if fast else composed_partials[
                     precise,
                     wide,
@@ -452,9 +453,23 @@ def _float_arity[
             exact_fields += Int(bundle.fields[i].needs_mean)
     comptime for n in range(arity + 1):
         if exact_fields == n:
-            return _run[n > 0, wide, arity, n, True, 0](
-                bundle, frame, scope, zero_copy, timings
-            )
+            comptime if n == 0:
+                if bundle.predicate.filter_dtype == DataType.INT32:
+                    return _run[False, wide, arity, 0, True, 0, 0](
+                        bundle, frame, scope, zero_copy, timings
+                    )
+                elif bundle.predicate.filter_dtype == DataType.INT64:
+                    return _run[False, wide, arity, 0, True, 0, 1](
+                        bundle, frame, scope, zero_copy, timings
+                    )
+                return _run[False, wide, arity, 0, True, 0, 2](
+                    bundle, frame, scope, zero_copy, timings
+                )
+            else:
+                # Preserve the original exact-mean scan and its register state.
+                return _run[True, wide, arity, n, True, 0](
+                    bundle, frame, scope, zero_copy, timings
+                )
     raise Error("Metal compact float prefix exceeds its field count")
 
 

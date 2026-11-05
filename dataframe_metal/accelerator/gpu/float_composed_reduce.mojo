@@ -17,7 +17,11 @@ from .exact_float_state import ExactFloatState
 
 
 def float_composed_partials[
-    wide: Bool, arity: Int, exact_fields: Int, batched: Bool = False
+    wide: Bool,
+    arity: Int,
+    exact_fields: Int,
+    native_predicate: Int = -1,
+    batched: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -50,6 +54,7 @@ def float_composed_partials[
 ):
     comptime assert 1 <= arity and arity <= 4
     comptime assert 0 <= exact_fields and exact_fields <= arity
+    comptime assert -1 <= native_predicate and native_predicate <= 2
     var geometry = static_segment_info[batched](
         metadata, metadata_offset, Int(block_idx.x)
     )
@@ -58,7 +63,9 @@ def float_composed_partials[
     var rows = Int(meta[unsafe_offset=0])
     var stride = Int(meta[unsafe_offset=1])
     var output_offset = Int(meta[unsafe_offset=2])
-    var predicate_tag = UInt32(meta[unsafe_offset=4])
+    var predicate_tag = UInt32(
+        native_predicate
+    ) if native_predicate >= 0 else UInt32(meta[unsafe_offset=4])
     var predicate_offset = UInt32(meta[unsafe_offset=5]) + UInt32(row_base)
     var predicate_nullable = UInt32(meta[unsafe_offset=6])
     var filtered = UInt32(meta[unsafe_offset=7])
@@ -67,6 +74,13 @@ def float_composed_partials[
     var high_bound = bitcast[DType.int64](meta[unsafe_offset=10])
     var low_float = bitcast[DType.float32](UInt32(meta[unsafe_offset=11]))
     var high_float = bitcast[DType.float32](UInt32(meta[unsafe_offset=12]))
+    var low_int32 = Int32(0)
+    var high_int32 = Int32(0)
+    comptime if native_predicate == 0:
+        # An absent bound retains an Int64 sentinel in the matcher. Clamp
+        # once before narrowing, without retaining Int64 state in the scan.
+        low_int32 = max(low_bound, Int64(Int32.MIN)).cast[DType.int32]()
+        high_int32 = min(high_bound, Int64(Int32.MAX)).cast[DType.int32]()
     var sum_flags = UInt32(meta[unsafe_offset=14])
     var predicate_slot = UInt32(meta[unsafe_offset=15])
     var predicate_values = predicate.unsafe_offset(
@@ -125,16 +139,22 @@ def float_composed_partials[
         if filtered:
             if predicate_nullable:
                 kept = _valid(predicate_bits, predicate_offset, row)
-            if predicate_tag == 2:
-                pf = predicate_values.unsafe_bitcast[Float32]()[
+            comptime if native_predicate == 0:
+                var pi = predicate_values.unsafe_bitcast[Int32]()[
                     unsafe_offset=row
                 ]
-                kept = kept & float_in_range(
-                    pf, low_float, high_float, inclusive
-                )
+                kept = kept & (pi >= low_int32) & (pi <= high_int32)
             else:
-                var pi = read_integer(predicate_values, predicate_tag, row)
-                kept = kept & (pi >= low_bound) & (pi <= high_bound)
+                if predicate_tag == 2:
+                    pf = predicate_values.unsafe_bitcast[Float32]()[
+                        unsafe_offset=row
+                    ]
+                    kept = kept & float_in_range(
+                        pf, low_float, high_float, inclusive
+                    )
+                else:
+                    var pi = read_integer(predicate_values, predicate_tag, row)
+                    kept = kept & (pi >= low_bound) & (pi <= high_bound)
         comptime for field in range(arity):
             var valid = kept
             if nullable & (UInt32(1) << UInt32(field)):

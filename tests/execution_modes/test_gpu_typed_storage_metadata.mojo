@@ -765,6 +765,119 @@ def test_metal_composed_shared_arithmetic_stays_in_one_gpu_region() raises:
     )
 
 
+# requires: metal
+def test_composed_float_sums_preserve_grid_tails_nulls_and_counts() raises:
+    from dataframe import col
+    from dataframe_metal.handoff import execute_timed
+    from dataframe_metal.metal import MetalRuntime
+
+    _ = require_metal()
+    var runtime = MetalRuntime()
+    for rows in [3, 257, 262147, 524293]:
+        for nullable in [False, True]:
+            var left = List[Float32]()
+            var right = List[Float32]()
+            var extra = List[Float32]()
+            var valid = List[Bool]()
+            var other_valid = List[Bool]()
+            for i in range(rows):
+                left.append(Float32(i % 17 - 8) / 4)
+                right.append(Float32(i % 5 + 1) / 2)
+                extra.append(Float32(i % 7 - 3) / 8)
+                valid.append(not nullable or i % 11 != 1)
+                other_valid.append(not nullable or i % 13 != 2)
+            var frame = DataFrame(
+                [
+                    Series("a", Column[Float32](left^, valid)),
+                    Series("b", Column[Float32](right^, other_valid)),
+                    Series("d", Column[Float32](extra^)),
+                ]
+            )
+            var value = col("a") * col("b")
+            var plan = frame.lazy().select_exprs(
+                [
+                    value.sum().alias("sales"),
+                    value.count().alias("n"),
+                    col("d").sum().alias("discount"),
+                    col("b").count().alias("quantity"),
+                ]
+            )
+            var expected = plan.collect(engine="cpu")
+            assert_equal(execute_timed(plan)[0].equals(expected), True)
+            assert_equal(
+                plan.collect(accelerator=runtime).equals(expected), True
+            )
+
+
+# requires: metal
+def test_compact_float_int32_predicates_preserve_unbounded_limits_and_nulls() raises:
+    from dataframe import Expr, col, lit
+    from dataframe_metal.composition_plan import (
+        plan_composition,
+        single_float_composition,
+    )
+    from dataframe_metal.handoff import execute_timed
+    from dataframe_metal.metal import MetalRuntime
+
+    _ = require_metal()
+    for nulls in [False, True]:
+        var frame = DataFrame(
+            [
+                Series(
+                    "p",
+                    Column[Int32](
+                        [Int32.MIN, -1, 0, 1, Int32.MAX],
+                        [True, True, not nulls, True, not nulls],
+                    ),
+                ),
+                Series(
+                    "f",
+                    Column[Float32](
+                        [0.5, 1, 1.5, 2, 2.5],
+                        [True, not nulls, True, True, True],
+                    ),
+                ),
+                Series("d", Column[Float32]([3, 4, 5, 6, 7])),
+            ]
+        )
+        var predicates: List[Expr] = [
+            col("p") > 0,
+            col("p") < 0,
+            col("p") >= -2147483648,
+            col("p") <= 2147483647,
+            col("p") == 2147483647,
+            col("p") == -2147483648,
+            col("p") > 2147483647,
+            col("p") < -2147483648,
+        ]
+        for predicate in predicates:
+            for mean in [False, True]:
+                var value = col("f") * lit(Float32(2))
+                var expressions: List[Expr] = [
+                    value.sum().alias("sum"),
+                    value.count().alias("count"),
+                    col("d").sum().alias("discount"),
+                ]
+                if mean:
+                    expressions.append(value.mean().alias("mean"))
+                var query = (
+                    frame.lazy().filter(predicate).select_exprs(expressions)
+                )
+                var matched = plan_composition(query)
+                assert_equal(Bool(matched), True)
+                assert_equal(single_float_composition(matched.value()), True)
+                var expected = query.collect(engine="cpu")
+                assert_equal(execute_timed(query)[0].equals(expected), True)
+                assert_equal(
+                    execute_timed(query, zero_copy=False)[0].equals(expected),
+                    True,
+                )
+                assert_equal(
+                    query.collect(accelerator=MetalRuntime()).equals(expected),
+                    True,
+                )
+
+
 def _check_adjacent_native_chunks[D: DType]() raises:
     from std.memory import Pointer
     from dataframe import Column, Series
