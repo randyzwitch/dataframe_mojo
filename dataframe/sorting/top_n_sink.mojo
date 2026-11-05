@@ -27,7 +27,7 @@ from dataframe.vector.data_chunk import (
     gather_series,
     to_series,
 )
-from dataframe.vector.types import SelectionVector
+from dataframe.vector.types import FLAT_VECTOR, SelectionVector
 from std.collections import Optional
 from std.memory import ArcPointer
 
@@ -64,6 +64,10 @@ struct TopNSink(Movable):
     # boundary when this sink's key becomes it, and its comparison.
     var dynamic: Optional[ArcPointer[DynamicFilterData]]
     var dynamic_op: Int
+    # The arena columns the layout is bound to while chunks are flat
+    # windows of them (one morsel), so a chunk's keys are read in place
+    # rather than made into columns; empty when unbound.
+    var bound: List[Int]
 
     def __init__(
         out self,
@@ -90,6 +94,11 @@ struct TopNSink(Movable):
         self.boundary = boundary
         self.dynamic = dynamic
         self.dynamic_op = dynamic_op
+        self.bound = List[Int]()
+
+    def new_morsel(mut self):
+        """The arena's columns are replaced: bind afresh."""
+        self.bound = List[Int]()
 
     def sink(mut self, frame: DataFrame) raises:
         """Sink: the chunk's rows that enter, a vector at a time."""
@@ -99,6 +108,7 @@ struct TopNSink(Movable):
         for name in self.names:
             keys.append(frame.column(name))
         self.layout.rebind(keys)
+        self.bound = List[Int]()
         if self.layout.variable:
             self._sink[1, True](frame)
         elif self.layout.words == 1:
@@ -116,28 +126,58 @@ struct TopNSink(Movable):
         enter the heap are copied into the payload (AddLargeHeap)."""
         if self.heap.heap_size == 0 or chunk.count == 0:
             return
-        var keys = List[Series](capacity=len(self.names))
+        # Keys that are flat windows of one place in the arena's columns
+        # are read where they are (DuckDB builds sort keys from the
+        # chunk's vectors): the layout stays bound to those columns and
+        # takes the chunk's row range.
+        var start = -1
+        var handles = List[Int](capacity=len(self.names))
         for name in self.names:
             var c = self.schema._index(name)
-            keys.append(
-                to_series(
-                    chunk, c, arena, name, self.schema._columns[c].dtype()
+            ref v = chunk.data[c]
+            if (
+                v.vector_type != FLAT_VECTOR
+                or v.source < 0
+                or (start >= 0 and v.source_offset != start)
+                or arena.columns[v.source].dtype()
+                != self.schema._columns[c].dtype()
+            ):
+                start = -1
+                break
+            start = v.source_offset
+            handles.append(v.source)
+        if start >= 0:
+            if self.bound != handles:
+                var keys = List[Series](capacity=len(handles))
+                for h in handles:
+                    keys.append(arena.columns[h].copy())
+                self.layout.rebind(keys)
+                self.bound = handles^
+        else:
+            start = 0
+            self.bound = List[Int]()
+            var keys = List[Series](capacity=len(self.names))
+            for name in self.names:
+                var c = self.schema._index(name)
+                keys.append(
+                    to_series(
+                        chunk, c, arena, name, self.schema._columns[c].dtype()
+                    )
                 )
-            )
-        self.layout.rebind(keys)
+            self.layout.rebind(keys)
         var matches: List[Int]
         if self.layout.variable:
-            matches = self._enter[1, True](chunk.count)
+            matches = self._enter[1, True](start, chunk.count)
         elif self.layout.words == 1:
-            matches = self._enter[1, False](chunk.count)
+            matches = self._enter[1, False](start, chunk.count)
         elif self.layout.words == 2:
-            matches = self._enter[2, False](chunk.count)
+            matches = self._enter[2, False](start, chunk.count)
         else:
-            matches = self._enter[3, False](chunk.count)
+            matches = self._enter[3, False](start, chunk.count)
         if len(matches) > 0:
             var rows = List[UInt32](unsafe_uninit_length=len(matches))
             for i in range(len(matches)):
-                rows[i] = UInt32(matches[i])
+                rows[i] = UInt32(matches[i] - start)
             var selection = SelectionVector(Int(rows.unsafe_ptr()))
             var columns = List[Series](capacity=self.schema.width())
             for c in range(self.schema.width()):
@@ -170,15 +210,19 @@ struct TopNSink(Movable):
         else:
             self._settle[3, False]()
 
-    def _enter[W: Int, VAR: Bool](mut self, n: Int) raises -> List[Int]:
-        """The bound key's rows that enter the heap, a vector at a time
-        (their payload positions follow the payload so far)."""
+    def _enter[
+        W: Int, VAR: Bool
+    ](mut self, start: Int, n: Int) raises -> List[Int]:
+        """The bound key's rows [start, start + n) that enter the heap, a
+        vector at a time (their payload positions follow the payload so
+        far); the rows, as the bound key's."""
         self.heap.view.refresh[W, VAR](self.boundary)
         var matches = List[Int]()
-        var at = 0
+        var at = start
+        var stop = start + n
         var prefixes = List[UInt64]()
-        while at < n:
-            var end = min(n, at + STANDARD_VECTOR_SIZE)
+        while at < stop:
+            var end = min(stop, at + STANDARD_VECTOR_SIZE)
             var block: KeyBlock
             var entering = Optional[List[Int]]()
             if key_prefixes(self.layout, at, end, prefixes):
@@ -208,7 +252,7 @@ struct TopNSink(Movable):
             self._reduce[W, VAR]()
 
     def _sink[W: Int, VAR: Bool](mut self, frame: DataFrame) raises:
-        var matches = self._enter[W, VAR](frame.height())
+        var matches = self._enter[W, VAR](0, frame.height())
         if len(matches) > 0:
             self.parts.append(frame.take(matches))
             self.payload_rows += len(matches)

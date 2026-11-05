@@ -330,16 +330,20 @@ def _dynamic_check(
     `DynamicFilterData::CheckStatistics`."""
     if _dynamic(data).initialized.load() == 0:
         return NO_PRUNING_POSSIBLE
+    # The constant is read in place under the lock rather than copied out:
+    # the scan checks it for every vector it reads, not once a row group.
     _lock(data)
     var op = _dynamic(data).op
-    var constants = _dynamic(data).constants.copy()
-    _unlock(data)
+    var result: Int
     if not stats.can_have_no_null():
-        return (
+        result = (
             FILTER_ALWAYS_TRUE if op
             == COMPARE_DISTINCT_FROM else FILTER_ALWAYS_FALSE
         )
-    return _zonemap(stats, op, constants)
+    else:
+        result = _zonemap(stats, op, _dynamic(data).constants)
+    _unlock(data)
+    return result
 
 
 @fieldwise_init

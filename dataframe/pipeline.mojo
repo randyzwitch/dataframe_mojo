@@ -3060,6 +3060,9 @@ struct _PipelineJob(Job):
         var direct = first == 0
         var bases = columns.bases(self.runner.arena)
         var made = 0
+        var skipped = 0
+        if len(self.topn) > 0:
+            self.topn[0].new_morsel()
         for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
             var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
             if direct and self.top_filter.info:
@@ -3071,7 +3074,7 @@ struct _PipelineJob(Job):
                 if self.top_filter.info.value()[].skip(
                     offset + start, offset + end
                 ):
-                    trace_path("pipeline.top_dynamic_skip_vector")
+                    skipped += 1
                     continue
             var address = self.runner.chunk(columns, bases, low, count, first)
             if address == 0:
@@ -3090,6 +3093,9 @@ struct _PipelineJob(Job):
             if len(self.topn) == 0:
                 self._sink_top(self.runner.output_schema(), k, offset, 0)
             self.topn[0].sink_chunk(chunk[], self.runner.arena)
+        if skipped > 0:
+            # Once a morsel: tracing reads the environment.
+            trace_path("pipeline.top_dynamic_skip_vector")
 
     def _sink_top(
         mut self, var output: DataFrame, k: Int, offset: Int, first_row: Int
