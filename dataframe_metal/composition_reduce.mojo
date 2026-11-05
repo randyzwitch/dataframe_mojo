@@ -35,7 +35,12 @@ from .accelerator.gpu.target import METAL_TARGET
 
 
 def _run[
-    precise: Bool, wide: Bool, arity: Int, float_fields: Int, fast: Bool
+    precise: Bool,
+    wide: Bool,
+    arity: Int,
+    float_fields: Int,
+    fast: Bool,
+    int32_fields: Int,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -245,12 +250,22 @@ def _run[
                 comptime kernel_batched = float_composed_partials[
                     wide, arity, float_fields, batched=True
                 ] if fast else composed_partials[
-                    precise, wide, arity, float_fields, batched=True
+                    precise,
+                    wide,
+                    arity,
+                    float_fields,
+                    int32_fields,
+                    batched=True,
                 ]
                 comptime kernel_separate = float_composed_partials[
                     wide, arity, float_fields, batched=False
                 ] if fast else composed_partials[
-                    precise, wide, arity, float_fields, batched=False
+                    precise,
+                    wide,
+                    arity,
+                    float_fields,
+                    int32_fields,
+                    batched=False,
                 ]
                 if batched:
                     ctx.enqueue_function[kernel_batched](
@@ -437,7 +452,7 @@ def _float_arity[
             exact_fields += Int(bundle.fields[i].needs_mean)
     comptime for n in range(arity + 1):
         if exact_fields == n:
-            return _run[n > 0, wide, arity, n, True](
+            return _run[n > 0, wide, arity, n, True, 0](
                 bundle, frame, scope, zero_copy, timings
             )
     raise Error("Metal compact float prefix exceeds its field count")
@@ -452,20 +467,19 @@ def _by_arity[
     zero_copy: Bool,
     mut timings: HandoffTimings,
 ) raises -> Tuple[List[Int128], List[Float64], List[Int]]:
-    comptime if not precise:
-        return _run[False, wide, arity, 0, False](
-            bundle, frame, scope, zero_copy, timings
-        )
-    else:
-        var floats = 0
-        for field in bundle.fields:
-            floats += Int(field.dtype == DataType.FLOAT32)
-        comptime for n in range(1, arity + 1):
-            if floats == n:
-                return _run[True, wide, arity, n, False](
-                    bundle, frame, scope, zero_copy, timings
-                )
-        raise Error("Metal exact-bin fields are not a nonempty float prefix")
+    var floats = 0
+    var int32s = 0
+    for field in bundle.fields:
+        floats += Int(field.dtype == DataType.FLOAT32)
+        int32s += Int(field.dtype == DataType.INT32)
+    comptime for n in range(arity + 1):
+        comptime if not precise or n > 0:
+            comptime for narrow in range(arity - n + 1):
+                if floats == n and int32s == narrow:
+                    return _run[precise, wide, arity, n, False, narrow](
+                        bundle, frame, scope, zero_copy, timings
+                    )
+    raise Error("Metal composed field types exceed their arity")
 
 
 def _dispatch[
