@@ -763,3 +763,47 @@ def test_metal_composed_shared_arithmetic_stays_in_one_gpu_region() raises:
     assert_equal(
         optimized.collect(accelerator=MetalRuntime()).equals(expected), True
     )
+
+
+# requires: metal
+def test_composed_float_sums_preserve_parallel_stream_tails_nulls_and_counts() raises:
+    from dataframe import col
+    from dataframe_metal.handoff import execute_timed
+    from dataframe_metal.metal import MetalRuntime
+
+    _ = require_metal()
+    var runtime = MetalRuntime()
+    for rows in [3, 257, 262147, 524293]:
+        for nullable in [False, True]:
+            var left = List[Float32]()
+            var right = List[Float32]()
+            var extra = List[Float32]()
+            var valid = List[Bool]()
+            var other_valid = List[Bool]()
+            for i in range(rows):
+                left.append(Float32(i % 17 - 8) / 4)
+                right.append(Float32(i % 5 + 1) / 2)
+                extra.append(Float32(i % 7 - 3) / 8)
+                valid.append(not nullable or i % 11 != 1)
+                other_valid.append(not nullable or i % 13 != 2)
+            var frame = DataFrame(
+                [
+                    Series("a", Column[Float32](left^, valid)),
+                    Series("b", Column[Float32](right^, other_valid)),
+                    Series("d", Column[Float32](extra^)),
+                ]
+            )
+            var value = col("a") * col("b")
+            var plan = frame.lazy().select_exprs(
+                [
+                    value.sum().alias("sales"),
+                    value.count().alias("n"),
+                    col("d").sum().alias("discount"),
+                    col("b").count().alias("quantity"),
+                ]
+            )
+            var expected = plan.collect(engine="cpu")
+            assert_equal(execute_timed(plan)[0].equals(expected), True)
+            assert_equal(
+                plan.collect(accelerator=runtime).equals(expected), True
+            )

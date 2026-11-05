@@ -99,83 +99,138 @@ def float_composed_partials[
     var reuse_right = (
         right_slot != 0 and right_slot == predicate_slot and filtered != 0
     )
+    # Independent compensated streams expose memory/ALU work within a thread.
+    # Exact means retain their original single-stream traversal.
+    comptime LANES = 2 if exact_fields == 0 else 1
     var total = SIMD[DType.float32, 4](0)
     var comp = SIMD[DType.float32, 4](0)
+    var second_total = SIMD[DType.float32, 4](0)
+    var second_comp = SIMD[DType.float32, 4](0)
     var count = SIMD[DType.uint32, 4](0)
     var exact = ExactFloatState[wide, max(1, exact_fields)]()
     var fault = UInt32(0)
     var row = global_idx.x
     while row < rows:
-        var kept = True
-        var pf = Float32(0)
-        if filtered:
-            if predicate_nullable:
-                kept = _valid(predicate_bits, predicate_offset, row)
-            if predicate_tag == 2:
-                pf = predicate.unsafe_bitcast[Float32]()[unsafe_offset=row]
-                kept = kept & float_in_range(
-                    pf, low_float, high_float, inclusive
-                )
-            else:
-                var pi = read_integer(predicate, predicate_tag, row)
-                kept = kept & (pi >= low_bound) & (pi <= high_bound)
-        comptime for field in range(arity):
-            var valid = kept
-            if nullable & (UInt32(1) << UInt32(field)):
-                valid = valid & _valid(bits[field], offsets[field], row)
-            comptime if field == 0:
-                if right_nullable:
-                    valid = valid & _valid(right_bits, right_offset, row)
-            if valid:
-                count[field] += 1
-                if sum_flags & (UInt32(1) << UInt32(field)):
-                    var value = Float32(0)
+        comptime for lane in range(LANES):
+            var position = row + lane * stride
+            var active = True
+            comptime if lane != 0:
+                active = position < rows
+            if active:
+                var kept = True
+                var pf = Float32(0)
+                if filtered:
+                    if predicate_nullable:
+                        kept = _valid(
+                            predicate_bits, predicate_offset, position
+                        )
+                    if predicate_tag == 2:
+                        pf = predicate.unsafe_bitcast[Float32]()[
+                            unsafe_offset=position
+                        ]
+                        kept = kept & float_in_range(
+                            pf, low_float, high_float, inclusive
+                        )
+                    else:
+                        var pi = read_integer(
+                            predicate, predicate_tag, position
+                        )
+                        kept = kept & (pi >= low_bound) & (pi <= high_bound)
+                comptime for field in range(arity):
+                    var valid = kept
+                    if nullable & (UInt32(1) << UInt32(field)):
+                        valid = valid & _valid(
+                            bits[field], offsets[field], position
+                        )
                     comptime if field == 0:
-                        var computed = float_value(
-                            values[0],
-                            right,
-                            op,
-                            side,
-                            literal,
-                            pf,
-                            Bool(reuse & 1),
-                            reuse_right,
-                            row,
-                        )
-                        fault |= UInt32(computed[1]) << 1
-                        value = computed[0]
-                    else:
-                        value = (
-                            pf if reuse
-                            & (UInt32(1) << UInt32(field)) else values[
-                                field
-                            ].unsafe_bitcast[Float32]()[unsafe_offset=row]
-                        )
-                    comptime if field < exact_fields:
-                        exact.add[field](value)
-                    else:
-                        # Kahan still performs Float32 arithmetic. Tiny
-                        # contributions or cancellation can require gradual
-                        # underflow even when the value itself was loaded.
-                        var magnitude = (
-                            bitcast[DType.uint32](value) & 0x7FFF_FFFF
-                        )
-                        fault |= (
-                            UInt32(magnitude != 0 and magnitude < 0x0C80_0000)
-                            << 1
-                        )
-                        var adjusted = value - comp[field]
-                        var next = total[field] + adjusted
-                        comp[field] = (next - total[field]) - adjusted
-                        total[field] = next
-        row += stride
+                        if right_nullable:
+                            valid = valid & _valid(
+                                right_bits, right_offset, position
+                            )
+                    if valid:
+                        count[field] += 1
+                        if sum_flags & (UInt32(1) << UInt32(field)):
+                            var value = Float32(0)
+                            comptime if field == 0:
+                                var computed = float_value(
+                                    values[0],
+                                    right,
+                                    op,
+                                    side,
+                                    literal,
+                                    pf,
+                                    Bool(reuse & 1),
+                                    reuse_right,
+                                    position,
+                                )
+                                fault |= UInt32(computed[1]) << 1
+                                value = computed[0]
+                            else:
+                                value = (
+                                    pf if reuse
+                                    & (UInt32(1) << UInt32(field)) else values[
+                                        field
+                                    ].unsafe_bitcast[Float32]()[
+                                        unsafe_offset=position
+                                    ]
+                                )
+                            comptime if field < exact_fields:
+                                exact.add[field](value)
+                            else:
+                                # Kahan still performs Float32 arithmetic. Tiny
+                                # contributions or cancellation can require gradual
+                                # underflow even when the value itself was loaded.
+                                var magnitude = (
+                                    bitcast[DType.uint32](value) & 0x7FFF_FFFF
+                                )
+                                fault |= (
+                                    UInt32(
+                                        magnitude != 0
+                                        and magnitude < 0x0C80_0000
+                                    )
+                                    << 1
+                                )
+                                comptime if lane == 0:
+                                    var adjusted = value - comp[field]
+                                    var next = total[field] + adjusted
+                                    comp[field] = (
+                                        next - total[field]
+                                    ) - adjusted
+                                    total[field] = next
+                                else:
+                                    var adjusted = value - second_comp[field]
+                                    var next = second_total[field] + adjusted
+                                    second_comp[field] = (
+                                        next - second_total[field]
+                                    ) - adjusted
+                                    second_total[field] = next
+        row += stride * LANES
     comptime for field in range(arity):
         var n = block.sum[block_size=BLOCK_SIZE, broadcast=False](count[field])
         var s = Float32(0)
         var c = Float32(0)
         comptime if field >= exact_fields:
-            s = block.sum[block_size=BLOCK_SIZE, broadcast=False](total[field])
-            c = block.sum[block_size=BLOCK_SIZE, broadcast=False](comp[field])
+            # The flag is uniform across the whole block. COUNT-only fields
+            # need no compensated-sum collectives.
+            if sum_flags & (UInt32(1) << UInt32(field)):
+                var local_total = total[field]
+                var local_comp = comp[field]
+                comptime for lane in range(1, LANES):
+                    comptime for component in range(2):
+                        var contribution = (
+                            second_total[field] if component
+                            == 0 else -second_comp[field]
+                        )
+                        var adjusted = contribution - local_comp
+                        var next = local_total + adjusted
+                        local_comp = (next - local_total) - adjusted
+                        local_total = next
+                s = block.sum[block_size=BLOCK_SIZE, broadcast=False](
+                    local_total
+                )
+                c = block.sum[block_size=BLOCK_SIZE, broadcast=False](
+                    local_comp
+                )
         var output = (output_offset + block_idx.x) * arity + field
         if thread_idx.x == 0:
             high[unsafe_offset=output] = 0
