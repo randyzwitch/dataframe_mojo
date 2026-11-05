@@ -68,8 +68,8 @@ struct BaseStatistics(Copyable, ImplicitlyCopyable, Movable):
     # Whether a row can be null, and whether a row can be non-null.
     var has_null: Bool
     var has_no_null: Bool
-    # Whether min/max are set: false when every valid value is NaN or
-    # no row is valid.
+    # Whether min/max are set: false when no row holds a valid value other
+    # than NaN. Float bounds leave NaN out; `has_nan` records it.
     var has_min_max: Bool
     var int_min: Int128
     var int_max: Int128
@@ -86,6 +86,8 @@ struct BaseStatistics(Copyable, ImplicitlyCopyable, Movable):
     var min_string_length: Int
     var max_string_length: Int
     var has_unicode: Bool
+    # Whether a valid float value can be NaN.
+    var has_nan: Bool
 
     @staticmethod
     def unknown() -> Self:
@@ -108,6 +110,7 @@ struct BaseStatistics(Copyable, ImplicitlyCopyable, Movable):
             0,
             0,
             True,
+            True,
         )
 
     @staticmethod
@@ -119,6 +122,7 @@ struct BaseStatistics(Copyable, ImplicitlyCopyable, Movable):
         result.has_null = False
         result.has_no_null = False
         result.has_unicode = False
+        result.has_nan = False
         result.min_string_length = Int.MAX
         return result
 
@@ -135,6 +139,9 @@ struct BaseStatistics(Copyable, ImplicitlyCopyable, Movable):
             return
         self.has_null = self.has_null or other.has_null
         self.has_no_null = self.has_no_null or other.has_no_null
+        # A stretch whose only values are NaN has no bounds to merge, but
+        # its NaN must reach the merged statistics.
+        self.has_nan = self.has_nan or other.has_nan
         if self.stats_type == BASE_STATS:
             return
         if self.stats_type == STRING_STATS:
@@ -283,22 +290,45 @@ def check_numeric_zonemap(
     return FILTER_ALWAYS_FALSE
 
 
+def _nan_answer(op: Int) -> Int:
+    """What a comparison with a number gives a NaN row: comparisons in
+    this library follow IEEE 754, so NaN is unequal to every number and
+    neither less nor greater than any (`!=` and `is_distinct_from` true,
+    every other comparison false)."""
+    if op == COMPARE_NOTEQUAL or op == COMPARE_DISTINCT_FROM:
+        return FILTER_ALWAYS_TRUE
+    return FILTER_ALWAYS_FALSE
+
+
 def check_float_zonemap(
     stats: BaseStatistics, op: Int, constants: List[Float64]
 ) -> Int:
-    """`NumericStats::CheckZonemap` over float constants. A NaN constant
-    rules nothing out."""
-    if not stats.has_min_max or stats.stats_type != FLOAT_STATS:
+    """`NumericStats::CheckZonemap` over float constants, with NaN kept
+    in the statistics as DuckDB keeps it (there, the greatest float, by
+    its comparisons' total order; here, outside the bounds, answering as
+    `_nan_answer` says): a stretch holding NaN keeps every row or none
+    only when its NaN rows agree. A NaN constant rules nothing out."""
+    if stats.stats_type != FLOAT_STATS:
         return NO_PRUNING_POSSIBLE
     for constant in constants:
         if constant != constant:
             return NO_PRUNING_POSSIBLE
+    if not stats.has_min_max:
+        # No number: every valid row is NaN, or none is valid.
+        if stats.has_nan:
+            return _nan_answer(op)
+        return NO_PRUNING_POSSIBLE
+    var result = FILTER_ALWAYS_FALSE
+    for constant in constants:
         var answer = _range_answer(
             op, stats.float_min, stats.float_max, constant
         )
         if answer == NO_PRUNING_POSSIBLE or answer == FILTER_ALWAYS_TRUE:
-            return answer
-    return FILTER_ALWAYS_FALSE
+            result = answer
+            break
+    if stats.has_nan and result != _nan_answer(op):
+        return NO_PRUNING_POSSIBLE
+    return result
 
 
 def constants_cover_range(

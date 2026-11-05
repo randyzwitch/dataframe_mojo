@@ -1,7 +1,7 @@
 """Typed-column footprint checks and native Float32 transfer roundtrips."""
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_raises
-from dataframe import Column, Series
+from dataframe import Column, DataFrame, Series
 from dataframe_metal.accelerator.gpu.query_scope import Scope
 from dataframe_metal.accelerator.gpu.typed_storage import (
     native_column_bytes,
@@ -11,8 +11,86 @@ from dataframe_metal.accelerator.gpu.typed_storage import (
     wrap_native,
     _append_native_bits,
     _NativeReservation,
+    NativeColumnAny,
 )
+from dataframe_metal.accelerator.gpu.erased_input import numeric_views
 from tests.support.metal_outcomes import require_metal
+from dataframe_metal.exact_float import finish_float_bins
+from std.memory import bitcast
+
+
+# requires: metal
+def test_erased_native_views_keep_typed_reservations_through_completion() raises:
+    _ = require_metal()
+    var frame = DataFrame(
+        [
+            Series("i", Column[Int32]([1, 2, 3])),
+            Series("l", Column[Int64]([4, 5, 6])),
+            Series("f", Column[Float32]([7, 8, 9])),
+        ]
+    )
+    var scope = Scope(budget=48)
+    var ctx = scope.context()
+    var empty = ctx.enqueue_create_buffer[DType.uint8](1)
+    var owners = List[NativeColumnAny]()
+    var views = numeric_views(frame, "i", scope, False, empty, owners)
+    views.append(
+        numeric_views(frame, "l", scope, False, empty, owners)[0].copy()
+    )
+    views.append(
+        numeric_views(frame, "f", scope, False, empty, owners)[0].copy()
+    )
+    assert_equal(scope.info()[0], 48)
+    var tail = views[0].view(1, 2)
+    _ = views^
+    assert_equal(scope.info()[0], 48)
+    with assert_raises(contains="memory budget"):
+        _ = scope.check(1)
+    var read = List[Int32](length=2, fill=0)
+    ctx.enqueue_copy(
+        read.unsafe_ptr(), tail.values.create_sub_buffer[DType.int32](0, 2)
+    )
+    scope.synchronize()
+    assert_equal(read[0], Int32(2))
+    assert_equal(read[1], Int32(3))
+    _ = tail^
+    _ = owners^
+    assert_equal(scope.info()[0], 0)
+
+
+def test_float32_exact_bins_normalize_carries_sign_and_rounding() raises:
+    var bins = List[Int128](length=9, fill=0)
+    bins[4] = Int128(1) << 21
+    assert_equal(finish_float_bins(bins, False, False, False), Float64(1))
+    bins[4] = -bins[4]
+    assert_equal(finish_float_bins(bins, False, False, False), Float64(-1))
+    bins = List[Int128](length=9, fill=0)
+    bins[0] = -Int128(4294967295)
+    bins[1] = 1
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64(bitcast[DType.float32](UInt32(1))),
+    )
+    bins = List[Int128](length=9, fill=0)
+    bins[7] = Int128(0xE0000000) * 2
+    bins[8] = Int128(0x1FFFFF) * 2
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64(Float32.MAX_FINITE) * 2,
+    )
+    bins = List[Int128](length=9, fill=0)
+    bins[1] = Int128(1) << 21
+    bins[0] = 1
+    var scale = bitcast[DType.float64](UInt64(1023 - 149) << 52)
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64(Int64(1) << 53) * scale,
+    )
+    bins[0] = 3
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64((Int64(1) << 53) + 4) * scale,
+    )
 
 
 def test_native_bitmap_append_matches_bits_at_every_alignment_and_vector_tail() raises:
