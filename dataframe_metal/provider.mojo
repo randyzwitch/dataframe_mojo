@@ -1,10 +1,10 @@
-"""The Metal provider: the fourteen provider functions over the Metal runtime.
+"""The Metal provider: the thirteen provider functions over the Metal runtime.
 
 The root `dataframe_provider` package re-exports this module, so a plain
 `-I .` build uses it. `-I providers/cpu -I .` replaces it with the CPU-only
 provider.
 
-The provider surface is fourteen functions whose signatures mention only core
+The provider surface is thirteen functions whose signatures mention only core
 types. Calibration is backend-specific and is imported from the backend.
 Presence checks do not open a driver. CPU collection never initializes Metal.
 """
@@ -107,27 +107,37 @@ def pipeline_supports(pipeline: LazyFrame, device: Int) -> Bool:
         return False
 
 
-def pipeline_estimate(
+def pipeline_costs(
     pipeline: LazyFrame, device: Int, features: PipelineFeatures
-) -> Float64:
+) -> Tuple[Float64, Float64]:
     """Metal's measured nanoseconds for the pipeline's input rows; -1 when
     there is no measurement."""
-    if device != 0 or features.input_rows < 0:
-        return Float64(-1)
+    if not installed() or device != 0 or features.input_rows < 0:
+        return (Float64(-1), Float64(-1))
     # A schema-only input cannot prove its physical layout. The pipeline
     # planner preserves actual in-memory scans; defer unknown inputs to CPU.
     var frame_rows = pipeline._plan._frames[
         pipeline._plan._nodes[0].source_slot()
     ].height()
     if frame_rows != features.input_rows:
-        return Float64(-1)
+        return (Float64(-1), Float64(-1))
     try:
         var normalized = normalize_region(pipeline)
         if not normalized:
-            return Float64(-1)
-        return handoff_estimate(normalized.value(), features.input_rows)[1]
+            return (Float64(-1), Float64(-1))
+        # Same validated profile snapshot and physical input for both engines.
+        var costs = handoff.estimate_costs(
+            normalized.value(), features.input_rows
+        )
+        return (costs[1], costs[2])
     except:
-        return Float64(-1)
+        return (Float64(-1), Float64(-1))
+
+
+def pipeline_estimate(
+    pipeline: LazyFrame, device: Int, features: PipelineFeatures
+) -> Float64:
+    return pipeline_costs(pipeline, device, features)[1]
 
 
 def run_pipeline(pipeline: LazyFrame, device: Int) raises -> DataFrame:

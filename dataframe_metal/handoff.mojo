@@ -19,7 +19,7 @@ from dataframe.storage.column import Column
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
 from dataframe.lazy import LazyFrame
-from .calibration import shape_key, measured_cost
+from .calibration import shape_key, measured_costs
 from dataframe.series import Series
 from .filter_plan import FilterSum, plan_region
 from .region_plan import normalize_region
@@ -110,21 +110,28 @@ def region_key(region: LazyFrame) raises -> String:
     return String()
 
 
-def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
+def estimate_costs(
+    region: LazyFrame, rows: Int
+) -> Tuple[String, Float64, Float64]:
     """Measured Metal cost only for this build, host, threads and layout."""
     try:
         var normalized = normalize_region(region)
         if not normalized:
-            return (String(), Float64(-1))
+            return (String(), Float64(-1), Float64(-1))
         var selected = normalized.take()
         var operator = region_key(selected)
         if not operator:
-            return (String(), Float64(-1))
+            return (String(), Float64(-1), Float64(-1))
         var key = shape_key(selected, operator)
-        var cost = measured_cost(key, rows)
-        return (key^, cost)
+        var costs = measured_costs(key, rows)
+        return (key^, costs[0], costs[1])
     except:
-        return (String(), Float64(-1))
+        return (String(), Float64(-1), Float64(-1))
+
+
+def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
+    var costs = estimate_costs(region, rows)
+    return (costs[0].copy(), costs[2])
 
 
 def _enqueue_integer[

@@ -18,6 +18,7 @@ from dataframe.parallel import configured_workers
 from dataframe.planning.device_placement import plan_pipeline_cuts
 from dataframe.placement import calibration_path, load_costs, LinearCost
 from .accelerator.gpu.identity import hardware, runtime_build_id
+from .accelerator.gpu.erased_input import single_native_span
 
 comptime SCHEMA_VERSION = 2
 
@@ -53,7 +54,7 @@ def shape_key(region: LazyFrame, operator: String) raises -> String:
     var frame = region._plan._frames[
         region._plan._nodes[0].source_slot()
     ].copy()
-    var key = operator + ":layout_v1"
+    var key = operator + ":layout_v2"
     # Literal bounds and arithmetic constants influence selectivity, overflow
     # and exact-bin retries. Do not borrow costs from a different query shape.
     for node in region._plan._nodes:
@@ -68,8 +69,22 @@ def shape_key(region: LazyFrame, operator: String) raises -> String:
 
     for name in names:
         var series = frame.column(name)
-        key += ":" + String(series.n_chunks()) + "["
+        key += (
+            ":"
+            + String(series.n_chunks())
+            + ":span="
+            + String(Int(single_native_span(series)))
+            + "["
+        )
         for chunk in series.chunks():
+            # Ratios generalize across calibrated row scales, while uneven
+            # chunk geometry must not borrow a balanced layout's timings.
+            key += (
+                String(
+                    (len(chunk) * 16 + len(series) // 2) // max(1, len(series))
+                )
+                + "/"
+            )
             if chunk.dtype() == DataType.INT32:
                 key += _chunk_shape[DType.int32](chunk)
             elif chunk.dtype() == DataType.INT64:
@@ -129,6 +144,7 @@ struct RegionCost(Copyable, Movable):
     var cpu: LinearCost
     var accel: LinearCost
     var pipeline: String
+    var cpu_key: String
     var first: Float64
     var last: Float64
 
@@ -199,7 +215,14 @@ def _snapshot(
                     var cpu = _model(entry, "cpu")
                     var accel = _model(entry, "accel")
                     var pipeline = entry.get("pipeline_key").string()
-                    var reference = _model(operators.get(pipeline), "cpu")
+                    var cpu_key = entry.get("cpu_key").string() if entry.has(
+                        "cpu_key"
+                    ) else pipeline.copy()
+                    if cpu_key != name and cpu_key != pipeline:
+                        raise Error(
+                            "Metal CPU model has a different region key"
+                        )
+                    var reference = _model(operators.get(cpu_key), "cpu")
                     if (
                         not pipeline.startswith("pipeline:")
                         or reference.fixed_ns != cpu.fixed_ns
@@ -209,7 +232,7 @@ def _snapshot(
                             "Metal region does not match its CPU pipeline model"
                         )
                     cache.regions[name] = RegionCost(
-                        cpu^, accel^, pipeline^, first, last
+                        cpu^, accel^, pipeline^, cpu_key^, first, last
                     )
                 cache.valid = True
         # File bytes are checked on every call, while JSON is parsed once.
@@ -226,36 +249,41 @@ def _snapshot(
         raise error^
 
 
-def measured_cost(key: String, rows: Int) raises -> Float64:
+def measured_costs(key: String, rows: Int) raises -> Tuple[Float64, Float64]:
     var path = calibration_path()
     if not path:
-        return -1
+        return (Float64(-1), Float64(-1))
     var text: String
     with open(path, "r") as source:
         text = source.read()
     var snapshot = _snapshot(path, text, key)
     if not snapshot[1]:
-        return -1
+        return (Float64(-1), Float64(-1))
     var current = JsonValue(identity_json())
     var saved = JsonValue('{"schema_version":2,"identity":' + snapshot[0] + "}")
     if validate_identity(saved, current):
-        return -1
+        return (Float64(-1), Float64(-1))
     var entry = snapshot[1].value().copy()
     if Float64(rows) < entry.first or Float64(rows) > entry.last:
-        return -1
+        return (Float64(-1), Float64(-1))
     var cpu_models = load_costs("cpu")
-    var cached_cpu = cpu_models.get(entry.pipeline)
+    var cached_cpu = cpu_models.get(entry.cpu_key)
     if not cached_cpu:
-        return -1
+        return (Float64(-1), Float64(-1))
     if (
         cached_cpu.value().fixed_ns != entry.cpu.fixed_ns
         or cached_cpu.value().row_ns != entry.cpu.row_ns
     ):
-        return -1
-    var value = entry.accel.ns(rows)
-    return value if isfinite(value) and isfinite(
-        entry.cpu.ns(rows)
-    ) else Float64(-1)
+        return (Float64(-1), Float64(-1))
+    var cpu_ns = entry.cpu.ns(rows)
+    var accel_ns = entry.accel.ns(rows)
+    if not isfinite(cpu_ns) or not isfinite(accel_ns):
+        return (Float64(-1), Float64(-1))
+    return (cpu_ns, accel_ns)
+
+
+def measured_cost(key: String, rows: Int) raises -> Float64:
+    return measured_costs(key, rows)[1]
 
 
 def calibration_status() -> String:

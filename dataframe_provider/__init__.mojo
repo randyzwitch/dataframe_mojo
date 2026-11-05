@@ -1,6 +1,6 @@
 """The default accelerator provider: Metal.
 
-`dataframe/_accel_provider.mojo` imports these twelve functions. On a host
+`dataframe/_accel_provider.mojo` imports these thirteen functions. On a host
 without Metal `installed()` is False and collection stays on the CPU. For a
 build that compiles no GPU code, put `providers/cpu` first on the import path
 (`-I providers/cpu -I .`). Another backend ships its own `dataframe_provider`
@@ -18,5 +18,6 @@ from dataframe_metal.provider import (
     transfer_model,
     pipeline_supports,
     pipeline_estimate,
+    pipeline_costs,
     run_pipeline,
 )

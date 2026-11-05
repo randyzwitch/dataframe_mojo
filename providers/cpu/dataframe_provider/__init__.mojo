@@ -1,6 +1,6 @@
 """The CPU-only accelerator provider: no backend is installed.
 
-`dataframe/_accel_provider.mojo` imports the twelve functions below. Put this
+`dataframe/_accel_provider.mojo` imports the thirteen functions below. Put this
 package first on the import path (`-I providers/cpu -I .`) for a build that
 compiles no GPU code. The default `dataframe_provider` in the repository root
 is the Metal provider.
@@ -56,6 +56,12 @@ def pipeline_estimate(
     pipeline: LazyFrame, device: Int, features: PipelineFeatures
 ) -> Float64:
     return Float64(-1)
+
+
+def pipeline_costs(
+    pipeline: LazyFrame, device: Int, features: PipelineFeatures
+) -> Tuple[Float64, Float64]:
+    return (Float64(-1), Float64(-1))
 
 
 def run_pipeline(pipeline: LazyFrame, device: Int) raises -> DataFrame:
