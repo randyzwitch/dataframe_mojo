@@ -717,7 +717,7 @@ def test_metal_region_fusion_recovers_cpu_common_expressions_without_pruning_wor
         .select_exprs([col("x").sum(), col("y").sum()])
     )
     assert_equal(Bool(normalize_region(dependent)), False)
-    before_filter = (
+    var before_filter = (
         frame.lazy()
         .with_columns(value.alias("v"))
         .filter(col("p") > 0)
