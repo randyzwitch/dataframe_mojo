@@ -65,7 +65,7 @@ from dataframe.join_type import (
 from dataframe.kernels.partition import _hash_column
 from dataframe.parallel import Job, partitions, run_jobs, worker_count
 from dataframe.series import Series
-from dataframe.storage.allocation import huge_list, huge_uninit
+from dataframe.storage.allocation import huge_uninit
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.buffer import _Buffer
 from dataframe.storage.column import Column, _validity_at
@@ -626,9 +626,14 @@ def _perfect_slots(
 ) -> Optional[Tuple[UInt64, Int, List[Int32]]]:
     """PerfectHashJoinExecutor::CanDoPerfectHashJoin and its build: an
     integer key whose valid values span at most PERFECT_MAX_BUILD_SIZE, with
-    no more of them than the span (DuckDB's `Count() > build_range` check),
-    each value once. Gives the least value's word, the span and each slot's
-    build row (-1 for none); None otherwise."""
+    no more of them than slots, each value once. Gives the least value's
+    word, the span and each slot's build row (-1 for none); None otherwise.
+
+    DuckDB bails when `Count() > build_range`, its comment says for
+    duplicates, but build_range is max - min, one less than its slots: a
+    key that fills its range (a dimension's dense surrogate key) would take
+    the hash table for no duplicate. Here the count is checked against the
+    slots, so only duplicates bail."""
     var bits = _validity(key)
     var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bits[0])
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -651,7 +656,7 @@ def _perfect_slots(
                 var span = _word[D](most) - base
                 if span > UInt64(PERFECT_MAX_BUILD_SIZE):
                     return None
-                if UInt64(inserted) > span:
+                if UInt64(inserted) > span + 1:
                     return None
                 var slots = List[Int32](length=Int(span) + 1, fill=-1)
                 var table = slots.unsafe_ptr()
@@ -701,6 +706,27 @@ def _perfect_heads(
                     if b >= 0:
                         out[unsafe_offset=i] = UInt64(rows + Int(b) * width)
                 return
+
+
+comptime _MINIMUM_ENTRIES_PER_TASK = 131072
+
+
+struct _ZeroJob(Job):
+    """Clear entries [start, end) of a pointer table."""
+
+    var entries: Int
+    var start: Int
+    var end: Int
+
+    def __init__(out self, entries: Int, start: Int, end: Int):
+        self.entries = entries
+        self.start = start
+        self.end = end
+
+    def run(mut self) raises:
+        _ = external_call["memset", Int](
+            self.entries + 8 * self.start, Int32(0), 8 * (self.end - self.start)
+        )
 
 
 def _next_power_of_two(value: Int) -> Int:
@@ -801,8 +827,27 @@ struct JoinHashTable(Copyable, Movable):
         # Finalize: the pointer table, then every row inserted.
         self.capacity = pointer_table_capacity(self.inserted)
         self.bitmask = UInt64(self.capacity - 1)
-        self.data[].entries = huge_list[UInt64](self.capacity, 0)
+        # InitializePointerTable: zeroed by tasks of at least 131,072
+        # entries (HashJoinTableInitEvent's MINIMUM_ENTRIES_PER_TASK), four
+        # a thread, or on this thread when the finalize is single-threaded.
+        self.data[].entries = huge_uninit[UInt64](self.capacity)
         var entries = Int(self.data[].entries.unsafe_ptr())
+        var single = self.count < PARALLEL_CONSTRUCT_THRESHOLD or workers == 1
+        var per_task = max(
+            self.capacity // max(workers, 1) // 4, _MINIMUM_ENTRIES_PER_TASK
+        )
+        var zeroing = List[_ZeroJob]()
+        var at = 0
+        while at < self.capacity:
+            var stop = min(self.capacity, at + per_task)
+            if single:
+                stop = self.capacity
+            zeroing.append(_ZeroJob(entries, at, stop))
+            at = stop
+        if len(zeroing) == 1:
+            zeroing[0].run()
+        else:
+            run_jobs(zeroing)
         var parallel = (
             self.count >= PARALLEL_CONSTRUCT_THRESHOLD and workers > 1
         )
