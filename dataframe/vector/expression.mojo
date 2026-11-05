@@ -76,12 +76,9 @@ from dataframe.expr import (
     subtree,
 )
 from dataframe.kernels.binary import (
-    _checked_mul,
-    _checked_sub,
     _decimal_mul,
     _round_div,
     _round_half_away,
-    checked_add,
 )
 from dataframe.time.calendar import civil_from_days
 from dataframe.series import Series
@@ -678,7 +675,14 @@ struct VectorExpression(Copyable, Movable):
                 and self.bound.dtypes[node.left] == DataType.BOOL
             )
         if node.op == IS_NULL or node.op == IS_NOT_NULL:
-            return node.left >= 0 and node.right < 0
+            # Only a vector of a type with a lane carries its validity
+            # (`flat_over`): a nested or other opaque column is tested
+            # through the at-rest evaluator.
+            return (
+                node.left >= 0
+                and node.right < 0
+                and _lane(self.bound.dtypes[node.left]) != _LANE_NONE
+            )
         if _is_string_predicate(node.op):
             return (
                 node.left >= 0
@@ -2121,18 +2125,43 @@ struct VectorExpression(Copyable, Movable):
             var x = self.lane_ints[left].unsafe_ptr()
             var y = self.lane_ints[right].unsafe_ptr()
             var out = self.lane_ints[index].unsafe_ptr()
-            for k in range(count):
-                if not whole and flags[unsafe_offset=k] == 0:
-                    out[unsafe_offset=k] = 0
-                    continue
-                var a = x[unsafe_offset=k]
-                var b = y[unsafe_offset=k]
-                if node.op == ADD:
-                    out[unsafe_offset=k] = checked_add(a, b)
-                elif node.op == SUB:
-                    out[unsafe_offset=k] = _checked_sub(a, b)
-                else:
-                    out[unsafe_offset=k] = _checked_mul(a, b)
+            # DuckDB's TryAddOperator / TrySubtractOperator /
+            # TryMultiplyOperator (function/scalar/operator/*.cpp): the
+            # result and an overflow flag per row (__builtin_*_overflow),
+            # no division and no branch; the error is raised after the
+            # loop when a valid row overflowed.
+            var overflow = False
+            if node.op == ADD:
+                for k in range(count):
+                    var a = x[unsafe_offset=k]
+                    var b = y[unsafe_offset=k]
+                    var value = a + b
+                    var keep = whole or flags[unsafe_offset=k] != 0
+                    overflow |= keep and ((a ^ value) & (b ^ value)) < 0
+                    out[unsafe_offset=k] = value if keep else 0
+                if overflow:
+                    raise Error("Int64 sum overflow")
+            elif node.op == SUB:
+                for k in range(count):
+                    var a = x[unsafe_offset=k]
+                    var b = y[unsafe_offset=k]
+                    var value = a - b
+                    var keep = whole or flags[unsafe_offset=k] != 0
+                    overflow |= keep and ((a ^ b) & (a ^ value)) < 0
+                    out[unsafe_offset=k] = value if keep else 0
+                if overflow:
+                    raise Error("Int64 subtraction overflow")
+            else:
+                for k in range(count):
+                    var wide = Int128(x[unsafe_offset=k]) * Int128(
+                        y[unsafe_offset=k]
+                    )
+                    var value = Int64(wide)
+                    var keep = whole or flags[unsafe_offset=k] != 0
+                    overflow |= keep and Int128(value) != wide
+                    out[unsafe_offset=k] = value if keep else 0
+                if overflow:
+                    raise Error("Int64 multiplication overflow")
             return
         # Decimals, as `_decimal_dense` computes them: products at the
         # operands' own scales, rounded to the result's; sums and

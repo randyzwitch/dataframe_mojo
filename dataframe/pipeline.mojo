@@ -27,7 +27,7 @@ from std.time import perf_counter_ns
 
 from dataframe.kernels.canonical_labels import canonical_labels
 from dataframe.storage.boolean import BoolColumn, both_true, true_count
-from .expr import COL, SELECTOR, Expr
+from .expr import COL, SELECTOR, WHEN, Expr
 from dataframe.aggregation.reducer import Reducer
 from .binding import BoundExpr, bind
 from dataframe.storage.column import Column, _copy_validity
@@ -49,7 +49,9 @@ from .expr import (
     STD,
     SUM,
     VAR,
+    col,
     is_reduction,
+    node_children,
     subtree,
 )
 from dataframe.aggregation.hash_table import (
@@ -137,7 +139,7 @@ from dataframe.storage.string import StringColumn
 from .trace import trace_path
 from .selectors import expand
 from .expr import LIT_BOOL, conjuncts
-from dataframe.aggregation.expressions import _bind_all
+from dataframe.aggregation.expressions import _bind_all, _row_local
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
@@ -236,6 +238,101 @@ def _reads(exprs: List[Expr]) -> Optional[List[String]]:
             if node.op == COL and node.text not in names:
                 names.append(node.text)
     return Optional(names^)
+
+
+comptime _AGGREGATE_INPUT = "__aggregate_input_"
+
+
+def _extract_aggregate_inputs(
+    steps: List[Step],
+    expressions: List[Expr],
+    keys: List[String],
+    schema: DataFrame,
+) raises -> Tuple[List[Step], List[Expr]]:
+    """DuckDB's ExtractAggregateExpressions (physical_plan/plan_aggregate.cpp):
+    every aggregate's computed input becomes a column of a projection
+    below the aggregate, and the aggregate reads that column. The
+    projection runs on the chunks the steps before it make, through their
+    selections, so a filter's kept rows reach the sink as the computed
+    values only, never as every input column gathered first. `schema` is
+    the steps' output; the steps are returned unchanged when no input is
+    computed (a projection of column references only moves no data)."""
+    var projected = List[Expr]()
+    var rewritten = List[Expr](capacity=len(expressions))
+    for e in expressions:
+        var nodes = e._nodes.copy()
+        var changed = False
+        for i in range(len(nodes)):
+            if not is_reduction(nodes[i].op):
+                continue
+            # An input `when(c).then(x)` with no otherwise is DuckDB's
+            # aggregate FILTER (WHERE c) over x: its condition and its
+            # value are projected each on its own, as the aggregate's
+            # filter and child are (`bound_aggr.GetFilter()`).
+            var targets = List[Int]()
+            for child in node_children(nodes[i]):
+                if nodes[child].op == WHEN and nodes[child].extra < 0:
+                    targets.append(nodes[child].left)
+                    targets.append(nodes[child].right)
+                else:
+                    targets.append(child)
+            for child in targets:
+                if nodes[child].op == COL:
+                    continue
+                var input = subtree(e, child)
+                var reads = False
+                var local = True
+                for node in input._nodes:
+                    reads = reads or node.op == COL
+                    local = local and not (
+                        is_reduction(node.op) or node.op == SELECTOR
+                    )
+                if not reads or not local or not _row_local([input.copy()]):
+                    continue
+                var name = _AGGREGATE_INPUT + String(len(projected))
+                while name in schema.columns():
+                    name += "_"
+                projected.append(input.alias(name))
+                nodes[child] = col(name)._nodes[0].copy()
+                changed = True
+        if changed:
+            var compact = Expr(nodes^, e._name)
+            rewritten.append(subtree(compact, len(compact._nodes) - 1))
+        else:
+            rewritten.append(e.copy())
+    if len(projected) == 0:
+        return (steps.copy(), expressions.copy())
+    # The projection's columns: the group keys, the columns the aggregates
+    # still read as they are, then the computed inputs.
+    var exprs = List[Expr]()
+    var names = List[String]()
+    for key in keys:
+        if key not in names:
+            names.append(key)
+    var reads = _reads(rewritten)
+    if not reads:
+        return (steps.copy(), expressions.copy())
+    for name in reads.value():
+        if name not in names and not name.startswith(_AGGREGATE_INPUT):
+            names.append(name)
+    for name in names:
+        exprs.append(col(name))
+    for p in projected:
+        exprs.append(p.copy())
+    var result = steps.copy()
+    result.append(
+        Step(
+            STEP_SELECT,
+            exprs^,
+            List[String](),
+            -1,
+            List[String](),
+            JOIN_INNER,
+            String(""),
+            False,
+        )
+    )
+    return (result^, rewritten^)
 
 
 def _row_counted(
@@ -857,9 +954,13 @@ struct _Collector(Movable):
     var raw_bits: List[List[UInt8]]
     var raw_physical: List[Int]
     var height: Int
+    # The most rows the morsel can give (its input's): raw values and
+    # bitmaps are sized for it once rather than grown chunk by chunk.
+    var capacity: Int
 
-    def __init__(out self, schema: DataFrame):
+    def __init__(out self, schema: DataFrame, capacity: Int = 0):
         self.schema = schema.copy()
+        self.capacity = capacity
         var width = schema.width()
         self.modes = List[Int](length=width, fill=_COLLECT_NONE)
         self.handles = List[Int](length=width, fill=-1)
@@ -951,7 +1052,13 @@ struct _Collector(Movable):
         ref bytes = self.raw[c]
         var start = len(bytes)
         if bytes.capacity() < start + size * count:
-            bytes.reserve(max(start + size * count, 2 * bytes.capacity()))
+            bytes.reserve(
+                max(
+                    start + size * count,
+                    size * self.capacity,
+                    2 * bytes.capacity(),
+                )
+            )
         var data = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=format.data)
         if not format.sel.is_set():
             bytes.extend(
@@ -968,17 +1075,18 @@ struct _Collector(Movable):
         if format.validity.all_valid() and len(self.raw_bits[c]) == 0:
             return
         ref bits = self.raw_bits[c]
-        if len(bits) == 0:
+        var needed = (max(self.capacity, self.height + count) + 7) // 8
+        if len(bits) < (self.height + count + 7) // 8:
             # The rows before were all valid.
-            bits = List[UInt8](length=(self.height + 7) // 8, fill=255)
+            bits.resize(needed, 255)
         var row = self.height
+        var out = bits.unsafe_ptr()
         for i in range(count):
-            var valid = format.validity.row_is_valid(format.sel.get_index(i))
+            var invalid = UInt8(
+                not format.validity.row_is_valid(format.sel.get_index(i))
+            )
             var r = row + i
-            if r >> 3 >= len(bits):
-                bits.append(255)
-            if not valid:
-                bits[r >> 3] &= ~(UInt8(1) << UInt8(r & 7))
+            out[unsafe_offset=r >> 3] &= ~(invalid << UInt8(r & 7))
 
     def _raw_series(self, c: Int) raises -> Series:
         """Column `c`'s raw values as a column of its schema type."""
@@ -999,8 +1107,7 @@ struct _Collector(Movable):
                 )
                 var bits = self.raw_bits[c].copy()
                 if len(bits) > 0:
-                    while len(bits) < (n + 7) // 8:
-                        bits.append(255)
+                    bits.resize((n + 7) // 8, 255)
                 var column = Column[Scalar[D]](values=values^, bits=bits^)
                 result = Series(name, column^)
         var dtype = self.schema._columns[c].dtype()
@@ -1372,7 +1479,7 @@ struct _ChunkRunner(Movable):
         for s in range(first, stop):
             self._compiled(s)
         var n = len(self.steps)
-        var collector = _Collector(self.schemas[][stop])
+        var collector = _Collector(self.schemas[][stop], columns.height)
         var bases = columns.bases(self.arena)
         var compiled = Pointer[Optional[_VectorStep], MutAnyOrigin](
             unsafe_from_address=Int(self.compiled.unsafe_ptr())
@@ -3914,10 +4021,10 @@ def _finish_with_steps(
 
 def _run_pipeline(
     frame: DataFrame,
-    steps: List[Step],
+    given_steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
     indexes: ArcPointer[List[Optional[JoinHashTable]]],
-    expressions: List[Expr],
+    given_expressions: List[Expr],
     keys: List[String],
     ordered: Bool,
     insert: Bool,
@@ -3952,7 +4059,21 @@ def _run_pipeline(
         schema_frame = schema_frame.with_column(
             Series(ROW_ID_COLUMN, Column[Int64](List[Int64]()))
         )
-    var schemas = ArcPointer(_step_schemas(schema_frame, steps, joins[]))
+    var steps = given_steps.copy()
+    var expressions = given_expressions.copy()
+    var typed = _step_schemas(schema_frame, steps, joins[])
+    if len(expressions) > 0:
+        var extracted = _extract_aggregate_inputs(
+            steps, expressions, keys, typed[len(steps)]
+        )
+        if len(extracted[0]) != len(steps):
+            trace_path("pipeline.aggregate_projection")
+            steps = extracted[0].copy()
+            expressions = extracted[1].copy()
+            typed.append(
+                typed[len(typed) - 1].select_exprs(steps[len(steps) - 1].exprs)
+            )
+    var schemas = ArcPointer(typed^)
     var templates = ArcPointer(_compile_steps(steps, schemas[]))
     # The aggregate table's layout, from the steps' output types (an
     # empty frame through every step) when it takes this reduction.
@@ -4201,6 +4322,17 @@ def _run_pipeline(
     for j in range(len(jobs)):
         for i in range(len(counts)):
             counts[i] += jobs[j].counts[i]
+    var planned = len(given_steps)
+    if len(steps) != planned:
+        # The aggregate inputs' projection has no plan node: the counts
+        # are the planned steps'.
+        var n = len(steps)
+        var kept = List[Int](capacity=3 * planned + 1)
+        for i in range(2 * planned + 1):
+            kept.append(counts[i])
+        for i in range(planned):
+            kept.append(counts[2 * n + 1 + i])
+        counts = kept^
     if len(layout) > 0 and len(sets) > 0:
         # Derived sets finish first: their rows point at key bytes the
         # source set's sinks hold. A worker's sinks are in set order, so a
