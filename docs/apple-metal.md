@@ -127,6 +127,9 @@ native span, preserving each segment's grid stride and partial-output order.
 Separate allocations, gaps, reordered windows and different bitmaps keep their
 separate ranges. Physical input layout still distinguishes calibration keys;
 the changed Metal build identity invalidates earlier submission profiles.
+Batched and ordinary compositions use separate compile-time kernel variants.
+The ordinary variant removes the batch-table lookup and row-base pointer
+arithmetic; both variants preserve the original per-segment reduction grids.
 
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
 every node it supports. `engine="auto"` places supported pipelines by measured
