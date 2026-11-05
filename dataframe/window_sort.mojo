@@ -561,6 +561,23 @@ struct _MergeJob(Job):
         self.count = len(first_rows)
 
 
+def _task_cuts(bounds: List[Int], height: Int) -> List[Int]:
+    """Cut hash groups (their row bounds) into tasks of about equal rows,
+    each at least one STANDARD_VECTOR_SIZE block, as CreateTaskList sizes
+    window tasks in blocks per thread."""
+    var blocks = (height + STANDARD_VECTOR_SIZE - 1) // STANDARD_VECTOR_SIZE
+    var tasks = max(1, min(configured_workers(), blocks))
+    var share = (height + tasks - 1) // tasks
+    var cuts = List[Int]()
+    cuts.append(0)
+    for b in range(1, len(bounds) - 1):
+        var at = bounds[b]
+        if at < height and at - cuts[len(cuts) - 1] >= share:
+            cuts.append(at)
+    cuts.append(height)
+    return cuts^
+
+
 def partition_ids(
     keys: List[Series], height: Int, mut ids: List[Int]
 ) raises -> Int:
