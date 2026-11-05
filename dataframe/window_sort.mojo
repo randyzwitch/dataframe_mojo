@@ -607,6 +607,8 @@ def partition_ids(
             )
     if len(jobs) == 1:
         jobs[0].run()
+        # Jobs read the hashes by address: keep them alive until here.
+        _ = partitioner^
         return jobs[0].count
     run_jobs(jobs)
     # Combine: one merge partition per morsel, by the hash's top bits.
