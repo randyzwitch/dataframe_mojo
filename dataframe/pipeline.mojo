@@ -2996,7 +2996,8 @@ struct _PipelineJob(Job):
                 continue
             self.runner.counts[0] += length
             var vectors = Optional[List[Int]]()
-            if self.top_filter.info:
+            # A top-N taking chunks checks each vector as it is read.
+            if self.top_filter.info and not self._chunk_top():
                 # The TopN's dynamic filter against the scan's vector
                 # statistics (CheckZonemapSegments): vectors it rules out
                 # are not read.
@@ -3061,7 +3062,7 @@ struct _PipelineJob(Job):
         var made = 0
         for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
             var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
-            if direct and self.top_filter.info and low > 0:
+            if direct and self.top_filter.info:
                 var start = low
                 var end = low + count
                 if rows:

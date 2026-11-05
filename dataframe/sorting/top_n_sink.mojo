@@ -155,6 +155,12 @@ struct TopNSink(Movable):
             _ = rows^
             self.parts.append(DataFrame(columns^))
             self.payload_rows += len(matches)
+        # Nothing entered: the heap's worst key is unchanged, so the shared
+        # boundary has nothing new from this chunk.
+        if len(matches) > 0:
+            self._settle_any()
+
+    def _settle_any(mut self) raises:
         if self.layout.variable:
             self._settle[1, True]()
         elif self.layout.words == 1:
