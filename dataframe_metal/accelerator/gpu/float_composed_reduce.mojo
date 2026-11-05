@@ -18,13 +18,13 @@ from .exact_float_state import ExactFloatState
 
 
 @always_inline
-def _pair[D: DType](values: Bytes, row: Int, rows: Int) -> SIMD[D, 2]:
-    var pointer = values.unsafe_bitcast[Scalar[D]]()
+def _pair(values: Bytes, row: Int, rows: Int) -> SIMD[DType.float32, 2]:
+    var pointer = values.unsafe_bitcast[Float32]()
     if row + 1 < rows:
         # Native windows retain scalar alignment even at an odd element.
         # Promise only that alignment, and guard the second element.
         return pointer.unsafe_load[width=2](row)
-    return SIMD[D, 2](pointer[unsafe_offset=row], Scalar[D](0))
+    return SIMD[DType.float32, 2](pointer[unsafe_offset=row], Float32(0))
 
 
 @always_inline
@@ -156,7 +156,7 @@ def float_composed_partials[
         comptime if LANES == 2:
             if filtered:
                 if predicate_tag == 2:
-                    predicate_pair = _pair[DType.float32](predicate_values, row, rows)
+                    predicate_pair = _pair(predicate_values, row, rows)
             comptime for field in range(arity):
                 pairs[field] = SIMD[DType.float32, 2](0)
                 if sum_flags & (UInt32(1) << UInt32(field)):
@@ -166,11 +166,11 @@ def float_composed_partials[
                     if load_value:
                         pairs[field] = predicate_pair if reuse & (
                             UInt32(1) << UInt32(field)
-                        ) else _pair[DType.float32](values[field], row, rows)
+                        ) else _pair(values[field], row, rows)
             if side != 2 and sum_flags & 1:
-                right_pair = predicate_pair if reuse_right else _pair[
-                    DType.float32
-                ](right, row, rows)
+                right_pair = predicate_pair if reuse_right else _pair(
+                    right, row, rows
+                )
         comptime for lane in range(LANES):
             var position = row + lane
             var active = True
