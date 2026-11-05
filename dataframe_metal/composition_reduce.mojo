@@ -3,13 +3,15 @@ from std.time import perf_counter_ns
 from std.memory import bitcast
 from std.math import isfinite
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series
-from dataframe.expr import COUNT, MEAN, SUM
+from dataframe.expr import COUNT, MEAN, SUM, MIN, MAX
 from .composition_plan import (
     Composition,
     plan_composition,
     single_float_composition,
+    has_extrema,
 )
 from .exact_float import finish_float_bins
+from .extrema_reduce import extrema_column
 from .accelerator.faults import data_fault
 from .accelerator.gpu.erased_input import (
     NumericView,
@@ -19,6 +21,7 @@ from .accelerator.gpu.erased_input import (
 from .accelerator.gpu.typed_storage import NativeColumnAny
 from .accelerator.gpu.composed_reduce import (
     composed_partials,
+    mixed_partials,
     META_WORDS,
     HEADER_WORDS,
     FIELD_WORDS,
@@ -34,7 +37,16 @@ from .accelerator.gpu.query_scope import Scope, shared_service
 from .accelerator.gpu.target import METAL_TARGET
 
 
-def _run[
+@fieldwise_init
+struct ComposedScan(Movable):
+    var integers: List[Int128]
+    var floating: List[Float64]
+    var counts: List[Int]
+    # Four native words per field: minimum, maximum, numeric count, flags.
+    var extrema: List[Int64]
+
+
+def _scan[
     precise: Bool,
     wide: Bool,
     arity: Int,
@@ -42,21 +54,31 @@ def _run[
     fast: Bool,
     int32_fields: Int,
     native_predicate: Int = -1,
+    mixed: Bool = False,
 ](
     bundle: Composition,
     frame: DataFrame,
     scope: Scope,
     zero_copy: Bool,
     mut timings: HandoffTimings,
-) raises -> Tuple[List[Int128], List[Float64], List[Int]]:
+) raises -> ComposedScan:
     comptime FIRST_BIN = 0 if wide else 3
     comptime BIN_COUNT = 9 if wide else 3
     var nf = arity
     var integers = List[Int128](length=nf, fill=0)
     var floating = List[Float64](length=nf, fill=0)
     var counts_out = List[Int](length=nf, fill=0)
+    var extrema_out = List[Int64](length=nf * 4 if mixed else 0, fill=0)
+    var extrema_fields = UInt32(0)
+    comptime if mixed:
+        for output in bundle.outputs:
+            if output.op == MIN or output.op == MAX:
+                extrema_fields |= UInt32(1) << UInt32(output.field)
+        for field in range(nf):
+            extrema_out[field * 4] = Int64.MAX
+            extrema_out[field * 4 + 1] = Int64.MIN
     if frame.height() == 0:
-        return (integers^, floating^, counts_out^)
+        return ComposedScan(integers^, floating^, counts_out^, extrema_out^)
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
@@ -142,7 +164,9 @@ def _run[
         for segment in segments:
             total_parts += _chunk_partials(segment[0].rows, frame.height())
         var size = total_parts * nf
-        var high = ctx.enqueue_create_buffer[DType.int64](size)
+        var high = ctx.enqueue_create_buffer[DType.int64](
+            size * (5 if mixed else 1)
+        )
         var low = ctx.enqueue_create_buffer[DType.uint64](size)
         var sums = ctx.enqueue_create_buffer[DType.float32](size)
         var compensation = ctx.enqueue_create_buffer[DType.float32](size)
@@ -153,7 +177,7 @@ def _run[
         var specials = ctx.enqueue_create_buffer[DType.uint32](
             size * 6 if precise else 1
         )
-        var hp = List[Int64](length=size, fill=0)
+        var hp = List[Int64](length=size * (5 if mixed else 1), fill=0)
         var lp = List[UInt64](length=size, fill=0)
         var sp = List[Float32](length=size, fill=0)
         var cp = List[Float32](length=size, fill=0)
@@ -223,6 +247,14 @@ def _run[
                 words[base + 7] = UInt64(
                     bitcast[DType.uint32](value.floating)
                 ) if tag == 2 else bitcast[DType.uint64](value.integer)
+            comptime if mixed:
+                # One packed tail avoids extra Metal buffer arguments.
+                words[at + 3] = UInt64(size)
+                for output in bundle.outputs:
+                    if output.op == MIN or output.op == MAX:
+                        words[at + 14] |= UInt64(1) << UInt64(
+                            output.field + (4 if output.op == MIN else 8)
+                        )
             output_offset += partials
         var metadata = ctx.enqueue_create_buffer[DType.uint64](len(words))
         try:
@@ -248,7 +280,14 @@ def _run[
                 var partials = total_parts if batched else _chunk_partials(
                     segment[0].rows, frame.height()
                 )
-                comptime kernel_batched = float_composed_partials[
+                comptime kernel_batched = mixed_partials[
+                    precise,
+                    wide,
+                    arity,
+                    float_fields,
+                    int32_fields,
+                    batched=True,
+                ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=True
                 ] if fast else composed_partials[
                     precise,
@@ -258,7 +297,14 @@ def _run[
                     int32_fields,
                     batched=True,
                 ]
-                comptime kernel_separate = float_composed_partials[
+                comptime kernel_separate = mixed_partials[
+                    precise,
+                    wide,
+                    arity,
+                    float_fields,
+                    int32_fields,
+                    batched=False,
+                ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=False
                 ] if fast else composed_partials[
                     precise,
@@ -428,8 +474,55 @@ def _run[
                         raise data_fault(
                             "float32 mean needs CPU accumulation order"
                         )
+        comptime if mixed:
+            for field in range(nf):
+                if not (extrema_fields & (UInt32(1) << UInt32(field))):
+                    continue
+                for part in range(total_parts):
+                    var at = size + (part * nf + field) * 4
+                    if hp[at + 2]:
+                        extrema_out[field * 4] = min(
+                            extrema_out[field * 4], hp[at]
+                        )
+                        extrema_out[field * 4 + 1] = max(
+                            extrema_out[field * 4 + 1], hp[at + 1]
+                        )
+                    extrema_out[field * 4 + 2] += hp[at + 2]
+                    extrema_out[field * 4 + 3] |= hp[at + 3]
         timings.finish_ns = Int(perf_counter_ns()) - started
-        return (integers^, floating^, counts_out^)
+        return ComposedScan(integers^, floating^, counts_out^, extrema_out^)
+
+
+def _run[
+    precise: Bool,
+    wide: Bool,
+    arity: Int,
+    float_fields: Int,
+    fast: Bool,
+    int32_fields: Int,
+    native_predicate: Int = -1,
+](
+    bundle: Composition,
+    frame: DataFrame,
+    scope: Scope,
+    zero_copy: Bool,
+    mut timings: HandoffTimings,
+) raises -> Tuple[List[Int128], List[Float64], List[Int]]:
+    var result = _scan[
+        precise,
+        wide,
+        arity,
+        float_fields,
+        fast,
+        int32_fields,
+        native_predicate,
+        False,
+    ](bundle, frame, scope, zero_copy, timings)
+    return (
+        result.integers.copy(),
+        result.floating.copy(),
+        result.counts.copy(),
+    )
 
 
 def _partial_float(s: Float32, c: Float32) raises -> Float64:
@@ -535,6 +628,35 @@ def _dispatch[
     return _by_arity[precise, wide, 4](bundle, frame, scope, zero_copy, timings)
 
 
+def _mixed_dispatch[
+    precise: Bool, wide: Bool
+](
+    bundle: Composition,
+    frame: DataFrame,
+    scope: Scope,
+    zero_copy: Bool,
+    mut timings: HandoffTimings,
+) raises -> ComposedScan:
+    var floats = 0
+    var int32s = 0
+    for field in bundle.fields:
+        floats += Int(field.dtype == DataType.FLOAT32)
+        int32s += Int(field.dtype == DataType.INT32)
+    comptime for arity in range(1, 5):
+        comptime for n in range(arity + 1):
+            comptime if not precise or n > 0:
+                comptime for narrow in range(arity - n + 1):
+                    if (
+                        len(bundle.fields) == arity
+                        and floats == n
+                        and int32s == narrow
+                    ):
+                        return _scan[
+                            precise, wide, arity, n, False, narrow, -1, True
+                        ](bundle, frame, scope, zero_copy, timings)
+    raise Error("Metal mixed field types exceed their arity")
+
+
 def execute_composition(
     region: LazyFrame, zero_copy: Bool
 ) raises -> Tuple[DataFrame, HandoffTimings]:
@@ -555,7 +677,31 @@ def execute_composition(
     _ = scope.context()
     timings.context_ns = Int(perf_counter_ns()) - started
     var result: Tuple[List[Int128], List[Float64], List[Int]]
-    if bundle.precise_float:
+    var extrema = List[Int64]()
+    if has_extrema(bundle):
+        var scan: ComposedScan
+        if bundle.precise_float:
+            try:
+                scan = _mixed_dispatch[True, False](
+                    bundle, frame, scope, zero_copy, timings
+                )
+            except error:
+                if String(error) != "Metal exact bins need wide scan":
+                    raise error^
+                scan = _mixed_dispatch[True, True](
+                    bundle, frame, scope, zero_copy, timings
+                )
+        else:
+            scan = _mixed_dispatch[False, False](
+                bundle, frame, scope, zero_copy, timings
+            )
+        extrema = scan.extrema.copy()
+        result = (
+            scan.integers.copy(),
+            scan.floating.copy(),
+            scan.counts.copy(),
+        )
+    elif bundle.precise_float:
         try:
             result = _dispatch[True, False](
                 bundle, frame, scope, zero_copy, timings
@@ -575,7 +721,19 @@ def execute_composition(
         var field = output.field
         var count = result[2][field]
         var dtype = bundle.fields[field].dtype
-        if output.op == COUNT:
+        if output.op == MIN or output.op == MAX:
+            var valid = extrema[field * 4 + 2] != 0
+            var value = extrema[field * 4 + (0 if output.op == MIN else 1)]
+            columns.append(
+                extrema_column(
+                    output.name.copy(),
+                    dtype,
+                    value,
+                    valid,
+                    UInt32(extrema[field * 4 + 3]),
+                )
+            )
+        elif output.op == COUNT:
             columns.append(Series(output.name, Column[Int64]([Int64(count)])))
         elif output.op == MEAN:
             var total = (

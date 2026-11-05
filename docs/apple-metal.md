@@ -121,8 +121,7 @@ ordered integer keys, preserving subnormals and infinities without floating
 arithmetic on the GPU. NaNs are skipped when a numeric value exists;
 all-NaN fields and extrema tied between opposite zero signs use CPU
 adjudication to preserve the CPU's payload and tie behavior. Arithmetic
-MIN/MAX and projections mixing extrema with SUM/COUNT/MEAN continue to run
-on CPU. These regions use `native_extrema:v1:` calibration keys and remain
+MIN/MAX on arithmetic expressions continues to run on CPU. These regions use `native_extrema:v1:` calibration keys and remain
 on CPU in automatic mode until measured for the current build and layout.
 
 Float32 range predicates use ordered integer keys when a bound is near
@@ -355,3 +354,23 @@ supplies the validated CPU cost for the exact measured region through the
 provider-neutral `pipeline_costs` hook, at both explain/planning and execution
 time. CPU execution kernels and operators are unchanged. Legacy explicit
 backends inherit their existing estimate and generic CPU costs.
+
+### Mixed aggregate projections
+
+Native MIN/MAX can share one scan with SUM, COUNT and MEAN, including the
+existing supported binary SUM/COUNT/MEAN expressions. Up to four distinct
+aggregate values share the range predicate, input mappings and segment grids;
+repeated outputs and aliases reuse their value's state. MIN/MAX still require
+a native Int32, Int64 or Float32 column; arithmetic MIN/MAX remains unsupported.
+
+The mixed scan uses the existing typed integer accumulation and Float32
+sum/mean policies. Extrema preserve raw Float32 bits, ignore NaNs when numeric
+values exist, and adjudicate all-NaN or ambiguous signed-zero results on CPU.
+COUNT includes non-null NaNs. Empty extrema/means remain typed nulls and SUM
+retains its minimum-count and overflow behavior. Adjacent shared-owner chunks
+batch into one launch; independent allocations retain their segment geometry.
+
+Mixed programs use `mixed_reductions:v1:` calibration keys. Existing pure
+aggregate paths retain their keys and entry signatures. A changed package
+identity requires fresh calibration before automatic placement uses the mixed
+program; unmeasured shapes stay on CPU.

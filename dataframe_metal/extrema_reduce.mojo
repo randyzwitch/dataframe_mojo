@@ -194,6 +194,38 @@ def _run[
         return (minima^, maxima^, counts_out^, specials_out^)
 
 
+def extrema_column(
+    name: String, dtype: DataType, value: Int64, valid: Bool, flags: UInt32
+) raises -> Series:
+    if dtype == DataType.FLOAT32:
+        if not valid and flags & 1:
+            raise data_fault(
+                "all-NaN Float32 extrema require CPU payload adjudication"
+            )
+        var raw = UInt32(0)
+        if valid:
+            var key = UInt32(value)
+            raw = key ^ 0x8000_0000 if key >> 31 else ~key
+            if raw & 0x7FFF_FFFF == 0:
+                if flags & 6 == 6:
+                    raise data_fault(
+                        "mixed signed-zero extrema require CPU tie adjudication"
+                    )
+                if flags & 4:
+                    raw = 0x8000_0000
+        return Series(
+            name, Column[Float32]([bitcast[DType.float32](raw)], [valid])
+        )
+    if dtype == DataType.INT32:
+        return Series(
+            name,
+            Column[Int32](
+                [value.cast[DType.int32]() if valid else Int32(0)], [valid]
+            ),
+        )
+    return Series(name, Column[Int64]([value if valid else Int64(0)], [valid]))
+
+
 def execute_extrema(
     region: LazyFrame, zero_copy: Bool
 ) raises -> Tuple[DataFrame, HandoffTimings]:
@@ -226,45 +258,10 @@ def execute_extrema(
         var valid = values[2][field] != 0
         var value = values[0][field] if output.op == MIN else values[1][field]
         var dtype = bundle.fields[field].dtype
-        if dtype == DataType.FLOAT32:
-            var flags = values[3][field]
-            if not valid and flags & 1:
-                raise data_fault(
-                    "all-NaN Float32 extrema require CPU payload adjudication"
-                )
-            var raw = UInt32(0)
-            if valid:
-                var key = UInt32(value)
-                raw = key ^ 0x8000_0000 if key >> 31 else ~key
-                if raw & 0x7FFF_FFFF == 0:
-                    if flags & 6 == 6:
-                        raise data_fault(
-                            "mixed signed-zero extrema require CPU tie adjudication"
-                        )
-                    if flags & 4:
-                        raw = 0x8000_0000
-            outputs.append(
-                Series(
-                    output.name.copy(),
-                    Column[Float32]([bitcast[DType.float32](raw)], [valid]),
-                )
+        outputs.append(
+            extrema_column(
+                output.name.copy(), dtype, value, valid, values[3][field]
             )
-        elif dtype == DataType.INT32:
-            outputs.append(
-                Series(
-                    output.name.copy(),
-                    Column[Int32](
-                        [value.cast[DType.int32]() if valid else Int32(0)],
-                        [valid],
-                    ),
-                )
-            )
-        else:
-            outputs.append(
-                Series(
-                    output.name.copy(),
-                    Column[Int64]([value if valid else Int64(0)], [valid]),
-                )
-            )
+        )
     scope.mark_success()
     return (DataFrame(outputs^), timings^)
