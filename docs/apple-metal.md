@@ -83,7 +83,14 @@ columns plus an independent predicate column. Operands retain the same dtype,
 literal and null rules as the single arithmetic SUM. COUNT checks integer
 intermediate overflow even when no sum is requested. Float32 means use the
 same exact-bin finish and CPU-order proof described above. These projections
-use `composed_reductions:v1:` calibration keys. Subnormal arithmetic operands
+use `composed_reductions:v2:typed_fields:` calibration keys for the general
+composition kernel; the compact all-Float32 kernel retains its v1 keys.
+A schema-only remap groups Float32, Int32 and Int64 fields while preserving
+output aliases and order. Native dtype branches and reduction states are
+compiled for those groups, including Int64 accumulation for narrow integers
+and split upper/lower words for Int64. COUNT-only fields omit unused sum
+collectives while retaining checked integer expression evaluation.
+Subnormal arithmetic operands
 and possible gradual underflow use CPU adjudication because Metal arithmetic
 can flush these values to zero before reduction. The existing single arithmetic
 SUM and pure column aggregate paths keep their specialized kernels.

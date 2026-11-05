@@ -144,7 +144,7 @@ def int_value(
 
 
 def composed_partials[
-    precise: Bool, wide: Bool, arity: Int, float_fields: Int
+    precise: Bool, wide: Bool, arity: Int, float_fields: Int, int32_fields: Int
 ](
     v0: Bytes,
     v1: Bytes,
@@ -176,13 +176,14 @@ def composed_partials[
     faults: Pointer[UInt32, MutUntrackedOrigin],
 ):
     comptime assert 1 <= arity and arity <= 4
+    comptime assert float_fields >= 0 and int32_fields >= 0
+    comptime assert float_fields + int32_fields <= arity
     var geometry = segment_info(metadata, metadata_offset, Int(block_idx.x))
     var meta = geometry[0]
     var row_base = geometry[3]
     var rows = UInt32(meta[unsafe_offset=0])
     var stride = UInt32(meta[unsafe_offset=1])
     var partial_offset = UInt32(meta[unsafe_offset=2])
-    var tags = UInt32(meta[unsafe_offset=3])
     var predicate_tag = UInt32(meta[unsafe_offset=4])
     var predicate_offset = UInt32(meta[unsafe_offset=5]) + UInt32(row_base)
     var predicate_nullable = UInt32(meta[unsafe_offset=6])
@@ -220,7 +221,7 @@ def composed_partials[
         rights[field] = input_pointer(
             Int(ri) - 1, v0, v1, v2, v3, v4, v5, v6, v7
         )
-        var width = 8 if ((tags >> UInt32(2 * field)) & 3) == 1 else 4
+        comptime width = 8 if field >= float_fields + int32_fields else 4
         if li != 0:
             lefts[field] = lefts[field].unsafe_offset(row_base * width)
         if ri != 0:
@@ -277,68 +278,40 @@ def composed_partials[
                 valid = valid & _valid(right_bits[field], roff[field], row)
             if valid:
                 nc[field] += 1
-                var tag = (tags >> UInt32(2 * field)) & 3
-                comptime if precise:
-                    comptime if field < float_fields:
-                        if sum_flags & (UInt32(1) << UInt32(field)):
-                            var value = float_value(
-                                lefts[field],
-                                rights[field],
-                                ops[field],
-                                sides[field],
-                                flit[field],
-                                pf,
-                                Bool(reuse_l[field]),
-                                Bool(reuse_r[field]),
-                                row,
+                comptime if field < float_fields:
+                    if sum_flags & (UInt32(1) << UInt32(field)):
+                        var result = float_value(
+                            lefts[field],
+                            rights[field],
+                            ops[field],
+                            sides[field],
+                            flit[field],
+                            pf,
+                            Bool(reuse_l[field]),
+                            Bool(reuse_r[field]),
+                            row,
+                        )
+                        fault |= UInt32(result[1]) << 1
+                        comptime if precise:
+                            exact.add[field](result[0])
+                        else:
+                            var magnitude = (
+                                bitcast[DType.uint32](result[0]) & 0x7FFF_FFFF
                             )
-                            fault |= UInt32(value[1]) << 1
-                            exact.add[field](value[0])
-                    else:
-                        # COUNT of arithmetic must still check integer errors.
-                        if (sum_flags & (UInt32(1) << UInt32(field))) or ops[
-                            field
-                        ] != UInt32(COL):
-                            var result = int_value(
-                                lefts[field],
-                                rights[field],
-                                ops[field],
-                                sides[field],
-                                ilit[field],
-                                pi,
-                                Bool(reuse_l[field]),
-                                Bool(reuse_r[field]),
-                                row,
-                                tag,
+                            fault |= (
+                                UInt32(
+                                    magnitude != 0 and magnitude < 0x0C80_0000
+                                )
+                                << 1
                             )
-                            fault |= UInt32(result[1])
-                            var value = result[0] if not result[1] else Int64(0)
-                            if sum_flags & (UInt32(1) << UInt32(field)):
-                                if tag == 1:
-                                    hi[field] += value >> 32
-                                    lo[field] += UInt64(value & 0xFFFF_FFFF)
-                                else:
-                                    hi[field] += value
-                else:
-                    if tag == 2:
-                        if sum_flags & (UInt32(1) << UInt32(field)):
-                            var value = float_value(
-                                lefts[field],
-                                rights[field],
-                                ops[field],
-                                sides[field],
-                                flit[field],
-                                pf,
-                                Bool(reuse_l[field]),
-                                Bool(reuse_r[field]),
-                                row,
-                            )
-                            fault |= UInt32(value[1]) << 1
-                            var adjusted = value[0] - fc[field]
+                            var adjusted = result[0] - fc[field]
                             var next = fs[field] + adjusted
                             fc[field] = (next - fs[field]) - adjusted
                             fs[field] = next
-                    elif (sum_flags & (UInt32(1) << UInt32(field))) or ops[
+                else:
+                    comptime TAG = 0 if field < float_fields + int32_fields else 1
+                    # Arithmetic COUNT still evaluates checked intermediates.
+                    if (sum_flags & (UInt32(1) << UInt32(field))) or ops[
                         field
                     ] != UInt32(COL):
                         var result = int_value(
@@ -351,12 +324,12 @@ def composed_partials[
                             Bool(reuse_l[field]),
                             Bool(reuse_r[field]),
                             row,
-                            tag,
+                            UInt32(TAG),
                         )
                         fault |= UInt32(result[1])
                         var value = result[0] if not result[1] else Int64(0)
                         if sum_flags & (UInt32(1) << UInt32(field)):
-                            if tag == 1:
+                            comptime if TAG == 1:
                                 hi[field] += value >> 32
                                 lo[field] += UInt64(value & 0xFFFF_FFFF)
                             else:
@@ -367,15 +340,18 @@ def composed_partials[
         var l = UInt64(0)
         var s = Float32(0)
         var c = Float32(0)
-        comptime if precise:
+        # Every branch is uniform within the block, and each field owns
+        # only its physical type's reduction work.
+        if sum_flags & (UInt32(1) << UInt32(field)):
             comptime if field >= float_fields:
                 h = block.sum[block_size=BLOCK_SIZE, broadcast=False](hi[field])
-                l = block.sum[block_size=BLOCK_SIZE, broadcast=False](lo[field])
-        else:
-            h = block.sum[block_size=BLOCK_SIZE, broadcast=False](hi[field])
-            l = block.sum[block_size=BLOCK_SIZE, broadcast=False](lo[field])
-            s = block.sum[block_size=BLOCK_SIZE, broadcast=False](fs[field])
-            c = block.sum[block_size=BLOCK_SIZE, broadcast=False](fc[field])
+                comptime if field >= float_fields + int32_fields:
+                    l = block.sum[block_size=BLOCK_SIZE, broadcast=False](
+                        lo[field]
+                    )
+            elif not precise:
+                s = block.sum[block_size=BLOCK_SIZE, broadcast=False](fs[field])
+                c = block.sum[block_size=BLOCK_SIZE, broadcast=False](fc[field])
         var n = block.sum[block_size=BLOCK_SIZE, broadcast=False](nc[field])
         var output = geometry[2] * arity + field
         if thread_idx.x == 0:
@@ -385,7 +361,8 @@ def composed_partials[
             compensations[unsafe_offset=output] = c
             counts[unsafe_offset=output] = n
         comptime if precise and field < float_fields:
-            exact.finish[field](output, bins, specials)
+            if sum_flags & (UInt32(1) << UInt32(field)):
+                exact.finish[field](output, bins, specials)
     var bad = block.max[block_size=BLOCK_SIZE, broadcast=False](fault)
     if thread_idx.x == 0:
         faults[unsafe_offset=geometry[2]] = bad
