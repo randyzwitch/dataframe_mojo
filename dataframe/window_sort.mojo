@@ -647,6 +647,7 @@ struct _GroupSortJob(Job):
             for k in range(n):
                 wide[k] = Int64(ids[k])
             sort_keys.append(Series("", Column[Int64](wide^)))
+        if partitions_here > 1:
             descending.append(False)
             nulls_last.append(False)
         for c in range(self.partition_keys, count):
