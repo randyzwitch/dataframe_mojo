@@ -9,6 +9,7 @@ the combined bins to Float64 once. No GPU Float64 arithmetic is needed.
 """
 from max.gpu import global_idx, thread_idx, block_idx
 from max.gpu.primitives import block
+from .float_predicate import float_in_range
 from std.memory import Pointer, bitcast
 from std.bit import count_leading_zeros, count_trailing_zeros
 from .filter_sum import BLOCK_SIZE, _valid
@@ -116,11 +117,9 @@ def multi_partials[
                 kept = _valid(predicate_bits, predicate_bit_offset, row)
             if predicate_tag == 2:
                 pf = predicate.unsafe_bitcast[Float32]()[unsafe_offset=row]
-                var above = pf >= low_float if inclusive & 1 else pf > low_float
-                var below = (
-                    pf <= high_float if inclusive & 2 else pf < high_float
+                kept = kept & float_in_range(
+                    pf, low_float, high_float, inclusive
                 )
-                kept = kept & above & below
             else:
                 pi = read_integer(predicate, predicate_tag, row)
                 kept = kept & (pi >= low_bound) & (pi <= high_bound)

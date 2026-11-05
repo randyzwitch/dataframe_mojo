@@ -863,3 +863,176 @@ def test_metal_arithmetic_overflow_flags_match_wide_integer_oracle() raises:
                 assert_equal(computed[1], overflow)
                 if not overflow:
                     assert_equal(computed[0], expected.cast[DType.int64]())
+
+
+def test_metal_composition_shares_whole_expressions_and_preserves_outputs() raises:
+    from dataframe_metal.composition_plan import (
+        plan_composition,
+        composition_key,
+    )
+
+    var frame = _frame()
+    var value = col("f") * col("f")
+    var plan = frame.lazy().select_exprs(
+        [
+            col("i").sum().alias("integer"),
+            value.sum().alias("sum"),
+            value.count().alias("count"),
+            value.mean().alias("mean"),
+            (col("f") + 1).sum().alias("other"),
+        ]
+    )
+    var matched = plan_composition(plan)
+    assert_true(Bool(matched))
+    assert_equal(len(matched.value().fields), 3)
+    assert_equal(len(matched.value().inputs), 2)
+    assert_equal(matched.value().outputs[0].field, 2)
+    for output in range(1, 4):
+        assert_equal(matched.value().outputs[output].field, 0)
+    assert_true(composition_key(matched.value()).endswith(":exact_float"))
+    assert_false(Bool(plan_composition(frame.lazy().select(value.sum()))))
+    assert_false(
+        Bool(
+            plan_composition(frame.lazy().select((col("i") + col("l")).mean()))
+        )
+    )
+
+
+# requires: metal
+def test_metal_composition_matches_cpu_for_shared_arithmetic_nulls_and_chunks() raises:
+    var runtime = require_metal()
+    for nulls in [False, True]:
+        var base = _cross_columns(13001, nulls)
+        var columns = List[Series]()
+        for name in ["i", "l", "f"]:
+            var split = 19 if name == "i" else (2503 if name == "l" else 101)
+            columns.append(
+                Series._from_chunks(
+                    [
+                        base.column(name).slice(5, split),
+                        base.column(name).slice(5 + split, 10003 - split),
+                    ]
+                )
+            )
+        for frame in [base.slice(5, 10003), DataFrame(columns^)]:
+            for name in ["i", "l", "f"]:
+                var input = frame.with_column(
+                    base.column(name).slice(0, 10003).renamed("other")
+                )
+                for expression in [
+                    col(name) + col("other"),
+                    col(name) - col("other"),
+                    col(name) * 2,
+                    2 - col(name),
+                ]:
+                    for predicate in ["", "i", "l", "f", "other"]:
+                        var query = input.lazy()
+                        if predicate:
+                            query = query.filter(col(predicate) > 0)
+                        var plan = query.select_exprs(
+                            [
+                                expression.sum().alias("sum"),
+                                expression.count().alias("count"),
+                                expression.mean().alias("mean"),
+                                col("i").count().alias("bare_count"),
+                                col("f").sum().alias("bare_sum"),
+                            ]
+                        )
+                        assert_true(
+                            "HANDOFF metal" in plan.explain(accelerator=runtime)
+                        )
+                        var expected = plan.collect(engine="cpu")
+                        _close_bundle(execute_timed(plan)[0], expected)
+                        _close_bundle(
+                            execute_timed(plan, zero_copy=False)[0], expected
+                        )
+                        _close_bundle(
+                            plan.collect(accelerator=runtime), expected
+                        )
+
+
+# requires: metal
+def test_metal_composition_uses_eight_value_inputs_and_independent_predicate() raises:
+    _ = require_metal()
+    var columns = List[Series]()
+    for i in range(9):
+        columns.append(
+            Series(
+                String(i),
+                Column[Int32]([1, 2, 3, 4], [True, i % 2 == 0, True, True]),
+            )
+        )
+    var frame = DataFrame(columns^).slice(1, 3)
+    var expressions = List[Expr]()
+    for i in range(4):
+        expressions.append(
+            (col(String(i * 2)) * col(String(i * 2 + 1))).sum().alias(String(i))
+        )
+    var plan = frame.lazy().filter(col("8") > 0).select_exprs(expressions)
+    _close_bundle(execute_timed(plan)[0], plan.collect(engine="cpu"))
+    _close_bundle(
+        execute_timed(plan, zero_copy=False)[0], plan.collect(engine="cpu")
+    )
+
+
+# requires: metal
+def test_metal_composition_checks_overflow_empty_and_exact_float_retry() raises:
+    var runtime = require_metal()
+    for wide in [False, True]:
+        var frame: DataFrame
+        if wide:
+            frame = DataFrame(
+                [
+                    Series("a", Column[Int64]([Int64.MAX, Int64.MAX])),
+                    Series("b", Column[Int64]([2, -2])),
+                ]
+            )
+        else:
+            frame = DataFrame(
+                [
+                    Series("a", Column[Int32]([Int32.MAX, Int32.MAX])),
+                    Series("b", Column[Int32]([2, -2])),
+                ]
+            )
+        var value = col("a") * col("b")
+        for expression in [value.count(), value.mean()]:
+            var plan = frame.lazy().select(expression)
+            with assert_raises(contains="overflow"):
+                _ = execute_timed(plan)
+            with assert_raises(contains="overflow"):
+                _ = plan.collect(accelerator=runtime)
+        var mean = frame.lazy().select((col("a") * 1).mean())
+        _close_bundle(execute_timed(mean)[0], mean.collect(engine="cpu"))
+        var sum = frame.lazy().select_exprs(
+            [(col("a") * 1).sum().alias("s"), col("b").count().alias("c")]
+        )
+        with assert_raises(contains="overflow"):
+            _ = execute_timed(sum)
+        var empty = (
+            frame.clear()
+            .lazy()
+            .select_exprs(
+                [
+                    value.sum(min_count=1).alias("s"),
+                    value.count().alias("c"),
+                    value.mean().alias("m"),
+                ]
+            )
+        )
+        _close_bundle(execute_timed(empty)[0], empty.collect(engine="cpu"))
+    var frame = DataFrame(
+        [Series("f", Column[Float32]([Float32.MAX_FINITE, Float32.MAX_FINITE]))]
+    )
+    var value = col("f") * 1
+    var exact = frame.lazy().select_exprs(
+        [value.mean().alias("m"), value.count().alias("c")]
+    )
+    _close_bundle(execute_timed(exact)[0], exact.collect(engine="cpu"))
+    var nonfinite = frame.lazy().select_exprs(
+        [(col("f") * 2).sum().alias("s"), col("f").count().alias("c")]
+    )
+    with assert_raises(contains="CPU non-finite accumulation"):
+        _ = execute_timed(nonfinite)
+    _close_bundle(
+        nonfinite.collect(accelerator=runtime), nonfinite.collect(engine="cpu")
+    )
