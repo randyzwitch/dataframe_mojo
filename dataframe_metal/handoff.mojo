@@ -22,6 +22,7 @@ from dataframe.lazy import LazyFrame
 from dataframe.placement import load_costs
 from dataframe.series import Series
 from .filter_plan import FilterSum, plan_region
+from .region_plan import normalize_region
 from .cross_sum import reduce_cross
 from .multi_plan import plan_bundle, bundle_key
 from .multi_reduce import execute_bundle
@@ -56,11 +57,15 @@ def supports(region: LazyFrame) -> Bool:
     comptime if not METAL_TARGET:
         return False
     try:
+        var normalized = normalize_region(region)
+        if not normalized:
+            return False
+        var selected = normalized.take()
         return (
-            Bool(plan_region(region))
-            or Bool(plan_bundle(region))
-            or Bool(plan_arithmetic(region))
-            or Bool(plan_composition(region))
+            Bool(plan_region(selected))
+            or Bool(plan_bundle(selected))
+            or Bool(plan_arithmetic(selected))
+            or Bool(plan_composition(selected))
         )
     except:
         return False
@@ -86,20 +91,24 @@ def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
     """This region's calibration key and its measured cost on Metal for
     `rows` input rows, in nanoseconds; -1 when it has no measured cost."""
     try:
-        var accepted = plan_region(region)
+        var normalized = normalize_region(region)
+        if not normalized:
+            return (String(), Float64(-1))
+        var selected = normalized.take()
+        var accepted = plan_region(selected)
         var key = String()
         if accepted:
             key = operator_key(accepted.value())
         else:
-            var bundle = plan_bundle(region)
+            var bundle = plan_bundle(selected)
             if bundle:
                 key = bundle_key(bundle.value())
             else:
-                var arithmetic = plan_arithmetic(region)
+                var arithmetic = plan_arithmetic(selected)
                 if arithmetic:
                     key = arithmetic_key(arithmetic.value())
                 else:
-                    var composed = plan_composition(region)
+                    var composed = plan_composition(selected)
                     if not composed:
                         return (String(), Float64(-1))
                     key = composition_key(composed.value())
@@ -472,7 +481,15 @@ def execute_timed(
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
-        return _execute_on_device(region, zero_copy)
+        var normalized = normalize_region(region)
+        if not normalized:
+            raise Error(
+                "Metal unsupported [handoff]: row expressions cannot be fused"
+            )
+        var selected = normalized.take()
+        var result = _execute_on_device(selected, zero_copy)
+        _ = selected^
+        return result^
 
 
 def _execute_on_device(
