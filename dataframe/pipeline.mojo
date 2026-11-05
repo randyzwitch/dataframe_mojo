@@ -66,6 +66,12 @@ from .frame import (
     _rows_mask,
     concat,
 )
+from dataframe.aggregation.ungrouped import (
+    UngroupedLayout,
+    UngroupedSink,
+    ungrouped_finish,
+    ungrouped_layout,
+)
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
 from dataframe.storage.statistics import (
@@ -1255,6 +1261,13 @@ struct _ChunkRunner(Movable):
     # Whether to stop at a step that leaves no row (a pipeline's morsel),
     # or to run on so the output has every step's columns.
     var stop_empty: Bool
+    # An ungrouped aggregate sink (`ungrouped.mojo`), when the pipeline
+    # ends in one: the last step's chunks are sunk into its states, and
+    # nothing is collected.
+    var ungrouped: List[UngroupedSink]
+    # The layout every worker's sink is made from, on its own thread
+    # when its job starts.
+    var ungrouped_layout: List[ArcPointer[UngroupedLayout]]
     # The source's table filters, and the source row of the morsel's first
     # row while the morsel's own rows run (-1 otherwise): a chunk whose
     # vector the filters' statistics rule out is not read (DuckDB's
@@ -1296,6 +1309,8 @@ struct _ChunkRunner(Movable):
         self.source = DataChunk()
         self.counts = List[Int](length=3 * len(steps) + 1, fill=0)
         self.stop_empty = stop_empty
+        self.ungrouped = List[UngroupedSink]()
+        self.ungrouped_layout = List[ArcPointer[UngroupedLayout]]()
         self.scan = None
         self.scan_offset = -1
 
@@ -1333,6 +1348,14 @@ struct _ChunkRunner(Movable):
                 stop += 1
             columns = self._vector_steps(columns, at, stop)
             at = stop
+        if len(self.ungrouped) > 0 and columns.height > 0:
+            if self.ungrouped[0].counts_only():
+                # Row counts read no column: the rows are only counted.
+                self.ungrouped[0].sink_rows(columns.height)
+                return _Columns()
+            # A join's output (or the source, with no steps) cut into
+            # chunks for the ungrouped sink.
+            columns = self._vector_steps(columns, n, n)
         return columns^
 
     def _compiled(mut self, s: Int) raises:
@@ -1383,7 +1406,11 @@ struct _ChunkRunner(Movable):
                 if step.output.count == 0:
                     empty = True
                     break
-            if not empty:
+            if empty:
+                continue
+            if stop == n and len(self.ungrouped) > 0:
+                self.ungrouped[0].sink(input[], self.arena)
+            else:
                 collector.append(input[], self.arena)
         return collector.finish(self.arena)
 
@@ -2902,9 +2929,20 @@ struct _PipelineJob(Job):
                 self.counts = self.runner.counts.copy()
                 if not self.finishes:
                     return
+                if len(self.runner.ungrouped) > 0:
+                    # Only the states outlive the worker's run.
+                    self.runner.ungrouped[0].release()
                 self._derive_sets()
                 return
             var k = self.first_morsel + taken
+            if len(self.runner.ungrouped_layout) > 0:
+                if len(self.runner.ungrouped) == 0:
+                    # The worker's ungrouped sink, made on its own thread
+                    # when it takes its first morsel.
+                    self.runner.ungrouped.append(
+                        UngroupedSink(self.runner.ungrouped_layout[0][])
+                    )
+                self.runner.ungrouped[0].begin(k)
             var offset = self.ranges[][2 * taken]
             var length = self.ranges[][2 * taken + 1]
             self.runner.begin_morsel()
@@ -4138,6 +4176,17 @@ def _run_pipeline(
                 templates,
             )
         )
+    # An ungrouped reduce sink: each worker's states updated from the
+    # last step's chunks (DuckDB's `PhysicalUngroupedAggregate`).
+    var ungrouped = List[ArcPointer[UngroupedLayout]]()
+    if len(keys) == 0 and len(expressions) > 0 and top <= 0:
+        var made = ungrouped_layout(schemas[][len(steps)], expressions)
+        if made:
+            ungrouped.append(ArcPointer(made.take()))
+    if len(ungrouped) > 0:
+        trace_path("pipeline.ungrouped_sink")
+        for w in range(len(jobs)):
+            jobs[w].runner.ungrouped_layout.append(ungrouped[0])
     if scan:
         for w in range(len(jobs)):
             jobs[w].runner.scan = scan.copy()
@@ -4339,6 +4388,12 @@ def _run_pipeline(
             ordered,
             workers,
         )
+    if len(ungrouped) > 0:
+        var sinks = List[UngroupedSink](capacity=len(jobs))
+        for j in range(len(jobs)):
+            if len(jobs[j].runner.ungrouped) > 0:
+                sinks.append(jobs[j].runner.ungrouped.pop())
+        return ungrouped_finish(ungrouped[0][], sinks)
     if len(expressions) > 0:
         var merged = List[_StreamReduction]()
         for j in range(len(jobs)):
