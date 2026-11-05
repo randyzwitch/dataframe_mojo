@@ -19,7 +19,7 @@ from dataframe.storage.column import Column
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
 from dataframe.lazy import LazyFrame
-from dataframe.placement import load_costs
+from .calibration import shape_key, measured_cost
 from dataframe.series import Series
 from .filter_plan import FilterSum, plan_region
 from .region_plan import normalize_region
@@ -87,36 +87,36 @@ def operator_key(plan: FilterSum) -> String:
     )
 
 
+def region_key(region: LazyFrame) raises -> String:
+    """Schema-only operator identity shared by placement and capture."""
+    var accepted = plan_region(region)
+    if accepted:
+        return operator_key(accepted.value())
+    var bundle = plan_bundle(region)
+    if bundle:
+        return bundle_key(bundle.value())
+    var arithmetic = plan_arithmetic(region)
+    if arithmetic:
+        return arithmetic_key(arithmetic.value())
+    var composed = plan_composition(region)
+    if composed:
+        return composition_key(composed.value())
+    return String()
+
+
 def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
-    """This region's calibration key and its measured cost on Metal for
-    `rows` input rows, in nanoseconds; -1 when it has no measured cost."""
+    """Measured Metal cost only for this build, host, threads and layout."""
     try:
         var normalized = normalize_region(region)
         if not normalized:
             return (String(), Float64(-1))
         var selected = normalized.take()
-        var accepted = plan_region(selected)
-        var key = String()
-        if accepted:
-            key = operator_key(accepted.value())
-        else:
-            var bundle = plan_bundle(selected)
-            if bundle:
-                key = bundle_key(bundle.value())
-            else:
-                var arithmetic = plan_arithmetic(selected)
-                if arithmetic:
-                    key = arithmetic_key(arithmetic.value())
-                else:
-                    var composed = plan_composition(selected)
-                    if not composed:
-                        return (String(), Float64(-1))
-                    key = composition_key(composed.value())
-        var costs = load_costs("accel")
-        var cost = costs.get(key)
-        if not cost:
-            return (key^, Float64(-1))
-        return (key^, cost.value().ns(rows))
+        var operator = region_key(selected)
+        if not operator:
+            return (String(), Float64(-1))
+        var key = shape_key(selected, operator)
+        var cost = measured_cost(key, rows)
+        return (key^, cost)
     except:
         return (String(), Float64(-1))
 

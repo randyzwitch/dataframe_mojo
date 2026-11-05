@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import tempfile
 from build_identity import cpu_build_id, identity_source
+from metal_build_identity import metal_build_id, metal_identity_source
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,20 +30,25 @@ def default_provider() -> str:
 def build(output: Path, provider: str) -> None:
     compiler = subprocess.check_output(["mojo", "--version"], text=True).strip()
     identity = cpu_build_id(ROOT, compiler)
+    metal_identity = (
+        metal_build_id(ROOT, compiler) if provider == "metal" else None
+    )
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="dataframe-package-") as directory:
         stage = Path(directory)
         shutil.copytree(ROOT / "dataframe", stage / "dataframe")
         # The root provider is Metal; the CPU-only one lives in providers/cpu.
         shutil.copytree(
-            ROOT / "providers/cpu/dataframe_provider"
-            if provider == "cpu"
-            else ROOT / "dataframe_provider",
+            ROOT / "providers/cpu/dataframe_provider" if provider
+            == "cpu" else ROOT / "dataframe_provider",
             stage / "dataframe_provider",
         )
         packages = ["dataframe", "dataframe_provider"]
         if provider == "metal":
             shutil.copytree(ROOT / "dataframe_metal", stage / "dataframe_metal")
+            (stage / "dataframe_metal/_build_identity.mojo").write_text(
+                metal_identity_source(metal_identity)
+            )
             packages.append("dataframe_metal")
         (stage / "dataframe/_build_identity.mojo").write_text(
             identity_source(identity)
@@ -89,16 +95,24 @@ def build(output: Path, provider: str) -> None:
                 "providers",
                 "scripts/build_package.py",
                 "scripts/build_identity.py",
+                "scripts/metal_build_identity.py",
                 "pixi.lock",
             ],
             text=True,
         ).strip()
     )
     metadata = {
-        "provider": "core-with-mojo-metal" if provider == "metal" else "core-cpu",
+        "provider": "core-with-mojo-metal" if provider
+        == "metal" else "core-cpu",
         "implementation": "mojo",
-        "runtime_build_id": "dataframe-mojo-metal-v1;source-compiler-sdk="
-        + identity,
+        "runtime_build_id": (
+            "dataframe-mojo-metal-v2;cpu="
+            + identity
+            + ";metal="
+            + metal_identity if metal_identity else "dataframe-mojo-metal-v1;source-compiler-sdk="
+            + identity
+        ),
+        "metal_build_id": metal_identity,
         "cpu_build_id": identity,
         "engine_revision": revision,
         "core_revision": revision,
