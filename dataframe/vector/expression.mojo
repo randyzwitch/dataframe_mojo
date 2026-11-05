@@ -675,7 +675,14 @@ struct VectorExpression(Copyable, Movable):
                 and self.bound.dtypes[node.left] == DataType.BOOL
             )
         if node.op == IS_NULL or node.op == IS_NOT_NULL:
-            return node.left >= 0 and node.right < 0
+            # Only a vector of a type with a lane carries its validity
+            # (`flat_over`): a nested or other opaque column is tested
+            # through the at-rest evaluator.
+            return (
+                node.left >= 0
+                and node.right < 0
+                and _lane(self.bound.dtypes[node.left]) != _LANE_NONE
+            )
         if _is_string_predicate(node.op):
             return (
                 node.left >= 0
