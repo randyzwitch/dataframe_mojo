@@ -95,7 +95,10 @@ def numeric_views(
 
 def single_native_span(series: Series) raises -> Bool:
     """Whether all logical chunks can share one native value/bitmap mapping."""
-    comptime for D in (DType.int32, DType.int64, DType.float32):
+    comptime for i in range(3):
+        comptime D = DType.int32 if i == 0 else (
+            DType.int64 if i == 1 else DType.float32
+        )
         if series.dtype() == DataType.of(D):
             var groups = coalesced_native_chunks[D](series)
             return len(groups) == 1 and groups[0]._data.isa[Column[Scalar[D]]]()
