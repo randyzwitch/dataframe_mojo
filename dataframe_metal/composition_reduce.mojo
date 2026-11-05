@@ -31,7 +31,12 @@ from .accelerator.gpu.target import METAL_TARGET
 
 
 def _run[
-    precise: Bool, wide: Bool, arity: Int, float_fields: Int, fast: Bool
+    precise: Bool,
+    wide: Bool,
+    arity: Int,
+    float_fields: Int,
+    fast: Bool,
+    native_predicate: Int = -1,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -201,7 +206,7 @@ def _run[
                 var predicate = segment[predicate_input].copy()
                 var partials = _chunk_partials(segment[0].rows, frame.height())
                 comptime kernel = float_composed_partials[
-                    wide, arity, float_fields
+                    wide, arity, float_fields, native_predicate
                 ] if fast else composed_partials[
                     precise, wide, arity, float_fields
                 ]
@@ -356,9 +361,23 @@ def _float_arity[
             exact_fields += Int(bundle.fields[i].needs_mean)
     comptime for n in range(arity + 1):
         if exact_fields == n:
-            return _run[n > 0, wide, arity, n, True](
-                bundle, frame, scope, zero_copy, timings
-            )
+            comptime if n == 0:
+                if bundle.predicate.filter_dtype == DataType.INT32:
+                    return _run[False, wide, arity, 0, True, 0](
+                        bundle, frame, scope, zero_copy, timings
+                    )
+                elif bundle.predicate.filter_dtype == DataType.INT64:
+                    return _run[False, wide, arity, 0, True, 1](
+                        bundle, frame, scope, zero_copy, timings
+                    )
+                return _run[False, wide, arity, 0, True, 2](
+                    bundle, frame, scope, zero_copy, timings
+                )
+            else:
+                # Preserve the original exact-mean scan and its register state.
+                return _run[True, wide, arity, n, True](
+                    bundle, frame, scope, zero_copy, timings
+                )
     raise Error("Metal compact float prefix exceeds its field count")
 
 
