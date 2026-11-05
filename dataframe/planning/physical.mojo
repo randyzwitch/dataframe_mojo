@@ -90,13 +90,11 @@ from dataframe.planning.graph import (
     plan_has_join,
     plan_has_kind,
     plan_height_bound,
-    plan_indexed_relation,
     plan_known_height,
     plan_largest_scan,
     plan_live_parents,
     plan_measurable,
     plan_order_free_above,
-    plan_progression_key,
     plan_provider_scan,
     plan_relation_estimate,
     plan_reorder,
@@ -1308,14 +1306,6 @@ def plan_tree_swaps(
             right_cost *= 1.15
         if not joined[left] and joined[right]:
             left_cost *= 1.15
-        if plan_indexed_relation(
-            self, left, right, joined, node_of, edges, tree.mask
-        ):
-            left_cost = 0.0
-        if plan_indexed_relation(
-            self, right, left, joined, node_of, edges, tree.mask
-        ):
-            right_cost = 0.0
         swaps[e] = right_cost > left_cost
         # The keys the join drops: one per key pair between its sides.
         var keys = 0
@@ -1556,15 +1546,12 @@ def plan_probe_largest_input(
         var after = 0
         for k in range(len(path)):
             var table = path[k]
-            ref edge = self._nodes[joins[table - 1]]
             # Built now, keyed by the join's right keys.
-            if not plan_progression_key(self, tables[table], edge.right_keys):
-                before += rows[table]
+            before += rows[table]
             # Built after re-rooting: the table on the other end,
             # keyed by the join's left keys.
             var other = linked[table - 1]
-            if not plan_progression_key(self, tables[other], edge.names):
-                after += rows[other]
+            after += rows[other]
         if before - after > saved:
             saved = before - after
             largest = candidate

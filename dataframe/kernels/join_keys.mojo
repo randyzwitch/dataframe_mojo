@@ -2,7 +2,8 @@
 dense integer lookup `replace` uses.
 
 - `int64_progression`: whether a key ascends by one step (kept with its
-  buffer, `_BufferFacts.progression`); the planner's build costs read it.
+  buffer, `_BufferFacts.progression`). No join reads it since the hash
+  join port; it stays with the buffer facts it publishes.
 - `prefer_left_build`: the planner's streaming build-side rule (gate audit
   #32); the pipeline scheduler port (step 6) replaces it.
 - `_perfect_slots`: integer keys' rows by `key - least` within

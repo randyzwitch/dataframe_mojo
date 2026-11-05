@@ -128,7 +128,6 @@ from dataframe.planning.graph import (
     plan_keeps_column,
     plan_key_source,
     plan_known_height,
-    plan_progression_key,
 )
 from dataframe.planning.model import (
     AGG,
@@ -507,16 +506,10 @@ def plan_stream_execute(
                 # whatever side a join was written on, rather than run
                 # the join outside the pipeline (TPC-DS q43 probed its
                 # 366 dates with 2.9M sales rows eagerly).
-                # A right side whose one key is a progression is no hash
-                # table to build: the left streams through its rows by
-                # position, which no swap beats.
                 if (
                     node.how == JOIN_INNER
                     and not node.sides_fixed
                     and plan_direct_key(self, node.left, node.names)
-                    and not plan_progression_key(
-                        self, node.right, node.right_keys
-                    )
                 ):
                     var large = self._execute(
                         node.right, False, True, batch_size
@@ -595,7 +588,6 @@ def plan_stream_execute(
                 and bound >= 0
                 and built.height() * max(built.width(), 1)
                 > bound * max(len(plan_columns_of(self, node.left)), 1)
-                and not plan_progression_key(self, node.right, node.right_keys)
             ):
                 # The built right side costs more to hash than the left
                 # can, in rows times columns as the planner's build side
@@ -644,22 +636,11 @@ def plan_stream_execute(
                 # hash every built row to probe a few: PDS-H q2 hashed
                 # and rechunked 159K wide supplier rows for its 747
                 # parts. The left's bound is read first, so a left that
-                # cannot be smaller is never sampled. A right side whose
-                # one key is a progression builds no hash table (the left
-                # looks its rows up by position), so it costs nothing to
-                # build on and is kept, as the planner's build side counts
-                # it (`plan_indexed_relation`) and the swaps above keep
-                # it: TPC-DS q35 hashed 100K customers to stream 1.9M
-                # demographics rows through them, where the customers
-                # look up their demographics by position.
+                # cannot be smaller is never sampled.
                 var right_cost = built.height() * max(built.width(), 1)
                 var columns = len(plan_columns_of(self, node.left))
                 var most = plan_height_bound(self, node.left)
-                if (
-                    most < 0 or most * columns < right_cost
-                ) and not plan_progression_key(
-                    self, node.right, node.right_keys
-                ):
+                if most < 0 or most * columns < right_cost:
                     var rows = plan_estimated_rows(self, node.left)
                     if rows >= 0 and rows * columns < right_cost:
                         # The join builds on the smaller left inside the
