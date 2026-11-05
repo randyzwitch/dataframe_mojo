@@ -170,15 +170,68 @@ def assert_typed_join(
         assert_true(
             actual.column("p_right").dtype() == right.column("p").dtype()
         )
+    # The join's row order is unspecified (it may build on either side):
+    # each output row must be one of the expected pairs, each pair used
+    # once.
+    var used = List[Bool](length=len(pairs), fill=False)
     for output in range(len(pairs)):
-        var i = pairs[output][0]
-        var j = pairs[output][1]
-        if coalesce and (how == "right" or (how == "full" and i < 0)):
-            _cell(actual, output, "k", right.column("k"), j)
-        else:
-            _cell(actual, output, "k", left.column("k"), i)
-        _cell(actual, output, "p", left.column("p"), i)
-        if keep_right_key:
-            _cell(actual, output, "k_right", right.column("k"), j)
-        if not left_only:
-            _cell(actual, output, "p_right", right.column("p"), j)
+        var found = False
+        for e in range(len(pairs)):
+            if used[e]:
+                continue
+            try:
+                _pair_cells(
+                    actual,
+                    output,
+                    left,
+                    right,
+                    pairs[e][0],
+                    pairs[e][1],
+                    how,
+                    coalesce,
+                    keep_right_key,
+                    left_only,
+                )
+            except:
+                continue
+            used[e] = True
+            found = True
+            break
+        if not found:
+            # Report the first mismatch against the pair at this position.
+            _pair_cells(
+                actual,
+                output,
+                left,
+                right,
+                pairs[output][0],
+                pairs[output][1],
+                how,
+                coalesce,
+                keep_right_key,
+                left_only,
+            )
+            assert_true(False, "typed join output row matches no pair")
+
+
+def _pair_cells(
+    actual: DataFrame,
+    output: Int,
+    left: DataFrame,
+    right: DataFrame,
+    i: Int,
+    j: Int,
+    how: String,
+    coalesce: Bool,
+    keep_right_key: Bool,
+    left_only: Bool,
+) raises:
+    if coalesce and (how == "right" or (how == "full" and i < 0)):
+        _cell(actual, output, "k", right.column("k"), j)
+    else:
+        _cell(actual, output, "k", left.column("k"), i)
+    _cell(actual, output, "p", left.column("p"), i)
+    if keep_right_key:
+        _cell(actual, output, "k_right", right.column("k"), j)
+    if not left_only:
+        _cell(actual, output, "p_right", right.column("p"), j)

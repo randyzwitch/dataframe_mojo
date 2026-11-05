@@ -1210,11 +1210,19 @@ struct _ProbeJob(Job):
                     break
                 var rows = scan.probe_rows.unsafe_ptr()
                 var builds = scan.build_rows.unsafe_ptr()
-                self.probe.reserve(len(self.probe) + n)
+                # Grown geometrically: an exact reservation per chunk
+                # copied the list again for every chunk.
+                if self.probe.capacity() < len(self.probe) + n:
+                    self.probe.reserve(
+                        max(len(self.probe) + n, 2 * self.probe.capacity())
+                    )
                 for k in range(n):
                     self.probe.append(low + Int(rows[unsafe_offset=k]))
                 if self.both:
-                    self.build.reserve(len(self.build) + n)
+                    if self.build.capacity() < len(self.build) + n:
+                        self.build.reserve(
+                            max(len(self.build) + n, 2 * self.build.capacity())
+                        )
                     for k in range(n):
                         self.build.append(Int(builds[unsafe_offset=k]))
             low += count

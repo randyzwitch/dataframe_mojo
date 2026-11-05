@@ -124,6 +124,47 @@ def test_join_predicates_preserve_outer_null_rows_and_side_dependencies() raises
                         )
 
 
+def _projected_row(
+    actual: DataFrame,
+    row: Int,
+    pair: RowPair,
+    how: String,
+    key: String,
+    left_model: ReferenceTable,
+    right_model: ReferenceTable,
+) raises:
+    if how == "right" or pair.left < 0:
+        assert_reference_cell(
+            actual.item(row, key),
+            right_model.rows[pair.right],
+            "s",
+        )
+    else:
+        assert_reference_cell(
+            actual.item(row, key),
+            left_model.rows[pair.left],
+            "s",
+        )
+    if pair.left < 0:
+        assert_true(actual.item(row, "b").is_null())
+    else:
+        assert_reference_cell(
+            actual.item(row, "b"),
+            left_model.rows[pair.left],
+            "b",
+        )
+    if pair.right < 0:
+        assert_true(
+            actual.item(row, "f_right").is_null()
+        )
+    else:
+        assert_reference_cell(
+            actual.item(row, "f_right"),
+            right_model.rows[pair.right],
+            "f",
+        )
+
+
 def test_join_projection_retains_both_keys_suffix_payloads_and_empty_schema() raises:
     for n in [0, 1, 35]:
         for validity in range(3):
@@ -156,38 +197,30 @@ def test_join_projection_retains_both_keys_suffix_payloads_and_empty_schema() ra
                             [DataType.STRING, DataType.BOOL, DataType.FLOAT64],
                         )
                         assert_equal(actual.height(), len(pairs))
+                        # Row order is unspecified: the join may build on
+                        # either side. Each row matches one unused pair.
+                        var used = List[Bool](length=len(pairs), fill=False)
                         for row in range(len(pairs)):
-                            ref pair = pairs[row]
-                            if how == "right" or pair.left < 0:
-                                assert_reference_cell(
-                                    actual.item(row, key),
-                                    right_model.rows[pair.right],
-                                    "s",
-                                )
-                            else:
-                                assert_reference_cell(
-                                    actual.item(row, key),
-                                    left_model.rows[pair.left],
-                                    "s",
-                                )
-                            if pair.left < 0:
-                                assert_true(actual.item(row, "b").is_null())
-                            else:
-                                assert_reference_cell(
-                                    actual.item(row, "b"),
-                                    left_model.rows[pair.left],
-                                    "b",
-                                )
-                            if pair.right < 0:
-                                assert_true(
-                                    actual.item(row, "f_right").is_null()
-                                )
-                            else:
-                                assert_reference_cell(
-                                    actual.item(row, "f_right"),
-                                    right_model.rows[pair.right],
-                                    "f",
-                                )
+                            var found = False
+                            for e in range(len(pairs)):
+                                if used[e]:
+                                    continue
+                                try:
+                                    _projected_row(
+                                        actual,
+                                        row,
+                                        pairs[e],
+                                        how,
+                                        key,
+                                        left_model,
+                                        right_model,
+                                    )
+                                except:
+                                    continue
+                                used[e] = True
+                                found = True
+                                break
+                            assert_true(found, "a joined row matches no pair")
                         var explicit = _fixed(
                             left.lazy().join(
                                 right.lazy(),
