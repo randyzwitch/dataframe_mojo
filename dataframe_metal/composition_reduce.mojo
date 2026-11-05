@@ -4,7 +4,11 @@ from std.memory import bitcast
 from std.math import isfinite
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series
 from dataframe.expr import COUNT, MEAN, SUM
-from .composition_plan import Composition, plan_composition
+from .composition_plan import (
+    Composition,
+    plan_composition,
+    single_float_composition,
+)
 from .exact_float import finish_float_bins
 from .accelerator.faults import data_fault
 from .accelerator.gpu.erased_input import NumericView, numeric_views
@@ -15,6 +19,7 @@ from .accelerator.gpu.composed_reduce import (
     HEADER_WORDS,
     FIELD_WORDS,
 )
+from .accelerator.gpu.float_composed_reduce import float_composed_partials
 from .accelerator.gpu.filter_sum import BLOCK_SIZE
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
@@ -26,7 +31,7 @@ from .accelerator.gpu.target import METAL_TARGET
 
 
 def _run[
-    precise: Bool, wide: Bool, arity: Int, float_fields: Int
+    precise: Bool, wide: Bool, arity: Int, float_fields: Int, fast: Bool
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -195,9 +200,12 @@ def _run[
                         )
                 var predicate = segment[predicate_input].copy()
                 var partials = _chunk_partials(segment[0].rows, frame.height())
-                ctx.enqueue_function[
-                    composed_partials[precise, wide, arity, float_fields]
-                ](
+                comptime kernel = float_composed_partials[
+                    wide, arity, float_fields
+                ] if fast else composed_partials[
+                    precise, wide, arity, float_fields
+                ]
+                ctx.enqueue_function[kernel](
                     values[0].values,
                     values[1].values,
                     values[2].values,
@@ -277,29 +285,30 @@ def _run[
                 counts_out[field] += Int(np[i])
                 if bundle.fields[field].dtype == DataType.FLOAT32:
                     comptime if precise:
-                        if xp[i * 6 + 5]:
-                            raise Error("Metal exact bins need wide scan")
-                        for bin in range(BIN_COUNT):
-                            exact[bin + FIRST_BIN] += Int128(
-                                bp[i * BIN_COUNT + bin]
-                            )
-                        nan = nan or xp[i * 6] != 0
-                        positive = positive or xp[i * 6 + 1] != 0
-                        negative = negative or xp[i * 6 + 2] != 0
-                        least = min(least, Int(xp[i * 6 + 3]))
-                        greatest = max(greatest, Int(xp[i * 6 + 4]))
+                        if not fast or field < float_fields:
+                            if xp[i * 6 + 5]:
+                                raise Error("Metal exact bins need wide scan")
+                            for bin in range(BIN_COUNT):
+                                exact[bin + FIRST_BIN] += Int128(
+                                    bp[i * BIN_COUNT + bin]
+                                )
+                            nan = nan or xp[i * 6] != 0
+                            positive = positive or xp[i * 6 + 1] != 0
+                            negative = negative or xp[i * 6 + 2] != 0
+                            least = min(least, Int(xp[i * 6 + 3]))
+                            greatest = max(greatest, Int(xp[i * 6 + 4]))
+                        else:
+                            floating[field] += _partial_float(sp[i], cp[i])
                     else:
-                        if not isfinite(sp[i]) or not isfinite(cp[i]):
-                            raise data_fault(
-                                "float32 sum needs CPU non-finite accumulation"
-                            )
-                        floating[field] += Float64(sp[i]) - Float64(cp[i])
+                        floating[field] += _partial_float(sp[i], cp[i])
                 elif bundle.fields[field].dtype == DataType.INT64:
                     integers[field] += (Int128(hp[i]) << 32) + Int128(lp[i])
                 else:
                     integers[field] += Int128(hp[i])
             comptime if precise:
-                if bundle.fields[field].dtype == DataType.FLOAT32:
+                if bundle.fields[field].dtype == DataType.FLOAT32 and (
+                    not fast or field < float_fields
+                ):
                     floating[field] = finish_float_bins(
                         exact, nan, positive, negative
                     )
@@ -326,6 +335,33 @@ def _run[
         return (integers^, floating^, counts_out^)
 
 
+def _partial_float(s: Float32, c: Float32) raises -> Float64:
+    if not isfinite(s) or not isfinite(c):
+        raise data_fault("float32 sum needs CPU non-finite accumulation")
+    return Float64(s) - Float64(c)
+
+
+def _float_arity[
+    wide: Bool, arity: Int
+](
+    bundle: Composition,
+    frame: DataFrame,
+    scope: Scope,
+    zero_copy: Bool,
+    mut timings: HandoffTimings,
+) raises -> Tuple[List[Int128], List[Float64], List[Int]]:
+    var exact_fields = 1 if bundle.precise_float else 0
+    if bundle.precise_float:
+        for i in range(1, len(bundle.fields)):
+            exact_fields += Int(bundle.fields[i].needs_mean)
+    comptime for n in range(arity + 1):
+        if exact_fields == n:
+            return _run[n > 0, wide, arity, n, True](
+                bundle, frame, scope, zero_copy, timings
+            )
+    raise Error("Metal compact float prefix exceeds its field count")
+
+
 def _by_arity[
     precise: Bool, wide: Bool, arity: Int
 ](
@@ -336,7 +372,7 @@ def _by_arity[
     mut timings: HandoffTimings,
 ) raises -> Tuple[List[Int128], List[Float64], List[Int]]:
     comptime if not precise:
-        return _run[False, wide, arity, 0](
+        return _run[False, wide, arity, 0, False](
             bundle, frame, scope, zero_copy, timings
         )
     else:
@@ -345,7 +381,7 @@ def _by_arity[
             floats += Int(field.dtype == DataType.FLOAT32)
         comptime for n in range(1, arity + 1):
             if floats == n:
-                return _run[True, wide, arity, n](
+                return _run[True, wide, arity, n, False](
                     bundle, frame, scope, zero_copy, timings
                 )
         raise Error("Metal exact-bin fields are not a nonempty float prefix")
@@ -360,6 +396,20 @@ def _dispatch[
     zero_copy: Bool,
     mut timings: HandoffTimings,
 ) raises -> Tuple[List[Int128], List[Float64], List[Int]]:
+    if single_float_composition(bundle):
+        if len(bundle.fields) == 1:
+            return _float_arity[wide, 1](
+                bundle, frame, scope, zero_copy, timings
+            )
+        if len(bundle.fields) == 2:
+            return _float_arity[wide, 2](
+                bundle, frame, scope, zero_copy, timings
+            )
+        if len(bundle.fields) == 3:
+            return _float_arity[wide, 3](
+                bundle, frame, scope, zero_copy, timings
+            )
+        return _float_arity[wide, 4](bundle, frame, scope, zero_copy, timings)
     if len(bundle.fields) == 1:
         return _by_arity[precise, wide, 1](
             bundle, frame, scope, zero_copy, timings

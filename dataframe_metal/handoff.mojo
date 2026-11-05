@@ -22,6 +22,7 @@ from dataframe.lazy import LazyFrame
 from .calibration import shape_key, measured_cost
 from dataframe.series import Series
 from .filter_plan import FilterSum, plan_region
+from .region_plan import normalize_region
 from .cross_sum import reduce_cross
 from .multi_plan import plan_bundle, bundle_key
 from .multi_reduce import execute_bundle
@@ -56,11 +57,15 @@ def supports(region: LazyFrame) -> Bool:
     comptime if not METAL_TARGET:
         return False
     try:
+        var normalized = normalize_region(region)
+        if not normalized:
+            return False
+        var selected = normalized.take()
         return (
-            Bool(plan_region(region))
-            or Bool(plan_bundle(region))
-            or Bool(plan_arithmetic(region))
-            or Bool(plan_composition(region))
+            Bool(plan_region(selected))
+            or Bool(plan_bundle(selected))
+            or Bool(plan_arithmetic(selected))
+            or Bool(plan_composition(selected))
         )
     except:
         return False
@@ -102,10 +107,14 @@ def region_key(region: LazyFrame) raises -> String:
 def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
     """Measured Metal cost only for this build, host, threads and layout."""
     try:
-        var operator = region_key(region)
+        var normalized = normalize_region(region)
+        if not normalized:
+            return (String(), Float64(-1))
+        var selected = normalized.take()
+        var operator = region_key(selected)
         if not operator:
             return (String(), Float64(-1))
-        var key = shape_key(region, operator)
+        var key = shape_key(selected, operator)
         var cost = measured_cost(key, rows)
         return (key^, cost)
     except:
@@ -472,7 +481,15 @@ def execute_timed(
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
-        return _execute_on_device(region, zero_copy)
+        var normalized = normalize_region(region)
+        if not normalized:
+            raise Error(
+                "Metal unsupported [handoff]: row expressions cannot be fused"
+            )
+        var selected = normalized.take()
+        var result = _execute_on_device(selected, zero_copy)
+        _ = selected^
+        return result^
 
 
 def _execute_on_device(
