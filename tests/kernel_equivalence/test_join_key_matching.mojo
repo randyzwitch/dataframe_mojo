@@ -1,20 +1,28 @@
-"""Hash joins on several keys, whose candidates are matched a key column at
-a time over batches of probe rows, against a nested-loop model: probes
-longer than a batch, strings stored as offsets or as Arrow views (inline
-lengths 0 to 12, and long strings that share their first bytes), floats
-with NaN and signed zero, Bool and Int128 keys, and a null in each key."""
+"""The join hash table (`JoinHashTable`, DuckDB's RowMatcher over row
+fields) on several keys, against a nested-loop model: probes longer than a
+chunk, strings stored as offsets or as Arrow views (inline lengths 0 to 12,
+and long strings that share their first bytes), floats with NaN and signed
+zero, Bool and Int128 keys, and a null in each key; every join type."""
 # contract-group: kernel.order_keys
 from std.testing import assert_equal
 
 from dataframe import BoolColumn, Column, Series, StringColumn
 from dataframe.aggregation.reducer import float_key
-from dataframe.kernels.join_hash import (
-    direct_hash_join_rows,
-    direct_hash_semi_anti_rows,
+from dataframe.join_type import (
+    JOIN_ANTI,
+    JOIN_FULL,
+    JOIN_INNER,
+    JOIN_LEFT,
+    JOIN_MARK,
+    JOIN_RIGHT,
+    JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI,
+    JOIN_SEMI,
 )
+from dataframe.joins.hash_table import JoinHashTable, ScanStructure, probe_pairs
 from dataframe.storage.string_view import StringViewBuilder
 
-# Longer than a batch of probe rows (1024), and not a multiple of one.
+# Longer than a chunk of probe rows (2048), and not a multiple of one.
 comptime PROBE = 2_500
 comptime BUILD = 300
 
@@ -147,18 +155,85 @@ def check(left: Side, right: Side, keys: Int) raises:
             if outer and len(matches[i]) == 0:
                 expected_left.append(i)
                 expected_right.append(-1)
-        var actual = direct_hash_join_rows(probe, build, outer)
+        var table = JoinHashTable(build)
+        var actual = probe_pairs(
+            table, probe, JOIN_LEFT if outer else JOIN_INNER, 0
+        )
         assert_equal(actual[0], expected_left)
         assert_equal(actual[1], expected_right)
     var semi = List[Int]()
     var anti = List[Int]()
+    var matched = List[Bool](length=BUILD, fill=False)
     for i in range(PROBE):
         if len(matches[i]) > 0:
             semi.append(i)
         else:
             anti.append(i)
-    assert_equal(direct_hash_semi_anti_rows(probe, build, True), semi)
-    assert_equal(direct_hash_semi_anti_rows(probe, build, False), anti)
+        for j in matches[i]:
+            matched[j] = True
+    var table = JoinHashTable(build)
+    assert_equal(probe_pairs(table, probe, JOIN_SEMI, 0)[0], semi)
+    assert_equal(probe_pairs(table, probe, JOIN_ANTI, 0)[0], anti)
+    # A right join: the matched pairs, then the build rows none matched;
+    # a full join also keeps the unmatched probe rows in place.
+    var unmatched = List[Int]()
+    var hit = List[Int]()
+    for j in range(BUILD):
+        if matched[j]:
+            hit.append(j)
+        else:
+            unmatched.append(j)
+    for full in [False, True]:
+        var expected_left = List[Int]()
+        var expected_right = List[Int]()
+        for i in range(PROBE):
+            for j in matches[i]:
+                expected_left.append(i)
+                expected_right.append(j)
+            if full and len(matches[i]) == 0:
+                expected_left.append(i)
+                expected_right.append(-1)
+        for j in unmatched:
+            expected_left.append(-1)
+            expected_right.append(j)
+        var fresh = JoinHashTable(build)
+        var actual = probe_pairs(
+            fresh, probe, JOIN_FULL if full else JOIN_RIGHT, 0
+        )
+        assert_equal(actual[0], expected_left)
+        assert_equal(actual[1], expected_right)
+    # Built on the probe side's partner: the build rows any probe matched
+    # (right semi) or none did (right anti), in build order.
+    assert_equal(
+        probe_pairs(JoinHashTable(build), probe, JOIN_RIGHT_SEMI, 0)[1], hit
+    )
+    assert_equal(
+        probe_pairs(JoinHashTable(build), probe, JOIN_RIGHT_ANTI, 0)[1],
+        unmatched,
+    )
+    # A mark join: every probe row, with whether it matched (2: unknown,
+    # a null probe key or no match against a build holding a null key).
+    var scan = ScanStructure(table, JOIN_MARK)
+    var low = 0
+    var build_null = False
+    for key in build:
+        build_null = build_null or key.null_count() > 0
+    while low < PROBE:
+        var count = min(2048, PROBE - low)
+        scan.probe(probe, low, count)
+        var n = scan.next()
+        assert_equal(n, count)
+        for k in range(n):
+            var i = low + Int(scan.probe_rows[k])
+            var null_key = False
+            for key in probe:
+                null_key = null_key or key.get(i).is_null()
+            var want = UInt8(1) if len(matches[i]) > 0 else (
+                UInt8(2) if (build_null or null_key) else UInt8(0)
+            )
+            assert_equal(scan.marks[k], want)
+        assert_equal(scan.next(), 0)
+        low += count
 
 
 def test_string_and_integer_keys_match_over_batches_in_every_storage() raises:

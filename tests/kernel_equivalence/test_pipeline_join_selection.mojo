@@ -275,8 +275,8 @@ def runs() raises -> DataFrame:
 
 def test_a_join_after_a_join_probes_the_kept_rows_in_place() raises:
     # The first join (inner, semi or anti) keeps its rows as row indices;
-    # the second probes its direct index (perfect hash slots, or a
-    # progression) through them, without gathering its key first. A semi
+    # the second probes its table in the pipeline with the rows they
+    # select (perfect hash slots, or the hash table). A semi
     # or anti join is the first join: the cost-based join order runs one
     # before an inner join its keys do not read, as DuckDB does.
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
@@ -304,9 +304,9 @@ def test_a_join_after_a_join_probes_the_kept_rows_in_place() raises:
                         .collect(batch_size=batch)
                     )
                     assert_true(
-                        "dataframe-path: join.direct_rows_at\n"
+                        "dataframe-path: pipeline.join_dictionary\n"
                         in observed.text(),
-                        "the second join gathered its key",
+                        "the second join did not probe in the pipeline",
                     )
                     _ = observed^
                     var r = 0
