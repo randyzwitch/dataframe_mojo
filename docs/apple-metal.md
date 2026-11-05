@@ -24,7 +24,88 @@ Native column chunks and their validity bitmaps are read in place, without
 coalescing or copying their values. Each chunk retains its own value and
 bit offsets. The reductions queue into separate partial-result ranges and
 share one final synchronization and readback; chunk count does not multiply
-the full reduction grid. Float64 and every other operator run on the CPU.
+the full reduction grid.
+
+One projection can also combine `sum`, `count` and `mean` over up to four
+distinct Int32, Int64 or Float32 columns, with the same optional range filter.
+Aliases of the same input share their sum and non-null count. A single GPU
+scan evaluates the predicate once and accumulates every requested field;
+different input chunk boundaries are intersected into native views. Count
+returns Int64, mean returns Float64, and sums preserve their input dtype and
+`min_count`. Empty means are null; empty counts are zero. Integer means do
+not overflow merely because a same-dtype sum would overflow.
+
+Float32 means accumulate exact integer exponent bins on the GPU and finish
+in Float64 on the host, without GPU Float64 arithmetic. If the finite input's
+significant-bit span and count cannot prove the CPU's Float64 additions
+exact, the CPU adjudicates the result in its own accumulation order. This
+preserves the CPU's behavior for extreme dynamic ranges and cancellation.
+Compensated Float32 sums with non-finite partials also use CPU adjudication,
+including finite inputs whose GPU partials overflow Float32.
+The common path uses three bins for values whose significant bits fit between
+2**-53 and 2**43, such as ordinary prices and sensor readings. A device flag
+detects any contribution outside that window and retries with all nine bins;
+large finite values and subnormals retain the same supported semantics. The
+kernel also specializes for the number of distinct aggregate fields.
+For projections containing a Float32 mean, a schema-only remap packs Float32
+fields into a prefix while preserving output order and aliases. Exact-bin
+registers and block reductions are compiled only for that prefix; integer
+fields keep their native integer reductions. These projections use the
+`exact_float:typed_v1` calibration revision so earlier measurements are not
+reused for the specialized kernels.
+
+A single SUM may reduce a binary `+`, `-` or `*` expression, for example
+`(col("price") * col("quantity")).sum()`. Both columns must have the same
+native dtype (Int32, Int64 or Float32). An operand may instead be a matching
+typed literal or an exactly representable untyped numeric literal, on either
+side. Arithmetic, the optional common filter and the reduction run in one GPU
+scan without an intermediate result column. Operand nulls discard that row;
+integer intermediate overflow is detected even if a final sum would cancel.
+Overflow and non-finite Float32 partials use CPU adjudication. These shapes
+have separate `arithmetic_sum:` calibration keys; nested expressions,
+division and mixed-dtype arithmetic remain on CPU.
+Arithmetic expressions can also appear inside SUM, COUNT and MEAN in the
+same projection as column aggregates, for example:
+
+```mojo
+frame.lazy().filter(col("p") > 0).select_exprs([
+    (col("price") * col("quantity")).sum().alias("sales"),
+    col("discount").sum().alias("discount"),
+    col("quantity").count().alias("quantity_count"),
+])
+```
+
+Up to four distinct aggregate values share one scan and range predicate.
+Repeated SUM/COUNT/MEAN of an identical expression share its computed value
+and reduction state; expressions using different operators or literals retain
+separate states. Four binary expressions may read eight distinct value
+columns plus an independent predicate column. Operands retain the same dtype,
+literal and null rules as the single arithmetic SUM. COUNT checks integer
+intermediate overflow even when no sum is requested. Float32 means use the
+same exact-bin finish and CPU-order proof described above. These projections
+use `composed_reductions:v1:` calibration keys. Subnormal arithmetic operands
+and possible gradual underflow use CPU adjudication because Metal arithmetic
+can flush these values to zero before reduction. The existing single arithmetic
+SUM and pure column aggregate paths keep their specialized kernels.
+
+A projection with one arithmetic value and otherwise Float32 column
+aggregates uses a compact typed kernel. It carries no integer reduction
+state; a mean-bearing prefix uses exact bins, while independent trailing
+sums use Float32 compensation. Output aliases retain their requested order.
+Supported composition regions stay fused before CPU common-expression
+materialization. The pipeline adapter can also re-inline eligible shared
+binary values immediately below a projection; it declines unused work,
+dependencies and expressions evaluated before filters. These are schema-only
+transformations in the Metal backend; the CPU optimizer is unchanged.
+
+New fused projections have separate `fused_reductions:` calibration keys;
+without a measurement they stay on CPU in automatic mode. Float64 input
+columns and other operators continue to run on CPU.
+
+Float32 range predicates use ordered integer keys when a bound is near
+zero, preserving subnormal comparisons, signed-zero equality and NaN
+exclusion even when Metal's floating comparisons flush denormals. Normal
+bounds retain native floating comparisons.
 
 The explicit-copy reference path packs unaligned validity windows in bytes
 and SIMD batches. It does not copy an entire unaligned bitmap one bit at a

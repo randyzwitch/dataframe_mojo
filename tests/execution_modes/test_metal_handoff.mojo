@@ -2,10 +2,13 @@
 results equal to the CPU's for the ones it runs."""
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_false, assert_raises, assert_true
+from std.math import isinf
+from std.memory import bitcast
 from dataframe import (
     Column,
     DataFrame,
     DataType,
+    Expr,
     LazyFrame,
     Series,
     col,
@@ -14,6 +17,10 @@ from dataframe import (
 )
 from dataframe_metal.handoff import execute_timed, operator_key, plan_region
 from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.multi_plan import plan_bundle, bundle_key
+from dataframe_metal.arithmetic_plan import plan_arithmetic
+from dataframe_metal.accelerator.gpu.arithmetic_sum import integer_binary
+from dataframe.expr import ADD, SUB, MUL
 from tests.support.group_strategy_reference import ScopedEnvironment
 from tests.support.metal_outcomes import require_metal
 
@@ -70,14 +77,11 @@ def test_metal_declines_float64_strings_and_other_shapes() raises:
     var frame = _frame()
     var declined: List[LazyFrame] = [
         frame.lazy().select(col("d").sum()),
-        frame.lazy().select(col("i").mean()),
-        frame.lazy().select_exprs([col("i").sum(), col("l").sum()]),
         frame.lazy().filter(col("i") != 2).select(col("i").sum()),
         frame.lazy().filter(col("i") > lit(Int64(2))).select(col("i").sum()),
         frame.lazy().filter(col("i") > 2.5).select(col("i").sum()),
         frame.lazy().filter(col("f") > 0.1).select(col("f").sum()),
         frame.lazy().filter(col("s") == "a").select(col("i").sum()),
-        frame.lazy().select((col("i") + 1).sum()),
         frame.lazy().group_by("s").agg([col("i").sum()]),
     ]
     for plan in declined:
@@ -284,6 +288,259 @@ def test_metal_chunk_batches_preserve_independent_owners_and_bitmap_offsets() ra
             _close(plan.collect(accelerator=runtime), expected)
             _close(execute_timed(plan)[0], expected)
             _close(execute_timed(plan, zero_copy=False)[0], expected)
+
+
+def test_metal_bundle_shares_states_and_accepts_mixed_native_types() raises:
+    var frame = _frame()
+    var plan = frame.lazy().select_exprs(
+        [
+            col("i").sum().alias("sum_i"),
+            col("i").count().alias("count_i"),
+            col("l").mean().alias("mean_l"),
+            col("f").mean().alias("mean_f"),
+        ]
+    )
+    var bundle = plan_bundle(plan)
+    assert_true(Bool(bundle))
+    assert_equal(len(bundle.value().fields), 3)
+    assert_equal(len(bundle.value().outputs), 4)
+    assert_true(bundle.value().precise_float)
+    assert_equal(bundle.value().fields[0].column, "f")
+    assert_equal(bundle.value().fields[1].column, "i")
+    assert_equal(bundle.value().fields[2].column, "l")
+    assert_equal(bundle.value().outputs[0].field, 1)
+    assert_equal(bundle.value().outputs[1].field, 1)
+    assert_equal(bundle.value().outputs[2].field, 2)
+    assert_equal(bundle.value().outputs[3].field, 0)
+    assert_true(bundle_key(bundle.value()).endswith(":exact_float:typed_v1"))
+    var filtered = plan_bundle(
+        frame.lazy()
+        .filter(col("i") > 0)
+        .select_exprs([col("i").sum().alias("s"), col("i").count().alias("c")])
+    )
+    var plain = plan_bundle(
+        frame.lazy().select_exprs(
+            [col("i").sum().alias("s"), col("i").count().alias("c")]
+        )
+    )
+    var external = plan_bundle(
+        frame.lazy()
+        .filter(col("l") > 0)
+        .select_exprs([col("i").sum().alias("s"), col("i").count().alias("c")])
+    )
+    assert_false(bundle_key(plain.value()) == bundle_key(filtered.value()))
+    assert_true(":filtered:external:" in bundle_key(external.value()))
+    assert_true(":filtered:shared0:" in bundle_key(filtered.value()))
+
+
+def _close_bundle(actual: DataFrame, expected: DataFrame) raises:
+    assert_equal(actual.columns(), expected.columns())
+    assert_equal(actual.height(), 1)
+    for name in expected.columns():
+        assert_equal(actual.column(name).dtype(), expected.column(name).dtype())
+        var a = actual.item(0, name)
+        var e = expected.item(0, name)
+        assert_equal(a.is_null(), e.is_null())
+        if e.is_null():
+            continue
+        if e.dtype() == DataType.FLOAT64 or e.dtype() == DataType.FLOAT32:
+            var x = a.float64() if e.dtype() == DataType.FLOAT64 else Float64(
+                a.float32()
+            )
+            var y = e.float64() if e.dtype() == DataType.FLOAT64 else Float64(
+                e.float32()
+            )
+            if x != x or y != y:
+                assert_true(x != x and y != y)
+            elif isinf(x) or isinf(y):
+                assert_equal(x, y)
+            elif x != y:
+                var tolerance = 1e-12 if e.dtype() == DataType.FLOAT64 else 1e-5
+                assert_true(abs(x - y) <= tolerance + tolerance * abs(y))
+        else:
+            assert_true(actual.column(name).equals(expected.column(name)))
+
+
+# requires: metal
+def test_metal_fused_sum_count_mean_share_predicate_with_mixed_nulls() raises:
+    var runtime = require_metal()
+    for nulls in [False, True]:
+        var base = _cross_columns(13001, nulls)
+        var chunked = List[Series]()
+        for name in ["i", "l", "f"]:
+            var split = 19 if name == "i" else (2503 if name == "l" else 101)
+            chunked.append(
+                Series._from_chunks(
+                    [
+                        base.column(name).slice(5, split),
+                        base.column(name).slice(5 + split, 10003 - split),
+                    ]
+                )
+            )
+        for frame in [base.slice(5, 10003), DataFrame(chunked^)]:
+            for predicate in ["", "i", "l", "f"]:
+                var query = frame.lazy()
+                if predicate:
+                    query = query.filter(col(predicate) > 0)
+                var plan = query.select_exprs(
+                    [
+                        col("i").sum().alias("sum_i"),
+                        col("i").count().alias("count_i"),
+                        col("i").mean().alias("mean_i"),
+                        col("l").sum().alias("sum_l"),
+                        col("l").count().alias("count_l"),
+                        col("l").mean().alias("mean_l"),
+                        col("f").sum().alias("sum_f"),
+                        col("f").count().alias("count_f"),
+                        col("f").mean().alias("mean_f"),
+                    ]
+                )
+                assert_true(
+                    "HANDOFF metal" in plan.explain(accelerator=runtime)
+                )
+                var expected = plan.collect(engine="cpu")
+                _close_bundle(plan.collect(accelerator=runtime), expected)
+                _close_bundle(execute_timed(plan)[0], expected)
+                _close_bundle(execute_timed(plan, zero_copy=False)[0], expected)
+
+
+# requires: metal
+def test_metal_bundle_empty_min_count_and_integer_mean_without_sum_overflow() raises:
+    var runtime = require_metal()
+    var frame = DataFrame([Series("i", Column[Int32]([Int32.MAX, Int32.MAX]))])
+    var mean = frame.lazy().select_exprs(
+        [col("i").mean().alias("m"), col("i").count().alias("c")]
+    )
+    _close_bundle(execute_timed(mean)[0], mean.collect(engine="cpu"))
+    for empty in [frame.clear(), frame.copy()]:
+        var plan = (
+            empty.lazy()
+            .filter(col("i") < 0)
+            .select_exprs(
+                [
+                    col("i").sum().alias("zero"),
+                    col("i").sum(min_count=1).alias("null"),
+                    col("i").mean().alias("mean"),
+                    col("i").count().alias("count"),
+                ]
+            )
+        )
+        _close_bundle(execute_timed(plan)[0], plan.collect(engine="cpu"))
+    var overflow = frame.lazy().select_exprs(
+        [col("i").sum().alias("s"), col("i").count().alias("c")]
+    )
+    with assert_raises(contains="int32 expression sum overflow"):
+        _ = overflow.collect(accelerator=runtime)
+
+
+# requires: metal
+def test_metal_float32_mean_preserves_range_specials_and_cpu_order_adjudication() raises:
+    var runtime = require_metal()
+    var maximum = Float32.MAX_FINITE
+    var nan = Float32(0) / Float32(0)
+    for values in [
+        [maximum, maximum],
+        [nan, Float32(1)],
+        [Float32(1) / Float32(0), Float32(1)],
+    ]:
+        var frame = DataFrame(
+            [Series("f", Column[Float32](List[Float32](values)))]
+        )
+        var plan = frame.lazy().select_exprs(
+            [col("f").mean().alias("m"), col("f").count().alias("c")]
+        )
+        _close_bundle(execute_timed(plan)[0], plan.collect(engine="cpu"))
+        var sums = frame.lazy().select_exprs(
+            [col("f").sum().alias("s"), col("f").count().alias("c")]
+        )
+        _close_bundle(
+            sums.collect(accelerator=runtime), sums.collect(engine="cpu")
+        )
+        with assert_raises(contains="CPU non-finite accumulation"):
+            _ = execute_timed(sums)
+    var wide = DataFrame([Series("f", Column[Float32]([maximum, 1, -maximum]))])
+    var plan = wide.lazy().select_exprs(
+        [col("f").mean().alias("m"), col("f").count().alias("c")]
+    )
+    _close_bundle(plan.collect(accelerator=runtime), plan.collect(engine="cpu"))
+    with assert_raises(contains="CPU accumulation order"):
+        _ = execute_timed(plan)
+    # Subnormals retry the full exponent window without changing the result.
+    var tiny = bitcast[DType.float32](UInt32(1))
+    var small = DataFrame([Series("f", Column[Float32]([tiny, tiny * 2]))])
+    var small_mean = small.lazy().select_exprs(
+        [col("f").mean().alias("m"), col("f").count().alias("c")]
+    )
+    assert_equal(
+        execute_timed(small_mean)[0].item(0, "m").float64(),
+        Float64(tiny) * 1.5,
+    )
+
+
+# requires: metal
+def test_metal_bundle_count_only_and_all_supported_field_arities() raises:
+    var runtime = require_metal()
+    var frame = _frame().with_column(Series("j", Column[Int32]([7, 11, 13])))
+    var plans: List[LazyFrame] = [
+        frame.lazy().select(col("f").count()),
+        frame.lazy().select_exprs(
+            [col("i").sum().alias("i"), col("f").sum().alias("f")]
+        ),
+        frame.lazy().select_exprs(
+            [
+                col("i").sum().alias("i"),
+                col("l").mean().alias("l"),
+                col("f").mean().alias("f"),
+                col("j").count().alias("j"),
+            ]
+        ),
+    ]
+    for plan in plans:
+        _close_bundle(execute_timed(plan)[0], plan.collect(engine="cpu"))
+        _close_bundle(
+            plan.collect(accelerator=runtime), plan.collect(engine="cpu")
+        )
+    # Every compact float-prefix specialization, with integer-first output
+    # ordering and duplicate SUM/COUNT/MEAN states, must preserve CPU results.
+    var typed = frame.with_column(
+        Series("g", Column[Float32]([3, -2, 1], [True, False, True]))
+    )
+    typed = typed.with_column(Series("h", Column[Float32]([-4, 2, 8])))
+    typed = typed.with_column(
+        Series("k", Column[Float32]([1, 0, -1], [False, True, True]))
+    )
+    var integers = [String("i"), String("l"), String("j")]
+    var floats = [String("f"), String("g"), String("h"), String("k")]
+    for arity in range(1, 5):
+        for float_count in range(1, arity + 1):
+            var expressions = List[Expr]()
+            var names = List[String]()
+            for i in range(arity - float_count):
+                names.append(integers[i].copy())
+            for i in range(float_count):
+                names.append(floats[i].copy())
+            for name in names:
+                expressions.append(col(name).mean().alias("m" + name))
+                expressions.append(col(name).count().alias("c" + name))
+                expressions.append(col(name).sum(min_count=3).alias("s" + name))
+            var plan = typed.lazy().select_exprs(expressions)
+            var expected = plan.collect(engine="cpu")
+            _close_bundle(execute_timed(plan)[0], expected)
+            _close_bundle(execute_timed(plan, zero_copy=False)[0], expected)
+            var wide = typed.copy()
+            for i in range(float_count):
+                wide = wide.with_column(
+                    Series(
+                        floats[i],
+                        Column[Float32](
+                            List[Float32](length=3, fill=Float32.MAX_FINITE)
+                        ),
+                    )
+                )
+            var wide_plan = wide.lazy().select_exprs(expressions)
+            _close_bundle(
+                execute_timed(wide_plan)[0], wide_plan.collect(engine="cpu")
+            )
     # The exact Int64 total requires cancellation across distinct chunks.
     var extremes = concat(
         [
@@ -350,7 +607,7 @@ def test_metal_handoff_float32_nan_and_explain_and_profile() raises:
         if report.item(row, "algorithm").string() == "handoff":
             handed = True
     assert_true(handed)
-    var declined = _columns(10, False).lazy().select(col("i").mean())
+    var declined = _columns(10, False).lazy().select(col("i").median())
     assert_true("supports no node" in declined.explain(accelerator=runtime))
     assert_true(
         declined.collect(accelerator=runtime).equals(
@@ -418,3 +675,364 @@ def test_metal_automatic_placement_follows_measured_costs() raises:
         var plain = frame.lazy().select(col("i").sum())
         assert_true("no measured cost" in plain.explain(engine="auto"))
         _ = calibrated^
+
+
+def test_metal_arithmetic_matcher_accepts_native_pairs_and_declines_wider_work() raises:
+    var frame = _frame().with_column(Series("j", Column[Int32]([3, 4, 5])))
+    for expression in [
+        col("i") + col("j"),
+        col("i") - 2,
+        2 - col("i"),
+        col("f") * lit(Float32(2)),
+        col("l") * col("l"),
+    ]:
+        var plan = (
+            frame.lazy()
+            .filter(col("l") > 0)
+            .select(expression.sum().alias("answer"))
+        )
+        assert_true(Bool(plan_arithmetic(plan)))
+    for expression in [
+        col("i") + col("l"),
+        col("d") * col("d"),
+        col("i") / col("i"),
+        (col("i") + 1) * 2,
+        col("i") + lit(Int64(2)),
+    ]:
+        assert_false(
+            Bool(plan_arithmetic(frame.lazy().select(expression.sum())))
+        )
+
+
+# requires: metal
+def test_metal_arithmetic_sums_match_cpu_with_literals_nulls_and_chunks() raises:
+    var runtime = require_metal()
+    for nulls in [False, True]:
+        var base = _cross_columns(13001, nulls)
+        var columns = List[Series]()
+        for name in ["i", "l", "f"]:
+            var split = 19 if name == "i" else (2503 if name == "l" else 101)
+            columns.append(
+                Series._from_chunks(
+                    [
+                        base.column(name).slice(5, split),
+                        base.column(name).slice(5 + split, 10003 - split),
+                    ]
+                )
+            )
+        for frame in [base.slice(5, 10003), DataFrame(columns^)]:
+            for name in ["i", "l", "f"]:
+                var input = frame.with_column(
+                    base.column(name).slice(0, 10003).renamed("other")
+                )
+                var expressions: List[Expr] = [
+                    col(name) + col("other"),
+                    col(name) - col("other"),
+                    col(name) * 2,
+                    2 - col(name),
+                ]
+                if name == "f":
+                    expressions.append(col(name) * col("other"))
+                else:
+                    expressions.append(col(name) * 0)
+                for expression in expressions:
+                    for predicate in ["", "i", "l", "f"]:
+                        var query = input.lazy()
+                        if predicate:
+                            query = query.filter(col(predicate) > 0)
+                        var plan = query.select(
+                            expression.sum().alias("answer")
+                        )
+                        assert_true(
+                            "HANDOFF metal" in plan.explain(accelerator=runtime)
+                        )
+                        var expected = plan.collect(engine="cpu")
+                        _close_bundle(execute_timed(plan)[0], expected)
+                        _close_bundle(
+                            execute_timed(plan, zero_copy=False)[0], expected
+                        )
+                        _close_bundle(
+                            plan.collect(accelerator=runtime), expected
+                        )
+
+
+# requires: metal
+def test_metal_arithmetic_checks_intermediate_overflow_before_cancelling_sum() raises:
+    var runtime = require_metal()
+    for dtype in [DataType.INT32, DataType.INT64]:
+        var frame: DataFrame
+        if dtype == DataType.INT32:
+            frame = DataFrame(
+                [
+                    Series("a", Column[Int32]([Int32.MAX, Int32.MAX])),
+                    Series("b", Column[Int32]([2, -2])),
+                    Series("p", Column[Int32]([0, 0])),
+                ]
+            )
+        else:
+            frame = DataFrame(
+                [
+                    Series("a", Column[Int64]([Int64.MAX, Int64.MAX])),
+                    Series("b", Column[Int64]([2, -2])),
+                    Series("p", Column[Int32]([0, 0])),
+                ]
+            )
+        for expression in [
+            col("a") * col("b"),
+            col("a") + col("a"),
+            col("b") - col("a"),
+            col("a") * 1,
+        ]:
+            var plan = frame.lazy().select(expression.sum())
+            with assert_raises(contains="overflow"):
+                _ = execute_timed(plan)
+            with assert_raises(contains="overflow"):
+                _ = plan.collect(accelerator=runtime)
+            var excluded = (
+                frame.lazy()
+                .filter(col("p") > 0)
+                .select(expression.sum(min_count=1))
+            )
+            _close_bundle(
+                execute_timed(excluded)[0], excluded.collect(engine="cpu")
+            )
+    var extremes = DataFrame(
+        [
+            Series("a", Column[Int64]([Int64.MIN, Int64.MIN, Int64.MAX])),
+            Series("b", Column[Int64]([1, -1, 1])),
+            Series("p", Column[Int32]([1, 0, 1])),
+        ]
+    )
+    var valid = (
+        extremes.lazy().filter(col("p") > 0).select((col("a") * col("b")).sum())
+    )
+    assert_equal(execute_timed(valid)[0].item().int64(), Int64(-1))
+    var invalid = extremes.lazy().select((col("a") * col("b")).sum())
+    with assert_raises(contains="overflow"):
+        _ = invalid.collect(accelerator=runtime)
+    var skipped = DataFrame(
+        [
+            Series("a", Column[Int32]([Int32.MAX, Int32.MIN], [False, False])),
+            Series("b", Column[Int32]([2, -1])),
+        ]
+    )
+    var nulls = skipped.lazy().select((col("a") * col("b")).sum(min_count=1))
+    _close_bundle(execute_timed(nulls)[0], nulls.collect(engine="cpu"))
+    for frame in [skipped.copy(), skipped.clear()]:
+        var empty = frame.lazy().select((col("a") * col("b")).sum())
+        _close_bundle(execute_timed(empty)[0], empty.collect(engine="cpu"))
+    var large_float = DataFrame(
+        [Series("f", Column[Float32]([Float32.MAX_FINITE]))]
+    )
+    var nonfinite = large_float.lazy().select((col("f") * 2).sum())
+    _close_bundle(
+        nonfinite.collect(accelerator=runtime), nonfinite.collect(engine="cpu")
+    )
+    with assert_raises(contains="CPU non-finite accumulation"):
+        _ = execute_timed(nonfinite)
+
+
+def test_metal_arithmetic_overflow_flags_match_wide_integer_oracle() raises:
+    var values: List[Int64] = [
+        Int64.MIN,
+        Int64.MIN + 1,
+        -4_000_000_000,
+        -3_037_000_500,
+        -2,
+        -1,
+        0,
+        1,
+        2,
+        3_037_000_500,
+        4_000_000_000,
+        Int64.MAX - 1,
+        Int64.MAX,
+    ]
+    for a in values:
+        for b in values:
+            for op in [ADD, SUB, MUL]:
+                var x = Int128(a)
+                var y = Int128(b)
+                var expected = x + y if op == ADD else (
+                    x - y if op == SUB else x * y
+                )
+                var computed = integer_binary(a, b, UInt32(op), UInt32(1))
+                var overflow = expected < Int128(
+                    Int64.MIN
+                ) or expected > Int128(Int64.MAX)
+                assert_equal(computed[1], overflow)
+                if not overflow:
+                    assert_equal(computed[0], expected.cast[DType.int64]())
+
+
+def test_metal_composition_shares_whole_expressions_and_preserves_outputs() raises:
+    from dataframe_metal.composition_plan import (
+        plan_composition,
+        composition_key,
+    )
+
+    var frame = _frame()
+    var value = col("f") * col("f")
+    var plan = frame.lazy().select_exprs(
+        [
+            col("i").sum().alias("integer"),
+            value.sum().alias("sum"),
+            value.count().alias("count"),
+            value.mean().alias("mean"),
+            (col("f") + 1).sum().alias("other"),
+        ]
+    )
+    var matched = plan_composition(plan)
+    assert_true(Bool(matched))
+    assert_equal(len(matched.value().fields), 3)
+    assert_equal(len(matched.value().inputs), 2)
+    assert_equal(matched.value().outputs[0].field, 2)
+    for output in range(1, 4):
+        assert_equal(matched.value().outputs[output].field, 0)
+    assert_true(composition_key(matched.value()).endswith(":exact_float"))
+    assert_false(Bool(plan_composition(frame.lazy().select(value.sum()))))
+    assert_false(
+        Bool(
+            plan_composition(frame.lazy().select((col("i") + col("l")).mean()))
+        )
+    )
+
+
+# requires: metal
+def test_metal_composition_matches_cpu_for_shared_arithmetic_nulls_and_chunks() raises:
+    var runtime = require_metal()
+    for nulls in [False, True]:
+        var base = _cross_columns(13001, nulls)
+        var columns = List[Series]()
+        for name in ["i", "l", "f"]:
+            var split = 19 if name == "i" else (2503 if name == "l" else 101)
+            columns.append(
+                Series._from_chunks(
+                    [
+                        base.column(name).slice(5, split),
+                        base.column(name).slice(5 + split, 10003 - split),
+                    ]
+                )
+            )
+        for frame in [base.slice(5, 10003), DataFrame(columns^)]:
+            for name in ["i", "l", "f"]:
+                var input = frame.with_column(
+                    base.column(name).slice(0, 10003).renamed("other")
+                )
+                for expression in [
+                    col(name) + col("other"),
+                    col(name) - col("other"),
+                    col(name) * 2,
+                    2 - col(name),
+                ]:
+                    for predicate in ["", "i", "l", "f", "other"]:
+                        var query = input.lazy()
+                        if predicate:
+                            query = query.filter(col(predicate) > 0)
+                        var plan = query.select_exprs(
+                            [
+                                expression.sum().alias("sum"),
+                                expression.count().alias("count"),
+                                expression.mean().alias("mean"),
+                                col("i").count().alias("bare_count"),
+                                col("f").sum().alias("bare_sum"),
+                            ]
+                        )
+                        assert_true(
+                            "HANDOFF metal" in plan.explain(accelerator=runtime)
+                        )
+                        var expected = plan.collect(engine="cpu")
+                        _close_bundle(execute_timed(plan)[0], expected)
+                        _close_bundle(
+                            execute_timed(plan, zero_copy=False)[0], expected
+                        )
+                        _close_bundle(
+                            plan.collect(accelerator=runtime), expected
+                        )
+
+
+# requires: metal
+def test_metal_composition_uses_eight_value_inputs_and_independent_predicate() raises:
+    _ = require_metal()
+    var columns = List[Series]()
+    for i in range(9):
+        columns.append(
+            Series(
+                String(i),
+                Column[Int32]([1, 2, 3, 4], [True, i % 2 == 0, True, True]),
+            )
+        )
+    var frame = DataFrame(columns^).slice(1, 3)
+    var expressions = List[Expr]()
+    for i in range(4):
+        expressions.append(
+            (col(String(i * 2)) * col(String(i * 2 + 1))).sum().alias(String(i))
+        )
+    var plan = frame.lazy().filter(col("8") > 0).select_exprs(expressions)
+    _close_bundle(execute_timed(plan)[0], plan.collect(engine="cpu"))
+    _close_bundle(
+        execute_timed(plan, zero_copy=False)[0], plan.collect(engine="cpu")
+    )
+
+
+# requires: metal
+def test_metal_composition_checks_overflow_empty_and_exact_float_retry() raises:
+    var runtime = require_metal()
+    for wide in [False, True]:
+        var frame: DataFrame
+        if wide:
+            frame = DataFrame(
+                [
+                    Series("a", Column[Int64]([Int64.MAX, Int64.MAX])),
+                    Series("b", Column[Int64]([2, -2])),
+                ]
+            )
+        else:
+            frame = DataFrame(
+                [
+                    Series("a", Column[Int32]([Int32.MAX, Int32.MAX])),
+                    Series("b", Column[Int32]([2, -2])),
+                ]
+            )
+        var value = col("a") * col("b")
+        for expression in [value.count(), value.mean()]:
+            var plan = frame.lazy().select(expression)
+            with assert_raises(contains="overflow"):
+                _ = execute_timed(plan)
+            with assert_raises(contains="overflow"):
+                _ = plan.collect(accelerator=runtime)
+        var mean = frame.lazy().select((col("a") * 1).mean())
+        _close_bundle(execute_timed(mean)[0], mean.collect(engine="cpu"))
+        var sum = frame.lazy().select_exprs(
+            [(col("a") * 1).sum().alias("s"), col("b").count().alias("c")]
+        )
+        with assert_raises(contains="overflow"):
+            _ = execute_timed(sum)
+        var empty = (
+            frame.clear()
+            .lazy()
+            .select_exprs(
+                [
+                    value.sum(min_count=1).alias("s"),
+                    value.count().alias("c"),
+                    value.mean().alias("m"),
+                ]
+            )
+        )
+        _close_bundle(execute_timed(empty)[0], empty.collect(engine="cpu"))
+    var frame = DataFrame(
+        [Series("f", Column[Float32]([Float32.MAX_FINITE, Float32.MAX_FINITE]))]
+    )
+    var value = col("f") * 1
+    var exact = frame.lazy().select_exprs(
+        [value.mean().alias("m"), value.count().alias("c")]
+    )
+    _close_bundle(execute_timed(exact)[0], exact.collect(engine="cpu"))
+    var nonfinite = frame.lazy().select_exprs(
+        [(col("f") * 2).sum().alias("s"), col("f").count().alias("c")]
+    )
+    with assert_raises(contains="CPU non-finite accumulation"):
+        _ = execute_timed(nonfinite)
+    _close_bundle(
+        nonfinite.collect(accelerator=runtime), nonfinite.collect(engine="cpu")
+    )

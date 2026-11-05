@@ -1,7 +1,7 @@
 """Typed-column footprint checks and native Float32 transfer roundtrips."""
 # contract-group: execution.backends
 from std.testing import assert_equal, assert_raises
-from dataframe import Column, Series
+from dataframe import Column, DataFrame, Series
 from dataframe_metal.accelerator.gpu.query_scope import Scope
 from dataframe_metal.accelerator.gpu.typed_storage import (
     native_column_bytes,
@@ -11,8 +11,86 @@ from dataframe_metal.accelerator.gpu.typed_storage import (
     wrap_native,
     _append_native_bits,
     _NativeReservation,
+    NativeColumnAny,
 )
+from dataframe_metal.accelerator.gpu.erased_input import numeric_views
 from tests.support.metal_outcomes import require_metal
+from dataframe_metal.exact_float import finish_float_bins
+from std.memory import bitcast
+
+
+# requires: metal
+def test_erased_native_views_keep_typed_reservations_through_completion() raises:
+    _ = require_metal()
+    var frame = DataFrame(
+        [
+            Series("i", Column[Int32]([1, 2, 3])),
+            Series("l", Column[Int64]([4, 5, 6])),
+            Series("f", Column[Float32]([7, 8, 9])),
+        ]
+    )
+    var scope = Scope(budget=48)
+    var ctx = scope.context()
+    var empty = ctx.enqueue_create_buffer[DType.uint8](1)
+    var owners = List[NativeColumnAny]()
+    var views = numeric_views(frame, "i", scope, False, empty, owners)
+    views.append(
+        numeric_views(frame, "l", scope, False, empty, owners)[0].copy()
+    )
+    views.append(
+        numeric_views(frame, "f", scope, False, empty, owners)[0].copy()
+    )
+    assert_equal(scope.info()[0], 48)
+    var tail = views[0].view(1, 2)
+    _ = views^
+    assert_equal(scope.info()[0], 48)
+    with assert_raises(contains="memory budget"):
+        _ = scope.check(1)
+    var read = List[Int32](length=2, fill=0)
+    ctx.enqueue_copy(
+        read.unsafe_ptr(), tail.values.create_sub_buffer[DType.int32](0, 2)
+    )
+    scope.synchronize()
+    assert_equal(read[0], Int32(2))
+    assert_equal(read[1], Int32(3))
+    _ = tail^
+    _ = owners^
+    assert_equal(scope.info()[0], 0)
+
+
+def test_float32_exact_bins_normalize_carries_sign_and_rounding() raises:
+    var bins = List[Int128](length=9, fill=0)
+    bins[4] = Int128(1) << 21
+    assert_equal(finish_float_bins(bins, False, False, False), Float64(1))
+    bins[4] = -bins[4]
+    assert_equal(finish_float_bins(bins, False, False, False), Float64(-1))
+    bins = List[Int128](length=9, fill=0)
+    bins[0] = -Int128(4294967295)
+    bins[1] = 1
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64(bitcast[DType.float32](UInt32(1))),
+    )
+    bins = List[Int128](length=9, fill=0)
+    bins[7] = Int128(0xE0000000) * 2
+    bins[8] = Int128(0x1FFFFF) * 2
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64(Float32.MAX_FINITE) * 2,
+    )
+    bins = List[Int128](length=9, fill=0)
+    bins[1] = Int128(1) << 21
+    bins[0] = 1
+    var scale = bitcast[DType.float64](UInt64(1023 - 149) << 52)
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64(Int64(1) << 53) * scale,
+    )
+    bins[0] = 3
+    assert_equal(
+        finish_float_bins(bins, False, False, False),
+        Float64((Int64(1) << 53) + 4) * scale,
+    )
 
 
 def test_native_bitmap_append_matches_bits_at_every_alignment_and_vector_tail() raises:
@@ -236,3 +314,452 @@ def test_native_float32_views_retain_one_owner_and_readback_checks_budget() rais
     assert_equal(native.has_errors(), False)
     assert_equal(native.retained_bytes(), 12)
     assert_equal(infallible.transfers()[0], 12)
+
+
+# requires: metal
+def test_composed_exact_float_prefixes_cover_all_arities_and_wide_bins() raises:
+    from dataframe import Expr, col
+    from dataframe_metal.handoff import execute_timed
+
+    _ = require_metal()
+    for floating in [
+        Float32(1.5),
+        Float32.MAX_FINITE,
+    ]:
+        var frame = DataFrame(
+            [
+                Series(
+                    "f", Column[Float32]([floating, floating], [True, False])
+                ),
+                Series("i", Column[Int32]([10, 20])),
+                Series("l", Column[Int64]([4_000_000_000, 8_000_000_000])),
+            ]
+        )
+        for arity in range(1, 5):
+            for floats in range(1, arity + 1):
+                var expressions = List[Expr]()
+                # Present integer fields first to exercise alias remapping.
+                for field in range(arity - 1, -1, -1):
+                    var name = String("f") if field < floats else (
+                        String("i") if field % 2 else String("l")
+                    )
+                    expressions.append(
+                        (col(name) + field).mean().alias("mean" + String(field))
+                    )
+                expressions.append((col("f") + 0).count().alias("count"))
+                var plan = frame.lazy().select_exprs(expressions)
+                var expected = plan.collect(engine="cpu")
+                for zero_copy in [True, False]:
+                    var actual = execute_timed(plan, zero_copy=zero_copy)
+                    assert_equal(actual[0].columns(), expected.columns())
+                    for name in expected.columns():
+                        assert_equal(
+                            actual[0].item(0, name).is_null(),
+                            expected.item(0, name).is_null(),
+                        )
+                        assert_equal(
+                            actual[0].column(name).dtype(),
+                            expected.column(name).dtype(),
+                        )
+                        assert_equal(
+                            actual[0]
+                            .column(name)
+                            .equals(expected.column(name)),
+                            True,
+                        )
+
+
+# requires: metal
+def test_composed_float32_arithmetic_adjudicates_gradual_underflow() raises:
+    from dataframe import Expr, col, lit
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    for bits in [UInt32(1), UInt32(0x00800000), UInt32(0x00800001)]:
+        var frame = DataFrame(
+            [Series("f", Column[Float32]([bitcast[DType.float32](bits)]))]
+        )
+        var expressions: List[Expr]
+        if bits == 1:
+            expressions = [col("f") + 0, col("f") * 1]
+        elif bits == 0x00800000:
+            expressions = [col("f") * lit(Float32(0.5))]
+        else:
+            expressions = [
+                col("f") - lit(bitcast[DType.float32](UInt32(0x00800000)))
+            ]
+        for expression in expressions:
+            var plan = frame.lazy().select_exprs(
+                [
+                    expression.mean().alias("mean"),
+                    col("f").count().alias("count"),
+                ]
+            )
+            var expected = plan.collect(engine="cpu")
+            with assert_raises(contains="CPU gradual underflow"):
+                _ = execute_timed(plan)
+            assert_equal(
+                plan.collect(accelerator=runtime).equals(expected), True
+            )
+
+
+def test_float32_range_keys_match_float64_order_at_underflow_and_specials() raises:
+    from dataframe_metal.accelerator.gpu.float_predicate import float_in_range
+
+    var patterns = List[UInt32]()
+    for bits in [
+        0,
+        0x80000000,
+        1,
+        0x80000001,
+        0x007FFFFF,
+        0x807FFFFF,
+        0x00800000,
+        0x80800000,
+        0x3F800000,
+        0xBF800000,
+        0x7F800000,
+        0xFF800000,
+        0x7FC12345,
+        0xFFC12345,
+    ]:
+        patterns.append(UInt32(bits))
+    for v in patterns:
+        for lo in patterns:
+            for hi in patterns:
+                for inclusive in range(4):
+                    var value = bitcast[DType.float32](v)
+                    var low = bitcast[DType.float32](lo)
+                    var high = bitcast[DType.float32](hi)
+                    var x = Float64(value)
+                    var a = Float64(low)
+                    var b = Float64(high)
+                    var above = x >= a if inclusive & 1 else x > a
+                    var below = x <= b if inclusive & 2 else x < b
+                    assert_equal(
+                        float_in_range(value, low, high, UInt32(inclusive)),
+                        above and below,
+                    )
+
+
+# requires: metal
+def test_float32_underflow_predicates_match_cpu_in_all_reduction_paths() raises:
+    from dataframe import Expr, col, lit
+    from dataframe_metal.handoff import execute_timed
+
+    _ = require_metal()
+    var values = List[Float32]()
+    var integers = List[Int32]()
+    var floats = List[Float32]()
+    for bits in [
+        0,
+        0x80000000,
+        1,
+        0x80000001,
+        0x007FFFFF,
+        0x807FFFFF,
+        0x00800000,
+        0x80800000,
+        0x3F800000,
+        0xBF800000,
+        0x7F800000,
+        0xFF800000,
+        0x7FC12345,
+    ]:
+        values.append(bitcast[DType.float32](UInt32(bits)))
+        integers.append(Int32(len(integers) + 1))
+        floats.append(Float32(len(floats) + 1) / 4)
+    var frame = DataFrame(
+        [
+            Series("p", Column[Float32](values^)),
+            Series("i", Column[Int32](integers^)),
+            Series("f", Column[Float32](floats^)),
+        ]
+    )
+    var tiny = Expr(Float64(bitcast[DType.float32](UInt32(1))))
+    var negative_tiny = Expr(
+        Float64(bitcast[DType.float32](UInt32(0x80000001)))
+    )
+    for predicate in [
+        col("p") > 0,
+        col("p") >= 0,
+        col("p") < 0,
+        col("p") <= 0,
+        col("p") == 0,
+        col("p") > tiny,
+        col("p") == tiny,
+        col("p") < negative_tiny,
+        (col("p") >= negative_tiny) & (col("p") <= tiny),
+    ]:
+        var query = frame.lazy().filter(predicate)
+        for mode in range(5):
+            var expressions: List[Expr]
+            if mode == 0:
+                expressions = [col("i").sum().alias("s")]
+            elif mode == 1:
+                expressions = [
+                    col("i").sum().alias("s"),
+                    col("i").count().alias("c"),
+                    col("i").mean().alias("m"),
+                ]
+            elif mode == 2:
+                expressions = [
+                    col("f").mean().alias("m"),
+                    col("i").count().alias("c"),
+                ]
+            elif mode == 3:
+                expressions = [(col("i") * 1).sum().alias("s")]
+            else:
+                expressions = [
+                    (col("f") + 1).mean().alias("m"),
+                    col("i").count().alias("c"),
+                ]
+            var plan = query.select_exprs(expressions)
+            var expected = plan.collect(engine="cpu")
+            for zero_copy in [True, False]:
+                var actual = execute_timed(plan, zero_copy=zero_copy)
+                assert_equal(actual[0].equals(expected), True)
+
+
+# requires: metal
+def test_single_float_composition_covers_mean_prefixes_and_native_sum_suffixes() raises:
+    from dataframe import Expr, col
+    from dataframe_metal.handoff import execute_timed
+    from dataframe_metal.composition_plan import (
+        plan_composition,
+        single_float_composition,
+    )
+
+    _ = require_metal()
+    for wide in [False, True]:
+        var value = Float32.MAX_FINITE if wide else Float32(2)
+        var frame = DataFrame(
+            [
+                Series("a", Column[Float32]([value, value], [True, False])),
+                Series("b", Column[Float32]([1, 1])),
+                Series("c", Column[Float32]([3, 4])),
+                Series("d", Column[Float32]([5, 6])),
+                Series("p", Column[Int32]([1, 1])),
+            ]
+        )
+        for arity in range(1, 5):
+            for means in range(arity + 1):
+                for op in range(3):
+                    var binary = col("a") + 0 if op == 0 else (
+                        0 - col("a") if op == 1 else col("a") * col("b")
+                    )
+                    var expressions = List[Expr]()
+                    for field in range(arity - 1, -1, -1):
+                        var expression = binary.copy() if field == 0 else col(
+                            "b" if field == 1 else ("c" if field == 2 else "d")
+                        )
+                        expressions.append(
+                            (
+                                expression.mean() if field
+                                < means else expression.sum()
+                            ).alias(String(field))
+                        )
+                    # COUNT shares the computed arithmetic state.
+                    expressions.append(binary.count().alias("count"))
+                    var plan = (
+                        frame.lazy()
+                        .filter(col("p") > 0)
+                        .select_exprs(expressions)
+                    )
+                    var matched = plan_composition(plan)
+                    assert_equal(
+                        single_float_composition(matched.value()), True
+                    )
+                    assert_equal(
+                        matched.value().fields[0].needs_mean, means > 0
+                    )
+                    var expected = plan.collect(engine="cpu")
+                    for zero_copy in [True, False]:
+                        var actual = execute_timed(plan, zero_copy=zero_copy)
+                        assert_equal(actual[0].equals(expected), True)
+
+
+# requires: metal
+def test_single_float_composition_preserves_native_sum_underflow_and_native_means() raises:
+    from dataframe import Expr, col
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    var tiny = bitcast[DType.float32](UInt32(1))
+    var frame = DataFrame(
+        [
+            Series("a", Column[Float32]([2, 4])),
+            Series("b", Column[Float32]([1, 1])),
+            Series("c", Column[Float32]([tiny, tiny])),
+        ]
+    )
+    var product = col("a") * col("b")
+    var plan = frame.lazy().select_exprs(
+        [product.mean().alias("m"), col("c").sum().alias("s")]
+    )
+    with assert_raises(contains="CPU gradual underflow"):
+        _ = execute_timed(plan)
+    assert_equal(
+        plan.collect(accelerator=runtime).equals(plan.collect(engine="cpu")),
+        True,
+    )
+    for variant in range(3):
+        var expressions: List[Expr]
+        if variant == 0:
+            expressions = [product.sum().alias("s"), col("c").mean().alias("m")]
+        elif variant == 1:
+            expressions = [
+                product.count().alias("c"),
+                col("c").mean().alias("m"),
+            ]
+        else:
+            expressions = [
+                product.mean().alias("m"),
+                col("c").count().alias("c"),
+            ]
+        var exact = frame.lazy().select_exprs(expressions)
+        var actual = execute_timed(exact)
+        assert_equal(actual[0].equals(exact.collect(engine="cpu")), True)
+
+
+# requires: metal
+def test_single_float_composition_reuses_float_predicates_and_nullable_operands() raises:
+    from dataframe import Expr, col
+    from dataframe_metal.handoff import execute_timed
+
+    _ = require_metal()
+    var frame = DataFrame(
+        [
+            Series("a", Column[Float32]([2, 4, 6], [True, False, True])),
+            Series("b", Column[Float32]([1, 2, 3], [True, True, False])),
+            Series(
+                "c",
+                Column[Float32](
+                    [
+                        bitcast[DType.float32](UInt32(1)),
+                        bitcast[DType.float32](UInt32(1)),
+                        bitcast[DType.float32](UInt32(1)),
+                    ]
+                ),
+            ),
+        ]
+    )
+    for predicate in ["a", "b", "c"]:
+        for binary in [col("a") * col("b"), col("a") + 1, 1 - col("a")]:
+            var plan = (
+                frame.lazy()
+                .filter(col(predicate) > 0)
+                .select_exprs(
+                    [
+                        col("c").mean().alias("native_mean"),
+                        binary.sum().alias("sum"),
+                        binary.mean().alias("mean"),
+                        col("b").count().alias("count"),
+                    ]
+                )
+            )
+            var expected = plan.collect(engine="cpu")
+            for zero_copy in [True, False]:
+                var actual = execute_timed(plan, zero_copy=zero_copy)
+                assert_equal(actual[0].equals(expected), True)
+
+
+def test_metal_region_fusion_recovers_cpu_common_expressions_without_pruning_work() raises:
+    from dataframe import col
+    from dataframe.lazy import WITH_COLUMNS
+    from dataframe_metal.region_plan import normalize_region
+    from dataframe_metal.composition_plan import plan_composition
+
+    var frame = DataFrame(
+        [
+            Series("a", Column[Float32]([2, 4, 6])),
+            Series("b", Column[Float32]([1, 2, 3])),
+            Series("p", Column[Int32]([1, 1, 0])),
+        ]
+    )
+    var value = col("a") * col("b")
+    var query = (
+        frame.lazy()
+        .filter(col("p") > 0)
+        .select_exprs(
+            [
+                value.sum().alias("s"),
+                value.count().alias("c"),
+                value.mean().alias("m"),
+            ]
+        )
+    )
+    var optimized = query._optimized()
+    var shared = False
+    for node in optimized._plan._nodes:
+        shared = shared or node.kind == WITH_COLUMNS
+    assert_equal(shared, True)
+    var recovered = normalize_region(optimized)
+    assert_equal(Bool(recovered), True)
+    assert_equal(Bool(plan_composition(recovered.value())), True)
+    assert_equal(
+        recovered.value()
+        .collect(engine="cpu", optimize=False)
+        .equals(query.collect(engine="cpu")),
+        True,
+    )
+    var unused = (
+        frame.lazy()
+        .with_columns((col("a") + col("b")).alias("unused"))
+        .select(col("b").sum())
+    )
+    assert_equal(Bool(normalize_region(unused)), False)
+    var dependent = (
+        frame.lazy()
+        .with_columns(
+            [(col("a") + col("b")).alias("x"), (col("x") * 2).alias("y")]
+        )
+        .select_exprs([col("x").sum(), col("y").sum()])
+    )
+    assert_equal(Bool(normalize_region(dependent)), False)
+    var before_filter = (
+        frame.lazy()
+        .with_columns(value.alias("v"))
+        .filter(col("p") > 0)
+        .select(col("v").sum())
+    )
+    assert_equal(Bool(normalize_region(before_filter)), False)
+
+
+# requires: metal
+def test_metal_composed_shared_arithmetic_stays_in_one_gpu_region() raises:
+    from dataframe import col
+    from dataframe_metal.handoff import supports, execute_timed
+    from dataframe_metal.metal import MetalRuntime
+
+    _ = require_metal()
+    var frame = DataFrame(
+        [
+            Series("a", Column[Float32]([2, 4, 6], [True, False, True])),
+            Series("b", Column[Float32]([1, 2, 3])),
+            Series("p", Column[Int32]([1, 1, 0])),
+        ]
+    )
+    var value = col("a") * col("b")
+    var plan = (
+        frame.lazy()
+        .filter(col("p") > 0)
+        .select_exprs(
+            [
+                value.sum().alias("s"),
+                value.count().alias("c"),
+                value.mean().alias("m"),
+            ]
+        )
+    )
+    var optimized = plan._optimized()
+    assert_equal(supports(optimized), True)
+    var expected = plan.collect(engine="cpu")
+    var direct = execute_timed(optimized)
+    assert_equal(direct[0].equals(expected), True)
+    assert_equal(
+        plan.collect(accelerator=MetalRuntime()).equals(expected), True
+    )
+    assert_equal(
+        optimized.collect(accelerator=MetalRuntime()).equals(expected), True
+    )

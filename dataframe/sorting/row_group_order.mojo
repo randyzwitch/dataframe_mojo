@@ -160,27 +160,18 @@ struct _RowGroup(Copyable, Movable):
 
 
 def _group_statistics(window: Series) -> Optional[BaseStatistics]:
-    """A row group's statistics, merged from its vectors'. A float vector
-    holding NaN has no min/max (NaN orders above every number), and then
-    neither has its row group: merging would keep the other vectors'."""
+    """A row group's statistics, merged from its vectors'. Float bounds
+    leave NaN out (`BaseStatistics.has_nan`), and NaN sorts above every
+    number, so a row group holding NaN has no min/max to order by."""
     var found = window_statistics(window)
     if not found:
         return None
     ref w = found.value()
     ref record = w.record[]
     var stats = record.vectors[w.first]
-    var unbounded = False
-    for v in range(w.first, w.last):
-        ref vector = record.vectors[v]
-        if (
-            vector.stats_type == FLOAT_STATS
-            and vector.can_have_no_null()
-            and not vector.has_min_max
-        ):
-            unbounded = True
-        if v > w.first:
-            stats.merge(vector)
-    if unbounded:
+    for v in range(w.first + 1, w.last):
+        stats.merge(record.vectors[v])
+    if stats.stats_type == FLOAT_STATS and stats.has_nan:
         stats.has_min_max = False
     return stats
 

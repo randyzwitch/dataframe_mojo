@@ -22,6 +22,7 @@ host. The data stays Float32: Apple GPUs have no Float64.
 
 from max.gpu import global_idx, thread_idx, block_idx
 from max.gpu.primitives import block
+from .float_predicate import float_in_range
 from std.memory import Pointer
 from std.sys import bit_width_of
 
@@ -130,16 +131,9 @@ def float32_partials[
         comptime if nullable:
             keep = _valid(validity, validity_offset, row)
         comptime if filtered:
-            var above = (
-                value >= low_bound if inclusive & 1 else value > low_bound
+            keep = keep & float_in_range(
+                value, low_bound, high_bound, inclusive
             )
-            var below = (
-                value <= high_bound if inclusive & 2 else value < high_bound
-            )
-            comptime if nullable:
-                keep = keep & above & below
-            else:
-                keep = above and below
         if keep:
             var adjusted = value - compensation
             var next = total + adjusted
