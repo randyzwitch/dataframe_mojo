@@ -445,7 +445,7 @@ struct _NumberJob(Job):
             var slices = List[Series](capacity=len(self.keys))
             for key in self.keys:
                 slices.append(key.slice(self.lo, n))
-            self.ids = List[Int](unsafe_uninit_length=n)
+            self.ids = huge_uninit[Int](n)
             self.count = number_partitions(
                 slices, self.hashes + self.lo * size_of[UInt64](), n, self.ids
             )
@@ -480,7 +480,7 @@ def partition_ids(
     count, with no sort: the window sink's hash partitioning, then one
     dictionary per task of consecutive hash groups, for aggregates over
     whole partitions (WindowConstantAggregator)."""
-    ids = List[Int](unsafe_uninit_length=height)
+    ids = huge_uninit[Int](height)
     if height == 0:
         return 0
     var sink = sink_threads(height)
@@ -600,7 +600,7 @@ struct _GroupSortJob(Job):
         var part_keys = List[Series](capacity=self.partition_keys)
         for c in range(self.partition_keys):
             part_keys.append(slices[c].copy())
-        var ids = List[Int](unsafe_uninit_length=n)
+        var ids = huge_uninit[Int](n)
         var partitions_here = number_partitions(
             part_keys, self.hashes + self.lo * size_of[UInt64](), n, ids
         )
@@ -638,12 +638,12 @@ struct _GroupSortJob(Job):
         if partitions_here > 1 and partitions_here <= Int(UInt32.MAX):
             # Four bytes hold the partition numbers, so the sort's records
             # stay narrow.
-            var narrow = List[UInt32](unsafe_uninit_length=n)
+            var narrow = huge_uninit[UInt32](n)
             for k in range(n):
                 narrow[k] = UInt32(ids[k])
             sort_keys.append(Series("", Column[UInt32](narrow^)))
         elif partitions_here > 1:
-            var wide = List[Int64](unsafe_uninit_length=n)
+            var wide = huge_uninit[Int64](n)
             for k in range(n):
                 wide[k] = Int64(ids[k])
             sort_keys.append(Series("", Column[Int64](wide^)))
@@ -836,7 +836,7 @@ def window_layout(
     layout.group_parts.append(layout.count)
     if not layout.in_place:
         # Each row's sorted position, to put row results back in order.
-        layout.inverse = List[Int](unsafe_uninit_length=height)
+        layout.inverse = huge_uninit[Int](height)
         for j in range(len(finish)):
             finish[j].inverse = Int(layout.inverse.unsafe_ptr())
         if len(finish) > 1:
@@ -1113,13 +1113,13 @@ def rank_from_layout(
     var code = rank_method(method)
     var n = len(layout.order)
     var average = code == RANK_AVERAGE
-    var ints = List[Int64](unsafe_uninit_length=0 if average else n)
-    var floats = List[Float64](unsafe_uninit_length=n if average else 0)
+    var ints = huge_uninit[Int64](0 if average else n)
+    var floats = huge_uninit[Float64](n if average else 0)
     var present = List[Bool]()
     var has_nulls = input.null_count() > 0
     if has_nulls:
         present = validity(input)
-    var out_valid = List[Bool](unsafe_uninit_length=n if has_nulls else 0)
+    var out_valid = huge_uninit[Bool](n if has_nulls else 0)
     var workers = configured_workers()
     var bounds = partitions(n, workers, STANDARD_VECTOR_SIZE)
     var jobs = List[_RankScanJob](capacity=workers)
@@ -1190,7 +1190,7 @@ def rank_rows(
     var n = len(input)
     var partition_keys = List[Series]()
     if len(ids) > 0:
-        var codes = List[Int64](unsafe_uninit_length=n)
+        var codes = huge_uninit[Int64](n)
         for k in range(n):
             codes[k] = Int64(ids[k])
         partition_keys.append(Series("", Column[Int64](codes^)))
