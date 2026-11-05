@@ -8,7 +8,7 @@ more than ReduceThreshold rows it is cut down to the live entries
 (`Finalize`) and gathers the payload in order; the caller combines the
 threads' results.
 """
-from dataframe.frame import DataFrame, concat
+from dataframe.frame import DataFrame
 from dataframe.series import Series
 from dataframe.sorting.sort_key import (
     STANDARD_VECTOR_SIZE,
@@ -30,9 +30,6 @@ from dataframe.vector.data_chunk import (
 from dataframe.vector.types import FLAT_VECTOR, SelectionVector
 from std.collections import Optional
 from std.memory import ArcPointer
-
-
-comptime _MAX_PIECES = 64
 
 
 def _sink_rows[
@@ -59,8 +56,9 @@ struct TopNSink(Movable):
     var names: List[String]
     var heap: TopNHeap
     var schema: DataFrame
-    # heap_data: the payload rows copied so far, in pieces.
-    var parts: List[DataFrame]
+    # heap_data: the payload rows copied so far, one growing column per
+    # schema column (DataChunk::Append with ALLOW_RESIZE).
+    var payload: List[Series]
     var payload_rows: Int
     var boundary: TopNBoundary
     # The scan's dynamic filter on the first sort column, set from the
@@ -92,7 +90,7 @@ struct TopNSink(Movable):
         self.names = names.copy()
         self.heap = TopNHeap(limit, self.layout.record_words())
         self.schema = schema.clear()
-        self.parts = List[DataFrame]()
+        self.payload = self.schema._columns.copy()
         self.payload_rows = 0
         self.boundary = boundary
         self.dynamic = dynamic
@@ -196,7 +194,7 @@ struct TopNSink(Movable):
                     )
                 )
             _ = rows^
-            self.parts.append(DataFrame(columns^))
+            self._append(columns)
             self.payload_rows += len(matches)
         # Nothing entered: the heap's worst key is unchanged, so the shared
         # boundary has nothing new from this chunk.
@@ -206,25 +204,18 @@ struct TopNSink(Movable):
     def _settle_any(mut self) raises:
         if self.layout.variable:
             self._settle[1, True]()
-            self._bound_pieces[1, True]()
         elif self.layout.words == 1:
             self._settle[1, False]()
-            self._bound_pieces[1, False]()
         elif self.layout.words == 2:
             self._settle[2, False]()
-            self._bound_pieces[2, False]()
         else:
             self._settle[3, False]()
-            self._bound_pieces[3, False]()
 
-    def _bound_pieces[W: Int, VAR: Bool](mut self) raises:
-        """DuckDB appends a chunk's entering rows to one heap_data
-        collection; ours is a list of pieces, one a chunk. Past
-        _MAX_PIECES the payload is reduced to the live rows on this
-        thread, so the finish (which runs the threads' heaps one after
-        another) never joins hundreds of small pieces."""
-        if len(self.parts) >= _MAX_PIECES:
-            self._reduce[W, VAR]()
+    def _append(mut self, columns: List[Series]) raises:
+        """The entering rows onto the payload (heap_data.Append in
+        TopNHeap::AddLargeHeap, physical_top_n.cpp:276)."""
+        for c in range(len(self.payload)):
+            self.payload[c]._append_series(columns[c])
 
     def _enter[
         W: Int, VAR: Bool
@@ -270,7 +261,7 @@ struct TopNSink(Movable):
     def _sink[W: Int, VAR: Bool](mut self, frame: DataFrame) raises:
         var matches = self._enter[W, VAR](0, frame.height())
         if len(matches) > 0:
-            self.parts.append(frame.take(matches))
+            self._append(frame.take(matches)._columns)
             self.payload_rows += len(matches)
         # TopNBoundaryValue::UpdateValue: the boundary's first sort value
         # becomes the scan filter's constant.
@@ -278,26 +269,18 @@ struct TopNSink(Movable):
 
     def _payload_value(self, row: Int) raises -> Series:
         """Payload row `row`'s first sort column, one row."""
-        var at = row
-        for part in self.parts:
-            if at < part.height():
-                return part.column(self.names[0]).slice(at, 1)
-            at -= part.height()
-        raise Error("top-N payload row out of range")
+        return self.payload[self.schema._index(self.names[0])].slice(row, 1)
 
     def _payload(self) raises -> DataFrame:
-        if len(self.parts) == 0:
-            return self.schema.copy()
-        if len(self.parts) == 1:
-            return self.parts[0].copy()
-        return concat(self.parts)
+        return DataFrame(self.payload.copy())
 
     def _reduce[W: Int, VAR: Bool](mut self) raises:
-        """Reduce: the payload cut to the live entries, renumbered."""
+        """Reduce (physical_top_n.cpp:431): once the payload passes
+        ReduceThreshold, it is cut to the live entries, renumbered."""
         var live = self._payload().take(self.heap.payloads[W, VAR]())
         self.heap.renumber[W, VAR]()
         self.heap.compact_keys[W, VAR]()
-        self.parts = [live^]
+        self.payload = live._columns.copy()
         self.payload_rows = self.heap.size
 
     def finish(mut self) raises -> DataFrame:
