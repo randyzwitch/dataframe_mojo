@@ -8,7 +8,12 @@ from dataframe.fused_compare import (
     selection_tree,
 )
 from dataframe.kernels.segment_statistics import ensure_statistics
-from dataframe.table_scan import scan_filtered
+from dataframe.storage.statistics import (
+    FILTER_ALWAYS_FALSE,
+    NO_PRUNING_POSSIBLE,
+)
+from dataframe.table_filter import table_filters
+from dataframe.table_scan import scan_filtered, zonemap_rows
 from dataframe.parallel import worker_count
 from tests.support.lifecycle_jobs import WorkerSetting
 
@@ -277,14 +282,20 @@ def test_table_filter_scan_prunes_row_groups_of_ordered_data_and_matches_full_fi
     # parts are still evaluated there.
     assert_equal(scanned.value().ranges, List[Int]([0, group]))
     assert_equal(len(scanned.value().remaining), 2)
-    # A view reads its buffer's statistics: one inside the first vector
-    # changes nothing, one inside the third keeps no row.
+    # A view reads its buffer's statistics. Its row group holds rows the
+    # parts keep, so the scan reads it; the chunk loop skips the vector of
+    # a view inside the third one.
     var view = source.slice(7, 65)
     assert_true(not scan_filtered(DataFrame([view.copy()]), parts))
-    var far = source.slice(4100, 65)
-    var windowed = scan_filtered(DataFrame([far.copy()]), parts)
-    assert_true(windowed)
-    assert_equal(windowed.value().frame.height(), 0)
+    var far = DataFrame([source.slice(4100, 65)])
+    var filters = table_filters(parts, far._columns)
+    assert_equal(
+        zonemap_rows(filters, far._columns, 0, 65), FILTER_ALWAYS_FALSE
+    )
+    assert_equal(
+        zonemap_rows(filters, DataFrame([view.copy()])._columns, 0, 65),
+        NO_PRUNING_POSSIBLE,
+    )
     var left = DataFrame([source.copy()])
     var right = DataFrame([ordered_series(n, -100)])
     for rechunked in [False, True]:
