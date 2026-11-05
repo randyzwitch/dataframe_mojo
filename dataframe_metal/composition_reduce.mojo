@@ -242,43 +242,82 @@ def _run[
                 var partials = total_parts if batched else _chunk_partials(
                     segment[0].rows, frame.height()
                 )
-                comptime kernel = float_composed_partials[
-                    wide, arity, float_fields
+                comptime kernel_batched = float_composed_partials[
+                    wide, arity, float_fields, batched=True
                 ] if fast else composed_partials[
-                    precise, wide, arity, float_fields
+                    precise, wide, arity, float_fields, batched=True
                 ]
-                ctx.enqueue_function[kernel](
-                    values[0].values,
-                    values[1].values,
-                    values[2].values,
-                    values[3].values,
-                    values[4].values,
-                    values[5].values,
-                    values[6].values,
-                    values[7].values,
-                    values[0].bits,
-                    values[1].bits,
-                    values[2].bits,
-                    values[3].bits,
-                    values[4].bits,
-                    values[5].bits,
-                    values[6].bits,
-                    values[7].bits,
-                    predicate.values,
-                    predicate.bits,
-                    metadata,
-                    UInt32.MAX if batched else UInt32(index * META_WORDS),
-                    high,
-                    low,
-                    sums,
-                    compensation,
-                    counts,
-                    bins,
-                    specials,
-                    faults,
-                    grid_dim=partials,
-                    block_dim=BLOCK_SIZE,
-                )
+                comptime kernel_separate = float_composed_partials[
+                    wide, arity, float_fields, batched=False
+                ] if fast else composed_partials[
+                    precise, wide, arity, float_fields, batched=False
+                ]
+                if batched:
+                    ctx.enqueue_function[kernel_batched](
+                        values[0].values,
+                        values[1].values,
+                        values[2].values,
+                        values[3].values,
+                        values[4].values,
+                        values[5].values,
+                        values[6].values,
+                        values[7].values,
+                        values[0].bits,
+                        values[1].bits,
+                        values[2].bits,
+                        values[3].bits,
+                        values[4].bits,
+                        values[5].bits,
+                        values[6].bits,
+                        values[7].bits,
+                        predicate.values,
+                        predicate.bits,
+                        metadata,
+                        UInt32.MAX if batched else UInt32(index * META_WORDS),
+                        high,
+                        low,
+                        sums,
+                        compensation,
+                        counts,
+                        bins,
+                        specials,
+                        faults,
+                        grid_dim=partials,
+                        block_dim=BLOCK_SIZE,
+                    )
+                else:
+                    ctx.enqueue_function[kernel_separate](
+                        values[0].values,
+                        values[1].values,
+                        values[2].values,
+                        values[3].values,
+                        values[4].values,
+                        values[5].values,
+                        values[6].values,
+                        values[7].values,
+                        values[0].bits,
+                        values[1].bits,
+                        values[2].bits,
+                        values[3].bits,
+                        values[4].bits,
+                        values[5].bits,
+                        values[6].bits,
+                        values[7].bits,
+                        predicate.values,
+                        predicate.bits,
+                        metadata,
+                        UInt32.MAX if batched else UInt32(index * META_WORDS),
+                        high,
+                        low,
+                        sums,
+                        compensation,
+                        counts,
+                        bins,
+                        specials,
+                        faults,
+                        grid_dim=partials,
+                        block_dim=BLOCK_SIZE,
+                    )
                 scope.record_launches(1)
             ctx.enqueue_copy(fp.unsafe_ptr(), faults)
             ctx.enqueue_copy(hp.unsafe_ptr(), high)

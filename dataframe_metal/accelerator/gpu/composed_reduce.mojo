@@ -52,6 +52,23 @@ def segment_info(
 
 
 @always_inline
+def static_segment_info[
+    batched: Bool
+](
+    root: Pointer[UInt64, UntrackedOrigin[mut=False]],
+    offset: UInt32,
+    group: Int,
+) -> Tuple[Pointer[UInt64, UntrackedOrigin[mut=False]], Int, Int, Int]:
+    # Separate entry points let the compiler erase the batch table and all
+    # row-base pointer arithmetic for ordinary contiguous/copy inputs.
+    comptime if batched:
+        return segment_info(root, UInt32.MAX, group)
+    else:
+        var meta = root.unsafe_offset(Int(offset))
+        return (meta, group, Int(meta[unsafe_offset=2]) + group, 0)
+
+
+@always_inline
 def input_pointer(
     slot: Int,
     a: Bytes,
@@ -144,7 +161,11 @@ def int_value(
 
 
 def composed_partials[
-    precise: Bool, wide: Bool, arity: Int, float_fields: Int
+    precise: Bool,
+    wide: Bool,
+    arity: Int,
+    float_fields: Int,
+    batched: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -176,7 +197,9 @@ def composed_partials[
     faults: Pointer[UInt32, MutUntrackedOrigin],
 ):
     comptime assert 1 <= arity and arity <= 4
-    var geometry = segment_info(metadata, metadata_offset, Int(block_idx.x))
+    var geometry = static_segment_info[batched](
+        metadata, metadata_offset, Int(block_idx.x)
+    )
     var meta = geometry[0]
     var row_base = geometry[3]
     var rows = UInt32(meta[unsafe_offset=0])

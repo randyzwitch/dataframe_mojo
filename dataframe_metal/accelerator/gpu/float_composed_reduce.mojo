@@ -10,14 +10,14 @@ from .composed_reduce import (
     float_value,
     HEADER_WORDS,
     FIELD_WORDS,
-    segment_info,
+    static_segment_info,
 )
 from .float_predicate import float_in_range
 from .exact_float_state import ExactFloatState
 
 
 def float_composed_partials[
-    wide: Bool, arity: Int, exact_fields: Int
+    wide: Bool, arity: Int, exact_fields: Int, batched: Bool = False
 ](
     v0: Bytes,
     v1: Bytes,
@@ -50,7 +50,9 @@ def float_composed_partials[
 ):
     comptime assert 1 <= arity and arity <= 4
     comptime assert 0 <= exact_fields and exact_fields <= arity
-    var geometry = segment_info(metadata, metadata_offset, Int(block_idx.x))
+    var geometry = static_segment_info[batched](
+        metadata, metadata_offset, Int(block_idx.x)
+    )
     var meta = geometry[0]
     var row_base = geometry[3]
     var rows = Int(meta[unsafe_offset=0])
