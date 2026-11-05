@@ -38,6 +38,20 @@ from std.collections import Optional
 from std.memory import ArcPointer
 
 
+def _copied_strings(
+    column: Series, rows: List[Int], name: String
+) raises -> Series:
+    """Rows `rows` of a string column as a fresh offsets column."""
+    ref source = column._data[StringColumn]
+    var built = StringBuilder(len(rows))
+    for r in rows:
+        if source._valid(r):
+            built.append(source._get(r))
+        else:
+            built.append_null()
+    return Series(name, built^.finish())
+
+
 def _appendable(column: Series) raises -> Series:
     """A payload column in a layout that grows in place: strings as offsets
     and bytes, which append amortized, rather than views, whose append
@@ -214,18 +228,17 @@ struct TopNSink(Movable):
                     # column: a take would share the source's view blocks
                     # (reference counts every thread touches) only to be
                     # copied into the payload's layout afterwards.
-                    ref source = arena.columns[v.source]._data[StringColumn]
-                    var built = StringBuilder(len(matches))
+                    var picked = List[Int](capacity=len(matches))
                     for i in range(len(matches)):
-                        var r = v.source_offset + v.child_row(
-                            matches[i] - start
+                        picked.append(
+                            v.source_offset + v.child_row(matches[i] - start)
                         )
-                        if source._valid(r):
-                            built.append(source._get(r))
-                        else:
-                            built.append_null()
                     columns.append(
-                        Series(self.schema._columns[c].name(), built^.finish())
+                        _copied_strings(
+                            arena.columns[v.source],
+                            picked,
+                            self.schema._columns[c].name(),
+                        )
                     )
                     continue
                 columns.append(
