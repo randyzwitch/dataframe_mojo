@@ -21,9 +21,9 @@ from .exact_float_state import ExactFloatState
 def _pair[D: DType](values: Bytes, row: Int, rows: Int) -> SIMD[D, 2]:
     var pointer = values.unsafe_bitcast[Scalar[D]]()
     if row + 1 < rows:
-        # Native windows may start at an odd element. Do not promise vector
-        # alignment, and never load a second element beyond the window.
-        return pointer.unsafe_load[width=2, alignment=1](row)
+        # Native windows retain scalar alignment even at an odd element.
+        # Promise only that alignment, and guard the second element.
+        return pointer.unsafe_load[width=2](row)
     return SIMD[D, 2](pointer[unsafe_offset=row], Scalar[D](0))
 
 
