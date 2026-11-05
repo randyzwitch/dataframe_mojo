@@ -314,3 +314,689 @@ def test_native_float32_views_retain_one_owner_and_readback_checks_budget() rais
     assert_equal(native.has_errors(), False)
     assert_equal(native.retained_bytes(), 12)
     assert_equal(infallible.transfers()[0], 12)
+
+
+# requires: metal
+def test_composed_exact_float_prefixes_cover_all_arities_and_wide_bins() raises:
+    from dataframe import Expr, col
+    from dataframe_metal.handoff import execute_timed
+
+    _ = require_metal()
+    for floating in [
+        Float32(1.5),
+        Float32.MAX_FINITE,
+    ]:
+        var frame = DataFrame(
+            [
+                Series(
+                    "f", Column[Float32]([floating, floating], [True, False])
+                ),
+                Series("i", Column[Int32]([10, 20])),
+                Series("l", Column[Int64]([4_000_000_000, 8_000_000_000])),
+            ]
+        )
+        for arity in range(1, 5):
+            for floats in range(1, arity + 1):
+                var expressions = List[Expr]()
+                # Present integer fields first to exercise alias remapping.
+                for field in range(arity - 1, -1, -1):
+                    var name = String("f") if field < floats else (
+                        String("i") if field % 2 else String("l")
+                    )
+                    expressions.append(
+                        (col(name) + field).mean().alias("mean" + String(field))
+                    )
+                expressions.append((col("f") + 0).count().alias("count"))
+                var plan = frame.lazy().select_exprs(expressions)
+                var expected = plan.collect(engine="cpu")
+                for zero_copy in [True, False]:
+                    var actual = execute_timed(plan, zero_copy=zero_copy)
+                    assert_equal(actual[0].columns(), expected.columns())
+                    for name in expected.columns():
+                        assert_equal(
+                            actual[0].item(0, name).is_null(),
+                            expected.item(0, name).is_null(),
+                        )
+                        assert_equal(
+                            actual[0].column(name).dtype(),
+                            expected.column(name).dtype(),
+                        )
+                        assert_equal(
+                            actual[0]
+                            .column(name)
+                            .equals(expected.column(name)),
+                            True,
+                        )
+
+
+# requires: metal
+def test_composed_float32_arithmetic_adjudicates_gradual_underflow() raises:
+    from dataframe import Expr, col, lit
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    for bits in [UInt32(1), UInt32(0x00800000), UInt32(0x00800001)]:
+        var frame = DataFrame(
+            [Series("f", Column[Float32]([bitcast[DType.float32](bits)]))]
+        )
+        var expressions: List[Expr]
+        if bits == 1:
+            expressions = [col("f") + 0, col("f") * 1]
+        elif bits == 0x00800000:
+            expressions = [col("f") * lit(Float32(0.5))]
+        else:
+            expressions = [
+                col("f") - lit(bitcast[DType.float32](UInt32(0x00800000)))
+            ]
+        for expression in expressions:
+            var plan = frame.lazy().select_exprs(
+                [
+                    expression.mean().alias("mean"),
+                    col("f").count().alias("count"),
+                ]
+            )
+            var expected = plan.collect(engine="cpu")
+            with assert_raises(contains="CPU gradual underflow"):
+                _ = execute_timed(plan)
+            assert_equal(
+                plan.collect(accelerator=runtime).equals(expected), True
+            )
+
+
+def test_float32_range_keys_match_float64_order_at_underflow_and_specials() raises:
+    from dataframe_metal.accelerator.gpu.float_predicate import float_in_range
+
+    var patterns = List[UInt32]()
+    for bits in [
+        0,
+        0x80000000,
+        1,
+        0x80000001,
+        0x007FFFFF,
+        0x807FFFFF,
+        0x00800000,
+        0x80800000,
+        0x3F800000,
+        0xBF800000,
+        0x7F800000,
+        0xFF800000,
+        0x7FC12345,
+        0xFFC12345,
+    ]:
+        patterns.append(UInt32(bits))
+    for v in patterns:
+        for lo in patterns:
+            for hi in patterns:
+                for inclusive in range(4):
+                    var value = bitcast[DType.float32](v)
+                    var low = bitcast[DType.float32](lo)
+                    var high = bitcast[DType.float32](hi)
+                    var x = Float64(value)
+                    var a = Float64(low)
+                    var b = Float64(high)
+                    var above = x >= a if inclusive & 1 else x > a
+                    var below = x <= b if inclusive & 2 else x < b
+                    assert_equal(
+                        float_in_range(value, low, high, UInt32(inclusive)),
+                        above and below,
+                    )
+
+
+# requires: metal
+def test_float32_underflow_predicates_match_cpu_in_all_reduction_paths() raises:
+    from dataframe import Expr, col, lit
+    from dataframe_metal.handoff import execute_timed
+
+    _ = require_metal()
+    var values = List[Float32]()
+    var integers = List[Int32]()
+    var floats = List[Float32]()
+    for bits in [
+        0,
+        0x80000000,
+        1,
+        0x80000001,
+        0x007FFFFF,
+        0x807FFFFF,
+        0x00800000,
+        0x80800000,
+        0x3F800000,
+        0xBF800000,
+        0x7F800000,
+        0xFF800000,
+        0x7FC12345,
+    ]:
+        values.append(bitcast[DType.float32](UInt32(bits)))
+        integers.append(Int32(len(integers) + 1))
+        floats.append(Float32(len(floats) + 1) / 4)
+    var frame = DataFrame(
+        [
+            Series("p", Column[Float32](values^)),
+            Series("i", Column[Int32](integers^)),
+            Series("f", Column[Float32](floats^)),
+        ]
+    )
+    var tiny = Expr(Float64(bitcast[DType.float32](UInt32(1))))
+    var negative_tiny = Expr(
+        Float64(bitcast[DType.float32](UInt32(0x80000001)))
+    )
+    for predicate in [
+        col("p") > 0,
+        col("p") >= 0,
+        col("p") < 0,
+        col("p") <= 0,
+        col("p") == 0,
+        col("p") > tiny,
+        col("p") == tiny,
+        col("p") < negative_tiny,
+        (col("p") >= negative_tiny) & (col("p") <= tiny),
+    ]:
+        var query = frame.lazy().filter(predicate)
+        for mode in range(5):
+            var expressions: List[Expr]
+            if mode == 0:
+                expressions = [col("i").sum().alias("s")]
+            elif mode == 1:
+                expressions = [
+                    col("i").sum().alias("s"),
+                    col("i").count().alias("c"),
+                    col("i").mean().alias("m"),
+                ]
+            elif mode == 2:
+                expressions = [
+                    col("f").mean().alias("m"),
+                    col("i").count().alias("c"),
+                ]
+            elif mode == 3:
+                expressions = [(col("i") * 1).sum().alias("s")]
+            else:
+                expressions = [
+                    (col("f") + 1).mean().alias("m"),
+                    col("i").count().alias("c"),
+                ]
+            var plan = query.select_exprs(expressions)
+            var expected = plan.collect(engine="cpu")
+            for zero_copy in [True, False]:
+                var actual = execute_timed(plan, zero_copy=zero_copy)
+                assert_equal(actual[0].equals(expected), True)
+
+
+# requires: metal
+def test_single_float_composition_covers_mean_prefixes_and_native_sum_suffixes() raises:
+    from dataframe import Expr, col
+    from dataframe_metal.handoff import execute_timed
+    from dataframe_metal.composition_plan import (
+        plan_composition,
+        single_float_composition,
+    )
+
+    _ = require_metal()
+    for wide in [False, True]:
+        var value = Float32.MAX_FINITE if wide else Float32(2)
+        var frame = DataFrame(
+            [
+                Series("a", Column[Float32]([value, value], [True, False])),
+                Series("b", Column[Float32]([1, 1])),
+                Series("c", Column[Float32]([3, 4])),
+                Series("d", Column[Float32]([5, 6])),
+                Series("p", Column[Int32]([1, 1])),
+            ]
+        )
+        for arity in range(1, 5):
+            for means in range(arity + 1):
+                for op in range(3):
+                    var binary = col("a") + 0 if op == 0 else (
+                        0 - col("a") if op == 1 else col("a") * col("b")
+                    )
+                    var expressions = List[Expr]()
+                    for field in range(arity - 1, -1, -1):
+                        var expression = binary.copy() if field == 0 else col(
+                            "b" if field == 1 else ("c" if field == 2 else "d")
+                        )
+                        expressions.append(
+                            (
+                                expression.mean() if field
+                                < means else expression.sum()
+                            ).alias(String(field))
+                        )
+                    # COUNT shares the computed arithmetic state.
+                    expressions.append(binary.count().alias("count"))
+                    var plan = (
+                        frame.lazy()
+                        .filter(col("p") > 0)
+                        .select_exprs(expressions)
+                    )
+                    var matched = plan_composition(plan)
+                    assert_equal(
+                        single_float_composition(matched.value()), True
+                    )
+                    assert_equal(
+                        matched.value().fields[0].needs_mean, means > 0
+                    )
+                    var expected = plan.collect(engine="cpu")
+                    for zero_copy in [True, False]:
+                        var actual = execute_timed(plan, zero_copy=zero_copy)
+                        assert_equal(actual[0].equals(expected), True)
+
+
+# requires: metal
+def test_single_float_composition_preserves_native_sum_underflow_and_native_means() raises:
+    from dataframe import Expr, col
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    var tiny = bitcast[DType.float32](UInt32(1))
+    var frame = DataFrame(
+        [
+            Series("a", Column[Float32]([2, 4])),
+            Series("b", Column[Float32]([1, 1])),
+            Series("c", Column[Float32]([tiny, tiny])),
+        ]
+    )
+    var product = col("a") * col("b")
+    var plan = frame.lazy().select_exprs(
+        [product.mean().alias("m"), col("c").sum().alias("s")]
+    )
+    with assert_raises(contains="CPU gradual underflow"):
+        _ = execute_timed(plan)
+    assert_equal(
+        plan.collect(accelerator=runtime).equals(plan.collect(engine="cpu")),
+        True,
+    )
+    for variant in range(3):
+        var expressions: List[Expr]
+        if variant == 0:
+            expressions = [product.sum().alias("s"), col("c").mean().alias("m")]
+        elif variant == 1:
+            expressions = [
+                product.count().alias("c"),
+                col("c").mean().alias("m"),
+            ]
+        else:
+            expressions = [
+                product.mean().alias("m"),
+                col("c").count().alias("c"),
+            ]
+        var exact = frame.lazy().select_exprs(expressions)
+        var actual = execute_timed(exact)
+        assert_equal(actual[0].equals(exact.collect(engine="cpu")), True)
+
+
+# requires: metal
+def test_single_float_composition_reuses_float_predicates_and_nullable_operands() raises:
+    from dataframe import Expr, col
+    from dataframe_metal.handoff import execute_timed
+
+    _ = require_metal()
+    var frame = DataFrame(
+        [
+            Series("a", Column[Float32]([2, 4, 6], [True, False, True])),
+            Series("b", Column[Float32]([1, 2, 3], [True, True, False])),
+            Series(
+                "c",
+                Column[Float32](
+                    [
+                        bitcast[DType.float32](UInt32(1)),
+                        bitcast[DType.float32](UInt32(1)),
+                        bitcast[DType.float32](UInt32(1)),
+                    ]
+                ),
+            ),
+        ]
+    )
+    for predicate in ["a", "b", "c"]:
+        for binary in [col("a") * col("b"), col("a") + 1, 1 - col("a")]:
+            var plan = (
+                frame.lazy()
+                .filter(col(predicate) > 0)
+                .select_exprs(
+                    [
+                        col("c").mean().alias("native_mean"),
+                        binary.sum().alias("sum"),
+                        binary.mean().alias("mean"),
+                        col("b").count().alias("count"),
+                    ]
+                )
+            )
+            var expected = plan.collect(engine="cpu")
+            for zero_copy in [True, False]:
+                var actual = execute_timed(plan, zero_copy=zero_copy)
+                assert_equal(actual[0].equals(expected), True)
+
+
+def test_metal_region_fusion_recovers_cpu_common_expressions_without_pruning_work() raises:
+    from dataframe import col
+    from dataframe.lazy import WITH_COLUMNS
+    from dataframe_metal.region_plan import normalize_region
+    from dataframe_metal.composition_plan import plan_composition
+
+    var frame = DataFrame(
+        [
+            Series("a", Column[Float32]([2, 4, 6])),
+            Series("b", Column[Float32]([1, 2, 3])),
+            Series("p", Column[Int32]([1, 1, 0])),
+        ]
+    )
+    var value = col("a") * col("b")
+    var query = (
+        frame.lazy()
+        .filter(col("p") > 0)
+        .select_exprs(
+            [
+                value.sum().alias("s"),
+                value.count().alias("c"),
+                value.mean().alias("m"),
+            ]
+        )
+    )
+    var optimized = query._optimized()
+    var shared = False
+    for node in optimized._plan._nodes:
+        shared = shared or node.kind == WITH_COLUMNS
+    assert_equal(shared, True)
+    var recovered = normalize_region(optimized)
+    assert_equal(Bool(recovered), True)
+    assert_equal(Bool(plan_composition(recovered.value())), True)
+    assert_equal(
+        recovered.value()
+        .collect(engine="cpu", optimize=False)
+        .equals(query.collect(engine="cpu")),
+        True,
+    )
+    var unused = (
+        frame.lazy()
+        .with_columns((col("a") + col("b")).alias("unused"))
+        .select(col("b").sum())
+    )
+    assert_equal(Bool(normalize_region(unused)), False)
+    var dependent = (
+        frame.lazy()
+        .with_columns(
+            [(col("a") + col("b")).alias("x"), (col("x") * 2).alias("y")]
+        )
+        .select_exprs([col("x").sum(), col("y").sum()])
+    )
+    assert_equal(Bool(normalize_region(dependent)), False)
+    var before_filter = (
+        frame.lazy()
+        .with_columns(value.alias("v"))
+        .filter(col("p") > 0)
+        .select(col("v").sum())
+    )
+    assert_equal(Bool(normalize_region(before_filter)), False)
+
+
+# requires: metal
+def test_metal_composed_shared_arithmetic_stays_in_one_gpu_region() raises:
+    from dataframe import col
+    from dataframe_metal.handoff import supports, execute_timed
+    from dataframe_metal.metal import MetalRuntime
+
+    _ = require_metal()
+    var frame = DataFrame(
+        [
+            Series("a", Column[Float32]([2, 4, 6], [True, False, True])),
+            Series("b", Column[Float32]([1, 2, 3])),
+            Series("p", Column[Int32]([1, 1, 0])),
+        ]
+    )
+    var value = col("a") * col("b")
+    var plan = (
+        frame.lazy()
+        .filter(col("p") > 0)
+        .select_exprs(
+            [
+                value.sum().alias("s"),
+                value.count().alias("c"),
+                value.mean().alias("m"),
+            ]
+        )
+    )
+    var optimized = plan._optimized()
+    assert_equal(supports(optimized), True)
+    var expected = plan.collect(engine="cpu")
+    var direct = execute_timed(optimized)
+    assert_equal(direct[0].equals(expected), True)
+    assert_equal(
+        plan.collect(accelerator=MetalRuntime()).equals(expected), True
+    )
+    assert_equal(
+        optimized.collect(accelerator=MetalRuntime()).equals(expected), True
+    )
+
+
+def _check_adjacent_native_chunks[D: DType]() raises:
+    from std.memory import Pointer
+    from dataframe import Column, Series
+    from dataframe_metal.accelerator.gpu.typed_storage import (
+        coalesced_native_chunks,
+    )
+
+    var values = List[Scalar[D]]()
+    var valid = List[Bool]()
+    for i in range(32):
+        values.append(Scalar[D](i - 16))
+        valid.append(i % 5 != 0)
+    var source = Series("x", Column[Scalar[D]](values^, valid))
+    var chunked = Series._from_chunks(
+        [
+            source.slice(3, 7),
+            source.slice(10, 11),
+            source.slice(21, 5),
+        ]
+    )
+    var joined = coalesced_native_chunks[D](chunked)
+    assert_equal(len(joined), 1)
+    assert_equal(joined[0].equals(source.slice(3, 23)), True)
+    var original = source.numeric[D]()
+    var merged = joined[0].numeric[D]()
+    assert_equal(
+        Int(merged.unsafe_values()),
+        Int(original.unsafe_values().unsafe_offset(3)),
+    )
+    assert_equal(
+        Int(Pointer(to=merged._data[])), Int(Pointer(to=original._data[]))
+    )
+    assert_equal(
+        Int(Pointer(to=merged._bits[])), Int(Pointer(to=original._bits[]))
+    )
+    # Storage identity and row adjacency are both required.
+    var gaps = Series._from_chunks([source.slice(3, 7), source.slice(11, 5)])
+    assert_equal(len(coalesced_native_chunks[D](gaps)), 2)
+    var reverse = Series._from_chunks([source.slice(10, 5), source.slice(3, 7)])
+    assert_equal(len(coalesced_native_chunks[D](reverse)), 2)
+    var duplicate = Series._from_chunks(
+        [source.slice(3, 7), source.slice(3, 7)]
+    )
+    assert_equal(len(coalesced_native_chunks[D](duplicate)), 2)
+    var independent = Series(
+        "x", Column[Scalar[D]](List[Scalar[D]](length=5, fill=0))
+    )
+    var separate = Series._from_chunks([source.slice(3, 7), independent^])
+    assert_equal(len(coalesced_native_chunks[D](separate)), 2)
+    # The same value allocation with a different bitmap must never coalesce.
+    var other = Column[Scalar[D]](
+        List[Scalar[D]](length=32, fill=0), List[Bool](length=32, fill=True)
+    )
+    var different = Column[Scalar[D]]._from_buffers(
+        original._data, other._bits, 10, 11
+    )
+    var masks = Series._from_chunks(
+        [source.slice(3, 7), Series("x", different^)]
+    )
+    var retained = coalesced_native_chunks[D](masks)
+    assert_equal(len(retained), 2)
+    assert_equal(retained[1].null_count(), 0)
+    assert_equal(len(coalesced_native_chunks[D](source.slice(0, 0))), 0)
+    assert_equal(source.n_chunks(), 1)
+    assert_equal(chunked.n_chunks(), 3)
+
+
+def test_native_chunk_coalescing_requires_shared_values_bitmaps_and_adjacent_rows() raises:
+    _check_adjacent_native_chunks[DType.int32]()
+    _check_adjacent_native_chunks[DType.int64]()
+    _check_adjacent_native_chunks[DType.float32]()
+
+
+# requires: metal
+def test_native_coalesced_views_retain_one_typed_owner_through_readback() raises:
+    from dataframe_metal.accelerator.gpu.erased_input import numeric_views
+    from dataframe_metal.accelerator.gpu.typed_storage import NativeColumnAny
+
+    var values = List[Float32]()
+    var valid = List[Bool]()
+    for i in range(32):
+        values.append(Float32(i - 16))
+        valid.append(i % 5 != 0)
+    var source = Series("f", Column[Float32](values^, valid))
+    var frame = DataFrame(
+        [
+            Series._from_chunks(
+                [
+                    source.slice(3, 7),
+                    source.slice(10, 11),
+                    source.slice(21, 5),
+                ]
+            )
+        ]
+    )
+    var scope = Scope(budget=1 << 20)
+    var ctx = scope.context()
+    var empty = ctx.enqueue_create_buffer[DType.uint8](1)
+    var owners = List[NativeColumnAny]()
+    var views = numeric_views(
+        frame, "f", scope, True, empty, owners, coalesce=True
+    )
+    assert_equal(len(views), 1)
+    assert_equal(len(owners), 1)
+    assert_equal(views[0].rows, 23)
+    var tail = views[0].view(1, 2)
+    _ = views^
+    assert_equal(scope.info()[0] > 0, True)
+    var observed = List[Float32](length=2, fill=0)
+    try:
+        ctx.enqueue_copy(
+            observed.unsafe_ptr(),
+            tail.values.create_sub_buffer[DType.float32](0, 2),
+        )
+        scope.synchronize()
+    except error:
+        try:
+            scope.synchronize()
+        except:
+            pass
+        _ = (observed^, tail^, owners^, frame^, source^)
+        raise error^
+    assert_equal(observed[0], Float32(-12))
+    assert_equal(observed[1], Float32(-11))
+    _ = tail^
+    _ = owners^
+    assert_equal(scope.info()[0], 0)
+    _ = (frame^, source^)
+
+
+def test_composed_batch_metadata_preserves_local_and_output_block_ranges() raises:
+    from std.memory import Pointer
+    from dataframe_metal.accelerator.gpu.composed_reduce import (
+        segment_info,
+        META_WORDS,
+    )
+
+    var words = List[UInt64](length=2 + 3 * META_WORDS, fill=0)
+    words[0] = 3
+    var sizes = List[Int]([257, 1024, 4097])
+    var bases = List[Int]([0, 2, 6])
+    var starts = List[Int]([0, 257, 1281])
+    for i in range(3):
+        words[2 + i * META_WORDS] = UInt64(sizes[i])
+        words[2 + i * META_WORDS + 2] = UInt64(bases[i])
+        words[2 + i * META_WORDS + 13] = UInt64(starts[i])
+    var pointer = Pointer[UInt64, UntrackedOrigin[mut=False]](
+        unsafe_from_address=Int(words.unsafe_ptr())
+    )
+    for group in range(14):
+        var i = 0 if group < 2 else (1 if group < 6 else 2)
+        var result = segment_info(pointer, UInt32.MAX, group)
+        assert_equal(Int(result[0][unsafe_offset=0]), sizes[i])
+        assert_equal(result[1], group - bases[i])
+        assert_equal(result[2], group)
+        assert_equal(result[3], starts[i])
+    for i in range(3):
+        var result = segment_info(pointer, UInt32(2 + i * META_WORDS), 1)
+        assert_equal(result[1], 1)
+        assert_equal(result[2], bases[i] + 1)
+        assert_equal(result[3], 0)
+    _ = words^
+
+
+# requires: metal
+def test_composed_adjacent_slices_batch_one_launch_with_original_segment_grids() raises:
+    from dataframe import Expr, col
+    from dataframe_metal.composition_plan import plan_composition
+    from dataframe_metal.composition_reduce import _run
+    from dataframe_metal.accelerator.gpu.reduction_inputs import HandoffTimings
+
+    _ = require_metal()
+    for nullable in [False, True]:
+        var a = List[Float32]()
+        var b = List[Float32]()
+        var d = List[Float32]()
+        var p = List[Int32]()
+        var av = List[Bool]()
+        var bv = List[Bool]()
+        for i in range(6007):
+            a.append(Float32(i % 17 - 8))
+            b.append(Float32(i % 5 + 1))
+            d.append(Float32(i % 7 - 3))
+            p.append(Int32(i % 4))
+            av.append(not nullable or i % 11 != 1)
+            bv.append(not nullable or i % 13 != 2)
+        var source = DataFrame(
+            [
+                Series("a", Column[Float32](a^, av)),
+                Series("b", Column[Float32](b^, bv)),
+                Series("d", Column[Float32](d^)),
+                Series("p", Column[Int32](p^)),
+            ]
+        )
+        var columns = List[Series]()
+        for i in range(4):
+            var name = "a" if i == 0 else (
+                "b" if i == 1 else ("d" if i == 2 else "p")
+            )
+            var n = 5 if i == 0 else (7 if i == 1 else (11 if i == 2 else 13))
+            var pieces = List[Series]()
+            for part in range(n):
+                var start = 6007 * part // n
+                pieces.append(
+                    source.column(name).slice(
+                        start, 6007 * (part + 1) // n - start
+                    )
+                )
+            columns.append(Series._from_chunks(pieces))
+        var frame = DataFrame(columns^)
+        var value = col("a") * col("b")
+        var query = (
+            frame.lazy()
+            .filter(col("p") > 0)
+            .select_exprs(
+                [
+                    value.sum().alias("s"),
+                    value.count().alias("n"),
+                    col("d").sum().alias("d"),
+                ]
+            )
+        )
+        var expected = query.collect(engine="cpu")
+        var matched = plan_composition(query)
+        var scope = Scope()
+        var timings = HandoffTimings()
+        var measured = _run[False, False, 2, 0, True, 0](
+            matched.value(), frame, scope, True, timings
+        )
+        assert_equal(Float32(measured[1][0]), expected.item(0, "s").float32())
+        assert_equal(Float32(measured[1][1]), expected.item(0, "d").float32())
+        assert_equal(Int64(measured[2][0]), expected.item(0, "n").int64())
+        assert_equal(scope.transfers()[2], 1)
+        assert_equal(scope.info()[0], 0)
+        _ = (frame^, source^)

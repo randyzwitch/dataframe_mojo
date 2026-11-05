@@ -76,9 +76,6 @@ from dataframe.kernels.partition import (
     encode_partitioned,
     low_cardinality,
 )
-from dataframe.kernels.join_hash import (
-    PreparedHashIndex,
-)
 from .join_type import (
     JOIN_CROSS,
     JOIN_INNER,
@@ -150,62 +147,10 @@ from dataframe.aggregation.state import (
     table_supported,
 )
 from dataframe.joins.eager import (
-    _left_builds,
-    _smaller_build_join_rows,
     cross_join_frames,
     join_frames,
 )
-from dataframe.joins.rows import (
-    _CSRCountJob,
-    _CSRFillJob,
-    _CSRScatterJob,
-    _CSR_MIN_PARALLEL_GROUPS,
-    _CSR_PARALLEL_WORKING_BYTES,
-    _JoinCountJob,
-    _JoinFillJob,
-    _OrderCountJob,
-    _OrderFillJob,
-    _OrderScatterJob,
-    _UnmatchedRightCountJob,
-    _UnmatchedRightFillJob,
-    _group_index,
-    _group_rows,
-    _id_range_bucket,
-    _id_range_first,
-    _parallel_csr_fits,
-    _parallel_full_join_rows,
-    _parallel_group_rows,
-    _parallel_join_rows,
-    _parallel_left_major,
-)
-from dataframe.joins.range import (
-    _PROGRESSION_PARALLEL_KEY_BYTES,
-    _ProgressionProbeJob,
-    _RANGE_MEMBERSHIP_MAX_BYTES,
-    _RANGE_PARALLEL_MIN_HEAD_BYTES,
-    _RANGE_PARALLEL_WORKING_BYTES,
-    _RANGE_SMALL_TABLE_BYTES,
-    _RANGE_TABLE_BYTES_PER_KEY,
-    _RANGE_TABLE_MAX_BYTES,
-    _RangeIndexBuildJob,
-    _RangeJoinProbeJob,
-    _RangeMembershipDomain,
-    _RangeMembershipJob,
-    _bounded_int64_join_ids,
-    _bounded_int64_join_rows,
-    _dense_right_int64_rows,
-    _int64_distance,
-    _parallel_progression_rows,
-    _parallel_range_build_workers,
-    _range_int64_membership_chunks,
-    _range_int64_membership_domain,
-    _range_int64_membership_rows,
-    _range_join_span_fits,
-    _range_join_table_capacity,
-)
-from dataframe.joins.keys import (
-    _joint_key_ids,
-)
+from dataframe.joins.hash_table import JoinHashTable
 
 
 @fieldwise_init
@@ -1947,18 +1892,16 @@ struct DataFrame(Copyable, Sized, Writable):
         how: Int = JOIN_INNER,
         suffix: String = "_right",
         coalesce: Bool = True,
-        prepared: Optional[PreparedHashIndex] = None,
-        range_filtered: Bool = False,
+        prepared: Optional[JoinHashTable] = None,
         keep_order: Bool = True,
         workers: Int = 0,
-        marks: Int = 0,
     ) raises -> Self:
         """`keep_order=False` lets an inner join emit its pairs in whatever
         order its probe produced them, for a caller whose consumers ignore
         row order (a lazy plan feeding an aggregation). A right join
-        probing a `prepared` index emits only its matched pairs, and sets
-        the byte at `marks` (the address of one byte per build row, when
-        not 0) of every build row it matched: the caller emits the rest."""
+        probing a `prepared` table emits only its matched pairs and flags
+        the build rows it matched in the table: the caller emits the rest
+        (`JoinHashTable.scan_full_outer`)."""
         if how == JOIN_CROSS:
             raise Error(
                 "A cross join takes no keys; use join(right, how='cross')"
@@ -1976,10 +1919,8 @@ struct DataFrame(Copyable, Sized, Writable):
             suffix=suffix,
             coalesce=coalesce,
             prepared=prepared,
-            range_filtered=range_filtered,
             keep_order=keep_order,
             workers=workers,
-            marks=marks,
         )
 
     def join(

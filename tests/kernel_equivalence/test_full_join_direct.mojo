@@ -94,8 +94,8 @@ def test_full_join_on_many_keys_matches_the_model() raises:
         right, left_on=["la", "lb"], right_on=["ra", "rb"], how="full"
     )
     assert_true(
-        "dataframe-path: join.full_direct\n" in observed.text(),
-        "the full join did not take the direct route",
+        "dataframe-path: join.hash_table\n" in observed.text(),
+        "the full join did not run on the hash table",
     )
     _ = observed^
     _ = trace^

@@ -19,12 +19,19 @@ from dataframe.storage.column import Column
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
 from dataframe.lazy import LazyFrame
-from dataframe.placement import load_costs
+from .calibration import shape_key, measured_cost
 from dataframe.series import Series
 from .filter_plan import FilterSum, plan_region
+from .region_plan import normalize_region
 from .cross_sum import reduce_cross
 from .multi_plan import plan_bundle, bundle_key
 from .multi_reduce import execute_bundle
+from .arithmetic_plan import plan_arithmetic, arithmetic_key
+from .arithmetic_sum import execute_arithmetic
+from .composition_plan import plan_composition, composition_key
+from .composition_reduce import execute_composition
+from .extrema_plan import plan_extrema, extrema_key
+from .extrema_reduce import execute_extrema
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
     _place_chunks,
@@ -52,7 +59,17 @@ def supports(region: LazyFrame) -> Bool:
     comptime if not METAL_TARGET:
         return False
     try:
-        return Bool(plan_region(region)) or Bool(plan_bundle(region))
+        var normalized = normalize_region(region)
+        if not normalized:
+            return False
+        var selected = normalized.take()
+        return (
+            Bool(plan_region(selected))
+            or Bool(plan_bundle(selected))
+            or Bool(plan_arithmetic(selected))
+            or Bool(plan_composition(selected))
+            or Bool(plan_extrema(selected))
+        )
     except:
         return False
 
@@ -73,24 +90,39 @@ def operator_key(plan: FilterSum) -> String:
     )
 
 
+def region_key(region: LazyFrame) raises -> String:
+    """Schema-only operator identity shared by placement and capture."""
+    var accepted = plan_region(region)
+    if accepted:
+        return operator_key(accepted.value())
+    var bundle = plan_bundle(region)
+    if bundle:
+        return bundle_key(bundle.value())
+    var arithmetic = plan_arithmetic(region)
+    if arithmetic:
+        return arithmetic_key(arithmetic.value())
+    var composed = plan_composition(region)
+    if composed:
+        return composition_key(composed.value())
+    var extrema = plan_extrema(region)
+    if extrema:
+        return extrema_key(extrema.value())
+    return String()
+
+
 def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
-    """This region's calibration key and its measured cost on Metal for
-    `rows` input rows, in nanoseconds; -1 when it has no measured cost."""
+    """Measured Metal cost only for this build, host, threads and layout."""
     try:
-        var accepted = plan_region(region)
-        var key = String()
-        if accepted:
-            key = operator_key(accepted.value())
-        else:
-            var bundle = plan_bundle(region)
-            if not bundle:
-                return (String(), Float64(-1))
-            key = bundle_key(bundle.value())
-        var costs = load_costs("accel")
-        var cost = costs.get(key)
-        if not cost:
-            return (key^, Float64(-1))
-        return (key^, cost.value().ns(rows))
+        var normalized = normalize_region(region)
+        if not normalized:
+            return (String(), Float64(-1))
+        var selected = normalized.take()
+        var operator = region_key(selected)
+        if not operator:
+            return (String(), Float64(-1))
+        var key = shape_key(selected, operator)
+        var cost = measured_cost(key, rows)
+        return (key^, cost)
     except:
         return (String(), Float64(-1))
 
@@ -455,7 +487,15 @@ def execute_timed(
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
-        return _execute_on_device(region, zero_copy)
+        var normalized = normalize_region(region)
+        if not normalized:
+            raise Error(
+                "Metal unsupported [handoff]: row expressions cannot be fused"
+            )
+        var selected = normalized.take()
+        var result = _execute_on_device(selected, zero_copy)
+        _ = selected^
+        return result^
 
 
 def _execute_on_device(
@@ -463,7 +503,13 @@ def _execute_on_device(
 ) raises -> Tuple[DataFrame, HandoffTimings]:
     var accepted = plan_region(region)
     if not accepted:
-        return execute_bundle(region, zero_copy)
+        if plan_extrema(region):
+            return execute_extrema(region, zero_copy)
+        if plan_bundle(region):
+            return execute_bundle(region, zero_copy)
+        if plan_arithmetic(region):
+            return execute_arithmetic(region, zero_copy)
+        return execute_composition(region, zero_copy)
     var plan = accepted.take()
     var timings = HandoffTimings()
     var frame = region._plan._frames[
