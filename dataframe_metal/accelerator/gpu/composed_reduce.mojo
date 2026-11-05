@@ -21,6 +21,37 @@ comptime META_WORDS = HEADER_WORDS + 4 * FIELD_WORDS
 
 
 @always_inline
+def segment_info(
+    root: Pointer[UInt64, UntrackedOrigin[mut=False]],
+    offset: UInt32,
+    group: Int,
+) -> Tuple[Pointer[UInt64, UntrackedOrigin[mut=False]], Int, Int, Int]:
+    """Metadata, local block, output block and row base for one workgroup.
+
+    A batch keeps the original segment grids and reduction order. Only the
+    submission is combined; no CPU pointer addresses enter this table.
+    """
+    if offset != UInt32.MAX:
+        var meta = root.unsafe_offset(Int(offset))
+        return (meta, group, Int(meta[unsafe_offset=2]) + group, 0)
+    var first = 0
+    var last = Int(root[unsafe_offset=0])
+    while first + 1 < last:
+        var middle = (first + last) >> 1
+        if Int(root[unsafe_offset=2 + middle * META_WORDS + 2]) <= group:
+            first = middle
+        else:
+            last = middle
+    var meta = root.unsafe_offset(2 + first * META_WORDS)
+    return (
+        meta,
+        group - Int(meta[unsafe_offset=2]),
+        group,
+        Int(meta[unsafe_offset=13]),
+    )
+
+
+@always_inline
 def input_pointer(
     slot: Int,
     a: Bytes,
@@ -145,13 +176,15 @@ def composed_partials[
     faults: Pointer[UInt32, MutUntrackedOrigin],
 ):
     comptime assert 1 <= arity and arity <= 4
-    var meta = metadata.unsafe_offset(Int(metadata_offset))
+    var geometry = segment_info(metadata, metadata_offset, Int(block_idx.x))
+    var meta = geometry[0]
+    var row_base = geometry[3]
     var rows = UInt32(meta[unsafe_offset=0])
     var stride = UInt32(meta[unsafe_offset=1])
     var partial_offset = UInt32(meta[unsafe_offset=2])
     var tags = UInt32(meta[unsafe_offset=3])
     var predicate_tag = UInt32(meta[unsafe_offset=4])
-    var predicate_offset = UInt32(meta[unsafe_offset=5])
+    var predicate_offset = UInt32(meta[unsafe_offset=5]) + UInt32(row_base)
     var predicate_nullable = UInt32(meta[unsafe_offset=6])
     var filtered = UInt32(meta[unsafe_offset=7])
     var inclusive = UInt32(meta[unsafe_offset=8])
@@ -161,6 +194,9 @@ def composed_partials[
     var high_float = bitcast[DType.float32](UInt32(meta[unsafe_offset=12]))
     var sum_flags = UInt32(meta[unsafe_offset=14])
     var predicate_slot = UInt32(meta[unsafe_offset=15])
+    var predicate_values = predicate.unsafe_offset(
+        row_base * (8 if predicate_tag == 1 else 4)
+    )
     var lefts = StaticTuple[Bytes, arity]()
     var rights = StaticTuple[Bytes, arity]()
     var left_bits = StaticTuple[Bytes, arity]()
@@ -184,6 +220,11 @@ def composed_partials[
         rights[field] = input_pointer(
             Int(ri) - 1, v0, v1, v2, v3, v4, v5, v6, v7
         )
+        var width = 8 if ((tags >> UInt32(2 * field)) & 3) == 1 else 4
+        if li != 0:
+            lefts[field] = lefts[field].unsafe_offset(row_base * width)
+        if ri != 0:
+            rights[field] = rights[field].unsafe_offset(row_base * width)
         left_bits[field] = input_pointer(
             Int(li) - 1, b0, b1, b2, b3, b4, b5, b6, b7
         )
@@ -192,8 +233,8 @@ def composed_partials[
         )
         ops[field] = UInt32(meta[unsafe_offset=at])
         flags[field] = UInt32(meta[unsafe_offset=at + 3])
-        loff[field] = UInt32(meta[unsafe_offset=at + 4])
-        roff[field] = UInt32(meta[unsafe_offset=at + 5])
+        loff[field] = UInt32(meta[unsafe_offset=at + 4]) + UInt32(row_base)
+        roff[field] = UInt32(meta[unsafe_offset=at + 5]) + UInt32(row_base)
         sides[field] = UInt32(meta[unsafe_offset=at + 6])
         ilit[field] = bitcast[DType.int64](meta[unsafe_offset=at + 7])
         flit[field] = bitcast[DType.float32](UInt32(meta[unsafe_offset=at + 7]))
@@ -210,7 +251,7 @@ def composed_partials[
     var nc = SIMD[DType.uint32, 4](0)
     var exact = ExactFloatState[wide, max(1, float_fields)]()
     var fault = UInt32(0)
-    var row = global_idx.x
+    var row = geometry[1] * BLOCK_SIZE + Int(thread_idx.x)
     while row < Int(rows):
         var kept = True
         var pi = Int64(0)
@@ -219,12 +260,14 @@ def composed_partials[
             if predicate_nullable:
                 kept = _valid(predicate_bits, predicate_offset, row)
             if predicate_tag == 2:
-                pf = predicate.unsafe_bitcast[Float32]()[unsafe_offset=row]
+                pf = predicate_values.unsafe_bitcast[Float32]()[
+                    unsafe_offset=row
+                ]
                 kept = kept & float_in_range(
                     pf, low_float, high_float, inclusive
                 )
             else:
-                pi = read_integer(predicate, predicate_tag, row)
+                pi = read_integer(predicate_values, predicate_tag, row)
                 kept = kept & (pi >= low_bound) & (pi <= high_bound)
         comptime for field in range(arity):
             var valid = kept
@@ -334,7 +377,7 @@ def composed_partials[
             s = block.sum[block_size=BLOCK_SIZE, broadcast=False](fs[field])
             c = block.sum[block_size=BLOCK_SIZE, broadcast=False](fc[field])
         var n = block.sum[block_size=BLOCK_SIZE, broadcast=False](nc[field])
-        var output = (Int(partial_offset) + block_idx.x) * arity + field
+        var output = geometry[2] * arity + field
         if thread_idx.x == 0:
             high[unsafe_offset=output] = h
             low[unsafe_offset=output] = l
@@ -345,4 +388,4 @@ def composed_partials[
             exact.finish[field](output, bins, specials)
     var bad = block.max[block_size=BLOCK_SIZE, broadcast=False](fault)
     if thread_idx.x == 0:
-        faults[unsafe_offset=Int(partial_offset) + block_idx.x] = bad
+        faults[unsafe_offset=geometry[2]] = bad

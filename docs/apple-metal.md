@@ -120,12 +120,13 @@ multiple distinct columns remains on CPU. Cross-column sums use distinct
 `cross_filter_sum:<predicate dtype>:<value dtype>` calibration keys; the
 single-column estimates are not reused for these larger memory reads.
 
-Adjacent native slices that share both value and validity owners are wrapped
-as one contiguous span before reduction. This preserves zero-copy input and
-bitmap offsets while avoiding repeated mappings and chunk launches. Separate
-allocations, gaps, reordered windows and different bitmaps remain separate.
-Physical input layout still distinguishes calibration keys; the changed Metal
-build identity invalidates profiles from the earlier submission path.
+Adjacent native slices that share both value and validity owners can share a
+zero-copy mapping while retaining their original logical ranges. Composition
+batches those ranges into one submission when every input has one shared
+native span, preserving each segment's grid stride and partial-output order.
+Separate allocations, gaps, reordered windows and different bitmaps keep their
+separate ranges. Physical input layout still distinguishes calibration keys;
+the changed Metal build identity invalidates earlier submission profiles.
 
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
 every node it supports. `engine="auto"` places supported pipelines by measured

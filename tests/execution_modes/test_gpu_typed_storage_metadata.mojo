@@ -864,7 +864,9 @@ def test_native_coalesced_views_retain_one_typed_owner_through_readback() raises
     var ctx = scope.context()
     var empty = ctx.enqueue_create_buffer[DType.uint8](1)
     var owners = List[NativeColumnAny]()
-    var views = numeric_views(frame, "f", scope, True, empty, owners)
+    var views = numeric_views(
+        frame, "f", scope, True, empty, owners, coalesce=True
+    )
     assert_equal(len(views), 1)
     assert_equal(len(owners), 1)
     assert_equal(views[0].rows, 23)
@@ -891,3 +893,110 @@ def test_native_coalesced_views_retain_one_typed_owner_through_readback() raises
     _ = owners^
     assert_equal(scope.info()[0], 0)
     _ = (frame^, source^)
+
+
+def test_composed_batch_metadata_preserves_local_and_output_block_ranges() raises:
+    from std.memory import Pointer
+    from dataframe_metal.accelerator.gpu.composed_reduce import (
+        segment_info,
+        META_WORDS,
+    )
+
+    var words = List[UInt64](length=2 + 3 * META_WORDS, fill=0)
+    words[0] = 3
+    var sizes = List[Int]([257, 1024, 4097])
+    var bases = List[Int]([0, 2, 6])
+    var starts = List[Int]([0, 257, 1281])
+    for i in range(3):
+        words[2 + i * META_WORDS] = UInt64(sizes[i])
+        words[2 + i * META_WORDS + 2] = UInt64(bases[i])
+        words[2 + i * META_WORDS + 13] = UInt64(starts[i])
+    var pointer = Pointer[UInt64, UntrackedOrigin[mut=False]](
+        unsafe_from_address=Int(words.unsafe_ptr())
+    )
+    for group in range(14):
+        var i = 0 if group < 2 else (1 if group < 6 else 2)
+        var result = segment_info(pointer, UInt32.MAX, group)
+        assert_equal(Int(result[0][unsafe_offset=0]), sizes[i])
+        assert_equal(result[1], group - bases[i])
+        assert_equal(result[2], group)
+        assert_equal(result[3], starts[i])
+    for i in range(3):
+        var result = segment_info(pointer, UInt32(2 + i * META_WORDS), 1)
+        assert_equal(result[1], 1)
+        assert_equal(result[2], bases[i] + 1)
+        assert_equal(result[3], 0)
+    _ = words^
+
+
+# requires: metal
+def test_composed_adjacent_slices_batch_one_launch_with_original_segment_grids() raises:
+    from dataframe import Expr, col
+    from dataframe_metal.composition_plan import plan_composition
+    from dataframe_metal.composition_reduce import _run
+    from dataframe_metal.accelerator.gpu.reduction_inputs import HandoffTimings
+
+    _ = require_metal()
+    for nullable in [False, True]:
+        var a = List[Float32]()
+        var b = List[Float32]()
+        var d = List[Float32]()
+        var p = List[Int32]()
+        var av = List[Bool]()
+        var bv = List[Bool]()
+        for i in range(6007):
+            a.append(Float32(i % 17 - 8))
+            b.append(Float32(i % 5 + 1))
+            d.append(Float32(i % 7 - 3))
+            p.append(Int32(i % 4))
+            av.append(not nullable or i % 11 != 1)
+            bv.append(not nullable or i % 13 != 2)
+        var source = DataFrame(
+            [
+                Series("a", Column[Float32](a^, av)),
+                Series("b", Column[Float32](b^, bv)),
+                Series("d", Column[Float32](d^)),
+                Series("p", Column[Int32](p^)),
+            ]
+        )
+        var columns = List[Series]()
+        for i in range(4):
+            var name = "a" if i == 0 else (
+                "b" if i == 1 else ("d" if i == 2 else "p")
+            )
+            var n = 5 if i == 0 else (7 if i == 1 else (11 if i == 2 else 13))
+            var pieces = List[Series]()
+            for part in range(n):
+                var start = 6007 * part // n
+                pieces.append(
+                    source.column(name).slice(
+                        start, 6007 * (part + 1) // n - start
+                    )
+                )
+            columns.append(Series._from_chunks(pieces))
+        var frame = DataFrame(columns^)
+        var value = col("a") * col("b")
+        var query = (
+            frame.lazy()
+            .filter(col("p") > 0)
+            .select_exprs(
+                [
+                    value.sum().alias("s"),
+                    value.count().alias("n"),
+                    col("d").sum().alias("d"),
+                ]
+            )
+        )
+        var expected = query.collect(engine="cpu")
+        var matched = plan_composition(query)
+        var scope = Scope()
+        var timings = HandoffTimings()
+        var measured = _run[False, False, 2, 0, True](
+            matched.value(), frame, scope, True, timings
+        )
+        assert_equal(Float32(measured[1][0]), expected.item(0, "s").float32())
+        assert_equal(Float32(measured[1][1]), expected.item(0, "d").float32())
+        assert_equal(Int64(measured[2][0]), expected.item(0, "n").int64())
+        assert_equal(scope.transfers()[2], 1)
+        assert_equal(scope.info()[0], 0)
+        _ = (frame^, source^)
