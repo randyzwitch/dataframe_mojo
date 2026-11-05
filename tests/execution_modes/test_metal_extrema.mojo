@@ -173,14 +173,15 @@ def test_native_extrema_float_payloads_and_adjudication() raises:
     var negative_tiny = bitcast[DType.float32](UInt32(0x8000_0001))
     var nan = bitcast[DType.float32](UInt32(0x7FC0_1234))
     var negative_zero = bitcast[DType.float32](UInt32(0x8000_0000))
-    for values in [
+    var cases: List[List[Float32]] = [
         [tiny, negative_tiny, Float32(0)],
         [Float32(0), Float32(0)],
         [negative_zero, negative_zero],
         [nan, Float32(2), Float32(-3)],
         [Float32(1) / Float32(0), -Float32(1) / Float32(0)],
-    ]:
-        var frame = DataFrame([Series("f", Column[Float32](values))])
+    ]
+    for values in cases:
+        var frame = DataFrame([Series("f", Column[Float32](values.copy()))])
         var query = frame.lazy().select_exprs(
             [
                 col("f").min().alias("lo"),
@@ -195,9 +196,13 @@ def test_native_extrema_float_payloads_and_adjudication() raises:
                     bitcast[DType.uint32](actual.item(0, name).float32()),
                     bitcast[DType.uint32](expected.item(0, name).float32()),
                 )
-    for values in [[nan, nan], [negative_zero, Float32(0)]]:
+    var adjudicated: List[List[Float32]] = [
+        [nan, nan],
+        [negative_zero, Float32(0)],
+    ]
+    for values in adjudicated:
         var query = (
-            DataFrame([Series("f", Column[Float32](values))])
+            DataFrame([Series("f", Column[Float32](values.copy()))])
             .lazy()
             .select_exprs(
                 [
