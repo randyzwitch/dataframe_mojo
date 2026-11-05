@@ -1204,3 +1204,21 @@ def test_metal_pipeline_adjudicates_changed_float_values_on_cpu() raises:
     assert_false('"engine":"metal"' in traced, traced)
     _ = trace^
     _ = configured^
+
+
+def test_compact_float_pair_loads_unaligned_windows_and_guards_tail() raises:
+    from dataframe_metal.accelerator.gpu.float_composed_reduce import _pair
+    from dataframe_metal.accelerator.gpu.multi_reduce import Bytes
+
+    comptime types = (DType.int32, DType.int64, DType.float32)
+    comptime for i in range(3):
+        comptime D = types[i]
+        var values: List[Scalar[D]] = [Scalar[D](1), Scalar[D](2), Scalar[D](3)]
+        var bytes = Bytes(unsafe_from_address=Int(values.unsafe_ptr()))
+        var middle = _pair[D](bytes, 1, 3)
+        assert_equal(middle[0], Scalar[D](2))
+        assert_equal(middle[1], Scalar[D](3))
+        var tail = _pair[D](bytes, 2, 3)
+        assert_equal(tail[0], Scalar[D](3))
+        assert_equal(tail[1], Scalar[D](0))
+        _ = values^

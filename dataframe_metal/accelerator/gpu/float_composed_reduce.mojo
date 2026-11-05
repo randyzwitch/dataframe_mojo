@@ -1,5 +1,6 @@
 """Compact Float32 composition: one binary value and shared column states."""
 from std.memory import Pointer, bitcast
+from dataframe.expr import ADD, SUB, MUL
 from std.utils.static_tuple import StaticTuple
 from max.gpu import global_idx, thread_idx, block_idx
 from max.gpu.primitives import block
@@ -13,6 +14,32 @@ from .composed_reduce import (
 )
 from .float_predicate import float_in_range
 from .exact_float_state import ExactFloatState
+
+
+@always_inline
+def _pair[D: DType](values: Bytes, row: Int, rows: Int) -> SIMD[D, 2]:
+    var pointer = values.unsafe_bitcast[Scalar[D]]()
+    if row + 1 < rows:
+        # Native windows may start at an odd element. Do not promise vector
+        # alignment, and never load a second element beyond the window.
+        return pointer.unsafe_load[width=2, alignment=1](row)
+    return SIMD[D, 2](pointer[unsafe_offset=row], Scalar[D](0))
+
+
+@always_inline
+def _binary(a: Float32, b: Float32, op: UInt32) -> Tuple[Float32, Bool]:
+    var ar = bitcast[DType.uint32](a) & 0x7FFF_FFFF
+    var br = bitcast[DType.uint32](b) & 0x7FFF_FFFF
+    var ae = ar >> 23
+    var be = br >> 23
+    var tiny = (ar != 0 and ae == 0) or (br != 0 and be == 0)
+    var underflow = (ar != 0 and br != 0 and ae + be <= 127) if op == UInt32(
+        MUL
+    ) else ((ar != 0 and ae <= 24) or (br != 0 and be <= 24))
+    var result = a + b if op == UInt32(ADD) else (
+        a - b if op == UInt32(SUB) else a * b
+    )
+    return (result, tiny or underflow)
 
 
 def float_composed_partials[
@@ -109,10 +136,38 @@ def float_composed_partials[
     var count = SIMD[DType.uint32, 4](0)
     var exact = ExactFloatState[wide, max(1, exact_fields)]()
     var fault = UInt32(0)
-    var row = global_idx.x
+    var row = global_idx.x * LANES
     while row < rows:
+        var pairs = StaticTuple[SIMD[DType.float32, 2], arity]()
+        var right_pair = SIMD[DType.float32, 2](0)
+        var predicate_pair = SIMD[DType.float32, 2](0)
+        var integer_pair = SIMD[DType.int64, 2](0)
+        comptime if LANES == 2:
+            if filtered:
+                if predicate_tag == 2:
+                    predicate_pair = _pair[DType.float32](predicate, row, rows)
+                elif predicate_tag == 1:
+                    integer_pair = _pair[DType.int64](predicate, row, rows)
+                else:
+                    integer_pair = _pair[DType.int32](
+                        predicate, row, rows
+                    ).cast[DType.int64]()
+            comptime for field in range(arity):
+                pairs[field] = SIMD[DType.float32, 2](0)
+                if sum_flags & (UInt32(1) << UInt32(field)):
+                    var load_value = True
+                    comptime if field == 0:
+                        load_value = side != 1
+                    if load_value:
+                        pairs[field] = predicate_pair if reuse & (
+                            UInt32(1) << UInt32(field)
+                        ) else _pair[DType.float32](values[field], row, rows)
+            if side != 2 and sum_flags & 1:
+                right_pair = predicate_pair if reuse_right else _pair[
+                    DType.float32
+                ](right, row, rows)
         comptime for lane in range(LANES):
-            var position = row + lane * stride
+            var position = row + lane
             var active = True
             comptime if lane != 0:
                 active = position < rows
@@ -125,16 +180,23 @@ def float_composed_partials[
                             predicate_bits, predicate_offset, position
                         )
                     if predicate_tag == 2:
-                        pf = predicate.unsafe_bitcast[Float32]()[
-                            unsafe_offset=position
-                        ]
+                        comptime if LANES == 2:
+                            pf = predicate_pair[lane]
+                        else:
+                            pf = predicate.unsafe_bitcast[Float32]()[
+                                unsafe_offset=position
+                            ]
                         kept = kept & float_in_range(
                             pf, low_float, high_float, inclusive
                         )
                     else:
-                        var pi = read_integer(
-                            predicate, predicate_tag, position
-                        )
+                        var pi = Int64(0)
+                        comptime if LANES == 2:
+                            pi = integer_pair[lane]
+                        else:
+                            pi = read_integer(
+                                predicate, predicate_tag, position
+                            )
                         kept = kept & (pi >= low_bound) & (pi <= high_bound)
                 comptime for field in range(arity):
                     var valid = kept
@@ -152,28 +214,44 @@ def float_composed_partials[
                         if sum_flags & (UInt32(1) << UInt32(field)):
                             var value = Float32(0)
                             comptime if field == 0:
-                                var computed = float_value(
-                                    values[0],
-                                    right,
-                                    op,
-                                    side,
-                                    literal,
-                                    pf,
-                                    Bool(reuse & 1),
-                                    reuse_right,
-                                    position,
-                                )
+                                var computed: Tuple[Float32, Bool]
+                                comptime if LANES == 2:
+                                    var a = (
+                                        literal if side == 1 else pairs[0][lane]
+                                    )
+                                    var b = (
+                                        literal if side
+                                        == 2 else right_pair[lane]
+                                    )
+                                    computed = _binary(a, b, op)
+                                else:
+                                    computed = float_value(
+                                        values[0],
+                                        right,
+                                        op,
+                                        side,
+                                        literal,
+                                        pf,
+                                        Bool(reuse & 1),
+                                        reuse_right,
+                                        position,
+                                    )
                                 fault |= UInt32(computed[1]) << 1
                                 value = computed[0]
                             else:
-                                value = (
-                                    pf if reuse
-                                    & (UInt32(1) << UInt32(field)) else values[
-                                        field
-                                    ].unsafe_bitcast[Float32]()[
-                                        unsafe_offset=position
-                                    ]
-                                )
+                                comptime if LANES == 2:
+                                    value = pairs[field][lane]
+                                else:
+                                    value = (
+                                        pf if reuse
+                                        & (
+                                            UInt32(1) << UInt32(field)
+                                        ) else values[field].unsafe_bitcast[
+                                            Float32
+                                        ]()[
+                                            unsafe_offset=position
+                                        ]
+                                    )
                             comptime if field < exact_fields:
                                 exact.add[field](value)
                             else:
