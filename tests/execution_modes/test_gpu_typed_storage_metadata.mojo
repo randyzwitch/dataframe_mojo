@@ -763,3 +763,131 @@ def test_metal_composed_shared_arithmetic_stays_in_one_gpu_region() raises:
     assert_equal(
         optimized.collect(accelerator=MetalRuntime()).equals(expected), True
     )
+
+
+def _check_adjacent_native_chunks[D: DType]() raises:
+    from std.memory import Pointer
+    from dataframe import Column, Series
+    from dataframe_metal.accelerator.gpu.typed_storage import (
+        coalesced_native_chunks,
+    )
+
+    var values = List[Scalar[D]]()
+    var valid = List[Bool]()
+    for i in range(32):
+        values.append(Scalar[D](i - 16))
+        valid.append(i % 5 != 0)
+    var source = Series("x", Column[Scalar[D]](values^, valid))
+    var chunked = Series._from_chunks(
+        [
+            source.slice(3, 7),
+            source.slice(10, 11),
+            source.slice(21, 5),
+        ]
+    )
+    var joined = coalesced_native_chunks[D](chunked)
+    assert_equal(len(joined), 1)
+    assert_equal(joined[0].equals(source.slice(3, 23)), True)
+    var original = source.numeric[D]()
+    var merged = joined[0].numeric[D]()
+    assert_equal(
+        Int(merged.unsafe_values()),
+        Int(original.unsafe_values().unsafe_offset(3)),
+    )
+    assert_equal(
+        Int(Pointer(to=merged._data[])), Int(Pointer(to=original._data[]))
+    )
+    assert_equal(
+        Int(Pointer(to=merged._bits[])), Int(Pointer(to=original._bits[]))
+    )
+    # Storage identity and row adjacency are both required.
+    var gaps = Series._from_chunks([source.slice(3, 7), source.slice(11, 5)])
+    assert_equal(len(coalesced_native_chunks[D](gaps)), 2)
+    var reverse = Series._from_chunks([source.slice(10, 5), source.slice(3, 7)])
+    assert_equal(len(coalesced_native_chunks[D](reverse)), 2)
+    var duplicate = Series._from_chunks(
+        [source.slice(3, 7), source.slice(3, 7)]
+    )
+    assert_equal(len(coalesced_native_chunks[D](duplicate)), 2)
+    var independent = Series(
+        "x", Column[Scalar[D]](List[Scalar[D]](length=5, fill=0))
+    )
+    var separate = Series._from_chunks([source.slice(3, 7), independent^])
+    assert_equal(len(coalesced_native_chunks[D](separate)), 2)
+    # The same value allocation with a different bitmap must never coalesce.
+    var other = Column[Scalar[D]](
+        List[Scalar[D]](length=32, fill=0), List[Bool](length=32, fill=True)
+    )
+    var different = Column[Scalar[D]]._from_buffers(
+        original._data, other._bits, 10, 11
+    )
+    var masks = Series._from_chunks(
+        [source.slice(3, 7), Series("x", different^)]
+    )
+    var retained = coalesced_native_chunks[D](masks)
+    assert_equal(len(retained), 2)
+    assert_equal(retained[1].null_count(), 0)
+    assert_equal(len(coalesced_native_chunks[D](source.slice(0, 0))), 0)
+    assert_equal(source.n_chunks(), 1)
+    assert_equal(chunked.n_chunks(), 3)
+
+
+def test_native_chunk_coalescing_requires_shared_values_bitmaps_and_adjacent_rows() raises:
+    _check_adjacent_native_chunks[DType.int32]()
+    _check_adjacent_native_chunks[DType.int64]()
+    _check_adjacent_native_chunks[DType.float32]()
+
+
+# requires: metal
+def test_native_coalesced_views_retain_one_typed_owner_through_readback() raises:
+    from dataframe_metal.accelerator.gpu.erased_input import numeric_views
+    from dataframe_metal.accelerator.gpu.typed_storage import NativeColumnAny
+
+    var values = List[Float32]()
+    var valid = List[Bool]()
+    for i in range(32):
+        values.append(Float32(i - 16))
+        valid.append(i % 5 != 0)
+    var source = Series("f", Column[Float32](values^, valid))
+    var frame = DataFrame(
+        [
+            Series._from_chunks(
+                [
+                    source.slice(3, 7),
+                    source.slice(10, 11),
+                    source.slice(21, 5),
+                ]
+            )
+        ]
+    )
+    var scope = Scope(budget=1 << 20)
+    var ctx = scope.context()
+    var empty = ctx.enqueue_create_buffer[DType.uint8](1)
+    var owners = List[NativeColumnAny]()
+    var views = numeric_views(frame, "f", scope, True, empty, owners)
+    assert_equal(len(views), 1)
+    assert_equal(len(owners), 1)
+    assert_equal(views[0].rows, 23)
+    var tail = views[0].view(1, 2)
+    _ = views^
+    assert_equal(scope.info()[0] > 0, True)
+    var observed = List[Float32](length=2, fill=0)
+    try:
+        ctx.enqueue_copy(
+            observed.unsafe_ptr(),
+            tail.values.create_sub_buffer[DType.float32](0, 2),
+        )
+        scope.synchronize()
+    except error:
+        try:
+            scope.synchronize()
+        except:
+            pass
+        _ = (observed^, tail^, owners^, frame^, source^)
+        raise error^
+    assert_equal(observed[0], Float32(-12))
+    assert_equal(observed[1], Float32(-11))
+    _ = (frame^, source^)
+    _ = tail^
+    _ = owners^
+    assert_equal(scope.info()[0], 0)
