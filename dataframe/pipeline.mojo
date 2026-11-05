@@ -939,9 +939,13 @@ struct _Collector(Movable):
     var raw_bits: List[List[UInt8]]
     var raw_physical: List[Int]
     var height: Int
+    # The most rows the morsel can give (its input's): raw values and
+    # bitmaps are sized for it once rather than grown chunk by chunk.
+    var capacity: Int
 
-    def __init__(out self, schema: DataFrame):
+    def __init__(out self, schema: DataFrame, capacity: Int = 0):
         self.schema = schema.copy()
+        self.capacity = capacity
         var width = schema.width()
         self.modes = List[Int](length=width, fill=_COLLECT_NONE)
         self.handles = List[Int](length=width, fill=-1)
@@ -1033,7 +1037,13 @@ struct _Collector(Movable):
         ref bytes = self.raw[c]
         var start = len(bytes)
         if bytes.capacity() < start + size * count:
-            bytes.reserve(max(start + size * count, 2 * bytes.capacity()))
+            bytes.reserve(
+                max(
+                    start + size * count,
+                    size * self.capacity,
+                    2 * bytes.capacity(),
+                )
+            )
         var data = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=format.data)
         if not format.sel.is_set():
             bytes.extend(
@@ -1050,17 +1060,18 @@ struct _Collector(Movable):
         if format.validity.all_valid() and len(self.raw_bits[c]) == 0:
             return
         ref bits = self.raw_bits[c]
-        if len(bits) == 0:
+        var needed = (max(self.capacity, self.height + count) + 7) // 8
+        if len(bits) < (self.height + count + 7) // 8:
             # The rows before were all valid.
-            bits = List[UInt8](length=(self.height + 7) // 8, fill=255)
+            bits.resize(needed, 255)
         var row = self.height
+        var out = bits.unsafe_ptr()
         for i in range(count):
-            var valid = format.validity.row_is_valid(format.sel.get_index(i))
+            var invalid = UInt8(
+                not format.validity.row_is_valid(format.sel.get_index(i))
+            )
             var r = row + i
-            if r >> 3 >= len(bits):
-                bits.append(255)
-            if not valid:
-                bits[r >> 3] &= ~(UInt8(1) << UInt8(r & 7))
+            out[unsafe_offset=r >> 3] &= ~(invalid << UInt8(r & 7))
 
     def _raw_series(self, c: Int) raises -> Series:
         """Column `c`'s raw values as a column of its schema type."""
@@ -1081,8 +1092,7 @@ struct _Collector(Movable):
                 )
                 var bits = self.raw_bits[c].copy()
                 if len(bits) > 0:
-                    while len(bits) < (n + 7) // 8:
-                        bits.append(255)
+                    bits.resize((n + 7) // 8, 255)
                 var column = Column[Scalar[D]](values=values^, bits=bits^)
                 result = Series(name, column^)
         var dtype = self.schema._columns[c].dtype()
@@ -1437,7 +1447,7 @@ struct _ChunkRunner(Movable):
         for s in range(first, stop):
             self._compiled(s)
         var n = len(self.steps)
-        var collector = _Collector(self.schemas[][stop])
+        var collector = _Collector(self.schemas[][stop], columns.height)
         var bases = columns.bases(self.arena)
         var compiled = Pointer[Optional[_VectorStep], MutAnyOrigin](
             unsafe_from_address=Int(self.compiled.unsafe_ptr())
