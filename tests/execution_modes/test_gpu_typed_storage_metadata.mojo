@@ -1003,7 +1003,7 @@ def test_composed_adjacent_slices_batch_one_launch_with_original_segment_grids()
 
 
 # requires: metal
-def test_composed_float_sums_preserve_parallel_stream_tails_nulls_and_counts() raises:
+def test_composed_float_sums_preserve_grid_tails_nulls_and_counts() raises:
     from dataframe import col
     from dataframe_metal.handoff import execute_timed
     from dataframe_metal.metal import MetalRuntime
@@ -1044,3 +1044,72 @@ def test_composed_float_sums_preserve_parallel_stream_tails_nulls_and_counts() r
             assert_equal(
                 plan.collect(accelerator=runtime).equals(expected), True
             )
+
+
+# requires: metal
+def test_compact_float_int32_predicates_preserve_unbounded_limits_and_nulls() raises:
+    from dataframe import Expr, col, lit
+    from dataframe_metal.composition_plan import (
+        plan_composition,
+        single_float_composition,
+    )
+    from dataframe_metal.handoff import execute_timed
+    from dataframe_metal.metal import MetalRuntime
+
+    _ = require_metal()
+    for nulls in [False, True]:
+        var frame = DataFrame(
+            [
+                Series(
+                    "p",
+                    Column[Int32](
+                        [Int32.MIN, -1, 0, 1, Int32.MAX],
+                        [True, True, not nulls, True, not nulls],
+                    ),
+                ),
+                Series(
+                    "f",
+                    Column[Float32](
+                        [0.5, 1, 1.5, 2, 2.5],
+                        [True, not nulls, True, True, True],
+                    ),
+                ),
+                Series("d", Column[Float32]([3, 4, 5, 6, 7])),
+            ]
+        )
+        var predicates: List[Expr] = [
+            col("p") > 0,
+            col("p") < 0,
+            col("p") >= -2147483648,
+            col("p") <= 2147483647,
+            col("p") == 2147483647,
+            col("p") == -2147483648,
+            col("p") > 2147483647,
+            col("p") < -2147483648,
+        ]
+        for predicate in predicates:
+            for mean in [False, True]:
+                var value = col("f") * lit(Float32(2))
+                var expressions: List[Expr] = [
+                    value.sum().alias("sum"),
+                    value.count().alias("count"),
+                    col("d").sum().alias("discount"),
+                ]
+                if mean:
+                    expressions.append(value.mean().alias("mean"))
+                var query = (
+                    frame.lazy().filter(predicate).select_exprs(expressions)
+                )
+                var matched = plan_composition(query)
+                assert_equal(Bool(matched), True)
+                assert_equal(single_float_composition(matched.value()), True)
+                var expected = query.collect(engine="cpu")
+                assert_equal(execute_timed(query)[0].equals(expected), True)
+                assert_equal(
+                    execute_timed(query, zero_copy=False)[0].equals(expected),
+                    True,
+                )
+                assert_equal(
+                    query.collect(accelerator=MetalRuntime()).equals(expected),
+                    True,
+                )
