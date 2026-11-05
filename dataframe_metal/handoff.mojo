@@ -25,6 +25,8 @@ from .filter_plan import FilterSum, plan_region
 from .cross_sum import reduce_cross
 from .multi_plan import plan_bundle, bundle_key
 from .multi_reduce import execute_bundle
+from .arithmetic_plan import plan_arithmetic, arithmetic_key
+from .arithmetic_sum import execute_arithmetic
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
     _place_chunks,
@@ -52,7 +54,11 @@ def supports(region: LazyFrame) -> Bool:
     comptime if not METAL_TARGET:
         return False
     try:
-        return Bool(plan_region(region)) or Bool(plan_bundle(region))
+        return (
+            Bool(plan_region(region))
+            or Bool(plan_bundle(region))
+            or Bool(plan_arithmetic(region))
+        )
     except:
         return False
 
@@ -83,9 +89,13 @@ def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
             key = operator_key(accepted.value())
         else:
             var bundle = plan_bundle(region)
-            if not bundle:
-                return (String(), Float64(-1))
-            key = bundle_key(bundle.value())
+            if bundle:
+                key = bundle_key(bundle.value())
+            else:
+                var arithmetic = plan_arithmetic(region)
+                if not arithmetic:
+                    return (String(), Float64(-1))
+                key = arithmetic_key(arithmetic.value())
         var costs = load_costs("accel")
         var cost = costs.get(key)
         if not cost:
@@ -463,7 +473,9 @@ def _execute_on_device(
 ) raises -> Tuple[DataFrame, HandoffTimings]:
     var accepted = plan_region(region)
     if not accepted:
-        return execute_bundle(region, zero_copy)
+        if plan_bundle(region):
+            return execute_bundle(region, zero_copy)
+        return execute_arithmetic(region, zero_copy)
     var plan = accepted.take()
     var timings = HandoffTimings()
     var frame = region._plan._frames[

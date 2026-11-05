@@ -8,6 +8,7 @@ from dataframe import (
     Column,
     DataFrame,
     DataType,
+    Expr,
     LazyFrame,
     Series,
     col,
@@ -17,6 +18,9 @@ from dataframe import (
 from dataframe_metal.handoff import execute_timed, operator_key, plan_region
 from dataframe_metal.metal import MetalRuntime
 from dataframe_metal.multi_plan import plan_bundle, bundle_key
+from dataframe_metal.arithmetic_plan import plan_arithmetic
+from dataframe_metal.accelerator.gpu.arithmetic_sum import integer_binary
+from dataframe.expr import ADD, SUB, MUL
 from tests.support.group_strategy_reference import ScopedEnvironment
 from tests.support.metal_outcomes import require_metal
 
@@ -78,7 +82,6 @@ def test_metal_declines_float64_strings_and_other_shapes() raises:
         frame.lazy().filter(col("i") > 2.5).select(col("i").sum()),
         frame.lazy().filter(col("f") > 0.1).select(col("f").sum()),
         frame.lazy().filter(col("s") == "a").select(col("i").sum()),
-        frame.lazy().select((col("i") + 1).sum()),
         frame.lazy().group_by("s").agg([col("i").sum()]),
     ]
     for plan in declined:
@@ -623,3 +626,191 @@ def test_metal_automatic_placement_follows_measured_costs() raises:
         var plain = frame.lazy().select(col("i").sum())
         assert_true("no measured cost" in plain.explain(engine="auto"))
         _ = calibrated^
+
+
+def test_metal_arithmetic_matcher_accepts_native_pairs_and_declines_wider_work() raises:
+    var frame = _frame().with_column(Series("j", Column[Int32]([3, 4, 5])))
+    for expression in [
+        col("i") + col("j"),
+        col("i") - 2,
+        2 - col("i"),
+        col("f") * lit(Float32(2)),
+        col("l") * col("l"),
+    ]:
+        var plan = (
+            frame.lazy()
+            .filter(col("l") > 0)
+            .select(expression.sum().alias("answer"))
+        )
+        assert_true(Bool(plan_arithmetic(plan)))
+    for expression in [
+        col("i") + col("l"),
+        col("d") * col("d"),
+        col("i") / col("i"),
+        (col("i") + 1) * 2,
+        col("i") + lit(Int64(2)),
+    ]:
+        assert_false(
+            Bool(plan_arithmetic(frame.lazy().select(expression.sum())))
+        )
+
+
+# requires: metal
+def test_metal_arithmetic_sums_match_cpu_with_literals_nulls_and_chunks() raises:
+    var runtime = require_metal()
+    for nulls in [False, True]:
+        var base = _cross_columns(13001, nulls)
+        var columns = List[Series]()
+        for name in ["i", "l", "f"]:
+            var split = 19 if name == "i" else (2503 if name == "l" else 101)
+            columns.append(
+                Series._from_chunks(
+                    [
+                        base.column(name).slice(5, split),
+                        base.column(name).slice(5 + split, 10003 - split),
+                    ]
+                )
+            )
+        for frame in [base.slice(5, 10003), DataFrame(columns^)]:
+            for name in ["i", "l", "f"]:
+                var input = frame.with_column(
+                    base.column(name).slice(0, 10003).renamed("other")
+                )
+                var expressions: List[Expr] = [
+                    col(name) + col("other"),
+                    col(name) - col("other"),
+                    col(name) * 2,
+                    2 - col(name),
+                ]
+                if name == "f":
+                    expressions.append(col(name) * col("other"))
+                else:
+                    expressions.append(col(name) * 0)
+                for expression in expressions:
+                    for predicate in ["", "i", "l", "f"]:
+                        var query = input.lazy()
+                        if predicate:
+                            query = query.filter(col(predicate) > 0)
+                        var plan = query.select(
+                            expression.sum().alias("answer")
+                        )
+                        assert_true(
+                            "HANDOFF metal" in plan.explain(accelerator=runtime)
+                        )
+                        var expected = plan.collect(engine="cpu")
+                        _close_bundle(execute_timed(plan)[0], expected)
+                        _close_bundle(
+                            execute_timed(plan, zero_copy=False)[0], expected
+                        )
+                        _close_bundle(
+                            plan.collect(accelerator=runtime), expected
+                        )
+
+
+# requires: metal
+def test_metal_arithmetic_checks_intermediate_overflow_before_cancelling_sum() raises:
+    var runtime = require_metal()
+    for dtype in [DataType.INT32, DataType.INT64]:
+        var frame: DataFrame
+        if dtype == DataType.INT32:
+            frame = DataFrame(
+                [
+                    Series("a", Column[Int32]([Int32.MAX, Int32.MAX])),
+                    Series("b", Column[Int32]([2, -2])),
+                    Series("p", Column[Int32]([0, 0])),
+                ]
+            )
+        else:
+            frame = DataFrame(
+                [
+                    Series("a", Column[Int64]([Int64.MAX, Int64.MAX])),
+                    Series("b", Column[Int64]([2, -2])),
+                    Series("p", Column[Int32]([0, 0])),
+                ]
+            )
+        for expression in [
+            col("a") * col("b"),
+            col("a") + col("a"),
+            col("b") - col("a"),
+            col("a") * 1,
+        ]:
+            var plan = frame.lazy().select(expression.sum())
+            with assert_raises(contains="overflow"):
+                _ = execute_timed(plan)
+            with assert_raises(contains="overflow"):
+                _ = plan.collect(accelerator=runtime)
+            var excluded = (
+                frame.lazy()
+                .filter(col("p") > 0)
+                .select(expression.sum(min_count=1))
+            )
+            _close_bundle(
+                execute_timed(excluded)[0], excluded.collect(engine="cpu")
+            )
+    var extremes = DataFrame(
+        [
+            Series("a", Column[Int64]([Int64.MIN, Int64.MIN, Int64.MAX])),
+            Series("b", Column[Int64]([1, -1, 1])),
+            Series("p", Column[Int32]([1, 0, 1])),
+        ]
+    )
+    var valid = (
+        extremes.lazy().filter(col("p") > 0).select((col("a") * col("b")).sum())
+    )
+    assert_equal(execute_timed(valid)[0].item().int64(), Int64(-1))
+    var invalid = extremes.lazy().select((col("a") * col("b")).sum())
+    with assert_raises(contains="overflow"):
+        _ = invalid.collect(accelerator=runtime)
+    var skipped = DataFrame(
+        [
+            Series("a", Column[Int32]([Int32.MAX, Int32.MIN], [False, False])),
+            Series("b", Column[Int32]([2, -1])),
+        ]
+    )
+    var nulls = skipped.lazy().select((col("a") * col("b")).sum(min_count=1))
+    _close_bundle(execute_timed(nulls)[0], nulls.collect(engine="cpu"))
+    for frame in [skipped.copy(), skipped.clear()]:
+        var empty = frame.lazy().select((col("a") * col("b")).sum())
+        _close_bundle(execute_timed(empty)[0], empty.collect(engine="cpu"))
+    var large_float = DataFrame(
+        [Series("f", Column[Float32]([Float32.MAX_FINITE]))]
+    )
+    var nonfinite = large_float.lazy().select((col("f") * 2).sum())
+    _close_bundle(
+        nonfinite.collect(accelerator=runtime), nonfinite.collect(engine="cpu")
+    )
+    with assert_raises(contains="CPU non-finite accumulation"):
+        _ = execute_timed(nonfinite)
+
+
+def test_metal_arithmetic_overflow_flags_match_wide_integer_oracle() raises:
+    var values: List[Int64] = [
+        Int64.MIN,
+        Int64.MIN + 1,
+        -4_000_000_000,
+        -3_037_000_500,
+        -2,
+        -1,
+        0,
+        1,
+        2,
+        3_037_000_500,
+        4_000_000_000,
+        Int64.MAX - 1,
+        Int64.MAX,
+    ]
+    for a in values:
+        for b in values:
+            for op in [ADD, SUB, MUL]:
+                var x = Int128(a)
+                var y = Int128(b)
+                var expected = x + y if op == ADD else (
+                    x - y if op == SUB else x * y
+                )
+                var computed = integer_binary(a, b, UInt32(op), UInt32(1))
+                var overflow = expected < Int128(
+                    Int64.MIN
+                ) or expected > Int128(Int64.MAX)
+                assert_equal(computed[1], overflow)
+                if not overflow:
+                    assert_equal(computed[0], expected.cast[DType.int64]())

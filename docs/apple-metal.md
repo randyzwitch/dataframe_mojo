@@ -47,6 +47,17 @@ The common path uses three bins for values whose significant bits fit between
 detects any contribution outside that window and retries with all nine bins;
 large finite values and subnormals retain the same supported semantics. The
 kernel also specializes for the number of distinct aggregate fields.
+
+A single SUM may reduce a binary `+`, `-` or `*` expression, for example
+`(col("price") * col("quantity")).sum()`. Both columns must have the same
+native dtype (Int32, Int64 or Float32). An operand may instead be a matching
+typed literal or an exactly representable untyped numeric literal, on either
+side. Arithmetic, the optional common filter and the reduction run in one GPU
+scan without an intermediate result column. Operand nulls discard that row;
+integer intermediate overflow is detected even if a final sum would cancel.
+Overflow and non-finite Float32 partials use CPU adjudication. These shapes
+have separate `arithmetic_sum:` calibration keys; nested expressions,
+division and mixed-dtype arithmetic remain on CPU.
 New fused projections have separate `fused_reductions:` calibration keys;
 without a measurement they stay on CPU in automatic mode. Float64 input
 columns and other operators continue to run on CPU.
