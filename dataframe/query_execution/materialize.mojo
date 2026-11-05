@@ -381,6 +381,7 @@ def plan_prefetch_breakers(
     # A build side's keys, as the stream prepares its table (none for the
     # source or a cross join).
     var keys = List[List[String]]()
+    var hows = List[Int]()
     var probe = top
     while probe >= 0:
         ref step = self._nodes[probe]
@@ -396,6 +397,7 @@ def plan_prefetch_breakers(
                     keys.append(step.right_keys.copy())
                 else:
                     keys.append(List[String]())
+                hows.append(step.how)
             probe = step.left
         else:
             break
@@ -407,6 +409,7 @@ def plan_prefetch_breakers(
     ):
         wanted.append(probe)
         keys.append(List[String]())
+        hows.append(JOIN_CROSS)
     if len(wanted) < 2:
         return
     trace_path("stream.prefetch_breakers")
@@ -419,6 +422,7 @@ def plan_prefetch_breakers(
                 True,
                 batch_size,
                 keys[k],
+                hows[k],
             )
         )
     run_jobs(jobs)
@@ -426,5 +430,5 @@ def plan_prefetch_breakers(
         ahead[][wanted[k]] = jobs[k].result.copy()
         if jobs[k].built and self._prefetched_indexes:
             self._prefetched_indexes.value()[][wanted[k]] = _ReadyIndex(
-                keys[k], jobs[k].built.value().copy()
+                keys[k], hows[k], jobs[k].built.value().copy()
             )

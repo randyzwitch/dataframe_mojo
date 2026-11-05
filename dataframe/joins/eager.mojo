@@ -207,7 +207,11 @@ def join_frames(
         for k in left_keys:
             probe_keys.append(self._columns[k].copy())
         var pairs = probe_pairs(
-            prepared.value(), probe_keys, how, 1 if workers > 0 else 0
+            prepared.value(),
+            probe_keys,
+            how,
+            1 if workers > 0 else 0,
+            scan=False,
         )
         if how == JOIN_SEMI or how == JOIN_ANTI:
             if len(pairs[0]) == self.height():
@@ -306,7 +310,7 @@ def join_frames(
             probe_keys.append(right._columns[right_keys[k]].copy())
             build_keys.append(self._columns[left_keys[k]].copy())
     trace_path("join.hash_table")
-    var table = JoinHashTable(build_keys)
+    var table = JoinHashTable(build_keys, perfect=physical == JOIN_INNER)
     var pairs = probe_pairs(table, probe_keys, physical, 0)
     if how == JOIN_SEMI or how == JOIN_ANTI:
         var kept = List[Int]()

@@ -149,17 +149,18 @@ or execution facades, or accelerator dispatch, and has no internal module cycles
 
 `DataFrame.join` retains its public overloads, key-argument checks, and cross-join
 name/overflow validation. `_join_impl` delegates to `joins/eager.mojo`, which
-owns the existing strategy order and output assembly. Key dtype and struct
-preparation remain in that implementation with their original error ordering.
+chooses the build side (DuckDB's `BuildProbeSideOptimizer` on exact sizes), runs
+the hash join and assembles the output. Key dtype and struct preparation remain
+in that implementation with their original error ordering.
 
-`joins/range.mojo` owns bounded-integer/progression matching, membership and
-range filtering, including their existing byte budgets and worker thresholds.
-`joins/rows.mojo` owns stable pair ordering, CSR layouts and row count/fill jobs;
-`joins/keys.mojo` encodes both sides into one key-id space for dictionary joins.
-The existing hash/fused join kernels and as-of joins remain in their modules.
+`joins/hash_table.mojo` is DuckDB 2.0's join hash table: build rows laid out
+with their key fields, a pointer table of salted `ht_entry_t` entries with
+linear probing and chains of equal keys, and `ScanStructure`, which probes a
+chunk of 2,048 rows and emits every join type (inner, left, right, full, semi,
+anti, mark, right semi and right anti). Eager joins and pipeline probes both
+run on it; `kernels/join_keys.mojo` keeps the key facts planning reads.
 
-The join modules use the existing `DataFrame` value type, while frame re-exports
-all moved helpers and constants for compatibility. Shared categorical dictionary
+The join modules use the existing `DataFrame` value type. Shared categorical dictionary
 normalization for concatenation and chunk-filter jobs stay on the frame.
 `scripts/check_join_boundaries.py` enforces the internal dependency direction
 and prevents imports of frame implementation helpers or higher execution layers.

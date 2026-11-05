@@ -71,6 +71,7 @@ from dataframe.storage.buffer import _Buffer
 from dataframe.storage.column import Column, _validity_at
 from dataframe.storage.string import StringColumn
 from dataframe.storage.string_view import StringView, _mapped
+from dataframe.trace import trace_path
 from dataframe.vector.types import STANDARD_VECTOR_SIZE
 
 # ht_entry_t (execution/ht_entry.hpp): the upper 16 bits are the salt, the
@@ -86,6 +87,9 @@ comptime MINIMUM_CAPACITY = 16384
 # physical_hash_join.cpp PARALLEL_CONSTRUCT_THRESHOLD: smaller tables are
 # finalized on one thread.
 comptime PARALLEL_CONSTRUCT_THRESHOLD = 1048576
+# PerfectHashJoinExecutor::CanDoPerfectHashJoin MAX_BUILD_SIZE: the widest
+# key range a perfect hash join addresses directly.
+comptime PERFECT_MAX_BUILD_SIZE = 1048576
 
 # Key field kinds and the row's fixed offsets.
 comptime _WORD = 0
@@ -409,12 +413,14 @@ struct _TableData(Movable):
     var entries: List[UInt64]
     var found: List[UInt8]
     var keys: List[Series]
+    var slots: List[Int32]
 
     def __init__(out self, var keys: List[Series]):
         self.rows = List[UInt8]()
         self.entries = List[UInt64]()
         self.found = List[UInt8]()
         self.keys = keys^
+        self.slots = List[Int32]()
 
 
 struct _ScatterJob(Job):
@@ -596,6 +602,99 @@ struct _InsertJob(Job):
                 offset = Int((UInt64(offset) + 1) & self.bitmask)
 
 
+@always_inline
+def _word[D: DType](value: Scalar[D]) -> UInt64:
+    """An integer as the 64-bit word its row field holds: unsigned values
+    zero-extended, signed ones sign-extended (two's complement), so the
+    unsigned difference of two words is their distance."""
+    comptime if D.is_unsigned():
+        return UInt64(value)
+    else:
+        return bitcast[DType.uint64](Int64(value))
+
+
+def _perfect_slots(
+    key: Series, inserted: Int
+) -> Optional[Tuple[UInt64, Int, List[Int32]]]:
+    """PerfectHashJoinExecutor::CanDoPerfectHashJoin and its build: an
+    integer key whose valid values span at most PERFECT_MAX_BUILD_SIZE, with
+    no more of them than the span (DuckDB's `Count() > build_range` check),
+    each value once. Gives the least value's word, the span and each slot's
+    build row (-1 for none); None otherwise."""
+    var bits = _validity(key)
+    var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bits[0])
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            if key._data.isa[Column[Scalar[D]]]():
+                var values = key._data[Column[Scalar[D]]]._ptr()
+                var n = len(key)
+                var least = Scalar[D].MAX
+                var most = Scalar[D].MIN
+                for i in range(n):
+                    if bits[0] != 0 and not _validity_at(bitmap, bits[1] + i):
+                        continue
+                    var value = values[unsafe_offset=i]
+                    least = min(least, value)
+                    most = max(most, value)
+                if least > most:
+                    return None
+                var base = _word[D](least)
+                var span = _word[D](most) - base
+                if span > UInt64(PERFECT_MAX_BUILD_SIZE):
+                    return None
+                if UInt64(inserted) > span:
+                    return None
+                var slots = List[Int32](length=Int(span) + 1, fill=-1)
+                var table = slots.unsafe_ptr()
+                for i in range(n):
+                    if bits[0] != 0 and not _validity_at(bitmap, bits[1] + i):
+                        continue
+                    var at = Int(_word[D](values[unsafe_offset=i]) - base)
+                    if table[unsafe_offset=at] >= 0:
+                        return None
+                    table[unsafe_offset=at] = Int32(i)
+                return (base, Int(span), slots^)
+    return None
+
+
+def _perfect_heads(
+    key: Series,
+    start: Int,
+    count: Int,
+    base: UInt64,
+    span: Int,
+    slots: Int,
+    rows: Int,
+    width: Int,
+    heads: Int,
+):
+    """Each probe row's build row, as the address of its row (0 for none),
+    looked up by `key - base` (PerfectHashJoinExecutor's probe)."""
+    var bits = _validity(key)
+    var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bits[0])
+    var table = Pointer[Int32, MutAnyOrigin](unsafe_from_address=slots)
+    var out = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=heads)
+    var limit = UInt64(span)
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            if key._data.isa[Column[Scalar[D]]]():
+                var values = key._data[Column[Scalar[D]]]._ptr()
+                for i in range(count):
+                    var at = _word[D](values[unsafe_offset=start + i]) - base
+                    if at > limit:
+                        continue
+                    if bits[0] != 0 and not _validity_at(
+                        bitmap, bits[1] + start + i
+                    ):
+                        continue
+                    var b = table[unsafe_offset=Int(at)]
+                    if b >= 0:
+                        out[unsafe_offset=i] = UInt64(rows + Int(b) * width)
+                return
+
+
 def _next_power_of_two(value: Int) -> Int:
     var power = 1
     while power < value:
@@ -617,6 +716,13 @@ struct JoinHashTable(Copyable, Movable):
 
     var data: ArcPointer[_TableData]
     var layout: KeyLayout
+    # DuckDB's PerfectHashJoinExecutor: an inner join on one integer key
+    # whose build keys are unique within PERFECT_MAX_BUILD_SIZE values
+    # looks each probe key up at `key - perfect_base` in `data.slots`
+    # (the build row, -1 for none) instead of the pointer table.
+    var perfect: Bool
+    var perfect_base: UInt64
+    var perfect_span: Int
     # Build rows, and those whose keys are all valid (in the table).
     var count: Int
     var inserted: Int
@@ -626,9 +732,10 @@ struct JoinHashTable(Copyable, Movable):
     # Whether a build key is null (a mark join's unknown results).
     var has_null: Bool
 
-    def __init__(out self, keys: List[Series]) raises:
+    def __init__(out self, keys: List[Series], perfect: Bool = False) raises:
         """Build and finalize the table over `keys` (one column per
-        equality condition, all of one length)."""
+        equality condition, all of one length). `perfect`: the join is an
+        inner join, which may run as a perfect hash join."""
         var unchunked = List[Series](capacity=len(keys))
         for key in keys:
             if key.dtype().is_nested():
@@ -660,10 +767,30 @@ struct JoinHashTable(Copyable, Movable):
                 )
         run_jobs(scatter)
         var invalid = 0
-        for job in scatter:
-            invalid += job.invalid
+        for w in range(len(scatter)):
+            invalid += scatter[w].invalid
         self.has_null = invalid > 0
         self.inserted = self.count - invalid
+        self.perfect = False
+        self.perfect_base = 0
+        self.perfect_span = 0
+        self.chains_longer_than_one = False
+        self.capacity = 0
+        self.bitmask = 0
+        if perfect and len(unchunked) == 1 and self.inserted > 0:
+            # PerfectHashJoinExecutor::BuildPerfectHashTable, else (a
+            # repeated key, a wide range) the hash table.
+            var slots = _perfect_slots(unchunked[0], self.inserted)
+            if slots:
+                trace_path("join.perfect_hash")
+                self.perfect = True
+                self.perfect_base = slots.value()[0]
+                self.perfect_span = slots.value()[1]
+                self.data[].slots = slots.value()[2].copy()
+                # Each row ends its chain: a probe emits it alone.
+                for r in range(self.count):
+                    _store64(rows + r * self.layout.width + _NEXT, 0)
+                return
         # Finalize: the pointer table, then every row inserted.
         self.capacity = pointer_table_capacity(self.inserted)
         self.bitmask = UInt64(self.capacity - 1)
@@ -694,10 +821,9 @@ struct JoinHashTable(Copyable, Movable):
             )
             job.run()
             inserts.append(job^)
-        self.chains_longer_than_one = False
-        for job in inserts:
+        for w in range(len(inserts)):
             self.chains_longer_than_one = (
-                self.chains_longer_than_one or job.chained
+                self.chains_longer_than_one or inserts[w].chained
             )
 
     def keys(self) -> List[Series]:
@@ -818,6 +944,23 @@ struct ScanStructure(Movable):
         self.started = False
         self.finished = False
         ref layout = self.table.layout
+        var heads = self.heads.unsafe_ptr()
+        for i in range(count):
+            heads[unsafe_offset=i] = 0
+        if self.table.perfect:
+            # ProbePerfectHashTable: the key's slot holds its build row.
+            _perfect_heads(
+                keys[0],
+                start,
+                count,
+                self.table.perfect_base,
+                self.table.perfect_span,
+                Int(self.table.data[].slots.unsafe_ptr()),
+                self.table.rows_address(),
+                layout.width,
+                Int(heads),
+            )
+            return
         var valid = self.valid.unsafe_ptr()
         for i in range(count):
             valid[unsafe_offset=i] = 1
@@ -842,9 +985,6 @@ struct ScanStructure(Movable):
                 k == 0,
                 output_offset=start,
             )
-        var heads = self.heads.unsafe_ptr()
-        for i in range(count):
-            heads[unsafe_offset=i] = 0
         if self.table.inserted == 0:
             return
         # PrepareKeys: rows with a null key match nothing.
@@ -1143,15 +1283,16 @@ def probe_pairs(
         swap(build, jobs[0].build)
     elif len(jobs) > 1:
         var total = 0
-        for job in jobs:
-            total += len(job.probe)
+        for w in range(len(jobs)):
+            total += len(jobs[w].probe)
         probe = huge_uninit[Int](total)
         var both = jobs[0].both
         if both:
             build = huge_uninit[Int](total)
         var copies = List[_AppendJob](capacity=2 * len(jobs))
         var at = 0
-        for job in jobs:
+        for w in range(len(jobs)):
+            ref job = jobs[w]
             copies.append(
                 _AppendJob(
                     Int(job.probe.unsafe_ptr()),

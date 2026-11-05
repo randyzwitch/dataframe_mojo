@@ -5,6 +5,7 @@ from dataframe.frame import (
 from dataframe.joins.hash_table import (
     JoinHashTable,
 )
+from dataframe.join_type import JOIN_INNER
 from dataframe.parallel import (
     Job,
 )
@@ -25,7 +26,7 @@ from std.memory import (
 
 
 def finish_build(
-    mut built: DataFrame, keys: List[String]
+    mut built: DataFrame, keys: List[String], how: Int
 ) raises -> Optional[JoinHashTable]:
     """A join's build side, finished as its build pipeline's last stage:
     every column in one chunk, then the hash index over `keys` (none
@@ -49,7 +50,7 @@ def finish_build(
         sources.append(key.copy())
     if not supported:
         return None
-    return JoinHashTable(sources)
+    return JoinHashTable(sources, perfect=how == JOIN_INNER)
 
 
 struct _SubplanJob(Job):
@@ -65,8 +66,10 @@ struct _SubplanJob(Job):
     var streaming: Bool
     var batch_size: Int
     var result: DataFrame
-    # Build keys; none for an input that is not a hash join's build side.
+    # Build keys and the join's type; no keys for an input that is not a
+    # hash join's build side.
     var keys: List[String]
+    var how: Int
     var built: Optional[JoinHashTable]
 
     def __init__(
@@ -76,6 +79,7 @@ struct _SubplanJob(Job):
         streaming: Bool,
         batch_size: Int,
         keys: List[String] = List[String](),
+        how: Int = JOIN_INNER,
     ) raises:
         self.plan = plan^
         # Its own memo: nested prefetches on other threads never share one.
@@ -88,6 +92,7 @@ struct _SubplanJob(Job):
         self.batch_size = batch_size
         self.result = DataFrame(List[Series]())
         self.keys = keys.copy()
+        self.how = how
         self.built = None
 
     def run(mut self) raises:
@@ -95,4 +100,4 @@ struct _SubplanJob(Job):
             self.index, False, self.streaming, self.batch_size
         )
         if len(self.keys) > 0:
-            self.built = finish_build(self.result, self.keys)
+            self.built = finish_build(self.result, self.keys, self.how)

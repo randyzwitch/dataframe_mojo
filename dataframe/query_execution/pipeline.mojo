@@ -765,11 +765,16 @@ def plan_stream_execute(
             var keys = List[String]()
             if node.how != JOIN_CROSS and len(node.names):
                 keys = node.right_keys.copy()
-            if len(keys) > 0 and ready and ready.value().keys == keys:
+            if (
+                len(keys) > 0
+                and ready
+                and ready.value().keys == keys
+                and ready.value().how == node.how
+            ):
                 prepared = ready.value().index.copy()
                 algorithm = "hash_index"
                 keys = List[String]()
-            var finished = finish_build(built, keys)
+            var finished = finish_build(built, keys, node.how)
             if finished:
                 prepared = finished^
                 algorithm = "hash_index"

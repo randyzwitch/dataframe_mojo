@@ -4060,6 +4060,14 @@ def _run_pipeline(
             break
     for r in key_ranges:
         _ensure_zones(frame.column(r.column))
+    # A right or full join's flags of matched build rows start clear.
+    for step in steps:
+        if (
+            step.kind == STEP_JOIN
+            and (step.how == JOIN_RIGHT or step.how == JOIN_FULL)
+            and indexes[][step.join]
+        ):
+            indexes[][step.join].value().reset_found()
     # One job per morsel at most: a tiny source (PDS-H q2's five-row
     # region frame) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
