@@ -183,7 +183,6 @@ from dataframe.planning.graph import (
     plan_has_join,
     plan_has_kind,
     plan_height_bound,
-    plan_indexed_relation,
     plan_input_name,
     plan_keeps_column,
     plan_key_source,
@@ -195,7 +194,6 @@ from dataframe.planning.graph import (
     plan_node_hash,
     plan_order_free_above,
     plan_parents,
-    plan_progression_key,
     plan_projection_visits,
     plan_provider_scan,
     plan_relation_estimate,
@@ -2370,9 +2368,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _estimated_rows(self, index: Int) raises -> Int:
         return plan_estimated_rows(self._plan, index=index)
 
-    def _progression_key(self, index: Int, keys: List[String]) raises -> Bool:
-        return plan_progression_key(self._plan, index=index, keys=keys)
-
     def _graph_step(self, index: Int) -> Bool:
         return plan_graph_step(self._plan, index=index)
 
@@ -2385,25 +2380,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     ):
         var joins = List[GraphJoin]()
         plan_collect_graph(self._plan, index, relations, pairs, filters, joins)
-
-    def _indexed_relation(
-        self,
-        entry: Int,
-        other: Int,
-        joined: List[Bool],
-        node_of: List[Int],
-        edges: List[JoinEdge],
-        masks: List[Int],
-    ) raises -> Bool:
-        return plan_indexed_relation(
-            self._plan,
-            entry=entry,
-            other=other,
-            joined=joined,
-            node_of=node_of,
-            edges=edges,
-            masks=masks,
-        )
 
     def _cost_order_joins(
         mut self, root: Int, streaming: Bool, batch_size: Int

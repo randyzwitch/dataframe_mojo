@@ -76,11 +76,9 @@ from dataframe.io.parquet import (
     _pruned_row_groups,
     parquet_row_group_statistics,
 )
-from dataframe.kernels.join_hash import (
-    PreparedHashIndex,
+from dataframe.joins.hash_table import JoinHashTable
+from dataframe.kernels.join_keys import (
     prefer_left_build,
-    prepare_progression_index,
-    serves_probe,
 )
 from dataframe.join_type import (
     JOIN_ANTI,
@@ -130,7 +128,6 @@ from dataframe.planning.graph import (
     plan_keeps_column,
     plan_key_source,
     plan_known_height,
-    plan_progression_key,
 )
 from dataframe.planning.model import (
     AGG,
@@ -423,7 +420,7 @@ def plan_stream_execute(
     # The plan node of each operation, for the execution report.
     var operation_nodes = List[Int]()
     var joins = List[DataFrame]()
-    var indexes = List[Optional[PreparedHashIndex]]()
+    var indexes = List[Optional[JoinHashTable]]()
     var reduced = plan_reduce_by_probe_keys(self, cursor, index, batch_size)
     if reduced:
         return reduced^
@@ -484,7 +481,7 @@ def plan_stream_execute(
             operations.append(node.copy())
             operation_nodes.append(cursor)
         elif _stream_join(node):
-            var prepared = Optional[PreparedHashIndex]()
+            var prepared = Optional[JoinHashTable]()
             # A left input that can only be small next to a large known
             # right may be the side to hash: decline streaming, so the
             # plan runs eagerly and `DataFrame.join` builds on the smaller
@@ -509,16 +506,10 @@ def plan_stream_execute(
                 # whatever side a join was written on, rather than run
                 # the join outside the pipeline (TPC-DS q43 probed its
                 # 366 dates with 2.9M sales rows eagerly).
-                # A right side whose one key is a progression is no hash
-                # table to build: the left streams through its rows by
-                # position, which no swap beats.
                 if (
                     node.how == JOIN_INNER
                     and not node.sides_fixed
                     and plan_direct_key(self, node.left, node.names)
-                    and not plan_progression_key(
-                        self, node.right, node.right_keys
-                    )
                 ):
                     var large = self._execute(
                         node.right, False, True, batch_size
@@ -578,25 +569,11 @@ def plan_stream_execute(
                 # physical reversal does not increase the materialized
                 # join output over the existing batch bound. Keep larger
                 # left inputs on the bounded streaming executor.
-                # A directly available progression already has a cheaper
-                # compact lookup. Validate once and retain its prepared
-                # state instead of falling back to eager progression scans.
-                ref build_node = self._nodes[node.right]
-                if build_node.kind == SCAN_FRAME and len(node.right_keys) == 1:
-                    var sources: List[Series] = [
-                        self._frames[build_node.source_slot()][
-                            node.right_keys[0]
-                        ].copy()
-                    ]
-                    prepared = prepare_progression_index(sources)
-                if not prepared:
-                    break
+                break
             var operation = node.copy()
             operation.set_join_build_slot(len(joins))
             var algorithm = String(
-                "progression" if prepared else (
-                    "cross" if node.how == JOIN_CROSS else "eager_hash"
-                )
+                "cross" if node.how == JOIN_CROSS else "eager_hash"
             )
             var built = self._execute(node.right, False, True, batch_size)
             # The index a prefetch made with this build, if any.
@@ -611,7 +588,6 @@ def plan_stream_execute(
                 and bound >= 0
                 and built.height() * max(built.width(), 1)
                 > bound * max(len(plan_columns_of(self, node.left)), 1)
-                and not plan_progression_key(self, node.right, node.right_keys)
             ):
                 # The built right side costs more to hash than the left
                 # can, in rows times columns as the planner's build side
@@ -660,22 +636,11 @@ def plan_stream_execute(
                 # hash every built row to probe a few: PDS-H q2 hashed
                 # and rechunked 159K wide supplier rows for its 747
                 # parts. The left's bound is read first, so a left that
-                # cannot be smaller is never sampled. A right side whose
-                # one key is a progression builds no hash table (the left
-                # looks its rows up by position), so it costs nothing to
-                # build on and is kept, as the planner's build side counts
-                # it (`plan_indexed_relation`) and the swaps above keep
-                # it: TPC-DS q35 hashed 100K customers to stream 1.9M
-                # demographics rows through them, where the customers
-                # look up their demographics by position.
+                # cannot be smaller is never sampled.
                 var right_cost = built.height() * max(built.width(), 1)
                 var columns = len(plan_columns_of(self, node.left))
                 var most = plan_height_bound(self, node.left)
-                if (
-                    most < 0 or most * columns < right_cost
-                ) and not plan_progression_key(
-                    self, node.right, node.right_keys
-                ):
+                if most < 0 or most * columns < right_cost:
                     var rows = plan_estimated_rows(self, node.left)
                     if rows >= 0 and rows * columns < right_cost:
                         # The join builds on the smaller left inside the
@@ -779,20 +744,18 @@ def plan_stream_execute(
             # The build finished: one chunk per column, and its keys'
             # hash index, unless a prefetch made the same one already.
             var keys = List[String]()
-            if not prepared and node.how != JOIN_CROSS and len(node.names):
+            if node.how != JOIN_CROSS and len(node.names):
                 keys = node.right_keys.copy()
             if (
                 len(keys) > 0
                 and ready
                 and ready.value().keys == keys
-                and serves_probe(
-                    ready.value().index, ready.value().probe_rows, bound
-                )
+                and ready.value().how == node.how
             ):
                 prepared = ready.value().index.copy()
                 algorithm = "hash_index"
                 keys = List[String]()
-            var finished = finish_build(built, keys, bound)
+            var finished = finish_build(built, keys, node.how)
             if finished:
                 prepared = finished^
                 algorithm = "hash_index"

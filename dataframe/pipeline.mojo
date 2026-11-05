@@ -66,6 +66,12 @@ from .frame import (
     _rows_mask,
     concat,
 )
+from dataframe.aggregation.ungrouped import (
+    UngroupedLayout,
+    UngroupedSink,
+    ungrouped_finish,
+    ungrouped_layout,
+)
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
 from dataframe.storage.statistics import (
@@ -98,11 +104,9 @@ from dataframe.aggregation.keys import (
     _group_keys,
 )
 from dataframe.aggregation.selected_rows import _reduce_floats, _reduce_ints
-from dataframe.kernels.join_hash import (
-    PreparedHashIndex,
-    prepared_direct_rows_at,
-    prepared_hash_join_rows,
-    prepared_hash_semi_anti_rows,
+from dataframe.joins.hash_table import (
+    JoinHashTable,
+    ScanStructure,
 )
 from .join_type import JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_RIGHT, JOIN_SEMI
 from dataframe.kernels.row_encode import encodable
@@ -1243,7 +1247,7 @@ struct _ChunkRunner(Movable):
     # per thread, its expressions bound once).
     var templates: ArcPointer[List[Optional[_VectorStep]]]
     var joins: ArcPointer[List[DataFrame]]
-    var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
+    var indexes: ArcPointer[List[Optional[JoinHashTable]]]
     var arena: ColumnArena
     # The arena's columns held for the whole pipeline (join builds); a
     # morsel's are dropped when the next one starts.
@@ -1255,6 +1259,13 @@ struct _ChunkRunner(Movable):
     # Whether to stop at a step that leaves no row (a pipeline's morsel),
     # or to run on so the output has every step's columns.
     var stop_empty: Bool
+    # An ungrouped aggregate sink (`ungrouped.mojo`), when the pipeline
+    # ends in one: the last step's chunks are sunk into its states, and
+    # nothing is collected.
+    var ungrouped: List[UngroupedSink]
+    # The layout every worker's sink is made from, on its own thread
+    # when its job starts.
+    var ungrouped_layout: List[ArcPointer[UngroupedLayout]]
     # The source's table filters, and the source row of the morsel's first
     # row while the morsel's own rows run (-1 otherwise): a chunk whose
     # vector the filters' statistics rule out is not read (DuckDB's
@@ -1267,7 +1278,7 @@ struct _ChunkRunner(Movable):
         steps: List[Step],
         schemas: ArcPointer[List[DataFrame]],
         joins: ArcPointer[List[DataFrame]],
-        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+        indexes: ArcPointer[List[Optional[JoinHashTable]]],
         stop_empty: Bool,
         templates: ArcPointer[List[Optional[_VectorStep]]] = ArcPointer(
             List[Optional[_VectorStep]]()
@@ -1296,6 +1307,8 @@ struct _ChunkRunner(Movable):
         self.source = DataChunk()
         self.counts = List[Int](length=3 * len(steps) + 1, fill=0)
         self.stop_empty = stop_empty
+        self.ungrouped = List[UngroupedSink]()
+        self.ungrouped_layout = List[ArcPointer[UngroupedLayout]]()
         self.scan = None
         self.scan_offset = -1
 
@@ -1333,6 +1346,14 @@ struct _ChunkRunner(Movable):
                 stop += 1
             columns = self._vector_steps(columns, at, stop)
             at = stop
+        if len(self.ungrouped) > 0 and columns.height > 0:
+            if self.ungrouped[0].counts_only():
+                # Row counts read no column: the rows are only counted.
+                self.ungrouped[0].sink_rows(columns.height)
+                return _Columns()
+            # A join's output (or the source, with no steps) cut into
+            # chunks for the ungrouped sink.
+            columns = self._vector_steps(columns, n, n)
         return columns^
 
     def _compiled(mut self, s: Int) raises:
@@ -1383,7 +1404,11 @@ struct _ChunkRunner(Movable):
                 if step.output.count == 0:
                     empty = True
                     break
-            if not empty:
+            if empty:
+                continue
+            if stop == n and len(self.ungrouped) > 0:
+                self.ungrouped[0].sink(input[], self.arena)
+            else:
                 collector.append(input[], self.arena)
         return collector.finish(self.arena)
 
@@ -1391,12 +1416,15 @@ struct _ChunkRunner(Movable):
         mut self, columns: _Columns, s: Int, marks: Int
     ) raises -> _Columns:
         """A join step over a morsel's collected columns. An inner, semi or
-        anti join through its prepared index probes the key columns only
-        and keeps every other column a dictionary over where it is: the
-        probe side through the matched probe rows, the build side through
-        the matched build rows (no payload is gathered, as DuckDB's probe
-        slices the probe chunk and emits build columns as dictionary
-        vectors). Any other join runs on the morsel's frame."""
+        anti join probes its table (`ScanStructure`) with the key columns
+        only and keeps every other column a dictionary over where it is:
+        the probe side through the matched probe rows, the build side
+        through the matched build rows (no payload is gathered, as
+        DuckDB's probe slices the probe chunk and emits build columns as
+        dictionary vectors, `EmitDictVectors`). Any other join probes the
+        morsel's frame; a right or full join flags the build rows it
+        matched in the table (`marks` is their address), for the rows no
+        morsel matched to come out after the probe."""
         ref step = self.steps[s]
         ref input = self.schemas[][s]
         ref output = self.schemas[][s + 1]
@@ -1422,69 +1450,52 @@ struct _ChunkRunner(Movable):
                 suffix=step.suffix,
                 coalesce=step.coalesce,
                 prepared=self.indexes[][step.join],
-                workers=0,
-                marks=marks,
+                workers=1,
             )
             return _Columns.of_frame(self.arena, joined)
         trace_path("pipeline.join_dictionary")
-        # A key read through a row list probes a direct index where it
-        # is, as DuckDB probes a dictionary vector through its selection:
-        # the key is not gathered first.
-        var through = Optional[Tuple[List[Int], List[Int], Bool]]()
-        if len(step.names) == 1:
-            var c = input._index(step.names[0])
-            if columns.lists[c] >= 0:
-                ref listed = columns.row_lists[columns.lists[c]]
-                var at = List[Int](unsafe_uninit_length=columns.height)
-                var to = at.unsafe_ptr()
-                var source = listed.unsafe_ptr()
-                for k in range(columns.height):
-                    to[unsafe_offset=k] = Int(source[unsafe_offset=k])
-                through = prepared_direct_rows_at(
-                    self.arena.columns[columns.handles[c]],
-                    at,
-                    self.indexes[][step.join].value(),
-                    step.how != JOIN_ANTI,
-                )
-        if step.how != JOIN_INNER:
-            var kept: List[Int]
-            if through:
-                kept = through.value()[0].copy()
-            else:
-                var keys = columns.frame(self.arena, input, step.names)
-                kept = prepared_hash_semi_anti_rows(
-                    keys._columns,
-                    self.indexes[][step.join].value(),
-                    step.how == JOIN_SEMI,
-                    0,
-                )
-            if len(kept) == columns.height:
+        var keys = columns.frame(self.arena, input, step.names)._columns.copy()
+        for k in range(len(keys)):
+            if keys[k].is_chunked():
+                keys[k] = keys[k].rechunk()
+        var scan = ScanStructure(self.indexes[][step.join].value(), step.how)
+        var probe_rows = List[Int](capacity=columns.height)
+        var build_rows = List[UInt32]()
+        var inner = step.how == JOIN_INNER
+        if inner:
+            build_rows.reserve(columns.height)
+        for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
+            var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
+            scan.probe(keys, low, count)
+            while True:
+                var n = scan.next()
+                if n == 0:
+                    break
+                var rows = scan.probe_rows.unsafe_ptr()
+                var builds = scan.build_rows.unsafe_ptr()
+                for k in range(n):
+                    probe_rows.append(low + Int(rows[unsafe_offset=k]))
+                if inner:
+                    for k in range(n):
+                        build_rows.append(UInt32(builds[unsafe_offset=k]))
+        if not inner:
+            if len(probe_rows) == columns.height:
                 return columns.copy()
-            return columns.through(kept)
-        var pairs: Tuple[List[Int], List[Int], Bool]
-        if through:
-            pairs = through.take()
-        else:
-            var keys = columns.frame(self.arena, input, step.names)
-            pairs = prepared_hash_join_rows(
-                keys._columns,
-                self.indexes[][step.join].value(),
-                False,
-                omit_identity=True,
-                workers=0,
-            )
+            return columns.through(probe_rows)
+        var identity = len(probe_rows) == columns.height
+        if identity:
+            var at = probe_rows.unsafe_ptr()
+            for k in range(len(probe_rows)):
+                if at[unsafe_offset=k] != k:
+                    identity = False
+                    break
         var result: _Columns
-        if pairs[2]:
+        if identity:
             result = columns.copy()
         else:
-            result = columns.through(pairs[0])
-        result.height = len(pairs[1])
+            result = columns.through(probe_rows)
+        result.height = len(build_rows)
         # The build side's output columns, in the join's output order.
-        var build_rows = List[UInt32](unsafe_uninit_length=len(pairs[1]))
-        var at = build_rows.unsafe_ptr()
-        var rows = pairs[1].unsafe_ptr()
-        for k in range(len(pairs[1])):
-            at[unsafe_offset=k] = UInt32(rows[unsafe_offset=k])
         var list = len(result.row_lists)
         result.row_lists.append(build_rows^)
         var right_keys = List[Int]()
@@ -1505,7 +1516,7 @@ def _steps_over_frame(
     frame: DataFrame,
     steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
     mut counts: List[Int],
 ) raises -> DataFrame:
     """`steps` over all of `frame` on this thread, chunk by chunk; `counts`
@@ -2546,7 +2557,7 @@ struct _PipelineJob(Job):
     var steps: List[Step]
     # Build frames and prepared indexes of the join steps, shared.
     var joins: ArcPointer[List[DataFrame]]
-    var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
+    var indexes: ArcPointer[List[Optional[JoinHashTable]]]
     var expressions: List[Expr]
     # Group keys of a grouped reduce sink (none: ungrouped or materialize).
     var keys: List[String]
@@ -2612,9 +2623,10 @@ struct _PipelineJob(Job):
     # Per range with a bloom filter: this worker's rows checked and kept.
     var bloom_checked: List[Int]
     var bloom_kept: List[Int]
-    # A right or full join step's flags of the build rows this worker's
-    # morsels matched (one byte a build row), by step; empty for others.
-    var marks: List[List[UInt8]]
+    # Per step, the address of a right or full join's flags of the build
+    # rows any morsel matched (one byte a build row, in the step's shared
+    # table; `JoinHashTable.found_address`), 0 for other steps.
+    var marks: List[Int]
     # The step the morsels enter at (0: the source's; past an outer join
     # step for the build rows it emits after its probe), and the number
     # of the frame's first morsel among all the morsels sunk.
@@ -2642,7 +2654,7 @@ struct _PipelineJob(Job):
         ranges: ArcPointer[List[Int]],
         steps: List[Step],
         joins: ArcPointer[List[DataFrame]],
-        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+        indexes: ArcPointer[List[Optional[JoinHashTable]]],
         expressions: List[Expr],
         keys: List[String],
         insert: Bool,
@@ -2672,16 +2684,18 @@ struct _PipelineJob(Job):
         self.key_ranges = key_ranges.copy()
         self.bloom_checked = List[Int](length=len(key_ranges), fill=0)
         self.bloom_kept = List[Int](length=len(key_ranges), fill=0)
-        self.marks = List[List[UInt8]](capacity=len(steps))
+        # A right or full join flags the build rows it matched in its
+        # shared table, as DuckDB flags them in the build's rows.
+        self.marks = List[Int](capacity=len(steps))
         for step in steps:
-            if step.kind == STEP_JOIN and (
-                step.how == JOIN_RIGHT or step.how == JOIN_FULL
+            if (
+                step.kind == STEP_JOIN
+                and (step.how == JOIN_RIGHT or step.how == JOIN_FULL)
+                and indexes[][step.join]
             ):
-                self.marks.append(
-                    List[UInt8](length=joins[][step.join].height(), fill=0)
-                )
+                self.marks.append(indexes[][step.join].value().found_address())
             else:
-                self.marks.append(List[UInt8]())
+                self.marks.append(0)
         self.first_step = 0
         self.first_morsel = 0
         self.finishes = True
@@ -2884,13 +2898,8 @@ struct _PipelineJob(Job):
 
     def _marks(self) -> List[Int]:
         """Per step, the address of a right or full join's matched-row
-        flags on this worker (0 for none)."""
-        var marks = List[Int](capacity=len(self.marks))
-        for i in range(len(self.marks)):
-            marks.append(
-                Int(self.marks[i].unsafe_ptr()) if len(self.marks[i]) > 0 else 0
-            )
-        return marks^
+        flags (0 for none)."""
+        return self.marks.copy()
 
     def run(mut self) raises:
         var count = len(self.ranges[]) // 2
@@ -2902,9 +2911,20 @@ struct _PipelineJob(Job):
                 self.counts = self.runner.counts.copy()
                 if not self.finishes:
                     return
+                if len(self.runner.ungrouped) > 0:
+                    # Only the states outlive the worker's run.
+                    self.runner.ungrouped[0].release()
                 self._derive_sets()
                 return
             var k = self.first_morsel + taken
+            if len(self.runner.ungrouped_layout) > 0:
+                if len(self.runner.ungrouped) == 0:
+                    # The worker's ungrouped sink, made on its own thread
+                    # when it takes its first morsel.
+                    self.runner.ungrouped.append(
+                        UngroupedSink(self.runner.ungrouped_layout[0][])
+                    )
+                self.runner.ungrouped[0].begin(k)
             var offset = self.ranges[][2 * taken]
             var length = self.ranges[][2 * taken + 1]
             self.runner.begin_morsel()
@@ -3511,7 +3531,7 @@ def _emit_unmatched(
     mut jobs: List[_PipelineJob],
     steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
     batch_size: Int,
 ) raises:
     """The build rows no morsel matched, for each right or full join step
@@ -3549,9 +3569,9 @@ def _emit_unmatched(
         # The probe side's columns at this step: an empty source through
         # the steps before it.
         var empty = jobs[0].runner.schema(j)
-        var marks = List[Int](capacity=len(jobs))
-        for w in range(len(jobs)):
-            marks.append(Int(jobs[w].marks[j].unsafe_ptr()))
+        # Every worker flagged its matches in the step's one table.
+        var marks = List[Int]()
+        marks.append(jobs[0].marks[j])
         # One more round of the workers over the build rows' morsels,
         # each into its own sink; the last round also finishes them.
         var cursor = _Cursor.new()
@@ -3607,7 +3627,7 @@ def run_pipeline(
     frame: DataFrame,
     steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
     expressions: List[Expr],
     keys: List[String],
     ordered: Bool,
@@ -3726,7 +3746,7 @@ struct _FinishStepsJob(Job):
     var state: _StreamReduction
     var steps: List[Step]
     var joins: ArcPointer[List[DataFrame]]
-    var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
+    var indexes: ArcPointer[List[Optional[JoinHashTable]]]
     var batch_size: Int
     var frame: DataFrame
     # Each step's input and output rows.
@@ -3737,7 +3757,7 @@ struct _FinishStepsJob(Job):
         var state: _StreamReduction,
         steps: List[Step],
         joins: ArcPointer[List[DataFrame]],
-        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+        indexes: ArcPointer[List[Optional[JoinHashTable]]],
         batch_size: Int,
     ) raises:
         self.state = state^
@@ -3863,7 +3883,7 @@ def _finish_with_steps(
     var parts: List[_StreamReduction],
     steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
     batch_size: Int,
     mut counts: List[Int],
 ) raises -> DataFrame:
@@ -3896,7 +3916,7 @@ def _run_pipeline(
     frame: DataFrame,
     steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
     expressions: List[Expr],
     keys: List[String],
     ordered: Bool,
@@ -4096,6 +4116,14 @@ def _run_pipeline(
             break
     for r in key_ranges:
         _ensure_zones(frame.column(r.column))
+    # A right or full join's flags of matched build rows start clear.
+    for step in steps:
+        if (
+            step.kind == STEP_JOIN
+            and (step.how == JOIN_RIGHT or step.how == JOIN_FULL)
+            and indexes[][step.join]
+        ):
+            indexes[][step.join].value().reset_found()
     # One job per morsel at most: a tiny source (PDS-H q2's five-row
     # region frame) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
@@ -4138,6 +4166,17 @@ def _run_pipeline(
                 templates,
             )
         )
+    # An ungrouped reduce sink: each worker's states updated from the
+    # last step's chunks (DuckDB's `PhysicalUngroupedAggregate`).
+    var ungrouped = List[ArcPointer[UngroupedLayout]]()
+    if len(keys) == 0 and len(expressions) > 0 and top <= 0:
+        var made = ungrouped_layout(schemas[][len(steps)], expressions)
+        if made:
+            ungrouped.append(ArcPointer(made.take()))
+    if len(ungrouped) > 0:
+        trace_path("pipeline.ungrouped_sink")
+        for w in range(len(jobs)):
+            jobs[w].runner.ungrouped_layout.append(ungrouped[0])
     if scan:
         for w in range(len(jobs)):
             jobs[w].runner.scan = scan.copy()
@@ -4339,6 +4378,12 @@ def _run_pipeline(
             ordered,
             workers,
         )
+    if len(ungrouped) > 0:
+        var sinks = List[UngroupedSink](capacity=len(jobs))
+        for j in range(len(jobs)):
+            if len(jobs[j].runner.ungrouped) > 0:
+                sinks.append(jobs[j].runner.ungrouped.pop())
+        return ungrouped_finish(ungrouped[0][], sinks)
     if len(expressions) > 0:
         var merged = List[_StreamReduction]()
         for j in range(len(jobs)):

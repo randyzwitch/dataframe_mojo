@@ -1204,3 +1204,40 @@ def test_metal_pipeline_adjudicates_changed_float_values_on_cpu() raises:
     assert_false('"engine":"metal"' in traced, traced)
     _ = trace^
     _ = configured^
+
+
+def test_metal_calibration_corpus_checks_shared_arithmetic_mean_and_both_null_masks() raises:
+    from benchmarks.bench_metal_calibration import (
+        _table,
+        _chunks,
+        _reference,
+        _expressions,
+    )
+    from dataframe_metal.calibration_capture import _check
+    from dataframe_metal.composition_plan import plan_composition
+
+    for nulls in [False, True]:
+        var example = _reference(32, nulls, 4)
+        assert_equal(
+            example.item(0, "count").int64(), Int64(16 if nulls else 24)
+        )
+        assert_equal(
+            example.item(0, "sales").float32(), Float32(-1 if nulls else 2)
+        )
+        assert_equal(
+            example.item(0, "mean").float64(), -0.0625 if nulls else 1.0 / 12
+        )
+        for rows in [32, 65, 127]:
+            var source = _table(rows, nulls)
+            for chunks in [1, 8]:
+                var frame = _chunks(source, chunks)
+                var plan = (
+                    frame.lazy()
+                    .filter(col("p") > 0)
+                    .select_exprs(_expressions(4))
+                )
+                var matched = plan_composition(plan)
+                assert_true(Bool(matched))
+                assert_equal(len(matched.value().fields), 2)
+                assert_true(matched.value().precise_float)
+                _check(plan.collect(engine="cpu"), _reference(rows, nulls, 4))
