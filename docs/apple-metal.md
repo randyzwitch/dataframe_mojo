@@ -92,6 +92,10 @@ A projection with one arithmetic value and otherwise Float32 column
 aggregates uses a compact typed kernel. It carries no integer reduction
 state; a mean-bearing prefix uses exact bins, while independent trailing
 sums use Float32 compensation. Output aliases retain their requested order.
+Compact projections without a mean specialize by predicate dtype: Int32
+comparisons stay native, and unused predicate branches and state are compiled
+out. Exact-mean projections retain their existing traversal and predicate
+path.
 Supported composition regions stay fused before CPU common-expression
 materialization. The pipeline adapter can also re-inline eligible shared
 binary values immediately below a projection; it declines unused work,
