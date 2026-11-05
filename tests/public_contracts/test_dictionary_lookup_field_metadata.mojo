@@ -17,9 +17,9 @@ def _labelled_source() raises -> DataFrame:
 
 
 def test_dictionary_lookup_does_not_change_public_metadata_conflicts() raises:
-    # Both CAT sides preserve their field owners during dictionary unification.
-    # Four equal right keys force low_cardinality's dictionary path for FULL;
-    # tiny LEFT/FULL direct hash shortcuts do not append/check key metadata.
+    # Both CAT sides preserve their field owners during dictionary unification,
+    # and a full join's coalesced key, which takes rows of both, requires
+    # their metadata to agree, as concatenation does.
     var original = _labelled_source()
     var fresh = DataFrame(
         [

@@ -396,6 +396,9 @@ def join_frames(
     for c in range(self.width()):
         for k in range(len(left_keys)):
             if left_keys[k] == c and sides_mixed and not keep_right_keys:
+                # One output column takes rows of both keys, as a
+                # concatenation does: their Arrow field metadata must agree.
+                self._columns[c]._check_metadata(right._columns[right_keys[k]])
                 coalesced.append(c)
                 right_sources.append(right._columns[right_keys[k]].copy())
     for k in range(len(right_output)):
