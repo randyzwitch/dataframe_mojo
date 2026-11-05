@@ -99,6 +99,10 @@ A projection with one arithmetic value and otherwise Float32 column
 aggregates uses a compact typed kernel. It carries no integer reduction
 state; a mean-bearing prefix uses exact bins, while independent trailing
 sums use Float32 compensation. Output aliases retain their requested order.
+Compact projections without a mean specialize by predicate dtype: Int32
+comparisons stay native, and unused predicate branches and state are compiled
+out. Exact-mean projections retain their existing traversal and predicate
+path.
 Supported composition regions stay fused before CPU common-expression
 materialization. The pipeline adapter can also re-inline eligible shared
 binary values immediately below a projection; it declines unused work,
@@ -146,6 +150,9 @@ native span, preserving each segment's grid stride and partial-output order.
 Separate allocations, gaps, reordered windows and different bitmaps keep their
 separate ranges. Physical input layout still distinguishes calibration keys;
 the changed Metal build identity invalidates earlier submission profiles.
+Batched and ordinary compositions use separate compile-time kernel variants.
+The ordinary variant removes the batch-table lookup and row-base pointer
+arithmetic; both variants preserve the original per-segment reduction grids.
 
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
 every node it supports. `engine="auto"` places supported pipelines by measured
