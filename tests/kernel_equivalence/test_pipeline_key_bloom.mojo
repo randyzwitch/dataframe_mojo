@@ -1,7 +1,6 @@
-"""A join build much smaller than the rows it filters, with keys spread too
-wide for its range to tell, hands the pipeline a bloom filter over its keys
-(`runtime_filter.mojo`); a probe row whose key the filter lacks is dropped
-before any step reads it. Joins against a scalar model: inner and semi joins,
+"""A join build no larger than the rows it filters hands the pipeline a
+bloom filter over its keys (DuckDB's CanUseBloomFilter, `join_filter.mojo`);
+a probe row whose key the filter lacks is dropped before any step reads it. Joins against a scalar model: inner and semi joins,
 Int64 and Int32 keys, nullable probe keys, a second join after the first so
 the filter works on rows an earlier filter kept, a probe filter before the
 joins (on another column, and on the filtered key itself, whose nulls leave
@@ -20,7 +19,6 @@ from dataframe import (
 from dataframe.kernels.runtime_filter import (
     KeyBloom,
     bloom_blocks_for,
-    bloom_mask,
 )
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
@@ -138,7 +136,7 @@ def check(
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var observed = StrategyTrace()
     var result = plan.collect()
-    var took = "dataframe-path: pipeline.key_bloom\n" in observed.text()
+    var took = "dataframe-path: pipeline.join_bloom\n" in observed.text()
     _ = observed^
     _ = trace^
     if expect_bloom:
@@ -180,14 +178,3 @@ def test_a_bloom_filter_never_loses_a_key() raises:
         if bloom.contains(Int64(SPAN + 1 + k)):
             false_hits += 1
     assert_true(false_hits < 500)
-    # The mask holds the rows the filter passes: every third row's key is
-    # in it.
-    var values = List[Int64]()
-    for r in range(1000):
-        values.append(keys[r] if r % 3 == 0 else Int64(SPAN + 7 + r))
-    var series = Series("k", Column[Int64](values^))
-    var found = bloom_mask(series, bloom)
-    assert_true(found[2] >= 334)
-    assert_true(found[2] < 334 + 60)
-    for r in range(0, 1000, 3):
-        assert_true(found[0].value(r))

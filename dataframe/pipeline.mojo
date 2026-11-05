@@ -26,7 +26,7 @@ from std.sys import size_of
 from std.time import perf_counter_ns
 
 from dataframe.kernels.canonical_labels import canonical_labels
-from dataframe.storage.boolean import BoolColumn, both_true, true_count
+from dataframe.storage.boolean import BoolColumn
 from .expr import COL, SELECTOR, Expr
 from dataframe.aggregation.reducer import Reducer
 from .binding import BoundExpr, bind
@@ -108,15 +108,18 @@ from dataframe.joins.hash_table import (
     JoinHashTable,
     ScanStructure,
 )
+from dataframe.joins.join_filter import (
+    BF_CHECK_N,
+    BF_THRESHOLD,
+    JoinFilter,
+    SelectivityStats,
+    finalize_filters,
+    keep_rows,
+    supports_join_filters,
+)
+from dataframe.table_filter import TableFilterSet
 from .join_type import JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_RIGHT, JOIN_SEMI
 from dataframe.kernels.row_encode import encodable
-from dataframe.kernels.runtime_filter import (
-    KeyBloom,
-    LOPSIDED_FACTOR,
-    MAX_BUILD_PROBE_DISTINCT_RATIO,
-    bloom_mask,
-    build_bloom,
-)
 from dataframe.kernels.gather import (
     can_filter_aligned_chunks,
     take_parallel,
@@ -283,53 +286,10 @@ def _row_counted(
     return (rewritten^, valued^, only_counted^)
 
 
-@fieldwise_init
-struct _KeyRange(Copyable, Movable):
-    """A finished join build's key range on a source column: a row
-    whose key is null or outside it joins nothing. `any` is false when the
-    build holds no non-null key, so no row joins."""
-
-    var column: String
-    var low: Int64
-    var high: Int64
-    var any: Bool
-    # A bloom filter over the build's keys, when the build is much smaller
-    # than the rows it filters and its keys a small share of the column's
-    # (`runtime_filter.mojo`): rows whose key it lacks join nothing.
-    var bloom: Optional[ArcPointer[KeyBloom]]
-    # The join's index among the pipeline's steps.
-    var step: Int
-
-
 def _range_key(dtype: DataType) -> Bool:
     """Keys whose values compare as their physical integers."""
     var physical = dtype.physical()
     return physical == DataType.INT64 or physical == DataType.INT32
-
-
-def _int_bounds(series: Series) -> Optional[Tuple[Int64, Int64]]:
-    """The least and greatest non-null value of an integer column (see
-    `_range_key`), or None when every row is null."""
-    var least = Int64.MAX
-    var most = Int64.MIN
-    var any = False
-    var physical = series.dtype().physical()
-    for part in series.chunks():
-        if physical == DataType.INT64:
-            var found = _column_bounds(part._data[Column[Int64]])
-            if found[0]:
-                any = True
-                least = min(least, found[1])
-                most = max(most, found[2])
-        else:
-            var found = _column_bounds(part._data[Column[Int32]])
-            if found[0]:
-                any = True
-                least = min(least, found[1])
-                most = max(most, found[2])
-    if not any:
-        return None
-    return (least, most)
 
 
 def _column_bounds[
@@ -384,14 +344,6 @@ def _column_bounds[
     return (any, smallest, largest)
 
 
-# Rows a worker checks against a bloom filter before it may leave it alone,
-# and the share kept from which it does: DuckDB pauses a bloom filter that
-# keeps a quarter or more of its first 75 vectors
-# (`SelectivityOptionalFilter::BF_CHECK_N`, `BF_THRESHOLD`).
-comptime _BLOOM_TRIAL_ROWS = 75 * 2048
-comptime _BLOOM_PAUSE_SHARE = 0.25
-
-
 def _ensure_zones(series: Series):
     """Compute the segment statistics of each buffer under an integer
     column (see `_range_key`) that has none, before any worker reads them
@@ -421,6 +373,7 @@ def _window_bounds(series: Series) -> Optional[Tuple[Int64, Int64]]:
     return (least, most)
 
 
+
 def _zoned_bounds(part: Series) -> Tuple[Bool, Int64, Int64]:
     """An unchunked integer window's bounds, from its buffer's statistics
     when it has them, else from its rows."""
@@ -437,100 +390,19 @@ def _zoned_bounds(part: Series) -> Tuple[Bool, Int64, Int64]:
     return _column_bounds(part._data[Column[Int32]])
 
 
-def _range_mask(
-    series: Series, low: Int64, high: Int64
-) raises -> Tuple[BoolColumn, Int]:
-    """The rows of an unchunked integer column (see `_range_key`) whose
-    value is valid and within [low, high], as a packed mask, and how many."""
-    var n = len(series)
-    var values = List[UInt8](length=(n + 7) // 8, fill=0)
-    var target = values.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
-    var kept = 0
-    if series.dtype().physical() == DataType.INT64:
-        kept = _range_bits(series._data[Column[Int64]], low, high, target)
-    else:
-        kept = _range_bits(series._data[Column[Int32]], low, high, target)
-    return (BoolColumn(values=values^, bits=List[UInt8](), length=n), kept)
-
-
-def _range_bits[
-    D: DType
-](
-    column: Column[Scalar[D]],
-    low: Int64,
-    high: Int64,
-    target: Pointer[UInt8, MutAnyOrigin],
-) -> Int:
-    var values = column._ptr()
-    var bits = column.unsafe_validity()
-    var n = len(column)
-    var all_valid = column.null_count() == 0
-    var weights = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
-    var kept = 0
-    var i = 0
-    while i + 8 <= n:
-        var v = values.unsafe_load[width=8](i).cast[DType.int64]()
-        var inside = v.ge(SIMD[DType.int64, 8](low)) & v.le(
-            SIMD[DType.int64, 8](high)
-        )
-        if not all_valid:
-            inside &= _valid_lanes(bits, column._offset + i)
-        var byte = (inside.cast[DType.uint8]() * weights).reduce_add()
-        target[unsafe_offset=i >> 3] = byte
-        kept += Int(inside.cast[DType.uint8]().reduce_add())
-        i += 8
-    while i < n:
-        if all_valid or column._valid(i):
-            var v = column._get(i).cast[DType.int64]()
-            if v >= low and v <= high:
-                target[unsafe_offset=i >> 3] |= UInt8(1) << UInt8(i & 7)
-                kept += 1
-        i += 1
-    return kept
-
-
-def _key_bloom(
+def _join_filters(
     frame: DataFrame,
-    name: String,
-    key: Series,
-    low: Int64,
-    high: Int64,
-    equalities: Int,
-    step: Int,
-) raises -> Optional[ArcPointer[KeyBloom]]:
-    """A bloom filter over a build's keys when it pays, by Polars' rules
-    (`join_runtime_filter.rs`): the build holds at most an eighth of the
-    rows it filters, and, where the column's distinct count is known (a
-    loaded table's statistics), at most 0.3 of it."""
-    if equalities != 1:
-        # As DuckDB's, only a join with one equality condition. The first
-        # step takes one too: DuckDB's sits in the probe table's scan
-        # whatever the join's place, and a lookup of one word costs a
-        # fraction of a hash probe (PDS-H q21's semi joins of 6M lineitem
-        # rows against 72K order keys).
-        return None
-    var keys = len(key) - key.null_count()
-    if keys == 0 or LOPSIDED_FACTOR * keys > frame.height():
-        return None
-    var distinct = frame._distinct_count(name)
-    if distinct > 0 and Float64(
-        keys
-    ) > MAX_BUILD_PROBE_DISTINCT_RATIO * Float64(distinct):
-        return None
-    # Keys that fill most of their range are told by the range already.
-    if Float64(keys) * 2.0 >= Float64(high) - Float64(low) + 1.0:
-        return None
-    return build_bloom(key, keys)
-
-
-def _key_ranges(
-    frame: DataFrame, steps: List[Step], joins: List[DataFrame]
-) raises -> List[_KeyRange]:
-    """The key ranges of the inner and semi joins among `steps` whose
-    probe key is a source column no earlier step replaces: every build is
-    finished before the first morsel, so its range can narrow the morsel
-    before any step runs."""
-    var ranges = List[_KeyRange]()
+    steps: List[Step],
+    joins: List[DataFrame],
+    indexes: List[Optional[JoinHashTable]],
+    mut scan: TableFilterSet,
+) raises -> List[JoinFilter]:
+    """DuckDB's join filter pushdown into the source: for each inner, semi
+    or right join among `steps` whose probe key is a source column no
+    earlier step replaces (every build is finished before the first
+    morsel), its statistics filters go into `scan` and its row filters
+    come back (`join_filter.finalize_filters`)."""
+    var filters = List[JoinFilter]()
     # Names the steps so far show for untouched source columns.
     var source = Dict[String, String]()
     for name in frame.columns():
@@ -539,41 +411,30 @@ def _key_ranges(
         ref step = steps[at]
         if step.kind == STEP_JOIN:
             ref build = joins[step.join]
-            if (step.how == JOIN_INNER or step.how == JOIN_SEMI) and len(
-                step.names
-            ) == len(step.right_keys):
+            if (
+                supports_join_filters(step.how)
+                and len(step.names) == len(step.right_keys)
+                and indexes[step.join]
+            ):
+                ref table = indexes[step.join].value()
                 for k in range(len(step.names)):
                     var probe = source.get(step.names[k])
                     if not probe:
                         continue
                     var name = probe.value()
-                    var key = build.column(step.right_keys[k])
-                    if key.dtype() != frame.column(name).dtype():
-                        continue
-                    if not _range_key(key.dtype()):
-                        continue
-                    var bounds = _int_bounds(key)
-                    if bounds:
-                        ranges.append(
-                            _KeyRange(
-                                name,
-                                bounds.value()[0],
-                                bounds.value()[1],
-                                True,
-                                _key_bloom(
-                                    frame,
-                                    name,
-                                    key,
-                                    bounds.value()[0],
-                                    bounds.value()[1],
-                                    len(step.names),
-                                    at,
-                                ),
-                                at,
-                            )
-                        )
-                    else:
-                        ranges.append(_KeyRange(name, 0, 0, False, None, at))
+                    var made = finalize_filters(
+                        name,
+                        frame.column(name).dtype(),
+                        build.column(step.right_keys[k]),
+                        at,
+                        len(step.names),
+                        table.inserted,
+                        frame.height(),
+                        table.build_filtered,
+                        scan,
+                    )
+                    if made:
+                        filters.append(made.take())
             # The build's columns join the output, under their names or
             # with the suffix.
             for column in build.columns():
@@ -593,7 +454,7 @@ def _key_ranges(
             for e in step.exprs:
                 if e._name in source:
                     _ = source.pop(e._name)
-    return ranges^
+    return filters^
 
 
 struct _Columns(Copyable, Movable):
@@ -2618,11 +2479,12 @@ struct _PipelineJob(Job):
     var rows: Int
     # Rows fed, then each step's input and output rows, for the report.
     var counts: List[Int]
-    # The join builds' key ranges on source columns (`_key_ranges`).
-    var key_ranges: List[_KeyRange]
-    # Per range with a bloom filter: this worker's rows checked and kept.
-    var bloom_checked: List[Int]
-    var bloom_kept: List[Int]
+    # The join builds' filters on source columns (`_join_filters`): row
+    # filters, with this worker's selectivity of each, and the statistics
+    # filters with their answers per vector.
+    var join_filters: List[JoinFilter]
+    var join_stats: List[SelectivityStats]
+    var join_scan: Optional[ArcPointer[ScanFilterInfo]]
     # Per step, the address of a right or full join's flags of the build
     # rows any morsel matched (one byte a build row, in the step's shared
     # table; `JoinHashTable.found_address`), 0 for other steps.
@@ -2674,16 +2536,20 @@ struct _PipelineJob(Job):
         derived_masks: List[List[Int64]],
         derive_order: List[Int],
         workers: Int,
-        key_ranges: List[_KeyRange],
+        join_filters: List[JoinFilter],
+        join_scan: Optional[ArcPointer[ScanFilterInfo]],
         schemas: ArcPointer[List[DataFrame]],
         templates: ArcPointer[List[Optional[_VectorStep]]],
     ) raises:
         self.runner = _ChunkRunner(
             steps, schemas, joins, indexes, True, templates
         )
-        self.key_ranges = key_ranges.copy()
-        self.bloom_checked = List[Int](length=len(key_ranges), fill=0)
-        self.bloom_kept = List[Int](length=len(key_ranges), fill=0)
+        self.join_filters = join_filters.copy()
+        self.join_stats = List[SelectivityStats](
+            length=len(join_filters),
+            fill=SelectivityStats.of(BF_CHECK_N, BF_THRESHOLD),
+        )
+        self.join_scan = join_scan
         # A right or full join flags the build rows it matched in its
         # shared table, as DuckDB flags them in the build's rows.
         self.marks = List[Int](capacity=len(steps))
@@ -2829,72 +2695,65 @@ struct _PipelineJob(Job):
             self.sinks[s].sink(keys, inputs, k << 32)
         self.rows += rows
 
-    def _key_mask(
-        mut self, frame: DataFrame
-    ) raises -> Tuple[Bool, Optional[BoolColumn]]:
-        """The rows of a fresh morsel inside every join build's key range
-        and bloom filter: False when none is, else their mask (None: every
-        row). A morsel whose keys all fall outside a range is skipped
-        whole, and one whose keys all fall inside is left as it is, both
-        told by its keys' least and greatest values (a zone map); a morsel
-        straddling the range is filtered row by row. The rows kept become
-        the selection the morsel's chunks start from, read through it
-        whatever share it keeps, as DuckDB's dynamic join filters are
-        table filters of the probe's scan."""
-        var mask = Optional[BoolColumn]()
-        for k in range(len(self.key_ranges)):
-            ref r = self.key_ranges[k]
-            if not r.any:
+    def _join_rows(
+        mut self, frame: DataFrame, offset: Int, length: Int
+    ) raises -> Tuple[Bool, Optional[List[Int]]]:
+        """The rows of a fresh morsel (`frame`, at source row `offset`) the
+        join filters keep: False when none is, else their rows (None:
+        every row). Vectors the statistics filters rule out are not read
+        (CheckZonemapSegments); the row filters run vector by vector, a
+        bloom filter only while its selectivity keeps it active."""
+        for f in self.join_filters:
+            if not f.any:
                 return (False, None)
-            var column = frame.column(r.column)
-            var bounds = _window_bounds(column)
-            if not bounds:
+        var vectors = Optional[List[Int]]()
+        if self.join_scan:
+            vectors = _vectors_kept(self.join_scan.value()[], offset, length)
+            if vectors and len(vectors.value()) == 0:
+                trace_path("pipeline.join_filter_skip")
                 return (False, None)
-            var least = bounds.value()[0]
-            var most = bounds.value()[1]
-            if most < r.low or least > r.high:
-                return (False, None)
-            if not (least >= r.low and most <= r.high):
-                var narrowed = _range_mask(_unchunked(column), r.low, r.high)
-                if narrowed[1] == 0:
-                    return (False, None)
-                if mask:
-                    mask = both_true(mask.value(), narrowed[0])
-                    if true_count(mask.value()) == 0:
-                        return (False, None)
-                else:
-                    mask = narrowed[0].copy()
-            if not r.bloom:
-                continue
-            var shared = r.bloom.value().copy()
-            # Rows whose key the bloom filter lacks join nothing. It is
-            # left alone once this worker's first rows show it keeps a
-            # quarter or more of what it looks at.
-            if self.bloom_checked[k] >= _BLOOM_TRIAL_ROWS and Float64(
-                self.bloom_kept[k]
-            ) >= _BLOOM_PAUSE_SHARE * Float64(self.bloom_checked[k]):
-                continue
-            var plain = (
-                mask
-                and mask.value()._offset == 0
-                and len(mask.value()._bits[]) == 0
-            )
-            # Only the rows still selected are looked up and counted: what
-            # the filter prunes is what earlier filters left.
-            var found = bloom_mask(
-                _unchunked(column),
-                shared[],
-                mask.copy() if plain else Optional[BoolColumn](),
-            )
-            self.bloom_checked[k] += found[1]
-            self.bloom_kept[k] += found[2]
-            if found[2] == 0:
-                return (False, None)
-            if mask and not plain:
-                mask = both_true(mask.value(), found[0])
+        var rowwise = False
+        for f in self.join_filters:
+            rowwise = rowwise or f.equal or Bool(f.bloom)
+        if not rowwise:
+            if not vectors:
+                return (True, None)
+            return (True, _rows_in_vectors(None, vectors.value(), length))
+        var keys = List[Series](capacity=len(self.join_filters))
+        for f in self.join_filters:
+            if f.equal or f.bloom:
+                keys.append(_unchunked(frame.column(f.column)))
             else:
-                mask = found[0].copy()
-        return (True, mask^)
+                keys.append(Series("", Column[Int64](List[Int64]())))
+        var starts = List[Int]()
+        if vectors:
+            starts = vectors.value().copy()
+        else:
+            for at in range(0, length, STATISTICS_VECTOR_SIZE):
+                starts.append(at)
+        var rows = List[Int]()
+        var keep = List[UInt8](length=STATISTICS_VECTOR_SIZE, fill=1)
+        for start in starts:
+            var end = min(length, start + STATISTICS_VECTOR_SIZE)
+            var at = keep.unsafe_ptr()
+            for i in range(end - start):
+                at[unsafe_offset=i] = 1
+            for k in range(len(self.join_filters)):
+                ref f = self.join_filters[k]
+                if f.equal:
+                    _ = keep_rows(f, keys[k], start, end, keep)
+                elif f.bloom:
+                    if not self.join_stats[k].active:
+                        self.join_stats[k].update(0, 0)
+                        continue
+                    var counted = keep_rows(f, keys[k], start, end, keep)
+                    self.join_stats[k].update(counted[1], counted[0])
+            for i in range(end - start):
+                if at[unsafe_offset=i] != 0:
+                    rows.append(start + i)
+        if len(rows) == length:
+            return (True, None)
+        return (True, rows^)
 
     def _marks(self) -> List[Int]:
         """Per step, the address of a right or full join's matched-row
@@ -2960,14 +2819,10 @@ struct _PipelineJob(Job):
                 if vectors and len(vectors.value()) == 0:
                     trace_path("pipeline.top_dynamic_skip")
                     continue
-            var keyed = self._key_mask(morsel)
+            var keyed = self._join_rows(morsel, offset, length)
             if not keyed[0]:
                 continue
-            var rows = Optional[List[Int]]()
-            if keyed[1]:
-                rows = _mask_rows(
-                    keyed[1].value(), true_count(keyed[1].value())
-                )
+            var rows = keyed[1].copy()
             if vectors:
                 rows = _rows_in_vectors(rows, vectors.value(), length)
             var source = _Columns.of_frame(self.runner.arena, morsel)
@@ -3195,33 +3050,6 @@ struct _PipelineJob(Job):
         else:
             self.parts.append(columns.whole(self.runner.arena, schema))
             self.sequences.append(k)
-
-
-def _mask_rows(mask: BoolColumn, count: Int) -> List[Int]:
-    """The rows a morsel's mask keeps (`count` of them), in order, found on
-    this worker a byte at a time: `true_rows` splits one mask into jobs,
-    which a morsel's worker must not start."""
-    var n = len(mask)
-    var rows = List[Int](capacity=count)
-    if mask._offset % 8 == 0:
-        var values = mask._data[].unsafe_ptr().unsafe_offset(mask._offset // 8)
-        var all_valid = len(mask._bits[]) == 0
-        var valid = mask._bits[].unsafe_ptr().unsafe_offset(mask._offset // 8)
-        for j in range(n // 8):
-            var byte = values[unsafe_offset=j]
-            if not all_valid:
-                byte &= valid[unsafe_offset=j]
-            while byte != 0:
-                rows.append(8 * j + Int(count_trailing_zeros(byte)))
-                byte &= byte - 1
-        for i in range(8 * (n // 8), n):
-            if mask._valid(i) and mask._get(i):
-                rows.append(i)
-        return rows^
-    for i in range(n):
-        if mask._valid(i) and mask._get(i):
-            rows.append(i)
-    return rows^
 
 
 def _unchunked(column: Series) raises -> Series:
@@ -4107,15 +3935,23 @@ def _run_pipeline(
     )
     top_filter.reordered = Bool(top_ranges)
     top_filter.row_ids = top_row_ids
-    var key_ranges = _key_ranges(frame, steps, joins[])
-    if len(key_ranges) > 0:
-        trace_path("pipeline.key_range")
-    for r in key_ranges:
-        if r.bloom:
-            trace_path("pipeline.key_bloom")
+    var join_scan_filters = TableFilterSet()
+    var join_filters = _join_filters(
+        frame, steps, joins[], indexes[], join_scan_filters
+    )
+    if len(join_filters) > 0:
+        trace_path("pipeline.join_filter")
+    for f in join_filters:
+        if f.bloom:
+            trace_path("pipeline.join_bloom")
             break
-    for r in key_ranges:
-        _ensure_zones(frame.column(r.column))
+    for f in join_scan_filters.filters:
+        _ensure_zones(frame.column(f.column))
+    var join_scan = Optional[ArcPointer[ScanFilterInfo]]()
+    if join_scan_filters.has_filters():
+        join_scan = ArcPointer(
+            ScanFilterInfo(join_scan_filters, frame._columns)
+        )
     # A right or full join's flags of matched build rows start clear.
     for step in steps:
         if (
@@ -4161,7 +3997,8 @@ def _run_pipeline(
                 derived_masks,
                 derive_order,
                 workers,
-                key_ranges,
+                join_filters,
+                join_scan,
                 schemas,
                 templates,
             )
