@@ -289,6 +289,35 @@ def _mixed_cases(nulls: Bool) raises -> List[LazyFrame]:
     return queries^
 
 
+def test_mixed_aggregate_calibration_reference_matches_cpu() raises:
+    from benchmarks.bench_metal_calibration import (
+        _table,
+        _chunks,
+        _reference,
+        _expressions,
+    )
+    from dataframe_metal.calibration_capture import _check
+
+    for rows in [32, 65, 127]:
+        for nulls in [False, True]:
+            var base = _table(rows, nulls)
+            for chunks in [1, 8]:
+                var frame = _chunks(base, chunks)
+                for mode in range(5, 8):
+                    var query = (
+                        frame.lazy()
+                        .filter(col("p") > 0)
+                        .select_exprs(_expressions(mode))
+                    )
+                    assert_true(
+                        region_key(query).startswith("mixed_reductions:v1:")
+                    )
+                    _check(
+                        query.collect(engine="cpu"),
+                        _reference(rows, nulls, mode),
+                    )
+
+
 def test_mixed_aggregate_schema_shares_states_and_preserves_output_order() raises:
     from dataframe_metal.composition_plan import (
         plan_composition,

@@ -120,8 +120,9 @@ state. Empty or all-null inputs return typed nulls. Float32 extrema compare
 ordered integer keys, preserving subnormals and infinities without floating
 arithmetic on the GPU. NaNs are skipped when a numeric value exists;
 all-NaN fields and extrema tied between opposite zero signs use CPU
-adjudication to preserve the CPU's payload and tie behavior. Arithmetic
-MIN/MAX on arithmetic expressions continues to run on CPU. These regions use `native_extrema:v1:` calibration keys and remain
+adjudication to preserve the CPU's payload and tie behavior.
+`min` and `max` on arithmetic expressions continue to run on CPU. These regions
+use `native_extrema:v1:` calibration keys and remain
 on CPU in automatic mode until measured for the current build and layout.
 
 Float32 range predicates use ordered integer keys when a bound is near
@@ -172,11 +173,12 @@ python3 scripts/metal_calibration.py build/metal-capture.jsonl --output-dir buil
 export DATAFRAME_HANDOFF_CALIBRATION=/absolute/path/printed/by/the/fitter.json
 ```
 
-The built-in capture uses 50M, 75M and 100M rows, five representative operator
+The built-in capture uses 50M, 75M and 100M rows, eight representative operator
 shapes, contiguous/eight-chunk inputs and independent nullable masks. Optional
 row counts follow the repetition count. It checks answers against a periodic
 scalar oracle, includes shared Float32 arithmetic SUM/COUNT/MEAN and mixed
-Float32-mean bundles, alternates CPU/Metal timing order and records unsupported or
+Float32-mean bundles and mixed MIN/MAX/SUM/COUNT/MEAN projections. It alternates
+CPU/Metal timing order and records unsupported or
 CPU-adjudicated cases explicitly. Every Metal timing requires direct GPU
 execution. These are development calibration workloads, not external-suite
 performance results.
