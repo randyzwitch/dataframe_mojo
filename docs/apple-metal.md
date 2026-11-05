@@ -88,6 +88,16 @@ and possible gradual underflow use CPU adjudication because Metal arithmetic
 can flush these values to zero before reduction. The existing single arithmetic
 SUM and pure column aggregate paths keep their specialized kernels.
 
+A projection with one arithmetic value and otherwise Float32 column
+aggregates uses a compact typed kernel. It carries no integer reduction
+state; a mean-bearing prefix uses exact bins, while independent trailing
+sums use Float32 compensation. Output aliases retain their requested order.
+Supported composition regions stay fused before CPU common-expression
+materialization. The pipeline adapter can also re-inline eligible shared
+binary values immediately below a projection; it declines unused work,
+dependencies and expressions evaluated before filters. These are schema-only
+transformations in the Metal backend; the CPU optimizer is unchanged.
+
 New fused projections have separate `fused_reductions:` calibration keys;
 without a measurement they stay on CPU in automatic mode. Float64 input
 columns and other operators continue to run on CPU.

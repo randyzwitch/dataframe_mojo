@@ -20,6 +20,7 @@ struct ValueField(Copyable, Movable):
     var integer: Int64
     var floating: Float32
     var needs_sum: Bool
+    var needs_mean: Bool
     var left_input: Int
     var right_input: Int
 
@@ -116,6 +117,7 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
                 0,
                 0,
                 False,
+                False,
                 -1,
                 -1,
             )
@@ -135,6 +137,7 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
                 p.integer,
                 p.floating,
                 False,
+                False,
                 -1,
                 -1,
             )
@@ -152,8 +155,10 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
             fields.append(value^)
         if aggregate.op != COUNT:
             fields[slot].needs_sum = True
-        if aggregate.op == MEAN and fields[slot].dtype == DataType.FLOAT32:
-            precise = True
+        if aggregate.op == MEAN:
+            fields[slot].needs_mean = True
+            if fields[slot].dtype == DataType.FLOAT32:
+                precise = True
         outputs.append(
             ReductionOutput(
                 slot, expression._name.copy(), aggregate.op, aggregate.min_count
@@ -161,12 +166,28 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
         )
     if not arithmetic:
         return None
-    if precise:
+    var single_float = True
+    var binary_slot = -1
+    var binary_count = 0
+    for i in range(len(fields)):
+        single_float = single_float and fields[i].dtype == DataType.FLOAT32
+        if fields[i].op != COL:
+            binary_slot = i
+            binary_count += 1
+    single_float = single_float and binary_count == 1
+    if precise or single_float:
         var order = List[Int]()
-        for floating in [True, False]:
-            for i in range(len(fields)):
-                if (fields[i].dtype == DataType.FLOAT32) == floating:
-                    order.append(i)
+        if single_float:
+            order.append(binary_slot)
+            for mean in [True, False]:
+                for i in range(len(fields)):
+                    if i != binary_slot and fields[i].needs_mean == mean:
+                        order.append(i)
+        else:
+            for floating in [True, False]:
+                for i in range(len(fields)):
+                    if (fields[i].dtype == DataType.FLOAT32) == floating:
+                        order.append(i)
         var packed = List[ValueField]()
         var remap = List[Int](length=len(fields), fill=0)
         for i in range(len(order)):
@@ -211,5 +232,16 @@ def composition_key(plan: Composition) -> String:
             + ":literal"
             + String(field.literal_side)
             + (":sum" if field.needs_sum else ":count")
+            + (":mean" if field.needs_mean else "")
         )
-    return key + (":exact_float" if plan.precise_float else ":native")
+    key += ":exact_float" if plan.precise_float else ":native"
+    return key + (":single_float_v1" if single_float_composition(plan) else "")
+
+
+def single_float_composition(plan: Composition) -> Bool:
+    var arithmetic = 0
+    for field in plan.fields:
+        if field.dtype != DataType.FLOAT32:
+            return False
+        arithmetic += Int(field.op != COL)
+    return arithmetic == 1
