@@ -3530,9 +3530,10 @@ def _over_mapped[
         if value.dtype() != bound.dtypes[node.left]:
             value = value.cast(bound.dtypes[node.left])
         parts.append(value^)
+    var row_partitions = layout.row_partitions()
     var ids = List[Int](capacity=height)
     for row in range(height):
-        ids.append(appearance[layout.row_partition[row]])
+        ids.append(appearance[row_partitions[row]])
     var prototype = parts[0].slice(0, 0) if len(parts) > 0 else _empty_output(
         inner, columns, len(inner.expr._nodes) - 1
     )
@@ -3708,7 +3709,7 @@ def _over[
         _ = owned^
         return combined.rechunk() if combined.is_chunked() else combined^
     var rows = layout.inverse.copy() if local.shape() == ROWS else (
-        layout.row_partition.copy()
+        layout.row_partitions()
     )
     _ = owned^
     var spread = take_parallel([combined^], rows^, lanes)

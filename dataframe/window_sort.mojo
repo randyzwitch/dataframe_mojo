@@ -88,8 +88,6 @@ struct WindowLayout(Movable):
     var count: Int
     # Partition index bounds of the hash groups (groups + 1 entries).
     var group_parts: List[Int]
-    # Input row -> its partition's index (in sorted partition order).
-    var row_partition: List[Int]
 
     def __init__(out self):
         self.order = List[Int]()
@@ -99,7 +97,17 @@ struct WindowLayout(Movable):
         self.starts = List[Int]()
         self.count = 0
         self.group_parts = List[Int]()
-        self.row_partition = List[Int]()
+
+    def row_partitions(self) -> List[Int]:
+        """Input row -> its partition's index (in sorted partition order),
+        for results with one value per partition."""
+        var rows = List[Int](unsafe_uninit_length=len(self.order))
+        var rp = rows.unsafe_ptr()
+        var op = self.order.unsafe_ptr()
+        for p in range(self.count):
+            for k in range(self.starts[p], self.starts[p + 1]):
+                rp[unsafe_offset=op[unsafe_offset=k]] = p
+        return rows^
 
     def partition_ids(self) -> List[Int]:
         """Each sorted position's partition index."""
@@ -806,10 +814,8 @@ def window_layout(
     else:
         finish[0].run()
     layout.in_place = True
-    var first = List[Int](capacity=len(finish))
     for j in range(len(finish)):
         layout.in_place = layout.in_place and finish[j].in_place
-        first.append(len(layout.starts) - 1)
         layout.starts.extend(Span(finish[j].starts))
     layout.count = len(layout.starts)
     layout.starts.append(height)
@@ -820,19 +826,15 @@ def window_layout(
             layout.group_parts.append(p)
             g += 1
     layout.group_parts.append(layout.count)
-    layout.row_partition = List[Int](unsafe_uninit_length=height)
     if not layout.in_place:
+        # Each row's sorted position, to put row results back in order.
         layout.inverse = List[Int](unsafe_uninit_length=height)
-    for j in range(len(finish)):
-        finish[j].partition = first[j]
-        finish[j].row_partition = Int(layout.row_partition.unsafe_ptr())
-        finish[j].inverse = 0 if layout.in_place else Int(
-            layout.inverse.unsafe_ptr()
-        )
-    if len(finish) > 1:
-        run_jobs(finish)
-    else:
-        finish[0].run()
+        for j in range(len(finish)):
+            finish[j].inverse = Int(layout.inverse.unsafe_ptr())
+        if len(finish) > 1:
+            run_jobs(finish)
+        else:
+            finish[0].run()
     layout.order = order^
     layout.flags = flags^
     return layout^
@@ -840,8 +842,8 @@ def window_layout(
 
 struct _FinishJob(Job):
     """One range of sorted positions [lo, hi): first its partition starts
-    and whether order is the identity there; then (`row_partition` set)
-    each row's partition index and sorted position."""
+    and whether order is the identity there; then (`inverse` set) each
+    row's sorted position."""
 
     var flags: Int
     var order: Int
@@ -849,9 +851,7 @@ struct _FinishJob(Job):
     var hi: Int
     var starts: List[Int]
     var in_place: Bool
-    # Second pass: the partition holding lo, and the outputs.
-    var partition: Int
-    var row_partition: Int
+    # Second pass: the output.
     var inverse: Int
 
     def __init__(out self, flags: Int, order: Int, lo: Int, hi: Int):
@@ -861,14 +861,12 @@ struct _FinishJob(Job):
         self.hi = hi
         self.starts = List[Int]()
         self.in_place = True
-        self.partition = 0
-        self.row_partition = 0
         self.inverse = 0
 
     def run(mut self) raises:
         var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.flags)
         var order = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
-        if self.row_partition == 0:
+        if self.inverse == 0:
             var identity = True
             for k in range(self.lo, self.hi):
                 if (flags[unsafe_offset=k] & PARTITION_START) != 0:
@@ -876,25 +874,11 @@ struct _FinishJob(Job):
                 identity = identity and order[unsafe_offset=k] == k
             self.in_place = identity
             return
-        var rows = Pointer[Int, MutAnyOrigin](
-            unsafe_from_address=self.row_partition
-        )
-        var p = self.partition
-        if self.inverse == 0:
-            for k in range(self.lo, self.hi):
-                if (flags[unsafe_offset=k] & PARTITION_START) != 0:
-                    p += 1
-                rows[unsafe_offset=order[unsafe_offset=k]] = p
-            return
         var inverse = Pointer[Int, MutAnyOrigin](
             unsafe_from_address=self.inverse
         )
         for k in range(self.lo, self.hi):
-            if (flags[unsafe_offset=k] & PARTITION_START) != 0:
-                p += 1
-            var row = order[unsafe_offset=k]
-            rows[unsafe_offset=row] = p
-            inverse[unsafe_offset=row] = k
+            inverse[unsafe_offset=order[unsafe_offset=k]] = k
 
 
 # Rank methods (rank()'s `method`).
