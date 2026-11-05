@@ -434,13 +434,23 @@ struct _LocalNumberJob(Job):
     var ids: Int
     var firsts: List[Int]
     var count: Int
+    # Local numbers by merge partition (the hash's top `bits` bits), as a
+    # radix-partitioned sink keeps its table.
+    var bits: Int
+    var by_part: List[List[Int]]
     # Second pass: local number -> (merge partition << 40 | number there),
     # and each merge partition's first global number.
     var codes: List[Int]
     var bases: Int
 
     def __init__(
-        out self, keys: List[Series], hashes: Int, lo: Int, hi: Int, ids: Int
+        out self,
+        keys: List[Series],
+        hashes: Int,
+        lo: Int,
+        hi: Int,
+        ids: Int,
+        bits: Int,
     ):
         self.keys = keys.copy()
         self.hashes = hashes
@@ -449,6 +459,8 @@ struct _LocalNumberJob(Job):
         self.ids = ids
         self.firsts = List[Int]()
         self.count = 0
+        self.bits = bits
+        self.by_part = List[List[Int]]()
         self.codes = List[Int]()
         self.bases = 0
 
@@ -466,8 +478,21 @@ struct _LocalNumberJob(Job):
                 self.ids + self.lo * size_of[Int](),
                 self.firsts,
             )
+            var hashes = Pointer[UInt64, MutAnyOrigin](
+                unsafe_from_address=self.hashes
+            )
+            for _ in range(1 << self.bits):
+                self.by_part.append(List[Int]())
+            var shift = UInt64(64 - self.bits)
             for g in range(self.count):
                 self.firsts[g] += self.lo
+                if self.bits > 0:
+                    var mixed = (
+                        hashes[unsafe_offset=self.firsts[g]]
+                        * 0x9E3779B97F4A7C15
+                    )
+                    self.by_part[Int(mixed >> shift)].append(g)
+            self.codes = List[Int](length=self.count, fill=0)
             return
         var bases = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.bases)
         var codes = self.codes.unsafe_ptr()
@@ -521,12 +546,10 @@ struct _MergeJob(Job):
         var first_hashes = List[UInt64]()
         for j in range(self.count):
             ref job = locals[unsafe_offset=j]
-            for g in range(job.count):
+            for g in job.by_part[self.part]:
                 var row = job.firsts[g]
                 var hash = hashes[unsafe_offset=row]
                 var mixed = hash * 0x9E3779B97F4A7C15
-                if Int(mixed >> self.shift) != self.part:
-                    continue
                 var at = Int((mixed << 8) >> shift)
                 while True:
                     var slot = slots[at]
@@ -593,6 +616,14 @@ def partition_ids(
     var sink = sink_threads(height)
     var partitioner = Partitioner(keys, sink)
     var bounds = partitions(height, sink, STANDARD_VECTOR_SIZE)
+    var morsels = 0
+    for w in range(sink):
+        if bounds[w + 1] > bounds[w]:
+            morsels += 1
+    # One merge partition per morsel, by the hash's top bits.
+    var bits = 0
+    while (1 << bits) < morsels:
+        bits += 1
     var jobs = List[_LocalNumberJob](capacity=sink)
     for w in range(sink):
         if bounds[w + 1] > bounds[w]:
@@ -603,6 +634,7 @@ def partition_ids(
                     bounds[w],
                     bounds[w + 1],
                     Int(ids.unsafe_ptr()),
+                    bits,
                 )
             )
     if len(jobs) == 1:
@@ -611,13 +643,8 @@ def partition_ids(
         _ = partitioner^
         return jobs[0].count
     run_jobs(jobs)
-    # Combine: one merge partition per morsel, by the hash's top bits.
-    var bits = 0
-    while (1 << bits) < len(jobs):
-        bits += 1
+    # Combine the morsels' dictionaries partition by partition.
     var shift = UInt64(64 - bits)
-    for j in range(len(jobs)):
-        jobs[j].codes = List[Int](length=jobs[j].count, fill=0)
     var merges = List[_MergeJob](capacity=1 << bits)
     for p in range(1 << bits):
         merges.append(
