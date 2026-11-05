@@ -27,7 +27,7 @@ from std.time import perf_counter_ns
 
 from dataframe.kernels.canonical_labels import canonical_labels
 from dataframe.storage.boolean import BoolColumn, both_true, true_count
-from .expr import COL, SELECTOR, Expr
+from .expr import COL, SELECTOR, WHEN, Expr
 from dataframe.aggregation.reducer import Reducer
 from .binding import BoundExpr, bind
 from dataframe.storage.column import Column, _copy_validity
@@ -267,7 +267,18 @@ def _extract_aggregate_inputs(
         for i in range(len(nodes)):
             if not is_reduction(nodes[i].op):
                 continue
+            # An input `when(c).then(x)` with no otherwise is DuckDB's
+            # aggregate FILTER (WHERE c) over x: its condition and its
+            # value are projected each on its own, as the aggregate's
+            # filter and child are (`bound_aggr.GetFilter()`).
+            var targets = List[Int]()
             for child in node_children(nodes[i]):
+                if nodes[child].op == WHEN and nodes[child].extra < 0:
+                    targets.append(nodes[child].left)
+                    targets.append(nodes[child].right)
+                else:
+                    targets.append(child)
+            for child in targets:
                 if nodes[child].op == COL:
                     continue
                 var input = subtree(e, child)
