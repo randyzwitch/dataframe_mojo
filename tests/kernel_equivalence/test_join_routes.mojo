@@ -161,4 +161,3 @@ def test_unordered_left_join_on_a_smaller_left_emits_unmatched_left_rows_after_t
                 var id = joined.item(row, "l").int64()
                 assert_true(id >= last)
                 last = id
-

@@ -61,4 +61,3 @@ def test_offsets_and_views_hash_every_length_alike() raises:
         hashes([first.copy(), offsets.copy()]),
         hashes([first.copy(), views.copy()]),
     )
-

@@ -374,7 +374,13 @@ def _same_text(a: Int, b: Int) -> Bool:
 
 @always_inline
 def _same_keys(
-    kinds: Int, offsets: Int, fields: Int, key_bytes: Int, text: Bool, a: Int, b: Int
+    kinds: Int,
+    offsets: Int,
+    fields: Int,
+    key_bytes: Int,
+    text: Bool,
+    a: Int,
+    b: Int,
 ) -> Bool:
     """Whether the key fields at `a` and `b` are equal (RowMatcher's
     equality over every key column). `kinds` and `offsets` address the
@@ -527,7 +533,9 @@ struct _InsertJob(Job):
         var fields = len(self.layout.kinds)
         var key_bytes = self.layout.key_bytes
         var text = self.layout.text
-        var table = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=self.entries)
+        var table = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=self.entries
+        )
         # Descending on one thread, so every chain lists its rows in
         # ascending order.
         var r = self.end - 1
@@ -740,8 +748,7 @@ struct JoinHashTable(Copyable, Movable):
         for key in keys:
             if key.dtype().is_nested():
                 raise Error(
-                    "list and struct columns cannot be join keys: "
-                    + key.name()
+                    "list and struct columns cannot be join keys: " + key.name()
                 )
             unchunked.append(key.rechunk() if key.is_chunked() else key.copy())
         self.layout = KeyLayout.of(unchunked)
@@ -1124,7 +1131,10 @@ struct ScanStructure(Movable):
                 var p = heads[unsafe_offset=i]
                 if p == 0:
                     continue
-                if found[unsafe_offset=Int(_load32(Int(p) + index_offset))] != 0:
+                if (
+                    found[unsafe_offset=Int(_load32(Int(p) + index_offset))]
+                    != 0
+                ):
                     continue
                 while p != 0:
                     found[unsafe_offset=Int(_load32(Int(p) + index_offset))] = 1

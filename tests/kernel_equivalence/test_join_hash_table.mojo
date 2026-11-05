@@ -114,7 +114,8 @@ def test_eager_join_builds_the_smaller_side_and_keeps_order_when_asked() raises:
             right,
             left_on=["k"],
             right_on=["k"],
-            how=0 if how == "inner" else (
+            how=0 if how
+            == "inner" else (
                 1 if how == "left" else (4 if how == "semi" else 5)
             ),
             keep_order=True,

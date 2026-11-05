@@ -284,9 +284,7 @@ def join_frames(
     var probe_left = how != JOIN_RIGHT
     var left_cost = build_size(self)
     var right_cost = build_size(right)
-    var flip = (
-        right_cost > left_cost if probe_left else left_cost > right_cost
-    )
+    var flip = right_cost > left_cost if probe_left else left_cost > right_cost
     if flip:
         trace_path("join.build_flipped")
         probe_left = not probe_left

@@ -154,9 +154,7 @@ def _projected_row(
             "b",
         )
     if pair.right < 0:
-        assert_true(
-            actual.item(row, "f_right").is_null()
-        )
+        assert_true(actual.item(row, "f_right").is_null())
     else:
         assert_reference_cell(
             actual.item(row, "f_right"),
