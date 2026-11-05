@@ -21,6 +21,13 @@ from dataframe.sorting.sort_key import (
 from dataframe.sorting.algorithms import SortKeys
 from dataframe.sorting.top_n import TopNBoundary, TopNHeap
 from dataframe.table_filter import DynamicFilterData, set_dynamic_value
+from dataframe.vector.data_chunk import (
+    ColumnArena,
+    DataChunk,
+    gather_series,
+    to_series,
+)
+from dataframe.vector.types import SelectionVector
 from std.collections import Optional
 from std.memory import ArcPointer
 
@@ -101,11 +108,68 @@ struct TopNSink(Movable):
         else:
             self._sink[3, False](frame)
 
-    def _sink[W: Int, VAR: Bool](mut self, frame: DataFrame) raises:
+    def sink_chunk(
+        mut self, mut chunk: DataChunk, mut arena: ColumnArena
+    ) raises:
+        """PhysicalTopN::Sink over one chunk whose columns are the schema's:
+        the key columns are read out of the chunk, and only the rows that
+        enter the heap are copied into the payload (AddLargeHeap)."""
+        if self.heap.heap_size == 0 or chunk.count == 0:
+            return
+        var keys = List[Series](capacity=len(self.names))
+        for name in self.names:
+            var c = self.schema._index(name)
+            keys.append(
+                to_series(
+                    chunk, c, arena, name, self.schema._columns[c].dtype()
+                )
+            )
+        self.layout.rebind(keys)
+        var matches: List[Int]
+        if self.layout.variable:
+            matches = self._enter[1, True](chunk.count)
+        elif self.layout.words == 1:
+            matches = self._enter[1, False](chunk.count)
+        elif self.layout.words == 2:
+            matches = self._enter[2, False](chunk.count)
+        else:
+            matches = self._enter[3, False](chunk.count)
+        if len(matches) > 0:
+            var rows = List[UInt32](unsafe_uninit_length=len(matches))
+            for i in range(len(matches)):
+                rows[i] = UInt32(matches[i])
+            var selection = SelectionVector(Int(rows.unsafe_ptr()))
+            var columns = List[Series](capacity=self.schema.width())
+            for c in range(self.schema.width()):
+                columns.append(
+                    gather_series(
+                        chunk,
+                        c,
+                        arena,
+                        selection,
+                        len(matches),
+                        self.schema._columns[c].name(),
+                        self.schema._columns[c].dtype(),
+                    )
+                )
+            _ = rows^
+            self.parts.append(DataFrame(columns^))
+            self.payload_rows += len(matches)
+        if self.layout.variable:
+            self._settle[1, True]()
+        elif self.layout.words == 1:
+            self._settle[1, False]()
+        elif self.layout.words == 2:
+            self._settle[2, False]()
+        else:
+            self._settle[3, False]()
+
+    def _enter[W: Int, VAR: Bool](mut self, n: Int) raises -> List[Int]:
+        """The bound key's rows that enter the heap, a vector at a time
+        (their payload positions follow the payload so far)."""
         self.heap.view.refresh[W, VAR](self.boundary)
         var matches = List[Int]()
         var at = 0
-        var n = frame.height()
         var prefixes = List[UInt64]()
         while at < n:
             var end = min(n, at + STANDARD_VECTOR_SIZE)
@@ -114,23 +178,21 @@ struct TopNSink(Movable):
             if key_prefixes(self.layout, at, end, prefixes):
                 entering = self.heap.entering[W, VAR](prefixes, end - at)
             if entering and len(entering.value()) == 0:
-                # No row of the vector can be in the result.
                 at = end
                 continue
             if entering and len(entering.value()) < end - at:
-                # Sort keys for the rows that pass alone.
                 block = encode_selected(self.layout, at, entering.value())
             else:
                 block = encode_keys(self.layout, at, end)
             _sink_rows[W, VAR](self.heap, block, self.payload_rows, matches)
             _ = block^
             at = end
-        if len(matches) > 0:
-            self.parts.append(frame.take(matches))
-            self.payload_rows += len(matches)
+        return matches^
+
+    def _settle[W: Int, VAR: Bool](mut self) raises:
+        """After rows enter: the shared boundary and the scan's dynamic
+        filter from it, and Reduce once the payload is large."""
         if self.heap.publish[W, VAR](self.boundary) and self.dynamic:
-            # TopNBoundaryValue::UpdateValue: the boundary's first sort
-            # value becomes the scan filter's constant.
             _ = set_dynamic_value(
                 self.dynamic.value(),
                 self.dynamic_op,
@@ -138,6 +200,15 @@ struct TopNSink(Movable):
             )
         if self.payload_rows >= self.heap.reduce_threshold():
             self._reduce[W, VAR]()
+
+    def _sink[W: Int, VAR: Bool](mut self, frame: DataFrame) raises:
+        var matches = self._enter[W, VAR](frame.height())
+        if len(matches) > 0:
+            self.parts.append(frame.take(matches))
+            self.payload_rows += len(matches)
+        # TopNBoundaryValue::UpdateValue: the boundary's first sort value
+        # becomes the scan filter's constant.
+        self._settle[W, VAR]()
 
     def _payload_value(self, row: Int) raises -> Series:
         """Payload row `row`'s first sort column, one row."""

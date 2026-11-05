@@ -3075,10 +3075,20 @@ struct _PipelineJob(Job):
             var address = self.runner.chunk(columns, bases, low, count, first)
             if address == 0:
                 continue
-            var frame = self.runner.chunk_frame(address)
-            var height = frame.height()
-            self._sink_top(frame^, k, offset, made)
-            made += height
+            var chunk = Pointer[DataChunk, MutAnyOrigin](
+                unsafe_from_address=address
+            )
+            if self.top_maintain_order:
+                # Ties keep the input order: the order column is added to
+                # the chunk's rows as a frame.
+                var frame = self.runner.chunk_frame(address)
+                var height = frame.height()
+                self._sink_top(frame^, k, offset, made)
+                made += height
+                continue
+            if len(self.topn) == 0:
+                self._sink_top(self.runner.output_schema(), k, offset, 0)
+            self.topn[0].sink_chunk(chunk[], self.runner.arena)
 
     def _sink_top(
         mut self, var output: DataFrame, k: Int, offset: Int, first_row: Int
