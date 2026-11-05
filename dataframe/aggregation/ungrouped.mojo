@@ -41,11 +41,11 @@ from dataframe.aggregation.reducer import Reducer
 from dataframe.aggregation.selected_rows import _canonical_int
 from dataframe.aggregation.state import (
     _StreamReduction,
-    table_inputs,
     table_specs,
 )
 from dataframe.decimal import check_limit, precision_limit
 from dataframe.expr import (
+    COL,
     CORR,
     COUNT,
     COV,
@@ -61,6 +61,7 @@ from dataframe.expr import (
     subtree,
 )
 from dataframe.dtype import DataType
+from dataframe.execution import _empty
 from dataframe.frame import DataFrame
 from dataframe.series import Series, Storage
 from dataframe.storage.column import Column
@@ -72,7 +73,7 @@ from dataframe.vector.data_chunk import (
     _from_unified,
     to_series,
 )
-from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
+from dataframe.vector.expression import VectorExpression
 from dataframe.vector.types import (
     SelectionVector,
     UnifiedVectorFormat,
@@ -92,6 +93,10 @@ struct UngroupedLayout(Copyable, Movable):
     # skips nulls, is `x` over the rows where `c` holds, so `expressions`
     # computes `x` and the filter selects the rows.
     var filters: List[Optional[VectorExpression]]
+    # Per input and per filter, the sink input column it is when it is a
+    # bare column (read in place, nothing compiled), else -1.
+    var columns: List[Int]
+    var filter_columns: List[Int]
     var types: List[Series]
     var reductions: List[Expr]
     var schema: DataFrame
@@ -104,6 +109,8 @@ struct UngroupedLayout(Copyable, Movable):
         self.layout = copy.layout.copy()
         self.expressions = copy.expressions.copy()
         self.filters = copy.filters.copy()
+        self.columns = copy.columns.copy()
+        self.filter_columns = copy.filter_columns.copy()
         self.types = copy.types.copy()
         self.reductions = copy.reductions.copy()
         self.schema = copy.schema.copy()
@@ -116,6 +123,8 @@ struct UngroupedLayout(Copyable, Movable):
         var layout: AggregateLayout,
         var expressions: List[Optional[VectorExpression]],
         var filters: List[Optional[VectorExpression]],
+        var columns: List[Int],
+        var filter_columns: List[Int],
         var types: List[Series],
         reductions: List[Expr],
         var schema: DataFrame,
@@ -124,6 +133,8 @@ struct UngroupedLayout(Copyable, Movable):
         self.layout = layout^
         self.expressions = expressions^
         self.filters = filters^
+        self.columns = columns^
+        self.filter_columns = filter_columns^
         self.types = types^
         self.reductions = reductions.copy()
         self.schema = schema^
@@ -167,50 +178,127 @@ def ungrouped_layout(
         inputs.append(second.copy())
     var template = _StreamReduction(empty, expressions, List[String]())
     var specs = table_specs(template)
-    # A row count reads no input; an Int64 column stands in for its type.
-    var count_key = Series("__rows", Column[Int64](List[Int64]()))
-    var typed = table_inputs(empty, [count_key^], expressions)
-    if len(typed) != len(inputs) or not states_supported(specs, typed):
-        return None
-    var layout = aggregate_layout(List[Series](), typed, specs)
+    # Each input as a bare column of the sink's input, or compiled; an
+    # aggregate filter's condition likewise. Its type is the column's, or
+    # what the compiled expression computes.
     var compiled = List[Optional[VectorExpression]](capacity=len(inputs))
     var filters = List[Optional[VectorExpression]](capacity=len(inputs))
+    var columns = List[Int](capacity=len(inputs))
+    var filter_columns = List[Int](capacity=len(inputs))
+    var typed = List[Series](capacity=len(inputs))
     for i in range(len(inputs)):
+        compiled.append(None)
+        filters.append(None)
+        columns.append(-1)
+        filter_columns.append(-1)
         if not inputs[i]:
-            compiled.append(None)
-            filters.append(None)
+            # A row count reads no input; an Int64 column stands in.
+            typed.append(Series("__rows", Column[Int64](List[Int64]())))
             continue
-        ref input = inputs[i].value()
-        ref root = input._nodes[len(input._nodes) - 1]
+        var value = inputs[i].value().copy()
+        ref root = value._nodes[len(value._nodes) - 1]
         if (
             i < len(ops)
             and root.op == WHEN
             and root.extra < 0
             and ops[i] in [SUM, MEAN, COUNT, MIN, MAX]
-            and layout.slots[i].kind
-            in [
-                _K_COUNT,
-                _K_INT_SUM,
-                _K_NARROW_SUM,
-                _K_FLOAT_SUM,
-                _K_DECIMAL_SUM,
-                _K_MIN,
-                _K_MAX,
-            ]
         ):
-            filters.append(
-                VectorExpression(subtree(input, root.left), empty._columns)
-            )
-            compiled.append(
-                VectorExpression(subtree(input, root.right), empty._columns)
-            )
-            continue
-        compiled.append(VectorExpression(input, empty._columns))
-        filters.append(None)
+            var condition = subtree(value, root.left)
+            var at = _bare_column(condition, empty)
+            if at >= 0:
+                filter_columns[i] = at
+            else:
+                filters[i] = VectorExpression(condition, empty._columns)
+            value = subtree(value, root.right)
+        var at = _bare_column(value, empty)
+        if at >= 0:
+            columns[i] = at
+            typed.append(empty._columns[at].copy())
+        else:
+            var one = VectorExpression(value, empty._columns)
+            typed.append(_empty(one.root_dtype()))
+            compiled[i] = one^
+    if not states_supported(specs, typed):
+        return None
+    var layout = aggregate_layout(List[Series](), typed, specs)
+    var simple: List[Int] = [
+        _K_COUNT,
+        _K_INT_SUM,
+        _K_NARROW_SUM,
+        _K_FLOAT_SUM,
+        _K_DECIMAL_SUM,
+        _K_MIN,
+        _K_MAX,
+    ]
+    for i in range(len(inputs)):
+        var filtered = filter_columns[i] >= 0 or Bool(filters[i])
+        if filtered and layout.slots[i].kind not in simple:
+            # Only the simple updates take a filter's selection: this
+            # input is computed whole.
+            return _unfiltered(empty, expressions, inputs, ops)
     return UngroupedLayout(
         layout^,
         compiled^,
         filters^,
+        columns^,
+        filter_columns^,
+        typed^,
+        expressions,
+        empty.copy(),
+        template,
+    )
+
+
+def _bare_column(expression: Expr, empty: DataFrame) -> Int:
+    """The input column a bare column expression reads, else -1."""
+    if len(expression._nodes) != 1 or expression._nodes[0].op != COL:
+        return -1
+    var name = expression._nodes[0].text
+    for c in range(len(empty._columns)):
+        if empty._columns[c].name() == name:
+            return c
+    return -1
+
+
+def _unfiltered(
+    empty: DataFrame,
+    expressions: List[Expr],
+    inputs: List[Optional[Expr]],
+    ops: List[Int],
+) raises -> Optional[UngroupedLayout]:
+    """The layout with every input computed whole, no aggregate filters."""
+    var template = _StreamReduction(empty, expressions, List[String]())
+    var specs = table_specs(template)
+    var compiled = List[Optional[VectorExpression]](capacity=len(inputs))
+    var filters = List[Optional[VectorExpression]](capacity=len(inputs))
+    var columns = List[Int](capacity=len(inputs))
+    var filter_columns = List[Int](capacity=len(inputs))
+    var typed = List[Series](capacity=len(inputs))
+    for i in range(len(inputs)):
+        compiled.append(None)
+        filters.append(None)
+        columns.append(-1)
+        filter_columns.append(-1)
+        if not inputs[i]:
+            typed.append(Series("__rows", Column[Int64](List[Int64]())))
+            continue
+        var at = _bare_column(inputs[i].value(), empty)
+        if at >= 0:
+            columns[i] = at
+            typed.append(empty._columns[at].copy())
+        else:
+            var one = VectorExpression(inputs[i].value(), empty._columns)
+            typed.append(_empty(one.root_dtype()))
+            compiled[i] = one^
+    if not states_supported(specs, typed):
+        return None
+    var layout = aggregate_layout(List[Series](), typed, specs)
+    return UngroupedLayout(
+        layout^,
+        compiled^,
+        filters^,
+        columns^,
+        filter_columns^,
         typed^,
         expressions,
         empty.copy(),
@@ -232,6 +320,8 @@ struct UngroupedSink(Movable):
     var groups: _Groups
     var expressions: List[Optional[VectorExpression]]
     var filters: List[Optional[VectorExpression]]
+    var columns: List[Int]
+    var filter_columns: List[Int]
     var types: List[Series]
     var output: DataChunk
     # A filter's kept rows, and those rows through the input's selection.
@@ -257,6 +347,8 @@ struct UngroupedSink(Movable):
         self.groups.n = 1
         self.expressions = shared.expressions.copy()
         self.filters = shared.filters.copy()
+        self.columns = shared.columns.copy()
+        self.filter_columns = shared.filter_columns.copy()
         self.types = shared.types.copy()
         self.kept = List[UInt32](length=_BATCH, fill=0)
         self.through = List[UInt32](length=_BATCH, fill=0)
@@ -295,15 +387,34 @@ struct UngroupedSink(Movable):
             if kind == _K_LEN:
                 _words(state + 8 * offset)[] += UInt64(n)
                 continue
-            var format = self.output.unified(s, arena)
-            if self.filters[s]:
+            var format = self._format(s, chunk, arena)
+            if self.filter_columns[s] >= 0 or self.filters[s]:
                 self._filtered(s, chunk, arena, format, state + 8 * offset)
                 continue
             if _simple_update(self.slots[s], format, n, state + 8 * offset):
                 continue
-            self._update(s, n, arena)
+            self._update(s, chunk, arena)
         self.count += n
         self.sequence += n
+
+    def _format(
+        mut self, i: Int, mut chunk: DataChunk, mut arena: ColumnArena
+    ) raises -> UnifiedVectorFormat:
+        """Input i's vector: the chunk's column, or what its expression
+        wrote."""
+        if self.columns[i] >= 0:
+            return chunk.unified(self.columns[i], arena)
+        return self.output.unified(i, arena)
+
+    def _series(
+        mut self, i: Int, mut chunk: DataChunk, mut arena: ColumnArena
+    ) raises -> Series:
+        """Input i as a column of the chunk's rows."""
+        if self.columns[i] >= 0:
+            return to_series(
+                chunk, self.columns[i], arena, "", self.types[i].dtype()
+            )
+        return to_series(self.output, i, arena, "", self.types[i].dtype())
 
     def _scratch(mut self) -> Int:
         """The address of the table update's scratch vectors (values,
@@ -324,10 +435,8 @@ struct UngroupedSink(Movable):
         (DuckDB's `AggregateFilterData::ApplyFilter` before the update)."""
         var through = self.through.unsafe_ptr()
         var kept = 0
-        if self.filters[s].value().root_kind() == _KIND_COLUMN:
-            var condition = chunk.unified(
-                self.filters[s].value().root_column(), arena
-            )
+        if self.filter_columns[s] >= 0:
+            var condition = chunk.unified(self.filter_columns[s], arena)
             if (
                 not condition.sel.is_set()
                 and condition.validity.all_valid()
@@ -402,21 +511,20 @@ struct UngroupedSink(Movable):
             self._scratch(),
         )
 
-    def _update(mut self, s: Int, n: Int, mut arena: ColumnArena) raises:
+    def _update(
+        mut self, s: Int, mut chunk: DataChunk, mut arena: ColumnArena
+    ) raises:
         """State s through the aggregate table's update, its input (and a
         two-input reduction's second) as a column, every row to the one
         state row."""
+        var n = chunk.count
         var slot = self.slots[s].copy()
         var pair = slot.kind == _K_COMOMENT
         # The slot alone, its input first and a pair's second after it.
         var lone = List[Series]()
-        lone.append(to_series(self.output, s, arena, "", self.types[s].dtype()))
+        lone.append(self._series(s, chunk, arena))
         if pair:
-            lone.append(
-                to_series(
-                    self.output, slot.k, arena, "", self.types[slot.k].dtype()
-                )
-            )
+            lone.append(self._series(slot.k, chunk, arena))
             slot.k = 1
         if slot.holds_strings():
             ref strings = lone[0]._data[StringColumn]
@@ -451,6 +559,8 @@ struct UngroupedSink(Movable):
         on the worker's own thread when its run ends."""
         self.expressions = List[Optional[VectorExpression]]()
         self.filters = List[Optional[VectorExpression]]()
+        self.columns = List[Int]()
+        self.filter_columns = List[Int]()
         self.output = DataChunk()
         self.scratch = List[UInt64]()
         self.kept = List[UInt32]()
