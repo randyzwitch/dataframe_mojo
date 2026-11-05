@@ -121,22 +121,80 @@ multiple distinct columns remains on CPU. Cross-column sums use distinct
 single-column estimates are not reused for these larger memory reads.
 
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
-every node it supports. `engine="auto"` places each such node by measured
+every node it supports. `engine="auto"` places supported pipelines by measured
 cost when `DATAFRAME_HANDOFF_CALIBRATION` names a calibration file, and
 runs on the CPU otherwise:
 
+Build the packages first so the measurements carry actual CPU and Metal
+source/compiler identities. Build both the capture program and application
+with `-O3` and the same compiler settings. A source checkout has no valid
+calibration identity. Capture on the target Mac with the application's CPU
+worker budget, and keep the packaged artifacts for the application:
+
 ```sh
-mojo build -O3 -I . benchmarks/bench_handoff.mojo -o build/bench_handoff
-build/bench_handoff 5 > sweep.tsv
-python3 benchmarks/tools/fit_handoff.py sweep.tsv > handoff.json
-export DATAFRAME_HANDOFF_CALIBRATION=$PWD/handoff.json
+python3 scripts/build_package.py --output dist
+mojo build -O3 -I dist benchmarks/bench_metal_calibration.mojo -o build/metal-calibration
+DATAFRAME_THREADS=8 build/metal-calibration 5 > build/metal-capture.jsonl
+python3 scripts/metal_calibration.py build/metal-capture.jsonl --output-dir build/calibration
+export DATAFRAME_HANDOFF_CALIBRATION=/absolute/path/printed/by/the/fitter.json
 ```
 
-`explain(engine="auto")` then prints a `PLACE` line per supported node with
-the CPU's and Metal's cost models and the row count from which Metal is
-estimated faster. Profiles record each decision with both estimates.
+The built-in capture uses 50M, 75M and 100M rows, four representative operator
+shapes, contiguous/eight-chunk inputs and independent nullable masks. Optional
+row counts follow the repetition count. It checks answers against a periodic
+scalar oracle, includes mixed Float32-mean bundles, alternates CPU/Metal timing order and records unsupported or
+CPU-adjudicated cases explicitly. Every Metal timing requires direct GPU
+execution. These are development calibration workloads, not external-suite
+performance results.
 
-### Measured on an M1 Mac mini
+For application workloads, call `dataframe_metal.calibration_capture.capture`
+with a supported `LazyFrame`, independently computed expected `DataFrame`
+and at least three repetitions; save its returned JSON as one line. Capture
+at least three distinct sizes per query/layout key, and pass the JSONL file
+to the same fitter. Check `capture_records` and `skipped` in the resulting
+profile. Query constants, output work, chunk counts and bitmap presence are
+part of the key; calibrating one layout does not measure another.
+
+The fitter takes a lower CPU and upper Metal envelope over the observed
+samples, adds a safety margin, and limits placement to each key's measured
+row range. Its content-addressed output filename is immutable. Models are
+empirical: changed selectivity or value distributions can change runtime
+even for the same schema. Recalibrate representative data after changes.
+
+Profiles must match both source/compiler build IDs, the device/host power
+and thermal state, and the effective CPU worker budget. A CPU rewrite, new
+Metal kernel, compiler/SDK update or thread change requires new measurements.
+Legacy unversioned profiles, missing keys, out-of-range inputs and identity
+mismatches stay on CPU. Replacing a file at an already cached path also stays
+on CPU if its models differ from the cached ones. Use a new profile filename.
+`dataframe_metal.calibration.calibration_status()` explains identity rejection
+without constructing a GPU context.
+
+Automatic collection uses the existing pipeline planner, which preserves
+physical input chunks. Profiles store conservative CPU pipeline models under
+`operators`, and layout-specific Metal models under `regions`. When several
+measured queries share a CPU pipeline key, its CPU model is a lower envelope
+across them, so pooling does not inflate CPU cost to favor Metal.
+Unmeasured region layouts remain on CPU even when their pipeline key matches.
+
+`explain(engine="auto")` shows actual placement in its `PIPELINE` lines.
+The older `PLACE` lines describe a separate schema-only handoff mechanism;
+versioned profiles do not supply costs to it. The current CPU `profile()`
+entry point uses that older mechanism, so it does not audit pipeline
+placement. To audit automatic collection, set
+`DATAFRAME_METAL_PLACEMENT_TRACE` to a writable JSONL path. The Metal provider
+appends a record after a pipeline finishes on Metal, or `cpu-adjudication`
+when input values require CPU evaluation. With tracing unset it writes
+nothing. Capture timings always use direct GPU completion checks instead.
+
+Pipeline data faults retain CPU semantics: overflow, non-finite compensated
+partials and gradual-underflow cases are adjudicated on CPU. Hardware and
+allocation failures propagate as errors.
+
+### Historical measurements on an M1 Mac mini
+
+These earlier, unversioned measurements are historical context and cannot
+be loaded as current automatic-placement profiles.
 
 `bench_handoff`, best of 5 warm runs from 10 thousand to 200 million rows,
 against the CPU executor on 8 threads, with every Metal answer checked
@@ -213,7 +271,9 @@ the CPU, in the same query.
   operator first checks MAX's GPU kernel libraries (warp and block
   reductions, 32-bit atomics and `elementwise` run on Apple GPUs) before
   writing its own.
-- **Visibility.** `explain` and `profile` show which operators ran on Metal.
+- **Visibility.** `explain(engine="auto")` shows pipeline placement; the
+  opt-in JSONL trace records automatic GPU completion. Profiles with an
+  explicit `MetalRuntime` show forced handoffs.
 
 The provider contract stays vendor-neutral: columns in and out, and the core
 never imports a backend. A discrete GPU (NVIDIA, AMD) is a separate provider

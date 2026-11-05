@@ -1054,11 +1054,9 @@ def _update_slot[
             )
             at[unsafe_offset=w + 1] += 1
         elif kind == _K_MOMENTS:
-            var x: Float64
-            comptime if D.is_floating_point():
-                x = Float64(value)
-            else:
-                x = Float64(_canonical_int[D](value))
+            # Every integer as its value (an ordering key would shift a
+            # UInt64 by 2^63 and lose its spread).
+            var x = value.cast[DType.float64]()
             var n = at[unsafe_offset=w] + 1
             var mean = bitcast[DType.float64](at[unsafe_offset=w + 1])
             var delta = x - mean
