@@ -314,12 +314,17 @@ def _rows_equal(keys: List[Series], a: Int, b: Int) -> Bool:
 
 
 def number_partitions(
-    keys: List[Series], hashes_address: Int, n: Int, mut ids: List[Int]
+    keys: List[Series],
+    hashes_address: Int,
+    n: Int,
+    ids_address: Int,
+    mut firsts: List[Int],
 ) -> Int:
     """Number the partitions of the keys' n rows by a dictionary of their
     keys, probed with the sink's row hashes (`hashes_address`, one per
-    row, in the same order); ids[k] gets row k's number, in first-occurrence
-    order. Returns the count."""
+    row, in the same order); ids[k] (at `ids_address`) gets row k's number,
+    in first-occurrence order, and firsts each number's first row. Returns
+    the count."""
     # One integer key compares its values directly; any other keys
     # compare through `_rows_equal`.
     if len(keys) == 1:
@@ -332,14 +337,16 @@ def number_partitions(
                         keys[0]._data[Column[Scalar[D]]],
                         hashes_address,
                         n,
-                        ids,
+                        ids_address,
+                        firsts,
                     )
     return _number_partitions[DType.int64, True](
         keys,
         Column[Scalar[DType.int64]](List[Int64]()),
         hashes_address,
         n,
-        ids,
+        ids_address,
+        firsts,
     )
 
 
@@ -350,9 +357,11 @@ def _number_partitions[
     column: Column[Scalar[D]],
     hashes_address: Int,
     n: Int,
-    mut ids: List[Int],
+    ids_address: Int,
+    mut firsts: List[Int],
 ) -> Int:
     var hashes = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes_address)
+    var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=ids_address)
     # A table of partition numbers, grown (rehashing the stored hashes)
     # to stay at most half full: it holds one slot per partition, not per
     # row, so it stays in cache. The hash's top bits chose the hash group,
@@ -375,7 +384,7 @@ def _number_partitions[
             var slot = slots[at]
             if slot < 0:
                 slots[at] = len(first_rows)
-                ids[k] = len(first_rows)
+                ids[unsafe_offset=k] = len(first_rows)
                 first_rows.append(row)
                 first_hashes.append(hash)
                 comptime if not GENERIC:
@@ -404,121 +413,214 @@ def _number_partitions[
                         not u or first_values[slot] == values[unsafe_offset=row]
                     )
                 if same:
-                    ids[k] = slot
+                    ids[unsafe_offset=k] = slot
                     break
             at = Int((UInt64(at) + 1) & mask)
-    return len(first_rows)
+    var count = len(first_rows)
+    firsts = first_rows^
+    return count
 
 
-struct _NumberJob(Job):
-    """Number one task's partitions (consecutive hash groups, their keys
-    and hashes in hash group order) and write each row's global partition
-    index: the first pass numbers, the second (with `base` set) writes."""
+struct _LocalNumberJob(Job):
+    """One morsel of rows [lo, hi): number its partitions with a local
+    dictionary (a thread-local hash table, as a hash aggregate's sink
+    builds), writing local numbers in place; then (`codes` set) rewrite
+    them as global numbers."""
 
     var keys: List[Series]
     var hashes: Int
-    var rows: Int
     var lo: Int
     var hi: Int
-    var ids: List[Int]
+    var ids: Int
+    var firsts: List[Int]
     var count: Int
-    var base: Int
-    var out: Int
+    # Second pass: local number -> (merge partition << 40 | number there),
+    # and each merge partition's first global number.
+    var codes: List[Int]
+    var bases: Int
 
     def __init__(
-        out self, keys: List[Series], hashes: Int, rows: Int, lo: Int, hi: Int
+        out self, keys: List[Series], hashes: Int, lo: Int, hi: Int, ids: Int
     ):
         self.keys = keys.copy()
         self.hashes = hashes
-        self.rows = rows
         self.lo = lo
         self.hi = hi
-        self.ids = List[Int]()
+        self.ids = ids
+        self.firsts = List[Int]()
         self.count = 0
-        self.base = -1
-        self.out = 0
+        self.codes = List[Int]()
+        self.bases = 0
 
     def run(mut self) raises:
         var n = self.hi - self.lo
-        var rows = self.rows + self.lo * size_of[Int]()
-        if self.base < 0:
+        var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ids)
+        if self.bases == 0:
             var slices = List[Series](capacity=len(self.keys))
             for key in self.keys:
                 slices.append(key.slice(self.lo, n))
-            self.ids = huge_uninit[Int](n)
             self.count = number_partitions(
-                slices, self.hashes + self.lo * size_of[UInt64](), n, self.ids
+                slices,
+                self.hashes + self.lo * size_of[UInt64](),
+                n,
+                self.ids + self.lo * size_of[Int](),
+                self.firsts,
             )
+            for g in range(self.count):
+                self.firsts[g] += self.lo
             return
-        var at = Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)
-        var out = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.out)
-        for k in range(n):
-            out[unsafe_offset=at[unsafe_offset=k]] = self.base + self.ids[k]
+        var bases = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.bases)
+        var codes = self.codes.unsafe_ptr()
+        for k in range(self.lo, self.hi):
+            var code = codes[unsafe_offset=ids[unsafe_offset=k]]
+            ids[unsafe_offset=k] = bases[unsafe_offset=code >> 40] + (
+                code & ((1 << 40) - 1)
+            )
 
 
-def _task_cuts(bounds: List[Int], height: Int) -> List[Int]:
-    """Cut hash groups (their row bounds) into tasks of about equal rows,
-    each at least one STANDARD_VECTOR_SIZE block, as CreateTaskList sizes
-    window tasks in blocks per thread."""
-    var blocks = (height + STANDARD_VECTOR_SIZE - 1) // STANDARD_VECTOR_SIZE
-    var tasks = max(1, min(configured_workers(), blocks))
-    var share = (height + tasks - 1) // tasks
-    var cuts = List[Int]()
-    cuts.append(0)
-    for b in range(1, len(bounds) - 1):
-        var at = bounds[b]
-        if at < height and at - cuts[len(cuts) - 1] >= share:
-            cuts.append(at)
-    cuts.append(height)
-    return cuts^
+struct _MergeJob(Job):
+    """Merge partition p of the morsels' dictionaries (the partitioned
+    combine of a hash aggregate): every morsel entry whose hash falls in p
+    is numbered in one dictionary, and the morsel learns its code."""
+
+    var keys: List[Series]
+    var hashes: Int
+    var jobs: Int
+    var count: Int
+    var part: Int
+    var shift: UInt64
+
+    def __init__(
+        out self,
+        keys: List[Series],
+        hashes: Int,
+        jobs: Int,
+        count: Int,
+        part: Int,
+        shift: UInt64,
+    ):
+        self.keys = keys.copy()
+        self.hashes = hashes
+        self.jobs = jobs
+        self.count = count
+        self.part = part
+        self.shift = shift
+
+    def run(mut self) raises:
+        var hashes = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=self.hashes
+        )
+        var locals = Pointer[_LocalNumberJob, MutAnyOrigin](
+            unsafe_from_address=self.jobs
+        )
+        var slots_count = 256
+        var shift = UInt64(56)
+        var mask = UInt64(slots_count - 1)
+        var slots = List[Int](length=slots_count, fill=-1)
+        var first_rows = List[Int]()
+        var first_hashes = List[UInt64]()
+        for j in range(self.count):
+            ref job = locals[unsafe_offset=j]
+            for g in range(job.count):
+                var row = job.firsts[g]
+                var hash = hashes[unsafe_offset=row]
+                var mixed = hash * 0x9E3779B97F4A7C15
+                if Int(mixed >> self.shift) != self.part:
+                    continue
+                var at = Int((mixed << 8) >> shift)
+                while True:
+                    var slot = slots[at]
+                    if slot < 0:
+                        slots[at] = len(first_rows)
+                        job.codes[g] = (self.part << 40) | len(first_rows)
+                        first_rows.append(row)
+                        first_hashes.append(hash)
+                        if 2 * len(first_rows) > slots_count:
+                            slots_count *= 2
+                            shift -= 1
+                            mask = UInt64(slots_count - 1)
+                            slots = List[Int](length=slots_count, fill=-1)
+                            for id in range(len(first_hashes)):
+                                var to = Int(
+                                    (
+                                        (first_hashes[id] * 0x9E3779B97F4A7C15)
+                                        << 8
+                                    )
+                                    >> shift
+                                )
+                                while slots[to] >= 0:
+                                    to = Int((UInt64(to) + 1) & mask)
+                                slots[to] = id
+                        break
+                    if first_hashes[slot] == hash and _rows_equal(
+                        self.keys, first_rows[slot], row
+                    ):
+                        job.codes[g] = (self.part << 40) | slot
+                        break
+                    at = Int((UInt64(at) + 1) & mask)
+        self.count = len(first_rows)
 
 
 def partition_ids(
     keys: List[Series], height: Int, mut ids: List[Int]
 ) raises -> Int:
     """Each row's partition index (ids, by input row) and the partition
-    count, with no sort: the window sink's hash partitioning, then one
-    dictionary per task of consecutive hash groups, for aggregates over
-    whole partitions (WindowConstantAggregator)."""
+    count, with no sort and no rows moved, for aggregates over whole
+    partitions (WindowConstantAggregator): a hash aggregate's sink, one
+    thread-local dictionary per morsel (DEFAULT_ROW_GROUP_SIZE rows), then
+    the morsels' dictionaries combined by hash partition, and every row's
+    local number rewritten as a global one."""
     ids = huge_uninit[Int](height)
     if height == 0:
         return 0
     var sink = sink_threads(height)
     var partitioner = Partitioner(keys, sink)
-    var parts = partitioner.scatter(
-        sink, with_hashes=True, bucket_count=1 << radix_bits(height)
-    )
-    # The sink materializes each hash group's keys and hashes together
-    # (RadixPartitionedTupleData), so tasks read them in order.
-    var gathered = take_parallel(
-        partitioner.keys, parts.order.copy(), configured_workers()
-    )
-    var cuts = _task_cuts(parts.bounds, height)
-    var jobs = List[_NumberJob](capacity=len(cuts) - 1)
-    for t in range(len(cuts) - 1):
-        jobs.append(
-            _NumberJob(
-                gathered,
-                Int(parts.hashes.unsafe_ptr()),
-                Int(parts.order.unsafe_ptr()),
-                cuts[t],
-                cuts[t + 1],
+    var bounds = partitions(height, sink, STANDARD_VECTOR_SIZE)
+    var jobs = List[_LocalNumberJob](capacity=sink)
+    for w in range(sink):
+        if bounds[w + 1] > bounds[w]:
+            jobs.append(
+                _LocalNumberJob(
+                    partitioner.keys,
+                    Int(partitioner.hashes.unsafe_ptr()),
+                    bounds[w],
+                    bounds[w + 1],
+                    Int(ids.unsafe_ptr()),
+                )
+            )
+    if len(jobs) == 1:
+        jobs[0].run()
+        return jobs[0].count
+    run_jobs(jobs)
+    # Combine: one merge partition per morsel, by the hash's top bits.
+    var bits = 0
+    while (1 << bits) < len(jobs):
+        bits += 1
+    var shift = UInt64(64 - bits)
+    for j in range(len(jobs)):
+        jobs[j].codes = List[Int](length=jobs[j].count, fill=0)
+    var merges = List[_MergeJob](capacity=1 << bits)
+    for p in range(1 << bits):
+        merges.append(
+            _MergeJob(
+                partitioner.keys,
+                Int(partitioner.hashes.unsafe_ptr()),
+                Int(jobs.unsafe_ptr()),
+                len(jobs),
+                p,
+                shift,
             )
         )
-    if len(jobs) == 1:
-        jobs[0].run()
-    else:
-        run_jobs(jobs)
+    run_jobs(merges)
+    var bases = List[Int](capacity=len(merges))
     var total = 0
+    for p in range(len(merges)):
+        bases.append(total)
+        total += merges[p].count
     for j in range(len(jobs)):
-        jobs[j].base = total
-        jobs[j].out = Int(ids.unsafe_ptr())
-        total += jobs[j].count
-    if len(jobs) == 1:
-        jobs[0].run()
-    else:
-        run_jobs(jobs)
-    _ = parts^
+        jobs[j].bases = Int(bases.unsafe_ptr())
+    run_jobs(jobs)
+    _ = bases^
     _ = partitioner^
     return total
 
@@ -601,8 +703,13 @@ struct _GroupSortJob(Job):
         for c in range(self.partition_keys):
             part_keys.append(slices[c].copy())
         var ids = huge_uninit[Int](n)
+        var firsts = List[Int]()
         var partitions_here = number_partitions(
-            part_keys, self.hashes + self.lo * size_of[UInt64](), n, ids
+            part_keys,
+            self.hashes + self.lo * size_of[UInt64](),
+            n,
+            Int(ids.unsafe_ptr()),
+            firsts,
         )
         if partitions_here == 1 and count == self.partition_keys:
             # PartitionKeyTracker::CanBypass: one key and no order keys.
