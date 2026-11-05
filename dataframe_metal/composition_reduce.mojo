@@ -11,7 +11,11 @@ from .composition_plan import (
 )
 from .exact_float import finish_float_bins
 from .accelerator.faults import data_fault
-from .accelerator.gpu.erased_input import NumericView, numeric_views
+from .accelerator.gpu.erased_input import (
+    NumericView,
+    numeric_views,
+    single_native_span,
+)
 from .accelerator.gpu.typed_storage import NativeColumnAny
 from .accelerator.gpu.composed_reduce import (
     composed_partials,
@@ -62,44 +66,73 @@ def _run[
         # Byte views retain device buffers; typed owners additionally retain
         # the query's checked allocation reservations until completion.
         var owners = List[NativeColumnAny]()
+        var names = bundle.inputs.copy()
+        if bundle.predicate.filter_column not in names:
+            names.append(bundle.predicate.filter_column.copy())
+        var batched = zero_copy
+        var fragmented = False
+        if batched:
+            for name in names:
+                var source = frame.column(name)
+                fragmented = fragmented or source.is_chunked()
+                if not single_native_span(source):
+                    batched = False
+                    break
+        batched = batched and fragmented
         var predicate_input = -1
-        for name in bundle.inputs:
-            inputs.append(
-                numeric_views(frame, name, scope, zero_copy, empty, owners)
-            )
-            if name == bundle.predicate.filter_column:
-                predicate_input = len(inputs) - 1
-        if predicate_input < 0:
-            predicate_input = len(inputs)
+        for name in names:
             inputs.append(
                 numeric_views(
                     frame,
-                    bundle.predicate.filter_column,
+                    name,
                     scope,
                     zero_copy,
                     empty,
                     owners,
+                    coalesce=batched,
                 )
             )
+            if name == bundle.predicate.filter_column:
+                predicate_input = len(inputs) - 1
+        var lengths = List[List[Int]]()
+        for i in range(len(inputs)):
+            var sizes = List[Int]()
+            if batched:
+                for part in frame.column(names[i]).chunks():
+                    if len(part):
+                        sizes.append(len(part))
+            else:
+                for part in inputs[i]:
+                    sizes.append(part.rows)
+            lengths.append(sizes^)
         var positions = List[Int](length=len(inputs), fill=0)
         var offsets = List[Int](length=len(inputs), fill=0)
         var segments = List[List[NumericView]]()
+        var starts = List[Int]()
         var consumed = 0
         while consumed < frame.height():
             var length = frame.height() - consumed
             for i in range(len(inputs)):
-                if positions[i] >= len(inputs[i]):
+                if positions[i] >= len(lengths[i]):
                     raise Error(
                         "Metal reduction columns have different lengths"
                     )
-                length = min(length, inputs[i][positions[i]].rows - offsets[i])
+                length = min(length, lengths[i][positions[i]] - offsets[i])
             var segment = List[NumericView]()
             for i in range(len(inputs)):
-                segment.append(inputs[i][positions[i]].view(offsets[i], length))
+                if batched:
+                    var value = inputs[i][0].copy()
+                    value.rows = length
+                    segment.append(value^)
+                else:
+                    segment.append(
+                        inputs[i][positions[i]].view(offsets[i], length)
+                    )
                 offsets[i] += length
-                if offsets[i] == inputs[i][positions[i]].rows:
+                if offsets[i] == lengths[i][positions[i]]:
                     positions[i] += 1
                     offsets[i] = 0
+            starts.append(consumed)
             segments.append(segment^)
             consumed += length
         timings.upload_ns = Int(perf_counter_ns()) - started
@@ -130,11 +163,16 @@ def _run[
         var fp = List[UInt32](length=total_parts, fill=0)
         # One immutable metadata block per intersected chunk segment. Its host
         # source and device root stay alive until the final queue drain.
-        var words = List[UInt64](length=len(segments) * META_WORDS, fill=0)
+        var prefix = 2 if batched else 0
+        var words = List[UInt64](
+            length=prefix + len(segments) * META_WORDS, fill=0
+        )
+        if batched:
+            words[0] = UInt64(len(segments))
         var output_offset = 0
         for index in range(len(segments)):
             ref segment = segments[index]
-            var at = index * META_WORDS
+            var at = prefix + index * META_WORDS
             var predicate = segment[predicate_input].copy()
             var partials = _chunk_partials(segment[0].rows, frame.height())
             words[at] = UInt64(segment[0].rows)
@@ -153,7 +191,9 @@ def _run[
             words[at + 12] = UInt64(
                 bitcast[DType.uint32](bundle.predicate.high_float)
             )
-            words[at + 13] = UInt64(len(bundle.inputs))
+            words[at + 13] = UInt64(starts[index]) if batched else UInt64(
+                len(bundle.inputs)
+            )
             words[at + 15] = UInt64(
                 predicate_input + 1 if predicate_input
                 < len(bundle.inputs) else 0
@@ -191,7 +231,7 @@ def _run[
             comptime if precise:
                 ctx.enqueue_memset(bins, Int64(0))
                 ctx.enqueue_memset(specials, UInt32(0))
-            for index in range(len(segments)):
+            for index in range(1 if batched else len(segments)):
                 ref segment = segments[index]
                 var values = List[NumericView]()
                 for i in range(8):
@@ -204,7 +244,9 @@ def _run[
                             )
                         )
                 var predicate = segment[predicate_input].copy()
-                var partials = _chunk_partials(segment[0].rows, frame.height())
+                var partials = total_parts if batched else _chunk_partials(
+                    segment[0].rows, frame.height()
+                )
                 comptime kernel = float_composed_partials[
                     wide, arity, float_fields
                 ] if fast else composed_partials[
@@ -230,7 +272,7 @@ def _run[
                     predicate.values,
                     predicate.bits,
                     metadata,
-                    UInt32(index * META_WORDS),
+                    UInt32.MAX if batched else UInt32(index * META_WORDS),
                     high,
                     low,
                     sums,
