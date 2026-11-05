@@ -3331,6 +3331,9 @@ struct _OverJob(Job):
     var first: Int
     var last: Int
     var batch_size: Int
+    # The over()'s partition keys: a nested over() with the same keys
+    # reads this job's partition numbers.
+    var keys: String
     var result: Series
 
     def __init__(
@@ -3343,6 +3346,7 @@ struct _OverJob(Job):
         lo: Int,
         hi: Int,
         batch_size: Int,
+        keys: String,
     ):
         self.inner = inner.copy()
         self.columns = columns.copy()
@@ -3352,6 +3356,7 @@ struct _OverJob(Job):
         self.lo = lo
         self.hi = hi
         self.batch_size = batch_size
+        self.keys = keys
         self.result = Series("", Column[Int64](List[Int64]()))
 
     def run(mut self) raises:
@@ -3374,6 +3379,10 @@ struct _OverJob(Job):
                 starts[unsafe_offset=g + 1] - self.lo,
             ):
                 ids[unsafe_offset=k] = g - self.first
+        var known = WindowLayouts()
+        known.id_keys.append(self.keys)
+        known.ids.append(groups.copy())
+        known.counts.append(self.last - self.first)
         self.result = evaluate(
             self.inner,
             part,
@@ -3382,7 +3391,9 @@ struct _OverJob(Job):
             grouped=True,
             groups=groups,
             group_count=self.last - self.first,
+            layouts=Int(Pointer(to=known)),
         )
+        _ = known^
 
 
 def _has_windows(expr: Expr) -> Bool:
@@ -3653,6 +3664,7 @@ def _over[
                 0,
                 height,
                 batch_size,
+                node.text2,
             )
         )
     else:
@@ -3686,6 +3698,7 @@ def _over[
                     layout.starts[first],
                     layout.starts[last],
                     batch_size,
+                    node.text2,
                 )
             )
     if len(jobs) == 1:
