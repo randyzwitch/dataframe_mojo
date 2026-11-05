@@ -64,9 +64,48 @@ integer intermediate overflow is detected even if a final sum would cancel.
 Overflow and non-finite Float32 partials use CPU adjudication. These shapes
 have separate `arithmetic_sum:` calibration keys; nested expressions,
 division and mixed-dtype arithmetic remain on CPU.
+Arithmetic expressions can also appear inside SUM, COUNT and MEAN in the
+same projection as column aggregates, for example:
+
+```mojo
+frame.lazy().filter(col("p") > 0).select_exprs([
+    (col("price") * col("quantity")).sum().alias("sales"),
+    col("discount").sum().alias("discount"),
+    col("quantity").count().alias("quantity_count"),
+])
+```
+
+Up to four distinct aggregate values share one scan and range predicate.
+Repeated SUM/COUNT/MEAN of an identical expression share its computed value
+and reduction state; expressions using different operators or literals retain
+separate states. Four binary expressions may read eight distinct value
+columns plus an independent predicate column. Operands retain the same dtype,
+literal and null rules as the single arithmetic SUM. COUNT checks integer
+intermediate overflow even when no sum is requested. Float32 means use the
+same exact-bin finish and CPU-order proof described above. These projections
+use `composed_reductions:v1:` calibration keys. Subnormal arithmetic operands
+and possible gradual underflow use CPU adjudication because Metal arithmetic
+can flush these values to zero before reduction. The existing single arithmetic
+SUM and pure column aggregate paths keep their specialized kernels.
+
+A projection with one arithmetic value and otherwise Float32 column
+aggregates uses a compact typed kernel. It carries no integer reduction
+state; a mean-bearing prefix uses exact bins, while independent trailing
+sums use Float32 compensation. Output aliases retain their requested order.
+Supported composition regions stay fused before CPU common-expression
+materialization. The pipeline adapter can also re-inline eligible shared
+binary values immediately below a projection; it declines unused work,
+dependencies and expressions evaluated before filters. These are schema-only
+transformations in the Metal backend; the CPU optimizer is unchanged.
+
 New fused projections have separate `fused_reductions:` calibration keys;
 without a measurement they stay on CPU in automatic mode. Float64 input
 columns and other operators continue to run on CPU.
+
+Float32 range predicates use ordered integer keys when a bound is near
+zero, preserving subnormal comparisons, signed-zero equality and NaN
+exclusion even when Metal's floating comparisons flush denormals. Normal
+bounds retain native floating comparisons.
 
 The explicit-copy reference path packs unaligned validity windows in bytes
 and SIMD batches. It does not copy an entire unaligned bitmap one bit at a

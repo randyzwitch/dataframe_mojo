@@ -1,6 +1,7 @@
 """Typed, fused range-filter and sum kernels with independent input columns."""
 from max.gpu import global_idx, thread_idx, block_idx
 from max.gpu.primitives import block
+from .float_predicate import float_in_range
 from std.memory import Pointer
 from .filter_sum import BLOCK_SIZE, _valid, split_total
 
@@ -47,9 +48,7 @@ def cross_partials[
             keep = keep & _valid(predicate_bits, predicate_bit_offset, row)
         comptime if filter_dtype == DType.float32:
             var f = condition.cast[DType.float32]()
-            var above = f >= low_float if inclusive & 1 else f > low_float
-            var below = f <= high_float if inclusive & 2 else f < high_float
-            keep = keep & above & below
+            keep = keep & float_in_range(f, low_float, high_float, inclusive)
         else:
             var n = condition.cast[DType.int64]()
             keep = keep & (n >= low_bound) & (n <= high_bound)

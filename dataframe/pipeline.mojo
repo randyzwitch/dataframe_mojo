@@ -129,6 +129,7 @@ from dataframe.kernels.segment_statistics import (
     series_statistics,
 )
 from dataframe.storage.statistics import NUMERIC_STATS
+from dataframe.table_scan import ScanFilterInfo, scan_filter_info
 from dataframe.kernels.hashing import encode_rows
 from dataframe.storage.string import StringColumn
 from .trace import trace_path
@@ -1340,6 +1341,12 @@ struct _ChunkRunner(Movable):
     # Whether to stop at a step that leaves no row (a pipeline's morsel),
     # or to run on so the output has every step's columns.
     var stop_empty: Bool
+    # The source's table filters, and the source row of the morsel's first
+    # row while the morsel's own rows run (-1 otherwise): a chunk whose
+    # vector the filters' statistics rule out is not read (DuckDB's
+    # `RowGroup::CheckZonemapSegments`).
+    var scan: Optional[ScanFilterInfo]
+    var scan_offset: Int
 
     def __init__(
         out self,
@@ -1375,6 +1382,8 @@ struct _ChunkRunner(Movable):
         self.source = DataChunk()
         self.counts = List[Int](length=3 * len(steps) + 1, fill=0)
         self.stop_empty = stop_empty
+        self.scan = None
+        self.scan_offset = -1
 
     def begin_morsel(mut self):
         """Drop the previous morsel's columns."""
@@ -1436,8 +1445,14 @@ struct _ChunkRunner(Movable):
         var source = Pointer[DataChunk, MutAnyOrigin](
             unsafe_from_address=Int(Pointer(to=self.source))
         )
+        var skips = first == 0 and self.scan_offset >= 0 and Bool(self.scan)
         for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
             var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
+            if skips:
+                var at = self.scan_offset + low
+                if self.scan.value().skip(at, at + count):
+                    trace_path("scan.vector_skip")
+                    continue
             columns.fill(bases, self.arena, source[], low, count)
             var input = source
             var empty = False
@@ -3026,7 +3041,10 @@ struct _PipelineJob(Job):
                 if len(rows.value()) == 0:
                     continue
                 source = source.through(rows.value())
+            else:
+                self.runner.scan_offset = offset
             var output = self.runner.run(source^, 0, marks)
+            self.runner.scan_offset = -1
             if output.height == 0:
                 continue
             self._consume(output, k, offset, length)
@@ -4181,6 +4199,11 @@ def _run_pipeline(
     # One job per morsel at most: a tiny source (PDS-H q2's five-row
     # region frame) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
+    # The source's table filters with their answers per vector, found once
+    # for every worker's chunk loop.
+    var scan = Optional[ScanFilterInfo]()
+    if len(steps) > 0 and steps[0].kind == STEP_FILTER:
+        scan = scan_filter_info(frame, conjuncts(steps[0].exprs[0]))
     var jobs = List[_PipelineJob](capacity=job_count)
     for _ in range(job_count):
         jobs.append(
@@ -4215,6 +4238,9 @@ def _run_pipeline(
                 templates,
             )
         )
+    if scan:
+        for w in range(len(jobs)):
+            jobs[w].runner.scan = scan.copy()
     # An outer join's unmatched build rows run after every morsel of the
     # source (`_emit_unmatched`), and the workers finish after them.
     for step in steps:
