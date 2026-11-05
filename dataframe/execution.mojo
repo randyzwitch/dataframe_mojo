@@ -3135,6 +3135,9 @@ struct WindowLayouts(Movable):
     var id_keys: List[String]
     var ids: List[List[Int]]
     var counts: List[Int]
+    # Key columns made contiguous once for every window that reads them.
+    var flat_names: List[String]
+    var flat: List[Series]
 
     def __init__(out self):
         self.keys = List[String]()
@@ -3142,6 +3145,8 @@ struct WindowLayouts(Movable):
         self.id_keys = List[String]()
         self.ids = List[List[Int]]()
         self.counts = List[Int]()
+        self.flat_names = List[String]()
+        self.flat = List[Series]()
 
     def find(self, keys: String) -> Int:
         for k in range(len(self.keys)):
@@ -3159,14 +3164,37 @@ def _layout_key(node: Node) -> String:
     return key^
 
 
-def _partition_keys(node: Node, columns: List[Series]) -> List[Series]:
+def _flat_column(
+    name: String, columns: List[Series], cache_address: Int
+) raises -> Optional[Series]:
+    """The named column in one chunk, made contiguous once per frame."""
+    var cache = Pointer[WindowLayouts, MutAnyOrigin](
+        unsafe_from_address=cache_address
+    )
+    for k in range(len(cache[].flat_names)):
+        if cache[].flat_names[k] == name:
+            return cache[].flat[k].copy()
+    for column in columns:
+        if column.name() == name:
+            var flat = column.rechunk() if column.is_chunked() else (
+                column.copy()
+            )
+            cache[].flat_names.append(name)
+            cache[].flat.append(flat.copy())
+            return flat^
+    return None
+
+
+def _partition_keys(
+    node: Node, columns: List[Series], cache_address: Int
+) raises -> List[Series]:
     """The over() node's partition key columns (none when global)."""
     var partition_keys = List[Series]()
     if (node.integer & OVER_GLOBAL) == 0:
         for name in split_names(node.text2):
-            for column in columns:
-                if column.name() == name:
-                    partition_keys.append(column.copy())
+            var column = _flat_column(name, columns, cache_address)
+            if column:
+                partition_keys.append(column.take())
     return partition_keys^
 
 
@@ -3194,7 +3222,7 @@ def _over_constant[
         if cache[].id_keys[k] == node.text2:
             at = k
     if at < 0:
-        var keys = _partition_keys(node, columns)
+        var keys = _partition_keys(node, columns, cache_address)
         var ids: List[Int]
         var count: Int
         if len(keys) == 0 or height == 0:
@@ -3231,6 +3259,7 @@ def _over_rank(
     inputs: List[Series],
     columns: List[Series],
     height: Int,
+    cache_address: Int,
 ) raises -> Series:
     """rank() directly under over(): DuckDB plans it as rank() OVER
     (PARTITION BY keys ORDER BY value), so the value joins the layout's
@@ -3249,7 +3278,7 @@ def _over_rank(
     var nulls_last = List[Bool]()
     rank_order_keys(value, rank.min_count == 1, keys, descending, nulls_last)
     var layout = window_layout(
-        _partition_keys(node, columns),
+        _partition_keys(node, columns, cache_address),
         keys,
         descending,
         nulls_last,
@@ -3273,13 +3302,13 @@ def _layout_index(
     var at = cache[].find(key)
     if at >= 0:
         return at
-    var partition_keys = _partition_keys(node, columns)
+    var partition_keys = _partition_keys(node, columns, cache_address)
     var order_keys = List[Series]()
     if node.min_count > 0:
         for name in split_names(node.text):
-            for column in columns:
-                if column.name() == name:
-                    order_keys.append(column.copy())
+            var column = _flat_column(name, columns, cache_address)
+            if column:
+                order_keys.append(column.take())
     var descending = List[Bool](
         length=len(order_keys), fill=(node.integer & 1) != 0
     )
@@ -3602,15 +3631,20 @@ def _over[
             batch_size,
         )
         argument_expr = Expr(nodes^, inner.expr._name)
+    var owned = WindowLayouts()
+    var cache_address = layouts if layouts != 0 else Int(Pointer(to=owned))
+    if not mapped:
         ref root = argument_expr._nodes[len(argument_expr._nodes) - 1]
         if (
             root.op == RANK
             and node.min_count == 0
             and argument_expr._nodes[root.left].op == COL
         ):
-            return _over_rank(node, argument_expr, inputs, columns, height)
-    var owned = WindowLayouts()
-    var cache_address = layouts if layouts != 0 else Int(Pointer(to=owned))
+            var ranked = _over_rank(
+                node, argument_expr, inputs, columns, height, cache_address
+            )
+            _ = owned^
+            return ranked^
     if (
         not mapped
         and node.min_count == 0
