@@ -1435,9 +1435,37 @@ struct _ChunkRunner(Movable):
         """The steps from `first` on over `columns` (the input of step
         `first`); `marks` is per step the address of a right or full
         join's matched-row flags (0 for none)."""
+        return self.run_until(columns^, first, len(self.steps), marks)
+
+    def run_to_last(
+        mut self, var columns: _Columns, first: Int, marks: List[Int]
+    ) raises -> Tuple[_Columns, Int]:
+        """The steps from `first` up to the last row-local segment: the
+        columns that segment reads and the step it starts at (the step
+        count when the last step is a join). The segment then runs one
+        chunk at a time through `chunk`, so a sink takes each chunk as it
+        is made (DuckDB's PipelineExecutor pushing a chunk to the sink)."""
+        var n = len(self.steps)
+        var last = n
+        while last > first and self.steps[last - 1].kind != STEP_JOIN:
+            last -= 1
+        if last > first:
+            columns = self.run_until(columns^, first, last, marks)
+        for s in range(last, n):
+            self._compiled(s)
+        return (columns^, last)
+
+    def run_until(
+        mut self,
+        var columns: _Columns,
+        first: Int,
+        stop: Int,
+        marks: List[Int],
+    ) raises -> _Columns:
+        """Steps [first, stop) over `columns`, collected."""
         var at = first
         var n = len(self.steps)
-        while at < n:
+        while at < stop:
             if self.stop_empty and columns.height == 0:
                 return columns^
             if self.steps[at].kind == STEP_JOIN:
@@ -1448,12 +1476,12 @@ struct _ChunkRunner(Movable):
                 self.counts[2 * at + 2] += columns.height
                 at += 1
                 continue
-            var stop = at
-            while stop < n and self.steps[stop].kind != STEP_JOIN:
-                stop += 1
-            columns = self._vector_steps(columns, at, stop)
-            at = stop
-        if len(self.ungrouped) > 0 and columns.height > 0:
+            var end = at
+            while end < stop and self.steps[end].kind != STEP_JOIN:
+                end += 1
+            columns = self._vector_steps(columns, at, end)
+            at = end
+        if stop == n and len(self.ungrouped) > 0 and columns.height > 0:
             if self.ungrouped[0].counts_only():
                 # Row counts read no column: the rows are only counted.
                 self.ungrouped[0].sink_rows(columns.height)
@@ -1462,6 +1490,59 @@ struct _ChunkRunner(Movable):
             # chunks for the ungrouped sink.
             columns = self._vector_steps(columns, n, n)
         return columns^
+
+    def chunk(
+        mut self,
+        columns: _Columns,
+        bases: List[Vector],
+        low: Int,
+        count: Int,
+        first: Int,
+    ) raises -> Int:
+        """Rows [low, low + count) of `columns` through steps [first, end)
+        (all row-local, compiled by `run_to_last`): the address of the
+        output chunk, or 0 when no row is left."""
+        var n = len(self.steps)
+        var compiled = Pointer[Optional[_VectorStep], MutAnyOrigin](
+            unsafe_from_address=Int(self.compiled.unsafe_ptr())
+        )
+        var input = Pointer[DataChunk, MutAnyOrigin](
+            unsafe_from_address=Int(Pointer(to=self.source))
+        )
+        columns.fill(bases, self.arena, input[], low, count)
+        for s in range(first, n):
+            self.counts[2 * s + 1] += input[].count
+            var began = Int(perf_counter_ns())
+            ref step = compiled[unsafe_offset=s].value()
+            step.run(input[], self.arena)
+            self.counts[2 * n + 1 + s] += Int(perf_counter_ns()) - began
+            self.counts[2 * s + 2] += step.output.count
+            input = Pointer[DataChunk, MutAnyOrigin](
+                unsafe_from_address=Int(Pointer(to=step.output))
+            )
+            if step.output.count == 0:
+                return 0
+        return Int(input)
+
+    def chunk_frame(mut self, address: Int) raises -> DataFrame:
+        """An output chunk as a frame of the output schema (the adapter
+        for sinks that read frames)."""
+        var chunk = Pointer[DataChunk, MutAnyOrigin](
+            unsafe_from_address=address
+        )
+        var schema = self.output_schema()
+        var columns = List[Series](capacity=schema.width())
+        for c in range(schema.width()):
+            columns.append(
+                to_series(
+                    chunk[],
+                    c,
+                    self.arena,
+                    schema._columns[c].name(),
+                    schema._columns[c].dtype(),
+                )
+            )
+        return DataFrame(columns^)
 
     def _compiled(mut self, s: Int) raises:
         if not self.compiled[s]:
@@ -3057,7 +3138,8 @@ struct _PipelineJob(Job):
                 continue
             self.runner.counts[0] += length
             var vectors = Optional[List[Int]]()
-            if self.top_filter.info:
+            # A top-N taking chunks checks each vector as it is read.
+            if self.top_filter.info and not self._chunk_top():
                 # The TopN's dynamic filter against the scan's vector
                 # statistics (CheckZonemapSegments): vectors it rules out
                 # are not read.
@@ -3084,11 +3166,120 @@ struct _PipelineJob(Job):
                 source = source.through(rows.value())
             else:
                 self.runner.scan_offset = offset
+            if self._chunk_top():
+                self._top_chunks(source^, rows, k, offset, marks)
+                self.runner.scan_offset = -1
+                continue
             var output = self.runner.run(source^, 0, marks)
             self.runner.scan_offset = -1
             if output.height == 0:
                 continue
             self._consume(output, k, offset, length)
+
+    def _chunk_top(self) -> Bool:
+        """Whether the sink is a top-N, taking chunks one at a time."""
+        return (
+            self.top > 0
+            and len(self.layout) == 0
+            and len(self.expressions) == 0
+            and self.unmatched_step < 0
+            and self.first_step == 0
+        )
+
+    def _top_chunks(
+        mut self,
+        var source: _Columns,
+        rows: Optional[List[Int]],
+        k: Int,
+        offset: Int,
+        marks: List[Int],
+    ) raises:
+        """A morsel into the top-N one chunk at a time, as DuckDB's
+        PhysicalTopN sinks each chunk the scan makes. Before each vector is
+        read, the scan checks the dynamic filter again (the OptionalFilter
+        on the TopN's boundary in CheckZonemap), so a boundary the chunks
+        before tightened skips the vectors it rules out."""
+        var ran = self.runner.run_to_last(source^, 0, marks)
+        var columns = ran[0].copy()
+        var first = ran[1]
+        # The vectors map to source rows only before any join.
+        var direct = first == 0
+        var bases = columns.bases(self.runner.arena)
+        var made = 0
+        var skipped = 0
+        if len(self.topn) > 0:
+            self.topn[0].new_morsel()
+        for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
+            var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
+            if direct and (self.top_filter.info or self.runner.scan):
+                var start = low
+                var end = low + count
+                if rows:
+                    start = rows.value()[low]
+                    end = rows.value()[low + count - 1] + 1
+                if self.runner.scan and self.runner.scan.value().skip(
+                    offset + start, offset + end
+                ):
+                    trace_path("scan.vector_skip")
+                    continue
+                if self.top_filter.info and self.top_filter.info.value()[].skip(
+                    offset + start, offset + end
+                ):
+                    skipped += 1
+                    continue
+            var address = self.runner.chunk(columns, bases, low, count, first)
+            if address == 0:
+                continue
+            var chunk = Pointer[DataChunk, MutAnyOrigin](
+                unsafe_from_address=address
+            )
+            if self.top_maintain_order:
+                # Ties keep the input order: the order column is added to
+                # the chunk's rows as a frame.
+                var frame = self.runner.chunk_frame(address)
+                var height = frame.height()
+                self._sink_top(frame^, k, offset, made)
+                made += height
+                continue
+            if len(self.topn) == 0:
+                self._sink_top(self.runner.output_schema(), k, offset, 0)
+            self.topn[0].sink_chunk(chunk[], self.runner.arena)
+        if skipped > 0:
+            # Once a morsel: tracing reads the environment.
+            trace_path("pipeline.top_dynamic_skip_vector")
+
+    def _sink_top(
+        mut self, var output: DataFrame, k: Int, offset: Int, first_row: Int
+    ) raises:
+        """Rows into this worker's top-N heap; `first_row` numbers the
+        first among the morsel's output rows (ties keep that order)."""
+        if self.top_maintain_order:
+            var h = output.height()
+            var places = List[Int64](capacity=h)
+            var base = Int64(k) << 40
+            if self.top_filter.reordered:
+                # A row group's rows (at most ROW_GROUP_ROWS, no
+                # join) after its source row.
+                base = Int64(offset) << 20
+            for r in range(h):
+                places.append(base + Int64(first_row + r))
+            output = output.with_column(
+                Series(_ORDER_COLUMN, Column[Int64](places^))
+            )
+        if len(self.topn) == 0:
+            self.topn.append(
+                TopNSink(
+                    output,
+                    _top_keys(self.top_names, self.top_maintain_order),
+                    _top_flags(self.top_descending, self.top_maintain_order),
+                    _top_flags(self.top_nulls_last, self.top_maintain_order),
+                    self.top,
+                    self.boundary,
+                    self.top_filter.dynamic,
+                    self.top_filter.op,
+                )
+            )
+        self.topn[0].sink(output)
 
     def _unmatched(self, offset: Int, length: Int) raises -> DataFrame:
         """The build rows in [offset, offset + length) that no worker's
@@ -3267,38 +3458,9 @@ struct _PipelineJob(Job):
                         self.reduction[p].merge_all(batch, parallel=False)
                     p += 1
         elif self.top > 0:
-            var output = columns.whole(self.runner.arena, schema)
-            if self.top_maintain_order:
-                var h = output.height()
-                var places = List[Int64](capacity=h)
-                var base = Int64(k) << 40
-                if self.top_filter.reordered:
-                    # A row group's rows (at most ROW_GROUP_ROWS, no
-                    # join) after its source row.
-                    base = Int64(offset) << 20
-                for r in range(h):
-                    places.append(base + Int64(r))
-                output = output.with_column(
-                    Series(_ORDER_COLUMN, Column[Int64](places^))
-                )
-            if len(self.topn) == 0:
-                self.topn.append(
-                    TopNSink(
-                        output,
-                        _top_keys(self.top_names, self.top_maintain_order),
-                        _top_flags(
-                            self.top_descending, self.top_maintain_order
-                        ),
-                        _top_flags(
-                            self.top_nulls_last, self.top_maintain_order
-                        ),
-                        self.top,
-                        self.boundary,
-                        self.top_filter.dynamic,
-                        self.top_filter.op,
-                    )
-                )
-            self.topn[0].sink(output)
+            self._sink_top(
+                columns.whole(self.runner.arena, schema), k, offset, 0
+            )
         else:
             self.parts.append(columns.whole(self.runner.arena, schema))
             self.sequences.append(k)

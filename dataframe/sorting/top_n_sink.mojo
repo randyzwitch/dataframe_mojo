@@ -8,8 +8,10 @@ more than ReduceThreshold rows it is cut down to the live entries
 (`Finalize`) and gathers the payload in order; the caller combines the
 threads' results.
 """
-from dataframe.frame import DataFrame, concat
+from dataframe.frame import DataFrame
+from dataframe.dtype import DataType
 from dataframe.series import Series
+from dataframe.storage.string import StringBuilder, StringColumn
 from dataframe.sorting.sort_key import (
     STANDARD_VECTOR_SIZE,
     KeyBlock,
@@ -21,8 +23,46 @@ from dataframe.sorting.sort_key import (
 from dataframe.sorting.algorithms import SortKeys
 from dataframe.sorting.top_n import TopNBoundary, TopNHeap
 from dataframe.table_filter import DynamicFilterData, set_dynamic_value
+from dataframe.vector.data_chunk import (
+    ColumnArena,
+    DataChunk,
+    gather_series,
+    to_series,
+)
+from dataframe.vector.types import (
+    FLAT_VECTOR,
+    SEQUENCE_VECTOR,
+    SelectionVector,
+)
 from std.collections import Optional
 from std.memory import ArcPointer
+
+
+def _copied_strings(
+    column: Series, rows: List[Int], name: String
+) raises -> Series:
+    """Rows `rows` of a string column as a fresh offsets column."""
+    ref source = column._data[StringColumn]
+    var built = StringBuilder(len(rows))
+    for r in rows:
+        if source._valid(r):
+            built.append(source._get(r))
+        else:
+            built.append_null()
+    return Series(name, built^.finish())
+
+
+def _appendable(column: Series) raises -> Series:
+    """A payload column in a layout that grows in place: strings as offsets
+    and bytes, which append amortized, rather than views, whose append
+    builds a new combined storage each time."""
+    if column._data.isa[StringColumn]():
+        ref strings = column._data[StringColumn]
+        if strings._is_view_storage():
+            return Series(column.name(), strings.to_large_utf8()).with_dtype(
+                column.dtype()
+            )
+    return column.copy()
 
 
 def _sink_rows[
@@ -49,14 +89,19 @@ struct TopNSink(Movable):
     var names: List[String]
     var heap: TopNHeap
     var schema: DataFrame
-    # heap_data: the payload rows copied so far, in pieces.
-    var parts: List[DataFrame]
+    # heap_data: the payload rows copied so far, one growing column per
+    # schema column (DataChunk::Append with ALLOW_RESIZE).
+    var payload: List[Series]
     var payload_rows: Int
     var boundary: TopNBoundary
     # The scan's dynamic filter on the first sort column, set from the
     # boundary when this sink's key becomes it, and its comparison.
     var dynamic: Optional[ArcPointer[DynamicFilterData]]
     var dynamic_op: Int
+    # The arena columns the layout is bound to while chunks are flat
+    # windows of them (one morsel), so a chunk's keys are read in place
+    # rather than made into columns; empty when unbound.
+    var bound: List[Int]
 
     def __init__(
         out self,
@@ -78,11 +123,18 @@ struct TopNSink(Movable):
         self.names = names.copy()
         self.heap = TopNHeap(limit, self.layout.record_words())
         self.schema = schema.clear()
-        self.parts = List[DataFrame]()
+        self.payload = List[Series](capacity=self.schema.width())
+        for column in self.schema._columns:
+            self.payload.append(_appendable(column))
         self.payload_rows = 0
         self.boundary = boundary
         self.dynamic = dynamic
         self.dynamic_op = dynamic_op
+        self.bound = List[Int]()
+
+    def new_morsel(mut self):
+        """The arena's columns are replaced: bind afresh."""
+        self.bound = List[Int]()
 
     def sink(mut self, frame: DataFrame) raises:
         """Sink: the chunk's rows that enter, a vector at a time."""
@@ -92,6 +144,7 @@ struct TopNSink(Movable):
         for name in self.names:
             keys.append(frame.column(name))
         self.layout.rebind(keys)
+        self.bound = List[Int]()
         if self.layout.variable:
             self._sink[1, True](frame)
         elif self.layout.words == 1:
@@ -101,36 +154,161 @@ struct TopNSink(Movable):
         else:
             self._sink[3, False](frame)
 
-    def _sink[W: Int, VAR: Bool](mut self, frame: DataFrame) raises:
+    def sink_chunk(
+        mut self, mut chunk: DataChunk, mut arena: ColumnArena
+    ) raises:
+        """PhysicalTopN::Sink over one chunk whose columns are the schema's:
+        the key columns are read out of the chunk, and only the rows that
+        enter the heap are copied into the payload (AddLargeHeap)."""
+        if self.heap.heap_size == 0 or chunk.count == 0:
+            return
+        # Keys that are flat windows of one place in the arena's columns
+        # are read where they are (DuckDB builds sort keys from the
+        # chunk's vectors): the layout stays bound to those columns and
+        # takes the chunk's row range.
+        var start = -1
+        var handles = List[Int](capacity=len(self.names))
+        for name in self.names:
+            var c = self.schema._index(name)
+            ref v = chunk.data[c]
+            if (
+                v.vector_type != FLAT_VECTOR
+                or v.source < 0
+                or (start >= 0 and v.source_offset != start)
+                or arena.columns[v.source].dtype()
+                != self.schema._columns[c].dtype()
+            ):
+                start = -1
+                break
+            start = v.source_offset
+            handles.append(v.source)
+        if start >= 0:
+            if self.bound != handles:
+                var keys = List[Series](capacity=len(handles))
+                for h in handles:
+                    keys.append(arena.columns[h].copy())
+                self.layout.rebind(keys)
+                self.bound = handles^
+        else:
+            start = 0
+            self.bound = List[Int]()
+            var keys = List[Series](capacity=len(self.names))
+            for name in self.names:
+                var c = self.schema._index(name)
+                keys.append(
+                    to_series(
+                        chunk, c, arena, name, self.schema._columns[c].dtype()
+                    )
+                )
+            self.layout.rebind(keys)
+        var matches: List[Int]
+        if self.layout.variable:
+            matches = self._enter[1, True](start, chunk.count)
+        elif self.layout.words == 1:
+            matches = self._enter[1, False](start, chunk.count)
+        elif self.layout.words == 2:
+            matches = self._enter[2, False](start, chunk.count)
+        else:
+            matches = self._enter[3, False](start, chunk.count)
+        if len(matches) > 0:
+            var rows = List[UInt32](unsafe_uninit_length=len(matches))
+            for i in range(len(matches)):
+                rows[i] = UInt32(matches[i] - start)
+            var selection = SelectionVector(Int(rows.unsafe_ptr()))
+            var columns = List[Series](capacity=self.schema.width())
+            for c in range(self.schema.width()):
+                ref v = chunk.data[c]
+                if (
+                    v.source >= 0
+                    and v.vector_type != SEQUENCE_VECTOR
+                    and self.schema._columns[c].dtype() == DataType.STRING
+                    and arena.columns[v.source]._data.isa[StringColumn]()
+                ):
+                    # Strings are copied out as bytes into a fresh offsets
+                    # column: a take would share the source's view blocks
+                    # (reference counts every thread touches) only to be
+                    # copied into the payload's layout afterwards.
+                    var picked = List[Int](capacity=len(matches))
+                    for i in range(len(matches)):
+                        picked.append(
+                            v.source_offset + v.child_row(matches[i] - start)
+                        )
+                    columns.append(
+                        _copied_strings(
+                            arena.columns[v.source],
+                            picked,
+                            self.schema._columns[c].name(),
+                        )
+                    )
+                    continue
+                columns.append(
+                    gather_series(
+                        chunk,
+                        c,
+                        arena,
+                        selection,
+                        len(matches),
+                        self.schema._columns[c].name(),
+                        self.schema._columns[c].dtype(),
+                    )
+                )
+            _ = rows^
+            self._append(columns)
+            self.payload_rows += len(matches)
+        # Nothing entered: the heap's worst key is unchanged, so the shared
+        # boundary has nothing new from this chunk.
+        if len(matches) > 0:
+            self._settle_any()
+
+    def _settle_any(mut self) raises:
+        if self.layout.variable:
+            self._settle[1, True]()
+        elif self.layout.words == 1:
+            self._settle[1, False]()
+        elif self.layout.words == 2:
+            self._settle[2, False]()
+        else:
+            self._settle[3, False]()
+
+    def _append(mut self, columns: List[Series]) raises:
+        """The entering rows onto the payload (heap_data.Append in
+        TopNHeap::AddLargeHeap, physical_top_n.cpp:276)."""
+        for c in range(len(self.payload)):
+            self.payload[c]._append_series(_appendable(columns[c]))
+
+    def _enter[
+        W: Int, VAR: Bool
+    ](mut self, start: Int, n: Int) raises -> List[Int]:
+        """The bound key's rows [start, start + n) that enter the heap, a
+        vector at a time (their payload positions follow the payload so
+        far); the rows, as the bound key's."""
         self.heap.view.refresh[W, VAR](self.boundary)
         var matches = List[Int]()
-        var at = 0
-        var n = frame.height()
+        var at = start
+        var stop = start + n
         var prefixes = List[UInt64]()
-        while at < n:
-            var end = min(n, at + STANDARD_VECTOR_SIZE)
+        while at < stop:
+            var end = min(stop, at + STANDARD_VECTOR_SIZE)
             var block: KeyBlock
             var entering = Optional[List[Int]]()
             if key_prefixes(self.layout, at, end, prefixes):
                 entering = self.heap.entering[W, VAR](prefixes, end - at)
             if entering and len(entering.value()) == 0:
-                # No row of the vector can be in the result.
                 at = end
                 continue
             if entering and len(entering.value()) < end - at:
-                # Sort keys for the rows that pass alone.
                 block = encode_selected(self.layout, at, entering.value())
             else:
                 block = encode_keys(self.layout, at, end)
             _sink_rows[W, VAR](self.heap, block, self.payload_rows, matches)
             _ = block^
             at = end
-        if len(matches) > 0:
-            self.parts.append(frame.take(matches))
-            self.payload_rows += len(matches)
+        return matches^
+
+    def _settle[W: Int, VAR: Bool](mut self) raises:
+        """After rows enter: the shared boundary and the scan's dynamic
+        filter from it, and Reduce once the payload is large."""
         if self.heap.publish[W, VAR](self.boundary) and self.dynamic:
-            # TopNBoundaryValue::UpdateValue: the boundary's first sort
-            # value becomes the scan filter's constant.
             _ = set_dynamic_value(
                 self.dynamic.value(),
                 self.dynamic_op,
@@ -139,28 +317,31 @@ struct TopNSink(Movable):
         if self.payload_rows >= self.heap.reduce_threshold():
             self._reduce[W, VAR]()
 
+    def _sink[W: Int, VAR: Bool](mut self, frame: DataFrame) raises:
+        var matches = self._enter[W, VAR](0, frame.height())
+        if len(matches) > 0:
+            self._append(frame.take(matches)._columns)
+            self.payload_rows += len(matches)
+        # TopNBoundaryValue::UpdateValue: the boundary's first sort value
+        # becomes the scan filter's constant.
+        self._settle[W, VAR]()
+
     def _payload_value(self, row: Int) raises -> Series:
         """Payload row `row`'s first sort column, one row."""
-        var at = row
-        for part in self.parts:
-            if at < part.height():
-                return part.column(self.names[0]).slice(at, 1)
-            at -= part.height()
-        raise Error("top-N payload row out of range")
+        return self.payload[self.schema._index(self.names[0])].slice(row, 1)
 
     def _payload(self) raises -> DataFrame:
-        if len(self.parts) == 0:
-            return self.schema.copy()
-        if len(self.parts) == 1:
-            return self.parts[0].copy()
-        return concat(self.parts)
+        return DataFrame(self.payload.copy())
 
     def _reduce[W: Int, VAR: Bool](mut self) raises:
-        """Reduce: the payload cut to the live entries, renumbered."""
+        """Reduce (physical_top_n.cpp:431): once the payload passes
+        ReduceThreshold, it is cut to the live entries, renumbered."""
         var live = self._payload().take(self.heap.payloads[W, VAR]())
         self.heap.renumber[W, VAR]()
         self.heap.compact_keys[W, VAR]()
-        self.parts = [live^]
+        self.payload = List[Series](capacity=live.width())
+        for column in live._columns:
+            self.payload.append(_appendable(column))
         self.payload_rows = self.heap.size
 
     def finish(mut self) raises -> DataFrame:
