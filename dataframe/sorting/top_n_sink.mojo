@@ -32,6 +32,9 @@ from std.collections import Optional
 from std.memory import ArcPointer
 
 
+comptime _MAX_PIECES = 64
+
+
 def _sink_rows[
     W: Int, VAR: Bool
 ](mut heap: TopNHeap, block: KeyBlock, base: Int, mut matches: List[Int]):
@@ -203,12 +206,25 @@ struct TopNSink(Movable):
     def _settle_any(mut self) raises:
         if self.layout.variable:
             self._settle[1, True]()
+            self._bound_pieces[1, True]()
         elif self.layout.words == 1:
             self._settle[1, False]()
+            self._bound_pieces[1, False]()
         elif self.layout.words == 2:
             self._settle[2, False]()
+            self._bound_pieces[2, False]()
         else:
             self._settle[3, False]()
+            self._bound_pieces[3, False]()
+
+    def _bound_pieces[W: Int, VAR: Bool](mut self) raises:
+        """DuckDB appends a chunk's entering rows to one heap_data
+        collection; ours is a list of pieces, one a chunk. Past
+        _MAX_PIECES the payload is reduced to the live rows on this
+        thread, so the finish (which runs the threads' heaps one after
+        another) never joins hundreds of small pieces."""
+        if len(self.parts) >= _MAX_PIECES:
+            self._reduce[W, VAR]()
 
     def _enter[
         W: Int, VAR: Bool
