@@ -3222,8 +3222,9 @@ struct _PipelineJob(Job):
                 ):
                     trace_path("scan.vector_skip")
                     continue
-                if self.top_filter.info and self.top_filter.info.value()[
-                ].skip(offset + start, offset + end):
+                if self.top_filter.info and self.top_filter.info.value()[].skip(
+                    offset + start, offset + end
+                ):
                     skipped += 1
                     continue
             var address = self.runner.chunk(columns, bases, low, count, first)
