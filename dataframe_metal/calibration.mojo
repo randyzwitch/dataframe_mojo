@@ -5,15 +5,21 @@ cost. CPU and Metal models must also match the CPU's path cache: overwriting
 an existing filename can never combine a new GPU model with an old CPU one.
 """
 from std.math import isfinite
+from std.atomic import Atomic
+from std.collections import Dict
+from std.ffi import _get_global
+from std.memory import Pointer
+from std.memory.alloc import Layout, alloc
 from std.memory import bitcast
 from dataframe import DataType, LazyFrame, Series
 from dataframe.expr import COL, LIT_INT, LIT_FLOAT
 from dataframe.json.value import JsonValue, json_quote
 from dataframe.parallel import configured_workers
+from dataframe.planning.device_placement import plan_pipeline_cuts
 from dataframe.placement import calibration_path, load_costs, LinearCost
 from .accelerator.gpu.identity import hardware, runtime_build_id
 
-comptime SCHEMA_VERSION = 1
+comptime SCHEMA_VERSION = 2
 
 
 def identity_json() raises -> String:
@@ -110,46 +116,146 @@ def validate_identity(profile: JsonValue, current: JsonValue) raises -> String:
     return String()
 
 
+def pipeline_key(region: LazyFrame) raises -> String:
+    var optimized = region._optimized()
+    var units = plan_pipeline_cuts(optimized._plan)
+    if len(units) != 1:
+        raise Error("Metal calibration requires one supported pipeline")
+    return units[0].key.copy()
+
+
+@fieldwise_init
+struct RegionCost(Copyable, Movable):
+    var cpu: LinearCost
+    var accel: LinearCost
+    var pipeline: String
+    var first: Float64
+    var last: Float64
+
+
+struct _ProfileCache(Movable):
+    var lock: Atomic[Int64]
+    var path: String
+    var text: String
+    var identity: String
+    var regions: Dict[String, RegionCost]
+    var valid: Bool
+
+    def __init__(out self):
+        self.lock = Atomic[Int64](0)
+        self.path = String()
+        self.text = String()
+        self.identity = String()
+        self.regions = Dict[String, RegionCost]()
+        self.valid = False
+
+
+def _profile_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    var slot = alloc(Layout[_ProfileCache].single()).unsafe_leak()
+    slot.unsafe_write(_ProfileCache())
+    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=Int(slot))
+
+
+def _profile_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
+    pass
+
+
+def _snapshot(
+    path: String, text: String, key: String
+) raises -> Tuple[String, Optional[RegionCost]]:
+    var address = _get_global[
+        "DATAFRAME_METAL_CALIBRATION_PROFILE_V2", _profile_init, _profile_keep
+    ]()
+    ref cache = Pointer[_ProfileCache, MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+    var unlocked = Int64(0)
+    while not cache.lock.compare_exchange(unlocked, 1):
+        unlocked = 0
+    try:
+        if cache.path != path:
+            cache.path = path.copy()
+            cache.text = text.copy()
+            cache.valid = False
+            cache.regions = Dict[String, RegionCost]()
+            var profile = JsonValue(text)
+            if profile.get("schema_version").canonical() == String(
+                SCHEMA_VERSION
+            ):
+                cache.identity = profile.get("identity").canonical()
+                var regions = profile.get("regions")
+                var operators = profile.get("operators")
+                for name in regions.keys():
+                    var entry = regions.get(name)
+                    var first = _number(entry.get("min_rows"))
+                    var last = _number(entry.get("max_rows"))
+                    if (
+                        not isfinite(first)
+                        or not isfinite(last)
+                        or first < 1
+                        or last < first
+                    ):
+                        raise Error("Invalid measured Metal row range")
+                    var cpu = _model(entry, "cpu")
+                    var accel = _model(entry, "accel")
+                    var pipeline = entry.get("pipeline_key").string()
+                    var reference = _model(operators.get(pipeline), "cpu")
+                    if (
+                        not pipeline.startswith("pipeline:")
+                        or reference.fixed_ns != cpu.fixed_ns
+                        or reference.row_ns != cpu.row_ns
+                    ):
+                        raise Error(
+                            "Metal region does not match its CPU pipeline model"
+                        )
+                    cache.regions[name] = RegionCost(
+                        cpu^, accel^, pipeline^, first, last
+                    )
+                cache.valid = True
+        # File bytes are checked on every call, while JSON is parsed once.
+        # An overwritten cached path cannot mix new GPU and old CPU models.
+        var result: Tuple[String, Optional[RegionCost]]
+        if cache.valid and cache.text == text:
+            result = (cache.identity.copy(), cache.regions.get(key))
+        else:
+            result = (String(), Optional[RegionCost]())
+        cache.lock.store(0)
+        return result^
+    except error:
+        cache.lock.store(0)
+        raise error^
+
+
 def measured_cost(key: String, rows: Int) raises -> Float64:
     var path = calibration_path()
     if not path:
         return -1
-    var text = String()
+    var text: String
     with open(path, "r") as source:
         text = source.read()
-    var profile = JsonValue(text)
-    if validate_identity(profile, JsonValue(identity_json())):
+    var snapshot = _snapshot(path, text, key)
+    if not snapshot[1]:
         return -1
-    var operators = profile.get("operators")
-    if not operators.has(key):
+    var current = JsonValue(identity_json())
+    var saved = JsonValue('{"schema_version":2,"identity":' + snapshot[0] + "}")
+    if validate_identity(saved, current):
         return -1
-    var entry = operators.get(key)
-    var first = _number(entry.get("min_rows"))
-    var last = _number(entry.get("max_rows"))
-    if (
-        not isfinite(first)
-        or not isfinite(last)
-        or first < 1
-        or last < first
-        or Float64(rows) < first
-        or Float64(rows) > last
-    ):
+    var entry = snapshot[1].value().copy()
+    if Float64(rows) < entry.first or Float64(rows) > entry.last:
         return -1
-    var cpu = _model(entry, "cpu")
-    var accel = _model(entry, "accel")
-    var cached_cpu = load_costs("cpu").get(key)
-    var cached_accel = load_costs("accel").get(key)
-    if not cached_cpu or not cached_accel:
+    var cpu_models = load_costs("cpu")
+    var cached_cpu = cpu_models.get(entry.pipeline)
+    if not cached_cpu:
         return -1
     if (
-        cached_cpu.value().fixed_ns != cpu.fixed_ns
-        or cached_cpu.value().row_ns != cpu.row_ns
-        or cached_accel.value().fixed_ns != accel.fixed_ns
-        or cached_accel.value().row_ns != accel.row_ns
+        cached_cpu.value().fixed_ns != entry.cpu.fixed_ns
+        or cached_cpu.value().row_ns != entry.cpu.row_ns
     ):
         return -1
-    var value = accel.ns(rows)
-    return value if isfinite(value) and isfinite(cpu.ns(rows)) else Float64(-1)
+    var value = entry.accel.ns(rows)
+    return value if isfinite(value) and isfinite(
+        entry.cpu.ns(rows)
+    ) else Float64(-1)
 
 
 def calibration_status() -> String:

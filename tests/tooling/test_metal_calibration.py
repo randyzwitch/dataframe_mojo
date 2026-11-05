@@ -13,7 +13,7 @@ class MetalCalibrationTests(unittest.TestCase):
     def captures(self):
         return [
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "identity": {
                     "runtime_build_id": "dataframe-mojo-metal-v2;cpu="
                     + "a" * 64
@@ -27,6 +27,7 @@ class MetalCalibrationTests(unittest.TestCase):
                 "verified": True,
                 "direct_gpu": True,
                 "key": "sum:chunks=1:nulls=0",
+                "pipeline_key": "pipeline:select:filter:int32",
                 "rows": n,
                 "cpu_ns": [2 * n + 50, 2 * n + 100, 2 * n + 150],
                 "accel_ns": [n + 900, n + 1000, n + 1100],
@@ -36,7 +37,7 @@ class MetalCalibrationTests(unittest.TestCase):
 
     def test_bounds_every_observed_sample_and_does_not_extrapolate(self):
         records = self.captures()
-        model = fit(records)["operators"][records[0]["key"]]
+        model = fit(records)["regions"][records[0]["key"]]
         self.assertEqual((model["min_rows"], model["max_rows"]), (100, 10000))
         for entry in records:
             cpu = model["cpu"]
@@ -70,7 +71,7 @@ class MetalCalibrationTests(unittest.TestCase):
             {"rows": 0},
             {"cpu_ns": [1, float("nan"), 2]},
             {"accel_ns": [1, 2]},
-            {"schema_version": 2},
+            {"schema_version": 99},
         ]:
             records = self.captures()
             records[0].update(change)
@@ -101,6 +102,23 @@ class MetalCalibrationTests(unittest.TestCase):
             second = publish(changed, root)
             self.assertNotEqual(first, second)
             self.assertTrue(first.exists())
+
+    def test_cpu_pipeline_envelope_is_conservative_across_layouts(self):
+        records = self.captures()
+        other = copy.deepcopy(records)
+        for entry in other:
+            entry["key"] = "sum:chunks=8:nulls=1"
+            entry["cpu_ns"] = [t * 0.5 for t in entry["cpu_ns"]]
+        profile = fit(records + other)
+        self.assertNotIn(records[0]["key"], profile["operators"])
+        model = profile["operators"][records[0]["pipeline_key"]]["cpu"]
+        for entry in records + other:
+            self.assertLessEqual(
+                model["fixed_ns"] + model["row_ns"] * entry["rows"],
+                min(entry["cpu_ns"]),
+            )
+            self.assertEqual(profile["regions"][entry["key"]]["cpu"], model)
+        self.assertEqual(len(profile["regions"]), 2)
 
 
 if __name__ == "__main__":

@@ -9,8 +9,9 @@ from std.math import isfinite, isinf
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
 from dataframe.json.value import json_quote
-from .calibration import identity_json, shape_key
+from .calibration import identity_json, shape_key, pipeline_key
 from .handoff import execute_timed, region_key, supports
+from .region_plan import normalize_region
 
 
 def _check(actual: DataFrame, expected: DataFrame) raises:
@@ -73,14 +74,28 @@ def capture(
     if repetitions < 3:
         raise Error("Metal calibration requires at least three repetitions")
     var identity = identity_json()
-    var prefix = '{"schema_version":1,"identity":' + identity
+    var prefix = '{"schema_version":2,"identity":' + identity
     if not supports(region):
         return prefix + ',"status":"skipped","reason":"unsupported region"}'
-    var key = shape_key(region, region_key(region))
+    var normalized = normalize_region(region)
+    var selected = normalized.take()
+    var key = shape_key(selected, region_key(selected))
     var rows = region._plan._frames[
         region._plan._nodes[0].source_slot()
     ].height()
-    prefix += ',"key":' + json_quote(key) + ',"rows":' + String(rows)
+    prefix += (
+        ',"pipeline_key":'
+        + json_quote(pipeline_key(region))
+        + ',"key":'
+        + json_quote(key)
+        + ',"rows":'
+        + String(rows)
+    )
+    if rows == 0:
+        return (
+            prefix
+            + ',"status":"skipped","reason":"empty input has no GPU timing"}'
+        )
     _check(region.collect(engine="cpu"), expected)
     var warm: DataFrame
     try:

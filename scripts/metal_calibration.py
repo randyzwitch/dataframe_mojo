@@ -13,7 +13,7 @@ import math
 from pathlib import Path
 from statistics import median
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 IDENTITY_FIELDS = {"runtime_build_id", "device", "host", "workers"}
 
 
@@ -87,6 +87,11 @@ def fit(records):
             )
         rows = record.get("rows")
         key = record.get("key")
+        pipeline = record.get("pipeline_key")
+        if not isinstance(pipeline, str) or not pipeline.startswith(
+            "pipeline:"
+        ):
+            raise ValueError("capture requires a CPU pipeline key")
         if (
             not isinstance(rows, int)
             or isinstance(rows, bool)
@@ -105,6 +110,26 @@ def fit(records):
     if identity is None or not grouped:
         raise ValueError("no measured operators")
     operators = {}
+    pipelines = defaultdict(list)
+    for entries in grouped.values():
+        for entry in entries:
+            pipelines[entry["pipeline_key"]].append(entry)
+    for key, entries in sorted(pipelines.items()):
+        points = []
+        for n in sorted({e["rows"] for e in entries}):
+            points.append(
+                (
+                    n,
+                    min(
+                        t
+                        for e in entries
+                        if e["rows"] == n
+                        for t in e["cpu_ns"]
+                    ),
+                )
+            )
+        operators[key] = {"cpu": _envelope(points, False)}
+    regions = {}
     for key, entries in sorted(grouped.items()):
         rows = sorted({e["rows"] for e in entries})
         if len(rows) < 3:
@@ -114,8 +139,16 @@ def fit(records):
             same = [e for e in entries if e["rows"] == n]
             cpu.append((n, min(t for e in same for t in e["cpu_ns"])))
             accel.append((n, max(t for e in same for t in e["accel_ns"])))
-        operators[key] = {
-            "cpu": _envelope(cpu, False),
+        pipeline_keys = {e["pipeline_key"] for e in entries}
+        if len(pipeline_keys) != 1:
+            raise ValueError(
+                "one region cannot have multiple pipeline identities"
+            )
+        pipeline = next(iter(pipeline_keys))
+        regions[key] = {
+            "pipeline_key": pipeline,
+            "cpu": operators[pipeline]["cpu"],
+            "local_cpu": _envelope(cpu, False),
             "accel": _envelope(accel, True),
             "min_rows": rows[0],
             "max_rows": rows[-1],
@@ -126,6 +159,7 @@ def fit(records):
         "schema_version": SCHEMA_VERSION,
         "identity": identity,
         "operators": operators,
+        "regions": regions,
         "skipped": skipped,
         "capture_records": records,
     }

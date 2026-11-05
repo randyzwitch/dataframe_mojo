@@ -159,10 +159,26 @@ on CPU if its models differ from the cached ones. Use a new profile filename.
 `dataframe_metal.calibration.calibration_status()` explains identity rejection
 without constructing a GPU context.
 
-`explain(engine="auto")` prints a `PLACE` line for measured supported nodes
-with the CPU and Metal cost models. The displayed linear crossover is an
-estimate; the provider also enforces the measured row range. Profiles record
-each decision with both estimates.
+Automatic collection uses the existing pipeline planner, which preserves
+physical input chunks. Profiles store conservative CPU pipeline models under
+`operators`, and layout-specific Metal models under `regions`. When several
+measured queries share a CPU pipeline key, its CPU model is a lower envelope
+across them; a cheaper CPU alternative cannot create a false Metal win.
+Unmeasured region layouts remain on CPU even when their pipeline key matches.
+
+`explain(engine="auto")` shows actual placement in its `PIPELINE` lines.
+The older `PLACE` lines describe a separate schema-only handoff mechanism;
+versioned profiles do not supply costs to it. The current CPU `profile()`
+entry point uses that older mechanism, so it does not audit pipeline
+placement. To audit automatic collection, set
+`DATAFRAME_METAL_PLACEMENT_TRACE` to a writable JSONL path. The Metal provider
+appends a record after a pipeline finishes on Metal, or `cpu-adjudication`
+when input values require CPU evaluation. With tracing unset it writes
+nothing. Capture timings always use direct GPU completion checks instead.
+
+Pipeline data faults retain CPU semantics: overflow, non-finite compensated
+partials and gradual-underflow cases are adjudicated on CPU. Hardware and
+allocation failures propagate as errors.
 
 ### Historical measurements on an M1 Mac mini
 
