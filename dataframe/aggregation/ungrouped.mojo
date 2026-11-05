@@ -362,6 +362,21 @@ struct UngroupedSink(Movable):
         self.count = 0
         self.sequence = 0
 
+    def counts_only(self) -> Bool:
+        """Whether every state is a row count, which reads no column."""
+        for slot in self.slots:
+            if slot.kind != _K_LEN:
+                return False
+        return True
+
+    def sink_rows(mut self, rows: Int):
+        """`rows` rows into row counts only (`counts_only`)."""
+        var state = self.groups.at(0) + 8 * self.groups.states_at
+        for slot in self.slots:
+            _words(state + 8 * slot.offset)[] += UInt64(rows)
+        self.count += rows
+        self.sequence += rows
+
     def begin(mut self, morsel: Int):
         """Rows from here on are the morsel's: numbered from `morsel << 32`
         in its output order, so first and last are the source's whichever

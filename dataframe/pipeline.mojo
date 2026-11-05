@@ -1340,6 +1340,10 @@ struct _ChunkRunner(Movable):
             columns = self._vector_steps(columns, at, stop)
             at = stop
         if len(self.ungrouped) > 0 and columns.height > 0:
+            if self.ungrouped[0].counts_only():
+                # Row counts read no column: the rows are only counted.
+                self.ungrouped[0].sink_rows(columns.height)
+                return _Columns()
             # A join's output (or the source, with no steps) cut into
             # chunks for the ungrouped sink.
             columns = self._vector_steps(columns, n, n)
