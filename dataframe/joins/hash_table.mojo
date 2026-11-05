@@ -1255,6 +1255,7 @@ struct _ProbeJob(Job):
 
     def run(mut self) raises:
         var scan = ScanStructure(self.table, self.how)
+        var used = 0
         var low = self.start
         while low < self.end:
             var count = min(STANDARD_VECTOR_SIZE, self.end - low)
@@ -1263,24 +1264,40 @@ struct _ProbeJob(Job):
                 var n = scan.next()
                 if n == 0:
                     break
+                if len(self.probe) < used + n:
+                    # Doubled, written through pointers, cut to size last.
+                    var size = max(used + n, 2 * len(self.probe))
+                    self.probe = _grown(self.probe, used, size)
+                    if self.both:
+                        self.build = _grown(self.build, used, size)
                 var rows = scan.probe_rows.unsafe_ptr()
-                var builds = scan.build_rows.unsafe_ptr()
-                # Grown geometrically: an exact reservation per chunk
-                # copied the list again for every chunk.
-                if self.probe.capacity() < len(self.probe) + n:
-                    self.probe.reserve(
-                        max(len(self.probe) + n, 2 * self.probe.capacity())
-                    )
+                var to = self.probe.unsafe_ptr()
                 for k in range(n):
-                    self.probe.append(low + Int(rows[unsafe_offset=k]))
+                    to[unsafe_offset=used + k] = low + Int(
+                        rows[unsafe_offset=k]
+                    )
                 if self.both:
-                    if self.build.capacity() < len(self.build) + n:
-                        self.build.reserve(
-                            max(len(self.build) + n, 2 * self.build.capacity())
-                        )
+                    var builds = scan.build_rows.unsafe_ptr()
+                    var into = self.build.unsafe_ptr()
                     for k in range(n):
-                        self.build.append(Int(builds[unsafe_offset=k]))
+                        into[unsafe_offset=used + k] = Int(
+                            builds[unsafe_offset=k]
+                        )
+                used += n
             low += count
+        self.probe.shrink(used)
+        if self.both:
+            self.build.shrink(used)
+
+
+def _grown(rows: List[Int], used: Int, size: Int) -> List[Int]:
+    """`size` rows, the first `used` of them `rows`'."""
+    var grown = List[Int](unsafe_uninit_length=size)
+    if used > 0:
+        unsafe_memcpy(
+            dest=grown.unsafe_ptr(), src=rows.unsafe_ptr(), count=used
+        )
+    return grown^
 
 
 struct _AppendJob(Job):
