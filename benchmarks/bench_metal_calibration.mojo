@@ -73,6 +73,7 @@ def _reference(rows: Int, nulls: Bool, mode: Int) raises -> DataFrame:
     var sales = Float64(0)
     var discount = Float64(0)
     var quantity_count = Int64(0)
+    var sales_count = Int64(0)
     for row in range(32):
         var weight = Int64(rows // 32 + Int(row < rows % 32))
         if row % 4 == 0 or (nulls and row % 16 == 5):
@@ -81,6 +82,7 @@ def _reference(rows: Int, nulls: Bool, mode: Int) raises -> DataFrame:
             integer += Int64(row % 16 - 8) * weight
             count += weight
             if not nulls or row % 16 != 3:
+                sales_count += weight
                 sales += (
                     (Float64(row % 16 - 8) / 4)
                     * (Float64((row * 3) % 8 - 4) / 2)
@@ -114,6 +116,15 @@ def _reference(rows: Int, nulls: Bool, mode: Int) raises -> DataFrame:
                 ),
             ]
         )
+    if mode == 4:
+        return DataFrame(
+            [
+                Series("sales", Column[Float32]([Float32(sales)])),
+                Series("count", Column[Int64]([sales_count])),
+                Series("mean", Column[Float64]([sales / Float64(sales_count)])),
+                Series("discount", Column[Float32]([Float32(discount)])),
+            ]
+        )
     return DataFrame(
         [
             Series("sales", Column[Float32]([Float32(sales)])),
@@ -138,6 +149,14 @@ def _expressions(mode: Int) -> List[Expr]:
             col("a").sum().alias("sum"),
             col("a").count().alias("count"),
             col("a").mean().alias("mean"),
+        ]
+    if mode == 4:
+        var value = col("a") * col("b")
+        return [
+            value.sum().alias("sales"),
+            value.count().alias("count"),
+            value.mean().alias("mean"),
+            col("d").sum().alias("discount"),
         ]
     return [
         (col("a") * col("b")).sum().alias("sales"),
@@ -165,7 +184,7 @@ def main() raises:
             var base = _table(rows, nulls)
             for chunks in [1, 8]:
                 var frame = _chunks(base, chunks)
-                for mode in range(4):
+                for mode in range(5):
                     var expressions = _expressions(mode)
                     var plan = (
                         frame.lazy()
