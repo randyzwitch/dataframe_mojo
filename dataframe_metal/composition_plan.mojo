@@ -175,28 +175,29 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
             binary_slot = i
             binary_count += 1
     single_float = single_float and binary_count == 1
-    if precise or single_float:
-        var order = List[Int]()
-        if single_float:
-            order.append(binary_slot)
-            for mean in [True, False]:
-                for i in range(len(fields)):
-                    if i != binary_slot and fields[i].needs_mean == mean:
-                        order.append(i)
-        else:
-            for floating in [True, False]:
-                for i in range(len(fields)):
-                    if (fields[i].dtype == DataType.FLOAT32) == floating:
-                        order.append(i)
-        var packed = List[ValueField]()
-        var remap = List[Int](length=len(fields), fill=0)
-        for i in range(len(order)):
-            packed.append(fields[order[i]].copy())
-            remap[order[i]] = i
-        for i in range(len(outputs)):
-            outputs[i].field = remap[outputs[i].field]
-        _ = fields^
-        fields = packed^
+    var order = List[Int]()
+    if single_float:
+        order.append(binary_slot)
+        for mean in [True, False]:
+            for i in range(len(fields)):
+                if i != binary_slot and fields[i].needs_mean == mean:
+                    order.append(i)
+    else:
+        # Group physical types so the kernel can resolve every value
+        # read and accumulator type at compile time.
+        for dtype in [DataType.FLOAT32, DataType.INT32, DataType.INT64]:
+            for i in range(len(fields)):
+                if fields[i].dtype == dtype:
+                    order.append(i)
+    var packed = List[ValueField]()
+    var remap = List[Int](length=len(fields), fill=0)
+    for i in range(len(order)):
+        packed.append(fields[order[i]].copy())
+        remap[order[i]] = i
+    for i in range(len(outputs)):
+        outputs[i].field = remap[outputs[i].field]
+    _ = fields^
+    fields = packed^
     var inputs = List[String]()
     for i in range(len(fields)):
         if fields[i].literal_side != 1:
@@ -211,7 +212,12 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
 def composition_key(plan: Composition) -> String:
     # Names do not affect costs; canonical source slots describe reuse.
     var key = (
-        String("composed_reductions:v1:") + plan.predicate.filter_dtype.name()
+        String(
+            "composed_reductions:v1:" if single_float_composition(
+                plan
+            ) else "composed_reductions:v2:typed_fields:"
+        )
+        + plan.predicate.filter_dtype.name()
     )
     key += ":filtered" if plan.predicate.filtered else ":plain"
     var shared = -1
