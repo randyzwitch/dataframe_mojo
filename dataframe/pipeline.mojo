@@ -3992,19 +3992,6 @@ def _run_pipeline(
     and output rows when the aggregate table's finish ran them, and stays
     empty otherwise."""
     trace_path("pipeline.run")
-    var steps = given_steps.copy()
-    var expressions = given_expressions.copy()
-    if len(expressions) > 0:
-        var extracted = _extract_aggregate_inputs(
-            steps,
-            expressions,
-            keys,
-            _step_schemas(frame.clear(), steps, joins[])[len(steps)],
-        )
-        if len(extracted[0]) != len(steps):
-            trace_path("pipeline.aggregate_projection")
-            steps = extracted[0].copy()
-            expressions = extracted[1].copy()
     # Every step's input columns and the output, typed once, and the
     # row-local steps compiled once for every worker. A late-materialized
     # top-N's scan adds its row id column to every morsel.
@@ -4013,7 +4000,21 @@ def _run_pipeline(
         schema_frame = schema_frame.with_column(
             Series(ROW_ID_COLUMN, Column[Int64](List[Int64]()))
         )
-    var schemas = ArcPointer(_step_schemas(schema_frame, steps, joins[]))
+    var steps = given_steps.copy()
+    var expressions = given_expressions.copy()
+    var typed = _step_schemas(schema_frame, steps, joins[])
+    if len(expressions) > 0:
+        var extracted = _extract_aggregate_inputs(
+            steps, expressions, keys, typed[len(steps)]
+        )
+        if len(extracted[0]) != len(steps):
+            trace_path("pipeline.aggregate_projection")
+            steps = extracted[0].copy()
+            expressions = extracted[1].copy()
+            typed.append(
+                typed[len(typed) - 1].select_exprs(steps[len(steps) - 1].exprs)
+            )
+    var schemas = ArcPointer(typed^)
     var templates = ArcPointer(_compile_steps(steps, schemas[]))
     # The aggregate table's layout, from the steps' output types (an
     # empty frame through every step) when it takes this reduction.
