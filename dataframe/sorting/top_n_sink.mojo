@@ -9,8 +9,9 @@ more than ReduceThreshold rows it is cut down to the live entries
 threads' results.
 """
 from dataframe.frame import DataFrame
+from dataframe.dtype import DataType
 from dataframe.series import Series
-from dataframe.storage.string import StringColumn
+from dataframe.storage.string import StringBuilder, StringColumn
 from dataframe.sorting.sort_key import (
     STANDARD_VECTOR_SIZE,
     KeyBlock,
@@ -28,7 +29,11 @@ from dataframe.vector.data_chunk import (
     gather_series,
     to_series,
 )
-from dataframe.vector.types import FLAT_VECTOR, SelectionVector
+from dataframe.vector.types import (
+    FLAT_VECTOR,
+    SEQUENCE_VECTOR,
+    SelectionVector,
+)
 from std.collections import Optional
 from std.memory import ArcPointer
 
@@ -198,6 +203,31 @@ struct TopNSink(Movable):
             var selection = SelectionVector(Int(rows.unsafe_ptr()))
             var columns = List[Series](capacity=self.schema.width())
             for c in range(self.schema.width()):
+                ref v = chunk.data[c]
+                if (
+                    v.source >= 0
+                    and v.vector_type != SEQUENCE_VECTOR
+                    and self.schema._columns[c].dtype() == DataType.STRING
+                    and arena.columns[v.source]._data.isa[StringColumn]()
+                ):
+                    # Strings are copied out as bytes into a fresh offsets
+                    # column: a take would share the source's view blocks
+                    # (reference counts every thread touches) only to be
+                    # copied into the payload's layout afterwards.
+                    ref source = arena.columns[v.source]._data[StringColumn]
+                    var built = StringBuilder(len(matches))
+                    for i in range(len(matches)):
+                        var r = v.source_offset + v.child_row(
+                            matches[i] - start
+                        )
+                        if source._valid(r):
+                            built.append(source._get(r))
+                        else:
+                            built.append_null()
+                    columns.append(
+                        Series(self.schema._columns[c].name(), built^.finish())
+                    )
+                    continue
                 columns.append(
                     gather_series(
                         chunk,
