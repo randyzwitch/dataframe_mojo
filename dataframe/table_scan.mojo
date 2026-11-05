@@ -239,6 +239,12 @@ struct ScanFilterInfo(Copyable, Movable):
     var filters: TableFilterSet
     var columns: List[Series]
     var segments: List[_Segments]
+    # Per dynamic filter, its column's storage windows found once: where
+    # each starts in the table and its statistics (the zone maps the
+    # filter's changing constant is checked against).
+    var window_starts: List[List[Int]]
+    var window_lengths: List[List[Int]]
+    var windows: List[List[WindowStatistics]]
 
     def __init__(
         out self, filters: TableFilterSet, columns: List[Series]
@@ -246,6 +252,9 @@ struct ScanFilterInfo(Copyable, Movable):
         self.filters = filters.copy()
         self.columns = List[Series]()
         self.segments = List[_Segments]()
+        self.window_starts = List[List[Int]]()
+        self.window_lengths = List[List[Int]]()
+        self.windows = List[List[WindowStatistics]]()
         for filter in filters.filters:
             var column = Optional[Series]()
             for c in columns:
@@ -259,6 +268,24 @@ struct ScanFilterInfo(Copyable, Movable):
                 self.segments.append(_filter_segments(filter, column.value()))
             else:
                 self.segments.append(_Segments(List[Int](), List[Int](), False))
+            var starts = List[Int]()
+            var lengths = List[Int]()
+            var found = List[WindowStatistics]()
+            if column and dynamic:
+                var at = 0
+                for part in column.value().chunks():
+                    var length = len(part)
+                    if length == 0:
+                        continue
+                    var stats = window_statistics(part)
+                    if stats:
+                        starts.append(at)
+                        lengths.append(length)
+                        found.append(stats.value().copy())
+                    at += length
+            self.window_starts.append(starts^)
+            self.window_lengths.append(lengths^)
+            self.windows.append(found^)
             if column:
                 self.columns.append(column.take())
             else:
@@ -279,12 +306,42 @@ struct ScanFilterInfo(Copyable, Movable):
                 or len(self.columns[f]) < end
             ):
                 continue
-            var now = _filter_segments(
-                filter, self.columns[f].slice(start, end - start)
-            )
-            if now.known and _ruled_out(now, 0, end - start):
+            if self._dynamic_rules_out(f, start, end):
                 return True
         return False
+
+    def _dynamic_rules_out(self, f: Int, start: Int, end: Int) -> Bool:
+        """Whether the dynamic filter `f`, at its current constant, rules
+        out every statistics vector over table rows [start, end): the
+        windows' zone maps found once, only the constant checked anew."""
+        ref filter = self.filters.filters[f]
+        ref starts = self.window_starts[f]
+        ref lengths = self.window_lengths[f]
+        var covered = start
+        for w in range(len(starts)):
+            var w_start = starts[w]
+            var w_end = w_start + lengths[w]
+            if w_end <= start or w_start >= end:
+                continue
+            if w_start > covered:
+                # Rows without statistics.
+                return False
+            ref found = self.windows[f][w]
+            ref record = found.record[]
+            var lo = max(start, w_start) - w_start
+            var hi = min(end, w_end) - w_start
+            var v = (lo + found.shift) // STATISTICS_VECTOR_SIZE
+            var v_end = (hi - 1 + found.shift) // STATISTICS_VECTOR_SIZE + 1
+            v = max(v, found.first)
+            v_end = min(v_end, found.last)
+            if v >= v_end:
+                return False
+            while v < v_end:
+                if not _rules_out(check_statistics(filter, record.vectors[v])):
+                    return False
+                v += 1
+            covered = w_end
+        return covered >= end
 
 
 def _ruled_out(segments: _Segments, start: Int, end: Int) -> Bool:
