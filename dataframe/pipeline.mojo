@@ -49,7 +49,9 @@ from .expr import (
     STD,
     SUM,
     VAR,
+    col,
     is_reduction,
+    node_children,
     subtree,
 )
 from dataframe.aggregation.hash_table import (
@@ -132,7 +134,7 @@ from dataframe.storage.string import StringColumn
 from .trace import trace_path
 from .selectors import expand
 from .expr import LIT_BOOL, conjuncts
-from dataframe.aggregation.expressions import _bind_all
+from dataframe.aggregation.expressions import _bind_all, _row_local
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
@@ -231,6 +233,90 @@ def _reads(exprs: List[Expr]) -> Optional[List[String]]:
             if node.op == COL and node.text not in names:
                 names.append(node.text)
     return Optional(names^)
+
+
+comptime _AGGREGATE_INPUT = "__aggregate_input_"
+
+
+def _extract_aggregate_inputs(
+    steps: List[Step],
+    expressions: List[Expr],
+    keys: List[String],
+    schema: DataFrame,
+) raises -> Tuple[List[Step], List[Expr]]:
+    """DuckDB's ExtractAggregateExpressions (physical_plan/plan_aggregate.cpp):
+    every aggregate's computed input becomes a column of a projection
+    below the aggregate, and the aggregate reads that column. The
+    projection runs on the chunks the steps before it make, through their
+    selections, so a filter's kept rows reach the sink as the computed
+    values only, never as every input column gathered first. `schema` is
+    the steps' output; the steps are returned unchanged when no input is
+    computed (a projection of column references only moves no data)."""
+    var projected = List[Expr]()
+    var rewritten = List[Expr](capacity=len(expressions))
+    for e in expressions:
+        var nodes = e._nodes.copy()
+        var changed = False
+        for i in range(len(nodes)):
+            if not is_reduction(nodes[i].op):
+                continue
+            for child in node_children(nodes[i]):
+                if nodes[child].op == COL:
+                    continue
+                var input = subtree(e, child)
+                var reads = False
+                var local = True
+                for node in input._nodes:
+                    reads = reads or node.op == COL
+                    local = local and not (
+                        is_reduction(node.op) or node.op == SELECTOR
+                    )
+                if not reads or not local or not _row_local([input.copy()]):
+                    continue
+                var name = _AGGREGATE_INPUT + String(len(projected))
+                while name in schema.columns():
+                    name += "_"
+                projected.append(input.alias(name))
+                nodes[child] = col(name)._nodes[0].copy()
+                changed = True
+        if changed:
+            var compact = Expr(nodes^, e._name)
+            rewritten.append(subtree(compact, len(compact._nodes) - 1))
+        else:
+            rewritten.append(e.copy())
+    if len(projected) == 0:
+        return (steps.copy(), expressions.copy())
+    # The projection's columns: the group keys, the columns the aggregates
+    # still read as they are, then the computed inputs.
+    var exprs = List[Expr]()
+    var names = List[String]()
+    for key in keys:
+        if key not in names:
+            names.append(key)
+    var reads = _reads(rewritten)
+    if not reads:
+        return (steps.copy(), expressions.copy())
+    for name in reads.value():
+        if name not in names and not name.startswith(_AGGREGATE_INPUT):
+            names.append(name)
+    for name in names:
+        exprs.append(col(name))
+    for p in projected:
+        exprs.append(p.copy())
+    var result = steps.copy()
+    result.append(
+        Step(
+            STEP_SELECT,
+            exprs^,
+            List[String](),
+            -1,
+            List[String](),
+            JOIN_INNER,
+            String(""),
+            False,
+        )
+    )
+    return (result^, rewritten^)
 
 
 def _row_counted(
@@ -3876,10 +3962,10 @@ def _finish_with_steps(
 
 def _run_pipeline(
     frame: DataFrame,
-    steps: List[Step],
+    given_steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
     indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
-    expressions: List[Expr],
+    given_expressions: List[Expr],
     keys: List[String],
     ordered: Bool,
     insert: Bool,
@@ -3906,6 +3992,19 @@ def _run_pipeline(
     and output rows when the aggregate table's finish ran them, and stays
     empty otherwise."""
     trace_path("pipeline.run")
+    var steps = given_steps.copy()
+    var expressions = given_expressions.copy()
+    if len(expressions) > 0:
+        var extracted = _extract_aggregate_inputs(
+            steps,
+            expressions,
+            keys,
+            _step_schemas(frame.clear(), steps, joins[])[len(steps)],
+        )
+        if len(extracted[0]) != len(steps):
+            trace_path("pipeline.aggregate_projection")
+            steps = extracted[0].copy()
+            expressions = extracted[1].copy()
     # Every step's input columns and the output, typed once, and the
     # row-local steps compiled once for every worker. A late-materialized
     # top-N's scan adds its row id column to every morsel.
@@ -4136,6 +4235,17 @@ def _run_pipeline(
     for j in range(len(jobs)):
         for i in range(len(counts)):
             counts[i] += jobs[j].counts[i]
+    var planned = len(given_steps)
+    if len(steps) != planned:
+        # The aggregate inputs' projection has no plan node: the counts
+        # are the planned steps'.
+        var n = len(steps)
+        var kept = List[Int](capacity=3 * planned + 1)
+        for i in range(2 * planned + 1):
+            kept.append(counts[i])
+        for i in range(planned):
+            kept.append(counts[2 * n + 1 + i])
+        counts = kept^
     if len(layout) > 0 and len(sets) > 0:
         # Derived sets finish first: their rows point at key bytes the
         # source set's sinks hold. A worker's sinks are in set order, so a
