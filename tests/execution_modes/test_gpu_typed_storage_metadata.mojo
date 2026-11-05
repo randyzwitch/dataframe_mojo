@@ -887,7 +887,7 @@ def test_native_coalesced_views_retain_one_typed_owner_through_readback() raises
         raise error^
     assert_equal(observed[0], Float32(-12))
     assert_equal(observed[1], Float32(-11))
-    _ = (frame^, source^)
     _ = tail^
     _ = owners^
     assert_equal(scope.info()[0], 0)
+    _ = (frame^, source^)
