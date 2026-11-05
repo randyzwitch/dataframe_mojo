@@ -7,6 +7,14 @@ comptime JOIN_FULL = 3
 comptime JOIN_SEMI = 4
 comptime JOIN_ANTI = 5
 comptime JOIN_CROSS = 6
+# Physical join types the hash join runs that no public `how` names
+# (DuckDB's JoinType): a semi or anti join whose table is built on its
+# left input flags the build rows a probe matched, then emits the flagged
+# (RIGHT_SEMI) or unflagged (RIGHT_ANTI) ones; a MARK join emits every
+# probe row with whether it matched.
+comptime JOIN_RIGHT_SEMI = 7
+comptime JOIN_RIGHT_ANTI = 8
+comptime JOIN_MARK = 9
 
 
 def join_code(how: String) -> Int:
@@ -54,4 +62,10 @@ def join_name(code: Int) -> String:
         return "anti"
     if code == JOIN_CROSS:
         return "cross"
+    if code == JOIN_RIGHT_SEMI:
+        return "right_semi"
+    if code == JOIN_RIGHT_ANTI:
+        return "right_anti"
+    if code == JOIN_MARK:
+        return "mark"
     return "unknown"

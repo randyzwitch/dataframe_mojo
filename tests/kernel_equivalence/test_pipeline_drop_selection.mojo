@@ -6,7 +6,7 @@ from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series, StringColumn, col, lit
 from std.memory import ArcPointer
 from dataframe import Expr
-from dataframe.kernels.join_hash import PreparedHashIndex
+from dataframe.joins.hash_table import JoinHashTable
 from dataframe.pipeline import STEP_DROP, STEP_FILTER, Step, _steps_over_frame
 
 
@@ -73,7 +73,7 @@ def test_drop_keeps_deferred_mixed_columns_and_empty_schema_row_counts() raises:
                         input,
                         steps,
                         ArcPointer(List[DataFrame]()),
-                        ArcPointer(List[Optional[PreparedHashIndex]]()),
+                        ArcPointer(List[Optional[JoinHashTable]]()),
                         counts,
                     )
                     var expected = List[Int]()

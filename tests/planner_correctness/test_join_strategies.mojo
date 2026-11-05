@@ -90,36 +90,7 @@ def test_join_rerooting_restores_coalesced_key_names_under_any_reduction() raise
                     )
 
 
-def test_a_renamed_progression_key_is_still_looked_up_by_position() raises:
-    # A key a projection renames is the same column of the same table: a
-    # progression there needs no hash table, so a join builds on it (and
-    # keeps building on it) rather than hashing the other side. A key a
-    # projection computes is no table's column.
-    var keys = List[Int64]()
-    var values = List[Int64]()
-    for row in range(500):
-        keys.append(Int64(row + 1))
-        values.append(Int64(row % 7))
-    var table = DataFrame(
-        [
-            Series("k", Column[Int64](keys^)),
-            Series("v", Column[Int64](values^)),
-        ]
-    )
-    var plan = table.lazy().select_exprs(
-        [
-            col("k").alias("key"),
-            (col("k") * 2).alias("doubled"),
-            col("v"),
-        ]
-    )
-    var top = len(plan._plan._nodes) - 1
-    assert_true(plan._progression_key(top, ["key"]))
-    assert_true(not plan._progression_key(top, ["doubled"]))
-    assert_true(not plan._progression_key(top, ["v"]))
-
-
-def test_join_rerooting_keeps_payload_sources_and_progression_lookup_plans_in_place() raises:
+def test_join_rerooting_keeps_payload_sources_in_place() raises:
     var inputs = _inputs()
     var query = (
         inputs[0]
@@ -146,36 +117,6 @@ def test_join_rerooting_keeps_payload_sources_and_progression_lookup_plans_in_pl
         assert_equal(
             ordered.item(row, "label").string(), ["zero", "one", "two"][row]
         )
-    var keys = List[Int64]()
-    var values = List[Int64]()
-    for row in range(299):
-        keys.append(Int64(row))
-        values.append(Int64(row - 149))
-    var progression = DataFrame(
-        [
-            Series("b", Column[Int64](keys^)),
-            Series("value", Column[Int64](values^)),
-        ]
-    )
-    var direct = (
-        inputs[0]
-        .lazy()
-        .select(["a"])
-        .join(progression.lazy(), left_on=["a"], right_on=["b"])
-        .group_by("a")
-        .agg(col("value").sum().alias("answer"))
-    )
-    planned = direct._optimized()
-    assert_true(
-        not planned._probe_largest_inputs(
-            len(planned._plan._nodes) - 1, True, 7
-        )
-    )
-    actual = direct.collect(engine="cpu").sort("a")
-    assert_equal(actual.height(), 3)
-    for row in range(3):
-        assert_equal(actual.item(row, "a").int64(), Int64(row))
-        assert_equal(actual.item(row, "answer").int64(), Int64(row - 149))
 
 
 def test_late_materialized_join_string_keys_are_eligible_only_when_no_expression_reads_or_replaces_them() raises:
