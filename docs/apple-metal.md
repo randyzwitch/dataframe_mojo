@@ -121,12 +121,13 @@ multiple distinct columns remains on CPU. Cross-column sums use distinct
 single-column estimates are not reused for these larger memory reads.
 
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
-every node it supports. `engine="auto"` places each such node by measured
+every node it supports. `engine="auto"` places supported pipelines by measured
 cost when `DATAFRAME_HANDOFF_CALIBRATION` names a calibration file, and
 runs on the CPU otherwise:
 
 Build the packages first so the measurements carry actual CPU and Metal
-source/compiler identities. A source checkout deliberately has no valid
+source/compiler identities. Build both the capture program and application
+with `-O3` and the same compiler settings. A source checkout has no valid
 calibration identity. Capture on the target Mac with the application's CPU
 worker budget, and keep the packaged artifacts for the application:
 
@@ -173,7 +174,7 @@ Automatic collection uses the existing pipeline planner, which preserves
 physical input chunks. Profiles store conservative CPU pipeline models under
 `operators`, and layout-specific Metal models under `regions`. When several
 measured queries share a CPU pipeline key, its CPU model is a lower envelope
-across them; a cheaper CPU alternative cannot create a false Metal win.
+across them, so pooling does not inflate CPU cost to favor Metal.
 Unmeasured region layouts remain on CPU even when their pipeline key matches.
 
 `explain(engine="auto")` shows actual placement in its `PIPELINE` lines.
@@ -270,7 +271,9 @@ the CPU, in the same query.
   operator first checks MAX's GPU kernel libraries (warp and block
   reductions, 32-bit atomics and `elementwise` run on Apple GPUs) before
   writing its own.
-- **Visibility.** `explain` and `profile` show which operators ran on Metal.
+- **Visibility.** `explain(engine="auto")` shows pipeline placement; the
+  opt-in JSONL trace records automatic GPU completion. Profiles with an
+  explicit `MetalRuntime` show forced handoffs.
 
 The provider contract stays vendor-neutral: columns in and out, and the core
 never imports a backend. A discrete GPU (NVIDIA, AMD) is a separate provider
