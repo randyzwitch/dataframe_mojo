@@ -177,8 +177,9 @@ once. The main thread does no per-morsel work.
   fix is a row-layout key store with the strings' bytes, as DuckDB's
   aggregate hash table keeps them.
 - **Hash join**: the build side is a sub-plan collected before the
-  pipeline runs (its own pipelines), rechunked once, and indexed with
-  `prepare_hash_index` (parallel over buckets); the index is shared by
+  pipeline runs (its own pipelines), rechunked once, and finalized into
+  DuckDB's join hash table (`JoinHashTable`: rows with key fields, salted
+  `ht_entry_t` pointers, chains of equal keys); the table is shared by
   every worker. The probe is a step: a worker probes the index with its
   morsel's rows on its own thread and gathers the matched rows of both
   sides in one piece, which is the next step's morsel (DuckDB's

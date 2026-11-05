@@ -20,9 +20,6 @@ from dataframe.aggregation.expressions import (
 from dataframe.io.csv import (
     CsvSchema,
 )
-from dataframe.kernels.join_hash import (
-    int64_progression,
-)
 from dataframe.join_order import (
     JoinEdge,
 )
@@ -1021,43 +1018,6 @@ def plan_estimated_rows(self: QueryContext, index: Int) raises -> Int:
     return Int(Float64(kept) / Float64(runs * run) * Float64(height))
 
 
-def plan_progression_key(
-    self: QueryContext, index: Int, keys: List[String]
-) raises -> Bool:
-    """Whether a join building on node `index` with these keys needs no
-    hash table: one integer key of a whole table whose values are an
-    arithmetic progression, which is looked up by position."""
-    if len(keys) != 1:
-        return False
-    var column = keys[0]
-    var cursor = index
-    while cursor >= 0:
-        ref node = self._nodes[cursor]
-        if node.kind == SCAN_FRAME:
-            ref frame = self._frames[node.source_slot()]
-            if column not in frame.columns():
-                return False
-            var key = frame[column]
-            if key.dtype().physical() != DataType.INT64:
-                return False
-            return int64_progression(key)[0]
-        if node.kind != DROP and not (
-            (node.kind == SELECT or node.kind == WITH_COLUMNS)
-            and _stream_rows(node)
-        ):
-            return False
-        if node.kind == SELECT or node.kind == WITH_COLUMNS:
-            # A renamed column is its source column; a computed one is
-            # no table's key.
-            for expr in node.exprs:
-                if expr._name == column:
-                    if len(expr._nodes) != 1 or expr._nodes[0].op != COL:
-                        return False
-                    column = expr._nodes[0].text
-        cursor = node.left
-    return False
-
-
 @fieldwise_init
 struct GraphJoin(Copyable, Movable):
     """A join of a join graph as written (`plan_collect_graph`): its plan
@@ -1163,33 +1123,6 @@ def plan_collect_graph(
     if node.kind == FILTER:
         filters.append(index)
     plan_collect_graph(self, node.left, relations, pairs, filters, joins)
-
-
-def plan_indexed_relation(
-    self: QueryContext,
-    entry: Int,
-    other: Int,
-    joined: List[Bool],
-    node_of: List[Int],
-    edges: List[JoinEdge],
-    masks: List[Int],
-) raises -> Bool:
-    """Whether tree entry `entry` is one relation joined to `other` on
-    a single key that is a progression in its table (`_progression_key`),
-    so building on it needs no hash table."""
-    if joined[entry]:
-        return False
-    var mine = masks[entry]
-    var theirs = masks[other]
-    var keys = List[String]()
-    for edge in edges:
-        if mine & (1 << edge.a) != 0 and theirs & (1 << edge.b) != 0:
-            for k in edge.a_keys:
-                keys.append(k)
-        elif mine & (1 << edge.b) != 0 and theirs & (1 << edge.a) != 0:
-            for k in edge.b_keys:
-                keys.append(k)
-    return len(keys) == 1 and plan_progression_key(self, node_of[entry], keys)
 
 
 def plan_relation_estimate(self: QueryContext, index: Int) raises -> Int:
