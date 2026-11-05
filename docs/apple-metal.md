@@ -331,3 +331,27 @@ scripts/test_metal_local.sh
 `pixi run -e oracle report-apple` times CPU against forced Metal on the
 benchmark suites. While no query shape is supported, every case reports
 `unsupported`.
+
+### Property-matched placement costs
+
+The fitter retains each operator/expression and physical layout's CPU and
+Metal measurements as a matched pair. Layout keys distinguish bitmap
+presence, chunk counts, approximate chunk proportions and whether adjacent
+chunks share one native span. They contain no process-specific addresses.
+Profiles apply only within their measured row range and matching build,
+hardware and thread identities. Unknown inputs and unmeasured shapes stay
+on CPU.
+
+Each side uses an affine fit to per-scale sample medians. Negative-coefficient
+boundary cases are refitted instead of clamping the intercept of an overly
+steep line. The Metal decision estimate includes one switching margin: at
+least 5%, or twice the median relative error in the paired speedup fit when
+that is larger. Typical Metal costs and the applied margin remain in the
+profile for inspection. Thus small advantages prefer CPU, while one timing
+outlier does not veto a clear repeated win.
+
+The generic CPU pipeline model remains a fallback for other providers. Metal
+supplies the validated CPU cost for the exact measured region through the
+provider-neutral `pipeline_costs` hook, at both explain/planning and execution
+time. CPU execution kernels and operators are unchanged. Legacy explicit
+backends inherit their existing estimate and generic CPU costs.

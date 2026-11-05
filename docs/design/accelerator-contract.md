@@ -17,8 +17,8 @@ The boundary is checked in CI by `scripts/check_accelerator_boundary.sh`.
 
 `dataframe/_accel_provider.mojo` is the only module the core calls to reach a
 backend. Only `dataframe/lazy_api.mojo` and `dataframe/execution_backend.mojo`
-import it. A provider is a module with these twelve functions: four for whole
-plans, three for hand-off and five for devices. Their signatures mention only
+import it. A provider is a module with these thirteen functions: four for whole
+plans, three for hand-off and six for devices. Their signatures mention only
 core types: `LazyFrame`, `DataFrame`, `String`, `Bool`, `Int`, `Float64` and
 the device types in `dataframe/devices.mojo`.
 
@@ -43,6 +43,7 @@ each pipeline with them (`dataframe/planning/device_placement.mojo`).
 | `transfer_model` | `(device: Int) -> TransferModel` | Measured cost of moving bytes to and from the device and of creating a context. Unified memory reports zero transfer cost. Negative fields mean not measured. Does not raise. |
 | `pipeline_supports` | `(pipeline: LazyFrame, device: Int) -> Bool` | Whether the device runs `pipeline`: a plan whose leaves are the pipeline's inputs, its root the pipeline's sink. Decided from the plan and input types; does not raise or open a device. |
 | `pipeline_estimate` | `(pipeline, device, features: PipelineFeatures) -> Float64` | Estimated nanoseconds to run the pipeline on the device, excluding moving its inputs and outputs: the core adds those from `transfer_model` and where each input already lives. -1 when there is no measurement. Does not raise. |
+| `pipeline_costs` | `(pipeline, device, features) -> Tuple[Float64, Float64]` | Matched CPU/device nanosecond estimates for the same physical workload. A negative CPU value keeps the generic CPU calibration. If several devices supply valid CPU estimates, the planner uses their minimum. The explicit-runtime trait defaults to `(-1, pipeline_estimate(...))`, preserving existing backends. Both planning and execution-time placement use this pair. |
 | `run_pipeline` | `(pipeline: LazyFrame, device: Int) raises -> DataFrame` | Run an accepted pipeline. Inputs may be host or device buffers (`dataframe/storage/residence.mojo`); outputs may stay on the device as device buffers. |
 
 The core calls the whole-plan functions for `engine="accel"`, the hand-off

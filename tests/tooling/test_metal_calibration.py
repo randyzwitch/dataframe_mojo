@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from metal_calibration import fit, publish
+from metal_calibration import fit, publish, _typical
 
 
 class MetalCalibrationTests(unittest.TestCase):
@@ -35,22 +35,55 @@ class MetalCalibrationTests(unittest.TestCase):
             for n in [100, 1000, 10000]
         ]
 
-    def test_bounds_every_observed_sample_and_does_not_extrapolate(self):
+    def test_fits_typical_samples_with_one_switching_margin(self):
         records = self.captures()
         model = fit(records)["regions"][records[0]["key"]]
         self.assertEqual((model["min_rows"], model["max_rows"]), (100, 10000))
         for entry in records:
+            n = entry["rows"]
             cpu = model["cpu"]
-            accel = model["accel"]
-            self.assertLessEqual(
-                cpu["fixed_ns"] + cpu["row_ns"] * entry["rows"],
-                min(entry["cpu_ns"]),
+            typical = model["accel_typical"]
+            self.assertAlmostEqual(
+                cpu["fixed_ns"] + cpu["row_ns"] * n, 2 * n + 100
             )
-            self.assertGreaterEqual(
-                accel["fixed_ns"] + accel["row_ns"] * entry["rows"],
-                max(entry["accel_ns"]),
+            self.assertAlmostEqual(
+                typical["fixed_ns"] + typical["row_ns"] * n, n + 1000
             )
-        self.assertGreater(model["accel"]["fixed_ns"], 0)
+        self.assertAlmostEqual(model["switch_margin"], 0.05)
+        self.assertAlmostEqual(model["accel"]["fixed_ns"], 1050)
+
+    def test_boundary_refit_does_not_keep_an_oversteep_slope(self):
+        model = _typical([(1, 1), (2, 3), (3, 5)])
+        self.assertEqual(model, {"fixed_ns": 0.0, "row_ns": 1.5})
+        self.assertEqual(
+            _typical([(1, 10), (2, 9), (3, 8)]), {"fixed_ns": 9, "row_ns": 0}
+        )
+
+    def test_a_single_slow_gpu_sample_does_not_hide_clear_wins(self):
+        records = self.captures()
+        for entry in records:
+            entry["accel_ns"][2] = 1e9
+        model = fit(records)["regions"][records[0]["key"]]
+        self.assertLess(
+            model["accel"]["fixed_ns"] + 5000 * model["accel"]["row_ns"],
+            model["cpu"]["fixed_ns"] + 5000 * model["cpu"]["row_ns"],
+        )
+
+    def test_near_ties_stay_on_cpu_but_clear_wins_do_not(self):
+        for ratio, choose_gpu in [(1.03, False), (1.5, True)]:
+            records = self.captures()
+            for entry in records:
+                n = entry["rows"]
+                entry["cpu_ns"] = [2 * n + 100] * 3
+                entry["accel_ns"] = [(2 * n + 100) / ratio] * 3
+            model = fit(records)["regions"][records[0]["key"]]
+            cpu = model["cpu"]
+            gpu = model["accel"]
+            self.assertEqual(
+                gpu["fixed_ns"] + 5000 * gpu["row_ns"]
+                < cpu["fixed_ns"] + 5000 * cpu["row_ns"],
+                choose_gpu,
+            )
 
     def test_cannot_mix_builds_devices_or_thread_budgets(self):
         for field, value in [
@@ -110,15 +143,23 @@ class MetalCalibrationTests(unittest.TestCase):
             entry["key"] = "sum:chunks=8:nulls=1"
             entry["cpu_ns"] = [t * 0.5 for t in entry["cpu_ns"]]
         profile = fit(records + other)
-        self.assertNotIn(records[0]["key"], profile["operators"])
+        self.assertIn(records[0]["key"], profile["operators"])
         model = profile["operators"][records[0]["pipeline_key"]]["cpu"]
         for entry in records + other:
             self.assertLessEqual(
                 model["fixed_ns"] + model["row_ns"] * entry["rows"],
                 min(entry["cpu_ns"]),
             )
-            self.assertEqual(profile["regions"][entry["key"]]["cpu"], model)
+            region = profile["regions"][entry["key"]]
+            self.assertEqual(
+                region["cpu"], profile["operators"][region["cpu_key"]]["cpu"]
+            )
         self.assertEqual(len(profile["regions"]), 2)
+        slow = profile["regions"][records[0]["key"]]
+        fast = profile["regions"][other[0]["key"]]
+        evaluate = lambda m: m["fixed_ns"] + 10000 * m["row_ns"]
+        self.assertLess(evaluate(slow["accel"]), evaluate(slow["cpu"]))
+        self.assertGreater(evaluate(fast["accel"]), evaluate(fast["cpu"]))
 
 
 if __name__ == "__main__":

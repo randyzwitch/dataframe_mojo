@@ -43,6 +43,26 @@ def _envelope(points, upper):
     return {"fixed_ns": fixed * margin, "row_ns": slope * margin}
 
 
+def _typical(points):
+    """Robust affine fit with nonnegative coefficients, including boundary refits."""
+    slopes = [
+        (y2 - y1) / (x2 - x1)
+        for i, (x1, y1) in enumerate(points)
+        for x2, y2 in points[i + 1 :]
+        if x2 != x1
+    ]
+    slope = max(0.0, median(slopes))
+    fixed = median(y - slope * x for x, y in points)
+    if fixed < 0:
+        fixed = 0.0
+        slope = median(y / x for x, y in points)
+    return {"fixed_ns": fixed, "row_ns": slope}
+
+
+def _ns(model, rows):
+    return model["fixed_ns"] + model["row_ns"] * rows
+
+
 def fit(records):
     identity = None
     grouped = defaultdict(list)
@@ -137,19 +157,39 @@ def fit(records):
         cpu, accel = [], []
         for n in rows:
             same = [e for e in entries if e["rows"] == n]
-            cpu.append((n, min(t for e in same for t in e["cpu_ns"])))
-            accel.append((n, max(t for e in same for t in e["accel_ns"])))
+            cpu.append((n, median(t for e in same for t in e["cpu_ns"])))
+            accel.append((n, median(t for e in same for t in e["accel_ns"])))
         pipeline_keys = {e["pipeline_key"] for e in entries}
         if len(pipeline_keys) != 1:
             raise ValueError(
                 "one region cannot have multiple pipeline identities"
             )
         pipeline = next(iter(pipeline_keys))
+        cpu_model = _typical(cpu)
+        accel_model = _typical(accel)
+        # One margin on the *relative* fit, not two unrelated worst cases.
+        errors = [
+            abs(
+                (c / a)
+                / (_ns(cpu_model, e["rows"]) / _ns(accel_model, e["rows"]))
+                - 1
+            )
+            for e in entries
+            for c, a in zip(e["cpu_ns"], e["accel_ns"])
+        ]
+        margin = max(0.05, 2 * median(errors))
+        if key.startswith("pipeline:"):
+            raise ValueError(
+                "region key uses the reserved CPU pipeline namespace"
+            )
+        operators[key] = {"cpu": cpu_model}
         regions[key] = {
             "pipeline_key": pipeline,
-            "cpu": operators[pipeline]["cpu"],
-            "local_cpu": _envelope(cpu, False),
-            "accel": _envelope(accel, True),
+            "cpu_key": key,
+            "cpu": cpu_model,
+            "accel_typical": accel_model,
+            "switch_margin": margin,
+            "accel": {k: v * (1 + margin) for k, v in accel_model.items()},
             "min_rows": rows[0],
             "max_rows": rows[-1],
             "measured_rows": rows,
