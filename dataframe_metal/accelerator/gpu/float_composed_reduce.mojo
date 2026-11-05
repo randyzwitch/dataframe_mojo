@@ -153,21 +153,10 @@ def float_composed_partials[
         var pairs = StaticTuple[SIMD[DType.float32, 2], arity]()
         var right_pair = SIMD[DType.float32, 2](0)
         var predicate_pair = SIMD[DType.float32, 2](0)
-        var integer_pair = SIMD[DType.int64, 2](0)
         comptime if LANES == 2:
             if filtered:
                 if predicate_tag == 2:
-                    predicate_pair = _pair[DType.float32](
-                        predicate_values, row, rows
-                    )
-                elif predicate_tag == 1:
-                    integer_pair = _pair[DType.int64](
-                        predicate_values, row, rows
-                    )
-                else:
-                    integer_pair = _pair[DType.int32](
-                        predicate_values, row, rows
-                    ).cast[DType.int64]()
+                    predicate_pair = _pair[DType.float32](predicate_values, row, rows)
             comptime for field in range(arity):
                 pairs[field] = SIMD[DType.float32, 2](0)
                 if sum_flags & (UInt32(1) << UInt32(field)):
@@ -206,13 +195,9 @@ def float_composed_partials[
                             pf, low_float, high_float, inclusive
                         )
                     else:
-                        var pi = Int64(0)
-                        comptime if LANES == 2:
-                            pi = integer_pair[lane]
-                        else:
-                            pi = read_integer(
-                                predicate_values, predicate_tag, position
-                            )
+                        var pi = read_integer(
+                            predicate_values, predicate_tag, position
+                        )
                         kept = kept & (pi >= low_bound) & (pi <= high_bound)
                 comptime for field in range(arity):
                     var valid = kept
