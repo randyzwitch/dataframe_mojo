@@ -10,6 +10,7 @@ threads' results.
 """
 from dataframe.frame import DataFrame
 from dataframe.series import Series
+from dataframe.storage.string import StringColumn
 from dataframe.sorting.sort_key import (
     STANDARD_VECTOR_SIZE,
     KeyBlock,
@@ -30,6 +31,19 @@ from dataframe.vector.data_chunk import (
 from dataframe.vector.types import FLAT_VECTOR, SelectionVector
 from std.collections import Optional
 from std.memory import ArcPointer
+
+
+def _appendable(column: Series) raises -> Series:
+    """A payload column in a layout that grows in place: strings as offsets
+    and bytes, which append amortized, rather than views, whose append
+    builds a new combined storage each time."""
+    if column._data.isa[StringColumn]():
+        ref strings = column._data[StringColumn]
+        if strings._is_view_storage():
+            return Series(column.name(), strings.to_large_utf8()).with_dtype(
+                column.dtype()
+            )
+    return column.copy()
 
 
 def _sink_rows[
@@ -90,7 +104,9 @@ struct TopNSink(Movable):
         self.names = names.copy()
         self.heap = TopNHeap(limit, self.layout.record_words())
         self.schema = schema.clear()
-        self.payload = self.schema._columns.copy()
+        self.payload = List[Series](capacity=self.schema.width())
+        for column in self.schema._columns:
+            self.payload.append(_appendable(column))
         self.payload_rows = 0
         self.boundary = boundary
         self.dynamic = dynamic
@@ -215,7 +231,7 @@ struct TopNSink(Movable):
         """The entering rows onto the payload (heap_data.Append in
         TopNHeap::AddLargeHeap, physical_top_n.cpp:276)."""
         for c in range(len(self.payload)):
-            self.payload[c]._append_series(columns[c])
+            self.payload[c]._append_series(_appendable(columns[c]))
 
     def _enter[
         W: Int, VAR: Bool
@@ -280,7 +296,9 @@ struct TopNSink(Movable):
         var live = self._payload().take(self.heap.payloads[W, VAR]())
         self.heap.renumber[W, VAR]()
         self.heap.compact_keys[W, VAR]()
-        self.payload = live._columns.copy()
+        self.payload = List[Series](capacity=live.width())
+        for column in live._columns:
+            self.payload.append(_appendable(column))
         self.payload_rows = self.heap.size
 
     def finish(mut self) raises -> DataFrame:
