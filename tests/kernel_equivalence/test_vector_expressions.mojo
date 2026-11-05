@@ -1,14 +1,15 @@
 """Expressions over data chunks against the eager evaluator: comparisons of
 integers, floats, decimals, dates and strings, Kleene AND / OR, NOT, null
-tests, IN lists, string predicates and CASE WHEN, arithmetic and casts in
-lanes, and nodes left to the at-rest evaluator, over flat chunks and over
-dictionaries through a selection, with nulls. A filter's selection and a
-projection's column equal filtering and projecting the frame eagerly."""
+tests, IN lists, fill_null, abs, round, date parts, slices, string
+predicates and CASE WHEN, arithmetic and casts in lanes, and nodes left to
+the at-rest evaluator, over flat chunks and over dictionaries through a
+selection, with nulls. A filter's selection and a projection's column equal
+filtering and projecting the frame eagerly."""
 # contract-group: expr.vectors
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Expr, Series, StringColumn
-from dataframe import col, lit, when
+from dataframe import col, concat_str, lit, when
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
@@ -70,17 +71,33 @@ def predicates() raises -> List[Expr]:
         col("s").str().starts_with("k1") | col("a").is_not_null(),
         col("s").is_null() & (col("a") > lit(Int64(0))),
         col("s").is_in(["k1", "a longer key 3", "absent"]),
+        (lit(Int64(-10)) <= col("a")) & (col("a") < lit(Int64(10))),
+        col("f").is_between(lit(-2.0), lit(3.0), closed="none")
+        | col("a").is_between(lit(Int64(20)), lit(Int64(30))),
+        (
+            (col("price") >= lit("100.00").cast(DataType.decimal(7, 2)))
+            & (col("price") <= lit("300.00").cast(DataType.decimal(7, 2)))
+        )
+        | (lit(5.0) < col("f"))
+        | (col("b") == lit(Int32(2))),
+        (col("b") > lit(Int32(3)))
+        & ((col("a") != lit(Int64(7))) | (col("f") < lit(0.0))),
         col("b").is_in([lit(Int32(1)), lit(Int32(4)), lit(Int32(16))])
         | col("a").is_in([lit(Int64(-50)), lit(Int64(7))]),
         col("s").str().like("%key%2")
         | col("s").str().like("k_")
         | col("s").str().like("a%"),
+        col("s").str().slice(2, 6) == lit("onger "),
+        when(col("b") > lit(Int32(8))).then(col("s")).otherwise(lit("k3"))
+        == lit("k3"),
         col("s").str().starts_with("a long")
         | col("s").str().ends_with("4")
         | col("s").str().contains("ey 1", literal=True),
         when(col("a") > lit(Int64(0)))
         .then(col("f") > lit(1.0))
         .otherwise(col("s") == lit("k2")),
+        (col("a") > lit(Int64(5))).fill_null(lit(True)),
+        col("a").abs() > lit(Int64(40)),
     ]
 
 
@@ -101,7 +118,34 @@ def projections() raises -> List[Expr]:
         .otherwise(col("a"))
         .alias("z"),
         when(col("f") < lit(0.0)).then(col("price")).alias("zz"),
+        when(col("a") > lit(Int64(20)))
+        .then(col("s"))
+        .when(col("b") == lit(Int32(3)))
+        .then(lit("three"))
+        .otherwise(col("s").str().slice(1, 1))
+        .alias("ws"),
+        concat_str([col("s"), lit("-"), col("s").str().slice(0, 2)], "/").alias(
+            "ca"
+        ),
+        concat_str([col("s"), col("s")], "", ignore_nulls=True).alias("cb"),
         lit(Int64(7)).alias("y"),
+        col("a").fill_null(lit(Int64(5))).abs().alias("fa"),
+        col("a").fill_null(col("b").cast(DataType.INT64)).alias("fb"),
+        col("f").abs().alias("fc"),
+        col("b").abs().alias("fd"),
+        (lit("100.00").cast(DataType.decimal(7, 2)) - col("price"))
+        .abs()
+        .alias("fe"),
+        (col("f") / lit(3.0)).round(2).alias("ra"),
+        (col("f") / lit(3.0)).floor().alias("rb"),
+        col("f").ceil().alias("rc"),
+        col("day").dt().year().alias("da"),
+        (
+            col("day").dt().month() * lit(Int64(100)) + col("day").dt().day()
+        ).alias("db"),
+        col("s").str().slice(2, 5).alias("sa"),
+        col("s").str().slice(-3).alias("sb"),
+        col("s").str().slice(0, 1).alias("sc"),
     ]
 
 
@@ -218,3 +262,22 @@ def test_a_dropped_rows_error_is_not_raised() raises:
     var got = to_series(out, 0, arena, "p", compiled.root_dtype())
     assert_equal(len(got), 1024)
     assert_true(got.null_count() == 0)
+
+
+def test_abs_of_the_minimum_raises_as_the_column_kernel() raises:
+    var values = List[Int64]()
+    for row in range(100):
+        values.append(Int64.MIN if row == 57 else Int64(row - 50))
+    var source = DataFrame([Series("m", Column[Int64](values^))])
+    var schema = source.clear()._columns.copy()
+    var arena = ColumnArena()
+    var chunk = chunk_of(source, arena, 0, 100, 1)
+    var compiled = VectorExpression(col("m").abs().alias("p"), schema)
+    var out = DataChunk(1)
+    out.count = chunk.count
+    var message = String()
+    try:
+        compiled.write(chunk, arena, out, 0)
+    except e:
+        message = String(e)
+    assert_equal(message, "Int64 abs overflow")

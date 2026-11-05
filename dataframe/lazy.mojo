@@ -154,7 +154,6 @@ from dataframe.query_execution.stream_state import (
     _StateAccumulator,
     _StreamJob,
     _apply_operation,
-    _bounded_batch,
     _coalesced,
     _filter_keeps,
     _merge_parts,

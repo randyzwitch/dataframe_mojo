@@ -22,6 +22,7 @@ host. The data stays Float32: Apple GPUs have no Float64.
 
 from max.gpu import global_idx, thread_idx, block_idx
 from max.gpu.primitives import block
+from .float_predicate import float_in_range
 from std.memory import Pointer
 from std.sys import bit_width_of
 
@@ -40,8 +41,10 @@ def _valid(
     validity_offset: UInt32,
     row: Int,
 ) -> Bool:
-    var bit = Int(validity_offset) + row
-    return (validity[unsafe_offset=bit // 8] >> UInt8(bit % 8)) & 1 != 0
+    # A handoff has fewer than 2**31 rows. Keep bitmap indexing in UInt32;
+    # the wrapped bitmap's page offset fits in its remaining high bit.
+    var bit = validity_offset + UInt32(row)
+    return (validity[unsafe_offset=Int(bit >> 3)] >> UInt8(bit & 7)) & 1 != 0
 
 
 def integer_partials[
@@ -58,6 +61,7 @@ def integer_partials[
     high: Pointer[Int64, MutUntrackedOrigin],
     low: Pointer[UInt64, MutUntrackedOrigin],
     counts: Pointer[UInt32, MutUntrackedOrigin],
+    partial_offset: UInt32,
 ):
     """Sum of the kept values of one block, as high and low partials (see
     `split_total`), and how many values it kept."""
@@ -66,30 +70,35 @@ def integer_partials[
     var count = UInt32(0)
     var row = global_idx.x
     while row < Int(rows):
+        # Read payloads together, before the validity branch. Null payloads
+        # are readable native values, but must never enter the accumulator.
+        var value = values[unsafe_offset=Int(value_offset) + row].cast[
+            DType.int64
+        ]()
         var keep = True
         comptime if nullable:
             keep = _valid(validity, validity_offset, row)
-        if keep:
-            var value = values[unsafe_offset=Int(value_offset) + row].cast[
-                DType.int64
-            ]()
-            comptime if filtered:
+        comptime if filtered:
+            comptime if nullable:
+                keep = keep & (value >= low_bound) & (value <= high_bound)
+            else:
                 keep = value >= low_bound and value <= high_bound
-            if keep:
-                comptime if split_total[dtype]():
-                    high_sum += value >> 32
-                    low_sum += UInt64(value & 0xFFFF_FFFF)
-                else:
-                    high_sum += value
-                count += 1
+        if keep:
+            comptime if split_total[dtype]():
+                high_sum += value >> 32
+                low_sum += UInt64(value & 0xFFFF_FFFF)
+            else:
+                high_sum += value
+            count += 1
         row += Int(stride)
     var block_high = block.sum[block_size=BLOCK_SIZE, broadcast=False](high_sum)
     var block_low = block.sum[block_size=BLOCK_SIZE, broadcast=False](low_sum)
     var block_count = block.sum[block_size=BLOCK_SIZE, broadcast=False](count)
     if thread_idx.x == 0:
-        high[unsafe_offset=block_idx.x] = block_high
-        low[unsafe_offset=block_idx.x] = block_low
-        counts[unsafe_offset=block_idx.x] = block_count
+        var output = Int(partial_offset) + block_idx.x
+        high[unsafe_offset=output] = block_high
+        low[unsafe_offset=output] = block_low
+        counts[unsafe_offset=output] = block_count
 
 
 def float32_partials[
@@ -107,6 +116,7 @@ def float32_partials[
     sums: Pointer[Float32, MutUntrackedOrigin],
     compensations: Pointer[Float32, MutUntrackedOrigin],
     counts: Pointer[UInt32, MutUntrackedOrigin],
+    partial_offset: UInt32,
 ):
     """Kahan-compensated sum of the kept values of one block, its
     compensation, and how many values it kept. Bit 0 of `inclusive` makes
@@ -116,25 +126,20 @@ def float32_partials[
     var count = UInt32(0)
     var row = global_idx.x
     while row < Int(rows):
+        var value = values[unsafe_offset=Int(value_offset) + row]
         var keep = True
         comptime if nullable:
             keep = _valid(validity, validity_offset, row)
+        comptime if filtered:
+            keep = keep & float_in_range(
+                value, low_bound, high_bound, inclusive
+            )
         if keep:
-            var value = values[unsafe_offset=Int(value_offset) + row]
-            comptime if filtered:
-                var above = (
-                    value >= low_bound if inclusive & 1 else value > low_bound
-                )
-                var below = (
-                    value <= high_bound if inclusive & 2 else value < high_bound
-                )
-                keep = above and below
-            if keep:
-                var adjusted = value - compensation
-                var next = total + adjusted
-                compensation = (next - total) - adjusted
-                total = next
-                count += 1
+            var adjusted = value - compensation
+            var next = total + adjusted
+            compensation = (next - total) - adjusted
+            total = next
+            count += 1
         row += Int(stride)
     var block_total = block.sum[block_size=BLOCK_SIZE, broadcast=False](total)
     var block_compensation = block.sum[block_size=BLOCK_SIZE, broadcast=False](
@@ -142,6 +147,7 @@ def float32_partials[
     )
     var block_count = block.sum[block_size=BLOCK_SIZE, broadcast=False](count)
     if thread_idx.x == 0:
-        sums[unsafe_offset=block_idx.x] = block_total
-        compensations[unsafe_offset=block_idx.x] = block_compensation
-        counts[unsafe_offset=block_idx.x] = block_count
+        var output = Int(partial_offset) + block_idx.x
+        sums[unsafe_offset=output] = block_total
+        compensations[unsafe_offset=output] = block_compensation
+        counts[unsafe_offset=output] = block_count
