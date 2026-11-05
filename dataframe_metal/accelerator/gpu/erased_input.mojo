@@ -1,10 +1,10 @@
 """Native byte views for heterogeneous fused kernels; no payload conversion."""
 from max.gpu.host import DeviceBuffer
 from std.sys import size_of
-from dataframe import DataFrame, DataType
+from dataframe import Column, DataFrame, DataType, Series
 from .query_scope import Scope
 from .reduction_inputs import _place_chunks
-from .typed_storage import NativeColumnAny
+from .typed_storage import NativeColumnAny, coalesced_native_chunks
 
 
 @fieldwise_init
@@ -40,9 +40,10 @@ def _place[
     empty: DeviceBuffer[DType.uint8],
     tag: Int,
     mut owners: List[NativeColumnAny],
+    coalesce: Bool,
 ) raises -> List[NumericView]:
     var source = frame.column(name)
-    var chunks = _place_chunks[D](scope, source, zero_copy)
+    var chunks = _place_chunks[D](scope, source, zero_copy, coalesce=coalesce)
     var views = List[NumericView]()
     for chunk in chunks:
         owners.append(NativeColumnAny(chunk))
@@ -75,16 +76,30 @@ def numeric_views(
     zero_copy: Bool,
     empty: DeviceBuffer[DType.uint8],
     mut owners: List[NativeColumnAny],
+    *,
+    coalesce: Bool = False,
 ) raises -> List[NumericView]:
     var dtype = frame.column(name).dtype()
     if dtype == DataType.INT32:
         return _place[DType.int32](
-            frame, name, scope, zero_copy, empty, 0, owners
+            frame, name, scope, zero_copy, empty, 0, owners, coalesce
         )
     if dtype == DataType.INT64:
         return _place[DType.int64](
-            frame, name, scope, zero_copy, empty, 1, owners
+            frame, name, scope, zero_copy, empty, 1, owners, coalesce
         )
     return _place[DType.float32](
-        frame, name, scope, zero_copy, empty, 2, owners
+        frame, name, scope, zero_copy, empty, 2, owners, coalesce
     )
+
+
+def single_native_span(series: Series) raises -> Bool:
+    """Whether all logical chunks can share one native value/bitmap mapping."""
+    comptime for i in range(3):
+        comptime D = DType.int32 if i == 0 else (
+            DType.int64 if i == 1 else DType.float32
+        )
+        if series.dtype() == DataType.of(D):
+            var groups = coalesced_native_chunks[D](series)
+            return len(groups) == 1 and groups[0]._data.isa[Column[Scalar[D]]]()
+    return False

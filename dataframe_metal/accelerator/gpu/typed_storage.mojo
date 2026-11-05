@@ -743,6 +743,48 @@ def allocate_native_column[
     )
 
 
+def coalesced_native_chunks[
+    dtype: DType
+](series: Series) raises -> List[Series]:
+    """Combine adjacent native windows with the same value and bitmap owners.
+
+    This changes device submission only: no values or bitmap bytes are copied,
+    and separately owned arrays, reordered windows and gaps remain separate.
+    Rebuild window facts instead of extending the cached facts of a slice.
+    """
+    if len(series) == 0:
+        return List[Series]()
+    if not series.is_chunked():
+        return [series.copy()]
+    var result = List[Series]()
+    for part in series.chunks():
+        if len(part) == 0:
+            continue
+        if len(result) and part._data.isa[Column[Scalar[dtype]]]():
+            var index = len(result) - 1
+            if result[index]._data.isa[Column[Scalar[dtype]]]():
+                var previous = result[index].numeric[dtype]()
+                var current = part.numeric[dtype]()
+                if (
+                    Int(Pointer(to=previous._data[]))
+                    == Int(Pointer(to=current._data[]))
+                    and Int(Pointer(to=previous._bits[]))
+                    == Int(Pointer(to=current._bits[]))
+                    and previous._offset + len(previous) == current._offset
+                ):
+                    var length = checked_add(len(previous), len(current))
+                    var joined = Column[Scalar[dtype]]._from_buffers(
+                        previous._data, previous._bits, previous._offset, length
+                    )
+                    var merged = Series(part.name(), joined^)
+                    merged._dtype = part._dtype
+                    merged._field_metadata = part._field_metadata
+                    result[index] = merged^
+                    continue
+        result.append(part.copy())
+    return result^
+
+
 def wrap_native[
     dtype: DType
 ](
