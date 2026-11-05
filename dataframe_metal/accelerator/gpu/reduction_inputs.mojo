@@ -1,7 +1,12 @@
 """Native reduction inputs, shared timing and checked chunk grid geometry."""
 from dataframe.series import Series
 from std.time import perf_counter_ns
-from .typed_storage import NativeColumn, upload_native, wrap_native
+from .typed_storage import (
+    NativeColumn,
+    upload_native,
+    wrap_native,
+    coalesced_native_chunks,
+)
 from .query_scope import Scope
 from .filter_sum import BLOCK_SIZE
 
@@ -37,19 +42,38 @@ def _place[
 
 def _place_chunks[
     dtype: DType
-](scope: Scope, series: Series, zero_copy: Bool) raises -> List[
-    NativeColumn[dtype]
-]:
-    """Keep native chunks separate, including their own bitmap offsets.
+](
+    scope: Scope, series: Series, zero_copy: Bool, *, coalesce: Bool = False
+) raises -> List[NativeColumn[dtype]]:
+    """Keep independent native chunks separate, including their bitmap offsets.
+
+    Adjacent windows with the same owners can share one zero-copy mapping.
 
     The caller keeps `series` alive through the batched reduction's final
     synchronization. Explicit copy mode remains a coalesced reference path.
     """
     var columns = List[NativeColumn[dtype]]()
     if zero_copy:
-        for part in series.chunks():
-            if len(part):
-                columns.append(_place[dtype](scope, part, True))
+        var logical = series.chunks()
+        var next = 0
+        for part in coalesced_native_chunks[dtype](series):
+            var mapped = _place[dtype](scope, part, True)
+            if coalesce:
+                columns.append(mapped^)
+            else:
+                # Share the mapping while retaining the original work ranges.
+                # Changing reduction geometry can hurt throughput and changes
+                # floating reduction order even though payloads are identical.
+                var offset = 0
+                while offset < len(part):
+                    while next < len(logical) and len(logical[next]) == 0:
+                        next += 1
+                    if next >= len(logical):
+                        raise Error("Metal native chunk ranges are incomplete")
+                    var length = len(logical[next])
+                    columns.append(mapped.view(offset, length))
+                    offset += length
+                    next += 1
     else:
         columns.append(_place[dtype](scope, series, False))
     return columns^
