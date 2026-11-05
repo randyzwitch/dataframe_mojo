@@ -22,8 +22,8 @@ from dataframe.io.csv_reader import (
 from dataframe.io.json_parallel import (
     _DecodeJob as _JsonDecodeJob,
 )
-from dataframe.kernels.join_hash import (
-    PreparedHashIndex,
+from dataframe.joins.hash_table import (
+    JoinHashTable,
 )
 from dataframe.join_type import (
     JOIN_CROSS,
@@ -235,7 +235,7 @@ struct _StreamJob(Job):
     var frame: DataFrame
     var operations: List[PlanNode]
     var joins: ArcPointer[List[DataFrame]]
-    var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
+    var indexes: ArcPointer[List[Optional[JoinHashTable]]]
     var expressions: List[Expr]
     var keys: List[String]
     var reduced: List[_StreamReduction]
@@ -271,7 +271,7 @@ struct _StreamJob(Job):
         var frame: DataFrame,
         operations: List[PlanNode],
         joins: ArcPointer[List[DataFrame]],
-        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+        indexes: ArcPointer[List[Optional[JoinHashTable]]],
         expressions: List[Expr],
         keys: List[String],
     ):
@@ -449,7 +449,7 @@ def _apply_operation(
     node: PlanNode,
     mut frame: DataFrame,
     joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
 ) raises:
     """Apply one row-local operation or join to a batch."""
     if node.kind == JOIN and indexes[][node.join_build_slot()]:
