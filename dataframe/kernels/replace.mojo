@@ -36,7 +36,7 @@ from dataframe.storage.column import _validity_at
 from dataframe.kernels.binary import choose
 from dataframe.kernels.gather import take_parallel
 from dataframe.kernels.hashing import encode_rows
-from dataframe.kernels.join_hash import _perfect_slots
+from dataframe.kernels.join_keys import _perfect_slots
 from dataframe.parallel import Job, partitions, run_jobs, worker_count
 from dataframe.kernels.partition import _hash_bytes, _mix
 from dataframe.series import Series
