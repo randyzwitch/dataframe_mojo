@@ -1227,17 +1227,17 @@ struct _RankScanJob(Job):
             var end = e if e < self.hi else self.next_start
             if self.out_valid != 0:
                 for j in range(k, e):
-                    out_valid[unsafe_offset=order[unsafe_offset=j]] = present
+                    out_valid[unsafe_offset=j] = present
             if not present:
                 k = e
                 continue
             if method == RANK_AVERAGE:
                 var value = Float64(peer + 1 + end - 2 * base) / 2
                 for j in range(k, e):
-                    floats[unsafe_offset=order[unsafe_offset=j]] = value
+                    floats[unsafe_offset=j] = value
             elif method == RANK_ORDINAL:
                 for j in range(k, e):
-                    ints[unsafe_offset=order[unsafe_offset=j]] = Int64(
+                    ints[unsafe_offset=j] = Int64(
                         j - base + 1
                     )
             else:
@@ -1249,7 +1249,7 @@ struct _RankScanJob(Job):
                 else:
                     value = Int64(dense)
                 for j in range(k, e):
-                    ints[unsafe_offset=order[unsafe_offset=j]] = value
+                    ints[unsafe_offset=j] = value
             k = e
 
 
@@ -1258,7 +1258,8 @@ def rank_from_layout(
 ) raises -> Series:
     """Every row's rank within its partition, read off a layout whose last
     order keys are `rank_order_keys(input)`: runs of equal values are
-    peers, as DuckDB's rank executors read them from the order mask. Nulls
+    peers, as DuckDB's rank executors read them from the order mask. Ranks
+    are computed in sorted order and gathered back to rows. Nulls
     rank as null; ranks count from a partition's first value. Ordinal
     ranks peers in layout order (input order when the layout is stable).
     Ranges of sorted positions are ranked in parallel, each starting from
@@ -1325,13 +1326,20 @@ def rank_from_layout(
     elif len(jobs) == 1:
         jobs[0].run()
     _ = present^
-    if average:
-        if has_nulls:
-            return Series("", Column[Float64](floats^, out_valid))
-        return Series("", Column[Float64](floats^))
-    if has_nulls:
-        return Series("", Column[Int64](ints^, out_valid))
-    return Series("", Column[Int64](ints^))
+    # Ranks were written in sorted order; rows read theirs back.
+    var ranked: Series
+    if average and has_nulls:
+        ranked = Series("", Column[Float64](floats^, out_valid))
+    elif average:
+        ranked = Series("", Column[Float64](floats^))
+    elif has_nulls:
+        ranked = Series("", Column[Int64](ints^, out_valid))
+    else:
+        ranked = Series("", Column[Int64](ints^))
+    if layout.in_place:
+        return ranked^
+    var back = take_parallel([ranked^], layout.inverse.copy(), workers)
+    return back[0].copy()
 
 
 def rank_rows(
