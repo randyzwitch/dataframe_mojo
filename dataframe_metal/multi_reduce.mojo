@@ -9,6 +9,7 @@ from .accelerator.faults import data_fault
 from .accelerator.gpu.erased_input import NumericView, numeric_views
 from .accelerator.gpu.typed_storage import NativeColumnAny
 from .accelerator.gpu.multi_reduce import multi_partials
+from .accelerator.gpu.precise_reduce import precise_partials
 from .accelerator.gpu.filter_sum import BLOCK_SIZE
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
@@ -20,7 +21,7 @@ from .accelerator.gpu.target import METAL_TARGET
 
 
 def _run[
-    precise: Bool, wide: Bool, arity: Int
+    precise: Bool, wide: Bool, arity: Int, float_fields: Int
 ](
     bundle: ReductionBundle,
     frame: DataFrame,
@@ -146,7 +147,10 @@ def _run[
                         )
                 var predicate = segment[predicate_input].copy()
                 var partials = _chunk_partials(segment[0].rows, frame.height())
-                ctx.enqueue_function[multi_partials[precise, wide, arity]](
+                comptime kernel = precise_partials[
+                    wide, arity, max(1, float_fields)
+                ] if precise else multi_partials[False, wide, arity]
+                ctx.enqueue_function[kernel](
                     values[0].values,
                     values[1].values,
                     values[2].values,
@@ -280,6 +284,31 @@ def _run[
         return (integers^, floating^, counts_out^)
 
 
+def _by_arity[
+    precise: Bool, wide: Bool, arity: Int
+](
+    bundle: ReductionBundle,
+    frame: DataFrame,
+    scope: Scope,
+    zero_copy: Bool,
+    mut timings: HandoffTimings,
+) raises -> Tuple[List[Int128], List[Float64], List[Int]]:
+    comptime if not precise:
+        return _run[False, wide, arity, 0](
+            bundle, frame, scope, zero_copy, timings
+        )
+    else:
+        var floats = 0
+        for field in bundle.fields:
+            floats += Int(field.dtype == DataType.FLOAT32)
+        comptime for n in range(1, arity + 1):
+            if floats == n:
+                return _run[True, wide, arity, n](
+                    bundle, frame, scope, zero_copy, timings
+                )
+        raise Error("Metal exact-bin fields are not a nonempty float prefix")
+
+
 def _dispatch[
     precise: Bool, wide: Bool
 ](
@@ -290,12 +319,18 @@ def _dispatch[
     mut timings: HandoffTimings,
 ) raises -> Tuple[List[Int128], List[Float64], List[Int]]:
     if len(bundle.fields) == 1:
-        return _run[precise, wide, 1](bundle, frame, scope, zero_copy, timings)
+        return _by_arity[precise, wide, 1](
+            bundle, frame, scope, zero_copy, timings
+        )
     if len(bundle.fields) == 2:
-        return _run[precise, wide, 2](bundle, frame, scope, zero_copy, timings)
+        return _by_arity[precise, wide, 2](
+            bundle, frame, scope, zero_copy, timings
+        )
     if len(bundle.fields) == 3:
-        return _run[precise, wide, 3](bundle, frame, scope, zero_copy, timings)
-    return _run[precise, wide, 4](bundle, frame, scope, zero_copy, timings)
+        return _by_arity[precise, wide, 3](
+            bundle, frame, scope, zero_copy, timings
+        )
+    return _by_arity[precise, wide, 4](bundle, frame, scope, zero_copy, timings)
 
 
 def execute_bundle(

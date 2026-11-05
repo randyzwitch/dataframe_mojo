@@ -97,6 +97,22 @@ def plan_bundle(region: LazyFrame) raises -> Optional[ReductionBundle]:
                 aggregate.min_count,
             )
         )
+    if precise:
+        # Float32 fields form a compact prefix for the exact-bin kernel.
+        # Outputs retain projection order through this schema-only remap.
+        var order = List[Int]()
+        for floating in [True, False]:
+            for i in range(len(fields)):
+                if (fields[i].dtype == DataType.FLOAT32) == floating:
+                    order.append(i)
+        var packed = List[ReductionField]()
+        var remap = List[Int](length=len(fields), fill=0)
+        for i in range(len(order)):
+            packed.append(fields[order[i]].copy())
+            remap[order[i]] = i
+        for i in range(len(outputs)):
+            outputs[i].field = remap[outputs[i].field]
+        return ReductionBundle(predicate.take(), packed^, outputs^, precise)
     return ReductionBundle(predicate.take(), fields^, outputs^, precise)
 
 
@@ -116,4 +132,6 @@ def bundle_key(bundle: ReductionBundle) -> String:
         key += (
             ":" + field.dtype.name() + (":sum" if field.needs_sum else ":count")
         )
-    return key + (":exact_float" if bundle.precise_float else ":native")
+    return key + (
+        ":exact_float:typed_v1" if bundle.precise_float else ":native"
+    )
