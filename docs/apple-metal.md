@@ -109,6 +109,18 @@ New fused projections have separate `fused_reductions:` calibration keys;
 without a measurement they stay on CPU in automatic mode. Float64 input
 columns and other operators continue to run on CPU.
 
+A projection can also combine native `min` and `max` over up to four
+distinct Int32, Int64 or Float32 columns, with the same optional range
+predicate. Aliases and MIN/MAX on the same column share a scan and reduction
+state. Empty or all-null inputs return typed nulls. Float32 extrema compare
+ordered integer keys, preserving subnormals and infinities without floating
+arithmetic on the GPU. NaNs are skipped when a numeric value exists;
+all-NaN fields and extrema tied between opposite zero signs use CPU
+adjudication to preserve the CPU's payload and tie behavior. Arithmetic
+MIN/MAX and projections mixing extrema with SUM/COUNT/MEAN continue to run
+on CPU. These regions use `native_extrema:v1:` calibration keys and remain
+on CPU in automatic mode until measured for the current build and layout.
+
 Float32 range predicates use ordered integer keys when a bound is near
 zero, preserving subnormal comparisons, signed-zero equality and NaN
 exclusion even when Metal's floating comparisons flush denormals. Normal
