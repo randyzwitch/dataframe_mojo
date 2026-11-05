@@ -1194,7 +1194,9 @@ def test_metal_pipeline_adjudicates_changed_float_values_on_cpu() raises:
     var trace = ScopedEnvironment("DATAFRAME_METAL_PLACEMENT_TRACE", trace_path)
     var actual = plan.collect(engine="auto")
     assert_true(actual.equals(expected))
-    assert_equal(bitcast[DType.uint32](actual.item(0, "s").float32()), UInt32(4))
+    assert_equal(
+        bitcast[DType.uint32](actual.item(0, "s").float32()), UInt32(4)
+    )
     var traced = String()
     with open(trace_path, "r") as source:
         traced = source.read()
