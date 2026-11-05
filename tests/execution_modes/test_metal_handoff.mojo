@@ -1161,3 +1161,44 @@ def test_metal_calibration_rejects_overwritten_cached_models_and_outside_rows() 
     assert_equal(measured_cost(key, 100_000), Float64(-1))
     assert_true("no measured cost" in plan.explain(engine="auto"))
     _ = configured^
+
+
+# requires: metal
+def test_metal_pipeline_adjudicates_changed_float_values_on_cpu() raises:
+    _ = require_metal()
+    from dataframe_metal.accelerator.gpu.identity import runtime_build_id
+
+    if not runtime_build_id().startswith("dataframe-mojo-metal-v2;cpu="):
+        return
+    var tiny = bitcast[DType.float32](UInt32(1))
+    var frame = DataFrame([Series("f", Column[Float32]([tiny, tiny]))])
+    var value = col("f") * lit(Float32(2))
+    var plan = frame.lazy().select_exprs(
+        [
+            value.sum().alias("s"),
+            value.count().alias("c"),
+            value.mean().alias("m"),
+        ]
+    )
+    var expected = plan.collect(engine="cpu")
+    assert_equal(
+        bitcast[DType.uint32](expected.item(0, "s").float32()), UInt32(4)
+    )
+    var path = String("build/test-handoff-changed-values.json")
+    _calibrate(path, 50_000_000, 0.1, plan)
+    var configured = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
+    assert_true("; on metal:0" in plan.explain(engine="auto"))
+    var trace_path = String("build/test-handoff-adjudication-trace.jsonl")
+    with open(trace_path, "w") as target:
+        target.write("")
+    var trace = ScopedEnvironment("DATAFRAME_METAL_PLACEMENT_TRACE", trace_path)
+    var actual = plan.collect(engine="auto")
+    assert_true(actual.equals(expected))
+    assert_equal(bitcast[DType.uint32](actual.item(0, "s").float32()), UInt32(4))
+    var traced = String()
+    with open(trace_path, "r") as source:
+        traced = source.read()
+    assert_true('"engine":"cpu-adjudication"' in traced, traced)
+    assert_false('"engine":"metal"' in traced, traced)
+    _ = trace^
+    _ = configured^
