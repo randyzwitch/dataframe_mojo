@@ -31,7 +31,7 @@ from dataframe.aggregation.function import (
     _K_INT_SUM,
     _ValueArena,
     _update_states,
-    combine,
+    combine as combine_states,
     reduction_supported,
     states_supported,
 )
@@ -74,6 +74,7 @@ from dataframe.vector.data_chunk import (
     to_series,
 )
 from dataframe.vector.expression import VectorExpression
+from dataframe.vector.sink import Sink
 from dataframe.vector.types import (
     SelectionVector,
     UnifiedVectorFormat,
@@ -311,10 +312,11 @@ def _words(address: Int) -> Pointer[UInt64, MutAnyOrigin]:
     return Pointer[UInt64, MutAnyOrigin](unsafe_from_address=address)
 
 
-struct UngroupedSink(Movable):
+struct UngroupedSink(Sink):
     """One worker's states of an ungrouped aggregate, and its own copy of
     the compiled input expressions (DuckDB's thread-local
-    `UngroupedAggregateLocalSinkState`)."""
+    `UngroupedAggregateLocalSinkState`); the global state is the first
+    worker's, which every other one combines into."""
 
     var slots: List[AggregateFunction]
     var groups: _Groups
@@ -584,7 +586,7 @@ struct UngroupedSink(Movable):
 
     def combine_into(self, mut other: UngroupedSink) raises:
         """These states folded into `other`'s (DuckDB's `Combine`)."""
-        combine(
+        combine_states(
             self.slots,
             other.groups.at(0) + 8 * other.groups.states_at,
             self.groups.at(0) + 8 * self.groups.states_at,
@@ -593,17 +595,26 @@ struct UngroupedSink(Movable):
         for column in self.held:
             other.held.append(column.copy())
 
+    def combine(var self, mut combined: List[UngroupedSink]) raises:
+        """These states into the global ones (DuckDB's `Combine`): the
+        first worker's states are the global states."""
+        if len(combined) == 0:
+            combined.append(self^)
+            return
+        self.combine_into(combined[0])
+
 
 def ungrouped_finish(
     shared: UngroupedLayout, mut sinks: List[UngroupedSink]
 ) raises -> DataFrame:
     """Every worker's states combined and finalized into one row (DuckDB's
     `Combine` and `Finalize`)."""
-    if len(sinks) == 0:
+    var combined = List[UngroupedSink]()
+    while len(sinks) > 0:
+        sinks.pop(0).combine(combined)
+    if len(combined) == 0:
         return shared.template().finish()
-    while len(sinks) > 1:
-        var other = sinks.pop()
-        other.combine_into(sinks[0])
+    sinks = combined^
     if sinks[0].count == 0:
         # No row survived: the reductions of an empty frame.
         return shared.template().finish()

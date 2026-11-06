@@ -23,6 +23,7 @@ from dataframe.sorting.sort_key import (
 from dataframe.sorting.algorithms import SortKeys
 from dataframe.sorting.top_n import TopNBoundary, TopNHeap
 from dataframe.table_filter import DynamicFilterData, set_dynamic_value
+from dataframe.vector.sink import Sink
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
@@ -80,7 +81,7 @@ def _sink_rows[
             heap.add[W, VAR](rec)
 
 
-struct TopNSink(Movable):
+struct TopNSink(Sink):
     """PhysicalTopN's sink over a stream of chunks, for one thread: the key
     is laid out from the schema alone (no statistics in a stream), its
     columns named `names`; `limit` rows are kept."""
@@ -135,6 +136,22 @@ struct TopNSink(Movable):
     def new_morsel(mut self):
         """The arena's columns are replaced: bind afresh."""
         self.bound = List[Int]()
+
+    def begin(mut self, morsel: Int):
+        """A new morsel's chunks come next (`new_morsel`)."""
+        self.new_morsel()
+
+    def sink(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
+        """Sink (`sink_chunk`)."""
+        self.sink_chunk(chunk, arena)
+
+    def release(mut self):
+        pass
+
+    def combine(var self, mut combined: List[TopNSink]) raises:
+        """This thread's heap into the global state, every thread's heap:
+        the finish sorts each and combines their rows."""
+        combined.append(self^)
 
     def sink(mut self, frame: DataFrame) raises:
         """Sink: the chunk's rows that enter, a vector at a time."""
