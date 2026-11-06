@@ -242,3 +242,226 @@ def test_metal_negation_inequality_nan_zero_and_unknown_selection() raises:
         var public = query.collect(accelerator=runtime)
         assert_equal(public.item(0, "s").int32(), sums[mode])
         assert_equal(public.item(0, "n").int64(), counts[mode])
+
+
+def test_metal_column_comparison_schema_types_bindings_and_keys() raises:
+    from dataframe_metal.predicate_plan import COLUMN_CLAUSE
+
+    var frame = DataFrame(
+        [
+            Series("i", Column[Int32]([1])),
+            Series("j", Column[Int32]([1])),
+            Series("l", Column[Int64]([1])),
+            Series("m", Column[Int64]([1])),
+            Series("f", Column[Float32]([1])),
+            Series("g", Column[Float32]([1])),
+        ]
+    )
+    for kind in range(3):
+        var left = String("i" if kind == 0 else ("l" if kind == 1 else "f"))
+        var right = String("j" if kind == 0 else ("m" if kind == 1 else "g"))
+        var predicates = List[Expr](
+            [
+                col(left) > col(right),
+                col(left) >= col(right),
+                col(left) < col(right),
+                col(left) <= col(right),
+                col(left) == col(right),
+                col(left) != col(right),
+            ]
+        )
+        var keys = List[String]()
+        for expression in predicates:
+            var matched = plan_predicates(
+                frame.lazy().filter(expression).select(col("i").sum())
+            )
+            assert_true(Bool(matched))
+            ref clause = matched.value().program.clauses[0]
+            assert_equal(clause.kind, COLUMN_CLAUSE)
+            assert_equal(clause.other, right)
+            assert_true(clause.other_input >= 0)
+            var key = predicate_key(matched.value())
+            assert_true(key.startswith("predicate_reductions:v2:"))
+            assert_false(key in keys)
+            keys.append(key^)
+    assert_false(
+        Bool(
+            plan_predicates(
+                frame.lazy().filter(col("i") > col("l")).select(col("i").sum())
+            )
+        )
+    )
+    assert_false(
+        Bool(
+            plan_predicates(
+                frame.lazy()
+                .filter((col("i") + 1) > col("j"))
+                .select(col("i").sum())
+            )
+        )
+    )
+
+
+def _integer_comparison(mode: Int, a: Int64, b: Int64) -> Bool:
+    if mode == 0:
+        return a > b
+    if mode == 1:
+        return a >= b
+    if mode == 2:
+        return a < b
+    if mode == 3:
+        return a <= b
+    if mode == 4:
+        return a == b
+    return a != b
+
+
+# requires: metal
+def test_metal_column_comparisons_boundaries_masks_chunks_and_ieee() raises:
+    from tests.support.metal_outcomes import require_metal
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    for kind in range(3):
+        var low = Int64(Int32.MIN) if kind == 0 else Int64.MIN
+        var high = Int64(Int32.MAX) if kind == 0 else Int64.MAX
+        var av = List[Int64]([low, high, -1, 0, 1, 2, 3, 0])
+        var bv = List[Int64]([low, high - 1, 0, -1, 1, 1, 4, 0])
+        var valid_a = List[Bool](
+            [True, True, True, True, True, True, True, True, False, True]
+        )
+        var valid_b = List[Bool](
+            [True, True, True, True, True, True, True, False, True, True]
+        )
+        var columns = List[Series](
+            [Series("i", Column[Int32]([0, 1, 2, 3, 4, 5, 6, 7, 8, 0]))]
+        )
+        if kind == 0:
+            var a = List[Int32]([Int32(0)])
+            var b = List[Int32]([Int32(0)])
+            for row in range(8):
+                a.append(Int32(av[row]))
+                b.append(Int32(bv[row]))
+            a.append(0)
+            b.append(0)
+            columns.append(Series("a", Column[Int32](a^, valid_a)))
+            columns.append(Series("b", Column[Int32](b^, valid_b)))
+        elif kind == 1:
+            var a = List[Int64]([Int64(0)])
+            var b = List[Int64]([Int64(0)])
+            for row in range(8):
+                a.append(av[row])
+                b.append(bv[row])
+            a.append(0)
+            b.append(0)
+            columns.append(Series("a", Column[Int64](a^, valid_a)))
+            columns.append(Series("b", Column[Int64](b^, valid_b)))
+        else:
+            from std.utils.numerics import inf
+
+            var nan = bitcast[DType.float32](UInt32(0x7FC00017))
+            var tiny = bitcast[DType.float32](UInt32(1))
+            var negative_zero = bitcast[DType.float32](UInt32(0x80000000))
+            columns.append(
+                Series(
+                    "a",
+                    Column[Float32](
+                        [
+                            Float32(0),
+                            nan,
+                            negative_zero,
+                            0,
+                            tiny,
+                            -tiny,
+                            inf[DType.float32](),
+                            -inf[DType.float32](),
+                            0,
+                            0,
+                        ],
+                        valid_a,
+                    ),
+                )
+            )
+            columns.append(
+                Series(
+                    "b",
+                    Column[Float32](
+                        [
+                            Float32(0),
+                            nan,
+                            0,
+                            negative_zero,
+                            0,
+                            0,
+                            inf[DType.float32](),
+                            -inf[DType.float32](),
+                            0,
+                            0,
+                        ],
+                        valid_b,
+                    ),
+                )
+            )
+        var contiguous = DataFrame(columns^).slice(1, 8)
+        var chunked = DataFrame(
+            [
+                Series._from_chunks(
+                    [
+                        contiguous.column("i").slice(0, 1),
+                        contiguous.column("i").slice(1, 7),
+                    ]
+                ),
+                Series._from_chunks(
+                    [
+                        contiguous.column("a").slice(0, 3),
+                        contiguous.column("a").slice(3, 5),
+                    ]
+                ),
+                Series._from_chunks(
+                    [
+                        contiguous.column("b").slice(0, 5),
+                        contiguous.column("b").slice(5, 3),
+                    ]
+                ),
+            ]
+        )
+        var float_sums = List[Int32]([Int32(4), 15, 5, 16, 11, 10])
+        var float_counts = List[Int64]([Int64(1), 4, 1, 4, 3, 3])
+        for frame in [contiguous, chunked]:
+            var predicates = List[Expr](
+                [
+                    col("a") > col("b"),
+                    col("a") >= col("b"),
+                    col("a") < col("b"),
+                    col("a") <= col("b"),
+                    col("a") == col("b"),
+                    col("a") != col("b"),
+                ]
+            )
+            for mode in range(len(predicates)):
+                var sum = Int32(0)
+                var count = Int64(0)
+                if kind == 2:
+                    sum = float_sums[mode]
+                    count = float_counts[mode]
+                else:
+                    for row in range(6):
+                        if _integer_comparison(mode, av[row], bv[row]):
+                            sum += Int32(row + 1)
+                            count += 1
+                var query = (
+                    frame.lazy()
+                    .filter(predicates[mode])
+                    .select_exprs(
+                        [col("i").sum().alias("s"), col("i").count().alias("n")]
+                    )
+                )
+                for copied in [False, True]:
+                    var answer = execute_timed(query, zero_copy=not copied)[
+                        0
+                    ].copy()
+                    assert_equal(answer.item(0, "s").int32(), sum)
+                    assert_equal(answer.item(0, "n").int64(), count)
+                var public = query.collect(accelerator=runtime)
+                assert_equal(public.item(0, "s").int32(), sum)
+                assert_equal(public.item(0, "n").int64(), count)

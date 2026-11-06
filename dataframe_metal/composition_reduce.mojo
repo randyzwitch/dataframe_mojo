@@ -306,10 +306,19 @@ def _scan[
                     words[base + 4] = UInt64(
                         bitcast[DType.uint32](clause.low_float)
                     ) | (UInt64(bitcast[DType.uint32](clause.high_float)) << 32)
+                    if leaf.kind == 2:
+                        ref right = segment[leaf.other_input]
+                        words[base + 2] = UInt64(leaf.other_input)
+                        words[base + 3] = (
+                            UInt64(right.bit_offset)
+                            | (UInt64(right.nullable) << 32)
+                            | (UInt64(right.tag) << 33)
+                        )
                     words[base + 5] = (
                         UInt64(clause.inclusive)
                         | (UInt64(leaf.kind) << 2)
                         | (UInt64(leaf.inverted) << 4)
+                        | (UInt64(leaf.comparison) << 5)
                     )
             output_offset += partials
         var metadata = ctx.enqueue_create_buffer[DType.uint64](len(words))

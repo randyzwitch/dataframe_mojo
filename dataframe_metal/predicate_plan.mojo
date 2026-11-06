@@ -6,7 +6,20 @@ selection, SQL AND and OR compose the leaves' is-true bits even with nulls.
 """
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Expr, LazyFrame
-from dataframe.expr import AND, OR, COL, IS_NULL, IS_NOT_NULL, NOT, NE, EQ
+from dataframe.expr import (
+    AND,
+    OR,
+    COL,
+    IS_NULL,
+    IS_NOT_NULL,
+    NOT,
+    NE,
+    EQ,
+    GT,
+    GE,
+    LT,
+    LE,
+)
 from dataframe.lazy import SCAN_FRAME, FILTER, SELECT
 from .filter_plan import FilterSum, _predicate, supported_dtype
 from .composition_plan import Composition, plan_composition, composition_key
@@ -17,22 +30,31 @@ comptime MAX_INPUTS = 9
 
 comptime RANGE_CLAUSE = 0
 comptime NULL_CLAUSE = 1
+comptime COLUMN_CLAUSE = 2
 
 
 struct PredicateClause(Copyable, Movable):
     var bounds: FilterSum
     var kind: Int
     var inverted: Bool
+    var other: String
+    var comparison: Int
+    var other_input: Int
 
     def __init__(
         out self,
         var bounds: FilterSum,
         kind: Int = RANGE_CLAUSE,
         inverted: Bool = False,
+        other: String = "",
+        comparison: Int = 0,
     ):
         self.bounds = bounds^
         self.kind = kind
         self.inverted = inverted
+        self.other = other.copy()
+        self.comparison = comparison
+        self.other_input = -1
 
 
 @fieldwise_init
@@ -71,7 +93,12 @@ def _range(
 
 
 def _same(a: PredicateClause, b: PredicateClause) -> Bool:
-    if a.kind != b.kind or a.inverted != b.inverted:
+    if (
+        a.kind != b.kind
+        or a.inverted != b.inverted
+        or a.other != b.other
+        or a.comparison != b.comparison
+    ):
         return False
     return (
         a.bounds.filter_column == b.bounds.filter_column
@@ -118,6 +145,34 @@ def _emit(
                 NULL_CLAUSE,
                 (node.op == IS_NOT_NULL) != inverted,
             )
+    if not leaf and (
+        root.op == GT
+        or root.op == GE
+        or root.op == LT
+        or root.op == LE
+        or root.op == EQ
+        or root.op == NE
+    ):
+        ref left = expression._nodes[root.left]
+        ref right = expression._nodes[root.right]
+        if (
+            left.op == COL
+            and right.op == COL
+            and left.text in frame.columns()
+            and right.text in frame.columns()
+        ):
+            var dtype = frame.column(left.text).dtype()
+            if (
+                supported_dtype(dtype)
+                and frame.column(right.text).dtype() == dtype
+            ):
+                leaf = PredicateClause(
+                    FilterSum(left.text.copy(), left.text.copy(), dtype),
+                    COLUMN_CLAUSE,
+                    inverted != unequal,
+                    right.text.copy(),
+                    EQ if unequal else root.op,
+                )
     if leaf:
         var slot = -1
         for i in range(len(clauses)):
@@ -200,14 +255,18 @@ def plan_predicates(region: LazyFrame) raises -> Optional[PredicateComposition]:
     for clause in clauses:
         if clause.bounds.filter_column not in names:
             names.append(clause.bounds.filter_column.copy())
+        if clause.kind == COLUMN_CLAUSE and clause.other not in names:
+            names.append(clause.other.copy())
     if len(names) > MAX_INPUTS:
         return None
     var slots = List[Int]()
-    for clause in clauses:
+    for index in range(len(clauses)):
+        ref clause = clauses[index]
         for i in range(len(names)):
             if names[i] == clause.bounds.filter_column:
                 slots.append(i)
-                break
+            if clause.kind == COLUMN_CLAUSE and names[i] == clause.other:
+                clause.other_input = i
     # Eight value bindings and a ninth independent predicate binding are the
     # existing physical ABI. Extra predicate columns use unused value slots.
     bundle.inputs = List[String]()
@@ -239,6 +298,10 @@ def predicate_key(plan: PredicateComposition) -> String:
                 + String(leaf.kind)
                 + ":inverted="
                 + String(Int(leaf.inverted))
+                + ":compare="
+                + String(leaf.comparison)
+                + ":right="
+                + String(leaf.other_input)
             )
         key += (
             ":p"
