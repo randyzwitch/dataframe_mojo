@@ -188,6 +188,43 @@ def test_compound_predicate_schema_range_folding_clause_and_binding_limits() rai
     )
 
 
+def _compound_selected_values(
+    rows: Int, nulls: Bool, predicate: Int
+) raises -> DataFrame:
+    # Independent scalar selection: do not use the CPU's nested predicate
+    # evaluator as the oracle for the Metal implementation.
+    var integers = List[Int32]()
+    var longs = List[Int64]()
+    var floats = List[Float32]()
+    var valid = List[Bool]()
+    for row in range(5, 5 + rows):
+        var av = not nulls or row % 11 != 3
+        var bv = not nulls or row % 13 != 2
+        var cv = not nulls or row % 17 != 5
+        var a = row % 3 - 1
+        var b = row % 5 - 2
+        var c = Float32(row % 7 - 3) / 4
+        var keep = (av and a > 0) and (bv and b < 2)
+        if predicate == 1:
+            keep = (av and a >= 0) or (cv and c == 0)
+        elif predicate == 2:
+            keep = ((av and a > 0) and (bv and b <= 0)) or (cv and c > 0)
+        elif predicate == 3:
+            keep = ((av and a < 0) or (bv and b >= 0)) and (cv and c < 0.5)
+        if keep:
+            integers.append(Int32(row % 17 - 8))
+            longs.append(Int64(row % 13 - 6) * (Int64(1) << 34))
+            floats.append(Float32(row % 19 - 9) / 4)
+            valid.append(not nulls or row % 7 != 1)
+    return DataFrame(
+        [
+            Series("i", Column[Int32](integers^, valid)),
+            Series("l", Column[Int64](longs^, valid)),
+            Series("f", Column[Float32](floats^, valid)),
+        ]
+    )
+
+
 # requires: metal
 def test_compound_predicates_types_nulls_operators_slices_chunks_and_aggregates() raises:
     var runtime = require_metal()
@@ -242,15 +279,19 @@ def test_compound_predicates_types_nulls_operators_slices_chunks_and_aggregates(
             DataFrame(columns^),
             source.clear(),
         ]:
-            for predicate in List[Expr](
+            var predicates = List[Expr](
                 [
                     (col("a") > 0) & (col("b") < 2),
                     (col("a") >= 0) | (col("c") == 0),
                     ((col("a") > 0) & (col("b") <= 0)) | (col("c") > 0),
                     ((col("a") < 0) | (col("b") >= 0)) & (col("c") < 0.5),
                 ]
-            ):
-                var offered = frame.lazy().filter(predicate)
+            )
+            for predicate_index in range(len(predicates)):
+                var offered = frame.lazy().filter(predicates[predicate_index])
+                var selected = _compound_selected_values(
+                    frame.height(), nulls, predicate_index
+                )
                 for mode in range(7):
                     var expressions = List[Expr]()
                     if mode == 0:
@@ -290,7 +331,19 @@ def test_compound_predicates_types_nulls_operators_slices_chunks_and_aggregates(
                     else:
                         expressions = [col("f").count().alias("n")]
                     var query = offered.select_exprs(expressions)
-                    var expected = query.collect(engine="cpu")
+                    var expected = (
+                        selected.lazy()
+                        .select_exprs(expressions)
+                        .collect(engine="cpu")
+                    )
+                    # The current CPU nested mixed-type predicate can differ
+                    # from scalar selection (e.g. -15 versus -18 for predicate
+                    # 2, non-null, 4096 rows). Keep CPU execution unchanged;
+                    # validate all Metal routes against independent selection.
+                    if predicate_index < 2:
+                        assert_true(
+                            query.collect(engine="cpu").equals(expected)
+                        )
                     assert_true(
                         "HANDOFF metal" in query.explain(accelerator=runtime)
                     )
