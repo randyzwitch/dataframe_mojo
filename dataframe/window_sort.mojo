@@ -124,9 +124,7 @@ def _row_at(rows: Int, k: Int) -> Int:
     """Sorted position k's row: rows[k], or k when `rows` is 0."""
     if rows == 0:
         return k
-    return Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)[
-        unsafe_offset=k
-    ]
+    return Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)[unsafe_offset=k]
 
 
 @always_inline
@@ -154,9 +152,9 @@ def _numeric_changes[
                 Float64(values[unsafe_offset=row])
             ) != float_key(Float64(values[unsafe_offset=previous]))
         else:
-            differs = values[unsafe_offset=row] != values[
-                unsafe_offset=previous
-            ]
+            differs = (
+                values[unsafe_offset=row] != values[unsafe_offset=previous]
+            )
         if bits:
             var a = column._valid(previous)
             var b = column._valid(row)
@@ -209,9 +207,7 @@ def _string_changes(
                 flags[unsafe_offset=k] |= bit
             previous = row
         return
-    var offsets = strings._offsets[].unsafe_ptr().unsafe_offset(
-        strings._offset
-    )
+    var offsets = strings._offsets[].unsafe_ptr().unsafe_offset(strings._offset)
     var data = strings._base()
     for k in range(lo + 1, hi):
         var row = _row_at(rows, k)
@@ -221,7 +217,9 @@ def _string_changes(
         var b1 = Int(offsets[unsafe_offset=row + 1])
         var differs = a1 - a0 != b1 - b0 or (
             external_call["memcmp", Int32](
-                Int(data.unsafe_offset(a0)), Int(data.unsafe_offset(b0)), a1 - a0
+                Int(data.unsafe_offset(a0)),
+                Int(data.unsafe_offset(b0)),
+                a1 - a0,
             )
             != 0
         )
@@ -257,9 +255,7 @@ def mark_changes(
             )
             return
     if column._data.isa[StringColumn]():
-        _string_changes(
-            column._data[StringColumn], flags, lo, hi, bit, rows
-        )
+        _string_changes(column._data[StringColumn], flags, lo, hi, bit, rows)
         return
     for k in range(lo + 1, hi):
         if not _same_value(column, _row_at(rows, k), _row_at(rows, k - 1)):
@@ -360,7 +356,9 @@ def _number_partitions[
     ids_address: Int,
     mut firsts: List[Int],
 ) -> Int:
-    var hashes = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes_address)
+    var hashes = Pointer[UInt64, MutAnyOrigin](
+        unsafe_from_address=hashes_address
+    )
     var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=ids_address)
     # A table of partition numbers, grown (rehashing the stored hashes)
     # to stay at most half full: it holds one slot per partition, not per
@@ -807,16 +805,14 @@ struct _GroupSortJob(Job):
             sort_keys.append(slices[c].copy())
             descending.append(self.descending[c])
             nulls_last.append(self.nulls_last[c])
-        var perm = sort_key_rows(
-            sort_keys, descending, nulls_last, self.stable
-        )
+        var perm = sort_key_rows(sort_keys, descending, nulls_last, self.stable)
         var previous = -1
         for k in range(n):
             var at = perm[k]
             order[unsafe_offset=self.lo + k] = rows[unsafe_offset=self.lo + at]
-            flags[unsafe_offset=k] = (
-                PARTITION_START | PEER_START
-            ) if ids[at] != previous else 0
+            flags[unsafe_offset=k] = (PARTITION_START | PEER_START) if ids[
+                at
+            ] != previous else 0
             previous = ids[at]
         for c in range(self.partition_keys, count):
             mark_changes(
@@ -851,9 +847,7 @@ struct _MaskJob(Job):
             flags[unsafe_offset=k] = 0
         var from_ = max(self.lo - 1, 0)
         for key in self.keys:
-            mark_changes(
-                key, self.flags, from_, self.hi, PEER_START, self.rows
-            )
+            mark_changes(key, self.flags, from_, self.hi, PEER_START, self.rows)
 
 
 def window_layout(
@@ -1237,9 +1231,7 @@ struct _RankScanJob(Job):
                     floats[unsafe_offset=j] = value
             elif method == RANK_ORDINAL:
                 for j in range(k, e):
-                    ints[unsafe_offset=j] = Int64(
-                        j - base + 1
-                    )
+                    ints[unsafe_offset=j] = Int64(j - base + 1)
             else:
                 var value: Int64
                 if method == RANK_MIN:
