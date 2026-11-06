@@ -452,3 +452,11 @@ def has_conditions(plan: Composition) -> Bool:
         if field.conditions:
             return True
     return False
+
+
+def only_conditional_trees(plan: Composition) -> Bool:
+    """Native and binary fields bypass the tree evaluator entirely."""
+    for field in plan.fields:
+        if field.op == TREE_OP and not field.conditions:
+            return False
+    return has_conditions(plan)

@@ -25,7 +25,7 @@ from .group_state import (
 
 @always_inline
 def group_value[
-    floating: Bool, cases: Bool = False
+    floating: Bool, cases: Bool = False, conditional_only: Bool = False
 ](
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
     field: Int,
@@ -54,7 +54,7 @@ def group_value[
     var descriptor = metadata.unsafe_offset(16 + field * 8)
     var op = UInt32(descriptor[unsafe_offset=0])
     if op == UInt32(TREE_OP):
-        return expression_value[floating, cases](
+        return expression_value[floating, cases, conditional_only](
             metadata.unsafe_offset(Int(descriptor[unsafe_offset=6])),
             Int(descriptor[unsafe_offset=7]),
             0,
@@ -139,7 +139,7 @@ def group_value[
 
 @always_inline
 def update_int64_ticket[
-    minimum: Bool, cases: Bool = False
+    minimum: Bool, cases: Bool = False, conditional_only: Bool = False
 ](
     ticket: Pointer[UInt32, MutUntrackedOrigin],
     candidate: Int64,
@@ -168,7 +168,7 @@ def update_int64_ticket[
     var expected = Atomic[UInt32].load(ticket)
     while True:
         if expected != UInt32.MAX:
-            var previous = group_value[False, cases](
+            var previous = group_value[False, cases, conditional_only](
                 metadata,
                 field,
                 Int(expected),
@@ -203,7 +203,11 @@ def update_int64_ticket[
 
 
 def grouped_partials[
-    arity: Int, float_fields: Int, int32_fields: Int, cases: Bool = False
+    arity: Int,
+    float_fields: Int,
+    int32_fields: Int,
+    cases: Bool = False,
+    conditional_only: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -284,7 +288,7 @@ def grouped_partials[
                 var extrema_requested = Bool(
                     (flags >> 4 | flags >> 8) & (UInt32(1) << UInt32(field))
                 )
-                var value = group_value[floating, cases](
+                var value = group_value[floating, cases, conditional_only](
                     metadata,
                     field,
                     row,
@@ -337,7 +341,7 @@ def grouped_partials[
                             )
                         else:
                             var candidate = bitcast[DType.int64](value[0])
-                            update_int64_ticket[True, cases](
+                            update_int64_ticket[True, cases, conditional_only](
                                 state.unsafe_offset(GROUP_MIN),
                                 candidate,
                                 metadata,
@@ -362,7 +366,7 @@ def grouped_partials[
                                 predicate,
                                 predicate_bits,
                             )
-                            update_int64_ticket[False, cases](
+                            update_int64_ticket[False, cases, conditional_only](
                                 state.unsafe_offset(GROUP_MAX),
                                 candidate,
                                 metadata,
@@ -393,7 +397,11 @@ def grouped_partials[
 
 
 def resolve_int64_extrema[
-    arity: Int, float_fields: Int, int32_fields: Int, cases: Bool = False
+    arity: Int,
+    float_fields: Int,
+    int32_fields: Int,
+    cases: Bool = False,
+    conditional_only: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -428,7 +436,7 @@ def resolve_int64_extrema[
                     unsafe_offset=index * GROUP_STATE_WORDS + GROUP_MIN + side
                 ]
                 if ticket != UInt32.MAX:
-                    var value = group_value[False, cases](
+                    var value = group_value[False, cases, conditional_only](
                         metadata,
                         field,
                         Int(ticket),

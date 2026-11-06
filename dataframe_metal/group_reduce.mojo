@@ -1,7 +1,7 @@
 """Host ownership and submission for bounded GPU hash aggregation."""
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
-from .composition_plan import has_conditions
+from .composition_plan import has_conditions, only_conditional_trees
 from .group_plan import GroupedComposition, plan_grouped
 from .group_metadata import group_metadata
 from .group_finish import finish_grouped
@@ -36,7 +36,11 @@ struct GroupedPartials(Movable):
 
 
 def _scan_grouped[
-    arity: Int, floats: Int, narrow: Int, cases: Bool = False
+    arity: Int,
+    floats: Int,
+    narrow: Int,
+    cases: Bool = False,
+    conditional_only: Bool = False,
 ](
     plan: GroupedComposition,
     frame: DataFrame,
@@ -145,7 +149,7 @@ def _scan_grouped[
                 block_dim=256,
             )
             ctx.enqueue_function[
-                grouped_partials[arity, floats, narrow, cases]
+                grouped_partials[arity, floats, narrow, cases, conditional_only]
             ](
                 inputs[0].values,
                 inputs[1].values,
@@ -179,7 +183,9 @@ def _scan_grouped[
             scope.record_launches(2)
             comptime if floats + narrow < arity:
                 ctx.enqueue_function[
-                    resolve_int64_extrema[arity, floats, narrow, cases]
+                    resolve_int64_extrema[
+                        arity, floats, narrow, cases, conditional_only
+                    ]
                 ](
                     inputs[0].values,
                     inputs[1].values,
@@ -343,6 +349,10 @@ def _dispatch_grouped(
                     and floats == nf
                     and narrow == ni
                 ):
+                    if only_conditional_trees(plan.selected.bundle):
+                        return _scan_grouped[arity, nf, ni, True, True](
+                            plan, frame, scope, zero_copy, timings
+                        )
                     if has_conditions(plan.selected.bundle):
                         return _scan_grouped[arity, nf, ni, True](
                             plan, frame, scope, zero_copy, timings

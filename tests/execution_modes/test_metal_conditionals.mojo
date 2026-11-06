@@ -108,6 +108,7 @@ def test_metal_conditional_aggregate_states_keys_and_grouped_planning() raises:
     from dataframe_metal.composition_plan import (
         plan_composition,
         composition_key,
+        only_conditional_trees,
     )
     from dataframe_metal.group_plan import plan_grouped
 
@@ -136,6 +137,28 @@ def test_metal_conditional_aggregate_states_keys_and_grouped_planning() raises:
     assert_true(Bool(compiled))
     ref plan = compiled.value()
     assert_equal(len(plan.fields), 1)
+    assert_true(only_conditional_trees(plan))
+    # A plain arithmetic tree in the same projection needs the mixed evaluator.
+    var mixed = plan_composition(
+        frame.lazy().select_exprs(
+            [
+                value.sum(),
+                ((col("v") * col("w")) + col("v")).sum().alias("ordinary"),
+            ]
+        )
+    )
+    assert_true(Bool(mixed))
+    assert_false(only_conditional_trees(mixed.value()))
+    var native = plan_composition(
+        frame.lazy().select_exprs(
+            [
+                value.sum(),
+                col("w").count().alias("native_count"),
+            ]
+        )
+    )
+    assert_true(Bool(native))
+    assert_true(only_conditional_trees(native.value()))
     assert_equal(len(plan.fields[0].conditions), 1)
     assert_equal(plan.inputs, List[String](["v", "w", "p"]))
     assert_equal(plan.fields[0].conditions[0].slots, List[Int]([2]))

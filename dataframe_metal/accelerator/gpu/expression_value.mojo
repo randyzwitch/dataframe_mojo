@@ -661,7 +661,7 @@ def _case_shape(
 
 @always_inline
 def expression_value[
-    floating: Bool, cases: Bool = True
+    floating: Bool, cases: Bool = True, conditional_only: Bool = False
 ](
     program: Pointer[UInt64, UntrackedOrigin[mut=False]],
     count: Int,
@@ -767,58 +767,11 @@ def expression_value[
                 predicate,
                 predicate_bits,
             )
-    if count == 5:
-        if program[unsafe_offset=8] > UInt64(1):
-            return _fixed[floating, 0](
-                program,
-                row_base,
-                row,
-                tag,
-                want_value,
-                v0,
-                v1,
-                v2,
-                v3,
-                v4,
-                v5,
-                v6,
-                v7,
-                b0,
-                b1,
-                b2,
-                b3,
-                b4,
-                b5,
-                b6,
-                b7,
-            )
-        return _fixed[floating, 1](
-            program,
-            row_base,
-            row,
-            tag,
-            want_value,
-            v0,
-            v1,
-            v2,
-            v3,
-            v4,
-            v5,
-            v6,
-            v7,
-            b0,
-            b1,
-            b2,
-            b3,
-            b4,
-            b5,
-            b6,
-            b7,
-        )
-    if count == 7:
-        if program[unsafe_offset=8] > UInt64(1):
-            if program[unsafe_offset=16] > UInt64(1):
-                return _fixed[floating, 2](
+    # Conditional-only bundles never need ordinary fixed-tree variants.
+    comptime if not conditional_only:
+        if count == 5:
+            if program[unsafe_offset=8] > UInt64(1):
+                return _fixed[floating, 0](
                     program,
                     row_base,
                     row,
@@ -841,7 +794,7 @@ def expression_value[
                     b6,
                     b7,
                 )
-            return _fixed[floating, 3](
+            return _fixed[floating, 1](
                 program,
                 row_base,
                 row,
@@ -864,9 +817,33 @@ def expression_value[
                 b6,
                 b7,
             )
-        if program[unsafe_offset=12] > UInt64(1):
-            if program[unsafe_offset=16] > UInt64(1):
-                return _fixed[floating, 4](
+        if count == 7:
+            if program[unsafe_offset=8] > UInt64(1):
+                if program[unsafe_offset=16] > UInt64(1):
+                    return _fixed[floating, 2](
+                        program,
+                        row_base,
+                        row,
+                        tag,
+                        want_value,
+                        v0,
+                        v1,
+                        v2,
+                        v3,
+                        v4,
+                        v5,
+                        v6,
+                        v7,
+                        b0,
+                        b1,
+                        b2,
+                        b3,
+                        b4,
+                        b5,
+                        b6,
+                        b7,
+                    )
+                return _fixed[floating, 3](
                     program,
                     row_base,
                     row,
@@ -889,7 +866,55 @@ def expression_value[
                     b6,
                     b7,
                 )
-            return _fixed[floating, 5](
+            if program[unsafe_offset=12] > UInt64(1):
+                if program[unsafe_offset=16] > UInt64(1):
+                    return _fixed[floating, 4](
+                        program,
+                        row_base,
+                        row,
+                        tag,
+                        want_value,
+                        v0,
+                        v1,
+                        v2,
+                        v3,
+                        v4,
+                        v5,
+                        v6,
+                        v7,
+                        b0,
+                        b1,
+                        b2,
+                        b3,
+                        b4,
+                        b5,
+                        b6,
+                        b7,
+                    )
+                return _fixed[floating, 5](
+                    program,
+                    row_base,
+                    row,
+                    tag,
+                    want_value,
+                    v0,
+                    v1,
+                    v2,
+                    v3,
+                    v4,
+                    v5,
+                    v6,
+                    v7,
+                    b0,
+                    b1,
+                    b2,
+                    b3,
+                    b4,
+                    b5,
+                    b6,
+                    b7,
+                )
+            return _fixed[floating, 6](
                 program,
                 row_base,
                 row,
@@ -912,29 +937,6 @@ def expression_value[
                 b6,
                 b7,
             )
-        return _fixed[floating, 6](
-            program,
-            row_base,
-            row,
-            tag,
-            want_value,
-            v0,
-            v1,
-            v2,
-            v3,
-            v4,
-            v5,
-            v6,
-            v7,
-            b0,
-            b1,
-            b2,
-            b3,
-            b4,
-            b5,
-            b6,
-            b7,
-        )
     return _stack_value[floating, False](
         program,
         count,
