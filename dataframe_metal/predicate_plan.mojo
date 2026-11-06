@@ -6,7 +6,7 @@ selection, SQL AND and OR compose the leaves' is-true bits even with nulls.
 """
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Expr, LazyFrame
-from dataframe.expr import AND, OR, COL, IS_NULL, IS_NOT_NULL
+from dataframe.expr import AND, OR, COL, IS_NULL, IS_NOT_NULL, NOT, NE, EQ
 from dataframe.lazy import SCAN_FRAME, FILTER, SELECT
 from .filter_plan import FilterSum, _predicate, supported_dtype
 from .composition_plan import Composition, plan_composition, composition_key
@@ -91,11 +91,19 @@ def _emit(
     frame: DataFrame,
     mut clauses: List[PredicateClause],
     mut code: List[Int],
+    inverted: Bool = False,
 ) raises -> Bool:
-    var bounds = _range(expression, at, frame)
+    ref root = expression._nodes[at]
+    if root.op == NOT:
+        return _emit(expression, root.left, frame, clauses, code, not inverted)
+    var unequal = root.op == NE
+    var equal = expression.copy()
+    if unequal:
+        equal._nodes[at].op = EQ
+    var bounds = _range(equal if unequal else expression, at, frame)
     var leaf = Optional[PredicateClause]()
     if bounds:
-        leaf = PredicateClause(bounds.take())
+        leaf = PredicateClause(bounds.take(), inverted=inverted != unequal)
     else:
         ref node = expression._nodes[at]
         if node.op == IS_NULL or node.op == IS_NOT_NULL:
@@ -108,7 +116,7 @@ def _emit(
             leaf = PredicateClause(
                 FilterSum(input.text.copy(), input.text.copy(), dtype),
                 NULL_CLAUSE,
-                node.op == IS_NOT_NULL,
+                (node.op == IS_NOT_NULL) != inverted,
             )
     if leaf:
         var slot = -1
@@ -125,11 +133,13 @@ def _emit(
     ref node = expression._nodes[at]
     if node.op != AND and node.op != OR:
         return False
-    if not _emit(expression, node.left, frame, clauses, code) or not _emit(
-        expression, node.right, frame, clauses, code
-    ):
+    if not _emit(
+        expression, node.left, frame, clauses, code, inverted
+    ) or not _emit(expression, node.right, frame, clauses, code, inverted):
         return False
-    code.append(-1 if node.op == AND else -2)
+    # Push NOT to leaves. Each inverted comparison still rejects nulls;
+    # complementing an is-true mask would incorrectly admit UNKNOWN.
+    code.append(-1 if (node.op == AND) != inverted else -2)
     return True
 
 
