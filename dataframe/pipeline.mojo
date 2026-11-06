@@ -161,7 +161,6 @@ from dataframe.vector.data_chunk import (
     flat_over,
     to_series,
 )
-from dataframe.vector.adaptive_filter import AdaptiveFilter
 from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
@@ -1121,22 +1120,19 @@ struct _VectorStep(Copyable, Movable):
     every chunk a worker runs through it."""
 
     var kind: Int
-    # FILTER: the predicate's conjuncts, run one after another, each on
-    # the rows the ones before kept (ExpressionExecutor::Select); none
-    # for a literal true. SELECT / WITH_COLUMNS: the computed columns.
+    # FILTER: the predicate (ExpressionExecutor::Select; its AND / OR
+    # nodes order their children with DuckDB's AdaptiveFilter); none for
+    # a literal true. SELECT / WITH_COLUMNS: the computed columns.
     var expressions: List[VectorExpression]
     # SELECT / WITH_COLUMNS / DROP: per output column, the input column it
     # reads (>= 0) or the expression computing it (-1 - expression).
     var outputs: List[Int]
     var output: DataChunk
-    # FILTER: the order the conjuncts run in (DuckDB's AdaptiveFilter).
-    var adaptive: AdaptiveFilter
 
     def __init__(
         out self, step: Step, input: DataFrame, output: DataFrame
     ) raises:
         self.kind = step.kind
-        self.adaptive = AdaptiveFilter(0, True)
         self.expressions = List[VectorExpression]()
         self.outputs = List[Int]()
         self.output = DataChunk()
@@ -1153,15 +1149,10 @@ struct _VectorStep(Copyable, Movable):
             if len(expanded) != 1:
                 raise Error("A filter selector must match exactly one column")
             trace_path("pipeline.vector_filter")
-            for part in conjuncts(expanded[0]):
-                var compiled = VectorExpression(part, schema)
-                if compiled.root_dtype() != DataType.BOOL:
-                    raise Error("Filter expression must return Boolean values")
-                self.expressions.append(compiled^)
-            var can_throw = False
-            for e in range(len(self.expressions)):
-                can_throw = can_throw or self.expressions[e].can_throw()
-            self.adaptive = AdaptiveFilter(len(self.expressions), can_throw)
+            var compiled = VectorExpression(expanded[0], schema)
+            if compiled.root_dtype() != DataType.BOOL:
+                raise Error("Filter expression must return Boolean values")
+            self.expressions.append(compiled^)
             return
         trace_path("pipeline.vector_projection")
         if step.kind == STEP_DROP:
@@ -1192,17 +1183,11 @@ struct _VectorStep(Copyable, Movable):
         if self.kind == STEP_FILTER:
             var rows = SelectionVector()
             var count = input.count
-            var start = self.adaptive.begin()
-            for p in range(len(self.expressions)):
-                var e = self.adaptive.permutation[p]
-                var target = self.output.new_selection()
-                count = self.expressions[e].select(
-                    input, arena, rows, count, target
+            if len(self.expressions) > 0:
+                rows = self.output.new_selection()
+                count = self.expressions[0].select(
+                    input, arena, SelectionVector(), count, rows
                 )
-                rows = target
-                if count == 0:
-                    break
-            self.adaptive.end(start)
             if count == input.count:
                 self.output.set_columns(input.column_count())
                 for c in range(input.column_count()):
@@ -4193,7 +4178,7 @@ def _run_pipeline(
     var layout = List[AggregateLayout]()
     var template = List[_StreamReduction]()
     var set_empty = List[DataFrame]()
-    if table and len(keys) > 0 and len(expressions) > 0 and not ordered:
+    if table and len(keys) > 0 and len(expressions) > 0:
         var empty = schemas[][len(steps)].copy()
         if len(sets) > 0 and table_supported(empty, keys, expressions):
             set_empty.append(empty.copy())
@@ -4566,7 +4551,18 @@ def _run_pipeline(
         var finished: DataFrame
         if len(finish_steps) == 0:
             var result = aggregate_finish(sinks, layout[0])
-            finished = table_frame(template[0], result^, False)
+            finished = table_frame(template[0], result^, ordered)
+        elif ordered:
+            # The groups in first-occurrence order (each group row's first
+            # sequence number), then the steps over them.
+            var result = aggregate_finish(sinks, layout[0])
+            finished = _steps_over_frame(
+                table_frame(template[0], result^, True),
+                finish_steps,
+                joins,
+                indexes,
+                finish_counts,
+            )
         else:
             # A first step filtering on the reductions' outputs alone runs
             # in the finish, before the groups are read out (DuckDB runs

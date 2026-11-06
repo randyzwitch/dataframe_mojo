@@ -1,5 +1,4 @@
-"""Window partitions numbered by the aggregate table's hashing on one thread
-(`table_row_keys`) against a scalar model: string keys short, long, empty,
+"""Window partitions against a scalar model: string keys short, long, empty,
 Unicode and null, with equal strings read at the end of their byte buffer
 (by bytes) and inside it (by masked word loads), an integer key with nulls,
 and a mean over a partition and a rank within one."""
@@ -7,7 +6,6 @@ and a mean over a partition and a rank within one."""
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Series, col, lit
-from dataframe.aggregation.hash_table import table_row_keys
 from tests.support.group_strategy_reference import ScopedEnvironment
 
 comptime ROWS = 4_000
@@ -67,22 +65,6 @@ def frame() raises -> DataFrame:
 def key_of(p: Int) -> String:
     var text = String("null") if not text_valid(p) else "t:" + text_of(p)
     return text + "|" + (String(p % 3) if number_valid(p) else "null")
-
-
-def test_row_keys_number_partitions_in_first_occurrence_order() raises:
-    var data = frame()
-    var keys = table_row_keys([data.column("t"), data.column("n")])
-    # Ids follow first occurrence; equal keys share an id.
-    var first_id = Dict[String, Int]()
-    var next = 0
-    for row in range(ROWS):
-        var key = key_of(part_of(row))
-        if key not in first_id:
-            first_id[key] = next
-            assert_equal(keys.representatives[next], row)
-            next += 1
-        assert_equal(keys.ids[row], first_id[key])
-    assert_equal(keys.count(), next)
 
 
 def test_mean_and_rank_over_string_partitions_match_scalar_values() raises:

@@ -11,34 +11,49 @@ end of its run a worker's table is combined into the global state, the
 list of every worker's partitioned rows (`Combine`), which the table's
 finish merges partition by partition (`Finalize`, `aggregate_finish`).
 """
+from dataframe.aggregation.function import (
+    AggregateFunction,
+    ReducerSpec,
+    _K_LEN,
+    _K_TOP_ROWS,
+)
 from dataframe.aggregation.hash_table import (
     AggregateLayout,
+    AggregateResult,
     AggregateSink,
     KeyVector,
+    _Cursor,
+    aggregate_finish,
+    aggregate_layout,
     layout_widths,
 )
 from dataframe.dtype import DataType
-from dataframe.expr import COL, CORR, COV, Expr, is_reduction, subtree
+from dataframe.expr import COL, CORR, COV, Expr, LEN, is_reduction, subtree
 from dataframe.frame import DataFrame
 from dataframe.kernels.canonical_labels import canonical_code_map
 from dataframe.series import Series
-from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
     flat_over,
+    from_frame_window,
     storage_physical,
     to_series,
 )
+from dataframe.parallel import Job, run_jobs
 from dataframe.vector.expression import VectorExpression
 from dataframe.vector.sink import Sink
 from std.memory import Pointer, bitcast
 from dataframe.vector.types import (
     CONSTANT_VECTOR,
     DICTIONARY_VECTOR,
+    PHYSICAL_BOOL,
+    PHYSICAL_INT128,
     PHYSICAL_INT64,
+    PHYSICAL_OPAQUE,
     PHYSICAL_VARCHAR,
+    STANDARD_VECTOR_SIZE,
     SelectionVector,
     UnifiedVectorFormat,
     ValidityMask,
@@ -50,8 +65,9 @@ from dataframe.vector.types import (
 struct TableSinkLayout(Copyable, Movable):
     """What every worker's table sink shares: the table's layout, the
     group columns of the sink's input, and each reduction input as a
-    column of the input (-1 for a row count, which reads the first group
-    column, or for a compiled expression) with its type."""
+    column of the input (-1 for a row count, which reads no column, or for
+    a compiled expression) with its type and the physical type its state
+    reads."""
 
     var layout: AggregateLayout
     var keys: List[Int]
@@ -60,6 +76,9 @@ struct TableSinkLayout(Copyable, Movable):
     var columns: List[Int]
     var expressions: List[Optional[VectorExpression]]
     var types: List[DataType]
+    var physical: List[Int]
+    # Whether the input's state reads its vector (a row count does not).
+    var reads: List[Bool]
 
     def __init__(out self, *, copy: Self):
         self.layout = copy.layout.copy()
@@ -69,6 +88,8 @@ struct TableSinkLayout(Copyable, Movable):
         self.columns = copy.columns.copy()
         self.expressions = copy.expressions.copy()
         self.types = copy.types.copy()
+        self.physical = copy.physical.copy()
+        self.reads = copy.reads.copy()
 
     def __init__(
         out self,
@@ -111,8 +132,14 @@ struct TableSinkLayout(Copyable, Movable):
         self.columns = List[Int](capacity=len(given))
         self.expressions = List[Optional[VectorExpression]](capacity=len(given))
         self.types = List[DataType](capacity=len(given))
+        self.physical = List[Int](capacity=len(given))
+        self.reads = List[Bool](capacity=len(given))
         for i in range(len(given)):
             self.types.append(inputs[i].dtype())
+            self.physical.append(storage_physical(inputs[i]))
+            self.reads.append(
+                i >= len(layout.slots) or layout.slots[i].kind != _K_LEN
+            )
             if not given[i]:
                 self.columns.append(-1)
                 self.expressions.append(None)
@@ -129,6 +156,38 @@ struct TableSinkLayout(Copyable, Movable):
             self.columns.append(-1)
             self.expressions.append(VectorExpression(value, empty._columns))
 
+    def __init__(
+        out self,
+        layout: AggregateLayout,
+        keys: List[Series],
+        inputs: List[Series],
+    ):
+        """The sink of a table laid out as `layout` over chunks of columns
+        (`sink_columns`): the group columns `keys`, then the reductions'
+        inputs `inputs` (a row count reads none of its own)."""
+        self.layout = layout.copy()
+        self.keys = List[Int](capacity=len(keys))
+        self.key_types = List[DataType](capacity=len(keys))
+        self.key_physical = List[Int](capacity=len(keys))
+        for k in range(len(keys)):
+            self.keys.append(k)
+            self.key_types.append(keys[k].dtype())
+            self.key_physical.append(storage_physical(keys[k]))
+        self.columns = List[Int](capacity=len(inputs))
+        self.expressions = List[Optional[VectorExpression]](
+            capacity=len(inputs)
+        )
+        self.types = List[DataType](capacity=len(inputs))
+        self.physical = List[Int](capacity=len(inputs))
+        self.reads = List[Bool](capacity=len(inputs))
+        for i in range(len(inputs)):
+            var reads = i >= len(layout.slots) or layout.slots[i].kind != _K_LEN
+            self.columns.append(len(keys) + i if reads else -1)
+            self.expressions.append(None)
+            self.types.append(inputs[i].dtype())
+            self.physical.append(storage_physical(inputs[i]))
+            self.reads.append(reads)
+
 
 struct TableSinkInputs(Movable):
     """A worker's reader of a chunk's group chunk and aggregate input
@@ -142,17 +201,17 @@ struct TableSinkInputs(Movable):
     var columns: List[Int]
     var expressions: List[Optional[VectorExpression]]
     var types: List[DataType]
+    var physical: List[Int]
+    var reads: List[Bool]
     var output: DataChunk
     # Per key, the canonical code of each categorical code (equal labels
     # group together); empty when its labels do not repeat.
     var maps: List[List[UInt32]]
     # Per key, a chunk's dictionary codes when its strings carry them.
     var codes: List[List[UInt32]]
-    # The arena columns this morsel's key vectors read that the table
-    # holds already (`hold` names each once a morsel).
+    # The arena columns this morsel's key and input vectors read that the
+    # table holds already (`hold` names each once a morsel).
     var held: List[Int]
-    # A row count's input: it reads no values.
-    var no_values: Series
 
     def __init__(out self, shared: TableSinkLayout):
         self.keys = shared.keys.copy()
@@ -161,6 +220,8 @@ struct TableSinkInputs(Movable):
         self.columns = shared.columns.copy()
         self.expressions = shared.expressions.copy()
         self.types = shared.types.copy()
+        self.physical = shared.physical.copy()
+        self.reads = shared.reads.copy()
         self.output = DataChunk(len(shared.expressions))
         self.maps = List[List[UInt32]](capacity=len(self.keys))
         self.codes = List[List[UInt32]](capacity=len(self.keys))
@@ -174,7 +235,6 @@ struct TableSinkInputs(Movable):
             self.maps.append(map^)
             self.codes.append(List[UInt32]())
         self.held = List[Int]()
-        self.no_values = Series("", Column[Int64](List[Int64]()))
 
     def begin(mut self):
         """A new morsel: its arena columns are new."""
@@ -251,44 +311,41 @@ struct TableSinkInputs(Movable):
         hold.append(arena.columns[handle].copy())
 
     def read_inputs(
-        mut self, mut chunk: DataChunk, mut arena: ColumnArena
-    ) raises -> List[Series]:
-        """Each reduction's input over the chunk's rows, converted once a
-        chunk: a column read is shared by every input reading it."""
-        var n = chunk.count
-        var read = List[Int]()
-        var made = List[Series]()
+        mut self,
+        mut chunk: DataChunk,
+        mut arena: ColumnArena,
+        mut hold: List[Series],
+    ) raises -> List[UnifiedVectorFormat]:
+        """Each reduction's input over the chunk's rows as its vector's
+        unified format (DuckDB's payload chunk, which `UpdateStates`
+        reads through `ToUnifiedFormat`): the chunk's column, or what its
+        compiled expression wrote; none for a row count. The columns
+        string inputs point into join `hold` (`input_vector`)."""
+        var inputs = List[UnifiedVectorFormat](capacity=len(self.columns))
         var computed = False
-        var inputs = List[Series](capacity=len(self.columns))
         for i in range(len(self.columns)):
             var at = self.columns[i]
-            if at >= 0:
-                var found = -1
-                for j in range(len(read)):
-                    if read[j] == at:
-                        found = j
-                if found >= 0 and made[found].dtype() == self.types[i]:
-                    inputs.append(made[found].copy())
-                    continue
-                var column = _one_buffer(
-                    to_series(chunk, at, arena, "", self.types[i])
-                )
-                read.append(at)
-                made.append(column.copy())
-                inputs.append(column^)
+            var physical = self.physical[i]
+            var dtype = self.types[i]
+            if not self.reads[i]:
+                inputs.append(UnifiedVectorFormat())
+            elif at >= 0:
+                var v = input_vector(chunk, at, arena, physical, dtype)
+                if v.physical == PHYSICAL_VARCHAR:
+                    self._hold(arena, v.source, hold)
+                inputs.append(chunk.unified(at, arena))
             elif self.expressions[i]:
                 if not computed:
                     self.output.reset()
-                    self.output.count = n
+                    self.output.count = chunk.count
                     computed = True
                 self.expressions[i].value().write(chunk, arena, self.output, i)
-                inputs.append(
-                    _one_buffer(
-                        to_series(self.output, i, arena, "", self.types[i])
-                    )
-                )
+                var v = input_vector(self.output, i, arena, physical, dtype)
+                if v.physical == PHYSICAL_VARCHAR:
+                    self._hold(arena, v.source, hold)
+                inputs.append(self.output.unified(i, arena))
             else:
-                inputs.append(self.no_values.copy())
+                inputs.append(UnifiedVectorFormat())
         return inputs^
 
     def release(mut self):
@@ -322,6 +379,164 @@ def _chunk_codes(
         ] if row != -1 else UInt32(0)
 
 
+def sink_columns(
+    mut table: AggregateSink,
+    mut reader: TableSinkInputs,
+    keys: List[Series],
+    inputs: List[Series],
+    first: Int,
+) raises:
+    """A morsel's group columns `keys` and reduction inputs `inputs` (each
+    unchunked or one chunk; `first` the source row of their first) into
+    `table` a data chunk at a time, as a table scan's chunks of flat
+    vectors over them reach the pipeline's sink (`reader` from a
+    `TableSinkLayout` over such columns)."""
+    var arena = ColumnArena()
+    var handles = List[Int](capacity=len(keys) + len(inputs))
+    for key in keys:
+        handles.append(arena.add(key))
+    for i in range(len(inputs)):
+        # A row count's chunk column is never read.
+        handles.append(arena.add(inputs[i]) if reader.reads[i] else handles[0])
+    reader.begin()
+    var chunk = DataChunk(len(handles))
+    var length = len(keys[0])
+    for lo in range(0, length, STANDARD_VECTOR_SIZE):
+        var n = min(STANDARD_VECTOR_SIZE, length - lo)
+        chunk.reset()
+        from_frame_window(chunk, arena, handles, lo, n)
+        var hold = List[Series]()
+        var key_vectors = reader.read_keys(chunk, arena, hold)
+        var input_vectors = reader.read_inputs(chunk, arena, hold)
+        table.sink_vectors(key_vectors, input_vectors, hold, first + lo, n)
+    _ = chunk^
+    _ = arena^
+
+
+struct _SinkJob(Job):
+    """Phase 1 over a frame's columns: one worker's morsels (row ranges
+    within chunks, from a shared cursor) into its own table, a data chunk
+    at a time (`sink_columns`)."""
+
+    var keys: List[Series]
+    var inputs: List[Series]
+    var shared: TableSinkLayout
+    var ranges: List[Int]
+    var cursor: _Cursor
+    var sink: AggregateSink
+
+    def __init__(
+        out self,
+        keys: List[Series],
+        inputs: List[Series],
+        layout: AggregateLayout,
+        ranges: List[Int],
+        cursor: _Cursor,
+        workers: Int,
+    ):
+        self.keys = keys.copy()
+        self.inputs = inputs.copy()
+        self.shared = TableSinkLayout(layout, keys, inputs)
+        self.ranges = ranges.copy()
+        self.cursor = cursor.copy()
+        self.sink = AggregateSink(layout, workers)
+
+    def run(mut self) raises:
+        var reader = TableSinkInputs(self.shared)
+        var morsels = len(self.ranges) // 2
+        while True:
+            var m = self.cursor.take()
+            if m >= morsels:
+                break
+            var offset = self.ranges[2 * m]
+            var length = self.ranges[2 * m + 1]
+            var keys = List[Series](capacity=len(self.keys))
+            for key in self.keys:
+                keys.append(key.slice(offset, length))
+            var inputs = List[Series](capacity=len(self.inputs))
+            for s in range(len(self.inputs)):
+                # A row count reads no input.
+                var size = length if reader.reads[s] else 0
+                inputs.append(self.inputs[s].slice(offset, size))
+            sink_columns(self.sink, reader, keys, inputs, offset)
+
+    def take_sink(deinit self) -> AggregateSink:
+        return self.sink^
+
+
+def _sink_jobs(
+    keys: List[Series],
+    inputs: List[Series],
+    layout: AggregateLayout,
+    ranges: List[Int],
+    workers: Int,
+) raises -> List[AggregateSink]:
+    """Every worker's table after sinking the (offset, length) morsels
+    `ranges` of `keys` and `inputs` on `workers` threads."""
+    var cursor = _Cursor.new()
+    var jobs = List[_SinkJob](capacity=workers)
+    for _ in range(max(1, workers)):
+        jobs.append(_SinkJob(keys, inputs, layout, ranges, cursor, workers))
+    try:
+        run_jobs(jobs)
+    except e:
+        cursor.free()
+        raise e^
+    cursor.free()
+    var sinks = List[AggregateSink](capacity=len(jobs))
+    while len(jobs) > 0:
+        var job = jobs.pop()
+        sinks.append(job^.take_sink())
+    return sinks^
+
+
+def aggregate_table(
+    keys: List[Series],
+    inputs: List[Series],
+    templates: List[ReducerSpec],
+    ranges: List[Int],
+    workers: Int,
+) raises -> AggregateResult:
+    """Group `keys` and reduce each of `inputs` with its `templates` state,
+    over the (offset, length) morsels `ranges` (within chunks) on `workers`
+    threads. Returns per finish partition its groups' keys, first rows and
+    states (unfinished), partitions in hash order. Every reduction's state
+    must fit inline (`states_supported`)."""
+    var layout = aggregate_layout(keys, inputs, templates)
+    var sinks = _sink_jobs(keys, inputs, layout, ranges, workers)
+    return aggregate_finish(sinks, layout)
+
+
+def aggregate_top_rows(
+    keys: List[Series],
+    value: Series,
+    k: Int,
+    descending: Bool,
+    ranges: List[Int],
+    workers: Int,
+) raises -> List[Int]:
+    """The rows of each group of `keys` whose `value` ranks among its k
+    first by ordinal rank (ties: the earlier row), over the (offset,
+    length) morsels `ranges` on `workers` threads, in no order: each
+    group's row in the table holds its k best (value, row) pairs, merged
+    across workers at the finish. `k` is at most `TOP_ROWS_INLINE`; nulls
+    are never kept."""
+    var count_spec = ReducerSpec(
+        LEN, DataType.INT64, 0, 0, 0.0, String(), DataType.INT64
+    )
+    var layout = aggregate_layout(keys, [value.copy()], [count_spec^])
+    var dtype = layout.slots[0].dtype
+    layout.slots[0] = AggregateFunction(
+        _K_TOP_ROWS, 0, value.dtype().is_float(), dtype, k, descending
+    )
+    layout.state_words = layout.slots[0].state_size()
+    var sinks = _sink_jobs(keys, [value.copy()], layout, ranges, workers)
+    var result = aggregate_finish(sinks, layout)
+    var rows = List[Int]()
+    swap(rows, result.top_rows)
+    return rows^
+
+
 struct TableSink(Sink):
     """One worker's table sink state (DuckDB's `HashAggregateLocalSinkState`
     over a `RadixHTLocalSinkState`): its table, its chunk reader, and the
@@ -341,14 +556,14 @@ struct TableSink(Sink):
         self.inputs.begin()
 
     def sink(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
-        """A chunk into the table: its group chunk's vectors as they are,
-        its reductions' inputs as columns."""
+        """A chunk into the table: its group chunk's and payload chunk's
+        vectors as they are."""
         var n = chunk.count
         if n == 0:
             return
         var hold = List[Series]()
         var keys = self.inputs.read_keys(chunk, arena, hold)
-        var inputs = self.inputs.read_inputs(chunk, arena)
+        var inputs = self.inputs.read_inputs(chunk, arena, hold)
         self.table.sink_vectors(keys, inputs, hold, self.sequence, n)
         self.sequence += n
 
@@ -463,7 +678,7 @@ struct GroupingSetsSink(Sink):
             return
         var hold = List[Series]()
         var all_keys = self.inputs.read_keys(chunk, arena, hold)
-        var inputs = self.inputs.read_inputs(chunk, arena)
+        var inputs = self.inputs.read_inputs(chunk, arena, hold)
         for s in range(len(self.shared.sets)):
             if self.shared.derived_from[s] >= 0:
                 continue
@@ -520,11 +735,37 @@ struct GroupingSetsSink(Sink):
         combined.append(self^)
 
 
-def _one_buffer(var column: Series) raises -> Series:
-    """A chunk's column as one buffer: a window of one source chunk is
-    that chunk's view."""
-    if not column.is_chunked():
-        return column^
-    if column.n_chunks() == 1:
-        return column.chunks()[0].copy()
-    return column.rechunk()
+def input_vector(
+    mut chunk: DataChunk,
+    c: Int,
+    mut arena: ColumnArena,
+    physical: Int,
+    dtype: DataType,
+) raises -> Vector:
+    """Column `c` of `chunk` as a state update reads it, typed `dtype`
+    whose storage is `physical`. The update dispatches on the vector's
+    physical type, so a narrower integer or float is read as it is; only
+    a vector of another kind (128-bit against narrower, or strings,
+    Booleans or nested values against anything else) is cast first, into
+    a column of the arena. Computed strings are copied into a column of
+    their own too, so a string state points only into arena columns,
+    which the sink holds."""
+    var v = chunk.data[c]
+    var cast = v.physical == PHYSICAL_VARCHAR and v.source < 0
+    if v.physical != physical:
+        cast = cast or not (
+            _numeric_physical(v.physical) and _numeric_physical(physical)
+        )
+    if cast:
+        var column = to_series(chunk, c, arena, "", dtype)
+        chunk.data[c] = flat_over(arena, arena.add(column), 0)
+    return chunk.data[c]
+
+
+def _numeric_physical(physical: Int) -> Bool:
+    """Whether a physical type is a number of at most 64 bits."""
+    return physical != PHYSICAL_VARCHAR and (
+        physical != PHYSICAL_BOOL
+        and physical != PHYSICAL_INT128
+        and physical != PHYSICAL_OPAQUE
+    )

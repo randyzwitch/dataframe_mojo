@@ -129,13 +129,10 @@ def consider_inline_table(
     ordered: Bool,
     distinct: Bool,
 ) -> Bool:
-    """Whether the existing empty-frame state-eligibility probe is needed."""
-    return (
-        eligibility.allowed
-        and key_count > 0
-        and expression_count > 0
-        and not ordered
-    )
+    """Whether the existing empty-frame state-eligibility probe is needed.
+    `ordered` groupings take the table too: its group rows keep their first
+    row's sequence number, and the finish orders by it."""
+    return eligibility.allowed and key_count > 0 and expression_count > 0
 
 
 def _counts_distinct(expressions: List[Expr]) -> Bool:

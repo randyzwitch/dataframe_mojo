@@ -73,6 +73,7 @@ from dataframe.expr import (
     SUB,
     WHEN,
     Expr,
+    node_children,
     subtree,
 )
 from dataframe.kernels.binary import (
@@ -86,6 +87,7 @@ from dataframe.text.predicates import decode_values
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
+from dataframe.vector.adaptive_filter import AdaptiveFilter
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
@@ -356,6 +358,9 @@ struct VectorExpression(Copyable, Movable):
     var ranges: List[Int]
     var select_rows: List[List[UInt32]]
     var children: List[List[Int]]
+    # Per AND / OR node, the order its children run in (DuckDB's
+    # ConjunctionState::adaptive_filter); disabled for any other node.
+    var adaptive: List[AdaptiveFilter]
     var scratch: DataChunk
 
     def __init__(out self, expr: Expr, schema: List[Series]) raises:
@@ -401,6 +406,9 @@ struct VectorExpression(Copyable, Movable):
         self.ranges = List[Int](length=n, fill=-1)
         self.select_rows = List[List[UInt32]](length=n, fill=List[UInt32]())
         self.children = List[List[Int]](length=n, fill=List[Int]())
+        self.adaptive = List[AdaptiveFilter](
+            length=n, fill=AdaptiveFilter(0, True)
+        )
         self.scratch = DataChunk(n)
         # Lane buffers are made by each worker's copy when it first
         # evaluates (`_allocate`): the compiled template stays small to copy.
@@ -510,6 +518,12 @@ struct VectorExpression(Copyable, Movable):
                 continue
             var flat = List[Int]()
             self._flatten(i, op, flat)
+            # AdaptiveFilter(const Expression &): permutations are disabled
+            # when any child can throw.
+            var can_throw = False
+            for c in flat:
+                can_throw = can_throw or self._can_throw(c)
+            self.adaptive[i] = AdaptiveFilter(len(flat), can_throw)
             self.children[i] = flat^
 
     def _flatten(self, index: Int, op: Int, mut out: List[Int]):
@@ -911,19 +925,24 @@ struct VectorExpression(Copyable, Movable):
             if self.kinds[i] == _KIND_CONSTANT:
                 self.ints[i] = Int64(self.decimals[i])
 
-    def can_throw(self) -> Bool:
-        """Whether evaluating may raise (Expression::CanThrow): arithmetic
-        and casts check overflow, and the at-rest evaluator may raise for
-        anything; comparisons, logic, null tests and IN lists never do."""
-        for i in range(len(self.kinds)):
-            if self.kinds[i] == _KIND_FALLBACK:
-                return True
-            if self.kinds[i] != _KIND_LANE:
-                continue
-            var op = self.bound.expr._nodes[i].op
-            if op == ADD or op == SUB or op == MUL or op == DIV or op == CAST:
-                return True
-            if op == ABS:
+    def _can_throw(self, index: Int) -> Bool:
+        """Whether evaluating node `index`'s subtree may raise
+        (Expression::CanThrow): arithmetic and casts check overflow, and the
+        at-rest evaluator may raise for anything; comparisons, logic, null
+        tests and IN lists never do, and a constant was computed when
+        compiling."""
+        var kind = self.kinds[index]
+        if kind == _KIND_FALLBACK:
+            return True
+        if kind != _KIND_LANE:
+            return False
+        var op = self.bound.expr._nodes[index].op
+        if op == ADD or op == SUB or op == MUL or op == DIV or op == CAST:
+            return True
+        if op == ABS:
+            return True
+        for child in node_children(self.bound.expr._nodes[index]):
+            if self._can_throw(child):
                 return True
         return False
 
@@ -2272,14 +2291,15 @@ struct VectorExpression(Copyable, Movable):
         false_target: Int = 0,
     ) raises -> Int:
         """ExpressionExecutor::Select for node `index`: the rows among
-        `rows` it is true for into `target`, and when `false_target` is set
-        the others there, both in row order.
+        `rows` it is true for into `target` in row order, and when
+        `false_target` is set the others there.
 
         AND (SelectAnd) runs each child on the rows the ones before kept;
         an AND of a lower and an upper bound on one column runs as one
         BETWEEN pass. OR (SelectOr) runs each child on the rows the ones
         before rejected, appends each child's true rows, then sorts them
-        (SelectionVector::Sort). A comparison of a column with a constant
+        (SelectionVector::Sort). Both run their children in the order the
+        node's AdaptiveFilter keeps, timed per call. A comparison of a column with a constant
         selects over the column's vector; anything else is evaluated in
         lanes and its true rows kept."""
         if count == 0:
@@ -2303,8 +2323,11 @@ struct VectorExpression(Copyable, Movable):
                 var current_count = count
                 var false_count = 0
                 var temp_false = own if false_target != 0 else 0
+                var started = self.adaptive[index].begin()
                 for ci in range(len(self.children[index])):
-                    var c = self.children[index][ci]
+                    var c = self.children[index][
+                        self.adaptive[index].permutation[ci]
+                    ]
                     var kept = self._select(
                         c,
                         input,
@@ -2325,13 +2348,17 @@ struct VectorExpression(Copyable, Movable):
                     if current_count == 0:
                         break
                     current = target
+                self.adaptive[index].end(started)
                 return current_count
             var false_rows = false_target if false_target != 0 else own2
             var current = rows
             var current_count = count
             var result = 0
+            var started = self.adaptive[index].begin()
             for ci in range(len(self.children[index])):
-                var c = self.children[index][ci]
+                var c = self.children[index][
+                    self.adaptive[index].permutation[ci]
+                ]
                 var kept = self._select(
                     c,
                     input,
@@ -2357,6 +2384,7 @@ struct VectorExpression(Copyable, Movable):
                         length=result,
                     )
                 )
+            self.adaptive[index].end(started)
             return result
         var column = self.direct[index]
         if column >= 0:
@@ -2951,12 +2979,21 @@ def _select_compare_op[
                         (bits[unsafe_offset=c >> 3] >> UInt8(c & 7)) & 1
                     )
                 mask |= keep << UInt64(j)
-        kept = _emit(mask, n, k, rows, out, kept)
-        if false_target != 0:
-            var span = UInt64(0xFFFFFFFFFFFFFFFF) if n == 64 else (
-                (UInt64(1) << UInt64(n)) - 1
-            )
-            dropped = _emit(~mask & span, n, k, rows, other, dropped)
+        if false_target == 0:
+            kept = _emit(mask, n, k, rows, out, kept)
+        else:
+            # Both outputs in one pass over the block: either may be the
+            # rows read (an AND narrows its rows in place, an OR its false
+            # rows), and every row is read before either writes over it.
+            for j in range(n):
+                var row = from_rows[
+                    unsafe_offset=k + j
+                ] if through_rows else UInt32(k + j)
+                var keep = Int((mask >> UInt64(j)) & 1)
+                out[unsafe_offset=kept] = row
+                other[unsafe_offset=dropped] = row
+                kept += keep
+                dropped += 1 - keep
         k += 64
     return kept
 

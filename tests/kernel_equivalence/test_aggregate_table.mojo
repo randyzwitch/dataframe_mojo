@@ -641,3 +641,50 @@ def test_medians_of_few_large_groups_match_the_single_thread_route() raises:
     assert_frame(piped.sort("k"), expected.sort("k"))
     _ = trace^
     _ = workers^
+
+
+def test_ordered_groupings_reach_the_table_sink_in_first_row_order() raises:
+    # maintain_order: the pipeline's table keeps each group's first row
+    # (its morsel and row), and the finish orders the groups by it, as the
+    # eager route orders its own.
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var rows = 200_000
+    var keys = List[Int64]()
+    var values = List[Int64]()
+    for row in range(rows):
+        keys.append(Int64((row * 7919) % 30_011))
+        values.append(Int64(row % 97))
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("v", Column[Int64](values^)),
+        ]
+    )
+    var reductions: List[Expr] = [
+        col("v").sum().alias("total"),
+        col("v").max().alias("most"),
+    ]
+    var observed = StrategyTrace()
+    var piped = (
+        frame.lazy()
+        .filter(col("v") >= lit(Int64(3)))
+        .group_by(["k"], maintain_order=True)
+        .agg(reductions)
+        .collect()
+    )
+    assert_true(
+        "dataframe-path: pipeline.group_table\n" in observed.text(),
+        "an ordered grouping did not reach the aggregate table sink",
+    )
+    _ = observed^
+    var eager = (
+        frame.filter(col("v") >= lit(Int64(3)))
+        .group_by(["k"], maintain_order=True)
+        .agg(reductions)
+    )
+    assert_equal(piped.height(), eager.height())
+    # Row by row: the groups' order is part of the answer.
+    assert_true(piped.equals(eager), "ordered groups differ")
+    _ = trace^
+    _ = workers^
