@@ -11,6 +11,7 @@ from .composition_plan import (
     has_extrema,
     has_trees,
     has_conditions,
+    only_conditional_trees,
 )
 from .exact_float import finish_float_bins
 from .expression_format import EXPRESSION_NODE_WORDS
@@ -74,6 +75,7 @@ def _scan[
     compound: Bool = False,
     trees: Bool = False,
     cases: Bool = False,
+    conditional_only: Bool = False,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -344,6 +346,7 @@ def _scan[
                     compound=compound,
                     trees=trees,
                     cases=cases,
+                    conditional_only=conditional_only,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=True
                 ] if fast and not compound else composed_partials[
@@ -356,6 +359,7 @@ def _scan[
                     compound=compound,
                     trees=trees,
                     cases=cases,
+                    conditional_only=conditional_only,
                 ]
                 comptime kernel_separate = native_float_mixed_partials[
                     precise, wide, batched=False
@@ -369,6 +373,7 @@ def _scan[
                     compound=compound,
                     trees=trees,
                     cases=cases,
+                    conditional_only=conditional_only,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=False
                 ] if fast and not compound else composed_partials[
@@ -381,6 +386,7 @@ def _scan[
                     compound=compound,
                     trees=trees,
                     cases=cases,
+                    conditional_only=conditional_only,
                 ]
                 if batched:
                     ctx.enqueue_function[kernel_batched](
@@ -735,6 +741,20 @@ def _mixed_dispatch[
                         and floats == n
                         and int32s == narrow
                     ):
+                        if only_conditional_trees(bundle):
+                            return _scan[
+                                precise,
+                                wide,
+                                arity,
+                                n,
+                                False,
+                                narrow,
+                                mixed=mixed,
+                                compound=compound,
+                                trees=trees,
+                                cases=True,
+                                conditional_only=True,
+                            ](bundle, frame, scope, zero_copy, timings, program)
                         if has_conditions(bundle):
                             return _scan[
                                 precise,
