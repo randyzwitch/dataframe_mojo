@@ -910,8 +910,8 @@ def _value_words(
                     prefix &= (UInt64(1) << UInt64(8 * length)) - 1
                 var keep = 8 * max(length - 4, 0)
                 rest &= (
-                    (UInt64(1) << UInt64(keep)) - 1 if keep < 64 else UInt64.MAX
-                )
+                    UInt64(1) << UInt64(keep)
+                ) - 1 if keep < 64 else UInt64.MAX
             first[unsafe_offset=k] = UInt64(length) | (prefix << 32)
             second[unsafe_offset=k] = rest
         return
@@ -1028,8 +1028,9 @@ def _update_values(
         if at[unsafe_offset=2] != 0:
             var entry = format.data + 16 * sel.get_index(start + k)
             var length = Int(
-                Pointer[StringT, MutAnyOrigin](unsafe_from_address=entry)[
-                ].length
+                Pointer[StringT, MutAnyOrigin](
+                    unsafe_from_address=entry
+                )[].length
             )
             var order = _string_order(string_data(entry), length, state)
             if (is_max and order <= 0) or (not is_max and order >= 0):
@@ -1261,9 +1262,9 @@ def _load_floats(
                 values[unsafe_offset=k] = data[unsafe_offset=i].cast[
                     DType.float64
                 ]()
-                valid[unsafe_offset=k] = (
-                    not nulls or validity.row_is_valid_unsafe(i)
-                )
+                valid[
+                    unsafe_offset=k
+                ] = not nulls or validity.row_is_valid_unsafe(i)
             return
     raise Error("aggregate table: unsupported pair input")
 
