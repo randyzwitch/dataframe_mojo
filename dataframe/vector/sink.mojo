@@ -9,7 +9,8 @@ Here a local sink state is a struct implementing `Sink`, and the global
 state is the list its workers' states are combined into: one state that
 every other one folds into (an ungrouped aggregate), or every worker's
 state kept for a parallel finalize (an aggregate table's partitions, a
-top-N's heaps). Each sink kind's finalize reads that list.
+top-N's heaps, a materialize sink's batches). Each sink kind's finalize
+reads that list.
 """
 from dataframe.vector.data_chunk import ColumnArena, DataChunk
 
@@ -29,7 +30,7 @@ trait Sink(Deinitable, Movable):
         the pipeline's output schema's, read through `arena`."""
         ...
 
-    def release(mut self):
+    def release(mut self) raises:
         """The worker's run is over: free what only sinking needs, on the
         worker's own thread."""
         ...
