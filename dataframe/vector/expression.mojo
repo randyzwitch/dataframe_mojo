@@ -2979,12 +2979,21 @@ def _select_compare_op[
                         (bits[unsafe_offset=c >> 3] >> UInt8(c & 7)) & 1
                     )
                 mask |= keep << UInt64(j)
-        kept = _emit(mask, n, k, rows, out, kept)
-        if false_target != 0:
-            var span = UInt64(0xFFFFFFFFFFFFFFFF) if n == 64 else (
-                (UInt64(1) << UInt64(n)) - 1
-            )
-            dropped = _emit(~mask & span, n, k, rows, other, dropped)
+        if false_target == 0:
+            kept = _emit(mask, n, k, rows, out, kept)
+        else:
+            # Both outputs in one pass over the block: either may be the
+            # rows read (an AND narrows its rows in place, an OR its false
+            # rows), and every row is read before either writes over it.
+            for j in range(n):
+                var row = from_rows[
+                    unsafe_offset=k + j
+                ] if through_rows else UInt32(k + j)
+                var keep = Int((mask >> UInt64(j)) & 1)
+                out[unsafe_offset=kept] = row
+                other[unsafe_offset=dropped] = row
+                kept += keep
+                dropped += 1 - keep
         k += 64
     return kept
 
