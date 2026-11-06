@@ -6,7 +6,7 @@ definition must feed an output; filters must precede definitions.
 """
 from dataframe import Expr, LazyFrame
 from dataframe.expr import COL, SUM, COUNT, MEAN, MIN, MAX, Node
-from dataframe.lazy import SCAN_FRAME, FILTER, WITH_COLUMNS, SELECT
+from dataframe.lazy import SCAN_FRAME, FILTER, WITH_COLUMNS, SELECT, AGG
 from .expression_plan import compile_expression
 from .expression_format import MAX_EXPRESSION_NODES
 
@@ -66,7 +66,10 @@ def normalize_region(region: LazyFrame) raises -> Optional[LazyFrame]:
         first < 1
         or n < 3
         or region._plan._nodes[0].kind != SCAN_FRAME
-        or region._plan._nodes[n - 1].kind != SELECT
+        or (
+            region._plan._nodes[n - 1].kind != SELECT
+            and region._plan._nodes[n - 1].kind != AGG
+        )
     ):
         return None
     for i in range(1, n):
@@ -148,4 +151,12 @@ def normalize_region(region: LazyFrame) raises -> Optional[LazyFrame]:
         if len(region._plan._nodes[i].exprs) != 1:
             return None
         normalized = normalized.filter(region._plan._nodes[i].exprs[0])
+    ref root = region._plan._nodes[n - 1]
+    if root.kind == AGG:
+        for key in root.group_keys():
+            if key in names:
+                return None
+        return normalized.group_by(
+            root.group_keys().copy(), maintain_order=root.maintain_order
+        ).agg(outputs)
     return normalized.select_exprs(outputs)
