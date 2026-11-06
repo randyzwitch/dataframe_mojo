@@ -1,6 +1,6 @@
-"""A pipeline narrows its morsels by each join build's key range before
-any step runs, deciding whole
-morsels from the zone maps of the probe key's buffer. Joins against a
+"""A pipeline skips the vectors of its source that each join build's key
+range or IN list rules out by their statistics, before any step runs
+(DuckDB's join filter pushdown into the scan's table filters). Joins against a
 scalar model: sorted keys (morsels wholly outside, wholly inside, or
 straddling the range) and scattered ones, nullable probe keys, a build
 with no rows, a build whose keys are all null, Int64, Int32 and Date
@@ -156,7 +156,7 @@ def check(
     var observed = StrategyTrace()
     var result = plan.collect()
     assert_true(
-        "dataframe-path: pipeline.key_range\n" in observed.text(),
+        "dataframe-path: pipeline.join_filter\n" in observed.text(),
         "no key range narrowed the pipeline",
     )
     _ = observed^

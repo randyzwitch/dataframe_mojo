@@ -765,6 +765,9 @@ struct JoinHashTable(Copyable, Movable):
     var chains_longer_than_one: Bool
     # Whether a build key is null (a mark join's unknown results).
     var has_null: Bool
+    # Whether the build's subplan filters its tables (JoinFilterPushdownInfo
+    # `build_side_has_filter`), which the join's bloom filter rule reads.
+    var build_filtered: Bool
 
     def __init__(out self, keys: List[Series], perfect: Bool = False) raises:
         """Build and finalize the table over `keys` (one column per
@@ -803,6 +806,7 @@ struct JoinHashTable(Copyable, Movable):
         for w in range(len(scatter)):
             invalid += scatter[w].invalid
         self.has_null = invalid > 0
+        self.build_filtered = False
         self.inserted = self.count - invalid
         self.perfect = False
         self.perfect_base = 0
