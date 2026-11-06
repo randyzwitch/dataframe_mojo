@@ -10,6 +10,7 @@ from .composition_plan import (
     single_float_composition,
     has_extrema,
     has_trees,
+    has_conditions,
 )
 from .exact_float import finish_float_bins
 from .expression_format import EXPRESSION_NODE_WORDS
@@ -72,6 +73,7 @@ def _scan[
     native_mixed: Bool = False,
     compound: Bool = False,
     trees: Bool = False,
+    cases: Bool = False,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -341,6 +343,7 @@ def _scan[
                     batched=True,
                     compound=compound,
                     trees=trees,
+                    cases=cases,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=True
                 ] if fast and not compound else composed_partials[
@@ -352,6 +355,7 @@ def _scan[
                     batched=True,
                     compound=compound,
                     trees=trees,
+                    cases=cases,
                 ]
                 comptime kernel_separate = native_float_mixed_partials[
                     precise, wide, batched=False
@@ -364,6 +368,7 @@ def _scan[
                     batched=False,
                     compound=compound,
                     trees=trees,
+                    cases=cases,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=False
                 ] if fast and not compound else composed_partials[
@@ -375,6 +380,7 @@ def _scan[
                     batched=False,
                     compound=compound,
                     trees=trees,
+                    cases=cases,
                 ]
                 if batched:
                     ctx.enqueue_function[kernel_batched](
@@ -729,6 +735,19 @@ def _mixed_dispatch[
                         and floats == n
                         and int32s == narrow
                     ):
+                        if has_conditions(bundle):
+                            return _scan[
+                                precise,
+                                wide,
+                                arity,
+                                n,
+                                False,
+                                narrow,
+                                mixed=mixed,
+                                compound=compound,
+                                trees=trees,
+                                cases=True,
+                            ](bundle, frame, scope, zero_copy, timings, program)
                         return _scan[
                             precise,
                             wide,
