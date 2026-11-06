@@ -1,5 +1,6 @@
 """Scalar metadata for one contiguous bounded hash aggregation scan."""
 from std.memory import bitcast
+from dataframe import DataType
 from dataframe.expr import COL, MIN, MAX
 from .group_plan import GroupedComposition
 from .expression_format import EXPRESSION_NODE_WORDS
@@ -35,6 +36,10 @@ def group_metadata(
     words[3] = UInt64(key.tag)
     words[4] = UInt64(key.bit_offset)
     words[5] = UInt64(key.nullable)
+    words[6] = UInt64(len(bundle.fields))
+    for value in bundle.fields:
+        words[7] += UInt64(value.dtype == DataType.FLOAT32)
+        words[8] += UInt64(value.dtype == DataType.INT32)
     words[10] = UInt64(predicate_at)
     for field in range(len(bundle.fields)):
         ref value = bundle.fields[field]
