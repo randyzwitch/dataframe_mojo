@@ -116,6 +116,23 @@ struct ColumnArena(Movable):
         return Int(self.decoded[handle].unsafe_ptr())
 
 
+def storage_physical(series: Series) -> Int:
+    """The physical type a vector over `series` reads (its first chunk's
+    storage), as `flat_over` wraps it."""
+    var column = series.chunks()[0].copy() if series.is_chunked() else (
+        series.copy()
+    )
+    comptime for k in range(len(_NUMERIC_STORAGE)):
+        comptime D = _NUMERIC_STORAGE[k]
+        if column._data.isa[Column[Scalar[D]]]():
+            return physical_of[D]()
+    if column._data.isa[BoolColumn]():
+        return PHYSICAL_BOOL
+    if column._data.isa[StringColumn]():
+        return PHYSICAL_VARCHAR
+    return PHYSICAL_OPAQUE
+
+
 def flat_over(arena: ColumnArena, handle: Int, offset: Int) -> Vector:
     """A flat vector over the arena column `handle` from row `offset` (no
     copy; Vector::Slice(other, offset, end) of a column segment). Fixed

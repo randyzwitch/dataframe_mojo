@@ -24,7 +24,110 @@ Native column chunks and their validity bitmaps are read in place, without
 coalescing or copying their values. Each chunk retains its own value and
 bit offsets. The reductions queue into separate partial-result ranges and
 share one final synchronization and readback; chunk count does not multiply
-the full reduction grid. Float64 and every other operator run on the CPU.
+the full reduction grid.
+
+One projection can also combine `sum`, `count` and `mean` over up to four
+distinct Int32, Int64 or Float32 columns, with the same optional range filter.
+Aliases of the same input share their sum and non-null count. A single GPU
+scan evaluates the predicate once and accumulates every requested field;
+different input chunk boundaries are intersected into native views. Count
+returns Int64, mean returns Float64, and sums preserve their input dtype and
+`min_count`. Empty means are null; empty counts are zero. Integer means do
+not overflow merely because a same-dtype sum would overflow.
+
+Float32 means accumulate exact integer exponent bins on the GPU and finish
+in Float64 on the host, without GPU Float64 arithmetic. If the finite input's
+significant-bit span and count cannot prove the CPU's Float64 additions
+exact, the CPU adjudicates the result in its own accumulation order. This
+preserves the CPU's behavior for extreme dynamic ranges and cancellation.
+Compensated Float32 sums with non-finite partials also use CPU adjudication,
+including finite inputs whose GPU partials overflow Float32.
+The common path uses three bins for values whose significant bits fit between
+2**-53 and 2**43, such as ordinary prices and sensor readings. A device flag
+detects any contribution outside that window and retries with all nine bins;
+large finite values and subnormals retain the same supported semantics. The
+kernel also specializes for the number of distinct aggregate fields.
+For projections containing a Float32 mean, a schema-only remap packs Float32
+fields into a prefix while preserving output order and aliases. Exact-bin
+registers and block reductions are compiled only for that prefix; integer
+fields keep their native integer reductions. These projections use the
+`exact_float:typed_v1` calibration revision so earlier measurements are not
+reused for the specialized kernels.
+
+A single SUM may reduce a binary `+`, `-` or `*` expression, for example
+`(col("price") * col("quantity")).sum()`. Both columns must have the same
+native dtype (Int32, Int64 or Float32). An operand may instead be a matching
+typed literal or an exactly representable untyped numeric literal, on either
+side. Arithmetic, the optional common filter and the reduction run in one GPU
+scan without an intermediate result column. Operand nulls discard that row;
+integer intermediate overflow is detected even if a final sum would cancel.
+Overflow and non-finite Float32 partials use CPU adjudication. These shapes
+have separate `arithmetic_sum:` calibration keys; nested expressions,
+division and mixed-dtype arithmetic remain on CPU.
+Arithmetic expressions can also appear inside SUM, COUNT and MEAN in the
+same projection as column aggregates, for example:
+
+```mojo
+frame.lazy().filter(col("p") > 0).select_exprs([
+    (col("price") * col("quantity")).sum().alias("sales"),
+    col("discount").sum().alias("discount"),
+    col("quantity").count().alias("quantity_count"),
+])
+```
+
+Up to four distinct aggregate values share one scan and range predicate.
+Repeated SUM/COUNT/MEAN of an identical expression share its computed value
+and reduction state; expressions using different operators or literals retain
+separate states. Four binary expressions may read eight distinct value
+columns plus an independent predicate column. Operands retain the same dtype,
+literal and null rules as the single arithmetic SUM. COUNT checks integer
+intermediate overflow even when no sum is requested. Float32 means use the
+same exact-bin finish and CPU-order proof described above. These projections
+use `composed_reductions:v2:typed_fields:` calibration keys for the general
+composition kernel; the compact all-Float32 kernel retains its v1 keys.
+A schema-only remap groups Float32, Int32 and Int64 fields while preserving
+output aliases and order. Native dtype branches and reduction states are
+compiled for those groups, including Int64 accumulation for narrow integers
+and split upper/lower words for Int64. COUNT-only fields omit unused sum
+collectives while retaining checked integer expression evaluation.
+Subnormal arithmetic operands
+and possible gradual underflow use CPU adjudication because Metal arithmetic
+can flush these values to zero before reduction. The existing single arithmetic
+SUM and pure column aggregate paths keep their specialized kernels.
+
+A projection with one arithmetic value and otherwise Float32 column
+aggregates uses a compact typed kernel. It carries no integer reduction
+state; a mean-bearing prefix uses exact bins, while independent trailing
+sums use Float32 compensation. Output aliases retain their requested order.
+Compact projections without a mean specialize by predicate dtype: Int32
+comparisons stay native, and unused predicate branches and state are compiled
+out. Exact-mean projections retain their existing traversal and predicate
+path.
+Supported composition regions stay fused before CPU common-expression
+materialization. The pipeline adapter can also re-inline eligible shared
+binary values immediately below a projection; it declines unused work,
+dependencies and expressions evaluated before filters. These are schema-only
+transformations in the Metal backend; the CPU optimizer is unchanged.
+
+New fused projections have separate `fused_reductions:` calibration keys;
+without a measurement they stay on CPU in automatic mode. Float64 input
+columns and other operators continue to run on CPU.
+
+A projection can also combine native `min` and `max` over up to four
+distinct Int32, Int64 or Float32 columns, with the same optional range
+predicate. Aliases and MIN/MAX on the same column share a scan and reduction
+state. Empty or all-null inputs return typed nulls. Float32 extrema compare
+ordered integer keys, preserving subnormals and infinities without floating
+arithmetic on the GPU. NaNs are skipped when a numeric value exists;
+all-NaN fields and extrema tied between opposite zero signs use CPU
+adjudication to preserve the CPU's payload and tie behavior.
+These native-column regions use `native_extrema:v1:` calibration keys and remain
+on CPU in automatic mode until measured for the current build and layout.
+
+Float32 range predicates use ordered integer keys when a bound is near
+zero, preserving subnormal comparisons, signed-zero equality and NaN
+exclusion even when Metal's floating comparisons flush denormals. Normal
+bounds retain native floating comparisons.
 
 The explicit-copy reference path packs unaligned validity windows in bytes
 and SIMD batches. It does not copy an entire unaligned bitmap one bit at a
@@ -39,23 +142,95 @@ multiple distinct columns remains on CPU. Cross-column sums use distinct
 `cross_filter_sum:<predicate dtype>:<value dtype>` calibration keys; the
 single-column estimates are not reused for these larger memory reads.
 
+Adjacent native slices that share both value and validity owners can share a
+zero-copy mapping while retaining their original logical ranges. Composition
+batches those ranges into one submission when every input has one shared
+native span, preserving each segment's grid stride and partial-output order.
+Separate allocations, gaps, reordered windows and different bitmaps keep their
+separate ranges. Physical input layout still distinguishes calibration keys;
+the changed Metal build identity invalidates earlier submission profiles.
+Batched and ordinary compositions use separate compile-time kernel variants.
+The ordinary variant removes the batch-table lookup and row-base pointer
+arithmetic; both variants preserve the original per-segment reduction grids.
+
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
-every node it supports. `engine="auto"` places each such node by measured
+every node it supports. `engine="auto"` places supported pipelines by measured
 cost when `DATAFRAME_HANDOFF_CALIBRATION` names a calibration file, and
 runs on the CPU otherwise:
 
+Build the packages first so the measurements carry actual CPU and Metal
+source/compiler identities. Build both the capture program and application
+with `-O3` and the same compiler settings. A source checkout has no valid
+calibration identity. Capture on the target Mac with the application's CPU
+worker budget, and keep the packaged artifacts for the application:
+
 ```sh
-mojo build -O3 -I . benchmarks/bench_handoff.mojo -o build/bench_handoff
-build/bench_handoff 5 > sweep.tsv
-python3 benchmarks/tools/fit_handoff.py sweep.tsv > handoff.json
-export DATAFRAME_HANDOFF_CALIBRATION=$PWD/handoff.json
+python3 scripts/build_package.py --output dist
+mojo build -O3 -I dist benchmarks/bench_metal_calibration.mojo -o build/metal-calibration
+DATAFRAME_THREADS=8 build/metal-calibration 5 > build/metal-capture.jsonl
+python3 scripts/metal_calibration.py build/metal-capture.jsonl --output-dir build/calibration
+export DATAFRAME_HANDOFF_CALIBRATION=/absolute/path/printed/by/the/fitter.json
 ```
 
-`explain(engine="auto")` then prints a `PLACE` line per supported node with
-the CPU's and Metal's cost models and the row count from which Metal is
-estimated faster. Profiles record each decision with both estimates.
+The built-in capture uses 50M, 75M and 100M rows, eleven representative operator
+shapes, contiguous/eight-chunk inputs and independent nullable masks. Optional
+row counts follow the repetition count. It checks answers against a periodic
+scalar oracle, includes shared Float32 arithmetic SUM/COUNT/MEAN and mixed
+Float32-mean bundles, mixed MIN/MAX/SUM/COUNT/MEAN projections, arithmetic
+extrema and multi-column AND/OR filters. It alternates
+CPU/Metal timing order and records unsupported or
+CPU-adjudicated cases explicitly. Every Metal timing requires direct GPU
+execution. These are development calibration workloads, not external-suite
+performance results.
 
-### Measured on an M1 Mac mini
+For application workloads, call `dataframe_metal.calibration_capture.capture`
+with a supported `LazyFrame`, independently computed expected `DataFrame`
+and at least three repetitions; save its returned JSON as one line. Capture
+at least three distinct sizes per query/layout key, and pass the JSONL file
+to the same fitter. Check `capture_records` and `skipped` in the resulting
+profile. Query constants, output work, chunk counts and bitmap presence are
+part of the key; calibrating one layout does not measure another.
+
+The fitter takes a lower CPU and upper Metal envelope over the observed
+samples, adds a safety margin, and limits placement to each key's measured
+row range. Its content-addressed output filename is immutable. Models are
+empirical: changed selectivity or value distributions can change runtime
+even for the same schema. Recalibrate representative data after changes.
+
+Profiles must match both source/compiler build IDs, the device/host power
+and thermal state, and the effective CPU worker budget. A CPU rewrite, new
+Metal kernel, compiler/SDK update or thread change requires new measurements.
+Legacy unversioned profiles, missing keys, out-of-range inputs and identity
+mismatches stay on CPU. Replacing a file at an already cached path also stays
+on CPU if its models differ from the cached ones. Use a new profile filename.
+`dataframe_metal.calibration.calibration_status()` explains identity rejection
+without constructing a GPU context.
+
+Automatic collection uses the existing pipeline planner, which preserves
+physical input chunks. Profiles store conservative CPU pipeline models under
+`operators`, and layout-specific Metal models under `regions`. When several
+measured queries share a CPU pipeline key, its CPU model is a lower envelope
+across them, so pooling does not inflate CPU cost to favor Metal.
+Unmeasured region layouts remain on CPU even when their pipeline key matches.
+
+`explain(engine="auto")` shows actual placement in its `PIPELINE` lines.
+The older `PLACE` lines describe a separate schema-only handoff mechanism;
+versioned profiles do not supply costs to it. The current CPU `profile()`
+entry point uses that older mechanism, so it does not audit pipeline
+placement. To audit automatic collection, set
+`DATAFRAME_METAL_PLACEMENT_TRACE` to a writable JSONL path. The Metal provider
+appends a record after a pipeline finishes on Metal, or `cpu-adjudication`
+when input values require CPU evaluation. With tracing unset it writes
+nothing. Capture timings always use direct GPU completion checks instead.
+
+Pipeline data faults retain CPU semantics: overflow, non-finite compensated
+partials and gradual-underflow cases are adjudicated on CPU. Hardware and
+allocation failures propagate as errors.
+
+### Historical measurements on an M1 Mac mini
+
+These earlier, unversioned measurements are historical context and cannot
+be loaded as current automatic-placement profiles.
 
 `bench_handoff`, best of 5 warm runs from 10 thousand to 200 million rows,
 against the CPU executor on 8 threads, with every Metal answer checked
@@ -132,7 +307,9 @@ the CPU, in the same query.
   operator first checks MAX's GPU kernel libraries (warp and block
   reductions, 32-bit atomics and `elementwise` run on Apple GPUs) before
   writing its own.
-- **Visibility.** `explain` and `profile` show which operators ran on Metal.
+- **Visibility.** `explain(engine="auto")` shows pipeline placement; the
+  opt-in JSONL trace records automatic GPU completion. Profiles with an
+  explicit `MetalRuntime` show forced handoffs.
 
 The provider contract stays vendor-neutral: columns in and out, and the core
 never imports a backend. A discrete GPU (NVIDIA, AMD) is a separate provider
@@ -155,3 +332,77 @@ scripts/test_metal_local.sh
 `pixi run -e oracle report-apple` times CPU against forced Metal on the
 benchmark suites. While no query shape is supported, every case reports
 `unsupported`.
+
+### Property-matched placement costs
+
+The fitter retains each operator/expression and physical layout's CPU and
+Metal measurements as a matched pair. Layout keys distinguish bitmap
+presence, chunk counts, approximate chunk proportions and whether adjacent
+chunks share one native span. They contain no process-specific addresses.
+Profiles apply only within their measured row range and matching build,
+hardware and thread identities. Unknown inputs and unmeasured shapes stay
+on CPU.
+
+Each side uses an affine fit to per-scale sample medians. Negative-coefficient
+boundary cases are refitted instead of clamping the intercept of an overly
+steep line. The Metal decision estimate includes one switching margin: at
+least 5%, increased by within-scale paired timing variation and by any
+overstatement of GPU speedup at a measured scale. Typical Metal costs and the applied margin remain in the
+profile for inspection. Thus small advantages prefer CPU, while one timing
+outlier does not veto a clear repeated win.
+
+The generic CPU pipeline model remains a fallback for other providers. Metal
+supplies the validated CPU cost for the exact measured region through the
+provider-neutral `pipeline_costs` hook, at both explain/planning and execution
+time. CPU execution kernels and operators are unchanged. Legacy explicit
+backends inherit their existing estimate and generic CPU costs.
+
+### Mixed aggregate projections
+
+MIN/MAX can share one scan with SUM, COUNT and MEAN, including supported
+binary arithmetic expressions. Up to four distinct
+aggregate values share the range predicate, input mappings and segment grids;
+repeated outputs and aliases reuse their value's state. MIN/MAX accept native
+Int32, Int64 and Float32 columns and one ADD, SUB or MUL with the same operand
+and literal rules as arithmetic SUM. Extrema-only arithmetic also shares one
+scan, without computing an unused sum. Checked integer intermediate overflow
+and Float32 arithmetic requiring gradual underflow use CPU adjudication.
+
+The mixed scan uses the existing typed integer accumulation and Float32
+sum/mean policies. Extrema preserve raw Float32 bits, ignore NaNs when numeric
+values exist, and adjudicate all-NaN or ambiguous signed-zero results on CPU.
+COUNT includes non-null NaNs. Empty extrema/means remain typed nulls and SUM
+retains its minimum-count and overflow behavior. Adjacent shared-owner chunks
+batch into one launch; independent allocations retain their segment geometry.
+
+When all outputs share one native Float32 value, a dedicated mixed kernel
+reads that value directly, without binary-operand selection or integer
+accumulator state. SUM/MEAN and extrema reuse its raw bits. It retains the
+same predicate types, exact-bin retries, CPU-order proof and IEEE adjudication
+as the general mixed scan, including copied and chunked inputs.
+
+Mixed programs use `mixed_reductions:v1:` calibration keys. Existing pure
+aggregate paths retain their keys and entry signatures. A changed package
+identity requires fresh calibration before automatic placement uses the mixed
+program; unmeasured shapes stay on CPU.
+
+### Predicates across numeric columns
+
+Aggregate projections can combine range comparisons on different Int32,
+Int64 and Float32 columns using `&` and `|`. Bounds follow the existing
+exactly representable, untyped-literal rules. Conjunctions on one column fold
+into one range; separate filter calls compose as AND. Up to eight distinct
+range leaves and nine total value/predicate input columns are supported.
+
+The GPU evaluates ranges and combines their is-true bits through a small
+truth table inside the aggregate scan. This preserves filter selection with
+nulls: a missing comparison can qualify through another true OR branch.
+It supports the existing native and binary SUM/COUNT/MEAN/MIN/MAX projections,
+with the same chunk mapping, checked arithmetic and IEEE adjudication. No
+intermediate filtered table is materialized. NOT and column-to-column
+comparisons remain outside this numeric-range path.
+
+These regions use `predicate_reductions:v1:` calibration keys, including the
+range inputs, bounds and Boolean program. Existing single-range paths retain
+their specialized kernels and keys; automatic placement requires matching
+measurements for the new regions.

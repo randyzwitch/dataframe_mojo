@@ -2,7 +2,7 @@
 from dataframe.aggregation.expressions import (
     _stream_reductions,
 )
-from dataframe.kernels.join_hash import (
+from dataframe.kernels.join_keys import (
     prefer_left_build,
 )
 from dataframe.join_type import (

@@ -134,17 +134,36 @@ struct MetalRuntime(AcceleratorBackend):
         """Run `query` on the CPU executor, handing Metal the nodes it
         supports."""
         var settings = self._execution_settings.copy()
-        var plan = query._with_handoff()
+        from .handoff import supports
+
+        # This entire region is already a valid device program. CPU CSE
+        # would materialize its repeated arithmetic or predicate intermediates
+        # as input columns, preventing the fused scan. Other plans retain CPU
+        # optimization.
+        from .region_plan import normalize_region
+        from .composition_plan import plan_composition
+        from .predicate_plan import plan_predicates
+
+        var optimize = settings.optimize
+        var offered = query.copy()
+        if supports(query):
+            var normalized = normalize_region(query)
+            if plan_composition(normalized.value()) or plan_predicates(
+                normalized.value()
+            ):
+                offered = normalized.take()
+                optimize = False
+        var plan = offered._with_handoff()
         if profiling:
             return plan.profile(
                 engine="cpu",
-                optimize=settings.optimize,
+                optimize=optimize,
                 streaming=settings.streaming,
                 batch_size=settings.batch_size,
             )
         var result = plan.collect(
             engine="cpu",
-            optimize=settings.optimize,
+            optimize=optimize,
             streaming=settings.streaming,
             batch_size=settings.batch_size,
         )

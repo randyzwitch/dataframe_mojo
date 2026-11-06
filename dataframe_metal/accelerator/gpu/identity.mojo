@@ -10,9 +10,10 @@ from std.memory import Pointer
 from std.sys import CompilationTarget, size_of
 from max.gpu.host import DeviceContext
 from dataframe._build_identity import CPU_BUILD_ID
+from ..._build_identity import METAL_BUILD_ID
 from .target import METAL_TARGET
 
-comptime PROVIDER_BUILD = "dataframe-mojo-metal-v1"
+comptime PROVIDER_BUILD = "dataframe-mojo-metal-v2"
 comptime _NameMessage = def(Int) thin abi("C") -> Int
 comptime _ObjectMessage = def(Int, Int) thin abi("C") -> Int
 comptime _BoolMessage = def(Int, Int) thin abi("C") -> UInt8
@@ -237,7 +238,8 @@ def _metal_hardware(device: Int) raises -> HardwareFacts:
 def runtime_build_id() -> String:
     if CPU_BUILD_ID == "development-source-no-calibration":
         return CPU_BUILD_ID
-    # The package builder hashes every dataframe source, the complete lock,
-    # full `mojo --version` and compiler flags into CPU_BUILD_ID. This binds
-    # the provider to actual compiler/SDK builds without duplicating pins.
-    return PROVIDER_BUILD + ";source-compiler-sdk=" + CPU_BUILD_ID
+    if METAL_BUILD_ID == "development-metal-no-calibration":
+        return METAL_BUILD_ID
+    # Both generated identities bind sources, compiler/SDK and build flags.
+    # A CPU rewrite invalidates the CPU hash and the dependent Metal hash.
+    return PROVIDER_BUILD + ";cpu=" + CPU_BUILD_ID + ";metal=" + METAL_BUILD_ID

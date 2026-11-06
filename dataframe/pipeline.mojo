@@ -11,10 +11,11 @@ the main thread does no per-morsel work.
 A row-local step reads its input chunk's vectors through the unified
 format: a filter's result is the same vectors as dictionaries through its
 selection, so nothing is copied for it, and a projection computes only
-the rows the selection keeps. Join probes and sinks do not read vectors
-yet: a morsel's chunks are collected for them (`_Collector`), each column
-kept as a range or a row list over the column it reads, and gathered
-through it only when one reads a frame.
+the rows the selection keeps. Every pipeline ends in a sink taking the
+last step's chunks one at a time (`dataframe/vector/sink.mojo`). Join
+probes do not read vectors yet: a morsel's chunks are collected for them
+(`_Collector`), each column kept as a range or a row list over the column
+it reads, and gathered through it only when the probe reads a frame.
 """
 from dataframe.storage.buffer import _Buffer, _BufferData
 from std.atomic import Atomic
@@ -27,7 +28,7 @@ from std.time import perf_counter_ns
 
 from dataframe.kernels.canonical_labels import canonical_labels
 from dataframe.storage.boolean import BoolColumn, both_true, true_count
-from .expr import COL, SELECTOR, Expr
+from .expr import COL, SELECTOR, WHEN, Expr
 from dataframe.aggregation.reducer import Reducer
 from .binding import BoundExpr, bind
 from dataframe.storage.column import Column, _copy_validity
@@ -49,7 +50,9 @@ from .expr import (
     STD,
     SUM,
     VAR,
+    col,
     is_reduction,
+    node_children,
     subtree,
 )
 from dataframe.aggregation.hash_table import (
@@ -66,8 +69,28 @@ from .frame import (
     _rows_mask,
     concat,
 )
+from dataframe.aggregation.table_sink import (
+    TOTAL_KEY,
+    GroupingSetsLayout,
+    GroupingSetsSink,
+    TableSink,
+    TableSinkLayout,
+)
+from dataframe.aggregation.ungrouped import (
+    UngroupedLayout,
+    UngroupedSink,
+    ungrouped_finish,
+    ungrouped_layout,
+)
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
+from dataframe.vector.column_data_collection import (
+    MaterializeSink,
+    append_raw,
+    materialize_finish,
+    raw_series,
+)
+from dataframe.vector.sink import Sink
 from dataframe.storage.statistics import (
     STATISTICS_VECTOR_SIZE,
     COMPARE_GREATERTHAN,
@@ -98,11 +121,9 @@ from dataframe.aggregation.keys import (
     _group_keys,
 )
 from dataframe.aggregation.selected_rows import _reduce_floats, _reduce_ints
-from dataframe.kernels.join_hash import (
-    PreparedHashIndex,
-    prepared_direct_rows_at,
-    prepared_hash_join_rows,
-    prepared_hash_semi_anti_rows,
+from dataframe.joins.hash_table import (
+    JoinHashTable,
+    ScanStructure,
 )
 from .join_type import JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_RIGHT, JOIN_SEMI
 from dataframe.kernels.row_encode import encodable
@@ -127,19 +148,19 @@ from dataframe.kernels.segment_statistics import (
     series_statistics,
 )
 from dataframe.storage.statistics import NUMERIC_STATS
+from dataframe.table_scan import ScanFilterInfo, scan_filter_info
 from dataframe.kernels.hashing import encode_rows
 from dataframe.storage.string import StringColumn
 from .trace import trace_path
 from .selectors import expand
 from .expr import LIT_BOOL, conjuncts
-from dataframe.aggregation.expressions import _bind_all
+from dataframe.aggregation.expressions import _bind_all, _row_local
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
     flat_over,
     to_series,
 )
-from dataframe.vector.adaptive_filter import AdaptiveFilter
 from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
@@ -200,9 +221,9 @@ def _flush_groups() -> Int:
 comptime _ORDER_COLUMN = "__pipeline_order"
 # A late-materialized top-N scan's row id column (DuckDB's `rowid`).
 comptime ROW_ID_COLUMN = "__dataframe_row_id"
-# The constant key a grouping sets' grand total groups by (the aggregate
-# table needs a key column); dropped from that set's result.
-comptime _TOTAL_KEY = "__grouping_total"
+# The constant key a grouping sets' grand total groups by; dropped from
+# that set's result.
+comptime _TOTAL_KEY = TOTAL_KEY
 
 
 @fieldwise_init
@@ -233,18 +254,112 @@ def _reads(exprs: List[Expr]) -> Optional[List[String]]:
     return Optional(names^)
 
 
+comptime _AGGREGATE_INPUT = "__aggregate_input_"
+
+
+def _extract_aggregate_inputs(
+    steps: List[Step],
+    expressions: List[Expr],
+    keys: List[String],
+    schema: DataFrame,
+) raises -> Tuple[List[Step], List[Expr]]:
+    """DuckDB's ExtractAggregateExpressions (physical_plan/plan_aggregate.cpp):
+    every aggregate's computed input becomes a column of a projection
+    below the aggregate, and the aggregate reads that column. The
+    projection runs on the chunks the steps before it make, through their
+    selections, so a filter's kept rows reach the sink as the computed
+    values only, never as every input column gathered first. `schema` is
+    the steps' output; the steps are returned unchanged when no input is
+    computed (a projection of column references only moves no data)."""
+    var projected = List[Expr]()
+    var rewritten = List[Expr](capacity=len(expressions))
+    for e in expressions:
+        var nodes = e._nodes.copy()
+        var changed = False
+        for i in range(len(nodes)):
+            if not is_reduction(nodes[i].op):
+                continue
+            # An input `when(c).then(x)` with no otherwise is DuckDB's
+            # aggregate FILTER (WHERE c) over x: its condition and its
+            # value are projected each on its own, as the aggregate's
+            # filter and child are (`bound_aggr.GetFilter()`).
+            var targets = List[Int]()
+            for child in node_children(nodes[i]):
+                if nodes[child].op == WHEN and nodes[child].extra < 0:
+                    targets.append(nodes[child].left)
+                    targets.append(nodes[child].right)
+                else:
+                    targets.append(child)
+            for child in targets:
+                if nodes[child].op == COL:
+                    continue
+                var input = subtree(e, child)
+                var reads = False
+                var local = True
+                for node in input._nodes:
+                    reads = reads or node.op == COL
+                    local = local and not (
+                        is_reduction(node.op) or node.op == SELECTOR
+                    )
+                if not reads or not local or not _row_local([input.copy()]):
+                    continue
+                var name = _AGGREGATE_INPUT + String(len(projected))
+                while name in schema.columns():
+                    name += "_"
+                projected.append(input.alias(name))
+                nodes[child] = col(name)._nodes[0].copy()
+                changed = True
+        if changed:
+            var compact = Expr(nodes^, e._name)
+            rewritten.append(subtree(compact, len(compact._nodes) - 1))
+        else:
+            rewritten.append(e.copy())
+    if len(projected) == 0:
+        return (steps.copy(), expressions.copy())
+    # The projection's columns: the group keys, the columns the aggregates
+    # still read as they are, then the computed inputs.
+    var exprs = List[Expr]()
+    var names = List[String]()
+    for key in keys:
+        if key not in names:
+            names.append(key)
+    var reads = _reads(rewritten)
+    if not reads:
+        return (steps.copy(), expressions.copy())
+    for name in reads.value():
+        if name not in names and not name.startswith(_AGGREGATE_INPUT):
+            names.append(name)
+    for name in names:
+        exprs.append(col(name))
+    for p in projected:
+        exprs.append(p.copy())
+    var result = steps.copy()
+    result.append(
+        Step(
+            STEP_SELECT,
+            exprs^,
+            List[String](),
+            -1,
+            List[String](),
+            JOIN_INNER,
+            String(""),
+            False,
+        )
+    )
+    return (result^, rewritten^)
+
+
 def _row_counted(
-    columns: _Columns,
-    arena: ColumnArena,
     schema: DataFrame,
     expressions: List[Expr],
+    null_free: List[Bool],
 ) raises -> Tuple[List[Expr], List[String], List[String]]:
-    """`expressions` with each count of a column that holds no null in the
-    morsel's source turned into a row count, the columns they still read
-    values of, and the columns read only by row counts. DuckDB's rule (its
-    count statistics callback): a count of a column without nulls is
-    count(*), so it is the kept-row count, and the column is never
-    gathered through its rows."""
+    """`expressions` with each count of a column that holds no null
+    (`null_free`, per column of `schema`) turned into a row count, the
+    columns they still read values of, and the columns read only by row
+    counts. DuckDB's rule (its count statistics callback): a count of a
+    column without nulls is count(*), so it is the kept-row count, and the
+    column is never gathered through its rows."""
     var rewritten = List[Expr](capacity=len(expressions))
     var valued = List[String]()
     var counted = List[String]()
@@ -256,8 +371,7 @@ def _row_counted(
             if child < 0 or nodes[child].op != COL:
                 continue
             if nodes[k].op == COUNT:
-                var at = schema._index(nodes[child].text)
-                if arena.columns[columns.handles[at]].null_count() == 0:
+                if null_free[schema._index(nodes[child].text)]:
                     nodes[k].op = LEN
             if nodes[k].op == LEN:
                 under_len[child] = True
@@ -739,21 +853,6 @@ struct _Columns(Copyable, Movable):
         """Every column as a frame of `height` rows."""
         return self.frame(arena, schema, schema.columns())
 
-    def selection_mask(self, length: Int) raises -> BoolColumn:
-        """The morsel rows these columns read, as a mask over its `length`
-        rows (empty: every row), for a pipeline whose steps only filter:
-        its columns are all the source's, read through one row list."""
-        if self.width() == 0 or (self.lists[0] < 0 and self.height == length):
-            return BoolColumn(List[Bool]())
-        var rows = List[Int](capacity=self.height)
-        if self.lists[0] < 0:
-            for r in range(self.height):
-                rows.append(self.starts[0] + r)
-        else:
-            for r in self.row_lists[self.lists[0]]:
-                rows.append(Int(r))
-        return _rows_mask(rows, length)
-
     def bases(self, arena: ColumnArena) -> List[Vector]:
         """Per column, a flat vector over its arena column from row 0."""
         var result = List[Vector](capacity=self.width())
@@ -793,21 +892,6 @@ struct _Columns(Copyable, Movable):
         chunk.count = count
 
 
-comptime _RAW_STORAGE = [
-    DType.int64,
-    DType.float64,
-    DType.int8,
-    DType.int16,
-    DType.int32,
-    DType.uint8,
-    DType.uint16,
-    DType.uint32,
-    DType.uint64,
-    DType.float32,
-    DType.int128,
-]
-
-
 def _append_rows(mut listed: List[UInt32], v: Vector, count: Int):
     """The at-rest rows of a vector over a source, appended."""
     # Grown geometrically: an exact reservation per chunk copied the
@@ -837,8 +921,8 @@ comptime _COLLECT_RAW = 4
 
 
 struct _Collector(Movable):
-    """A morsel's chunks gathered into `_Columns` for an operator that
-    reads frames (the adapter the join and aggregate ports delete): a
+    """A morsel's chunks gathered into `_Columns` for a join step, which
+    reads frames (the adapter the join port deletes): a
     column whose chunks read one arena column is kept as that column's
     range or row list, and only values a step computed are copied."""
 
@@ -852,9 +936,13 @@ struct _Collector(Movable):
     var raw_bits: List[List[UInt8]]
     var raw_physical: List[Int]
     var height: Int
+    # The most rows the morsel can give (its input's): raw values and
+    # bitmaps are sized for it once rather than grown chunk by chunk.
+    var capacity: Int
 
-    def __init__(out self, schema: DataFrame):
+    def __init__(out self, schema: DataFrame, capacity: Int = 0):
         self.schema = schema.copy()
+        self.capacity = capacity
         var width = schema.width()
         self.modes = List[Int](length=width, fill=_COLLECT_NONE)
         self.handles = List[Int](length=width, fill=-1)
@@ -942,66 +1030,24 @@ struct _Collector(Movable):
         count: Int,
         size: Int,
     ) raises:
-        var format = chunk.unified(c, arena)
-        ref bytes = self.raw[c]
-        var start = len(bytes)
-        if bytes.capacity() < start + size * count:
-            bytes.reserve(max(start + size * count, 2 * bytes.capacity()))
-        var data = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=format.data)
-        if not format.sel.is_set():
-            bytes.extend(
-                Span[UInt8, MutAnyOrigin](unsafe_ptr=data, length=size * count)
-            )
-        else:
-            for i in range(count):
-                var at = size * format.sel.get_index_unsafe(i)
-                bytes.extend(
-                    Span[UInt8, MutAnyOrigin](
-                        unsafe_ptr=data.unsafe_offset(at), length=size
-                    )
-                )
-        if format.validity.all_valid() and len(self.raw_bits[c]) == 0:
-            return
-        ref bits = self.raw_bits[c]
-        if len(bits) == 0:
-            # The rows before were all valid.
-            bits = List[UInt8](length=(self.height + 7) // 8, fill=255)
-        var row = self.height
-        for i in range(count):
-            var valid = format.validity.row_is_valid(format.sel.get_index(i))
-            var r = row + i
-            if r >> 3 >= len(bits):
-                bits.append(255)
-            if not valid:
-                bits[r >> 3] &= ~(UInt8(1) << UInt8(r & 7))
+        append_raw(
+            self.raw[c],
+            self.raw_bits[c],
+            self.height,
+            self.capacity,
+            chunk.unified(c, arena),
+            count,
+            size,
+        )
 
     def _raw_series(self, c: Int) raises -> Series:
         """Column `c`'s raw values as a column of its schema type."""
-        ref bytes = self.raw[c]
-        var physical = self.raw_physical[c]
-        var name = self.schema._columns[c].name()
-        var size = physical_size(physical)
-        var n = len(bytes) // size if size > 0 else 0
-        var result = self.schema._columns[c].copy()
-        comptime for k in range(len(_RAW_STORAGE)):
-            comptime D = _RAW_STORAGE[k]
-            if physical == physical_of[D]():
-                var values = List[Scalar[D]](unsafe_uninit_length=n)
-                unsafe_memcpy(
-                    dest=values.unsafe_ptr().unsafe_bitcast[UInt8](),
-                    src=bytes.unsafe_ptr(),
-                    count=size * n,
-                )
-                var bits = self.raw_bits[c].copy()
-                if len(bits) > 0:
-                    while len(bits) < (n + 7) // 8:
-                        bits.append(255)
-                var column = Column[Scalar[D]](values=values^, bits=bits^)
-                result = Series(name, column^)
-        var dtype = self.schema._columns[c].dtype()
-        if result.dtype() != dtype:
-            result = result.with_dtype(dtype)
-        return result^
+        return raw_series(
+            self.raw[c],
+            self.raw_bits[c],
+            self.raw_physical[c],
+            self.schema._columns[c],
+        )
 
     def _so_far(self, c: Int, arena: ColumnArena) raises -> Series:
         """Column `c`'s rows collected so far, as values."""
@@ -1074,22 +1120,19 @@ struct _VectorStep(Copyable, Movable):
     every chunk a worker runs through it."""
 
     var kind: Int
-    # FILTER: the predicate's conjuncts, run one after another, each on
-    # the rows the ones before kept (ExpressionExecutor::Select); none
-    # for a literal true. SELECT / WITH_COLUMNS: the computed columns.
+    # FILTER: the predicate (ExpressionExecutor::Select; its AND / OR
+    # nodes order their children with DuckDB's AdaptiveFilter); none for
+    # a literal true. SELECT / WITH_COLUMNS: the computed columns.
     var expressions: List[VectorExpression]
     # SELECT / WITH_COLUMNS / DROP: per output column, the input column it
     # reads (>= 0) or the expression computing it (-1 - expression).
     var outputs: List[Int]
     var output: DataChunk
-    # FILTER: the order the conjuncts run in (DuckDB's AdaptiveFilter).
-    var adaptive: AdaptiveFilter
 
     def __init__(
         out self, step: Step, input: DataFrame, output: DataFrame
     ) raises:
         self.kind = step.kind
-        self.adaptive = AdaptiveFilter(0, True)
         self.expressions = List[VectorExpression]()
         self.outputs = List[Int]()
         self.output = DataChunk()
@@ -1106,15 +1149,10 @@ struct _VectorStep(Copyable, Movable):
             if len(expanded) != 1:
                 raise Error("A filter selector must match exactly one column")
             trace_path("pipeline.vector_filter")
-            for part in conjuncts(expanded[0]):
-                var compiled = VectorExpression(part, schema)
-                if compiled.root_dtype() != DataType.BOOL:
-                    raise Error("Filter expression must return Boolean values")
-                self.expressions.append(compiled^)
-            var can_throw = False
-            for e in range(len(self.expressions)):
-                can_throw = can_throw or self.expressions[e].can_throw()
-            self.adaptive = AdaptiveFilter(len(self.expressions), can_throw)
+            var compiled = VectorExpression(expanded[0], schema)
+            if compiled.root_dtype() != DataType.BOOL:
+                raise Error("Filter expression must return Boolean values")
+            self.expressions.append(compiled^)
             return
         trace_path("pipeline.vector_projection")
         if step.kind == STEP_DROP:
@@ -1145,17 +1183,11 @@ struct _VectorStep(Copyable, Movable):
         if self.kind == STEP_FILTER:
             var rows = SelectionVector()
             var count = input.count
-            var start = self.adaptive.begin()
-            for p in range(len(self.expressions)):
-                var e = self.adaptive.permutation[p]
-                var target = self.output.new_selection()
-                count = self.expressions[e].select(
-                    input, arena, rows, count, target
+            if len(self.expressions) > 0:
+                rows = self.output.new_selection()
+                count = self.expressions[0].select(
+                    input, arena, SelectionVector(), count, rows
                 )
-                rows = target
-                if count == 0:
-                    break
-            self.adaptive.end(start)
             if count == input.count:
                 self.output.set_columns(input.column_count())
                 for c in range(input.column_count()):
@@ -1242,7 +1274,7 @@ struct _ChunkRunner(Movable):
     # per thread, its expressions bound once).
     var templates: ArcPointer[List[Optional[_VectorStep]]]
     var joins: ArcPointer[List[DataFrame]]
-    var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
+    var indexes: ArcPointer[List[Optional[JoinHashTable]]]
     var arena: ColumnArena
     # The arena's columns held for the whole pipeline (join builds); a
     # morsel's are dropped when the next one starts.
@@ -1254,13 +1286,42 @@ struct _ChunkRunner(Movable):
     # Whether to stop at a step that leaves no row (a pipeline's morsel),
     # or to run on so the output has every step's columns.
     var stop_empty: Bool
+    # An ungrouped aggregate sink (`ungrouped.mojo`), when the pipeline
+    # ends in one: the last step's chunks are sunk into its states, and
+    # nothing is collected.
+    var ungrouped: List[UngroupedSink]
+    # The layout every worker's sink is made from, on its own thread
+    # when its job starts.
+    var ungrouped_layout: List[ArcPointer[UngroupedLayout]]
+    # A grouped aggregate table sink (`table_sink.mojo`), likewise: the
+    # last step's chunks go into the worker's table; its layout, and the
+    # workers every table is sized for.
+    var table: List[TableSink]
+    var table_layout: List[ArcPointer[TableSinkLayout]]
+    var table_workers: Int
+    # Grouping sets' tables (`GroupingSetsSink`), likewise.
+    var sets: List[GroupingSetsSink]
+    var sets_layout: List[ArcPointer[GroupingSetsLayout]]
+    # A reduction neither aggregate sink takes (`_ReduceSink`).
+    var reduce: List[_ReduceSink]
+    var reduce_layout: List[ArcPointer[_ReduceSinkLayout]]
+    # A materialize sink (`MaterializeSink`), when the pipeline's rows are
+    # its result.
+    var materialize: List[MaterializeSink]
+    var materializes: Bool
+    # The source's table filters, and the source row of the morsel's first
+    # row while the morsel's own rows run (-1 otherwise): a chunk whose
+    # vector the filters' statistics rule out is not read (DuckDB's
+    # `RowGroup::CheckZonemapSegments`).
+    var scan: Optional[ScanFilterInfo]
+    var scan_offset: Int
 
     def __init__(
         out self,
         steps: List[Step],
         schemas: ArcPointer[List[DataFrame]],
         joins: ArcPointer[List[DataFrame]],
-        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+        indexes: ArcPointer[List[Optional[JoinHashTable]]],
         stop_empty: Bool,
         templates: ArcPointer[List[Optional[_VectorStep]]] = ArcPointer(
             List[Optional[_VectorStep]]()
@@ -1289,10 +1350,98 @@ struct _ChunkRunner(Movable):
         self.source = DataChunk()
         self.counts = List[Int](length=3 * len(steps) + 1, fill=0)
         self.stop_empty = stop_empty
+        self.ungrouped = List[UngroupedSink]()
+        self.ungrouped_layout = List[ArcPointer[UngroupedLayout]]()
+        self.table = List[TableSink]()
+        self.table_layout = List[ArcPointer[TableSinkLayout]]()
+        self.table_workers = 1
+        self.sets = List[GroupingSetsSink]()
+        self.sets_layout = List[ArcPointer[GroupingSetsLayout]]()
+        self.reduce = List[_ReduceSink]()
+        self.reduce_layout = List[ArcPointer[_ReduceSinkLayout]]()
+        self.materialize = List[MaterializeSink]()
+        self.materializes = False
+        self.scan = None
+        self.scan_offset = -1
 
     def begin_morsel(mut self):
         """Drop the previous morsel's columns."""
         self.arena.truncate(self.held)
+
+    def sinks_chunks(self) -> Bool:
+        """Whether the worker's sink state is made (`begin_sink`): the
+        last step's chunks go into it, and nothing is collected."""
+        return (
+            len(self.ungrouped) > 0
+            or len(self.table) > 0
+            or len(self.sets) > 0
+            or len(self.reduce) > 0
+            or len(self.materialize) > 0
+        )
+
+    def begin_sink(
+        mut self, morsel: Int, offset: Int = 0, length: Int = 0
+    ) raises:
+        """Morsel `morsel` (source rows [offset, offset + length)) comes
+        next: the worker's local sink state, made on its own thread at its
+        first morsel (`GetLocalSinkState`), numbers its rows from the
+        morsel's."""
+        if len(self.ungrouped_layout) > 0:
+            if len(self.ungrouped) == 0:
+                self.ungrouped.append(UngroupedSink(self.ungrouped_layout[0][]))
+            self.ungrouped[0].begin(morsel)
+        elif len(self.table_layout) > 0:
+            if len(self.table) == 0:
+                self.table.append(
+                    TableSink(self.table_layout[0][], self.table_workers)
+                )
+            self.table[0].begin(morsel)
+        elif len(self.sets_layout) > 0:
+            if len(self.sets) == 0:
+                self.sets.append(
+                    GroupingSetsSink(self.sets_layout[0][], self.table_workers)
+                )
+            self.sets[0].begin(morsel)
+        elif len(self.reduce_layout) > 0:
+            if len(self.reduce) == 0:
+                self.reduce.append(_ReduceSink(self.reduce_layout[0][]))
+            self.reduce[0].place(offset, length)
+            self.reduce[0].begin(morsel)
+        elif self.materializes:
+            if len(self.materialize) == 0:
+                self.materialize.append(
+                    MaterializeSink(self.output_schema().clear())
+                )
+            self.materialize[0].begin(morsel)
+
+    def release_sink(mut self) raises:
+        """The worker's run is over: only its sink's states outlive it. A
+        grouping sets sink derives its coarser sets here, on the worker's
+        thread."""
+        if len(self.ungrouped) > 0:
+            self.ungrouped[0].release()
+        if len(self.table) > 0:
+            self.table[0].release()
+        if len(self.sets) > 0:
+            self.sets[0].release()
+            self.sets[0].derive()
+        if len(self.reduce) > 0:
+            self.reduce[0].release()
+        if len(self.materialize) > 0:
+            self.materialize[0].release()
+
+    def _sink(mut self, mut chunk: DataChunk) raises:
+        """One output chunk into the worker's sink."""
+        if len(self.ungrouped) > 0:
+            _sink_chunk(self.ungrouped[0], chunk, self.arena)
+        elif len(self.table) > 0:
+            _sink_chunk(self.table[0], chunk, self.arena)
+        elif len(self.sets) > 0:
+            _sink_chunk(self.sets[0], chunk, self.arena)
+        elif len(self.reduce) > 0:
+            _sink_chunk(self.reduce[0], chunk, self.arena)
+        else:
+            _sink_chunk(self.materialize[0], chunk, self.arena)
 
     def schema(self, at: Int) -> DataFrame:
         return self.schemas[][at].copy()
@@ -1306,9 +1455,37 @@ struct _ChunkRunner(Movable):
         """The steps from `first` on over `columns` (the input of step
         `first`); `marks` is per step the address of a right or full
         join's matched-row flags (0 for none)."""
+        return self.run_until(columns^, first, len(self.steps), marks)
+
+    def run_to_last(
+        mut self, var columns: _Columns, first: Int, marks: List[Int]
+    ) raises -> Tuple[_Columns, Int]:
+        """The steps from `first` up to the last row-local segment: the
+        columns that segment reads and the step it starts at (the step
+        count when the last step is a join). The segment then runs one
+        chunk at a time through `chunk`, so a sink takes each chunk as it
+        is made (DuckDB's PipelineExecutor pushing a chunk to the sink)."""
+        var n = len(self.steps)
+        var last = n
+        while last > first and self.steps[last - 1].kind != STEP_JOIN:
+            last -= 1
+        if last > first:
+            columns = self.run_until(columns^, first, last, marks)
+        for s in range(last, n):
+            self._compiled(s)
+        return (columns^, last)
+
+    def run_until(
+        mut self,
+        var columns: _Columns,
+        first: Int,
+        stop: Int,
+        marks: List[Int],
+    ) raises -> _Columns:
+        """Steps [first, stop) over `columns`, collected."""
         var at = first
         var n = len(self.steps)
-        while at < n:
+        while at < stop:
             if self.stop_empty and columns.height == 0:
                 return columns^
             if self.steps[at].kind == STEP_JOIN:
@@ -1319,12 +1496,73 @@ struct _ChunkRunner(Movable):
                 self.counts[2 * at + 2] += columns.height
                 at += 1
                 continue
-            var stop = at
-            while stop < n and self.steps[stop].kind != STEP_JOIN:
-                stop += 1
-            columns = self._vector_steps(columns, at, stop)
-            at = stop
+            var end = at
+            while end < stop and self.steps[end].kind != STEP_JOIN:
+                end += 1
+            columns = self._vector_steps(columns, at, end)
+            at = end
+        if stop == n and self.sinks_chunks() and columns.height > 0:
+            if len(self.ungrouped) > 0 and self.ungrouped[0].counts_only():
+                # Row counts read no column: the rows are only counted.
+                self.ungrouped[0].sink_rows(columns.height)
+                return _Columns()
+            # A join's output (or the source, with no steps) cut into
+            # chunks for the sink.
+            columns = self._vector_steps(columns, n, n)
         return columns^
+
+    def chunk(
+        mut self,
+        columns: _Columns,
+        bases: List[Vector],
+        low: Int,
+        count: Int,
+        first: Int,
+    ) raises -> Int:
+        """Rows [low, low + count) of `columns` through steps [first, end)
+        (all row-local, compiled by `run_to_last`): the address of the
+        output chunk, or 0 when no row is left."""
+        var n = len(self.steps)
+        var compiled = Pointer[Optional[_VectorStep], MutAnyOrigin](
+            unsafe_from_address=Int(self.compiled.unsafe_ptr())
+        )
+        var input = Pointer[DataChunk, MutAnyOrigin](
+            unsafe_from_address=Int(Pointer(to=self.source))
+        )
+        columns.fill(bases, self.arena, input[], low, count)
+        for s in range(first, n):
+            self.counts[2 * s + 1] += input[].count
+            var began = Int(perf_counter_ns())
+            ref step = compiled[unsafe_offset=s].value()
+            step.run(input[], self.arena)
+            self.counts[2 * n + 1 + s] += Int(perf_counter_ns()) - began
+            self.counts[2 * s + 2] += step.output.count
+            input = Pointer[DataChunk, MutAnyOrigin](
+                unsafe_from_address=Int(Pointer(to=step.output))
+            )
+            if step.output.count == 0:
+                return 0
+        return Int(input)
+
+    def chunk_frame(mut self, address: Int) raises -> DataFrame:
+        """An output chunk as a frame of the output schema (the adapter
+        for sinks that read frames)."""
+        var chunk = Pointer[DataChunk, MutAnyOrigin](
+            unsafe_from_address=address
+        )
+        var schema = self.output_schema()
+        var columns = List[Series](capacity=schema.width())
+        for c in range(schema.width()):
+            columns.append(
+                to_series(
+                    chunk[],
+                    c,
+                    self.arena,
+                    schema._columns[c].name(),
+                    schema._columns[c].dtype(),
+                )
+            )
+        return DataFrame(columns^)
 
     def _compiled(mut self, s: Int) raises:
         if not self.compiled[s]:
@@ -1342,7 +1580,11 @@ struct _ChunkRunner(Movable):
         for s in range(first, stop):
             self._compiled(s)
         var n = len(self.steps)
-        var collector = _Collector(self.schemas[][stop])
+        var sinking = stop == n and self.sinks_chunks()
+        # Chunks for a later join step are collected; a sink takes its own.
+        var collector = List[_Collector]()
+        if not sinking:
+            collector.append(_Collector(self.schemas[][stop], columns.height))
         var bases = columns.bases(self.arena)
         var compiled = Pointer[Optional[_VectorStep], MutAnyOrigin](
             unsafe_from_address=Int(self.compiled.unsafe_ptr())
@@ -1350,8 +1592,14 @@ struct _ChunkRunner(Movable):
         var source = Pointer[DataChunk, MutAnyOrigin](
             unsafe_from_address=Int(Pointer(to=self.source))
         )
+        var skips = first == 0 and self.scan_offset >= 0 and Bool(self.scan)
         for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
             var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
+            if skips:
+                var at = self.scan_offset + low
+                if self.scan.value().skip(at, at + count):
+                    trace_path("scan.vector_skip")
+                    continue
             columns.fill(bases, self.arena, source[], low, count)
             var input = source
             var empty = False
@@ -1368,20 +1616,29 @@ struct _ChunkRunner(Movable):
                 if step.output.count == 0:
                     empty = True
                     break
-            if not empty:
-                collector.append(input[], self.arena)
-        return collector.finish(self.arena)
+            if empty:
+                continue
+            if sinking:
+                self._sink(input[])
+            else:
+                collector[0].append(input[], self.arena)
+        if sinking:
+            return _Columns()
+        return collector[0].finish(self.arena)
 
     def _join(
         mut self, columns: _Columns, s: Int, marks: Int
     ) raises -> _Columns:
         """A join step over a morsel's collected columns. An inner, semi or
-        anti join through its prepared index probes the key columns only
-        and keeps every other column a dictionary over where it is: the
-        probe side through the matched probe rows, the build side through
-        the matched build rows (no payload is gathered, as DuckDB's probe
-        slices the probe chunk and emits build columns as dictionary
-        vectors). Any other join runs on the morsel's frame."""
+        anti join probes its table (`ScanStructure`) with the key columns
+        only and keeps every other column a dictionary over where it is:
+        the probe side through the matched probe rows, the build side
+        through the matched build rows (no payload is gathered, as
+        DuckDB's probe slices the probe chunk and emits build columns as
+        dictionary vectors, `EmitDictVectors`). Any other join probes the
+        morsel's frame; a right or full join flags the build rows it
+        matched in the table (`marks` is their address), for the rows no
+        morsel matched to come out after the probe."""
         ref step = self.steps[s]
         ref input = self.schemas[][s]
         ref output = self.schemas[][s + 1]
@@ -1407,69 +1664,52 @@ struct _ChunkRunner(Movable):
                 suffix=step.suffix,
                 coalesce=step.coalesce,
                 prepared=self.indexes[][step.join],
-                workers=0,
-                marks=marks,
+                workers=1,
             )
             return _Columns.of_frame(self.arena, joined)
         trace_path("pipeline.join_dictionary")
-        # A key read through a row list probes a direct index where it
-        # is, as DuckDB probes a dictionary vector through its selection:
-        # the key is not gathered first.
-        var through = Optional[Tuple[List[Int], List[Int], Bool]]()
-        if len(step.names) == 1:
-            var c = input._index(step.names[0])
-            if columns.lists[c] >= 0:
-                ref listed = columns.row_lists[columns.lists[c]]
-                var at = List[Int](unsafe_uninit_length=columns.height)
-                var to = at.unsafe_ptr()
-                var source = listed.unsafe_ptr()
-                for k in range(columns.height):
-                    to[unsafe_offset=k] = Int(source[unsafe_offset=k])
-                through = prepared_direct_rows_at(
-                    self.arena.columns[columns.handles[c]],
-                    at,
-                    self.indexes[][step.join].value(),
-                    step.how != JOIN_ANTI,
-                )
-        if step.how != JOIN_INNER:
-            var kept: List[Int]
-            if through:
-                kept = through.value()[0].copy()
-            else:
-                var keys = columns.frame(self.arena, input, step.names)
-                kept = prepared_hash_semi_anti_rows(
-                    keys._columns,
-                    self.indexes[][step.join].value(),
-                    step.how == JOIN_SEMI,
-                    0,
-                )
-            if len(kept) == columns.height:
+        var keys = columns.frame(self.arena, input, step.names)._columns.copy()
+        for k in range(len(keys)):
+            if keys[k].is_chunked():
+                keys[k] = keys[k].rechunk()
+        var scan = ScanStructure(self.indexes[][step.join].value(), step.how)
+        var probe_rows = List[Int](capacity=columns.height)
+        var build_rows = List[UInt32]()
+        var inner = step.how == JOIN_INNER
+        if inner:
+            build_rows.reserve(columns.height)
+        for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
+            var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
+            scan.probe(keys, low, count)
+            while True:
+                var n = scan.next()
+                if n == 0:
+                    break
+                var rows = scan.probe_rows.unsafe_ptr()
+                var builds = scan.build_rows.unsafe_ptr()
+                for k in range(n):
+                    probe_rows.append(low + Int(rows[unsafe_offset=k]))
+                if inner:
+                    for k in range(n):
+                        build_rows.append(UInt32(builds[unsafe_offset=k]))
+        if not inner:
+            if len(probe_rows) == columns.height:
                 return columns.copy()
-            return columns.through(kept)
-        var pairs: Tuple[List[Int], List[Int], Bool]
-        if through:
-            pairs = through.take()
-        else:
-            var keys = columns.frame(self.arena, input, step.names)
-            pairs = prepared_hash_join_rows(
-                keys._columns,
-                self.indexes[][step.join].value(),
-                False,
-                omit_identity=True,
-                workers=0,
-            )
+            return columns.through(probe_rows)
+        var identity = len(probe_rows) == columns.height
+        if identity:
+            var at = probe_rows.unsafe_ptr()
+            for k in range(len(probe_rows)):
+                if at[unsafe_offset=k] != k:
+                    identity = False
+                    break
         var result: _Columns
-        if pairs[2]:
+        if identity:
             result = columns.copy()
         else:
-            result = columns.through(pairs[0])
-        result.height = len(pairs[1])
+            result = columns.through(probe_rows)
+        result.height = len(build_rows)
         # The build side's output columns, in the join's output order.
-        var build_rows = List[UInt32](unsafe_uninit_length=len(pairs[1]))
-        var at = build_rows.unsafe_ptr()
-        var rows = pairs[1].unsafe_ptr()
-        for k in range(len(pairs[1])):
-            at[unsafe_offset=k] = UInt32(rows[unsafe_offset=k])
         var list = len(result.row_lists)
         result.row_lists.append(build_rows^)
         var right_keys = List[Int]()
@@ -1486,24 +1726,45 @@ struct _ChunkRunner(Movable):
         return result^
 
 
+def _sink_chunk[
+    S: Sink
+](mut sink: S, mut chunk: DataChunk, mut arena: ColumnArena) raises:
+    """One chunk into a worker's local sink state (DuckDB's `Sink`)."""
+    sink.sink(chunk, arena)
+
+
+def _combined[S: Sink](var locals: List[S]) raises -> List[S]:
+    """Every worker's local sink state combined into the global state
+    (DuckDB's `Combine`), in worker order."""
+    var combined = List[S]()
+    while len(locals) > 0:
+        locals.pop(0).combine(combined)
+    return combined^
+
+
 def _steps_over_frame(
     frame: DataFrame,
     steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
     mut counts: List[Int],
 ) raises -> DataFrame:
     """`steps` over all of `frame` on this thread, chunk by chunk; `counts`
     receives each step's input and output rows."""
     var schemas = ArcPointer(_step_schemas(frame, steps, joins[]))
     var runner = _ChunkRunner(steps, schemas, joins, indexes, False)
+    runner.materializes = True
+    runner.begin_sink(0)
     var source = _Columns.of_frame(runner.arena, frame)
     var marks = List[Int](length=len(steps), fill=0)
-    var result = runner.run(source^, 0, marks)
+    _ = runner.run(source^, 0, marks)
+    runner.release_sink()
     for i in range(len(steps)):
         counts.append(runner.counts[2 * i + 1])
         counts.append(runner.counts[2 * i + 2])
-    return result.whole(runner.arena, runner.output_schema())
+    return materialize_finish(
+        runner.materialize, runner.output_schema().clear()
+    )
 
 
 @fieldwise_init
@@ -2466,6 +2727,226 @@ struct _GroupedSink(Movable):
         return out^
 
 
+struct _ReduceSinkLayout(Copyable, Movable):
+    """What every worker's reduce sink shares (a grouped reduction the
+    aggregate table does not take, or an ungrouped one the ungrouped sink
+    does not): the sink input's types, the reductions and group keys,
+    whether groups are inserted or collected, whether every step only
+    filters, and the input columns read."""
+
+    var schema: DataFrame
+    var expressions: List[Expr]
+    var keys: List[String]
+    var insert: Bool
+    var filter_only: Bool
+    var batch_size: Int
+    # None: a selector may read any column, so every one is read.
+    var reads: Optional[List[String]]
+
+    def __init__(
+        out self,
+        schema: DataFrame,
+        expressions: List[Expr],
+        keys: List[String],
+        insert: Bool,
+        filter_only: Bool,
+        batch_size: Int,
+    ):
+        self.schema = schema.copy()
+        self.expressions = expressions.copy()
+        self.keys = keys.copy()
+        self.insert = insert
+        self.filter_only = filter_only
+        self.batch_size = batch_size
+        self.reads = _reads(expressions)
+
+    def selects(self) -> Bool:
+        """Whether the sink keeps each morsel's selection over the source
+        rather than its rows (a collected grouping of a pipeline that only
+        filters: its rows are gathered once at the finish)."""
+        return (
+            len(self.keys) > 0
+            and len(self.expressions) > 0
+            and not self.insert
+            and self.filter_only
+        )
+
+
+struct _ReduceSink(Sink):
+    """One worker's reduce sink state, fed a chunk at a time: its grouped
+    sink (`_GroupedSink`) while the keys partition, else its reducer
+    states (ungrouped: one state; grouped: one per hash part, each chunk's
+    state merged into them). A grouped sink of a filter-only pipeline
+    keeps the source rows each morsel's chunks select."""
+
+    var shared: _ReduceSinkLayout
+    var grouped: List[_GroupedSink]
+    var reduction: List[_StreamReduction]
+    var sequence: Int
+    # The morsel the chunks come from, as its source offset and length,
+    # and the morsel rows they selected so far.
+    var offset: Int
+    var length: Int
+    var selected: List[UInt32]
+
+    def __init__(out self, shared: _ReduceSinkLayout):
+        self.shared = shared.copy()
+        self.grouped = List[_GroupedSink]()
+        self.reduction = List[_StreamReduction]()
+        self.sequence = 0
+        self.offset = 0
+        self.length = 0
+        self.selected = List[UInt32]()
+
+    def place(mut self, offset: Int, length: Int) raises:
+        """The next morsel's rows are source rows [offset, offset +
+        length)."""
+        self._keep_selection()
+        self.offset = offset
+        self.length = length
+
+    def _keep_selection(mut self) raises:
+        """The morsel's selected rows as its mask over the source (empty:
+        every row)."""
+        if len(self.selected) == 0:
+            return
+        if len(self.grouped) == 0:
+            self.grouped.append(
+                _GroupedSink(
+                    self.shared.schema,
+                    self.shared.expressions,
+                    self.shared.keys,
+                    True,
+                    self.shared.batch_size,
+                )
+            )
+        var mask = BoolColumn(List[Bool]())
+        if len(self.selected) != self.length:
+            var rows = List[Int](capacity=len(self.selected))
+            for r in self.selected:
+                rows.append(Int(r))
+            mask = _rows_mask(rows, self.length)
+        self.grouped[0].select(self.offset, self.length, mask)
+        self.selected = List[UInt32]()
+
+    def begin(mut self, morsel: Int):
+        self.sequence = morsel << 32
+
+    def sink(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
+        var n = chunk.count
+        if n == 0:
+            return
+        if self.shared.selects():
+            var v = chunk.data[0]
+            if v.source < 0 or (
+                v.vector_type != FLAT_VECTOR
+                and v.vector_type != DICTIONARY_VECTOR
+            ):
+                raise Error("pipeline: a filter's chunk lost its source rows")
+            _append_rows(self.selected, v, n)
+            self.sequence += n
+            return
+        ref schema = self.shared.schema
+        var expressions = self.shared.expressions.copy()
+        var input: DataFrame
+        if self.shared.reads and len(self.shared.keys) == 0:
+            # A count of a column holding no null is the row count, and a
+            # column only row counts read is not gathered.
+            var null_free = List[Bool](capacity=schema.width())
+            for c in range(schema.width()):
+                var source = chunk.data[c].source
+                null_free.append(
+                    source >= 0 and arena.columns[source].null_count() == 0
+                )
+            var counts = _row_counted(schema, expressions, null_free)
+            expressions = counts[0].copy()
+            input = _chunk_frame(chunk, arena, schema, counts[1])
+            for name in counts[2]:
+                # Only row counts read it: a column of the chunk's height
+                # stands in, and its values are never read.
+                input = input.with_column(
+                    Series(name, Column[Int8](List[Int8](length=n, fill=0)))
+                )
+        elif self.shared.reads:
+            var names = self.shared.reads.value().copy()
+            for key in self.shared.keys:
+                if key not in names:
+                    names.append(key)
+            input = _chunk_frame(chunk, arena, schema, names)
+        else:
+            input = _chunk_frame(chunk, arena, schema, schema.columns())
+        var first = self.sequence
+        self.sequence += n
+        if len(self.shared.keys) > 0 and len(self.reduction) == 0:
+            # Rows go straight into this worker's per-part key indexes and
+            # reducer states (DuckDB's thread-local partitioned aggregate
+            # table), when the keys encode as words; otherwise each chunk's
+            # state is split into parts and merged below.
+            if len(self.grouped) == 0:
+                self.grouped.append(
+                    _GroupedSink(
+                        input,
+                        self.shared.expressions,
+                        self.shared.keys,
+                        not self.shared.insert,
+                        self.shared.batch_size,
+                    )
+                )
+            if self.grouped[0].absorb(input, first):
+                return
+            if self.grouped[0].count > 0:
+                raise Error("grouped pipeline: keys stopped partitioning")
+            self.grouped = List[_GroupedSink]()
+        # Group first rows are numbered by morsel, so first-occurrence
+        # order survives morsels taken out of order.
+        var state = _StreamReduction(input, expressions, self.shared.keys)
+        state.shift_firsts(first)
+        if len(self.shared.keys) == 0:
+            if len(self.reduction) == 0:
+                self.reduction.append(state^)
+            else:
+                self.reduction[0].merge(state)
+        elif len(self.reduction) == 0:
+            # The worker's state is kept in hash parts, so every chunk's
+            # groups go into tables small enough to stay in cache.
+            self.reduction = state.split(_PART_BITS)
+        else:
+            var pieces = state.split(_PART_BITS)
+            var p = 0
+            while len(pieces) > 0:
+                var piece = pieces.pop(0)
+                if piece.group_count() > 0:
+                    var batch = List[_StreamReduction]()
+                    batch.append(piece^)
+                    self.reduction[p].merge_all(batch, parallel=False)
+                p += 1
+
+    def release(mut self) raises:
+        self._keep_selection()
+
+    def combine(var self, mut combined: List[_ReduceSink]) raises:
+        """This worker's state into the global state, every worker's: the
+        finish merges them (by hash part when grouped)."""
+        combined.append(self^)
+
+
+def _chunk_frame(
+    mut chunk: DataChunk,
+    mut arena: ColumnArena,
+    schema: DataFrame,
+    names: List[String],
+) raises -> DataFrame:
+    """The named columns of a chunk of `schema`'s columns as a frame (the
+    adapter for sinks that read frames)."""
+    var columns = List[Series](capacity=len(names))
+    for name in names:
+        var c = schema._index(name)
+        columns.append(
+            to_series(chunk, c, arena, name, schema._columns[c].dtype())
+        )
+    return DataFrame(columns^, height=chunk.count)
+
+
 struct _PartJob(Job):
     """Finish some hash parts: merge the workers' parts of each through
     the first one's index (stored hashes and words, nothing encoded
@@ -2531,17 +3012,9 @@ struct _PipelineJob(Job):
     var steps: List[Step]
     # Build frames and prepared indexes of the join steps, shared.
     var joins: ArcPointer[List[DataFrame]]
-    var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
-    var expressions: List[Expr]
-    # Group keys of a grouped reduce sink (none: ungrouped or materialize).
-    var keys: List[String]
-    # Grouped sink: inserted into part tables, or collected for the
-    # eager partitioned group-by (the plan decides for every worker).
-    var insert: Bool
-    # Every step is a filter: a collecting sink keeps the morsels'
-    # selections over the source frame rather than their rows.
-    var filter_only: Bool
-    var batch_size: Int
+    var indexes: ArcPointer[List[Optional[JoinHashTable]]]
+    # Whether the pipeline ends in a reduction (no top-N then).
+    var reduces: Bool
     # Top-N sink (PhysicalTopN): this worker's heap over the output's
     # sort keys (made at its first chunk), the boundary every worker's
     # full heap shares, and whether ties keep the input order (the
@@ -2556,40 +3029,6 @@ struct _PipelineJob(Job):
     # The scan's dynamic filter on the first sort column (DuckDB's TopN
     # filter pushdown), when that column is the source's own.
     var top_filter: _TopScanFilter
-    # Materialize sink: the morsels' frames and their sequence numbers.
-    var parts: List[DataFrame]
-    var sequences: List[Int]
-    # Reduce sink: this worker's merged state (ungrouped: one state;
-    # grouped keys the key index cannot word-encode: one state per hash
-    # part, merged from each morsel's state).
-    var reduction: List[_StreamReduction]
-    # Grouped sink: rows inserted straight into per-part key indexes and
-    # reducer states (`_GroupedSink`).
-    var grouped: List[_GroupedSink]
-    # Aggregate table sink (`aggregate_table.mojo`): its layout, shared by
-    # every worker, and this worker's sink once it takes a morsel.
-    var layout: List[AggregateLayout]
-    var sinks: List[AggregateSink]
-    # Grouping sets: each set's key columns (indices into `keys`; empty is
-    # the grand total). Every set has its own layout and sink, and every
-    # morsel is sunk into each of them (DuckDB's one sink feeding every
-    # grouping set's table, `PhysicalHashAggregate::Sink`).
-    var sets: List[List[Int]]
-    # Per set, a mask for each of its key columns: a key packing several
-    # coded keys (one field each) is grouped by the fields the set keeps,
-    # the others masked to zero; -1 keeps the whole value. Empty: none.
-    var set_masks: List[List[Int64]]
-    # A set derived from another's group rows rather than sunk from the
-    # morsels: its source set (-1 for none) and, per key it groups by, that
-    # key's column among the source's.
-    var derived_from: List[Int]
-    var derived_columns: List[List[Int]]
-    # Per derived set, the mask of each of its key columns (as `set_masks`).
-    var derived_masks: List[List[Int64]]
-    # The sets by size, largest first: a set is derived after its source.
-    var derive_order: List[Int]
-    var workers: Int
-    var rows: Int
     # Rows fed, then each step's input and output rows, for the report.
     var counts: List[Int]
     # The join builds' key ranges on source columns (`_key_ranges`).
@@ -2597,9 +3036,10 @@ struct _PipelineJob(Job):
     # Per range with a bloom filter: this worker's rows checked and kept.
     var bloom_checked: List[Int]
     var bloom_kept: List[Int]
-    # A right or full join step's flags of the build rows this worker's
-    # morsels matched (one byte a build row), by step; empty for others.
-    var marks: List[List[UInt8]]
+    # Per step, the address of a right or full join's flags of the build
+    # rows any morsel matched (one byte a build row, in the step's shared
+    # table; `JoinHashTable.found_address`), 0 for other steps.
+    var marks: List[Int]
     # The step the morsels enter at (0: the source's; past an outer join
     # step for the build rows it emits after its probe), and the number
     # of the frame's first morsel among all the morsels sunk.
@@ -2627,11 +3067,8 @@ struct _PipelineJob(Job):
         ranges: ArcPointer[List[Int]],
         steps: List[Step],
         joins: ArcPointer[List[DataFrame]],
-        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
-        expressions: List[Expr],
-        keys: List[String],
-        insert: Bool,
-        batch_size: Int,
+        indexes: ArcPointer[List[Optional[JoinHashTable]]],
+        reduces: Bool,
         top: Int,
         top_names: List[String],
         top_descending: List[Bool],
@@ -2639,14 +3076,6 @@ struct _PipelineJob(Job):
         top_maintain_order: Bool,
         boundary: TopNBoundary,
         top_filter: _TopScanFilter,
-        layout: List[AggregateLayout],
-        sets: List[List[Int]],
-        set_masks: List[List[Int64]],
-        derived_from: List[Int],
-        derived_columns: List[List[Int]],
-        derived_masks: List[List[Int64]],
-        derive_order: List[Int],
-        workers: Int,
         key_ranges: List[_KeyRange],
         schemas: ArcPointer[List[DataFrame]],
         templates: ArcPointer[List[Optional[_VectorStep]]],
@@ -2657,31 +3086,24 @@ struct _PipelineJob(Job):
         self.key_ranges = key_ranges.copy()
         self.bloom_checked = List[Int](length=len(key_ranges), fill=0)
         self.bloom_kept = List[Int](length=len(key_ranges), fill=0)
-        self.marks = List[List[UInt8]](capacity=len(steps))
+        # A right or full join flags the build rows it matched in its
+        # shared table, as DuckDB flags them in the build's rows.
+        self.marks = List[Int](capacity=len(steps))
         for step in steps:
-            if step.kind == STEP_JOIN and (
-                step.how == JOIN_RIGHT or step.how == JOIN_FULL
+            if (
+                step.kind == STEP_JOIN
+                and (step.how == JOIN_RIGHT or step.how == JOIN_FULL)
+                and indexes[][step.join]
             ):
-                self.marks.append(
-                    List[UInt8](length=joins[][step.join].height(), fill=0)
-                )
+                self.marks.append(indexes[][step.join].value().found_address())
             else:
-                self.marks.append(List[UInt8]())
+                self.marks.append(0)
         self.first_step = 0
         self.first_morsel = 0
         self.finishes = True
         self.unmatched_step = -1
         self.unmatched_marks = ArcPointer(List[Int]())
         self.unmatched_probe = frame.copy()
-        self.layout = layout.copy()
-        self.sets = sets.copy()
-        self.set_masks = set_masks.copy()
-        self.derived_from = derived_from.copy()
-        self.derived_columns = derived_columns.copy()
-        self.derived_masks = derived_masks.copy()
-        self.derive_order = derive_order.copy()
-        self.sinks = List[AggregateSink]()
-        self.workers = workers
         self.boundary = boundary
         self.top_filter = top_filter.copy()
         self.top_maintain_order = top_maintain_order
@@ -2696,109 +3118,10 @@ struct _PipelineJob(Job):
         self.steps = steps.copy()
         self.joins = joins.copy()
         self.indexes = indexes.copy()
-        self.expressions = expressions.copy()
-        self.keys = keys.copy()
-        self.insert = insert
-        self.filter_only = True
-        for step in steps:
-            if step.kind != STEP_FILTER:
-                self.filter_only = False
-        self.batch_size = batch_size
-        self.parts = List[DataFrame]()
-        self.sequences = List[Int]()
-        self.reduction = List[_StreamReduction]()
-        self.grouped = List[_GroupedSink]()
-        self.rows = 0
+        self.reduces = reduces
         # Rows fed, then each step's rows in and out, then each step's
         # busy nanoseconds on this worker.
         self.counts = List[Int](length=3 * len(steps) + 1, fill=0)
-
-    def _table_reads(self) raises -> List[String]:
-        """The columns the keys and reductions read."""
-        var names = self.keys.copy()
-        var reads = _reads(self.expressions)
-        if reads:
-            for name in reads.take():
-                if name not in names:
-                    names.append(name)
-        return names^
-
-    def _derive_sets(mut self) raises:
-        """The sets derived from another's group rows: each worker merges
-        its own finer table's rows into a table of the coarser set, so a
-        coarser grouping reads groups, not input rows."""
-        if len(self.sets) == 0 or len(self.sinks) == 0:
-            return
-        while len(self.sinks) < len(self.sets):
-            self.sinks.append(
-                AggregateSink(
-                    self.layout[len(self.sinks)],
-                    self.workers,
-                    len(self.sets),
-                )
-            )
-        for t in self.derive_order:
-            var from_set = self.derived_from[t]
-            if from_set < 0:
-                continue
-            # The target comes out of the list while the source is read.
-            var target = self.sinks.pop(t)
-            target.sink_group_rows(
-                self.sinks[from_set if from_set < t else from_set - 1],
-                self.derived_columns[t],
-                layout_widths(self.layout[from_set]),
-                self.derived_masks[t],
-            )
-            self.sinks.insert(t, target^)
-
-    def _sink_sets(mut self, columns: _Columns, k: Int) raises:
-        """A morsel into every grouping set's sink: the reduction inputs
-        are evaluated once, and each set takes the key columns it groups
-        by (the grand total a constant one)."""
-        var schema = self.runner.output_schema()
-        var source = columns.frame(
-            self.runner.arena, schema, self._table_reads()
-        ) if _reads(self.expressions) else columns.whole(
-            self.runner.arena, schema
-        )
-        var all_keys = List[Series](capacity=len(self.keys))
-        for name in self.keys:
-            all_keys.append(canonical_labels(_unchunked(source.column(name))))
-        var inputs = table_inputs(source, all_keys, self.expressions)
-        for i in range(len(inputs)):
-            inputs[i] = _unchunked(inputs[i])
-        var rows = len(all_keys[0])
-        while len(self.sinks) < len(self.sets):
-            self.sinks.append(
-                AggregateSink(
-                    self.layout[len(self.sinks)],
-                    self.workers,
-                    len(self.sets),
-                )
-            )
-        for s in range(len(self.sets)):
-            if self.derived_from[s] >= 0:
-                continue
-            var keys = List[Series](capacity=len(self.sets[s]))
-            if len(self.sets[s]) == 0:
-                keys.append(
-                    Series(
-                        _TOTAL_KEY,
-                        Column[Int64](List[Int64](length=rows, fill=0)),
-                    )
-                )
-            else:
-                for j in range(len(self.sets[s])):
-                    var i = self.sets[s][j]
-                    var mask = self.set_masks[s][j] if len(
-                        self.set_masks
-                    ) > 0 else Int64(-1)
-                    if mask == -1:
-                        keys.append(all_keys[i].copy())
-                    else:
-                        keys.append(_masked_key(all_keys[i], mask))
-            self.sinks[s].sink(keys, inputs, k << 32)
-        self.rows += rows
 
     def _key_mask(
         mut self, frame: DataFrame
@@ -2869,13 +3192,8 @@ struct _PipelineJob(Job):
 
     def _marks(self) -> List[Int]:
         """Per step, the address of a right or full join's matched-row
-        flags on this worker (0 for none)."""
-        var marks = List[Int](capacity=len(self.marks))
-        for i in range(len(self.marks)):
-            marks.append(
-                Int(self.marks[i].unsafe_ptr()) if len(self.marks[i]) > 0 else 0
-            )
-        return marks^
+        flags (0 for none)."""
+        return self.marks.copy()
 
     def run(mut self) raises:
         var count = len(self.ranges[]) // 2
@@ -2887,20 +3205,19 @@ struct _PipelineJob(Job):
                 self.counts = self.runner.counts.copy()
                 if not self.finishes:
                     return
-                self._derive_sets()
+                self.runner.release_sink()
                 return
             var k = self.first_morsel + taken
             var offset = self.ranges[][2 * taken]
             var length = self.ranges[][2 * taken + 1]
+            self.runner.begin_sink(k, offset, length)
             self.runner.begin_morsel()
             if self.unmatched_step >= 0:
                 var rows = self._unmatched(offset, length)
                 if rows.height() == 0:
                     continue
                 var tail = _Columns.of_frame(self.runner.arena, rows)
-                var output = self.runner.run(tail^, self.first_step, marks)
-                if output.height > 0:
-                    self._consume(output, k, offset, length)
+                self._sink_from(tail^, k, offset, marks)
                 continue
             var morsel = self.frame[].slice(offset, length)
             if self.top_filter.row_ids:
@@ -2909,13 +3226,12 @@ struct _PipelineJob(Job):
                 # An outer join's unmatched build rows: the source's key
                 # ranges and top-k bound do not apply to them.
                 var source = _Columns.of_frame(self.runner.arena, morsel)
-                var output = self.runner.run(source^, self.first_step, marks)
-                if output.height > 0:
-                    self._consume(output, k, offset, length)
+                self._sink_from(source^, k, offset, marks)
                 continue
             self.runner.counts[0] += length
             var vectors = Optional[List[Int]]()
-            if self.top_filter.info:
+            # A top-N taking chunks checks each vector as it is read.
+            if self.top_filter.info and not self._chunk_top():
                 # The TopN's dynamic filter against the scan's vector
                 # statistics (CheckZonemapSegments): vectors it rules out
                 # are not read.
@@ -2940,10 +3256,125 @@ struct _PipelineJob(Job):
                 if len(rows.value()) == 0:
                     continue
                 source = source.through(rows.value())
-            var output = self.runner.run(source^, 0, marks)
-            if output.height == 0:
+            else:
+                self.runner.scan_offset = offset
+            if self._chunk_top():
+                self._top_chunks(source^, rows, k, offset, marks, 0)
+                self.runner.scan_offset = -1
                 continue
-            self._consume(output, k, offset, length)
+            _ = self.runner.run(source^, 0, marks)
+            self.runner.scan_offset = -1
+
+    def _sink_from(
+        mut self, var columns: _Columns, k: Int, offset: Int, marks: List[Int]
+    ) raises:
+        """An outer join's unmatched build rows (or a morsel of them past
+        its step) through the steps after `first_step` into the sink."""
+        if self._chunk_top():
+            self._top_chunks(columns^, None, k, offset, marks, self.first_step)
+        else:
+            _ = self.runner.run(columns^, self.first_step, marks)
+
+    def _chunk_top(self) -> Bool:
+        """Whether the sink is a top-N, taking chunks one at a time."""
+        return self.top > 0 and not self.reduces
+
+    def _top_chunks(
+        mut self,
+        var source: _Columns,
+        rows: Optional[List[Int]],
+        k: Int,
+        offset: Int,
+        marks: List[Int],
+        first_step: Int,
+    ) raises:
+        """A morsel into the top-N one chunk at a time, as DuckDB's
+        PhysicalTopN sinks each chunk the scan makes, from step
+        `first_step` on. Before each vector is read, the scan checks the
+        dynamic filter again (the OptionalFilter on the TopN's boundary in
+        CheckZonemap), so a boundary the chunks before tightened skips the
+        vectors it rules out."""
+        var ran = self.runner.run_to_last(source^, first_step, marks)
+        var columns = ran[0].copy()
+        var first = ran[1]
+        # The vectors map to source rows only before any join.
+        var direct = first == 0
+        var bases = columns.bases(self.runner.arena)
+        var made = 0
+        var skipped = 0
+        if len(self.topn) > 0:
+            self.topn[0].begin(k)
+        for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
+            var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
+            if direct and (self.top_filter.info or self.runner.scan):
+                var start = low
+                var end = low + count
+                if rows:
+                    start = rows.value()[low]
+                    end = rows.value()[low + count - 1] + 1
+                if self.runner.scan and self.runner.scan.value().skip(
+                    offset + start, offset + end
+                ):
+                    trace_path("scan.vector_skip")
+                    continue
+                if self.top_filter.info and self.top_filter.info.value()[].skip(
+                    offset + start, offset + end
+                ):
+                    skipped += 1
+                    continue
+            var address = self.runner.chunk(columns, bases, low, count, first)
+            if address == 0:
+                continue
+            var chunk = Pointer[DataChunk, MutAnyOrigin](
+                unsafe_from_address=address
+            )
+            if self.top_maintain_order:
+                # Ties keep the input order: the order column is added to
+                # the chunk's rows as a frame.
+                var frame = self.runner.chunk_frame(address)
+                var height = frame.height()
+                self._sink_top(frame^, k, offset, made)
+                made += height
+                continue
+            if len(self.topn) == 0:
+                self._sink_top(self.runner.output_schema(), k, offset, 0)
+            _sink_chunk(self.topn[0], chunk[], self.runner.arena)
+        if skipped > 0:
+            # Once a morsel: tracing reads the environment.
+            trace_path("pipeline.top_dynamic_skip_vector")
+
+    def _sink_top(
+        mut self, var output: DataFrame, k: Int, offset: Int, first_row: Int
+    ) raises:
+        """Rows into this worker's top-N heap; `first_row` numbers the
+        first among the morsel's output rows (ties keep that order)."""
+        if self.top_maintain_order:
+            var h = output.height()
+            var places = List[Int64](capacity=h)
+            var base = Int64(k) << 40
+            if self.top_filter.reordered:
+                # A row group's rows (at most ROW_GROUP_ROWS, no
+                # join) after its source row.
+                base = Int64(offset) << 20
+            for r in range(h):
+                places.append(base + Int64(first_row + r))
+            output = output.with_column(
+                Series(_ORDER_COLUMN, Column[Int64](places^))
+            )
+        if len(self.topn) == 0:
+            self.topn.append(
+                TopNSink(
+                    output,
+                    _top_keys(self.top_names, self.top_maintain_order),
+                    _top_flags(self.top_descending, self.top_maintain_order),
+                    _top_flags(self.top_nulls_last, self.top_maintain_order),
+                    self.top,
+                    self.boundary,
+                    self.top_filter.dynamic,
+                    self.top_filter.op,
+                )
+            )
+        self.topn[0].sink(output)
 
     def _unmatched(self, offset: Int, length: Int) raises -> DataFrame:
         """The build rows in [offset, offset + length) that no worker's
@@ -2987,176 +3418,6 @@ struct _PipelineJob(Job):
             suffix=step.suffix,
             coalesce=step.coalesce,
         )
-
-    def _consume(
-        mut self, columns: _Columns, k: Int, offset: Int, length: Int
-    ) raises:
-        """Sink one morsel that has run every step into this worker's
-        state: `k` numbers it, `offset` and `length` place its rows in the
-        source. The sinks read frames: the morsel's columns are gathered
-        through their rows here (the adapter the aggregate, top-k and
-        materialize ports delete)."""
-        var schema = self.runner.output_schema()
-        if len(self.layout) > 0 and len(self.sets) > 0:
-            self._sink_sets(columns, k)
-            return
-        if len(self.layout) > 0:
-            # The aggregate table: the morsel's keys and reduction
-            # inputs into this worker's sink, no matter how many groups
-            # (its tables adapt), with strings compared in place.
-            var source = columns.frame(
-                self.runner.arena, schema, self._table_reads()
-            ) if _reads(self.expressions) else columns.whole(
-                self.runner.arena, schema
-            )
-            var keys = List[Series](capacity=len(self.keys))
-            for name in self.keys:
-                keys.append(canonical_labels(_unchunked(source.column(name))))
-            var inputs = table_inputs(source, keys, self.expressions)
-            for i in range(len(inputs)):
-                inputs[i] = _unchunked(inputs[i])
-            if len(self.sinks) == 0:
-                self.sinks.append(AggregateSink(self.layout[0], self.workers))
-            # First rows numbered by morsel, then by row of its output
-            # (a join's may outgrow the morsel), so the table orders
-            # groups the same whichever worker took which morsel.
-            self.sinks[0].sink(keys, inputs, k << 32)
-            self.rows += len(keys[0])
-            return
-        if (
-            len(self.keys) > 0
-            and len(self.expressions) > 0
-            and not self.insert
-            and self.filter_only
-        ):
-            if len(self.grouped) == 0:
-                self.grouped.append(
-                    _GroupedSink(
-                        schema,
-                        self.expressions,
-                        self.keys,
-                        True,
-                        self.batch_size,
-                    )
-                )
-            self.grouped[0].select(
-                offset, length, columns.selection_mask(length)
-            )
-            self.rows += columns.height
-            return
-        if len(self.expressions) > 0:
-            var reads = _reads(self.expressions)
-            var expressions = self.expressions.copy()
-            var input: DataFrame
-            if reads and len(self.keys) == 0:
-                var counts = _row_counted(
-                    columns, self.runner.arena, schema, self.expressions
-                )
-                expressions = counts[0].copy()
-                input = columns.frame(self.runner.arena, schema, counts[1])
-                for name in counts[2]:
-                    # Only row counts read it: a column of the kept-row
-                    # height stands in, and its values are never read.
-                    input = input.with_column(
-                        Series(
-                            name,
-                            Column[Int8](
-                                List[Int8](length=columns.height, fill=0)
-                            ),
-                        )
-                    )
-            elif reads:
-                var names = reads.take()
-                for key in self.keys:
-                    if key not in names:
-                        names.append(key)
-                input = columns.frame(self.runner.arena, schema, names)
-            else:
-                input = columns.whole(self.runner.arena, schema)
-            if len(self.keys) > 0 and len(self.reduction) == 0:
-                # Rows go straight into this worker's per-part key
-                # indexes and reducer states (DuckDB's thread-local
-                # partitioned aggregate table), when the keys encode
-                # as words; otherwise each morsel's state is split
-                # into parts and merged below.
-                if len(self.grouped) == 0:
-                    self.grouped.append(
-                        _GroupedSink(
-                            input,
-                            self.expressions,
-                            self.keys,
-                            not self.insert,
-                            self.batch_size,
-                        )
-                    )
-                if self.grouped[0].absorb(input, offset):
-                    self.rows += input.height()
-                    return
-                if self.grouped[0].count > 0:
-                    raise Error("grouped pipeline: keys stopped partitioning")
-                self.grouped = List[_GroupedSink]()
-            # Group first rows are the frame's rows, so first-occurrence
-            # order survives morsels taken out of order.
-            var state = _StreamReduction(input, expressions, self.keys)
-            state.shift_firsts(offset)
-            self.rows += state.rows
-            if len(self.keys) == 0:
-                if len(self.reduction) == 0:
-                    self.reduction.append(state^)
-                else:
-                    self.reduction[0].merge(state)
-            elif len(self.reduction) == 0:
-                # The worker's state is kept in hash parts, so every
-                # morsel's groups go into tables small enough to stay
-                # in cache; one table over all the worker's groups
-                # cost ClickBench q32 (10M groups) 280 ns a probe.
-                self.reduction = state.split(_PART_BITS)
-            else:
-                var pieces = state.split(_PART_BITS)
-                var p = 0
-                while len(pieces) > 0:
-                    var piece = pieces.pop(0)
-                    if piece.group_count() > 0:
-                        var batch = List[_StreamReduction]()
-                        batch.append(piece^)
-                        self.reduction[p].merge_all(batch, parallel=False)
-                    p += 1
-        elif self.top > 0:
-            var output = columns.whole(self.runner.arena, schema)
-            if self.top_maintain_order:
-                var h = output.height()
-                var places = List[Int64](capacity=h)
-                var base = Int64(k) << 40
-                if self.top_filter.reordered:
-                    # A row group's rows (at most ROW_GROUP_ROWS, no
-                    # join) after its source row.
-                    base = Int64(offset) << 20
-                for r in range(h):
-                    places.append(base + Int64(r))
-                output = output.with_column(
-                    Series(_ORDER_COLUMN, Column[Int64](places^))
-                )
-            if len(self.topn) == 0:
-                self.topn.append(
-                    TopNSink(
-                        output,
-                        _top_keys(self.top_names, self.top_maintain_order),
-                        _top_flags(
-                            self.top_descending, self.top_maintain_order
-                        ),
-                        _top_flags(
-                            self.top_nulls_last, self.top_maintain_order
-                        ),
-                        self.top,
-                        self.boundary,
-                        self.top_filter.dynamic,
-                        self.top_filter.op,
-                    )
-                )
-            self.topn[0].sink(output)
-        else:
-            self.parts.append(columns.whole(self.runner.arena, schema))
-            self.sequences.append(k)
 
 
 def _mask_rows(mask: BoolColumn, count: Int) -> List[Int]:
@@ -3493,7 +3754,7 @@ def _emit_unmatched(
     mut jobs: List[_PipelineJob],
     steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
     batch_size: Int,
 ) raises:
     """The build rows no morsel matched, for each right or full join step
@@ -3531,9 +3792,9 @@ def _emit_unmatched(
         # The probe side's columns at this step: an empty source through
         # the steps before it.
         var empty = jobs[0].runner.schema(j)
-        var marks = List[Int](capacity=len(jobs))
-        for w in range(len(jobs)):
-            marks.append(Int(jobs[w].marks[j].unsafe_ptr()))
+        # Every worker flagged its matches in the step's one table.
+        var marks = List[Int]()
+        marks.append(jobs[0].marks[j])
         # One more round of the workers over the build rows' morsels,
         # each into its own sink; the last round also finishes them.
         var cursor = _Cursor.new()
@@ -3567,29 +3828,11 @@ def _set_mask(set_masks: List[List[Int64]], s: Int, j: Int) -> Int64:
     return set_masks[s][j]
 
 
-def _masked_key(key: Series, mask: Int64) raises -> Series:
-    """An Int64 key column's values with only `mask`'s bits kept, its
-    validity unchanged."""
-    ref typed = key._data[Column[Int64]]
-    var n = len(typed)
-    var values = List[Int64](unsafe_uninit_length=n)
-    var out = values.unsafe_ptr()
-    var source = typed._data[].unsafe_ptr().unsafe_offset(typed._offset)
-    for i in range(n):
-        out[unsafe_offset=i] = source[unsafe_offset=i] & mask
-    return Series(
-        key.name(),
-        Column[Int64](
-            values=values^, bits=_copy_validity(typed._bits[], typed._offset, n)
-        ),
-    )
-
-
 def run_pipeline(
     frame: DataFrame,
     steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
     expressions: List[Expr],
     keys: List[String],
     ordered: Bool,
@@ -3708,7 +3951,7 @@ struct _FinishStepsJob(Job):
     var state: _StreamReduction
     var steps: List[Step]
     var joins: ArcPointer[List[DataFrame]]
-    var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
+    var indexes: ArcPointer[List[Optional[JoinHashTable]]]
     var batch_size: Int
     var frame: DataFrame
     # Each step's input and output rows.
@@ -3719,7 +3962,7 @@ struct _FinishStepsJob(Job):
         var state: _StreamReduction,
         steps: List[Step],
         joins: ArcPointer[List[DataFrame]],
-        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+        indexes: ArcPointer[List[Optional[JoinHashTable]]],
         batch_size: Int,
     ) raises:
         self.state = state^
@@ -3845,7 +4088,7 @@ def _finish_with_steps(
     var parts: List[_StreamReduction],
     steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
     batch_size: Int,
     mut counts: List[Int],
 ) raises -> DataFrame:
@@ -3876,10 +4119,10 @@ def _finish_with_steps(
 
 def _run_pipeline(
     frame: DataFrame,
-    steps: List[Step],
+    given_steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
-    expressions: List[Expr],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
+    given_expressions: List[Expr],
     keys: List[String],
     ordered: Bool,
     insert: Bool,
@@ -3914,14 +4157,28 @@ def _run_pipeline(
         schema_frame = schema_frame.with_column(
             Series(ROW_ID_COLUMN, Column[Int64](List[Int64]()))
         )
-    var schemas = ArcPointer(_step_schemas(schema_frame, steps, joins[]))
+    var steps = given_steps.copy()
+    var expressions = given_expressions.copy()
+    var typed = _step_schemas(schema_frame, steps, joins[])
+    if len(expressions) > 0:
+        var extracted = _extract_aggregate_inputs(
+            steps, expressions, keys, typed[len(steps)]
+        )
+        if len(extracted[0]) != len(steps):
+            trace_path("pipeline.aggregate_projection")
+            steps = extracted[0].copy()
+            expressions = extracted[1].copy()
+            typed.append(
+                typed[len(typed) - 1].select_exprs(steps[len(steps) - 1].exprs)
+            )
+    var schemas = ArcPointer(typed^)
     var templates = ArcPointer(_compile_steps(steps, schemas[]))
     # The aggregate table's layout, from the steps' output types (an
     # empty frame through every step) when it takes this reduction.
     var layout = List[AggregateLayout]()
     var template = List[_StreamReduction]()
     var set_empty = List[DataFrame]()
-    if table and len(keys) > 0 and len(expressions) > 0 and not ordered:
+    if table and len(keys) > 0 and len(expressions) > 0:
         var empty = schemas[][len(steps)].copy()
         if len(sets) > 0 and table_supported(empty, keys, expressions):
             set_empty.append(empty.copy())
@@ -4078,9 +4335,22 @@ def _run_pipeline(
             break
     for r in key_ranges:
         _ensure_zones(frame.column(r.column))
+    # A right or full join's flags of matched build rows start clear.
+    for step in steps:
+        if (
+            step.kind == STEP_JOIN
+            and (step.how == JOIN_RIGHT or step.how == JOIN_FULL)
+            and indexes[][step.join]
+        ):
+            indexes[][step.join].value().reset_found()
     # One job per morsel at most: a tiny source (PDS-H q2's five-row
     # region frame) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
+    # The source's table filters with their answers per vector, found once
+    # for every worker's chunk loop.
+    var scan = Optional[ScanFilterInfo]()
+    if len(steps) > 0 and steps[0].kind == STEP_FILTER:
+        scan = scan_filter_info(frame, conjuncts(steps[0].exprs[0]))
     var jobs = List[_PipelineJob](capacity=job_count)
     for _ in range(job_count):
         jobs.append(
@@ -4091,10 +4361,7 @@ def _run_pipeline(
                 steps,
                 joins,
                 indexes,
-                expressions,
-                keys,
-                insert,
-                batch_size,
+                len(expressions) > 0,
                 top,
                 top_names,
                 top_descending,
@@ -4102,6 +4369,57 @@ def _run_pipeline(
                 top_maintain_order,
                 boundary,
                 top_filter,
+                key_ranges,
+                schemas,
+                templates,
+            )
+        )
+    # An ungrouped reduce sink: each worker's states updated from the
+    # last step's chunks (DuckDB's `PhysicalUngroupedAggregate`).
+    var ungrouped = List[ArcPointer[UngroupedLayout]]()
+    if len(keys) == 0 and len(expressions) > 0 and top <= 0:
+        var made = ungrouped_layout(schemas[][len(steps)], expressions)
+        if made:
+            ungrouped.append(ArcPointer(made.take()))
+    if len(ungrouped) > 0:
+        trace_path("pipeline.ungrouped_sink")
+        for w in range(len(jobs)):
+            jobs[w].runner.ungrouped_layout.append(ungrouped[0])
+    # The aggregate table (one grouping): each worker's table takes the
+    # last step's chunks (`PhysicalHashAggregate::Sink`).
+    if len(layout) > 0 and len(sets) == 0:
+        var empty = schemas[][len(steps)].copy()
+        var empty_keys = List[Series](capacity=len(keys))
+        for name in keys:
+            empty_keys.append(empty.column(name))
+        var table_layout = ArcPointer(
+            TableSinkLayout(
+                layout[0],
+                empty,
+                keys,
+                expressions,
+                table_inputs(empty, empty_keys, expressions),
+            )
+        )
+        for w in range(len(jobs)):
+            jobs[w].runner.table_layout.append(table_layout)
+            jobs[w].runner.table_workers = workers
+    # Grouping sets: each worker's tables, one a set, take the last step's
+    # chunks, every key of every set read once a chunk.
+    if len(layout) > 0 and len(sets) > 0:
+        var empty = schemas[][len(steps)].copy()
+        var empty_keys = List[Series](capacity=len(keys))
+        for name in keys:
+            empty_keys.append(empty.column(name))
+        var sets_layout = ArcPointer(
+            GroupingSetsLayout(
+                TableSinkLayout(
+                    layout[0],
+                    empty,
+                    keys,
+                    expressions,
+                    table_inputs(empty, empty_keys, expressions),
+                ),
                 layout,
                 sets,
                 set_masks,
@@ -4109,12 +4427,40 @@ def _run_pipeline(
                 derived_columns,
                 derived_masks,
                 derive_order,
-                workers,
-                key_ranges,
-                schemas,
-                templates,
             )
         )
+        for w in range(len(jobs)):
+            jobs[w].runner.sets_layout.append(sets_layout)
+            jobs[w].runner.table_workers = workers
+    # Any other reduction: each worker's reduce sink takes the chunks.
+    var reduce_layout = List[ArcPointer[_ReduceSinkLayout]]()
+    if len(expressions) > 0 and len(layout) == 0 and len(ungrouped) == 0:
+        var filter_only = True
+        for step in steps:
+            if step.kind != STEP_FILTER:
+                filter_only = False
+        reduce_layout.append(
+            ArcPointer(
+                _ReduceSinkLayout(
+                    schemas[][len(steps)].clear(),
+                    expressions,
+                    keys,
+                    insert,
+                    filter_only,
+                    batch_size,
+                )
+            )
+        )
+        for w in range(len(jobs)):
+            jobs[w].runner.reduce_layout.append(reduce_layout[0])
+    # No reduction and no top-N: the rows are the result, each worker's
+    # chunks copied into its collections (PhysicalBatchCollector).
+    if len(expressions) == 0 and top <= 0:
+        for w in range(len(jobs)):
+            jobs[w].runner.materializes = True
+    if scan:
+        for w in range(len(jobs)):
+            jobs[w].runner.scan = scan.copy()
     # An outer join's unmatched build rows run after every morsel of the
     # source (`_emit_unmatched`), and the workers finish after them.
     for step in steps:
@@ -4136,6 +4482,17 @@ def _run_pipeline(
     for j in range(len(jobs)):
         for i in range(len(counts)):
             counts[i] += jobs[j].counts[i]
+    var planned = len(given_steps)
+    if len(steps) != planned:
+        # The aggregate inputs' projection has no plan node: the counts
+        # are the planned steps'.
+        var n = len(steps)
+        var kept = List[Int](capacity=3 * planned + 1)
+        for i in range(2 * planned + 1):
+            kept.append(counts[i])
+        for i in range(planned):
+            kept.append(counts[2 * n + 1 + i])
+        counts = kept^
     if len(layout) > 0 and len(sets) > 0:
         # Derived sets finish first: their rows point at key bytes the
         # source set's sinks hold. A worker's sinks are in set order, so a
@@ -4155,12 +4512,16 @@ def _run_pipeline(
         var finished_sets = List[DataFrame](
             length=len(sets), fill=frame.clear()
         )
+        var locals = List[GroupingSetsSink]()
+        for j in range(len(jobs)):
+            if len(jobs[j].runner.sets) > 0:
+                locals.append(jobs[j].runner.sets.pop())
+        var combined = _combined(locals^)
         for s in finish_order:
             var place = remaining.index(s)
             var sinks = List[AggregateSink]()
-            for j in range(len(jobs)):
-                if len(jobs[j].sinks) > 0:
-                    sinks.append(jobs[j].sinks.pop(place))
+            for j in range(len(combined)):
+                sinks.append(combined[j].tables.pop(place))
             _ = remaining.pop(place)
             var result = aggregate_finish(sinks, layout[s])
             var finished = table_frame(template[s], result^, False)
@@ -4177,16 +4538,31 @@ def _run_pipeline(
         # An empty frame of the steps' output types the caller's null keys.
         return set_empty[0].copy()
     if len(layout) > 0:
-        var sinks = List[AggregateSink]()
+        var locals = List[TableSink]()
         for j in range(len(jobs)):
-            if len(jobs[j].sinks) > 0:
-                sinks.append(jobs[j].sinks.pop())
+            if len(jobs[j].runner.table) > 0:
+                locals.append(jobs[j].runner.table.pop())
+        var combined = _combined(locals^)
+        var sinks = List[AggregateSink](capacity=len(combined))
+        while len(combined) > 0:
+            sinks.append(combined.pop(0).take_table())
         # Long key strings live in the sinks' heaps until the finish has
         # read them out.
         var finished: DataFrame
         if len(finish_steps) == 0:
             var result = aggregate_finish(sinks, layout[0])
-            finished = table_frame(template[0], result^, False)
+            finished = table_frame(template[0], result^, ordered)
+        elif ordered:
+            # The groups in first-occurrence order (each group row's first
+            # sequence number), then the steps over them.
+            var result = aggregate_finish(sinks, layout[0])
+            finished = _steps_over_frame(
+                table_frame(template[0], result^, True),
+                finish_steps,
+                joins,
+                indexes,
+                finish_counts,
+            )
         else:
             # A first step filtering on the reductions' outputs alone runs
             # in the finish, before the groups are read out (DuckDB runs
@@ -4226,22 +4602,29 @@ def _run_pipeline(
             finish_counts.extend(Span(rest_counts))
         _ = sinks^
         return finished^
+    var reduces = List[_ReduceSink]()
+    if len(reduce_layout) > 0:
+        var locals = List[_ReduceSink]()
+        for j in range(len(jobs)):
+            if len(jobs[j].runner.reduce) > 0:
+                locals.append(jobs[j].runner.reduce.pop())
+        reduces = _combined(locals^)
     if len(expressions) > 0 and len(keys) > 0:
         var sink = -1
-        for j in range(len(jobs)):
-            if len(jobs[j].grouped) > 0:
+        for j in range(len(reduces)):
+            if len(reduces[j].grouped) > 0:
                 sink = j
         if sink < 0:
             var empty = schemas[][len(steps)].copy()
             return _StreamReduction(empty, expressions, keys).finish()
-        if jobs[sink].grouped[0].collecting:
+        if reduces[sink].grouped[0].collecting:
             # Every worker's rows, grouped once by the eager partitioned
             # group-by: one scatter of the rows into buckets, each encoded
             # on its own worker.
             # Only the columns the keys and expressions read are gathered
             # and grouped; the steps may have read others.
             var whole: DataFrame
-            if len(steps) == 0 or jobs[sink].filter_only:
+            if len(steps) == 0 or reduce_layout[0][].filter_only:
                 var source = frame.copy()
                 var reads = _reads(expressions)
                 if reads:
@@ -4258,10 +4641,10 @@ def _run_pipeline(
                     var offsets = List[Int]()
                     var lengths = List[Int]()
                     var masks = List[BoolColumn]()
-                    for j in range(len(jobs)):
-                        if len(jobs[j].grouped) == 0:
+                    for j in range(len(reduces)):
+                        if len(reduces[j].grouped) == 0:
                             continue
-                        ref kept = jobs[j].grouped[0]
+                        ref kept = reduces[j].grouped[0]
                         for m in range(len(kept.offsets)):
                             offsets.append(kept.offsets[m])
                             lengths.append(kept.lengths[m])
@@ -4271,11 +4654,11 @@ def _run_pipeline(
                     )
             else:
                 var collected = List[DataFrame]()
-                for j in range(len(jobs)):
-                    if len(jobs[j].grouped) == 0:
+                for j in range(len(reduces)):
+                    if len(reduces[j].grouped) == 0:
                         continue
                     var rows = List[DataFrame]()
-                    swap(rows, jobs[j].grouped[0].collected)
+                    swap(rows, reduces[j].grouped[0].collected)
                     while len(rows) > 0:
                         collected.append(rows.pop(0))
                 # One chunk per column (merged in parallel): the
@@ -4286,14 +4669,17 @@ def _run_pipeline(
         # Each worker's parts, part by part across the workers; every
         # worker splits into hash parts when any did.
         var split = False
-        for j in range(len(jobs)):
-            if len(jobs[j].grouped) > 0 and len(jobs[j].grouped[0].parts) > 1:
+        for j in range(len(reduces)):
+            if (
+                len(reduces[j].grouped) > 0
+                and len(reduces[j].grouped[0].parts) > 1
+            ):
                 split = True
         var parts = List[List[_GroupPart]]()
-        for j in range(len(jobs)):
-            if len(jobs[j].grouped) == 0:
+        for j in range(len(reduces)):
+            if len(reduces[j].grouped) == 0:
                 continue
-            var pieces = jobs[j].grouped[0].into_parts(frame.clear(), split)
+            var pieces = reduces[j].grouped[0].into_parts(frame.clear(), split)
             var p = 0
             while len(pieces) > 0:
                 if len(parts) <= p:
@@ -4302,7 +4688,7 @@ def _run_pipeline(
                 while len(tables) > 0:
                     parts[p].append(tables.pop(0))
                 p += 1
-        ref meta = jobs[sink].grouped[0]
+        ref meta = reduces[sink].grouped[0]
         return _combine_grouped(
             parts^,
             meta.width,
@@ -4313,67 +4699,65 @@ def _run_pipeline(
             ordered,
             workers,
         )
+    if len(ungrouped) > 0:
+        var sinks = List[UngroupedSink](capacity=len(jobs))
+        for j in range(len(jobs)):
+            if len(jobs[j].runner.ungrouped) > 0:
+                sinks.append(jobs[j].runner.ungrouped.pop())
+        var combined = _combined(sinks^)
+        return ungrouped_finish(ungrouped[0][], combined)
     if len(expressions) > 0:
         var merged = List[_StreamReduction]()
-        for j in range(len(jobs)):
-            if len(jobs[j].reduction) == 0:
+        for j in range(len(reduces)):
+            if len(reduces[j].reduction) == 0:
                 continue
             if len(merged) == 0:
-                merged.append(jobs[j].reduction.pop())
+                merged.append(reduces[j].reduction.pop())
             else:
-                merged[0].merge(jobs[j].reduction[0])
+                merged[0].merge(reduces[j].reduction[0])
         if len(merged) == 0:
             # No row survived: reduce an empty frame of the right schema.
             var empty = schemas[][len(steps)].copy()
             return _StreamReduction(empty, expressions, List[String]()).finish()
         return merged[0].finish()
-    # Morsels in source order: each worker's parts are in the order it
-    # took them, so a merge by sequence over the workers' lists orders all.
-    # A top-N's are its workers' heaps, each sorted (Finalize).
+    if top <= 0:
+        # The workers' batches in source order.
+        var locals = List[MaterializeSink]()
+        for j in range(len(jobs)):
+            if len(jobs[j].runner.materialize) > 0:
+                locals.append(jobs[j].runner.materialize.pop())
+        var combined = _combined(locals^)
+        return materialize_finish(combined, schemas[][len(steps)].clear())
+    # A top-N's parts are its workers' heaps, each sorted (Finalize).
     var parts = List[DataFrame]()
-    var next = List[Int](length=len(jobs), fill=0)
-    if top > 0:
-        for j in range(len(jobs)):
-            if len(jobs[j].topn) > 0:
-                var part = jobs[j].topn[0].finish()
-                if part.height() > 0:
-                    parts.append(part^)
-    while top <= 0:
-        var best = -1
-        var best_sequence = 0
-        for j in range(len(jobs)):
-            if next[j] < len(jobs[j].sequences):
-                var sequence = jobs[j].sequences[next[j]]
-                if best < 0 or sequence < best_sequence:
-                    best = j
-                    best_sequence = sequence
-        if best < 0:
-            break
-        parts.append(jobs[best].parts[next[best]].copy())
-        next[best] += 1
+    var locals = List[TopNSink]()
+    for j in range(len(jobs)):
+        if len(jobs[j].topn) > 0:
+            locals.append(jobs[j].topn.pop())
+    var heaps = _combined(locals^)
+    for h in range(len(heaps)):
+        var part = heaps[h].finish()
+        if part.height() > 0:
+            parts.append(part^)
     if len(parts) == 0:
         var empty = schemas[][len(steps)].copy()
         return empty^
-    if top > 0:
-        # Combine: the workers' heaps into one top-N.
-        var merged = parts[0].copy() if len(parts) == 1 else concat(parts)
-        if len(parts) > 1:
-            var names = _top_keys(top_names, top_maintain_order)
-            merged = merged.take(
-                merged._arg_sort_head(
-                    names,
-                    _top_flags(top_descending, top_maintain_order),
-                    _top_flags(top_nulls_last, top_maintain_order),
-                    top,
-                    maintain_order=False,
-                )
+    # Combine: the workers' heaps into one top-N.
+    var merged = parts[0].copy() if len(parts) == 1 else concat(parts)
+    if len(parts) > 1:
+        var names = _top_keys(top_names, top_maintain_order)
+        merged = merged.take(
+            merged._arg_sort_head(
+                names,
+                _top_flags(top_descending, top_maintain_order),
+                _top_flags(top_nulls_last, top_maintain_order),
+                top,
+                maintain_order=False,
             )
-        if top_maintain_order:
-            merged = merged.drop([_ORDER_COLUMN])
-        return merged^
-    if len(parts) == 1:
-        return parts[0].copy()
-    return concat(parts)
+        )
+    if top_maintain_order:
+        merged = merged.drop([_ORDER_COLUMN])
+    return merged^
 
 
 def _combine_grouped(

@@ -1,4 +1,5 @@
 """Public lazy query construction and backend dispatch."""
+from std.math import isfinite
 from dataframe.aggregation.expressions import count_rows_by
 from dataframe.io.file_sources import has_pattern, resolve_paths
 from dataframe.io.dataset_options import DatasetOptions, DatasetSpec
@@ -47,6 +48,7 @@ from dataframe._accel_provider import (
     transfer_model as _accel_transfer_model,
     pipeline_supports as _accel_pipeline_supports,
     pipeline_estimate as _accel_pipeline_estimate,
+    pipeline_costs as _accel_pipeline_costs,
     run_pipeline as _accel_run_pipeline,
 )
 from dataframe.planning.device_placement import (
@@ -183,7 +185,6 @@ from dataframe.planning.graph import (
     plan_has_join,
     plan_has_kind,
     plan_height_bound,
-    plan_indexed_relation,
     plan_input_name,
     plan_keeps_column,
     plan_key_source,
@@ -195,7 +196,6 @@ from dataframe.planning.graph import (
     plan_node_hash,
     plan_order_free_above,
     plan_parents,
-    plan_progression_key,
     plan_projection_visits,
     plan_provider_scan,
     plan_relation_estimate,
@@ -2370,9 +2370,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _estimated_rows(self, index: Int) raises -> Int:
         return plan_estimated_rows(self._plan, index=index)
 
-    def _progression_key(self, index: Int, keys: List[String]) raises -> Bool:
-        return plan_progression_key(self._plan, index=index, keys=keys)
-
     def _graph_step(self, index: Int) -> Bool:
         return plan_graph_step(self._plan, index=index)
 
@@ -2385,25 +2382,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     ):
         var joins = List[GraphJoin]()
         plan_collect_graph(self._plan, index, relations, pairs, filters, joins)
-
-    def _indexed_relation(
-        self,
-        entry: Int,
-        other: Int,
-        joined: List[Bool],
-        node_of: List[Int],
-        edges: List[JoinEdge],
-        masks: List[Int],
-    ) raises -> Bool:
-        return plan_indexed_relation(
-            self._plan,
-            entry=entry,
-            other=other,
-            joined=joined,
-            node_of=node_of,
-            edges=edges,
-            masks=masks,
-        )
 
     def _cost_order_joins(
         mut self, root: Int, streaming: Bool, batch_size: Int
@@ -2611,6 +2589,12 @@ trait AcceleratorBackend(Copyable):
     ) -> Float64:
         return Float64(-1)
 
+    def pipeline_costs(
+        self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
+    ) -> Tuple[Float64, Float64]:
+        """Matched CPU/device costs; -1 CPU keeps the generic calibration."""
+        return (Float64(-1), self.pipeline_estimate(pipeline, device, features))
+
     def run_pipeline(
         self, pipeline: LazyFrame, device: Int
     ) raises -> DataFrame:
@@ -2649,6 +2633,11 @@ struct _RegisteredProvider(AcceleratorBackend):
         self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
     ) -> Float64:
         return _accel_pipeline_estimate(pipeline, device, features)
+
+    def pipeline_costs(
+        self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
+    ) -> Tuple[Float64, Float64]:
+        return _accel_pipeline_costs(pipeline, device, features)
 
     def run_pipeline(
         self, pipeline: LazyFrame, device: Int
@@ -2733,13 +2722,23 @@ def _solve_devices[
                 _PLACE_CPU
             ] = cpu.value().fixed_ns + cpu.value().row_ns * Float64(rows)
         var region = _from_context(unit.region.copy())
+        var matched_cpu = Float64(-1)
         for d in range(len(devices)):
             if problem.run_ns[p][_PLACE_CPU] < 0:
                 continue
             if supported[p][d]:
-                problem.run_ns[p][d + 1] = backend.pipeline_estimate(
+                var costs = backend.pipeline_costs(
                     region, devices[d].ordinal, unit.features
                 )
+                problem.run_ns[p][d + 1] = costs[1] if isfinite(
+                    costs[1]
+                ) and costs[1] >= 0 else Float64(-1)
+                if costs[0] >= 0 and isfinite(costs[0]):
+                    matched_cpu = costs[0] if matched_cpu < 0 else min(
+                        matched_cpu, costs[0]
+                    )
+        if matched_cpu >= 0:
+            problem.run_ns[p][_PLACE_CPU] = matched_cpu
     var placement = solve_placement(problem)
     return _DevicePlacement(devices^, units^, problem^, placement^)
 
@@ -2882,11 +2881,21 @@ def _decide_at_start[
             _PLACE_CPU
         ] = cpu.value().fixed_ns + cpu.value().row_ns * Float64(rows)
         var lazy = _from_context(region.copy())
+        var matched_cpu = Float64(-1)
         for d in range(len(devices)):
             if backend.pipeline_supports(lazy, devices[d].ordinal):
-                problem.run_ns[p][d + 1] = backend.pipeline_estimate(
+                var costs = backend.pipeline_costs(
                     lazy, devices[d].ordinal, features
                 )
+                problem.run_ns[p][d + 1] = costs[1] if isfinite(
+                    costs[1]
+                ) and costs[1] >= 0 else Float64(-1)
+                if costs[0] >= 0 and isfinite(costs[0]):
+                    matched_cpu = costs[0] if matched_cpu < 0 else min(
+                        matched_cpu, costs[0]
+                    )
+        if matched_cpu >= 0:
+            problem.run_ns[p][_PLACE_CPU] = matched_cpu
     return solve_placement(problem)
 
 

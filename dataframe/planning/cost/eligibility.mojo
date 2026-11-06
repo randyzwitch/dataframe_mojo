@@ -23,8 +23,8 @@ from dataframe.expr import (
 from dataframe.frame import (
     DataFrame,
 )
-from dataframe.kernels.join_hash import (
-    PreparedHashIndex,
+from dataframe.joins.hash_table import (
+    JoinHashTable,
 )
 from dataframe.join_type import (
     JOIN_ANTI,
@@ -55,7 +55,7 @@ from std.collections import (
 
 
 def _pipeline_steps(
-    operations: List[PlanNode], indexes: List[Optional[PreparedHashIndex]]
+    operations: List[PlanNode], indexes: List[Optional[JoinHashTable]]
 ) -> Bool:
     """Whether every operation is a step a pipeline runs: a row-local
     step, or an inner, left, semi, anti, full or (uncoalesced) right join whose
@@ -97,7 +97,7 @@ def pipeline_eligibility(
     limit: Int,
     skip: Int,
     operations: List[PlanNode],
-    indexes: List[Optional[PreparedHashIndex]],
+    indexes: List[Optional[JoinHashTable]],
     distinct: Bool,
     key_count: Int,
     join_count: Int,
@@ -129,13 +129,10 @@ def consider_inline_table(
     ordered: Bool,
     distinct: Bool,
 ) -> Bool:
-    """Whether the existing empty-frame state-eligibility probe is needed."""
-    return (
-        eligibility.allowed
-        and key_count > 0
-        and expression_count > 0
-        and not ordered
-    )
+    """Whether the existing empty-frame state-eligibility probe is needed.
+    `ordered` groupings take the table too: its group rows keep their first
+    row's sequence number, and the finish orders by it."""
+    return eligibility.allowed and key_count > 0 and expression_count > 0
 
 
 def _counts_distinct(expressions: List[Expr]) -> Bool:

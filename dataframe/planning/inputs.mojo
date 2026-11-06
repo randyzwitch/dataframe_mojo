@@ -2,10 +2,10 @@
 from dataframe.frame import (
     DataFrame,
 )
-from dataframe.kernels.join_hash import (
-    PreparedHashIndex,
-    prepare_hash_index,
+from dataframe.joins.hash_table import (
+    JoinHashTable,
 )
+from dataframe.join_type import JOIN_INNER
 from dataframe.parallel import (
     Job,
 )
@@ -26,8 +26,8 @@ from std.memory import (
 
 
 def finish_build(
-    mut built: DataFrame, keys: List[String], probe_rows: Int
-) raises -> Optional[PreparedHashIndex]:
+    mut built: DataFrame, keys: List[String], how: Int
+) raises -> Optional[JoinHashTable]:
     """A join's build side, finished as its build pipeline's last stage:
     every column in one chunk, then the hash index over `keys` (none
     when `keys` is empty, or when a key cannot be hashed this way), as
@@ -35,8 +35,7 @@ def finish_build(
     pipeline. A probe gathers the build's payload through
     `take_parallel`, which rechunks a chunked column every time it is
     called, once per morsel or batch (PDS-H q2's 159K-row build with five
-    string columns: 3.8 ms a probe). `probe_rows` bounds the rows that
-    will probe it (see `prepare_hash_index`)."""
+    string columns: 3.8 ms a probe)."""
     for column in built._columns:
         if column.is_chunked():
             built = built.rechunk()
@@ -51,7 +50,7 @@ def finish_build(
         sources.append(key.copy())
     if not supported:
         return None
-    return prepare_hash_index(sources, probe_rows=probe_rows)
+    return JoinHashTable(sources, perfect=how == JOIN_INNER)
 
 
 struct _SubplanJob(Job):
@@ -67,11 +66,11 @@ struct _SubplanJob(Job):
     var streaming: Bool
     var batch_size: Int
     var result: DataFrame
-    # Build keys and the rows bound to probe them; no keys for an input
-    # that is not a hash join's build side.
+    # Build keys and the join's type; no keys for an input that is not a
+    # hash join's build side.
     var keys: List[String]
-    var probe_rows: Int
-    var built: Optional[PreparedHashIndex]
+    var how: Int
+    var built: Optional[JoinHashTable]
 
     def __init__(
         out self,
@@ -80,7 +79,7 @@ struct _SubplanJob(Job):
         streaming: Bool,
         batch_size: Int,
         keys: List[String] = List[String](),
-        probe_rows: Int = -1,
+        how: Int = JOIN_INNER,
     ) raises:
         self.plan = plan^
         # Its own memo: nested prefetches on other threads never share one.
@@ -93,7 +92,7 @@ struct _SubplanJob(Job):
         self.batch_size = batch_size
         self.result = DataFrame(List[Series]())
         self.keys = keys.copy()
-        self.probe_rows = probe_rows
+        self.how = how
         self.built = None
 
     def run(mut self) raises:
@@ -101,4 +100,4 @@ struct _SubplanJob(Job):
             self.index, False, self.streaming, self.batch_size
         )
         if len(self.keys) > 0:
-            self.built = finish_build(self.result, self.keys, self.probe_rows)
+            self.built = finish_build(self.result, self.keys, self.how)

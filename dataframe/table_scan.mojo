@@ -27,9 +27,7 @@ from dataframe.storage.statistics import (
     ROW_GROUP_VECTORS,
     STATISTICS_VECTOR_SIZE,
 )
-from dataframe.storage.column import Column
 from dataframe.table_filter import (
-    DYNAMIC_FILTER,
     TableFilter,
     TableFilterSet,
     check_statistics,
@@ -63,37 +61,26 @@ struct _Segments(Copyable, Movable):
         self.answers.append(answer)
 
 
-def _window_segments(
+def _group_segments(
     filter: TableFilter,
     found: WindowStatistics,
     start: Int,
     length: Int,
     mut segments: _Segments,
 ):
-    """A window's answers, table rows from `start`: row groups first, then
-    the vectors of each row group not ruled out."""
+    """A window's answers per row group (`RowGroup::CheckZonemap`), table
+    rows from `start`."""
     ref record = found.record[]
     var v = found.first
     while v < found.last:
         var group = v // ROW_GROUP_VECTORS
         var group_last = min((group + 1) * ROW_GROUP_VECTORS, found.last)
-        var group_answer = NO_PRUNING_POSSIBLE
+        var answer = NO_PRUNING_POSSIBLE
         if group < len(record.groups):
-            group_answer = check_statistics(filter, record.groups[group])
-        if _rules_out(group_answer) or group_answer == FILTER_ALWAYS_TRUE:
-            var end = min(
-                group_last * STATISTICS_VECTOR_SIZE - found.shift, length
-            )
-            segments.add(start + end, group_answer)
-            v = group_last
-            continue
-        while v < group_last:
-            var answer = check_statistics(filter, record.vectors[v])
-            var end = min(
-                (v + 1) * STATISTICS_VECTOR_SIZE - found.shift, length
-            )
-            segments.add(start + end, answer)
-            v += 1
+            answer = check_statistics(filter, record.groups[group])
+        var end = min(group_last * STATISTICS_VECTOR_SIZE - found.shift, length)
+        segments.add(start + end, answer)
+        v = group_last
 
 
 def _filter_segments(filter: TableFilter, column: Series) -> _Segments:
@@ -106,7 +93,7 @@ def _filter_segments(filter: TableFilter, column: Series) -> _Segments:
         var found = window_statistics(part)
         if found:
             segments.known = True
-            _window_segments(filter, found.value(), start, length, segments)
+            _group_segments(filter, found.value(), start, length, segments)
         else:
             segments.add(start + length, NO_PRUNING_POSSIBLE)
         start += length
@@ -229,82 +216,84 @@ def prune_scan(
     return ScanPruning(ranges^, always^)
 
 
+@fieldwise_init
+struct _ColumnWindows(Copyable, Movable):
+    """A filter column's chunks: the table row each starts at, its length,
+    and the statistics its window reads."""
+
+    var starts: List[Int]
+    var lengths: List[Int]
+    var stats: List[Optional[WindowStatistics]]
+
+
 struct ScanFilterInfo(Copyable, Movable):
-    """A scan's table filters with their answers per vector, found once
-    (`ScanFilterInfo`): the chunk loop asks `skip` for each vector it
-    is about to read (`CheckZonemapSegments`). Dynamic filters are
-    checked anew on every call, as the operator that sets them tightens
-    them while the scan runs (a TopN boundary)."""
+    """A scan's table filters and where their columns' statistics are
+    (`ScanFilterInfo`): the chunk loop asks `skip` for each vector it is
+    about to read (`CheckZonemapSegments`), which checks the vector's
+    statistics then. Dynamic filters are read as they are at that moment,
+    as the operator that sets them tightens them while the scan runs (a
+    TopN boundary)."""
 
     var filters: TableFilterSet
-    var columns: List[Series]
-    var segments: List[_Segments]
+    var windows: List[_ColumnWindows]
 
     def __init__(
         out self, filters: TableFilterSet, columns: List[Series]
     ) raises:
         self.filters = filters.copy()
-        self.columns = List[Series]()
-        self.segments = List[_Segments]()
+        self.windows = List[_ColumnWindows]()
         for filter in filters.filters:
-            var column = Optional[Series]()
-            for c in columns:
-                if c.name() == filter.column:
-                    column = c.copy()
-                    break
-            var dynamic = (
-                filter.nodes[len(filter.nodes) - 1].kind == DYNAMIC_FILTER
+            var found = _ColumnWindows(
+                List[Int](), List[Int](), List[Optional[WindowStatistics]]()
             )
-            if column and not dynamic:
-                self.segments.append(_filter_segments(filter, column.value()))
-            else:
-                self.segments.append(_Segments(List[Int](), List[Int](), False))
-            if column:
-                self.columns.append(column.take())
-            else:
-                self.columns.append(Series("", Column[Int64]([])))
+            for c in columns:
+                if c.name() != filter.column:
+                    continue
+                var start = 0
+                for part in c.chunks():
+                    found.starts.append(start)
+                    found.lengths.append(len(part))
+                    found.stats.append(window_statistics(part))
+                    start += len(part)
+                break
+            self.windows.append(found^)
 
-    def skip(self, start: Int, end: Int) raises -> Bool:
+    def skip(self, start: Int, end: Int) -> Bool:
         """Whether some filter's statistics rule out every row of table
         rows [start, end)."""
         for f in range(len(self.filters.filters)):
-            ref segments = self.segments[f]
-            if segments.known:
-                if _ruled_out(segments, start, end):
-                    return True
+            ref w = self.windows[f]
+            var lo = 0
+            var hi = len(w.starts)
+            while lo < hi:
+                var mid = (lo + hi) // 2
+                if w.starts[mid] + w.lengths[mid] <= start:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            if lo >= len(w.starts) or not w.stats[lo]:
                 continue
-            ref filter = self.filters.filters[f]
-            if (
-                filter.nodes[len(filter.nodes) - 1].kind != DYNAMIC_FILTER
-                or len(self.columns[f]) < end
-            ):
+            if end > w.starts[lo] + w.lengths[lo]:
+                # Rows of two chunks: left to the filter.
                 continue
-            var now = _filter_segments(
-                filter, self.columns[f].slice(start, end - start)
+            ref found = w.stats[lo].value()
+            ref record = found.record[]
+            var first = (start - w.starts[lo] + found.shift) // (
+                STATISTICS_VECTOR_SIZE
             )
-            if now.known and _ruled_out(now, 0, end - start):
+            var last = (end - 1 - w.starts[lo] + found.shift) // (
+                STATISTICS_VECTOR_SIZE
+            )
+            var out = True
+            for v in range(first, last + 1):
+                if not _rules_out(
+                    check_statistics(self.filters.filters[f], record.vectors[v])
+                ):
+                    out = False
+                    break
+            if out:
                 return True
         return False
-
-
-def _ruled_out(segments: _Segments, start: Int, end: Int) -> Bool:
-    """Whether every segment over rows [start, end) rules its rows out."""
-    var lo = 0
-    var hi = len(segments.ends)
-    while lo < hi:
-        var mid = (lo + hi) // 2
-        if segments.ends[mid] <= start:
-            lo = mid + 1
-        else:
-            hi = mid
-    var at = lo
-    while at < len(segments.ends):
-        if not _rules_out(segments.answers[at]):
-            return False
-        if segments.ends[at] >= end:
-            return True
-        at += 1
-    return False
 
 
 def zonemap_rows(
@@ -355,17 +344,7 @@ def scan_filtered(
 ) raises -> Optional[FilteredScan]:
     """The rows of `frame` the table filters among `parts` can keep, and the
     parts left to evaluate; None when statistics change nothing."""
-    # Constants are only evaluated when a column the parts read has
-    # statistics: most frames filtered are not stored tables.
-    var any = False
-    for part in parts:
-        for node in part._nodes:
-            if node.op != COL or any:
-                continue
-            for column in frame._columns:
-                if column.name() == node.text and _has_statistics(column):
-                    any = True
-    if not any:
+    if not _reads_statistics(frame, parts):
         return None
     var filters = table_filters(parts, frame._columns)
     if not filters.has_filters():
@@ -391,6 +370,33 @@ def scan_filtered(
     return FilteredScan(
         rows_of(frame, found.ranges), remaining^, found.ranges.copy()
     )
+
+
+def _reads_statistics(frame: DataFrame, parts: List[Expr]) -> Bool:
+    """Whether a column the parts read has statistics: constants are only
+    evaluated then, as most frames filtered are not stored tables."""
+    for part in parts:
+        for node in part._nodes:
+            if node.op != COL:
+                continue
+            for column in frame._columns:
+                if column.name() == node.text and _has_statistics(column):
+                    return True
+    return False
+
+
+def scan_filter_info(
+    frame: DataFrame, parts: List[Expr]
+) raises -> Optional[ScanFilterInfo]:
+    """The table filters among a scan's first filter's `parts`, with their
+    answers per vector of `frame`, or None when no filtered column has
+    statistics."""
+    if frame.height() == 0 or not _reads_statistics(frame, parts):
+        return None
+    var filters = table_filters(parts, frame._columns)
+    if not filters.has_filters():
+        return None
+    return ScanFilterInfo(filters, frame._columns)
 
 
 def _has_statistics(column: Series) -> Bool:

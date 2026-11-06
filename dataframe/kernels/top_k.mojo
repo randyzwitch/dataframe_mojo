@@ -25,9 +25,9 @@ from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.expr import COL, LE, LIT_INT, LT, OVER, RANK, split_names
 from dataframe.aggregation.hash_table import (
     TOP_ROWS_INLINE,
-    aggregate_top_rows,
     key_supported,
 )
+from dataframe.aggregation.table_sink import aggregate_top_rows
 from dataframe.kernels.hashing import encode_rows, encode_rows_parallel
 from dataframe.parallel import Job, run_jobs, worker_count
 from dataframe.kernels.partition import encode_partitioned, low_cardinality

@@ -1,10 +1,10 @@
-"""The Metal provider: the fourteen provider functions over the Metal runtime.
+"""The Metal provider: the thirteen provider functions over the Metal runtime.
 
 The root `dataframe_provider` package re-exports this module, so a plain
 `-I .` build uses it. `-I providers/cpu -I .` replaces it with the CPU-only
 provider.
 
-The provider surface is fourteen functions whose signatures mention only core
+The provider surface is thirteen functions whose signatures mention only core
 types. Calibration is backend-specific and is imported from the backend.
 Presence checks do not open a driver. CPU collection never initializes Metal.
 """
@@ -18,6 +18,12 @@ from dataframe.frame import DataFrame
 from dataframe.lazy import LazyFrame
 from .metal import MetalRuntime, default_runtime, metal_installed
 from . import handoff
+from .accelerator.faults import is_data_fault
+from .calibration import shape_key
+from .region_plan import normalize_region
+from .accelerator.gpu.identity import runtime_build_id
+from dataframe.json.value import json_quote
+from std.os import getenv
 
 
 def installed() -> Bool:
@@ -92,17 +98,46 @@ def transfer_model(device: Int) -> TransferModel:
 def pipeline_supports(pipeline: LazyFrame, device: Int) -> Bool:
     """Whether Metal runs `pipeline`: the operators hand-off accepts, as a
     plan over the pipeline's inputs."""
-    return device == 0 and handoff_supports(pipeline)
+    if device != 0:
+        return False
+    try:
+        var normalized = normalize_region(pipeline)
+        return Bool(normalized) and handoff_supports(normalized.value())
+    except:
+        return False
+
+
+def pipeline_costs(
+    pipeline: LazyFrame, device: Int, features: PipelineFeatures
+) -> Tuple[Float64, Float64]:
+    """Metal's measured nanoseconds for the pipeline's input rows; -1 when
+    there is no measurement."""
+    if not installed() or device != 0 or features.input_rows < 0:
+        return (Float64(-1), Float64(-1))
+    # A schema-only input cannot prove its physical layout. The pipeline
+    # planner preserves actual in-memory scans; defer unknown inputs to CPU.
+    var frame_rows = pipeline._plan._frames[
+        pipeline._plan._nodes[0].source_slot()
+    ].height()
+    if frame_rows != features.input_rows:
+        return (Float64(-1), Float64(-1))
+    try:
+        var normalized = normalize_region(pipeline)
+        if not normalized:
+            return (Float64(-1), Float64(-1))
+        # Same validated profile snapshot and physical input for both engines.
+        var costs = handoff.estimate_costs(
+            normalized.value(), features.input_rows
+        )
+        return (costs[1], costs[2])
+    except:
+        return (Float64(-1), Float64(-1))
 
 
 def pipeline_estimate(
     pipeline: LazyFrame, device: Int, features: PipelineFeatures
 ) -> Float64:
-    """Metal's measured nanoseconds for the pipeline's input rows; -1 when
-    there is no measurement."""
-    if device != 0 or features.input_rows < 0:
-        return Float64(-1)
-    return handoff_estimate(pipeline, features.input_rows)[1]
+    return pipeline_costs(pipeline, device, features)[1]
 
 
 def run_pipeline(pipeline: LazyFrame, device: Int) raises -> DataFrame:
@@ -110,4 +145,38 @@ def run_pipeline(pipeline: LazyFrame, device: Int) raises -> DataFrame:
         raise Error("Metal is not available here; no device runs pipelines")
     if device != 0:
         raise Error("Metal runs pipelines on device 0 only")
-    return handoff_execute(pipeline)
+    try:
+        var result = handoff_execute(pipeline)
+        _trace_placement(pipeline, "metal")
+        return result^
+    except error:
+        if not is_data_fault(error):
+            raise error^
+        var result = pipeline.collect(engine="cpu")
+        _trace_placement(pipeline, "cpu-adjudication")
+        return result^
+
+
+def _trace_placement(pipeline: LazyFrame, engine: String) raises:
+    var path = getenv("DATAFRAME_METAL_PLACEMENT_TRACE")
+    if not path:
+        return
+    var normalized = normalize_region(pipeline)
+    var selected = normalized.take()
+    var key = shape_key(selected, handoff.region_key(selected))
+    var rows = pipeline._plan._frames[
+        pipeline._plan._nodes[0].source_slot()
+    ].height()
+    var record = (
+        '{"engine":'
+        + json_quote(engine)
+        + ',"key":'
+        + json_quote(key)
+        + ',"rows":'
+        + String(rows)
+        + ',"runtime_build_id":'
+        + json_quote(runtime_build_id())
+        + "}\n"
+    )
+    with open(path, "a") as target:
+        target.write(record)
