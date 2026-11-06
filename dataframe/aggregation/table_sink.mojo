@@ -11,15 +11,24 @@ end of its run a worker's table is combined into the global state, the
 list of every worker's partitioned rows (`Combine`), which the table's
 finish merges partition by partition (`Finalize`, `aggregate_finish`).
 """
-from dataframe.aggregation.function import _K_LEN
+from dataframe.aggregation.function import (
+    AggregateFunction,
+    ReducerSpec,
+    _K_LEN,
+    _K_TOP_ROWS,
+)
 from dataframe.aggregation.hash_table import (
     AggregateLayout,
+    AggregateResult,
     AggregateSink,
     KeyVector,
+    _Cursor,
+    aggregate_finish,
+    aggregate_layout,
     layout_widths,
 )
 from dataframe.dtype import DataType
-from dataframe.expr import COL, CORR, COV, Expr, is_reduction, subtree
+from dataframe.expr import COL, CORR, COV, Expr, LEN, is_reduction, subtree
 from dataframe.frame import DataFrame
 from dataframe.kernels.canonical_labels import canonical_code_map
 from dataframe.series import Series
@@ -28,9 +37,11 @@ from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
     flat_over,
+    from_frame_window,
     storage_physical,
     to_series,
 )
+from dataframe.parallel import Job, run_jobs
 from dataframe.vector.expression import VectorExpression
 from dataframe.vector.sink import Sink
 from std.memory import Pointer, bitcast
@@ -42,6 +53,7 @@ from dataframe.vector.types import (
     PHYSICAL_INT64,
     PHYSICAL_OPAQUE,
     PHYSICAL_VARCHAR,
+    STANDARD_VECTOR_SIZE,
     SelectionVector,
     UnifiedVectorFormat,
     ValidityMask,
@@ -143,6 +155,38 @@ struct TableSinkLayout(Copyable, Movable):
                 continue
             self.columns.append(-1)
             self.expressions.append(VectorExpression(value, empty._columns))
+
+    def __init__(
+        out self,
+        layout: AggregateLayout,
+        keys: List[Series],
+        inputs: List[Series],
+    ):
+        """The sink of a table laid out as `layout` over chunks of columns
+        (`sink_columns`): the group columns `keys`, then the reductions'
+        inputs `inputs` (a row count reads none of its own)."""
+        self.layout = layout.copy()
+        self.keys = List[Int](capacity=len(keys))
+        self.key_types = List[DataType](capacity=len(keys))
+        self.key_physical = List[Int](capacity=len(keys))
+        for k in range(len(keys)):
+            self.keys.append(k)
+            self.key_types.append(keys[k].dtype())
+            self.key_physical.append(storage_physical(keys[k]))
+        self.columns = List[Int](capacity=len(inputs))
+        self.expressions = List[Optional[VectorExpression]](
+            capacity=len(inputs)
+        )
+        self.types = List[DataType](capacity=len(inputs))
+        self.physical = List[Int](capacity=len(inputs))
+        self.reads = List[Bool](capacity=len(inputs))
+        for i in range(len(inputs)):
+            var reads = i >= len(layout.slots) or layout.slots[i].kind != _K_LEN
+            self.columns.append(len(keys) + i if reads else -1)
+            self.expressions.append(None)
+            self.types.append(inputs[i].dtype())
+            self.physical.append(storage_physical(inputs[i]))
+            self.reads.append(reads)
 
 
 struct TableSinkInputs(Movable):
@@ -333,6 +377,164 @@ def _chunk_codes(
         out[unsafe_offset=i] = source[
             unsafe_offset=row + stored.shift
         ] if row != -1 else UInt32(0)
+
+
+def sink_columns(
+    mut table: AggregateSink,
+    mut reader: TableSinkInputs,
+    keys: List[Series],
+    inputs: List[Series],
+    first: Int,
+) raises:
+    """A morsel's group columns `keys` and reduction inputs `inputs` (each
+    unchunked or one chunk; `first` the source row of their first) into
+    `table` a data chunk at a time, as a table scan's chunks of flat
+    vectors over them reach the pipeline's sink (`reader` from a
+    `TableSinkLayout` over such columns)."""
+    var arena = ColumnArena()
+    var handles = List[Int](capacity=len(keys) + len(inputs))
+    for key in keys:
+        handles.append(arena.add(key))
+    for i in range(len(inputs)):
+        # A row count's chunk column is never read.
+        handles.append(arena.add(inputs[i]) if reader.reads[i] else handles[0])
+    reader.begin()
+    var chunk = DataChunk(len(handles))
+    var length = len(keys[0])
+    for lo in range(0, length, STANDARD_VECTOR_SIZE):
+        var n = min(STANDARD_VECTOR_SIZE, length - lo)
+        chunk.reset()
+        from_frame_window(chunk, arena, handles, lo, n)
+        var hold = List[Series]()
+        var key_vectors = reader.read_keys(chunk, arena, hold)
+        var input_vectors = reader.read_inputs(chunk, arena, hold)
+        table.sink_vectors(key_vectors, input_vectors, hold, first + lo, n)
+    _ = chunk^
+    _ = arena^
+
+
+struct _SinkJob(Job):
+    """Phase 1 over a frame's columns: one worker's morsels (row ranges
+    within chunks, from a shared cursor) into its own table, a data chunk
+    at a time (`sink_columns`)."""
+
+    var keys: List[Series]
+    var inputs: List[Series]
+    var shared: TableSinkLayout
+    var ranges: List[Int]
+    var cursor: _Cursor
+    var sink: AggregateSink
+
+    def __init__(
+        out self,
+        keys: List[Series],
+        inputs: List[Series],
+        layout: AggregateLayout,
+        ranges: List[Int],
+        cursor: _Cursor,
+        workers: Int,
+    ):
+        self.keys = keys.copy()
+        self.inputs = inputs.copy()
+        self.shared = TableSinkLayout(layout, keys, inputs)
+        self.ranges = ranges.copy()
+        self.cursor = cursor.copy()
+        self.sink = AggregateSink(layout, workers)
+
+    def run(mut self) raises:
+        var reader = TableSinkInputs(self.shared)
+        var morsels = len(self.ranges) // 2
+        while True:
+            var m = self.cursor.take()
+            if m >= morsels:
+                break
+            var offset = self.ranges[2 * m]
+            var length = self.ranges[2 * m + 1]
+            var keys = List[Series](capacity=len(self.keys))
+            for key in self.keys:
+                keys.append(key.slice(offset, length))
+            var inputs = List[Series](capacity=len(self.inputs))
+            for s in range(len(self.inputs)):
+                # A row count reads no input.
+                var size = length if reader.reads[s] else 0
+                inputs.append(self.inputs[s].slice(offset, size))
+            sink_columns(self.sink, reader, keys, inputs, offset)
+
+    def take_sink(deinit self) -> AggregateSink:
+        return self.sink^
+
+
+def _sink_jobs(
+    keys: List[Series],
+    inputs: List[Series],
+    layout: AggregateLayout,
+    ranges: List[Int],
+    workers: Int,
+) raises -> List[AggregateSink]:
+    """Every worker's table after sinking the (offset, length) morsels
+    `ranges` of `keys` and `inputs` on `workers` threads."""
+    var cursor = _Cursor.new()
+    var jobs = List[_SinkJob](capacity=workers)
+    for _ in range(max(1, workers)):
+        jobs.append(_SinkJob(keys, inputs, layout, ranges, cursor, workers))
+    try:
+        run_jobs(jobs)
+    except e:
+        cursor.free()
+        raise e^
+    cursor.free()
+    var sinks = List[AggregateSink](capacity=len(jobs))
+    while len(jobs) > 0:
+        var job = jobs.pop()
+        sinks.append(job^.take_sink())
+    return sinks^
+
+
+def aggregate_table(
+    keys: List[Series],
+    inputs: List[Series],
+    templates: List[ReducerSpec],
+    ranges: List[Int],
+    workers: Int,
+) raises -> AggregateResult:
+    """Group `keys` and reduce each of `inputs` with its `templates` state,
+    over the (offset, length) morsels `ranges` (within chunks) on `workers`
+    threads. Returns per finish partition its groups' keys, first rows and
+    states (unfinished), partitions in hash order. Every reduction's state
+    must fit inline (`states_supported`)."""
+    var layout = aggregate_layout(keys, inputs, templates)
+    var sinks = _sink_jobs(keys, inputs, layout, ranges, workers)
+    return aggregate_finish(sinks, layout)
+
+
+def aggregate_top_rows(
+    keys: List[Series],
+    value: Series,
+    k: Int,
+    descending: Bool,
+    ranges: List[Int],
+    workers: Int,
+) raises -> List[Int]:
+    """The rows of each group of `keys` whose `value` ranks among its k
+    first by ordinal rank (ties: the earlier row), over the (offset,
+    length) morsels `ranges` on `workers` threads, in no order: each
+    group's row in the table holds its k best (value, row) pairs, merged
+    across workers at the finish. `k` is at most `TOP_ROWS_INLINE`; nulls
+    are never kept."""
+    var count_spec = ReducerSpec(
+        LEN, DataType.INT64, 0, 0, 0.0, String(), DataType.INT64
+    )
+    var layout = aggregate_layout(keys, [value.copy()], [count_spec^])
+    var dtype = layout.slots[0].dtype
+    layout.slots[0] = AggregateFunction(
+        _K_TOP_ROWS, 0, value.dtype().is_float(), dtype, k, descending
+    )
+    layout.state_words = layout.slots[0].state_size()
+    var sinks = _sink_jobs(keys, [value.copy()], layout, ranges, workers)
+    var result = aggregate_finish(sinks, layout)
+    var rows = List[Int]()
+    swap(rows, result.top_rows)
+    return rows^
 
 
 struct TableSink(Sink):
