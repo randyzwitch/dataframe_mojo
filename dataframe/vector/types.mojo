@@ -348,6 +348,14 @@ struct UnifiedVectorFormat(Copyable, ImplicitlyCopyable, Movable):
     var physical: Int
 
     @always_inline
+    def __init__(out self):
+        """No vector: no rows to read."""
+        self.sel = SelectionVector()
+        self.data = 0
+        self.validity = ValidityMask()
+        self.physical = PHYSICAL_OPAQUE
+
+    @always_inline
     def __init__(
         out self,
         sel: SelectionVector,

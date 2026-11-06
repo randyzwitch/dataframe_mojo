@@ -27,13 +27,15 @@ from dataframe.vector.sink import Sink
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
+    flat_over,
     gather_series,
+    storage_physical,
     to_series,
 )
 from dataframe.vector.types import (
-    FLAT_VECTOR,
     SEQUENCE_VECTOR,
     SelectionVector,
+    UnifiedVectorFormat,
 )
 from std.collections import Optional
 from std.memory import ArcPointer
@@ -99,10 +101,10 @@ struct TopNSink(Sink):
     # boundary when this sink's key becomes it, and its comparison.
     var dynamic: Optional[ArcPointer[DynamicFilterData]]
     var dynamic_op: Int
-    # The arena columns the layout is bound to while chunks are flat
-    # windows of them (one morsel), so a chunk's keys are read in place
-    # rather than made into columns; empty when unbound.
-    var bound: List[Int]
+    # Each key's column in the schema, and the physical type its vectors
+    # are read as.
+    var key_columns: List[Int]
+    var key_physical: List[Int]
 
     def __init__(
         out self,
@@ -131,15 +133,15 @@ struct TopNSink(Sink):
         self.boundary = boundary
         self.dynamic = dynamic
         self.dynamic_op = dynamic_op
-        self.bound = List[Int]()
-
-    def new_morsel(mut self):
-        """The arena's columns are replaced: bind afresh."""
-        self.bound = List[Int]()
+        self.key_columns = List[Int](capacity=len(names))
+        self.key_physical = List[Int](capacity=len(names))
+        for name in names:
+            var c = self.schema._index(name)
+            self.key_columns.append(c)
+            self.key_physical.append(storage_physical(self.schema._columns[c]))
 
     def begin(mut self, morsel: Int):
-        """A new morsel's chunks come next (`new_morsel`)."""
-        self.new_morsel()
+        pass
 
     def sink(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
         """Sink (`sink_chunk`)."""
@@ -161,7 +163,6 @@ struct TopNSink(Sink):
         for name in self.names:
             keys.append(frame.column(name))
         self.layout.rebind(keys)
-        self.bound = List[Int]()
         if self.layout.variable:
             self._sink[1, True](frame)
         elif self.layout.words == 1:
@@ -179,58 +180,39 @@ struct TopNSink(Sink):
         enter the heap are copied into the payload (AddLargeHeap)."""
         if self.heap.heap_size == 0 or chunk.count == 0:
             return
-        # Keys that are flat windows of one place in the arena's columns
-        # are read where they are (DuckDB builds sort keys from the
-        # chunk's vectors): the layout stays bound to those columns and
-        # takes the chunk's row range.
-        var start = -1
-        var handles = List[Int](capacity=len(self.names))
-        for name in self.names:
-            var c = self.schema._index(name)
-            ref v = chunk.data[c]
-            if (
-                v.vector_type != FLAT_VECTOR
-                or v.source < 0
-                or (start >= 0 and v.source_offset != start)
-                or arena.columns[v.source].dtype()
-                != self.schema._columns[c].dtype()
-            ):
-                start = -1
-                break
-            start = v.source_offset
-            handles.append(v.source)
-        if start >= 0:
-            if self.bound != handles:
-                var keys = List[Series](capacity=len(handles))
-                for h in handles:
-                    keys.append(arena.columns[h].copy())
-                self.layout.rebind(keys)
-                self.bound = handles^
-        else:
-            start = 0
-            self.bound = List[Int]()
-            var keys = List[Series](capacity=len(self.names))
-            for name in self.names:
-                var c = self.schema._index(name)
-                keys.append(
-                    to_series(
-                        chunk, c, arena, name, self.schema._columns[c].dtype()
-                    )
+        # The key columns are read where they are, through their
+        # UnifiedVectorFormat (TopNHeap::Sink builds the sort key from the
+        # chunk's vectors, create_sort_key.cpp): flat windows of a morsel's
+        # columns, a filter's dictionary vectors and computed vectors
+        # alike. A vector whose physical type is not the key's (a column
+        # stored narrower than the schema says) is cast first.
+        var formats = List[UnifiedVectorFormat](capacity=len(self.names))
+        for k in range(len(self.names)):
+            var c = self.key_columns[k]
+            if chunk.data[c].physical != self.key_physical[k]:
+                var cast = to_series(
+                    chunk,
+                    c,
+                    arena,
+                    self.names[k],
+                    self.schema._columns[c].dtype(),
                 )
-            self.layout.rebind(keys)
+                chunk.data[c] = flat_over(arena, arena.add(cast), 0)
+            formats.append(chunk.unified(c, arena))
+        self.layout.rebind_vectors(formats, chunk.count)
         var matches: List[Int]
         if self.layout.variable:
-            matches = self._enter[1, True](start, chunk.count)
+            matches = self._enter[1, True](0, chunk.count)
         elif self.layout.words == 1:
-            matches = self._enter[1, False](start, chunk.count)
+            matches = self._enter[1, False](0, chunk.count)
         elif self.layout.words == 2:
-            matches = self._enter[2, False](start, chunk.count)
+            matches = self._enter[2, False](0, chunk.count)
         else:
-            matches = self._enter[3, False](start, chunk.count)
+            matches = self._enter[3, False](0, chunk.count)
         if len(matches) > 0:
             var rows = List[UInt32](unsafe_uninit_length=len(matches))
             for i in range(len(matches)):
-                rows[i] = UInt32(matches[i] - start)
+                rows[i] = UInt32(matches[i])
             var selection = SelectionVector(Int(rows.unsafe_ptr()))
             var columns = List[Series](capacity=self.schema.width())
             for c in range(self.schema.width()):
@@ -248,7 +230,7 @@ struct TopNSink(Sink):
                     var picked = List[Int](capacity=len(matches))
                     for i in range(len(matches)):
                         picked.append(
-                            v.source_offset + v.child_row(matches[i] - start)
+                            v.source_offset + v.child_row(matches[i])
                         )
                     columns.append(
                         _copied_strings(

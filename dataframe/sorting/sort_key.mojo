@@ -42,6 +42,16 @@ from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
 from dataframe.text.bytes import _Bytes
+from dataframe.vector.types import (
+    PHYSICAL_BOOL,
+    PHYSICAL_INT128,
+    PHYSICAL_UINT32,
+    PHYSICAL_VARCHAR,
+    StringT,
+    UnifiedVectorFormat,
+    physical_of,
+    string_data,
+)
 
 # STANDARD_VECTOR_SIZE and DEFAULT_ROW_GROUP_SIZE (vector_size.hpp,
 # storage_info.hpp): the vector and the row group, which is both a scan
@@ -83,6 +93,9 @@ struct SortKeyColumn(Copyable, Movable):
     var max_length: Int
     # A categorical key: each code's rank, by which its rows sort.
     var ranks: List[UInt32]
+    # The chunk vector the key is bound to (`rebind_vectors`), read as
+    # its UnifiedVectorFormat.
+    var format: UnifiedVectorFormat
 
     def constant_size(self) -> Bool:
         return self.encoding != _ENC_VARCHAR and self.encoding != _ENC_BLOB
@@ -150,6 +163,9 @@ struct SortKeyLayout(Copyable, Movable):
 
     var columns: List[SortKeyColumn]
     var rows: Int
+    # Whether the columns are bound to a chunk's vectors (`rebind_vectors`)
+    # rather than to at-rest columns (`rebind`).
+    var vectors: Bool
     # Key words of a fixed record (1-3); 0 when variable.
     var words: Int
     var variable: Bool
@@ -209,6 +225,7 @@ struct SortKeyLayout(Copyable, Movable):
                     nulls,
                     longest,
                     ranks^,
+                    UnifiedVectorFormat(),
                 )
             )
         if maintain_order:
@@ -223,6 +240,7 @@ struct SortKeyLayout(Copyable, Movable):
                     False,
                     0,
                     List[UInt32](),
+                    UnifiedVectorFormat(),
                 )
             )
         # TupleDataLayout::Initialize(orders): the widest key, and the null
@@ -281,6 +299,7 @@ struct SortKeyLayout(Copyable, Movable):
         var ska_sort_width = 8 if sort_width < 0 else min(sort_width, 8)
         self.columns = columns^
         self.rows = rows
+        self.vectors = False
         self.words = words
         self.variable = variable
         self.sort_width = sort_width
@@ -292,6 +311,7 @@ struct SortKeyLayout(Copyable, Movable):
     def rebind(mut self, keys: List[Series]) raises:
         """The same key over other rows: `keys` are the key columns of a
         new chunk, of the types the layout was made for."""
+        self.vectors = False
         if len(keys) == 0:
             self.rows = 0
             return
@@ -302,6 +322,19 @@ struct SortKeyLayout(Copyable, Movable):
                 # The chunk's codes through the ranks found once.
                 column = codes_to_ranks(column, self.columns[k].ranks)
             self.columns[k].series = column^
+
+    def rebind_vectors(
+        mut self, formats: List[UnifiedVectorFormat], count: Int
+    ):
+        """The same key over a chunk's `count` rows, read where they are:
+        `formats` are the key columns' vectors as UnifiedVectorFormat
+        (create_sort_key.cpp builds its SortKeyVectorData from
+        ToUnifiedFormat), valid while the chunk is. A categorical key's
+        codes are read through its ranks."""
+        self.vectors = True
+        self.rows = count
+        for k in range(len(formats)):
+            self.columns[k].format = formats[k]
 
 
 @always_inline
@@ -670,6 +703,237 @@ def _for_parts(
     return result^
 
 
+comptime _VECTOR_NUMERIC = [
+    DType.int64,
+    DType.float64,
+    DType.int32,
+    DType.float32,
+    DType.int16,
+    DType.int8,
+    DType.uint64,
+    DType.uint32,
+    DType.uint16,
+    DType.uint8,
+]
+
+# Keys bound to a chunk's vectors (`SortKeyLayout.rebind_vectors`): row
+# `first + i` of the chunk, or `rows[i]` when `rows` (an address of Ints)
+# is set, read through its UnifiedVectorFormat's selection and validity,
+# as create_sort_key.cpp's SortKeyVectorData reads any vector.
+
+
+@always_inline
+def _vector_row(first: Int, rows: Int, i: Int) -> Int:
+    if rows == 0:
+        return first + i
+    return Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)[
+        unsafe_offset=i
+    ]
+
+
+@always_inline
+def _vector_string(format: UnifiedVectorFormat, index: Int) -> Span[
+    UInt8, ImmutAnyOrigin
+]:
+    """The bytes of the string_t at `index`."""
+    var entry = format.data + 16 * index
+    var s = Pointer[StringT, MutAnyOrigin](unsafe_from_address=entry)[]
+    return Span[UInt8, ImmutAnyOrigin](
+        unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+            unsafe_from_address=string_data(entry)
+        ),
+        length=Int(s.length),
+    )
+
+
+def _encode_vector_numeric[
+    D: DType
+](
+    c: SortKeyColumn,
+    first: Int,
+    count: Int,
+    rows: Int,
+    cursors: Pointer[Int, MutAnyOrigin],
+):
+    """`_encode_numeric` over a vector; a categorical key's codes are
+    encoded as their ranks."""
+    ref format = c.format
+    var values = format.values[D]()
+    var nulls = c.nulls and not format.validity.all_valid()
+    var ranked = len(c.ranks) > 0
+    var ranks = c.ranks.unsafe_ptr()
+    comptime B = bit_width_of[D]()
+    comptime U = DType.uint64 if B == 64 else (
+        DType.uint32 if B == 32 else (DType.uint16 if B == 16 else DType.uint8)
+    )
+    var flip = Scalar[U].MAX if c.descending else Scalar[U](0)
+    for i in range(count):
+        var at = cursors[unsafe_offset=i]
+        var index = format.sel.get_index(_vector_row(first, rows, i))
+        if nulls and not format.validity.row_is_valid_unsafe(index):
+            Pointer[UInt8, MutAnyOrigin](unsafe_from_address=at)[] = c.null_byte
+            cursors[unsafe_offset=i] = at + 1
+            continue
+        Pointer[UInt8, MutAnyOrigin](unsafe_from_address=at)[] = c.valid_byte
+        var value = values[unsafe_offset=index]
+        comptime if D == DType.uint32:
+            if ranked:
+                value = rebind[Scalar[D]](ranks[unsafe_offset=Int(value)])
+        var bits = _order_bits[D, U](value)
+        _store_be[U](at + 1, bits ^ flip)
+        cursors[unsafe_offset=i] = at + 1 + B // 8
+
+
+def _encode_vector(
+    c: SortKeyColumn,
+    first: Int,
+    count: Int,
+    rows: Int,
+    cursors: Pointer[Int, MutAnyOrigin],
+) raises:
+    """`_encode_part` over the vector the column is bound to."""
+    ref format = c.format
+    var nulls = c.nulls and not format.validity.all_valid()
+    if format.physical == PHYSICAL_VARCHAR:
+        var blob = c.encoding == _ENC_BLOB
+        for i in range(count):
+            var at = cursors[unsafe_offset=i]
+            var index = format.sel.get_index(_vector_row(first, rows, i))
+            if nulls and not format.validity.row_is_valid_unsafe(index):
+                Pointer[UInt8, MutAnyOrigin](
+                    unsafe_from_address=at
+                )[] = c.null_byte
+                cursors[unsafe_offset=i] = at + 1
+                continue
+            Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=at
+            )[] = c.valid_byte
+            var bytes = _vector_string(format, index)
+            var written = _encode_blob(
+                at + 1, bytes, c.descending
+            ) if blob else _encode_varchar(at + 1, bytes, c.descending)
+            cursors[unsafe_offset=i] = at + 1 + written
+        return
+    if format.physical == PHYSICAL_BOOL:
+        var data = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=format.data)
+        var flip = UInt8(0xFF) if c.descending else UInt8(0)
+        for i in range(count):
+            var at = cursors[unsafe_offset=i]
+            var index = format.sel.get_index(_vector_row(first, rows, i))
+            var out = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=at)
+            if nulls and not format.validity.row_is_valid_unsafe(index):
+                out[] = c.null_byte
+                cursors[unsafe_offset=i] = at + 1
+                continue
+            out[] = c.valid_byte
+            out[unsafe_offset=1] = (
+                UInt8(1) if data[unsafe_offset=index] != 0 else UInt8(0)
+            ) ^ flip
+            cursors[unsafe_offset=i] = at + 2
+        return
+    if format.physical == PHYSICAL_INT128:
+        var values = format.values[DType.int128]()
+        var flip = UInt64.MAX if c.descending else UInt64(0)
+        for i in range(count):
+            var at = cursors[unsafe_offset=i]
+            var index = format.sel.get_index(_vector_row(first, rows, i))
+            if nulls and not format.validity.row_is_valid_unsafe(index):
+                Pointer[UInt8, MutAnyOrigin](
+                    unsafe_from_address=at
+                )[] = c.null_byte
+                cursors[unsafe_offset=i] = at + 1
+                continue
+            Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=at
+            )[] = c.valid_byte
+            var value = values[unsafe_offset=index]
+            var upper = (value >> 64).cast[DType.uint64]() ^ (UInt64(1) << 63)
+            var lower = value.cast[DType.uint64]()
+            _store_be[DType.uint64](at + 1, upper ^ flip)
+            _store_be[DType.uint64](at + 9, lower ^ flip)
+            cursors[unsafe_offset=i] = at + 17
+        return
+    comptime for k in range(len(_VECTOR_NUMERIC)):
+        comptime D = _VECTOR_NUMERIC[k]
+        if format.physical == physical_of[D]():
+            _encode_vector_numeric[D](c, first, count, rows, cursors)
+            return
+    raise Error("cannot sort by a vector of this type")
+
+
+def _vector_lengths(
+    c: SortKeyColumn,
+    first: Int,
+    count: Int,
+    rows: Int,
+    lengths: Pointer[Int, MutAnyOrigin],
+):
+    """`_part_lengths` over the vector the column is bound to."""
+    ref format = c.format
+    var nulls = c.nulls and not format.validity.all_valid()
+    if format.physical != PHYSICAL_VARCHAR:
+        for i in range(count):
+            if nulls and not format.validity.row_is_valid_unsafe(
+                format.sel.get_index(_vector_row(first, rows, i))
+            ):
+                lengths[unsafe_offset=i] += 1
+            else:
+                lengths[unsafe_offset=i] += 1 + c.width
+        return
+    var blob = c.encoding == _ENC_BLOB
+    for i in range(count):
+        var index = format.sel.get_index(_vector_row(first, rows, i))
+        if nulls and not format.validity.row_is_valid_unsafe(index):
+            lengths[unsafe_offset=i] += 1
+            continue
+        var bytes = _vector_string(format, index)
+        lengths[unsafe_offset=i] += 1 + (
+            _blob_length(bytes) if blob else len(bytes) + 1
+        )
+
+
+def _vector_string_prefixes(
+    c: SortKeyColumn,
+    first: Int,
+    count: Int,
+    cursors: Pointer[Int, MutAnyOrigin],
+    limits: Pointer[Int, MutAnyOrigin],
+):
+    """`_string_prefixes` over the vector the column is bound to: a
+    string_t holds the length and first four bytes inline."""
+    ref format = c.format
+    var nulls = c.nulls and not format.validity.all_valid()
+    var flip = UInt8(0xFF) if c.descending else UInt8(0)
+    for i in range(count):
+        var at = cursors[unsafe_offset=i]
+        var limit = limits[unsafe_offset=i]
+        if at >= limit:
+            continue
+        var index = format.sel.get_index(first + i)
+        var out_bytes = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=at)
+        if nulls and not format.validity.row_is_valid_unsafe(index):
+            out_bytes[] = c.null_byte
+            cursors[unsafe_offset=i] = at + 1
+            continue
+        out_bytes[] = c.valid_byte
+        var s = Pointer[StringT, MutAnyOrigin](
+            unsafe_from_address=format.data + 16 * index
+        )[]
+        var n = Int(s.length)
+        var room = limit - at - 1
+        var shown = min(n, 4)
+        for j in range(min(shown, room)):
+            out_bytes[unsafe_offset=1 + j] = (
+                UInt8((s.prefix >> UInt32(8 * j)) & 0xFF) + 1
+            ) ^ flip
+        if n < 4:
+            if n < room:
+                out_bytes[unsafe_offset=1 + n] = flip
+            cursors[unsafe_offset=i] = min(at + n + 2, limit)
+        else:
+            cursors[unsafe_offset=i] = limit
+
+
 struct KeyBlock(Movable):
     """Encoded key records of rows [lo, hi) of the sort input (the sink's
     key TupleDataCollection for one run, or one chunk of a top-N): `words`
@@ -691,8 +955,15 @@ struct KeyBlock(Movable):
 def encode_keys(layout: SortKeyLayout, lo: Int, hi: Int) raises -> KeyBlock:
     """Records for rows [lo, hi): each row's key (create_sort_key, then
     SortKey::Construct) and its row index as the payload."""
+    return _encode_rows(layout, lo, hi - lo, 0)
+
+
+def _encode_rows(
+    layout: SortKeyLayout, lo: Int, n: Int, rows: Int
+) raises -> KeyBlock:
+    """`encode_keys` of rows [lo, lo + n), or of the `n` rows at `rows` (an
+    address of Ints; a layout bound to vectors only)."""
     var block = KeyBlock()
-    var n = hi - lo
     block.count = n
     var r = layout.record_words()
     block.records = List[UInt64](length=max(1, n * r), fill=0)
@@ -714,7 +985,10 @@ def encode_keys(layout: SortKeyLayout, lo: Int, hi: Int) raises -> KeyBlock:
                 for i in range(n):
                     length[unsafe_offset=i] += 8
                 continue
-            for piece in _for_parts(c.series, lo, hi):
+            if layout.vectors:
+                _vector_lengths(c, lo, n, rows, length)
+                continue
+            for piece in _for_parts(c.series, lo, lo + n):
                 _part_lengths(
                     piece[0],
                     c,
@@ -737,10 +1011,13 @@ def encode_keys(layout: SortKeyLayout, lo: Int, hi: Int) raises -> KeyBlock:
         if c.encoding == _ENC_ROW:
             for i in range(n):
                 var at = cursor[unsafe_offset=i]
-                _store_be[DType.uint64](at, UInt64(lo + i))
+                _store_be[DType.uint64](at, UInt64(_vector_row(lo, rows, i)))
                 cursor[unsafe_offset=i] = at + 8
             continue
-        for piece in _for_parts(c.series, lo, hi):
+        if layout.vectors:
+            _encode_vector(c, lo, n, rows, cursor)
+            continue
+        for piece in _for_parts(c.series, lo, lo + n):
             _encode_part(
                 piece[0], c, piece[1], piece[2], cursor.unsafe_offset(piece[3])
             )
@@ -758,7 +1035,7 @@ def encode_keys(layout: SortKeyLayout, lo: Int, hi: Int) raises -> KeyBlock:
             rec[] = part0
             rec[unsafe_offset=1] = UInt64(size)
             rec[unsafe_offset=2] = UInt64(at)
-            rec[unsafe_offset=3] = UInt64(lo + i)
+            rec[unsafe_offset=3] = UInt64(_vector_row(lo, rows, i))
             at += size
     else:
         var w = layout.words
@@ -766,7 +1043,7 @@ def encode_keys(layout: SortKeyLayout, lo: Int, hi: Int) raises -> KeyBlock:
             var rec = records.unsafe_offset(i * r)
             for k in range(w):
                 rec[unsafe_offset=k] = byte_swap(rec[unsafe_offset=k])
-            rec[unsafe_offset=w] = UInt64(lo + i)
+            rec[unsafe_offset=w] = UInt64(_vector_row(lo, rows, i))
     _ = cursors^
     _ = lengths^
     return block^
@@ -861,6 +1138,10 @@ def key_prefixes(
                 if at < limits[i]:
                     _store_be[DType.uint64](at, UInt64(lo + i))
                     cursors[i] = at + 8
+        elif c.encoding == _ENC_VARCHAR and layout.vectors:
+            _vector_string_prefixes(c, lo, n, cursor, limit)
+        elif layout.vectors:
+            _encode_vector(c, lo, n, 0, cursor)
         elif c.encoding == _ENC_VARCHAR:
             for piece in _for_parts(c.series, lo, hi):
                 _string_prefixes(
@@ -909,6 +1190,13 @@ def encode_selected(
     var rows = List[Int](capacity=len(selection))
     for s in selection:
         rows.append(lo + s)
+    if layout.vectors:
+        # The vectors are read at the selected rows where they are.
+        var picked = _encode_rows(
+            layout, 0, len(rows), Int(rows.unsafe_ptr())
+        )
+        _ = rows^
+        return picked^
     var sub = layout.copy()
     for k in range(len(sub.columns)):
         sub.columns[k].series = layout.columns[k].series.take(rows)
