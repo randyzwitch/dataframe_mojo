@@ -121,8 +121,7 @@ ordered integer keys, preserving subnormals and infinities without floating
 arithmetic on the GPU. NaNs are skipped when a numeric value exists;
 all-NaN fields and extrema tied between opposite zero signs use CPU
 adjudication to preserve the CPU's payload and tie behavior.
-`min` and `max` on arithmetic expressions continue to run on CPU. These regions
-use `native_extrema:v1:` calibration keys and remain
+These native-column regions use `native_extrema:v1:` calibration keys and remain
 on CPU in automatic mode until measured for the current build and layout.
 
 Float32 range predicates use ordered integer keys when a bound is near
@@ -173,11 +172,12 @@ python3 scripts/metal_calibration.py build/metal-capture.jsonl --output-dir buil
 export DATAFRAME_HANDOFF_CALIBRATION=/absolute/path/printed/by/the/fitter.json
 ```
 
-The built-in capture uses 50M, 75M and 100M rows, eight representative operator
+The built-in capture uses 50M, 75M and 100M rows, eleven representative operator
 shapes, contiguous/eight-chunk inputs and independent nullable masks. Optional
 row counts follow the repetition count. It checks answers against a periodic
 scalar oracle, includes shared Float32 arithmetic SUM/COUNT/MEAN and mixed
-Float32-mean bundles and mixed MIN/MAX/SUM/COUNT/MEAN projections. It alternates
+Float32-mean bundles, mixed MIN/MAX/SUM/COUNT/MEAN projections, arithmetic
+extrema and multi-column AND/OR filters. It alternates
 CPU/Metal timing order and records unsupported or
 CPU-adjudicated cases explicitly. Every Metal timing requires direct GPU
 execution. These are development calibration workloads, not external-suite
@@ -359,11 +359,14 @@ backends inherit their existing estimate and generic CPU costs.
 
 ### Mixed aggregate projections
 
-Native MIN/MAX can share one scan with SUM, COUNT and MEAN, including the
-existing supported binary SUM/COUNT/MEAN expressions. Up to four distinct
+MIN/MAX can share one scan with SUM, COUNT and MEAN, including supported
+binary arithmetic expressions. Up to four distinct
 aggregate values share the range predicate, input mappings and segment grids;
-repeated outputs and aliases reuse their value's state. MIN/MAX still require
-a native Int32, Int64 or Float32 column; arithmetic MIN/MAX remains unsupported.
+repeated outputs and aliases reuse their value's state. MIN/MAX accept native
+Int32, Int64 and Float32 columns and one ADD, SUB or MUL with the same operand
+and literal rules as arithmetic SUM. Extrema-only arithmetic also shares one
+scan, without computing an unused sum. Checked integer intermediate overflow
+and Float32 arithmetic requiring gradual underflow use CPU adjudication.
 
 The mixed scan uses the existing typed integer accumulation and Float32
 sum/mean policies. Extrema preserve raw Float32 bits, ignore NaNs when numeric
@@ -382,3 +385,24 @@ Mixed programs use `mixed_reductions:v1:` calibration keys. Existing pure
 aggregate paths retain their keys and entry signatures. A changed package
 identity requires fresh calibration before automatic placement uses the mixed
 program; unmeasured shapes stay on CPU.
+
+### Predicates across numeric columns
+
+Aggregate projections can combine range comparisons on different Int32,
+Int64 and Float32 columns using `&` and `|`. Bounds follow the existing
+exactly representable, untyped-literal rules. Conjunctions on one column fold
+into one range; separate filter calls compose as AND. Up to eight distinct
+range leaves and nine total value/predicate input columns are supported.
+
+The GPU evaluates ranges and combines their is-true bits through a small
+truth table inside the aggregate scan. This preserves filter selection with
+nulls: a missing comparison can qualify through another true OR branch.
+It supports the existing native and binary SUM/COUNT/MEAN/MIN/MAX projections,
+with the same chunk mapping, checked arithmetic and IEEE adjudication. No
+intermediate filtered table is materialized. NOT and column-to-column
+comparisons remain outside this numeric-range path.
+
+These regions use `predicate_reductions:v1:` calibration keys, including the
+range inputs, bounds and Boolean program. Existing single-range paths retain
+their specialized kernels and keys; automatic placement requires matching
+measurements for the new regions.

@@ -348,7 +348,7 @@ def test_mixed_aggregate_schema_shares_states_and_preserves_output_order() raise
             Series("d", Column[Float64]([1, 2])),
         ]
     )
-    assert_false(
+    assert_true(
         Bool(
             plan_composition(
                 frame.lazy().select_exprs(
@@ -762,4 +762,271 @@ def test_native_float_mixed_wide_bins_and_underflow_without_mean() raises:
             ordinary_sum.collect(accelerator=runtime).equals(
                 ordinary_sum.collect(engine="cpu")
             )
+        )
+
+
+def test_arithmetic_extrema_schema_shares_expression_state() raises:
+    from dataframe_metal.composition_plan import plan_composition, has_extrema
+    from dataframe_metal.region_plan import normalize_region
+    from dataframe import lit
+
+    var frame = DataFrame([Series("i", Column[Int32]([1, 2, 3]))])
+    var value = col("i") * 2
+    var query = frame.lazy().select_exprs(
+        [
+            value.min().alias("lo"),
+            value.max().alias("hi"),
+            value.sum().alias("s"),
+            value.count().alias("n"),
+            value.mean().alias("avg"),
+            value.min().alias("again"),
+        ]
+    )
+    var matched = plan_composition(query)
+    assert_true(Bool(matched))
+    assert_true(has_extrema(matched.value()))
+    assert_equal(len(matched.value().fields), 1)
+    assert_equal(len(matched.value().inputs), 1)
+    for output in matched.value().outputs:
+        assert_equal(output.field, 0)
+    assert_true(region_key(query).startswith("mixed_reductions:v1:"))
+    var extrema = plan_composition(frame.lazy().select(value.min()))
+    assert_true(Bool(extrema))
+    assert_false(extrema.value().fields[0].needs_sum)
+    var shared = (
+        frame.lazy()
+        .with_columns([value.alias("twice")])
+        .select_exprs(
+            [
+                col("twice").min().alias("lo"),
+                col("twice").max().alias("hi"),
+            ]
+        )
+    )
+    var normalized = normalize_region(shared)
+    assert_true(Bool(normalized))
+    var inlined = plan_composition(normalized.value())
+    assert_true(Bool(inlined))
+    assert_equal(len(inlined.value().fields), 1)
+    assert_false(
+        Bool(
+            plan_composition(
+                frame.lazy().select((col("i") + lit(Int64(1))).min())
+            )
+        )
+    )
+    assert_false(
+        Bool(plan_composition(frame.lazy().select((col("i") + 1 + 1).min())))
+    )
+
+
+# requires: metal
+def test_arithmetic_extrema_types_operands_nulls_slices_chunks_and_public_fusion() raises:
+    from dataframe import Expr, lit
+
+    var runtime = require_metal()
+    for nulls in [False, True]:
+        var i = List[Int32]()
+        var j = List[Int32]()
+        var l = List[Int64]()
+        var m = List[Int64]()
+        var f = List[Float32]()
+        var g = List[Float32]()
+        var av = List[Bool]()
+        var bv = List[Bool]()
+        for row in range(4113):
+            i.append(Int32(row % 17 - 8))
+            j.append(Int32(row % 11 - 5))
+            l.append(Int64(row % 13 - 6) * (Int64(1) << 34))
+            m.append(Int64(row % 7 - 3))
+            f.append(Float32(row % 19 - 9) / 4)
+            g.append(Float32(row % 7 - 3) / 2)
+            av.append(not nulls or row % 7 != 1)
+            bv.append(not nulls or row % 11 != 3)
+        var source = DataFrame(
+            [
+                Series("i", Column[Int32](i^, av)),
+                Series("j", Column[Int32](j^, bv)),
+                Series("l", Column[Int64](l^, av)),
+                Series("m", Column[Int64](m^, bv)),
+                Series("f", Column[Float32](f^, av)),
+                Series("g", Column[Float32](g^, bv)),
+            ]
+        )
+        var columns = List[Series]()
+        for name in source.columns():
+            var column = source.column(name)
+            var first = (
+                263 if name == "i" or name == "l" or name == "f" else 519
+            )
+            columns.append(
+                Series._from_chunks(
+                    [
+                        column.slice(5, first),
+                        column.slice(5 + first, 4096 - first),
+                    ]
+                )
+            )
+        for frame in [
+            source.slice(5, 4096),
+            DataFrame(columns^),
+            source.clear(),
+        ]:
+            for kind in range(3):
+                var name = String(
+                    "i" if kind == 0 else ("l" if kind == 1 else "f")
+                )
+                var other = String(
+                    "j" if kind == 0 else ("m" if kind == 1 else "g")
+                )
+                var two = lit(Int32(2)) if kind == 0 else (
+                    lit(Int64(2)) if kind == 1 else lit(Float32(2))
+                )
+                var values = List[Expr](
+                    [
+                        col(name) + col(other),
+                        col(name) - col(other),
+                        col(name) * col(other),
+                        col(name) + two,
+                        two - col(name),
+                        col(name) * two,
+                    ]
+                )
+                for value in values:
+                    for filtered in [False, True]:
+                        var offered = frame.lazy()
+                        if filtered:
+                            offered = offered.filter(col(name) > 0)
+                        var query = offered.select_exprs(
+                            [
+                                value.max().alias("hi"),
+                                value.min().alias("lo"),
+                                value.count().alias("n"),
+                                value.sum().alias("s"),
+                                value.mean().alias("avg"),
+                                col(name).max().alias("native"),
+                                value.min().alias("again"),
+                            ]
+                        )
+                        var expected = query.collect(engine="cpu")
+                        assert_true(
+                            "HANDOFF metal"
+                            in query.explain(accelerator=runtime)
+                        )
+                        assert_true(execute_timed(query)[0].equals(expected))
+                        assert_true(
+                            execute_timed(query, zero_copy=False)[0].equals(
+                                expected
+                            )
+                        )
+                        assert_true(
+                            query.collect(accelerator=runtime).equals(expected)
+                        )
+                        var pure = offered.select_exprs(
+                            [value.min().alias("lo"), value.max().alias("hi")]
+                        )
+                        assert_true(
+                            execute_timed(pure)[0].equals(
+                                pure.collect(engine="cpu")
+                            )
+                        )
+
+
+# requires: metal
+def test_arithmetic_extrema_four_values_eight_inputs_and_independent_predicate() raises:
+    from dataframe import Expr
+    from dataframe_metal.composition_plan import plan_composition
+
+    _ = require_metal()
+    var columns = List[Series]()
+    for i in range(8):
+        columns.append(
+            Series(
+                "f" + String(i),
+                Column[Float32]([Float32(i + 1), -Float32(i + 1), 2]),
+            )
+        )
+    columns.append(Series("p", Column[Int64]([1, 0, 1])))
+    var frame = DataFrame(columns^)
+    var expressions = List[Expr]()
+    for i in range(4):
+        var value = col("f" + String(i * 2)) * col("f" + String(i * 2 + 1))
+        expressions.append(value.min().alias("lo" + String(i)))
+        expressions.append(value.max().alias("hi" + String(i)))
+    var query = frame.lazy().filter(col("p") > 0).select_exprs(expressions)
+    var matched = plan_composition(query)
+    assert_equal(len(matched.value().fields), 4)
+    assert_equal(len(matched.value().inputs), 8)
+    assert_true(execute_timed(query)[0].equals(query.collect(engine="cpu")))
+    assert_true(
+        execute_timed(query, zero_copy=False)[0].equals(
+            query.collect(engine="cpu")
+        )
+    )
+
+
+# requires: metal
+def test_arithmetic_extrema_overflow_masks_underflow_and_ieee_adjudication() raises:
+    from dataframe import lit
+
+    var runtime = require_metal()
+    var boundary = DataFrame(
+        [
+            Series("i", Column[Int32]([Int32.MAX, Int32.MIN])),
+            Series("l", Column[Int64]([Int64.MAX, Int64.MIN])),
+        ]
+    )
+    for name in ["i", "l"]:
+        var query = boundary.lazy().select((col(name) + 1).min())
+        with assert_raises(contains="overflow"):
+            _ = execute_timed(query)
+        same_outcome(query)
+    var large = DataFrame([Series("i", Column[Int32]([Int32.MAX, Int32.MAX]))])
+    var extrema = large.lazy().select_exprs(
+        [(col("i") - 1).min().alias("lo"), (col("i") - 1).max().alias("hi")]
+    )
+    assert_true(execute_timed(extrema)[0].equals(extrema.collect(engine="cpu")))
+    var masked = DataFrame(
+        [
+            Series("i", Column[Int32]([Int32.MAX, 1])),
+            Series("p", Column[Int32]([0, 1])),
+        ]
+    )
+    var query = masked.lazy().filter(col("p") > 0).select((col("i") + 1).min())
+    assert_true(execute_timed(query)[0].equals(query.collect(engine="cpu")))
+    var invalid = DataFrame(
+        [Series("i", Column[Int32]([Int32.MAX, 1], [False, True]))]
+    )
+    var safe = invalid.lazy().select((col("i") + 1).max())
+    assert_true(execute_timed(safe)[0].equals(safe.collect(engine="cpu")))
+    for raw in [UInt32(1), UInt32(0x0080_0000)]:
+        var tiny = bitcast[DType.float32](raw)
+        var frame = DataFrame([Series("f", Column[Float32]([tiny, tiny]))])
+        var value = col("f") * lit(Float32(0.5))
+        var underflow = frame.lazy().select_exprs(
+            [value.min().alias("lo"), value.max().alias("hi")]
+        )
+        with assert_raises(contains="gradual underflow"):
+            _ = execute_timed(underflow)
+        assert_true(
+            underflow.collect(accelerator=runtime).equals(
+                underflow.collect(engine="cpu")
+            )
+        )
+    var nan = bitcast[DType.float32](UInt32(0x7FC0_0017))
+    for values in [
+        List[Float32]([nan, nan]),
+        List[Float32](
+            [bitcast[DType.float32](UInt32(0x8000_0000)), Float32(0.0)]
+        ),
+    ]:
+        var frame = DataFrame([Series("f", Column[Float32](values.copy()))])
+        var value = col("f") * lit(Float32(1))
+        var ieee = frame.lazy().select_exprs(
+            [value.min().alias("lo"), value.max().alias("hi")]
+        )
+        with assert_raises(contains="CPU"):
+            _ = execute_timed(ieee)
+        assert_true(
+            ieee.collect(accelerator=runtime).equals(ieee.collect(engine="cpu"))
         )

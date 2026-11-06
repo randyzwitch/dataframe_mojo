@@ -55,7 +55,9 @@ def _input_slot(mut names: List[String], name: String) -> Int:
     return slot
 
 
-def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
+def plan_composition(
+    region: LazyFrame, include_native: Bool = False
+) raises -> Optional[Composition]:
     var n = len(region._plan._nodes)
     if n < 2 or region._plan._nodes[0].kind != SCAN_FRAME:
         return None
@@ -67,6 +69,7 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
         len(root.exprs) == 1
         and len(root.exprs[0]._nodes) == 4
         and root.exprs[0]._nodes[3].op == SUM
+        and not include_native
     ):
         return None
     var frame = region._plan._frames[
@@ -100,8 +103,6 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
         ):
             return None
         if aggregate.op == MIN or aggregate.op == MAX:
-            if size != 2:
-                return None
             extrema = True
         else:
             ordinary = True
@@ -174,7 +175,7 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
                 slot, expression._name.copy(), aggregate.op, aggregate.min_count
             )
         )
-    if not arithmetic and not (extrema and ordinary):
+    if not arithmetic and not (extrema and ordinary) and not include_native:
         return None
     var single_float = True
     var binary_slot = -1
