@@ -3,6 +3,7 @@ from std.memory import bitcast
 from dataframe.expr import COL, MIN, MAX
 from .group_plan import GroupedComposition
 from .expression_format import EXPRESSION_NODE_WORDS
+from .value_program_metadata import value_program_words, pack_value_program
 from .accelerator.gpu.erased_input import NumericView
 from .accelerator.gpu.compound_predicate import (
     PREDICATE_HEADER_WORDS,
@@ -26,7 +27,7 @@ def group_metadata(
     )
     var total = tree_at
     for field in bundle.fields:
-        total += len(field.tree) * EXPRESSION_NODE_WORDS
+        total += value_program_words(field.tree, field.conditions)
     var words = List[UInt64](length=total, fill=0)
     words[0] = UInt64(key.rows)
     words[1] = UInt64(blocks * 256)
@@ -58,16 +59,12 @@ def group_metadata(
         if value.tree:
             words[base + 6] = UInt64(tree_at)
             words[base + 7] = UInt64(len(value.tree))
-            for node in value.tree:
-                words[tree_at] = UInt64(node.op)
-                if node.op == COL:
-                    ref input = inputs[node.input]
-                    words[tree_at + 1] = UInt64(node.input)
-                    words[tree_at + 2] = UInt64(input.bit_offset) | (
-                        UInt64(input.nullable) << 32
-                    )
-                words[tree_at + 3] = node.literal
-                tree_at += EXPRESSION_NODE_WORDS
+            var packed = pack_value_program(
+                value.tree, value.conditions, inputs
+            )
+            for word in packed:
+                words[tree_at] = word
+                tree_at += 1
     for output in bundle.outputs:
         if output.op == MIN or output.op == MAX:
             words[9] |= UInt64(1) << UInt64(

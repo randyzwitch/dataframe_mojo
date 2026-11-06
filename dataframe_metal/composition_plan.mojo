@@ -8,6 +8,8 @@ from .arithmetic_plan import plan_arithmetic
 from .multi_plan import MAX_FIELDS, ReductionOutput
 from .expression_plan import ValueNode, compile_expression
 from .expression_format import TREE_OP
+from .conditional_plan import compile_conditional
+from .predicate_program import PredicateProgram, bind_predicate_inputs
 
 comptime MAX_VALUE_INPUTS = 8
 
@@ -26,8 +28,16 @@ struct ValueField(Copyable, Movable):
     var left_input: Int
     var right_input: Int
     var tree: List[ValueNode]
+    var conditions: List[PredicateProgram]
 
     def same_value(self, other: Self) -> Bool:
+        if len(self.conditions) != len(other.conditions):
+            return False
+        for i in range(len(self.conditions)):
+            if condition_key(self.conditions[i]) != condition_key(
+                other.conditions[i]
+            ):
+                return False
         if len(self.tree) != len(other.tree):
             return False
         for i in range(len(self.tree)):
@@ -140,6 +150,7 @@ def plan_composition(
                 -1,
                 -1,
                 List[ValueNode](),
+                List[PredicateProgram](),
             )
             if not predicate:
                 predicate = p^
@@ -161,6 +172,7 @@ def plan_composition(
                 -1,
                 -1,
                 List[ValueNode](),
+                List[PredicateProgram](),
             )
             if not predicate:
                 predicate = p.predicate.copy()
@@ -168,18 +180,33 @@ def plan_composition(
         else:
             if aggregate.left != size - 2:
                 return None
-            var compiled = compile_expression(expression, frame, size - 2)
-            if not compiled:
-                return None
-            var tree = compiled.take()
-            var matched = plan_region(offered.select(col(tree.seed).sum()))
+            var conditional = compile_conditional(expression, frame, size - 2)
+            var conditions = List[PredicateProgram]()
+            var tree_nodes = List[ValueNode]()
+            var seed = String()
+            var dtype = DataType.INT32
+            if conditional:
+                var conditional_value = conditional.take()
+                seed = conditional_value.seed.copy()
+                dtype = conditional_value.dtype
+                tree_nodes = conditional_value.nodes.copy()
+                conditions = conditional_value.conditions.copy()
+            else:
+                var compiled = compile_expression(expression, frame, size - 2)
+                if not compiled:
+                    return None
+                var tree = compiled.take()
+                seed = tree.seed.copy()
+                dtype = tree.dtype
+                tree_nodes = tree.nodes.copy()
+            var matched = plan_region(offered.select(col(seed).sum()))
             if not matched:
                 return None
             var p = matched.take()
             value = ValueField(
-                tree.seed.copy(),
-                tree.seed.copy(),
-                tree.dtype,
+                seed.copy(),
+                seed.copy(),
+                dtype,
                 TREE_OP,
                 0,
                 0,
@@ -188,7 +215,8 @@ def plan_composition(
                 False,
                 -1,
                 -1,
-                tree.nodes.copy(),
+                tree_nodes^,
+                conditions^,
             )
             if not predicate:
                 predicate = p^
@@ -264,6 +292,12 @@ def plan_composition(
             fields[i].left_input = _input_slot(inputs, fields[i].left)
         if fields[i].op != COL and fields[i].literal_side != 2:
             fields[i].right_input = _input_slot(inputs, fields[i].right)
+    for i in range(len(fields)):
+        for j in range(len(fields[i].conditions)):
+            if not bind_predicate_inputs(
+                fields[i].conditions[j], inputs, limit=MAX_VALUE_INPUTS
+            ):
+                return None
     if len(inputs) > MAX_VALUE_INPUTS:
         return None
     return Composition(predicate.take(), fields^, outputs^, inputs^, precise)
@@ -273,9 +307,13 @@ def composition_key(plan: Composition) -> String:
     # Names do not affect costs; canonical source slots describe reuse.
     var key = (
         String(
-            "expression_reductions:v1:" if has_trees(
+            "conditional_reductions:v1:" if has_conditions(
                 plan
-            ) else "mixed_reductions:v1:" if has_extrema(plan) else (
+            ) else "expression_reductions:v1:" if has_trees(
+                plan
+            ) else "mixed_reductions:v1:" if has_extrema(
+                plan
+            ) else (
                 "composed_reductions:v1:" if single_float_composition(
                     plan
                 ) else "composed_reductions:v2:typed_fields:"
@@ -325,6 +363,9 @@ def composition_key(plan: Composition) -> String:
                         key += ":min" if op == MIN else ":max"
                         break
     key += ":exact_float" if plan.precise_float else ":native"
+    for field in plan.fields:
+        for condition in field.conditions:
+            key += ":" + condition_key(condition, names=False)
     return key + (":single_float_v1" if single_float_composition(plan) else "")
 
 
@@ -351,3 +392,46 @@ def single_float_composition(plan: Composition) -> Bool:
             return False
         arithmetic += Int(field.op != COL)
     return arithmetic == 1
+
+
+def condition_key(program: PredicateProgram, names: Bool = True) -> String:
+    var key = String("case_predicate:v1")
+    for i in range(len(program.clauses)):
+        ref leaf = program.clauses[i]
+        ref p = leaf.bounds
+        key += ":" + (p.filter_column if names else String(program.slots[i]))
+        key += ":" + (leaf.other if names else String(leaf.other_input))
+        key += (
+            ":"
+            + p.filter_dtype.name()
+            + ":"
+            + String(leaf.kind)
+            + ":"
+            + String(Int(leaf.inverted))
+            + ":"
+            + String(leaf.comparison)
+        )
+        key += (
+            ":"
+            + String(p.low)
+            + ":"
+            + String(p.high)
+            + ":"
+            + String(p.inclusive)
+        )
+        key += (
+            ":"
+            + String(bitcast[DType.uint32](p.low_float))
+            + ":"
+            + String(bitcast[DType.uint32](p.high_float))
+        )
+    for word in program.truth:
+        key += ":" + String(word)
+    return key
+
+
+def has_conditions(plan: Composition) -> Bool:
+    for field in plan.fields:
+        if field.conditions:
+            return True
+    return False

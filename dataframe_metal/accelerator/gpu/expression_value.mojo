@@ -1,9 +1,15 @@
 """Bounded checked postfix evaluation inside a reduction scan."""
 from std.memory import Pointer, bitcast
 from dataframe.expr import COL, LIT_INT
-from ...expression_format import EXPRESSION_NODE_WORDS
+from ...expression_format import (
+    EXPRESSION_NODE_WORDS,
+    CASE_HEADER,
+    CASE_TEST,
+    CASE_JUMP,
+    CASE_NULL,
+)
 from .multi_reduce import Bytes, read_integer
-from .compound_predicate import _pointer
+from .compound_predicate import _pointer, predicate_matches
 from .filter_sum import _valid
 from .arithmetic_sum import integer_binary
 from .value_ops import checked_float_value
@@ -40,12 +46,47 @@ def _stack_value[
     var valid = SIMD[DType.uint32, 8](0)
     var top = 0
     var fault = UInt32(0)
-    for node in range(count):
+    var node = 0
+    while node < count:
         var at = node * EXPRESSION_NODE_WORDS
         var op = UInt32(program[unsafe_offset=at])
         var bits = UInt64(0)
         var present = True
-        if op == UInt32(COL):
+        if op == UInt32(CASE_HEADER):
+            node += 1
+            continue
+        if op == UInt32(CASE_TEST):
+            var selected = predicate_matches(
+                program.unsafe_offset(Int(program[unsafe_offset=at + 1])),
+                row_base,
+                row,
+                v0,
+                v1,
+                v2,
+                v3,
+                v4,
+                v5,
+                v6,
+                v7,
+                v7,
+                b0,
+                b1,
+                b2,
+                b3,
+                b4,
+                b5,
+                b6,
+                b7,
+                b7,
+            )
+            node = node + 1 if selected else Int(program[unsafe_offset=at + 3])
+            continue
+        if op == UInt32(CASE_JUMP):
+            node = Int(program[unsafe_offset=at + 3])
+            continue
+        if op == UInt32(CASE_NULL):
+            present = False
+        elif op == UInt32(COL):
             var slot = Int(program[unsafe_offset=at + 1])
             var meta = program[unsafe_offset=at + 2]
             if meta >> 32:
@@ -95,6 +136,7 @@ def _stack_value[
         values[top] = bits
         valid[top] = UInt32(present)
         top += 1
+        node += 1
     return (values[0], Bool(valid[0]), fault)
 
 
@@ -412,6 +454,31 @@ def expression_value[
     b6: Bytes,
     b7: Bytes,
 ) -> Tuple[UInt64, Bool, UInt32]:
+    if program[unsafe_offset=0] == UInt64(CASE_HEADER):
+        return _stack_value[floating](
+            program,
+            count,
+            row_base,
+            row,
+            tag,
+            want_value,
+            v0,
+            v1,
+            v2,
+            v3,
+            v4,
+            v5,
+            v6,
+            v7,
+            b0,
+            b1,
+            b2,
+            b3,
+            b4,
+            b5,
+            b6,
+            b7,
+        )
     if count == 5:
         if program[unsafe_offset=8] > UInt64(1):
             return _fixed[floating, 0](

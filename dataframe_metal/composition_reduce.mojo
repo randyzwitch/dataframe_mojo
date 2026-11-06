@@ -13,8 +13,9 @@ from .composition_plan import (
 )
 from .exact_float import finish_float_bins
 from .expression_format import EXPRESSION_NODE_WORDS
+from .value_program_metadata import value_program_words, pack_value_program
 from .extrema_reduce import extrema_column
-from .predicate_plan import PredicateProgram
+from .predicate_program import PredicateProgram
 from .accelerator.gpu.compound_predicate import (
     PREDICATE_HEADER_WORDS,
     PREDICATE_FIELD_WORDS,
@@ -214,7 +215,7 @@ def _scan[
         var tree_words = 0
         comptime if trees:
             for value in bundle.fields:
-                tree_words += len(value.tree) * EXPRESSION_NODE_WORDS
+                tree_words += value_program_words(value.tree, value.conditions)
         var tail_words = predicate_words + tree_words
         var words = List[UInt64](
             length=base_words + len(segments) * tail_words, fill=0
@@ -281,16 +282,12 @@ def _scan[
                     if value.tree:
                         words[base + 6] = UInt64(tree_at)
                         words[base + 7] = UInt64(len(value.tree))
-                        for node in value.tree:
-                            words[tree_at] = UInt64(node.op)
-                            if node.op == COL:
-                                ref input = segment[node.input]
-                                words[tree_at + 1] = UInt64(node.input)
-                                words[tree_at + 2] = UInt64(
-                                    input.bit_offset
-                                ) | (UInt64(input.nullable) << 32)
-                            words[tree_at + 3] = node.literal
-                            tree_at += EXPRESSION_NODE_WORDS
+                        var packed = pack_value_program(
+                            value.tree, value.conditions, segment
+                        )
+                        for word in packed:
+                            words[tree_at] = word
+                            tree_at += 1
             comptime if mixed:
                 # One packed tail avoids extra Metal buffer arguments.
                 words[at + 3] = UInt64(size)
