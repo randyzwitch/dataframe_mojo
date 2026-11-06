@@ -14,7 +14,7 @@ def _numbers(
             narrowed.append(Int32(value))
         return Series(name, Column[Int32](narrowed^, valid))
     if kind == 1:
-        return Series(name, Column[Int64](values, valid))
+        return Series(name, Column[Int64](values.copy(), valid))
     var narrowed = List[Float32]()
     for value in values:
         narrowed.append(Float32(value))
@@ -158,7 +158,7 @@ def test_metal_grouped_cost_properties_distinguish_cardinality_and_skew() raises
         uniform.append(Int32(i % 16))
         distinct.append(Int32(i))
         skewed.append(Int32(0 if i < 240 else i - 240))
-    var low = DataFrame([Series("k", Column[Int32](uniform))])
+    var low = DataFrame([Series("k", Column[Int32](uniform.copy()))])
     var high = DataFrame([Series("k", Column[Int32](distinct^))])
     var hot = DataFrame([Series("k", Column[Int32](skewed^))])
     var nulls = DataFrame(
@@ -208,6 +208,34 @@ def test_metal_grouped_layout_key_includes_the_group_key_column() raises:
     assert_true(Bool(plan))
     var operator = grouped_key(plan.value())
     assert_false(shape_key(flat, operator) == shape_key(chunked, operator))
+
+
+def test_metal_grouped_normalization_inlines_values_without_replacing_keys() raises:
+    from dataframe_metal.region_plan import normalize_region
+
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int32]([0, 1, 0])),
+            Series("v", Column[Float32]([2, 3, 4])),
+        ]
+    )
+    var query = (
+        frame.lazy()
+        .with_columns([(col("v") * 2).alias("x")])
+        .with_columns([(col("x") - 1).alias("y")])
+        .group_by("k", maintain_order=True)
+        .agg(col("y").sum())
+    )
+    var normalized = normalize_region(query)
+    assert_true(Bool(normalized))
+    assert_true(Bool(plan_grouped(normalized.value())))
+    var changed_key = (
+        frame.lazy()
+        .with_columns([(col("k") + 1).alias("k")])
+        .group_by("k")
+        .agg(col("k").sum())
+    )
+    assert_false(Bool(normalize_region(changed_key)))
 
 
 # requires: metal
