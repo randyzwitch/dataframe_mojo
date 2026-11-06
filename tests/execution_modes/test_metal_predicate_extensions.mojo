@@ -101,8 +101,8 @@ def test_metal_null_predicates_fused_with_aggregates_and_ieee_values() raises:
                 | (col("p").is_not_null() & (col("i") < 3)),
             ]
         )
-        var sums = List[Int32]([4, 6, 2, 8, 5])
-        var counts = List[Int64]([2, 2, 1, 3, 2])
+        var sums = List[Int32]([Int32(4), 6, 2, 8, 5])
+        var counts = List[Int64]([Int64(2), 2, 1, 3, 2])
         for mode in range(len(predicates)):
             var query = (
                 frame.lazy()
