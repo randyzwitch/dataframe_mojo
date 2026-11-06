@@ -148,6 +148,40 @@ def test_metal_grouped_partial_finish_retains_wide_sums_and_null_group() raises:
     assert_equal(answer.item(1, "s").int64(), Int64(6))
 
 
+def test_metal_grouped_cost_properties_distinguish_cardinality_and_skew() raises:
+    from dataframe_metal.group_properties import group_properties
+
+    var uniform = List[Int32]()
+    var distinct = List[Int32]()
+    var skewed = List[Int32]()
+    for i in range(256):
+        uniform.append(Int32(i % 16))
+        distinct.append(Int32(i))
+        skewed.append(Int32(0 if i < 240 else i - 240))
+    var low = DataFrame([Series("k", Column[Int32](uniform))])
+    var high = DataFrame([Series("k", Column[Int32](distinct^))])
+    var hot = DataFrame([Series("k", Column[Int32](skewed^))])
+    var nulls = DataFrame(
+        [
+            Series(
+                "k", Column[Int32](uniform^, List[Bool](length=256, fill=False))
+            )
+        ]
+    )
+    assert_equal(
+        group_properties(low.lazy(), "k"), ":sample:v1:groups16:hot1:null0"
+    )
+    assert_equal(
+        group_properties(high.lazy(), "k"), ":sample:v1:groups256:hot1:null0"
+    )
+    assert_equal(
+        group_properties(hot.lazy(), "k"), ":sample:v1:groups16:hot8:null0"
+    )
+    assert_equal(
+        group_properties(nulls.lazy(), "k"), ":sample:v1:groups1:hot8:null8"
+    )
+
+
 # requires: metal
 def test_metal_grouped_reductions_null_keys_values_extrema_and_order() raises:
     from tests.support.metal_outcomes import require_metal
