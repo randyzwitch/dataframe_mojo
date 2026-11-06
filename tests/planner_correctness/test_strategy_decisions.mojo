@@ -69,15 +69,20 @@ def test_inline_table_eligibility_precedes_cardinality_preferences() raises:
     _assert_sums(result, "k", True)
 
 
-def test_ordered_group_density_selects_insert_or_materializing_pipeline() raises:
+def test_ordered_groupings_take_the_inline_table() raises:
+    # maintain_order: the table orders its groups by first row in the
+    # finish, so key density no longer picks an insert or collect route.
     for unique in [False, True]:
         var frame = _source(unique)
-        var reason = "morsel_pipeline" if unique else "insert_pipeline"
         var result = _run(
             frame.lazy().group_by("k", maintain_order=True).agg(col("v").sum()),
-            reason + ": sampled_key_density",
+            "table_pipeline: inline_aggregate_states",
         )
         _assert_sums(result, "k", unique)
+        for row in range(result.height()):
+            assert_equal(
+                result.column("k").int64().value(row).value(), Int64(row)
+            )
 
 
 def test_positional_global_reduction_uses_ordered_batches() raises:
@@ -90,7 +95,7 @@ def test_positional_global_reduction_uses_ordered_batches() raises:
     assert_equal(result.column("v").int64().value(0), Int64(0))
 
 
-def test_filtered_string_density_refines_the_pending_strategy() raises:
+def test_filtered_ordered_string_keys_take_the_inline_table() raises:
     for unique in [False, True]:
         var frame = _source(unique)
         var query = (
@@ -99,18 +104,15 @@ def test_filtered_string_density_refines_the_pending_strategy() raises:
             .group_by("s", maintain_order=True)
             .agg(col("v").sum())
         )
-        var reason = (
-            "eager_frame: filtered_strings_mostly_distinct" if unique else "insert_pipeline: filtered_string_keys"
-        )
-        var result = _run(query, reason)
+        var result = _run(query, "table_pipeline: inline_aggregate_states")
         _assert_sums(result, "s", unique)
 
 
-def test_ordered_quantiles_explain_the_inline_table_requirement() raises:
+def test_ordered_quantiles_take_the_inline_table() raises:
     var frame = _source()
     var result = _run(
         frame.lazy().group_by("k", maintain_order=True).agg(col("v").median()),
-        "eager_frame: inline_table_required",
+        "table_pipeline: inline_aggregate_states",
     )
     assert_equal(result.height(), 4)
     for row in range(result.height()):
