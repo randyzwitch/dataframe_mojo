@@ -280,6 +280,10 @@ def _composed_scan[
     var exact = ExactFloatState[wide, max(1, float_fields)]()
     var ext_lo = SIMD[DType.int64, 4](Int64.MAX)
     var ext_hi = SIMD[DType.int64, 4](Int64.MIN)
+    # Float32's ordered bit keys fit in UInt32. Keep both their live scan
+    # state and block collectives narrow; widen only at the output boundary.
+    var float_lo = SIMD[DType.uint32, 4](UInt32.MAX)
+    var float_hi = SIMD[DType.uint32, 4](0)
     var ext_count = SIMD[DType.uint32, 4](0)
     var ext_special = SIMD[DType.uint32, 4](0)
     var extent_flags = (sum_flags >> 4) | (sum_flags >> 8)
@@ -378,9 +382,9 @@ def _composed_scan[
                                             UInt32(20) if raw
                                             >> 31 else UInt32(10)
                                         )
-                                    var key = Int64(_ordered(raw))
-                                    ext_lo[field] = min(ext_lo[field], key)
-                                    ext_hi[field] = max(ext_hi[field], key)
+                                    var key = _ordered(raw)
+                                    float_lo[field] = min(float_lo[field], key)
+                                    float_hi[field] = max(float_hi[field], key)
                                     ext_count[field] += 1
                 else:
                     comptime TAG = 0 if field < float_fields + int32_fields else 1
@@ -449,12 +453,32 @@ def _composed_scan[
                 exact.finish[field](output, bins, specials)
         comptime if with_extrema:
             if extent_flags & (UInt32(1) << UInt32(field)):
-                var minimum = block.min[block_size=BLOCK_SIZE](ext_lo[field])
-                var maximum = block.max[block_size=BLOCK_SIZE](ext_hi[field])
-                var numeric = block.sum[block_size=BLOCK_SIZE](ext_count[field])
-                var flags_out = block.sum[block_size=BLOCK_SIZE](
-                    ext_special[field]
+                var minimum = Int64(0)
+                var maximum = Int64(0)
+                comptime if field < float_fields:
+                    minimum = Int64(
+                        block.min[block_size=BLOCK_SIZE, broadcast=False](
+                            float_lo[field]
+                        )
+                    )
+                    maximum = Int64(
+                        block.max[block_size=BLOCK_SIZE, broadcast=False](
+                            float_hi[field]
+                        )
+                    )
+                else:
+                    minimum = block.min[block_size=BLOCK_SIZE, broadcast=False](
+                        ext_lo[field]
+                    )
+                    maximum = block.max[block_size=BLOCK_SIZE, broadcast=False](
+                        ext_hi[field]
+                    )
+                var numeric = block.sum[block_size=BLOCK_SIZE, broadcast=False](
+                    ext_count[field]
                 )
+                var flags_out = block.sum[
+                    block_size=BLOCK_SIZE, broadcast=False
+                ](ext_special[field])
                 if thread_idx.x == 0:
                     extrema[unsafe_offset=output * 4] = minimum
                     extrema[unsafe_offset=output * 4 + 1] = maximum
