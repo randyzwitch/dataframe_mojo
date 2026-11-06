@@ -335,6 +335,7 @@ def _composed_scan[
                                     Bool(reuse_r[field]),
                                     row,
                                 )
+                                raw = bitcast[DType.uint32](result[0])
                         else:
                             result = float_value(
                                 lefts[field],
@@ -347,8 +348,10 @@ def _composed_scan[
                                 Bool(reuse_r[field]),
                                 row,
                             )
+                        # Extrema-only arithmetic also needs gradual-underflow
+                        # adjudication; its SUM bit is deliberately absent.
+                        fault |= UInt32(result[1]) << 1
                         if sum_flags & (UInt32(1) << UInt32(field)):
-                            fault |= UInt32(result[1]) << 1
                             comptime if precise:
                                 exact.add[field](result[0])
                             else:

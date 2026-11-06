@@ -100,8 +100,6 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
         ):
             return None
         if aggregate.op == MIN or aggregate.op == MAX:
-            if size != 2:
-                return None
             extrema = True
         else:
             ordinary = True
