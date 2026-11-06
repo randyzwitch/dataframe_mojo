@@ -22,6 +22,7 @@ from dataframe.expr import (
     LE,
 )
 from .filter_plan import FilterSum, _predicate, supported_dtype
+from .membership_plan import compile_membership
 
 comptime MAX_CLAUSES = 8
 comptime MAX_INPUTS = 9
@@ -30,6 +31,7 @@ comptime MAX_INPUTS = 9
 comptime RANGE_CLAUSE = 0
 comptime NULL_CLAUSE = 1
 comptime COLUMN_CLAUSE = 2
+comptime MEMBERSHIP_CLAUSE = 3
 
 
 struct PredicateClause(Copyable, Movable):
@@ -39,6 +41,7 @@ struct PredicateClause(Copyable, Movable):
     var other: String
     var comparison: Int
     var other_input: Int
+    var members: List[UInt64]
 
     def __init__(
         out self,
@@ -47,6 +50,7 @@ struct PredicateClause(Copyable, Movable):
         inverted: Bool = False,
         other: String = "",
         comparison: Int = 0,
+        var members: List[UInt64] = List[UInt64](),
     ):
         self.bounds = bounds^
         self.kind = kind
@@ -54,6 +58,7 @@ struct PredicateClause(Copyable, Movable):
         self.other = other.copy()
         self.comparison = comparison
         self.other_input = -1
+        self.members = members^
 
 
 @fieldwise_init
@@ -91,6 +96,7 @@ def _same(a: PredicateClause, b: PredicateClause) -> Bool:
         or a.inverted != b.inverted
         or a.other != b.other
         or a.comparison != b.comparison
+        or a.members != b.members
     ):
         return False
     return (
@@ -120,9 +126,20 @@ def _emit(
     var equal = expression.copy()
     if unequal:
         equal._nodes[at].op = EQ
+    var membership = compile_membership(expression, at, frame)
     var bounds = _range(equal if unequal else expression, at, frame)
     var leaf = Optional[PredicateClause]()
-    if bounds:
+    if membership:
+        var matched = membership.take()
+        leaf = PredicateClause(
+            FilterSum(
+                matched.column.copy(), matched.column.copy(), matched.dtype
+            ),
+            MEMBERSHIP_CLAUSE,
+            inverted,
+            members=matched.keys.copy(),
+        )
+    elif bounds:
         leaf = PredicateClause(bounds.take(), inverted=inverted != unequal)
     else:
         ref node = expression._nodes[at]

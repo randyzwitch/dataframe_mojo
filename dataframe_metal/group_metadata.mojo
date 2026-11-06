@@ -3,7 +3,12 @@ from std.memory import bitcast
 from dataframe.expr import COL, MIN, MAX
 from .group_plan import GroupedComposition
 from .expression_format import EXPRESSION_NODE_WORDS
-from .value_program_metadata import value_program_words, pack_value_program
+from .value_program_metadata import (
+    value_program_words,
+    pack_value_program,
+    predicate_words,
+    write_predicate,
+)
 from .accelerator.gpu.erased_input import NumericView
 from .accelerator.gpu.compound_predicate import (
     PREDICATE_HEADER_WORDS,
@@ -20,11 +25,7 @@ def group_metadata(
     ref bundle = plan.selected.bundle
     ref compiled = plan.selected.program
     var predicate_at = 48
-    var tree_at = (
-        predicate_at
-        + PREDICATE_HEADER_WORDS
-        + len(compiled.clauses) * PREDICATE_FIELD_WORDS
-    )
+    var tree_at = predicate_at + predicate_words(compiled)
     var total = tree_at
     for field in bundle.fields:
         total += value_program_words(field.tree, field.conditions)
@@ -70,39 +71,5 @@ def group_metadata(
             words[9] |= UInt64(1) << UInt64(
                 output.field + (4 if output.op == MIN else 8)
             )
-    words[predicate_at] = UInt64(len(compiled.clauses))
-    for i in range(8):
-        words[predicate_at + 1 + i] = UInt64(compiled.truth[i])
-    for i in range(len(compiled.clauses)):
-        ref leaf = compiled.clauses[i]
-        ref clause = leaf.bounds
-        ref input = inputs[compiled.slots[i]]
-        var base = (
-            predicate_at + PREDICATE_HEADER_WORDS + i * PREDICATE_FIELD_WORDS
-        )
-        words[base] = UInt64(compiled.slots[i])
-        words[base + 1] = (
-            UInt64(input.bit_offset)
-            | (UInt64(input.nullable) << 32)
-            | (UInt64(input.tag) << 33)
-        )
-        words[base + 2] = bitcast[DType.uint64](clause.low)
-        words[base + 3] = bitcast[DType.uint64](clause.high)
-        words[base + 4] = UInt64(bitcast[DType.uint32](clause.low_float)) | (
-            UInt64(bitcast[DType.uint32](clause.high_float)) << 32
-        )
-        if leaf.kind == 2:
-            ref right = inputs[leaf.other_input]
-            words[base + 2] = UInt64(leaf.other_input)
-            words[base + 3] = (
-                UInt64(right.bit_offset)
-                | (UInt64(right.nullable) << 32)
-                | (UInt64(right.tag) << 33)
-            )
-        words[base + 5] = (
-            UInt64(clause.inclusive)
-            | (UInt64(leaf.kind) << 2)
-            | (UInt64(leaf.inverted) << 4)
-            | (UInt64(leaf.comparison) << 5)
-        )
+    write_predicate(words, predicate_at, compiled, inputs)
     return words^

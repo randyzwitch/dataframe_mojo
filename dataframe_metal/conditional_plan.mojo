@@ -27,6 +27,7 @@ from .expression_format import (
     CASE_JUMP,
     CASE_NULL,
     MAX_CASE_INSTRUCTIONS,
+    MAX_CASE_SOURCE_NODES,
     MAX_CASE_CONDITIONS,
     MAX_CASE_STACK,
 )
@@ -41,14 +42,18 @@ struct ConditionalValue(Copyable, Movable):
 
 
 def _mark_condition(expression: Expr, at: Int, mut visited: List[Bool]) -> Bool:
-    if at < 0 or at >= len(visited) or visited[at]:
-        return False
-    visited[at] = True
-    ref node = expression._nodes[at]
-    for child in [node.left, node.right, node.extra]:
-        if child >= 0:
-            if child >= at or not _mark_condition(expression, child, visited):
-                return False
+    var pending = List[Int]([at])
+    while pending:
+        var index = pending.pop()
+        if index < 0 or index >= len(visited) or visited[index]:
+            return False
+        visited[index] = True
+        ref node = expression._nodes[index]
+        for child in [node.left, node.right, node.extra]:
+            if child >= 0:
+                if child >= index:
+                    return False
+                pending.append(child)
     return True
 
 
@@ -198,7 +203,7 @@ def compile_conditional(
 ) raises -> Optional[ConditionalValue]:
     """Preserve native branch types and CPU binding without reading row values."""
     var at = len(expression._nodes) - 1 if root < 0 else root
-    if at < 0 or at >= len(expression._nodes) or at >= MAX_CASE_INSTRUCTIONS:
+    if at < 0 or at >= len(expression._nodes) or at >= MAX_CASE_SOURCE_NODES:
         return None
     var present = False
     for i in range(at + 1):

@@ -17,3 +17,6 @@ comptime CASE_NULL = 0xFFFF_FFFB
 comptime MAX_CASE_INSTRUCTIONS = 64
 comptime MAX_CASE_CONDITIONS = 8
 comptime MAX_CASE_STACK = 8
+
+# A large membership predicate may have many source nodes but one GPU leaf.
+comptime MAX_CASE_SOURCE_NODES = 262144
