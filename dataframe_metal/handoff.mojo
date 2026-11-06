@@ -32,6 +32,8 @@ from .composition_plan import plan_composition, composition_key
 from .composition_reduce import execute_composition
 from .extrema_plan import plan_extrema, extrema_key
 from .extrema_reduce import execute_extrema
+from .predicate_plan import plan_predicates, predicate_key
+from .predicate_reduce import execute_predicates
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
     _place_chunks,
@@ -69,6 +71,7 @@ def supports(region: LazyFrame) -> Bool:
             or Bool(plan_arithmetic(selected))
             or Bool(plan_composition(selected))
             or Bool(plan_extrema(selected))
+            or Bool(plan_predicates(selected))
         )
     except:
         return False
@@ -107,6 +110,9 @@ def region_key(region: LazyFrame) raises -> String:
     var extrema = plan_extrema(region)
     if extrema:
         return extrema_key(extrema.value())
+    var predicates = plan_predicates(region)
+    if predicates:
+        return predicate_key(predicates.value())
     return String()
 
 
@@ -516,6 +522,8 @@ def _execute_on_device(
             return execute_bundle(region, zero_copy)
         if plan_arithmetic(region):
             return execute_arithmetic(region, zero_copy)
+        if plan_predicates(region):
+            return execute_predicates(region, zero_copy)
         return execute_composition(region, zero_copy)
     var plan = accepted.take()
     var timings = HandoffTimings()
