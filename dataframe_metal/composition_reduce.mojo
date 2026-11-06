@@ -3,7 +3,7 @@ from std.time import perf_counter_ns
 from std.memory import bitcast
 from std.math import isfinite
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series
-from dataframe.expr import COUNT, MEAN, SUM, MIN, MAX
+from dataframe.expr import COUNT, MEAN, SUM, MIN, MAX, COL
 from .composition_plan import (
     Composition,
     plan_composition,
@@ -27,6 +27,7 @@ from .accelerator.gpu.composed_reduce import (
     FIELD_WORDS,
 )
 from .accelerator.gpu.float_composed_reduce import float_composed_partials
+from .accelerator.gpu.native_float_mixed import native_float_mixed_partials
 from .accelerator.gpu.filter_sum import BLOCK_SIZE
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
@@ -55,6 +56,7 @@ def _scan[
     int32_fields: Int,
     native_predicate: Int = -1,
     mixed: Bool = False,
+    native_mixed: Bool = False,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -62,6 +64,9 @@ def _scan[
     zero_copy: Bool,
     mut timings: HandoffTimings,
 ) raises -> ComposedScan:
+    comptime assert not native_mixed or (
+        mixed and arity == 1 and float_fields == 1 and not fast
+    )
     comptime FIRST_BIN = 0 if wide else 3
     comptime BIN_COUNT = 9 if wide else 3
     var nf = arity
@@ -280,7 +285,9 @@ def _scan[
                 var partials = total_parts if batched else _chunk_partials(
                     segment[0].rows, frame.height()
                 )
-                comptime kernel_batched = mixed_partials[
+                comptime kernel_batched = native_float_mixed_partials[
+                    precise, wide, batched=True
+                ] if native_mixed else mixed_partials[
                     precise,
                     wide,
                     arity,
@@ -297,7 +304,9 @@ def _scan[
                     int32_fields,
                     batched=True,
                 ]
-                comptime kernel_separate = mixed_partials[
+                comptime kernel_separate = native_float_mixed_partials[
+                    precise, wide, batched=False
+                ] if native_mixed else mixed_partials[
                     precise,
                     wide,
                     arity,
@@ -637,6 +646,16 @@ def _mixed_dispatch[
     zero_copy: Bool,
     mut timings: HandoffTimings,
 ) raises -> ComposedScan:
+    if (
+        len(bundle.fields) == 1
+        and bundle.fields[0].dtype == DataType.FLOAT32
+        and bundle.fields[0].op == COL
+        and len(bundle.inputs) == 1
+        and bundle.fields[0].left_input == 0
+    ):
+        return _scan[
+            precise, wide, 1, 1, False, 0, mixed=True, native_mixed=True
+        ](bundle, frame, scope, zero_copy, timings)
     var floats = 0
     var int32s = 0
     for field in bundle.fields:
