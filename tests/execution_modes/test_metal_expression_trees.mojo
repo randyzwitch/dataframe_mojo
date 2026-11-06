@@ -69,6 +69,7 @@ def test_metal_expression_tree_literals_are_exact() raises:
     assert_true(Bool(compile_expression((col("f") * 2) - 1, frame)))
     assert_false(Bool(compile_expression(col("f") + lit(Int64.MAX), frame)))
     assert_false(Bool(compile_expression(col("f") + 0.1, frame)))
+    assert_false(Bool(compile_expression((lit(2) + lit(3)) * col("f"), frame)))
 
 
 def test_metal_expression_tree_normalization_tracks_definition_versions() raises:

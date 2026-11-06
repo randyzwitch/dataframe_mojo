@@ -70,8 +70,10 @@ def compile_expression(
         return None
     var nodes = List[ValueNode]()
     var stack = List[Int]()
+    var columns = List[Bool]()
     for i in range(last + 1):
         ref node = expression._nodes[i]
+        var has_column = node.op == COL
         if node.op == COL:
             if node.left >= 0 or node.right >= 0:
                 return None
@@ -115,6 +117,14 @@ def compile_expression(
                 return None
             var right = stack.pop()
             var left = stack.pop()
+            var right_column = columns.pop()
+            var left_column = columns.pop()
+            has_column = left_column or right_column
+            # Literal-only arithmetic may bind its intermediate dtype before
+            # the surrounding column supplies a native dtype. Decline it
+            # rather than silently changing those intermediate semantics.
+            if not has_column:
+                return None
             # Require a real postfix tree, not arbitrary DAG edges or dead
             # work that might hide checked errors when lowering the program.
             if node.left != left or node.right != right:
@@ -123,6 +133,7 @@ def compile_expression(
         else:
             return None
         stack.append(i)
+        columns.append(has_column)
         if len(stack) > MAX_EXPRESSION_STACK:
             return None
     if len(stack) != 1 or stack[0] != last:
