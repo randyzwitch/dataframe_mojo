@@ -710,3 +710,56 @@ def test_mixed_aggregate_batches_once_and_preserves_independent_allocations() ra
         assert_equal(scope.transfers()[2], 8 if independent else 1)
         assert_equal(scope.info()[0], 0)
         assert_true(execute_timed(query, zero_copy=False)[0].equals(expected))
+
+
+# requires: metal
+def test_native_float_mixed_wide_bins_and_underflow_without_mean() raises:
+    var runtime = require_metal()
+    var frame = DataFrame(
+        [
+            Series(
+                "f",
+                Column[Float32](
+                    [
+                        bitcast[DType.float32](UInt32(1)),
+                        bitcast[DType.float32](UInt32(2)),
+                        bitcast[DType.float32](UInt32(4)),
+                    ]
+                ),
+            ),
+            Series("p", Column[Int64]([1, 2, 3])),
+        ]
+    )
+    for predicate in ["", "f", "p"]:
+        var offered = frame.lazy()
+        if predicate:
+            offered = offered.filter(col(predicate) > 0)
+        var query = offered.select_exprs(
+            [
+                col("f").min().alias("lo"),
+                col("f").max().alias("hi"),
+                col("f").sum().alias("s"),
+                col("f").count().alias("n"),
+                col("f").mean().alias("avg"),
+            ]
+        )
+        var expected = query.collect(engine="cpu")
+        for copy in [False, True]:
+            var actual = execute_timed(query, zero_copy=not copy)[0].copy()
+            assert_true(actual.equals(expected))
+            assert_equal(
+                bitcast[DType.uint32](actual.item(0, "lo").float32()), UInt32(1)
+            )
+            assert_equal(
+                bitcast[DType.uint32](actual.item(0, "s").float32()), UInt32(7)
+            )
+        var ordinary_sum = offered.select_exprs(
+            [col("f").min().alias("lo"), col("f").sum().alias("s")]
+        )
+        with assert_raises(contains="gradual underflow"):
+            _ = execute_timed(ordinary_sum)
+        assert_true(
+            ordinary_sum.collect(accelerator=runtime).equals(
+                ordinary_sum.collect(engine="cpu")
+            )
+        )
