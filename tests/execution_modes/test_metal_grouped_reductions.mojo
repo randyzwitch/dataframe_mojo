@@ -318,7 +318,7 @@ def test_metal_grouped_reductions_null_keys_values_extrema_and_order() raises:
                             List[Int64](
                                 [
                                     Int64(9 if filtered else 2),
-                                    0 if filtered else 9,
+                                    Int64(0 if filtered else 9),
                                     12,
                                 ]
                             ),
@@ -329,7 +329,7 @@ def test_metal_grouped_reductions_null_keys_values_extrema_and_order() raises:
                             Column[Int64](
                                 [
                                     Int64(2 if filtered else 1),
-                                    0 if filtered else 2,
+                                    Int64(0 if filtered else 2),
                                     2,
                                 ]
                             ),
@@ -339,7 +339,7 @@ def test_metal_grouped_reductions_null_keys_values_extrema_and_order() raises:
                             Column[Float64](
                                 [
                                     Float64(4.5 if filtered else 2),
-                                    0 if filtered else 4.5,
+                                    Float64(0 if filtered else 4.5),
                                     6,
                                 ],
                                 nonempty,
@@ -351,7 +351,7 @@ def test_metal_grouped_reductions_null_keys_values_extrema_and_order() raises:
                             List[Int64](
                                 [
                                     Int64(3 if filtered else 2),
-                                    0 if filtered else 3,
+                                    Int64(0 if filtered else 3),
                                     5,
                                 ]
                             ),
@@ -363,7 +363,7 @@ def test_metal_grouped_reductions_null_keys_values_extrema_and_order() raises:
                             List[Int64](
                                 [
                                     Int64(6 if filtered else 2),
-                                    0 if filtered else 6,
+                                    Int64(0 if filtered else 6),
                                     7,
                                 ]
                             ),
