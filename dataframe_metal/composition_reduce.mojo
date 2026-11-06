@@ -776,33 +776,50 @@ def _mixed_dispatch[
                         and floats == n
                         and int32s == narrow
                     ):
-                        if only_conditional_trees(bundle):
-                            return _scan[
-                                precise,
-                                wide,
-                                arity,
-                                n,
-                                False,
-                                narrow,
-                                mixed=mixed,
-                                compound=compound,
-                                trees=trees,
-                                cases=True,
-                                conditional_only=True,
-                            ](bundle, frame, scope, zero_copy, timings, program)
-                        if has_conditions(bundle):
-                            return _scan[
-                                precise,
-                                wide,
-                                arity,
-                                n,
-                                False,
-                                narrow,
-                                mixed=mixed,
-                                compound=compound,
-                                trees=trees,
-                                cases=True,
-                            ](bundle, frame, scope, zero_copy, timings, program)
+                        # CASE values are tree programs. Native/binary bundles
+                        # cannot use these variants; omit their instantiations.
+                        comptime if trees:
+                            if only_conditional_trees(bundle):
+                                return _scan[
+                                    precise,
+                                    wide,
+                                    arity,
+                                    n,
+                                    False,
+                                    narrow,
+                                    mixed=mixed,
+                                    compound=compound,
+                                    trees=trees,
+                                    cases=True,
+                                    conditional_only=True,
+                                ](
+                                    bundle,
+                                    frame,
+                                    scope,
+                                    zero_copy,
+                                    timings,
+                                    program,
+                                )
+                            if has_conditions(bundle):
+                                return _scan[
+                                    precise,
+                                    wide,
+                                    arity,
+                                    n,
+                                    False,
+                                    narrow,
+                                    mixed=mixed,
+                                    compound=compound,
+                                    trees=trees,
+                                    cases=True,
+                                ](
+                                    bundle,
+                                    frame,
+                                    scope,
+                                    zero_copy,
+                                    timings,
+                                    program,
+                                )
                         return _scan[
                             precise,
                             wide,
