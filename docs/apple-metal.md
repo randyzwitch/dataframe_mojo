@@ -13,11 +13,23 @@ var placed = plan.collect()  # engine="auto": by measured cost, see below
 print(plan.explain(accelerator=MetalRuntime()))  # HANDOFF metal: ...
 ```
 
-**Supported so far:** `select(col(c).sum())` over filters that compare one
-column `p` with untyped numeric literals (`>`, `>=`, `<`, `<=`, `==`, joined
-by `&`). The value column `c` and predicate column `p` may differ; each can
-independently be Int32, Int64 or Float32. All nine type pairs are supported,
-including columns with different chunk boundaries. Results equal the CPU's: integer
+**Supported:** fused global and bounded grouped numeric reductions over
+Int32, Int64 and Float32 inputs. SUM, COUNT, MEAN, MIN and MAX can share one
+scan, with checked arithmetic and optional numeric Boolean predicates.
+
+| Area | Accepted regions |
+| --- | --- |
+| Values | Native columns, binary arithmetic, bounded trees of `+`, `-`, `*` |
+| Filters | Literal ranges, same-dtype column comparisons, null tests, AND/OR/NOT |
+| Grouping | One native Int32/Int64 key, at most 256 groups including null |
+| Input layout | Native nullable columns, slices and chunked inputs |
+| CPU execution | Other input types, joins, sorting, windows, distinct and unsupported expressions |
+
+Supported regions still require matching measurements before automatic
+placement selects Metal. The existing filtered-SUM fast path compares a
+numeric predicate column with numeric literals. The value and predicate
+columns may differ; all nine native dtype pairs are supported, including
+columns with different chunk boundaries. Results equal the CPU's: integer
 sums are exact and raise the CPU's overflow error; Float32 sums use Kahan
 compensation per GPU thread and can differ from the CPU in the last bits.
 Native column chunks and their validity bitmaps are read in place, without
@@ -62,8 +74,8 @@ side. Arithmetic, the optional common filter and the reduction run in one GPU
 scan without an intermediate result column. Operand nulls discard that row;
 integer intermediate overflow is detected even if a final sum would cancel.
 Overflow and non-finite Float32 partials use CPU adjudication. These shapes
-have separate `arithmetic_sum:` calibration keys; nested expressions,
-division and mixed-dtype arithmetic remain on CPU.
+have separate `arithmetic_sum:` calibration keys. Deeper arithmetic uses the
+bounded tree path below; division and mixed-dtype arithmetic remain on CPU.
 Arithmetic expressions can also appear inside SUM, COUNT and MEAN in the
 same projection as column aggregates, for example:
 
@@ -105,13 +117,13 @@ out. Exact-mean projections retain their existing traversal and predicate
 path.
 Supported composition regions stay fused before CPU common-expression
 materialization. The pipeline adapter can also re-inline eligible shared
-binary values immediately below a projection; it declines unused work,
-dependencies and expressions evaluated before filters. These are schema-only
+arithmetic values across row-local definitions; it declines unused checked
+work and expressions evaluated before filters. These are schema-only
 transformations in the Metal backend; the CPU optimizer is unchanged.
 
 New fused projections have separate `fused_reductions:` calibration keys;
 without a measurement they stay on CPU in automatic mode. Float64 input
-columns and other operators continue to run on CPU.
+columns continue to run on CPU.
 
 A projection can also combine native `min` and `max` over up to four
 distinct Int32, Int64 or Float32 columns, with the same optional range
@@ -137,8 +149,8 @@ unchanged.
 For example, a range on an Int32 quantity column can filter a Float32 revenue
 sum. Predicate nulls discard rows; value nulls are skipped by the sum. The
 columns' chunk boundaries are intersected into native views, without making
-a filtered column or coalescing either input. A query with predicates on
-multiple distinct columns remains on CPU. Cross-column sums use distinct
+a filtered column or coalescing either input. Predicates on multiple columns
+use the Boolean program described below. Cross-column sums use distinct
 `cross_filter_sum:<predicate dtype>:<value dtype>` calibration keys; the
 single-column estimates are not reused for these larger memory reads.
 
@@ -386,23 +398,70 @@ aggregate paths retain their keys and entry signatures. A changed package
 identity requires fresh calibration before automatic placement uses the mixed
 program; unmeasured shapes stay on CPU.
 
-### Predicates across numeric columns
+### Numeric predicates
 
-Aggregate projections can combine range comparisons on different Int32,
-Int64 and Float32 columns using `&` and `|`. Bounds follow the existing
-exactly representable, untyped-literal rules. Conjunctions on one column fold
-into one range; separate filter calls compose as AND. Up to eight distinct
-range leaves and nine total value/predicate input columns are supported.
+Aggregate projections can combine predicates with `&`, `|` and `~`:
 
-The GPU evaluates ranges and combines their is-true bits through a small
-truth table inside the aggregate scan. This preserves filter selection with
-nulls: a missing comparison can qualify through another true OR branch.
-It supports the existing native and binary SUM/COUNT/MEAN/MIN/MAX projections,
-with the same chunk mapping, checked arithmetic and IEEE adjudication. No
-intermediate filtered table is materialized. NOT and column-to-column
-comparisons remain outside this numeric-range path.
+- Column-to-literal ranges use `>`, `>=`, `<`, `<=`, `==` and `!=` with
+  exactly representable literals.
+- Column-to-column comparisons support those six operators when both inputs
+  have the same native Int32, Int64 or Float32 dtype.
+- `is_null()` and `is_not_null()` read native numeric validity bitmaps.
 
-These regions use `predicate_reductions:v1:` calibration keys, including the
-range inputs, bounds and Boolean program. Existing single-range paths retain
-their specialized kernels and keys; automatic placement requires matching
-measurements for the new regions.
+Up to eight distinct leaves and nine total value/predicate input columns
+share the aggregate scan. Separate filter calls compose as AND. NOT preserves
+SQL unknown values; it is not implemented by complementing a leaf's is-true
+bit after a null comparison. Float32 comparisons preserve NaNs, signed zero,
+infinities and subnormals through ordered raw-bit comparisons.
+
+Existing positive range programs retain `predicate_reductions:v1:` keys.
+Null tests, negation, inequality and column comparisons use v2 keys describing
+the complete predicate program. Existing single-range fast paths keep their
+specialized kernels. No intermediate filtered table is materialized.
+
+### Bounded arithmetic trees
+
+SUM, COUNT, MEAN, MIN and MAX can reduce deeper same-dtype expressions, such
+as `(col("price") * col("quantity") * (1 - col("discount"))).sum()`.
+Programs contain at most 15 value nodes, with at most 8 stack entries,8 distinct
+value inputs and 4 distinct aggregate values. Matching typed literals and
+exactly representable untyped literals are accepted. Literal-only arithmetic
+subtrees are declined when their intermediate binding could change dtype.
+
+The GPU evaluates checked arithmetic and null validity at each node, then
+reuses the root across requested aggregates. Valid integer intermediates
+still report overflow when a later operand makes the root null. Filtered-out
+rows skip value evaluation. Float32 arithmetic retains rounding at each node
+and the existing gradual-underflow adjudication policy. Multi-stage row-local
+shared definitions can be inlined when all definitions feed outputs and
+filters precede them; grouping keys cannot be replaced by this transformation.
+These programs use `expression_reductions:v1:` keys. Existing native and
+one-binary kernels retain their specialized routes.
+
+### Bounded grouped reductions
+
+One native Int32 or Int64 key can group the same numeric aggregate values,
+including checked binary expressions and bounded trees. Arbitrary signed key
+values and a null group are supported, with an initial limit of 256 total
+groups. Group existence and row counts include rows whose aggregate values
+are null. Empty inputs produce typed empty columns; all-null groups preserve
+SUM/COUNT/MEAN/MIN/MAX null and minimum-count rules.
+
+A GPU hash table uses immutable source-row tickets and 32-bit atomics. Each
+workgroup keeps its own aggregate partials. Exact integer word sums and
+Float32 exponent bins avoid 64-bit atomics and floating atomic sums. Int64
+extrema record winning row tickets and resolve them after aggregation.
+The host merges bounded partial states and orders groups by their first
+qualifying row; it does not scan input keys to discover groups. Independent
+chunk allocations use an explicit upload when row-ticket lookup requires one
+contiguous logical buffer. Shared native spans map in place.
+
+Excessive cardinality and checked data faults use CPU adjudication. Float32
+sums and means require a proof that the CPU's Float64 additions are exact;
+non-finite inputs and ambiguous extrema use CPU adjudication. Direct GPU
+measurement rejects adjudication rather than recording it as a Metal win.
+
+`grouped_reductions:v1:` costs distinguish key dtype and layout, aggregate and
+predicate programs, and bounded samples of cardinality, skew and null
+frequency. Sampling describes placement cost only; GPU hashing independently
+checks actual cardinality. Unmeasured shapes retain CPU placement.
