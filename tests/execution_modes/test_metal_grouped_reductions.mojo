@@ -146,6 +146,11 @@ def test_metal_grouped_partial_finish_retains_wide_sums_and_null_group() raises:
     assert_equal(answer.item(0, "hi").int64(), Int64.MAX)
     assert_equal(answer.item(1, "k").int64(), Int64(9))
     assert_equal(answer.item(1, "s").int64(), Int64(6))
+    var original_keys = frame.column("k").numeric[DType.int64]()
+    for chunk in answer.column("k").chunks():
+        assert_false(
+            chunk.numeric[DType.int64]()._shares_buffers_with(original_keys)
+        )
 
 
 def test_metal_grouped_cost_properties_distinguish_cardinality_and_skew() raises:
@@ -180,6 +185,70 @@ def test_metal_grouped_cost_properties_distinguish_cardinality_and_skew() raises
     assert_equal(
         group_properties(nulls.lazy(), "k"), ":sample:v1:groups1:hot8:null8"
     )
+
+
+def test_metal_grouped_final_keys_do_not_retain_source_buffers() raises:
+    from dataframe_metal.group_finish import finish_grouped
+
+    for kind in range(2):
+        var frame = DataFrame(
+            [
+                _numbers(
+                    kind,
+                    "k",
+                    List[Int64]([Int64(3), 4]),
+                    List[Bool]([True, False]),
+                ),
+                Series("v", Column[Int64]([1, 2])),
+            ]
+        )
+        var matched = plan_grouped(
+            frame.lazy().group_by("k").agg(col("v").count().alias("n"))
+        )
+        assert_true(Bool(matched))
+        var first = List[UInt32]([UInt32(0), 1])
+        var counts = List[UInt32]([UInt32(1), 1])
+        var states = List[UInt32](length=64, fill=0)
+        states[0] = 1
+        states[32] = 1
+        states[4] = UInt32.MAX
+        states[36] = UInt32.MAX
+        var answer = finish_grouped(
+            matched.value(),
+            frame,
+            1,
+            first,
+            counts,
+            states,
+            List[Int64](length=4, fill=0),
+        )
+        assert_equal(answer.height(), 2)
+        assert_true(answer.item(1, "k").is_null())
+        var empty = finish_grouped(
+            matched.value(),
+            frame,
+            0,
+            List[UInt32](),
+            List[UInt32](),
+            List[UInt32](),
+            List[Int64](),
+        )
+        assert_equal(empty.height(), 0)
+        assert_equal(empty.column("k").dtype(), frame.column("k").dtype())
+        for result in [answer^, empty^]:
+            for chunk in result.column("k").chunks():
+                if kind == 0:
+                    assert_false(
+                        chunk.numeric[DType.int32]()._shares_buffers_with(
+                            frame.column("k").numeric[DType.int32]()
+                        )
+                    )
+                else:
+                    assert_false(
+                        chunk.numeric[DType.int64]()._shares_buffers_with(
+                            frame.column("k").numeric[DType.int64]()
+                        )
+                    )
 
 
 def test_metal_grouped_layout_key_includes_the_group_key_column() raises:

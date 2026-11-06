@@ -40,8 +40,11 @@ def finish_grouped(
         ),
         List[Int64](length=nf * 4, fill=0),
     )
+    var keys32 = List[Int32]()
+    var keys64 = List[Int64]()
+    var key_valid = List[Bool]()
     var columns = List[List[Series]]()
-    columns.append(List[Series]([frame.column(plan.key).slice(0, 0)]))
+    columns.append(List[Series]())
     for output in bundle.outputs:
         columns.append(List[Series]([empty.column(output.name).slice(0, 0)]))
     for slot in order:
@@ -144,7 +147,15 @@ def finish_grouped(
         var output = finish_composition(
             bundle, (integers^, floating^, counts^), extrema
         )
-        columns[0].append(frame.column(plan.key).slice(Int(first[slot]), 1))
+        # Copy only finalized keys. Returning source slices would keep the
+        # entire input key allocation alive behind a tiny grouped result.
+        var key = frame.item(Int(first[slot]), plan.key)
+        var present = not key.is_null()
+        key_valid.append(present)
+        if plan.key_dtype == DataType.INT32:
+            keys32.append(key.int32() if present else Int32(0))
+        else:
+            keys64.append(key.int64() if present else Int64(0))
         for i in range(len(bundle.outputs)):
             ref item = bundle.outputs[i]
             if item.name in plan.row_counts:
@@ -154,6 +165,10 @@ def finish_grouped(
             else:
                 columns[i + 1].append(output.column(item.name))
     var answer = List[Series]()
-    for column in columns:
-        answer.append(Series._from_chunks(column))
+    if plan.key_dtype == DataType.INT32:
+        answer.append(Series(plan.key, Column[Int32](keys32^, key_valid)))
+    else:
+        answer.append(Series(plan.key, Column[Int64](keys64^, key_valid)))
+    for i in range(1, len(columns)):
+        answer.append(Series._from_chunks(columns[i]))
     return DataFrame(answer^)
