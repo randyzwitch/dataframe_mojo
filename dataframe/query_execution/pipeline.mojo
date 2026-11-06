@@ -769,9 +769,9 @@ def plan_stream_execute(
                 prepared = finished^
                 algorithm = "hash_index"
             if prepared:
-                var table = prepared.take()
-                table.build_filtered = plan_is_filtering(self, node.right)
-                prepared = table^
+                var hash_index = prepared.take()
+                hash_index.build_filtered = plan_is_filtering(self, node.right)
+                prepared = hash_index^
             joins.append(built^)
             plan_record(
                 self,
