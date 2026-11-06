@@ -370,8 +370,21 @@ def test_compound_predicates_types_nulls_operators_slices_chunks_and_aggregates(
                             expected
                         )
                     )
+                    var public = query.collect(accelerator=runtime)
                     assert_true(
-                        query.collect(accelerator=runtime).equals(expected)
+                        public.equals(expected),
+                        String("public; nulls=")
+                        + String(Int(nulls))
+                        + "; rows="
+                        + String(frame.height())
+                        + "; mode="
+                        + String(mode)
+                        + "; key="
+                        + region_key(query)
+                        + "\nActual:\n"
+                        + public.to_string()
+                        + "\nExpected:\n"
+                        + expected.to_string(),
                     )
 
 
