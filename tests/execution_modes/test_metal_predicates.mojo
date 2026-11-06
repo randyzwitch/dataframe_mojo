@@ -90,7 +90,9 @@ def test_compound_predicate_truth_tables_select_sql_true_with_nulls() raises:
             )
             var mask = UInt32(0)
             for i in range(len(matched.value().program.clauses)):
-                var name = matched.value().program.clauses[i].filter_column
+                var name = (
+                    matched.value().program.clauses[i].bounds.filter_column
+                )
                 var value = x if name == "a" else (y if name == "b" else z)
                 mask |= UInt32(value) << UInt32(i)
             var word = matched.value().program.truth[Int(mask >> 5)]

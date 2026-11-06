@@ -79,24 +79,32 @@ def predicate_matches(
         var bits = _pointer(
             slot, b0, b1, b2, b3, b4, b5, b6, b7, predicate_bits
         )
-        var kept = True
+        var valid = True
         if nullable:
-            kept = _valid(bits, offset, row)
-        if tag == 2:
+            valid = _valid(bits, offset, row)
+        var flags = UInt32(clause[unsafe_offset=5])
+        var kind = (flags >> 2) & 3
+        var inverted = (flags & 16) != 0
+        var matched = False
+        var kept = False
+        if kind == 1:
+            matched = not valid
+            kept = not matched if inverted else matched
+        elif tag == 2:
             var bounds = clause[unsafe_offset=4]
-            kept = kept & float_in_range(
+            matched = float_in_range(
                 values.unsafe_bitcast[Float32]()[unsafe_offset=row],
                 bitcast[DType.float32](UInt32(bounds)),
                 bitcast[DType.float32](UInt32(bounds >> 32)),
-                UInt32(clause[unsafe_offset=5]),
+                flags & 3,
             )
         else:
             var value = read_integer(values, tag, row)
-            kept = (
-                kept
-                & (value >= bitcast[DType.int64](clause[unsafe_offset=2]))
-                & (value <= bitcast[DType.int64](clause[unsafe_offset=3]))
-            )
+            matched = (
+                value >= bitcast[DType.int64](clause[unsafe_offset=2])
+            ) & (value <= bitcast[DType.int64](clause[unsafe_offset=3]))
+        if kind != 1:
+            kept = valid & (not matched if inverted else matched)
         mask |= UInt32(kept) << UInt32(i)
     return Bool(
         UInt32(program[unsafe_offset=1 + Int(mask >> 5)])

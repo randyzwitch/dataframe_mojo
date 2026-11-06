@@ -286,7 +286,8 @@ def _scan[
                 for i in range(8):
                     words[program_at + 1 + i] = UInt64(compiled.truth[i])
                 for i in range(len(compiled.clauses)):
-                    ref clause = compiled.clauses[i]
+                    ref leaf = compiled.clauses[i]
+                    ref clause = leaf.bounds
                     var slot = compiled.slots[i]
                     ref input = segment[slot]
                     var base = (
@@ -305,7 +306,11 @@ def _scan[
                     words[base + 4] = UInt64(
                         bitcast[DType.uint32](clause.low_float)
                     ) | (UInt64(bitcast[DType.uint32](clause.high_float)) << 32)
-                    words[base + 5] = UInt64(clause.inclusive)
+                    words[base + 5] = (
+                        UInt64(clause.inclusive)
+                        | (UInt64(leaf.kind) << 2)
+                        | (UInt64(leaf.inverted) << 4)
+                    )
             output_offset += partials
         var metadata = ctx.enqueue_create_buffer[DType.uint64](len(words))
         try:
