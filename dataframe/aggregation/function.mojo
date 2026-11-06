@@ -36,7 +36,6 @@ from std.memory import Pointer, bitcast
 from dataframe.aggregation.reducer import (
     Reducer,
     _from_canonical,
-    float_key,
     quantile_in,
 )
 from dataframe.decimal import check_limit, decimal_mean, precision_limit
@@ -45,7 +44,6 @@ from dataframe.storage.column import (
     Column,
     _count_set,
     _pack_bits,
-    _validity_at,
 )
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
@@ -407,186 +405,6 @@ struct AggregateFunction(Copyable, Movable):
         pass
 
 
-def _string_words(
-    strings: StringColumn,
-    start: Int,
-    count: Int,
-    first_at: Int,
-    second_at: Int,
-    nulls_at: Int,
-    bit: UInt64,
-):
-    """Encode rows [start, start + count) of a string column as a
-    16-byte key: length and up to twelve inline bytes, or a pointer to the
-    bytes of a longer string."""
-    var first = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=first_at)
-    var second = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=second_at)
-    var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
-    var has_nulls = _batch_nulls(strings._bits[], strings._offset, start, count)
-    var views = strings._is_view_storage()
-    if views:
-        # A view is already these words: its first word, then its inline
-        # bytes or (past twelve bytes) where its bytes are.
-        var rows = _Bytes(strings)
-        var words = Pointer[UInt64, ImmutAnyOrigin](
-            unsafe_from_address=rows.views
-        )
-        for k in range(count):
-            var i = start + k
-            if has_nulls and not strings._valid(i):
-                first[unsafe_offset=k] = 0
-                second[unsafe_offset=k] = 0
-                nulls[unsafe_offset=k] |= bit
-                continue
-            var head = rows.head(i)
-            var length = Int(head & 0xFFFFFFFF)
-            first[unsafe_offset=k] = head
-            if length <= 12:
-                var keep = 8 * max(length - 4, 0)
-                second[unsafe_offset=k] = words[unsafe_offset=2 * i + 1] & (
-                    (UInt64(1) << UInt64(keep)) - 1 if keep < 64 else UInt64.MAX
-                )
-            else:
-                second[unsafe_offset=k] = UInt64(Int(rows.get(i).unsafe_ptr()))
-        return
-    var size = len(strings._bytes[])
-    for k in range(count):
-        var i = start + k
-        if has_nulls and not strings._valid(i):
-            first[unsafe_offset=k] = 0
-            second[unsafe_offset=k] = 0
-            nulls[unsafe_offset=k] |= bit
-            continue
-        var bytes = strings._row_bytes(i) if views else Span[
-            UInt8, ImmutAnyOrigin
-        ](
-            unsafe_ptr=strings._base().unsafe_offset(strings._start(i)),
-            length=strings._end(i) - strings._start(i),
-        )
-        var length = len(bytes)
-        var start_ptr = bytes.unsafe_ptr()
-        var head = UInt64(length)
-        if not views and strings._start(i) + 16 <= size:
-            # Sixteen readable bytes from the string's start: its words by
-            # two loads, masked to its length.
-            var low = start_ptr.unsafe_bitcast[UInt64]().unsafe_load[
-                alignment=1
-            ]()
-            head |= (low & 0xFFFFFFFF) << 32
-            first[unsafe_offset=k] = head
-            if length <= 12:
-                var high = (low >> 32) | (
-                    UInt64(
-                        start_ptr.unsafe_offset(8)
-                        .unsafe_bitcast[UInt32]()
-                        .unsafe_load[alignment=1]()
-                    )
-                    << 32
-                )
-                var keep = 8 * max(length - 4, 0)
-                second[unsafe_offset=k] = high & (
-                    (UInt64(1) << UInt64(keep)) - 1 if keep < 64 else UInt64.MAX
-                )
-                if length < 4:
-                    first[unsafe_offset=k] = UInt64(length) | (
-                        (low & ((UInt64(1) << UInt64(8 * length)) - 1)) << 32
-                    )
-            else:
-                second[unsafe_offset=k] = UInt64(Int(start_ptr))
-            continue
-        for b in range(min(length, 4)):
-            head |= UInt64(start_ptr[unsafe_offset=b]) << UInt64(32 + 8 * b)
-        first[unsafe_offset=k] = head
-        if length <= 12:
-            var tail = UInt64(0)
-            for b in range(4, length):
-                tail |= UInt64(start_ptr[unsafe_offset=b]) << UInt64(
-                    8 * (b - 4)
-                )
-            second[unsafe_offset=k] = tail
-        else:
-            second[unsafe_offset=k] = UInt64(Int(start_ptr))
-
-
-def _column_words(
-    column: Series,
-    start: Int,
-    count: Int,
-    first_at: Int,
-    second_at: Int,
-    nulls_at: Int,
-    bit: UInt64,
-) raises:
-    """A key column's words for rows [start, start + count) of a column
-    that is not chunked, written at the given buffer addresses; a null row
-    sets `bit` in its null word. A float is its canonical key (-0.0 as 0.0,
-    every NaN one)."""
-    if column._data.isa[StringColumn]():
-        _string_words(
-            column._data[StringColumn],
-            start,
-            count,
-            first_at,
-            second_at,
-            nulls_at,
-            bit,
-        )
-        return
-    var first = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=first_at)
-    var second = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=second_at)
-    var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
-    if column._data.isa[BoolColumn]():
-        ref bools = column._data[BoolColumn]
-        for k in range(count):
-            if not bools._valid(start + k):
-                first[unsafe_offset=k] = 0
-                nulls[unsafe_offset=k] |= bit
-            else:
-                first[unsafe_offset=k] = UInt64(1) if bools._get(
-                    start + k
-                ) else UInt64(2)
-        return
-    if column._data.isa[Column[Int128]]():
-        ref wide = column._data[Column[Int128]]
-        var has_nulls = _batch_nulls(wide._bits[], wide._offset, start, count)
-        var valid = wide._bits[].unsafe_ptr()
-        for k in range(count):
-            if has_nulls and not _validity_at(valid, wide._offset + start + k):
-                first[unsafe_offset=k] = 0
-                second[unsafe_offset=k] = 0
-                nulls[unsafe_offset=k] |= bit
-                continue
-            var value = bitcast[DType.uint128](wide._get(start + k))
-            first[unsafe_offset=k] = UInt64(value)
-            second[unsafe_offset=k] = UInt64(value >> 64)
-        return
-    comptime for d in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[d]
-        if column._data.isa[Column[Scalar[D]]]():
-            ref typed = column._data[Column[Scalar[D]]]
-            var values = typed._ptr()
-            var has_nulls = _batch_nulls(
-                typed._bits[], typed._offset, start, count
-            )
-            var valid = typed._bits[].unsafe_ptr()
-            for k in range(count):
-                var i = start + k
-                if has_nulls and not _validity_at(valid, typed._offset + i):
-                    first[unsafe_offset=k] = 0
-                    nulls[unsafe_offset=k] |= bit
-                    continue
-                var value = values[unsafe_offset=i]
-                comptime if D.is_floating_point():
-                    # The hash's canonical float: -0.0 is 0.0, NaNs are one.
-                    first[unsafe_offset=k] = float_key(Float64(value))
-                elif D.is_unsigned():
-                    first[unsafe_offset=k] = UInt64(value)
-                else:
-                    first[unsafe_offset=k] = bitcast[DType.uint64](Int64(value))
-            return
-    raise Error("aggregate table: unsupported key storage")
-
-
 # Row words before the key words: hash, null bits, first row.
 comptime _HEAD = 3
 
@@ -800,17 +618,6 @@ def _words_at(address: Int) -> Pointer[UInt64, MutAnyOrigin]:
     return Pointer[UInt64, MutAnyOrigin](unsafe_from_address=address)
 
 
-@always_inline
-def _batch_nulls(
-    bits: _BufferData[UInt8], offset: Int, start: Int, count: Int
-) -> Bool:
-    """Whether rows [start, start + count) contain a null, using the
-    column's validity bits (`bits`, row 0 at bit `offset`)."""
-    if len(bits) == 0:
-        return False
-    return _count_set(bits, offset + start, count) < count
-
-
 def _format_nulls(format: UnifiedVectorFormat, start: Int, count: Int) -> Bool:
     """Whether rows [start, start + count) of a vector may be null
     (`ValidityMask::CanHaveNull`, which every DuckDB scatter loop checks
@@ -882,7 +689,7 @@ def _value_words(
     bytes past its length masked off), 1 for true and 2 for false, a
     128-bit value's halves, or a number's bits (a float's exactly, an
     integer as Int64 or UInt64). A null row's word is 0 and its null word
-    nonzero. These are the words `_column_words` gives a column's rows."""
+    nonzero. These are the key words `_vector_key` gives the same rows."""
     var first = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=first_at)
     var second = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=second_at)
     var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)

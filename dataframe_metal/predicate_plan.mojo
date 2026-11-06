@@ -6,7 +6,20 @@ selection, SQL AND and OR compose the leaves' is-true bits even with nulls.
 """
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Expr, LazyFrame
-from dataframe.expr import AND, OR, COL
+from dataframe.expr import (
+    AND,
+    OR,
+    COL,
+    IS_NULL,
+    IS_NOT_NULL,
+    NOT,
+    NE,
+    EQ,
+    GT,
+    GE,
+    LT,
+    LE,
+)
 from dataframe.lazy import SCAN_FRAME, FILTER, SELECT
 from .filter_plan import FilterSum, _predicate, supported_dtype
 from .composition_plan import Composition, plan_composition, composition_key
@@ -15,9 +28,38 @@ comptime MAX_CLAUSES = 8
 comptime MAX_INPUTS = 9
 
 
+comptime RANGE_CLAUSE = 0
+comptime NULL_CLAUSE = 1
+comptime COLUMN_CLAUSE = 2
+
+
+struct PredicateClause(Copyable, Movable):
+    var bounds: FilterSum
+    var kind: Int
+    var inverted: Bool
+    var other: String
+    var comparison: Int
+    var other_input: Int
+
+    def __init__(
+        out self,
+        var bounds: FilterSum,
+        kind: Int = RANGE_CLAUSE,
+        inverted: Bool = False,
+        other: String = "",
+        comparison: Int = 0,
+    ):
+        self.bounds = bounds^
+        self.kind = kind
+        self.inverted = inverted
+        self.other = other.copy()
+        self.comparison = comparison
+        self.other_input = -1
+
+
 @fieldwise_init
 struct PredicateProgram(Copyable, Movable):
-    var clauses: List[FilterSum]
+    var clauses: List[PredicateClause]
     var truth: List[UInt32]
     var slots: List[Int]
 
@@ -50,16 +92,23 @@ def _range(
     return plan^
 
 
-def _same(a: FilterSum, b: FilterSum) -> Bool:
+def _same(a: PredicateClause, b: PredicateClause) -> Bool:
+    if (
+        a.kind != b.kind
+        or a.inverted != b.inverted
+        or a.other != b.other
+        or a.comparison != b.comparison
+    ):
+        return False
     return (
-        a.filter_column == b.filter_column
-        and a.low == b.low
-        and a.high == b.high
-        and a.inclusive == b.inclusive
-        and bitcast[DType.uint32](a.low_float)
-        == bitcast[DType.uint32](b.low_float)
-        and bitcast[DType.uint32](a.high_float)
-        == bitcast[DType.uint32](b.high_float)
+        a.bounds.filter_column == b.bounds.filter_column
+        and a.bounds.low == b.bounds.low
+        and a.bounds.high == b.bounds.high
+        and a.bounds.inclusive == b.bounds.inclusive
+        and bitcast[DType.uint32](a.bounds.low_float)
+        == bitcast[DType.uint32](b.bounds.low_float)
+        and bitcast[DType.uint32](a.bounds.high_float)
+        == bitcast[DType.uint32](b.bounds.high_float)
     )
 
 
@@ -67,10 +116,63 @@ def _emit(
     expression: Expr,
     at: Int,
     frame: DataFrame,
-    mut clauses: List[FilterSum],
+    mut clauses: List[PredicateClause],
     mut code: List[Int],
+    inverted: Bool = False,
 ) raises -> Bool:
-    var leaf = _range(expression, at, frame)
+    ref root = expression._nodes[at]
+    if root.op == NOT:
+        return _emit(expression, root.left, frame, clauses, code, not inverted)
+    var unequal = root.op == NE
+    var equal = expression.copy()
+    if unequal:
+        equal._nodes[at].op = EQ
+    var bounds = _range(equal if unequal else expression, at, frame)
+    var leaf = Optional[PredicateClause]()
+    if bounds:
+        leaf = PredicateClause(bounds.take(), inverted=inverted != unequal)
+    else:
+        ref node = expression._nodes[at]
+        if node.op == IS_NULL or node.op == IS_NOT_NULL:
+            ref input = expression._nodes[node.left]
+            if input.op != COL or input.text not in frame.columns():
+                return False
+            var dtype = frame.column(input.text).dtype()
+            if not supported_dtype(dtype):
+                return False
+            leaf = PredicateClause(
+                FilterSum(input.text.copy(), input.text.copy(), dtype),
+                NULL_CLAUSE,
+                (node.op == IS_NOT_NULL) != inverted,
+            )
+    if not leaf and (
+        root.op == GT
+        or root.op == GE
+        or root.op == LT
+        or root.op == LE
+        or root.op == EQ
+        or root.op == NE
+    ):
+        ref left = expression._nodes[root.left]
+        ref right = expression._nodes[root.right]
+        if (
+            left.op == COL
+            and right.op == COL
+            and left.text in frame.columns()
+            and right.text in frame.columns()
+        ):
+            var dtype = frame.column(left.text).dtype()
+            if (
+                supported_dtype(dtype)
+                and frame.column(right.text).dtype() == dtype
+            ):
+                leaf = PredicateClause(
+                    FilterSum(left.text.copy(), left.text.copy(), dtype),
+                    COLUMN_CLAUSE,
+                    inverted != unequal,
+                    right.text.copy(),
+                    EQ if unequal else root.op,
+                )
     if leaf:
         var slot = -1
         for i in range(len(clauses)):
@@ -86,11 +188,13 @@ def _emit(
     ref node = expression._nodes[at]
     if node.op != AND and node.op != OR:
         return False
-    if not _emit(expression, node.left, frame, clauses, code) or not _emit(
-        expression, node.right, frame, clauses, code
-    ):
+    if not _emit(
+        expression, node.left, frame, clauses, code, inverted
+    ) or not _emit(expression, node.right, frame, clauses, code, inverted):
         return False
-    code.append(-1 if node.op == AND else -2)
+    # Push NOT to leaves. Each inverted comparison still rejects nulls;
+    # complementing an is-true mask would incorrectly admit UNKNOWN.
+    code.append(-1 if (node.op == AND) != inverted else -2)
     return True
 
 
@@ -124,7 +228,7 @@ def plan_predicates(region: LazyFrame) raises -> Optional[PredicateComposition]:
     var frame = region._plan._frames[
         region._plan._nodes[0].source_slot()
     ].copy()
-    var clauses = List[FilterSum]()
+    var clauses = List[PredicateClause]()
     var code = List[Int]()
     for i in range(1, n - 1):
         ref node = region._plan._nodes[i]
@@ -149,16 +253,20 @@ def plan_predicates(region: LazyFrame) raises -> Optional[PredicateComposition]:
     var bundle = offered.take()
     var names = bundle.inputs.copy()
     for clause in clauses:
-        if clause.filter_column not in names:
-            names.append(clause.filter_column.copy())
+        if clause.bounds.filter_column not in names:
+            names.append(clause.bounds.filter_column.copy())
+        if clause.kind == COLUMN_CLAUSE and clause.other not in names:
+            names.append(clause.other.copy())
     if len(names) > MAX_INPUTS:
         return None
     var slots = List[Int]()
-    for clause in clauses:
+    for index in range(len(clauses)):
+        ref clause = clauses[index]
         for i in range(len(names)):
-            if names[i] == clause.filter_column:
+            if names[i] == clause.bounds.filter_column:
                 slots.append(i)
-                break
+            if clause.kind == COLUMN_CLAUSE and names[i] == clause.other:
+                clause.other_input = i
     # Eight value bindings and a ninth independent predicate binding are the
     # existing physical ABI. Extra predicate columns use unused value slots.
     bundle.inputs = List[String]()
@@ -175,9 +283,26 @@ def plan_predicates(region: LazyFrame) raises -> Optional[PredicateComposition]:
 
 
 def predicate_key(plan: PredicateComposition) -> String:
-    var key = String("predicate_reductions:v1:") + composition_key(plan.bundle)
+    var advanced = False
+    for clause in plan.program.clauses:
+        advanced = advanced or clause.kind != RANGE_CLAUSE or clause.inverted
+    var key = String(
+        "predicate_reductions:v2:" if advanced else "predicate_reductions:v1:"
+    ) + composition_key(plan.bundle)
     for i in range(len(plan.program.clauses)):
-        ref clause = plan.program.clauses[i]
+        ref leaf = plan.program.clauses[i]
+        ref clause = leaf.bounds
+        if advanced:
+            key += (
+                ":kind="
+                + String(leaf.kind)
+                + ":inverted="
+                + String(Int(leaf.inverted))
+                + ":compare="
+                + String(leaf.comparison)
+                + ":right="
+                + String(leaf.other_input)
+            )
         key += (
             ":p"
             + String(plan.program.slots[i])
