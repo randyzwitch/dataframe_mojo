@@ -137,16 +137,20 @@ struct MetalRuntime(AcceleratorBackend):
         from .handoff import supports
 
         # This entire region is already a valid device program. CPU CSE
-        # would materialize its repeated arithmetic as an input column,
-        # preventing the fused scan. Other plans retain CPU optimization.
+        # would materialize its repeated arithmetic or predicate intermediates
+        # as input columns, preventing the fused scan. Other plans retain CPU
+        # optimization.
         from .region_plan import normalize_region
         from .composition_plan import plan_composition
+        from .predicate_plan import plan_predicates
 
         var optimize = settings.optimize
         var offered = query.copy()
         if supports(query):
             var normalized = normalize_region(query)
-            if plan_composition(normalized.value()):
+            if plan_composition(normalized.value()) or plan_predicates(
+                normalized.value()
+            ):
                 offered = normalized.take()
                 optimize = False
         var plan = offered._with_handoff()

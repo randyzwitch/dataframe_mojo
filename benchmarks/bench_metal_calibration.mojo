@@ -6,7 +6,7 @@ at 50M, 75M and 100M rows. Progress/errors go to stderr via the runtime;
 stdout contains only capture records for scripts/metal_calibration.py.
 """
 from std.sys import argv
-from dataframe import Column, DataFrame, Expr, Series, col
+from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col
 from dataframe_metal.calibration_capture import capture
 
 
@@ -74,14 +74,32 @@ def _reference(rows: Int, nulls: Bool, mode: Int) raises -> DataFrame:
     var discount = Float64(0)
     var quantity_count = Int64(0)
     var sales_count = Int64(0)
+    var low = Int32.MAX
+    var high = Int32.MIN
+    var product_low = Float32.MAX_FINITE
+    var product_high = -Float32.MAX_FINITE
     for row in range(32):
         var weight = Int64(rows // 32 + Int(row < rows % 32))
-        if row % 4 == 0 or (nulls and row % 16 == 5):
+        var p = row % 4 != 0 and (not nulls or row % 16 != 5)
+        var a = row % 16 > 8 and (not nulls or row % 8 != 1)
+        var selected = p and a if mode == 9 else (p or a if mode == 10 else p)
+        if not selected:
             continue
         if not nulls or row % 8 != 1:
+            if weight:
+                low = min(low, Int32(row % 16 - 8))
+                high = max(high, Int32(row % 16 - 8))
             integer += Int64(row % 16 - 8) * weight
             count += weight
             if not nulls or row % 16 != 3:
+                if weight:
+                    var product = (
+                        Float32(row % 16 - 8)
+                        / 4
+                        * (Float32((row * 3) % 8 - 4) / 2)
+                    )
+                    product_low = min(product_low, product)
+                    product_high = max(product_high, product)
                 sales_count += weight
                 sales += (
                     (Float64(row % 16 - 8) / 4)
@@ -92,6 +110,48 @@ def _reference(rows: Int, nulls: Bool, mode: Int) raises -> DataFrame:
             discount += Float64((row * 5) % 32 - 16) / 8 * Float64(weight)
         if not nulls or row % 16 != 3:
             quantity_count += weight
+    if mode == 5:
+        return DataFrame(
+            [
+                Series("sum", Column[Int32]([Int32(integer)])),
+                Series("count", Column[Int64]([count])),
+                Series(
+                    "mean", Column[Float64]([Float64(integer) / Float64(count)])
+                ),
+                Series("min", Column[Int32]([low])),
+                Series("max", Column[Int32]([high])),
+            ]
+        )
+    if mode == 6 or mode == 9 or mode == 10:
+        return DataFrame(
+            [
+                Series("sum", Column[Float32]([Float32(Float64(integer) / 4)])),
+                Series("count", Column[Int64]([count])),
+                Series(
+                    "mean",
+                    Column[Float64]([Float64(integer) / Float64(4 * count)]),
+                ),
+                Series("min", Column[Float32]([Float32(low) / 4])),
+                Series("max", Column[Float32]([Float32(high) / 4])),
+            ]
+        )
+    if mode == 8:
+        return DataFrame(
+            [
+                Series("min", Column[Float32]([product_low])),
+                Series("max", Column[Float32]([product_high])),
+            ]
+        )
+    if mode == 7:
+        return DataFrame(
+            [
+                Series("min", Column[Int32]([low])),
+                Series("max", Column[Float32]([Float32(high) / 4])),
+                Series("sales", Column[Float32]([Float32(sales)])),
+                Series("count", Column[Int64]([sales_count])),
+                Series("mean", Column[Float64]([sales / Float64(sales_count)])),
+            ]
+        )
     if mode == 0:
         return DataFrame([Series("sum", Column[Int32]([Int32(integer)]))])
     if mode == 1:
@@ -135,6 +195,27 @@ def _reference(rows: Int, nulls: Bool, mode: Int) raises -> DataFrame:
 
 
 def _expressions(mode: Int) -> List[Expr]:
+    if mode == 5 or mode == 6 or mode == 9 or mode == 10:
+        var value = col("i" if mode == 5 else "a")
+        return [
+            value.sum().alias("sum"),
+            value.count().alias("count"),
+            value.mean().alias("mean"),
+            value.min().alias("min"),
+            value.max().alias("max"),
+        ]
+    if mode == 8:
+        var value = col("a") * col("b")
+        return [value.min().alias("min"), value.max().alias("max")]
+    if mode == 7:
+        var value = col("a") * col("b")
+        return [
+            col("i").min().alias("min"),
+            col("a").max().alias("max"),
+            value.sum().alias("sales"),
+            value.count().alias("count"),
+            value.mean().alias("mean"),
+        ]
     if mode == 0:
         return [col("i").sum().alias("sum")]
     if mode == 1:
@@ -165,6 +246,17 @@ def _expressions(mode: Int) -> List[Expr]:
     ]
 
 
+def _query(frame: DataFrame, mode: Int) raises -> LazyFrame:
+    var offered = frame.lazy()
+    if mode == 9:
+        offered = offered.filter((col("p") > 0) & (col("a") > 0))
+    elif mode == 10:
+        offered = offered.filter((col("p") > 0) | (col("a") > 0))
+    else:
+        offered = offered.filter(col("p") > 0)
+    return offered.select_exprs(_expressions(mode))
+
+
 def main() raises:
     var args = argv()
     var repetitions = Int(String(args[1])) if len(args) > 1 else 5
@@ -184,13 +276,8 @@ def main() raises:
             var base = _table(rows, nulls)
             for chunks in [1, 8]:
                 var frame = _chunks(base, chunks)
-                for mode in range(5):
-                    var expressions = _expressions(mode)
-                    var plan = (
-                        frame.lazy()
-                        .filter(col("p") > 0)
-                        .select_exprs(expressions)
-                    )
+                for mode in range(11):
+                    var plan = _query(frame, mode)
                     print(
                         capture(
                             plan,

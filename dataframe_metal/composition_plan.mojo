@@ -1,7 +1,7 @@
 """Schema-only matching for arithmetic and column aggregates in one region."""
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Expr, LazyFrame, col
-from dataframe.expr import COL, SUM, COUNT, MEAN
+from dataframe.expr import COL, SUM, COUNT, MEAN, MIN, MAX
 from dataframe.lazy import FILTER, SCAN_FRAME, SELECT
 from .filter_plan import FilterSum, plan_region
 from .arithmetic_plan import plan_arithmetic
@@ -55,7 +55,9 @@ def _input_slot(mut names: List[String], name: String) -> Int:
     return slot
 
 
-def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
+def plan_composition(
+    region: LazyFrame, include_native: Bool = False
+) raises -> Optional[Composition]:
     var n = len(region._plan._nodes)
     if n < 2 or region._plan._nodes[0].kind != SCAN_FRAME:
         return None
@@ -67,6 +69,7 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
         len(root.exprs) == 1
         and len(root.exprs[0]._nodes) == 4
         and root.exprs[0]._nodes[3].op == SUM
+        and not include_native
     ):
         return None
     var frame = region._plan._frames[
@@ -83,6 +86,8 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
     var output_names = List[String]()
     var predicate = Optional[FilterSum]()
     var arithmetic = False
+    var extrema = False
+    var ordinary = False
     var precise = False
     for expression in root.exprs:
         var size = len(expression._nodes)
@@ -93,8 +98,14 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
             aggregate.op != SUM
             and aggregate.op != COUNT
             and aggregate.op != MEAN
+            and aggregate.op != MIN
+            and aggregate.op != MAX
         ):
             return None
+        if aggregate.op == MIN or aggregate.op == MAX:
+            extrema = True
+        else:
+            ordinary = True
         if expression._name in output_names:
             return None
         output_names.append(expression._name.copy())
@@ -153,7 +164,7 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
                 return None
             slot = len(fields)
             fields.append(value^)
-        if aggregate.op != COUNT:
+        if aggregate.op == SUM or aggregate.op == MEAN:
             fields[slot].needs_sum = True
         if aggregate.op == MEAN:
             fields[slot].needs_mean = True
@@ -164,7 +175,7 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
                 slot, expression._name.copy(), aggregate.op, aggregate.min_count
             )
         )
-    if not arithmetic:
+    if not arithmetic and not (extrema and ordinary) and not include_native:
         return None
     var single_float = True
     var binary_slot = -1
@@ -174,29 +185,30 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
         if fields[i].op != COL:
             binary_slot = i
             binary_count += 1
-    single_float = single_float and binary_count == 1
-    if precise or single_float:
-        var order = List[Int]()
-        if single_float:
-            order.append(binary_slot)
-            for mean in [True, False]:
-                for i in range(len(fields)):
-                    if i != binary_slot and fields[i].needs_mean == mean:
-                        order.append(i)
-        else:
-            for floating in [True, False]:
-                for i in range(len(fields)):
-                    if (fields[i].dtype == DataType.FLOAT32) == floating:
-                        order.append(i)
-        var packed = List[ValueField]()
-        var remap = List[Int](length=len(fields), fill=0)
-        for i in range(len(order)):
-            packed.append(fields[order[i]].copy())
-            remap[order[i]] = i
-        for i in range(len(outputs)):
-            outputs[i].field = remap[outputs[i].field]
-        _ = fields^
-        fields = packed^
+    single_float = single_float and binary_count == 1 and not extrema
+    var order = List[Int]()
+    if single_float:
+        order.append(binary_slot)
+        for mean in [True, False]:
+            for i in range(len(fields)):
+                if i != binary_slot and fields[i].needs_mean == mean:
+                    order.append(i)
+    else:
+        # Group physical types so the kernel can resolve every value
+        # read and accumulator type at compile time.
+        for dtype in [DataType.FLOAT32, DataType.INT32, DataType.INT64]:
+            for i in range(len(fields)):
+                if fields[i].dtype == dtype:
+                    order.append(i)
+    var packed = List[ValueField]()
+    var remap = List[Int](length=len(fields), fill=0)
+    for i in range(len(order)):
+        packed.append(fields[order[i]].copy())
+        remap[order[i]] = i
+    for i in range(len(outputs)):
+        outputs[i].field = remap[outputs[i].field]
+    _ = fields^
+    fields = packed^
     var inputs = List[String]()
     for i in range(len(fields)):
         if fields[i].literal_side != 1:
@@ -211,7 +223,14 @@ def plan_composition(region: LazyFrame) raises -> Optional[Composition]:
 def composition_key(plan: Composition) -> String:
     # Names do not affect costs; canonical source slots describe reuse.
     var key = (
-        String("composed_reductions:v1:") + plan.predicate.filter_dtype.name()
+        String(
+            "mixed_reductions:v1:" if has_extrema(plan) else (
+                "composed_reductions:v1:" if single_float_composition(
+                    plan
+                ) else "composed_reductions:v2:typed_fields:"
+            )
+        )
+        + plan.predicate.filter_dtype.name()
     )
     key += ":filtered" if plan.predicate.filtered else ":plain"
     var shared = -1
@@ -234,11 +253,28 @@ def composition_key(plan: Composition) -> String:
             + (":sum" if field.needs_sum else ":count")
             + (":mean" if field.needs_mean else "")
         )
+    if has_extrema(plan):
+        for i in range(len(plan.fields)):
+            key += ":ext" + String(i)
+            for op in [MIN, MAX]:
+                for output in plan.outputs:
+                    if output.field == i and output.op == op:
+                        key += ":min" if op == MIN else ":max"
+                        break
     key += ":exact_float" if plan.precise_float else ":native"
     return key + (":single_float_v1" if single_float_composition(plan) else "")
 
 
+def has_extrema(plan: Composition) -> Bool:
+    for output in plan.outputs:
+        if output.op == MIN or output.op == MAX:
+            return True
+    return False
+
+
 def single_float_composition(plan: Composition) -> Bool:
+    if has_extrema(plan):
+        return False
     var arithmetic = 0
     for field in plan.fields:
         if field.dtype != DataType.FLOAT32:

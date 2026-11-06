@@ -654,11 +654,11 @@ def plan_cost_order_joins(
                 estimates.append(plan_relation_estimate(self, relations[r]))
             if estimates[r] < 0:
                 runs.append(r)
-        # A left join's right relation is built whole in every order (no
-        # key set narrows a left join's build side). With no estimate,
-        # when other relations must run anyway, it runs with them, at
-        # once, and is counted: independent pipelines run together, as
-        # `_prefetch_breakers` runs them, not one after another.
+        # A left join's right relation is built whole in every order. With
+        # no estimate, when other relations must run anyway, it runs with
+        # them, at once, and is counted: independent pipelines run
+        # together, as `_prefetch_breakers` runs them, not one after
+        # another.
         if len(runs) > 0:
             for r in range(n):
                 if uncounted & (1 << r) != 0:

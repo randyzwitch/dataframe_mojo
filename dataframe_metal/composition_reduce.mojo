@@ -3,23 +3,36 @@ from std.time import perf_counter_ns
 from std.memory import bitcast
 from std.math import isfinite
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series
-from dataframe.expr import COUNT, MEAN, SUM
+from dataframe.expr import COUNT, MEAN, SUM, MIN, MAX, COL
 from .composition_plan import (
     Composition,
     plan_composition,
     single_float_composition,
+    has_extrema,
 )
 from .exact_float import finish_float_bins
+from .extrema_reduce import extrema_column
+from .predicate_plan import PredicateProgram
+from .accelerator.gpu.compound_predicate import (
+    PREDICATE_HEADER_WORDS,
+    PREDICATE_FIELD_WORDS,
+)
 from .accelerator.faults import data_fault
-from .accelerator.gpu.erased_input import NumericView, numeric_views
+from .accelerator.gpu.erased_input import (
+    NumericView,
+    numeric_views,
+    single_native_span,
+)
 from .accelerator.gpu.typed_storage import NativeColumnAny
 from .accelerator.gpu.composed_reduce import (
     composed_partials,
+    mixed_partials,
     META_WORDS,
     HEADER_WORDS,
     FIELD_WORDS,
 )
 from .accelerator.gpu.float_composed_reduce import float_composed_partials
+from .accelerator.gpu.native_float_mixed import native_float_mixed_partials
 from .accelerator.gpu.filter_sum import BLOCK_SIZE
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
@@ -30,23 +43,54 @@ from .accelerator.gpu.query_scope import Scope, shared_service
 from .accelerator.gpu.target import METAL_TARGET
 
 
-def _run[
-    precise: Bool, wide: Bool, arity: Int, float_fields: Int, fast: Bool
+@fieldwise_init
+struct ComposedScan(Movable):
+    var integers: List[Int128]
+    var floating: List[Float64]
+    var counts: List[Int]
+    # Four native words per field: minimum, maximum, numeric count, flags.
+    var extrema: List[Int64]
+
+
+def _scan[
+    precise: Bool,
+    wide: Bool,
+    arity: Int,
+    float_fields: Int,
+    fast: Bool,
+    int32_fields: Int,
+    native_predicate: Int = -1,
+    mixed: Bool = False,
+    native_mixed: Bool = False,
+    compound: Bool = False,
 ](
     bundle: Composition,
     frame: DataFrame,
     scope: Scope,
     zero_copy: Bool,
     mut timings: HandoffTimings,
-) raises -> Tuple[List[Int128], List[Float64], List[Int]]:
+    program: Optional[PredicateProgram] = None,
+) raises -> ComposedScan:
+    comptime assert not native_mixed or (
+        mixed and arity == 1 and float_fields == 1 and not fast and not compound
+    )
     comptime FIRST_BIN = 0 if wide else 3
     comptime BIN_COUNT = 9 if wide else 3
     var nf = arity
     var integers = List[Int128](length=nf, fill=0)
     var floating = List[Float64](length=nf, fill=0)
     var counts_out = List[Int](length=nf, fill=0)
+    var extrema_out = List[Int64](length=nf * 4 if mixed else 0, fill=0)
+    var extrema_fields = UInt32(0)
+    comptime if mixed:
+        for output in bundle.outputs:
+            if output.op == MIN or output.op == MAX:
+                extrema_fields |= UInt32(1) << UInt32(output.field)
+        for field in range(nf):
+            extrema_out[field * 4] = Int64.MAX
+            extrema_out[field * 4 + 1] = Int64.MIN
     if frame.height() == 0:
-        return (integers^, floating^, counts_out^)
+        return ComposedScan(integers^, floating^, counts_out^, extrema_out^)
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
@@ -57,44 +101,73 @@ def _run[
         # Byte views retain device buffers; typed owners additionally retain
         # the query's checked allocation reservations until completion.
         var owners = List[NativeColumnAny]()
+        var names = bundle.inputs.copy()
+        if bundle.predicate.filter_column not in names:
+            names.append(bundle.predicate.filter_column.copy())
+        var batched = zero_copy
+        var fragmented = False
+        if batched:
+            for name in names:
+                var source = frame.column(name)
+                fragmented = fragmented or source.is_chunked()
+                if not single_native_span(source):
+                    batched = False
+                    break
+        batched = batched and fragmented
         var predicate_input = -1
-        for name in bundle.inputs:
-            inputs.append(
-                numeric_views(frame, name, scope, zero_copy, empty, owners)
-            )
-            if name == bundle.predicate.filter_column:
-                predicate_input = len(inputs) - 1
-        if predicate_input < 0:
-            predicate_input = len(inputs)
+        for name in names:
             inputs.append(
                 numeric_views(
                     frame,
-                    bundle.predicate.filter_column,
+                    name,
                     scope,
                     zero_copy,
                     empty,
                     owners,
+                    coalesce=batched,
                 )
             )
+            if name == bundle.predicate.filter_column:
+                predicate_input = len(inputs) - 1
+        var lengths = List[List[Int]]()
+        for i in range(len(inputs)):
+            var sizes = List[Int]()
+            if batched:
+                for part in frame.column(names[i]).chunks():
+                    if len(part):
+                        sizes.append(len(part))
+            else:
+                for part in inputs[i]:
+                    sizes.append(part.rows)
+            lengths.append(sizes^)
         var positions = List[Int](length=len(inputs), fill=0)
         var offsets = List[Int](length=len(inputs), fill=0)
         var segments = List[List[NumericView]]()
+        var starts = List[Int]()
         var consumed = 0
         while consumed < frame.height():
             var length = frame.height() - consumed
             for i in range(len(inputs)):
-                if positions[i] >= len(inputs[i]):
+                if positions[i] >= len(lengths[i]):
                     raise Error(
                         "Metal reduction columns have different lengths"
                     )
-                length = min(length, inputs[i][positions[i]].rows - offsets[i])
+                length = min(length, lengths[i][positions[i]] - offsets[i])
             var segment = List[NumericView]()
             for i in range(len(inputs)):
-                segment.append(inputs[i][positions[i]].view(offsets[i], length))
+                if batched:
+                    var value = inputs[i][0].copy()
+                    value.rows = length
+                    segment.append(value^)
+                else:
+                    segment.append(
+                        inputs[i][positions[i]].view(offsets[i], length)
+                    )
                 offsets[i] += length
-                if offsets[i] == inputs[i][positions[i]].rows:
+                if offsets[i] == lengths[i][positions[i]]:
                     positions[i] += 1
                     offsets[i] = 0
+            starts.append(consumed)
             segments.append(segment^)
             consumed += length
         timings.upload_ns = Int(perf_counter_ns()) - started
@@ -103,7 +176,9 @@ def _run[
         for segment in segments:
             total_parts += _chunk_partials(segment[0].rows, frame.height())
         var size = total_parts * nf
-        var high = ctx.enqueue_create_buffer[DType.int64](size)
+        var high = ctx.enqueue_create_buffer[DType.int64](
+            size * (5 if mixed else 1)
+        )
         var low = ctx.enqueue_create_buffer[DType.uint64](size)
         var sums = ctx.enqueue_create_buffer[DType.float32](size)
         var compensation = ctx.enqueue_create_buffer[DType.float32](size)
@@ -114,7 +189,7 @@ def _run[
         var specials = ctx.enqueue_create_buffer[DType.uint32](
             size * 6 if precise else 1
         )
-        var hp = List[Int64](length=size, fill=0)
+        var hp = List[Int64](length=size * (5 if mixed else 1), fill=0)
         var lp = List[UInt64](length=size, fill=0)
         var sp = List[Float32](length=size, fill=0)
         var cp = List[Float32](length=size, fill=0)
@@ -125,11 +200,23 @@ def _run[
         var fp = List[UInt32](length=total_parts, fill=0)
         # One immutable metadata block per intersected chunk segment. Its host
         # source and device root stay alive until the final queue drain.
-        var words = List[UInt64](length=len(segments) * META_WORDS, fill=0)
+        var prefix = 2 if batched else 0
+        var base_words = prefix + len(segments) * META_WORDS
+        var predicate_words = 0
+        comptime if compound:
+            predicate_words = (
+                PREDICATE_HEADER_WORDS
+                + len(program.value().clauses) * PREDICATE_FIELD_WORDS
+            )
+        var words = List[UInt64](
+            length=base_words + len(segments) * predicate_words, fill=0
+        )
+        if batched:
+            words[0] = UInt64(len(segments))
         var output_offset = 0
         for index in range(len(segments)):
             ref segment = segments[index]
-            var at = index * META_WORDS
+            var at = prefix + index * META_WORDS
             var predicate = segment[predicate_input].copy()
             var partials = _chunk_partials(segment[0].rows, frame.height())
             words[at] = UInt64(segment[0].rows)
@@ -138,7 +225,9 @@ def _run[
             words[at + 4] = UInt64(predicate.tag)
             words[at + 5] = UInt64(predicate.bit_offset)
             words[at + 6] = UInt64(predicate.nullable)
-            words[at + 7] = UInt64(bundle.predicate.filtered)
+            words[at + 7] = UInt64(
+                False if compound else bundle.predicate.filtered
+            )
             words[at + 8] = UInt64(bundle.predicate.inclusive)
             words[at + 9] = bitcast[DType.uint64](bundle.predicate.low)
             words[at + 10] = bitcast[DType.uint64](bundle.predicate.high)
@@ -148,7 +237,9 @@ def _run[
             words[at + 12] = UInt64(
                 bitcast[DType.uint32](bundle.predicate.high_float)
             )
-            words[at + 13] = UInt64(len(bundle.inputs))
+            words[at + 13] = UInt64(starts[index]) if batched else UInt64(
+                len(bundle.inputs)
+            )
             words[at + 15] = UInt64(
                 predicate_input + 1 if predicate_input
                 < len(bundle.inputs) else 0
@@ -177,6 +268,44 @@ def _run[
                 words[base + 7] = UInt64(
                     bitcast[DType.uint32](value.floating)
                 ) if tag == 2 else bitcast[DType.uint64](value.integer)
+            comptime if mixed:
+                # One packed tail avoids extra Metal buffer arguments.
+                words[at + 3] = UInt64(size)
+                for output in bundle.outputs:
+                    if output.op == MIN or output.op == MAX:
+                        words[at + 14] |= UInt64(1) << UInt64(
+                            output.field + (4 if output.op == MIN else 8)
+                        )
+            comptime if compound:
+                ref compiled = program.value()
+                var program_at = base_words + index * predicate_words
+                words[at + 3] = UInt64(size if mixed else 0) | (
+                    UInt64(program_at) << 32
+                )
+                words[program_at] = UInt64(len(compiled.clauses))
+                for i in range(8):
+                    words[program_at + 1 + i] = UInt64(compiled.truth[i])
+                for i in range(len(compiled.clauses)):
+                    ref clause = compiled.clauses[i]
+                    var slot = compiled.slots[i]
+                    ref input = segment[slot]
+                    var base = (
+                        program_at
+                        + PREDICATE_HEADER_WORDS
+                        + i * PREDICATE_FIELD_WORDS
+                    )
+                    words[base] = UInt64(slot)
+                    words[base + 1] = (
+                        UInt64(input.bit_offset)
+                        | (UInt64(input.nullable) << 32)
+                        | (UInt64(input.tag) << 33)
+                    )
+                    words[base + 2] = bitcast[DType.uint64](clause.low)
+                    words[base + 3] = bitcast[DType.uint64](clause.high)
+                    words[base + 4] = UInt64(
+                        bitcast[DType.uint32](clause.low_float)
+                    ) | (UInt64(bitcast[DType.uint32](clause.high_float)) << 32)
+                    words[base + 5] = UInt64(clause.inclusive)
             output_offset += partials
         var metadata = ctx.enqueue_create_buffer[DType.uint64](len(words))
         try:
@@ -186,7 +315,7 @@ def _run[
             comptime if precise:
                 ctx.enqueue_memset(bins, Int64(0))
                 ctx.enqueue_memset(specials, UInt32(0))
-            for index in range(len(segments)):
+            for index in range(1 if batched else len(segments)):
                 ref segment = segments[index]
                 var values = List[NumericView]()
                 for i in range(8):
@@ -199,44 +328,117 @@ def _run[
                             )
                         )
                 var predicate = segment[predicate_input].copy()
-                var partials = _chunk_partials(segment[0].rows, frame.height())
-                comptime kernel = float_composed_partials[
-                    wide, arity, float_fields
-                ] if fast else composed_partials[
-                    precise, wide, arity, float_fields
-                ]
-                ctx.enqueue_function[kernel](
-                    values[0].values,
-                    values[1].values,
-                    values[2].values,
-                    values[3].values,
-                    values[4].values,
-                    values[5].values,
-                    values[6].values,
-                    values[7].values,
-                    values[0].bits,
-                    values[1].bits,
-                    values[2].bits,
-                    values[3].bits,
-                    values[4].bits,
-                    values[5].bits,
-                    values[6].bits,
-                    values[7].bits,
-                    predicate.values,
-                    predicate.bits,
-                    metadata,
-                    UInt32(index * META_WORDS),
-                    high,
-                    low,
-                    sums,
-                    compensation,
-                    counts,
-                    bins,
-                    specials,
-                    faults,
-                    grid_dim=partials,
-                    block_dim=BLOCK_SIZE,
+                var partials = total_parts if batched else _chunk_partials(
+                    segment[0].rows, frame.height()
                 )
+                comptime kernel_batched = native_float_mixed_partials[
+                    precise, wide, batched=True
+                ] if native_mixed else mixed_partials[
+                    precise,
+                    wide,
+                    arity,
+                    float_fields,
+                    int32_fields,
+                    batched=True,
+                    compound=compound,
+                ] if mixed else float_composed_partials[
+                    wide, arity, float_fields, native_predicate, batched=True
+                ] if fast and not compound else composed_partials[
+                    precise,
+                    wide,
+                    arity,
+                    float_fields,
+                    int32_fields,
+                    batched=True,
+                    compound=compound,
+                ]
+                comptime kernel_separate = native_float_mixed_partials[
+                    precise, wide, batched=False
+                ] if native_mixed else mixed_partials[
+                    precise,
+                    wide,
+                    arity,
+                    float_fields,
+                    int32_fields,
+                    batched=False,
+                    compound=compound,
+                ] if mixed else float_composed_partials[
+                    wide, arity, float_fields, native_predicate, batched=False
+                ] if fast and not compound else composed_partials[
+                    precise,
+                    wide,
+                    arity,
+                    float_fields,
+                    int32_fields,
+                    batched=False,
+                    compound=compound,
+                ]
+                if batched:
+                    ctx.enqueue_function[kernel_batched](
+                        values[0].values,
+                        values[1].values,
+                        values[2].values,
+                        values[3].values,
+                        values[4].values,
+                        values[5].values,
+                        values[6].values,
+                        values[7].values,
+                        values[0].bits,
+                        values[1].bits,
+                        values[2].bits,
+                        values[3].bits,
+                        values[4].bits,
+                        values[5].bits,
+                        values[6].bits,
+                        values[7].bits,
+                        predicate.values,
+                        predicate.bits,
+                        metadata,
+                        UInt32.MAX if batched else UInt32(index * META_WORDS),
+                        high,
+                        low,
+                        sums,
+                        compensation,
+                        counts,
+                        bins,
+                        specials,
+                        faults,
+                        grid_dim=partials,
+                        block_dim=BLOCK_SIZE,
+                    )
+                else:
+                    ctx.enqueue_function[kernel_separate](
+                        values[0].values,
+                        values[1].values,
+                        values[2].values,
+                        values[3].values,
+                        values[4].values,
+                        values[5].values,
+                        values[6].values,
+                        values[7].values,
+                        values[0].bits,
+                        values[1].bits,
+                        values[2].bits,
+                        values[3].bits,
+                        values[4].bits,
+                        values[5].bits,
+                        values[6].bits,
+                        values[7].bits,
+                        predicate.values,
+                        predicate.bits,
+                        metadata,
+                        UInt32.MAX if batched else UInt32(index * META_WORDS),
+                        high,
+                        low,
+                        sums,
+                        compensation,
+                        counts,
+                        bins,
+                        specials,
+                        faults,
+                        grid_dim=partials,
+                        block_dim=BLOCK_SIZE,
+                    )
                 scope.record_launches(1)
             ctx.enqueue_copy(fp.unsafe_ptr(), faults)
             ctx.enqueue_copy(hp.unsafe_ptr(), high)
@@ -331,8 +533,55 @@ def _run[
                         raise data_fault(
                             "float32 mean needs CPU accumulation order"
                         )
+        comptime if mixed:
+            for field in range(nf):
+                if not (extrema_fields & (UInt32(1) << UInt32(field))):
+                    continue
+                for part in range(total_parts):
+                    var at = size + (part * nf + field) * 4
+                    if hp[at + 2]:
+                        extrema_out[field * 4] = min(
+                            extrema_out[field * 4], hp[at]
+                        )
+                        extrema_out[field * 4 + 1] = max(
+                            extrema_out[field * 4 + 1], hp[at + 1]
+                        )
+                    extrema_out[field * 4 + 2] += hp[at + 2]
+                    extrema_out[field * 4 + 3] |= hp[at + 3]
         timings.finish_ns = Int(perf_counter_ns()) - started
-        return (integers^, floating^, counts_out^)
+        return ComposedScan(integers^, floating^, counts_out^, extrema_out^)
+
+
+def _run[
+    precise: Bool,
+    wide: Bool,
+    arity: Int,
+    float_fields: Int,
+    fast: Bool,
+    int32_fields: Int,
+    native_predicate: Int = -1,
+](
+    bundle: Composition,
+    frame: DataFrame,
+    scope: Scope,
+    zero_copy: Bool,
+    mut timings: HandoffTimings,
+) raises -> Tuple[List[Int128], List[Float64], List[Int]]:
+    var result = _scan[
+        precise,
+        wide,
+        arity,
+        float_fields,
+        fast,
+        int32_fields,
+        native_predicate,
+        False,
+    ](bundle, frame, scope, zero_copy, timings)
+    return (
+        result.integers.copy(),
+        result.floating.copy(),
+        result.counts.copy(),
+    )
 
 
 def _partial_float(s: Float32, c: Float32) raises -> Float64:
@@ -356,9 +605,23 @@ def _float_arity[
             exact_fields += Int(bundle.fields[i].needs_mean)
     comptime for n in range(arity + 1):
         if exact_fields == n:
-            return _run[n > 0, wide, arity, n, True](
-                bundle, frame, scope, zero_copy, timings
-            )
+            comptime if n == 0:
+                if bundle.predicate.filter_dtype == DataType.INT32:
+                    return _run[False, wide, arity, 0, True, 0, 0](
+                        bundle, frame, scope, zero_copy, timings
+                    )
+                elif bundle.predicate.filter_dtype == DataType.INT64:
+                    return _run[False, wide, arity, 0, True, 0, 1](
+                        bundle, frame, scope, zero_copy, timings
+                    )
+                return _run[False, wide, arity, 0, True, 0, 2](
+                    bundle, frame, scope, zero_copy, timings
+                )
+            else:
+                # Preserve the original exact-mean scan and its register state.
+                return _run[True, wide, arity, n, True, 0](
+                    bundle, frame, scope, zero_copy, timings
+                )
     raise Error("Metal compact float prefix exceeds its field count")
 
 
@@ -371,20 +634,19 @@ def _by_arity[
     zero_copy: Bool,
     mut timings: HandoffTimings,
 ) raises -> Tuple[List[Int128], List[Float64], List[Int]]:
-    comptime if not precise:
-        return _run[False, wide, arity, 0, False](
-            bundle, frame, scope, zero_copy, timings
-        )
-    else:
-        var floats = 0
-        for field in bundle.fields:
-            floats += Int(field.dtype == DataType.FLOAT32)
-        comptime for n in range(1, arity + 1):
-            if floats == n:
-                return _run[True, wide, arity, n, False](
-                    bundle, frame, scope, zero_copy, timings
-                )
-        raise Error("Metal exact-bin fields are not a nonempty float prefix")
+    var floats = 0
+    var int32s = 0
+    for field in bundle.fields:
+        floats += Int(field.dtype == DataType.FLOAT32)
+        int32s += Int(field.dtype == DataType.INT32)
+    comptime for n in range(arity + 1):
+        comptime if not precise or n > 0:
+            comptime for narrow in range(arity - n + 1):
+                if floats == n and int32s == narrow:
+                    return _run[precise, wide, arity, n, False, narrow](
+                        bundle, frame, scope, zero_copy, timings
+                    )
+    raise Error("Metal composed field types exceed their arity")
 
 
 def _dispatch[
@@ -425,6 +687,54 @@ def _dispatch[
     return _by_arity[precise, wide, 4](bundle, frame, scope, zero_copy, timings)
 
 
+def _mixed_dispatch[
+    precise: Bool, wide: Bool, mixed: Bool = True, compound: Bool = False
+](
+    bundle: Composition,
+    frame: DataFrame,
+    scope: Scope,
+    zero_copy: Bool,
+    mut timings: HandoffTimings,
+    program: Optional[PredicateProgram] = None,
+) raises -> ComposedScan:
+    comptime if mixed and not compound:
+        if (
+            len(bundle.fields) == 1
+            and bundle.fields[0].dtype == DataType.FLOAT32
+            and bundle.fields[0].op == COL
+            and len(bundle.inputs) == 1
+            and bundle.fields[0].left_input == 0
+        ):
+            return _scan[
+                precise, wide, 1, 1, False, 0, mixed=True, native_mixed=True
+            ](bundle, frame, scope, zero_copy, timings)
+    var floats = 0
+    var int32s = 0
+    for field in bundle.fields:
+        floats += Int(field.dtype == DataType.FLOAT32)
+        int32s += Int(field.dtype == DataType.INT32)
+    comptime for arity in range(1, 5):
+        comptime for n in range(arity + 1):
+            comptime if not precise or n > 0:
+                comptime for narrow in range(arity - n + 1):
+                    if (
+                        len(bundle.fields) == arity
+                        and floats == n
+                        and int32s == narrow
+                    ):
+                        return _scan[
+                            precise,
+                            wide,
+                            arity,
+                            n,
+                            False,
+                            narrow,
+                            mixed=mixed,
+                            compound=compound,
+                        ](bundle, frame, scope, zero_copy, timings, program)
+    raise Error("Metal mixed field types exceed their arity")
+
+
 def execute_composition(
     region: LazyFrame, zero_copy: Bool
 ) raises -> Tuple[DataFrame, HandoffTimings]:
@@ -445,7 +755,31 @@ def execute_composition(
     _ = scope.context()
     timings.context_ns = Int(perf_counter_ns()) - started
     var result: Tuple[List[Int128], List[Float64], List[Int]]
-    if bundle.precise_float:
+    var extrema = List[Int64]()
+    if has_extrema(bundle):
+        var scan: ComposedScan
+        if bundle.precise_float:
+            try:
+                scan = _mixed_dispatch[True, False](
+                    bundle, frame, scope, zero_copy, timings
+                )
+            except error:
+                if String(error) != "Metal exact bins need wide scan":
+                    raise error^
+                scan = _mixed_dispatch[True, True](
+                    bundle, frame, scope, zero_copy, timings
+                )
+        else:
+            scan = _mixed_dispatch[False, False](
+                bundle, frame, scope, zero_copy, timings
+            )
+        extrema = scan.extrema.copy()
+        result = (
+            scan.integers.copy(),
+            scan.floating.copy(),
+            scan.counts.copy(),
+        )
+    elif bundle.precise_float:
         try:
             result = _dispatch[True, False](
                 bundle, frame, scope, zero_copy, timings
@@ -460,12 +794,34 @@ def execute_composition(
         result = _dispatch[False, False](
             bundle, frame, scope, zero_copy, timings
         )
+    var answer = finish_composition(bundle, result, extrema)
+    scope.mark_success()
+    return (answer^, timings^)
+
+
+def finish_composition(
+    bundle: Composition,
+    result: Tuple[List[Int128], List[Float64], List[Int]],
+    extrema: List[Int64],
+) raises -> DataFrame:
     var columns = List[Series]()
     for output in bundle.outputs:
         var field = output.field
         var count = result[2][field]
         var dtype = bundle.fields[field].dtype
-        if output.op == COUNT:
+        if output.op == MIN or output.op == MAX:
+            var valid = extrema[field * 4 + 2] != 0
+            var value = extrema[field * 4 + (0 if output.op == MIN else 1)]
+            columns.append(
+                extrema_column(
+                    output.name.copy(),
+                    dtype,
+                    value,
+                    valid,
+                    UInt32(extrema[field * 4 + 3]),
+                )
+            )
+        elif output.op == COUNT:
             columns.append(Series(output.name, Column[Int64]([Int64(count)])))
         elif output.op == MEAN:
             var total = (
@@ -516,5 +872,4 @@ def execute_composition(
                         ),
                     )
                 )
-    scope.mark_success()
-    return (DataFrame(columns^), timings^)
+    return DataFrame(columns^)

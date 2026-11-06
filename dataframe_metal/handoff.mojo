@@ -19,7 +19,7 @@ from dataframe.storage.column import Column
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
 from dataframe.lazy import LazyFrame
-from .calibration import shape_key, measured_cost
+from .calibration import shape_key, measured_costs
 from dataframe.series import Series
 from .filter_plan import FilterSum, plan_region
 from .region_plan import normalize_region
@@ -30,6 +30,10 @@ from .arithmetic_plan import plan_arithmetic, arithmetic_key
 from .arithmetic_sum import execute_arithmetic
 from .composition_plan import plan_composition, composition_key
 from .composition_reduce import execute_composition
+from .extrema_plan import plan_extrema, extrema_key
+from .extrema_reduce import execute_extrema
+from .predicate_plan import plan_predicates, predicate_key
+from .predicate_reduce import execute_predicates
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
     _place_chunks,
@@ -66,6 +70,8 @@ def supports(region: LazyFrame) -> Bool:
             or Bool(plan_bundle(selected))
             or Bool(plan_arithmetic(selected))
             or Bool(plan_composition(selected))
+            or Bool(plan_extrema(selected))
+            or Bool(plan_predicates(selected))
         )
     except:
         return False
@@ -101,24 +107,37 @@ def region_key(region: LazyFrame) raises -> String:
     var composed = plan_composition(region)
     if composed:
         return composition_key(composed.value())
+    var extrema = plan_extrema(region)
+    if extrema:
+        return extrema_key(extrema.value())
+    var predicates = plan_predicates(region)
+    if predicates:
+        return predicate_key(predicates.value())
     return String()
 
 
-def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
+def estimate_costs(
+    region: LazyFrame, rows: Int
+) -> Tuple[String, Float64, Float64]:
     """Measured Metal cost only for this build, host, threads and layout."""
     try:
         var normalized = normalize_region(region)
         if not normalized:
-            return (String(), Float64(-1))
+            return (String(), Float64(-1), Float64(-1))
         var selected = normalized.take()
         var operator = region_key(selected)
         if not operator:
-            return (String(), Float64(-1))
+            return (String(), Float64(-1), Float64(-1))
         var key = shape_key(selected, operator)
-        var cost = measured_cost(key, rows)
-        return (key^, cost)
+        var costs = measured_costs(key, rows)
+        return (key^, costs[0], costs[1])
     except:
-        return (String(), Float64(-1))
+        return (String(), Float64(-1), Float64(-1))
+
+
+def estimate(region: LazyFrame, rows: Int) -> Tuple[String, Float64]:
+    var costs = estimate_costs(region, rows)
+    return (costs[0].copy(), costs[2])
 
 
 def _enqueue_integer[
@@ -497,10 +516,16 @@ def _execute_on_device(
 ) raises -> Tuple[DataFrame, HandoffTimings]:
     var accepted = plan_region(region)
     if not accepted:
+        if plan_extrema(region):
+            return execute_extrema(region, zero_copy)
         if plan_bundle(region):
             return execute_bundle(region, zero_copy)
         if plan_arithmetic(region):
             return execute_arithmetic(region, zero_copy)
+        if plan_composition(region):
+            return execute_composition(region, zero_copy)
+        if plan_predicates(region):
+            return execute_predicates(region, zero_copy)
         return execute_composition(region, zero_copy)
     var plan = accepted.take()
     var timings = HandoffTimings()

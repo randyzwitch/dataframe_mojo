@@ -5,7 +5,7 @@ inlined. Filters must already precede their evaluation; unused or dependent
 with-columns work is declined so errors cannot be pruned by GPU fusion.
 """
 from dataframe import Expr, LazyFrame
-from dataframe.expr import COL, ADD, SUB, MUL, SUM, COUNT, MEAN
+from dataframe.expr import COL, ADD, SUB, MUL, SUM, COUNT, MEAN, MIN, MAX
 from dataframe.lazy import SCAN_FRAME, FILTER, WITH_COLUMNS, SELECT
 
 
@@ -71,6 +71,8 @@ def normalize_region(region: LazyFrame) raises -> Optional[LazyFrame]:
             aggregate.op != SUM
             and aggregate.op != COUNT
             and aggregate.op != MEAN
+            and aggregate.op != MIN
+            and aggregate.op != MAX
         ):
             return None
         var expanded = definitions[slot].copy()

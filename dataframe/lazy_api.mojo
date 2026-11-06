@@ -1,4 +1,5 @@
 """Public lazy query construction and backend dispatch."""
+from std.math import isfinite
 from dataframe.aggregation.expressions import count_rows_by
 from dataframe.io.file_sources import has_pattern, resolve_paths
 from dataframe.io.dataset_options import DatasetOptions, DatasetSpec
@@ -47,6 +48,7 @@ from dataframe._accel_provider import (
     transfer_model as _accel_transfer_model,
     pipeline_supports as _accel_pipeline_supports,
     pipeline_estimate as _accel_pipeline_estimate,
+    pipeline_costs as _accel_pipeline_costs,
     run_pipeline as _accel_run_pipeline,
 )
 from dataframe.planning.device_placement import (
@@ -2537,6 +2539,12 @@ trait AcceleratorBackend(Copyable):
     ) -> Float64:
         return Float64(-1)
 
+    def pipeline_costs(
+        self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
+    ) -> Tuple[Float64, Float64]:
+        """Matched CPU/device costs; -1 CPU keeps the generic calibration."""
+        return (Float64(-1), self.pipeline_estimate(pipeline, device, features))
+
     def run_pipeline(
         self, pipeline: LazyFrame, device: Int
     ) raises -> DataFrame:
@@ -2575,6 +2583,11 @@ struct _RegisteredProvider(AcceleratorBackend):
         self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
     ) -> Float64:
         return _accel_pipeline_estimate(pipeline, device, features)
+
+    def pipeline_costs(
+        self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
+    ) -> Tuple[Float64, Float64]:
+        return _accel_pipeline_costs(pipeline, device, features)
 
     def run_pipeline(
         self, pipeline: LazyFrame, device: Int
@@ -2659,13 +2672,23 @@ def _solve_devices[
                 _PLACE_CPU
             ] = cpu.value().fixed_ns + cpu.value().row_ns * Float64(rows)
         var region = _from_context(unit.region.copy())
+        var matched_cpu = Float64(-1)
         for d in range(len(devices)):
             if problem.run_ns[p][_PLACE_CPU] < 0:
                 continue
             if supported[p][d]:
-                problem.run_ns[p][d + 1] = backend.pipeline_estimate(
+                var costs = backend.pipeline_costs(
                     region, devices[d].ordinal, unit.features
                 )
+                problem.run_ns[p][d + 1] = costs[1] if isfinite(
+                    costs[1]
+                ) and costs[1] >= 0 else Float64(-1)
+                if costs[0] >= 0 and isfinite(costs[0]):
+                    matched_cpu = costs[0] if matched_cpu < 0 else min(
+                        matched_cpu, costs[0]
+                    )
+        if matched_cpu >= 0:
+            problem.run_ns[p][_PLACE_CPU] = matched_cpu
     var placement = solve_placement(problem)
     return _DevicePlacement(devices^, units^, problem^, placement^)
 
@@ -2808,11 +2831,21 @@ def _decide_at_start[
             _PLACE_CPU
         ] = cpu.value().fixed_ns + cpu.value().row_ns * Float64(rows)
         var lazy = _from_context(region.copy())
+        var matched_cpu = Float64(-1)
         for d in range(len(devices)):
             if backend.pipeline_supports(lazy, devices[d].ordinal):
-                problem.run_ns[p][d + 1] = backend.pipeline_estimate(
+                var costs = backend.pipeline_costs(
                     lazy, devices[d].ordinal, features
                 )
+                problem.run_ns[p][d + 1] = costs[1] if isfinite(
+                    costs[1]
+                ) and costs[1] >= 0 else Float64(-1)
+                if costs[0] >= 0 and isfinite(costs[0]):
+                    matched_cpu = costs[0] if matched_cpu < 0 else min(
+                        matched_cpu, costs[0]
+                    )
+        if matched_cpu >= 0:
+            problem.run_ns[p][_PLACE_CPU] = matched_cpu
     return solve_placement(problem)
 
 
