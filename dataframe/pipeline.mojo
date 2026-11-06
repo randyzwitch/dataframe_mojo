@@ -4178,7 +4178,7 @@ def _run_pipeline(
     var layout = List[AggregateLayout]()
     var template = List[_StreamReduction]()
     var set_empty = List[DataFrame]()
-    if table and len(keys) > 0 and len(expressions) > 0 and not ordered:
+    if table and len(keys) > 0 and len(expressions) > 0:
         var empty = schemas[][len(steps)].copy()
         if len(sets) > 0 and table_supported(empty, keys, expressions):
             set_empty.append(empty.copy())
@@ -4551,7 +4551,18 @@ def _run_pipeline(
         var finished: DataFrame
         if len(finish_steps) == 0:
             var result = aggregate_finish(sinks, layout[0])
-            finished = table_frame(template[0], result^, False)
+            finished = table_frame(template[0], result^, ordered)
+        elif ordered:
+            # The groups in first-occurrence order (each group row's first
+            # sequence number), then the steps over them.
+            var result = aggregate_finish(sinks, layout[0])
+            finished = _steps_over_frame(
+                table_frame(template[0], result^, True),
+                finish_steps,
+                joins,
+                indexes,
+                finish_counts,
+            )
         else:
             # A first step filtering on the reductions' outputs alone runs
             # in the finish, before the groups are read out (DuckDB runs
