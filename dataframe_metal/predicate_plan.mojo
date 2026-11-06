@@ -114,6 +114,10 @@ def plan_predicates(region: LazyFrame) raises -> Optional[PredicateComposition]:
     var n = len(region._plan._nodes)
     if n < 3 or region._plan._nodes[0].kind != SCAN_FRAME:
         return None
+    # Existing compositions already have their own specialized scan. Keep
+    # their execution route aligned with their unchanged calibration key.
+    if plan_composition(region):
+        return None
     ref root = region._plan._nodes[n - 1]
     if root.kind != SELECT or root.left != n - 2:
         return None

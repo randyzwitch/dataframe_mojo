@@ -81,6 +81,15 @@ def test_compound_predicate_schema_range_folding_clause_and_binding_limits() rai
     columns.append(Series("p", Column[Int64]([1, 2, 3])))
     columns.append(Series("q", Column[Float32]([1, 2, 3])))
     var frame = DataFrame(columns^)
+    var legacy = (
+        frame.lazy()
+        .filter(col("p") > 0)
+        .select_exprs(
+            [col("q").min().alias("lo"), col("q").mean().alias("avg")]
+        )
+    )
+    assert_false(Bool(plan_predicates(legacy)))
+    assert_true(region_key(legacy).startswith("mixed_reductions:v1:"))
     var expressions = List[Expr]()
     for i in range(4):
         expressions.append(

@@ -522,6 +522,8 @@ def _execute_on_device(
             return execute_bundle(region, zero_copy)
         if plan_arithmetic(region):
             return execute_arithmetic(region, zero_copy)
+        if plan_composition(region):
+            return execute_composition(region, zero_copy)
         if plan_predicates(region):
             return execute_predicates(region, zero_copy)
         return execute_composition(region, zero_copy)
