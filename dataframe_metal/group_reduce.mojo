@@ -76,15 +76,25 @@ def _scan_grouped[
             inputs.append(mapped[0].copy())
             if name == bundle.predicate.filter_column:
                 predicate_input = len(inputs) - 1
-        var mapped_keys = numeric_views(
-            frame,
-            plan.key,
-            scope,
-            zero_copy and single_native_span(frame.column(plan.key)),
-            empty,
-            owners,
-            coalesce=True,
-        )
+        var key_input = -1
+        for i in range(len(names)):
+            if names[i] == plan.key:
+                key_input = i
+        var mapped_keys = List[NumericView]()
+        if key_input >= 0:
+            # The key may also be a value or predicate input. Reuse its
+            # mapping, upload and byte reservation instead of charging twice.
+            mapped_keys.append(inputs[key_input].copy())
+        else:
+            mapped_keys = numeric_views(
+                frame,
+                plan.key,
+                scope,
+                zero_copy and single_native_span(frame.column(plan.key)),
+                empty,
+                owners,
+                coalesce=True,
+            )
         if len(mapped_keys) != 1:
             raise Error("Metal grouped key did not form one native span")
         var keys = mapped_keys[0].copy()
