@@ -4,7 +4,7 @@ Metadata contains only scalar values and input-slot indices. Device pointers
 are real buffer arguments selected once before scanning, never CPU address
 integers or a per-row expression-tree interpreter.
 """
-from .float_predicate import float_in_range
+from .float_predicate import float_in_range, _ordered
 from std.memory import Pointer, bitcast
 from std.utils.static_tuple import StaticTuple
 from max.gpu import global_idx, thread_idx, block_idx
@@ -160,13 +160,15 @@ def int_value(
     return integer_binary(a, b, op, tag)
 
 
-def composed_partials[
+@always_inline
+def _composed_scan[
     precise: Bool,
     wide: Bool,
     arity: Int,
     float_fields: Int,
     int32_fields: Int,
-    batched: Bool = False,
+    batched: Bool,
+    with_extrema: Bool,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -196,6 +198,7 @@ def composed_partials[
     bins: Pointer[Int64, MutUntrackedOrigin],
     specials: Pointer[UInt32, MutUntrackedOrigin],
     faults: Pointer[UInt32, MutUntrackedOrigin],
+    extrema: Pointer[Int64, MutUntrackedOrigin],
 ):
     comptime assert 1 <= arity and arity <= 4
     comptime assert float_fields >= 0 and int32_fields >= 0
@@ -275,6 +278,11 @@ def composed_partials[
     var fc = SIMD[DType.float32, 4](0)
     var nc = SIMD[DType.uint32, 4](0)
     var exact = ExactFloatState[wide, max(1, float_fields)]()
+    var ext_lo = SIMD[DType.int64, 4](Int64.MAX)
+    var ext_hi = SIMD[DType.int64, 4](Int64.MIN)
+    var ext_count = SIMD[DType.uint32, 4](0)
+    var ext_special = SIMD[DType.uint32, 4](0)
+    var extent_flags = (sum_flags >> 4) | (sum_flags >> 8)
     var fault = UInt32(0)
     var row = geometry[1] * BLOCK_SIZE + Int(thread_idx.x)
     while row < Int(rows):
@@ -303,41 +311,88 @@ def composed_partials[
             if valid:
                 nc[field] += 1
                 comptime if field < float_fields:
-                    if sum_flags & (UInt32(1) << UInt32(field)):
-                        var result = float_value(
-                            lefts[field],
-                            rights[field],
-                            ops[field],
-                            sides[field],
-                            flit[field],
-                            pf,
-                            Bool(reuse_l[field]),
-                            Bool(reuse_r[field]),
-                            row,
-                        )
-                        fault |= UInt32(result[1]) << 1
-                        comptime if precise:
-                            exact.add[field](result[0])
-                        else:
-                            var magnitude = (
-                                bitcast[DType.uint32](result[0]) & 0x7FFF_FFFF
-                            )
-                            fault |= (
-                                UInt32(
-                                    magnitude != 0 and magnitude < 0x0C80_0000
+                    if (sum_flags & (UInt32(1) << UInt32(field))) or (
+                        with_extrema
+                        and (extent_flags & (UInt32(1) << UInt32(field)))
+                    ):
+                        var raw = UInt32(0)
+                        var result = (Float32(0), False)
+                        comptime if with_extrema:
+                            if ops[field] == UInt32(COL):
+                                raw = lefts[field].unsafe_bitcast[UInt32]()[
+                                    unsafe_offset=row
+                                ]
+                                result = (bitcast[DType.float32](raw), False)
+                            else:
+                                result = float_value(
+                                    lefts[field],
+                                    rights[field],
+                                    ops[field],
+                                    sides[field],
+                                    flit[field],
+                                    pf,
+                                    Bool(reuse_l[field]),
+                                    Bool(reuse_r[field]),
+                                    row,
                                 )
-                                << 1
+                        else:
+                            result = float_value(
+                                lefts[field],
+                                rights[field],
+                                ops[field],
+                                sides[field],
+                                flit[field],
+                                pf,
+                                Bool(reuse_l[field]),
+                                Bool(reuse_r[field]),
+                                row,
                             )
-                            var adjusted = result[0] - fc[field]
-                            var next = fs[field] + adjusted
-                            fc[field] = (next - fs[field]) - adjusted
-                            fs[field] = next
+                        if sum_flags & (UInt32(1) << UInt32(field)):
+                            fault |= UInt32(result[1]) << 1
+                            comptime if precise:
+                                exact.add[field](result[0])
+                            else:
+                                var magnitude = (
+                                    bitcast[DType.uint32](result[0])
+                                    & 0x7FFF_FFFF
+                                )
+                                fault |= (
+                                    UInt32(
+                                        magnitude != 0
+                                        and magnitude < 0x0C80_0000
+                                    )
+                                    << 1
+                                )
+                                var adjusted = result[0] - fc[field]
+                                var next = fs[field] + adjusted
+                                fc[field] = (next - fs[field]) - adjusted
+                                fs[field] = next
+                        comptime if with_extrema:
+                            if extent_flags & (UInt32(1) << UInt32(field)):
+                                var magnitude = raw & 0x7FFF_FFFF
+                                if magnitude > 0x7F80_0000:
+                                    ext_special[field] |= 1
+                                else:
+                                    if magnitude == 0:
+                                        ext_special[field] |= UInt32(1) << (
+                                            UInt32(20) if raw
+                                            >> 31 else UInt32(10)
+                                        )
+                                    var key = Int64(_ordered(raw))
+                                    ext_lo[field] = min(ext_lo[field], key)
+                                    ext_hi[field] = max(ext_hi[field], key)
+                                    ext_count[field] += 1
                 else:
                     comptime TAG = 0 if field < float_fields + int32_fields else 1
                     # Arithmetic COUNT still evaluates checked intermediates.
-                    if (sum_flags & (UInt32(1) << UInt32(field))) or ops[
-                        field
-                    ] != UInt32(COL):
+                    if (
+                        (sum_flags & (UInt32(1) << UInt32(field)))
+                        or ops[field] != UInt32(COL)
+                        or (
+                            with_extrema
+                            and (extent_flags & (UInt32(1) << UInt32(field)))
+                        )
+                    ):
                         var result = int_value(
                             lefts[field],
                             rights[field],
@@ -352,6 +407,11 @@ def composed_partials[
                         )
                         fault |= UInt32(result[1])
                         var value = result[0] if not result[1] else Int64(0)
+                        comptime if with_extrema:
+                            if extent_flags & (UInt32(1) << UInt32(field)):
+                                ext_lo[field] = min(ext_lo[field], value)
+                                ext_hi[field] = max(ext_hi[field], value)
+                                ext_count[field] += 1
                         if sum_flags & (UInt32(1) << UInt32(field)):
                             comptime if TAG == 1:
                                 hi[field] += value >> 32
@@ -387,6 +447,171 @@ def composed_partials[
         comptime if precise and field < float_fields:
             if sum_flags & (UInt32(1) << UInt32(field)):
                 exact.finish[field](output, bins, specials)
+        comptime if with_extrema:
+            if extent_flags & (UInt32(1) << UInt32(field)):
+                var minimum = block.min[block_size=BLOCK_SIZE](ext_lo[field])
+                var maximum = block.max[block_size=BLOCK_SIZE](ext_hi[field])
+                var numeric = block.sum[block_size=BLOCK_SIZE](ext_count[field])
+                var flags_out = block.sum[block_size=BLOCK_SIZE](
+                    ext_special[field]
+                )
+                if thread_idx.x == 0:
+                    extrema[unsafe_offset=output * 4] = minimum
+                    extrema[unsafe_offset=output * 4 + 1] = maximum
+                    extrema[unsafe_offset=output * 4 + 2] = Int64(numeric)
+                    extrema[unsafe_offset=output * 4 + 3] = Int64(
+                        UInt32((flags_out & 1023) != 0)
+                        | (UInt32(((flags_out >> 10) & 1023) != 0) << 1)
+                        | (UInt32((flags_out >> 20) != 0) << 2)
+                    )
     var bad = block.max[block_size=BLOCK_SIZE, broadcast=False](fault)
     if thread_idx.x == 0:
         faults[unsafe_offset=geometry[2]] = bad
+
+
+def composed_partials[
+    precise: Bool,
+    wide: Bool,
+    arity: Int,
+    float_fields: Int,
+    int32_fields: Int,
+    batched: Bool = False,
+](
+    v0: Bytes,
+    v1: Bytes,
+    v2: Bytes,
+    v3: Bytes,
+    v4: Bytes,
+    v5: Bytes,
+    v6: Bytes,
+    v7: Bytes,
+    b0: Bytes,
+    b1: Bytes,
+    b2: Bytes,
+    b3: Bytes,
+    b4: Bytes,
+    b5: Bytes,
+    b6: Bytes,
+    b7: Bytes,
+    predicate: Bytes,
+    predicate_bits: Bytes,
+    metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
+    metadata_offset: UInt32,
+    high: Pointer[Int64, MutUntrackedOrigin],
+    low: Pointer[UInt64, MutUntrackedOrigin],
+    sums: Pointer[Float32, MutUntrackedOrigin],
+    compensations: Pointer[Float32, MutUntrackedOrigin],
+    counts: Pointer[UInt32, MutUntrackedOrigin],
+    bins: Pointer[Int64, MutUntrackedOrigin],
+    specials: Pointer[UInt32, MutUntrackedOrigin],
+    faults: Pointer[UInt32, MutUntrackedOrigin],
+):
+    _composed_scan[
+        precise, wide, arity, float_fields, int32_fields, batched, False
+    ](
+        v0,
+        v1,
+        v2,
+        v3,
+        v4,
+        v5,
+        v6,
+        v7,
+        b0,
+        b1,
+        b2,
+        b3,
+        b4,
+        b5,
+        b6,
+        b7,
+        predicate,
+        predicate_bits,
+        metadata,
+        metadata_offset,
+        high,
+        low,
+        sums,
+        compensations,
+        counts,
+        bins,
+        specials,
+        faults,
+        high,
+    )
+
+
+def mixed_partials[
+    precise: Bool,
+    wide: Bool,
+    arity: Int,
+    float_fields: Int,
+    int32_fields: Int,
+    batched: Bool = False,
+](
+    v0: Bytes,
+    v1: Bytes,
+    v2: Bytes,
+    v3: Bytes,
+    v4: Bytes,
+    v5: Bytes,
+    v6: Bytes,
+    v7: Bytes,
+    b0: Bytes,
+    b1: Bytes,
+    b2: Bytes,
+    b3: Bytes,
+    b4: Bytes,
+    b5: Bytes,
+    b6: Bytes,
+    b7: Bytes,
+    predicate: Bytes,
+    predicate_bits: Bytes,
+    metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
+    metadata_offset: UInt32,
+    high: Pointer[Int64, MutUntrackedOrigin],
+    low: Pointer[UInt64, MutUntrackedOrigin],
+    sums: Pointer[Float32, MutUntrackedOrigin],
+    compensations: Pointer[Float32, MutUntrackedOrigin],
+    counts: Pointer[UInt32, MutUntrackedOrigin],
+    bins: Pointer[Int64, MutUntrackedOrigin],
+    specials: Pointer[UInt32, MutUntrackedOrigin],
+    faults: Pointer[UInt32, MutUntrackedOrigin],
+):
+    var geometry = static_segment_info[batched](
+        metadata, metadata_offset, Int(block_idx.x)
+    )
+    var extrema_tail = high.unsafe_offset(Int(geometry[0][unsafe_offset=3]))
+    _composed_scan[
+        precise, wide, arity, float_fields, int32_fields, batched, True
+    ](
+        v0,
+        v1,
+        v2,
+        v3,
+        v4,
+        v5,
+        v6,
+        v7,
+        b0,
+        b1,
+        b2,
+        b3,
+        b4,
+        b5,
+        b6,
+        b7,
+        predicate,
+        predicate_bits,
+        metadata,
+        metadata_offset,
+        high,
+        low,
+        sums,
+        compensations,
+        counts,
+        bins,
+        specials,
+        faults,
+        extrema_tail,
+    )

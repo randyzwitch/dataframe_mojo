@@ -74,11 +74,16 @@ def _reference(rows: Int, nulls: Bool, mode: Int) raises -> DataFrame:
     var discount = Float64(0)
     var quantity_count = Int64(0)
     var sales_count = Int64(0)
+    var low = Int32.MAX
+    var high = Int32.MIN
     for row in range(32):
         var weight = Int64(rows // 32 + Int(row < rows % 32))
         if row % 4 == 0 or (nulls and row % 16 == 5):
             continue
         if not nulls or row % 8 != 1:
+            if weight:
+                low = min(low, Int32(row % 16 - 8))
+                high = max(high, Int32(row % 16 - 8))
             integer += Int64(row % 16 - 8) * weight
             count += weight
             if not nulls or row % 16 != 3:
@@ -92,6 +97,41 @@ def _reference(rows: Int, nulls: Bool, mode: Int) raises -> DataFrame:
             discount += Float64((row * 5) % 32 - 16) / 8 * Float64(weight)
         if not nulls or row % 16 != 3:
             quantity_count += weight
+    if mode == 5:
+        return DataFrame(
+            [
+                Series("sum", Column[Int32]([Int32(integer)])),
+                Series("count", Column[Int64]([count])),
+                Series(
+                    "mean", Column[Float64]([Float64(integer) / Float64(count)])
+                ),
+                Series("min", Column[Int32]([low])),
+                Series("max", Column[Int32]([high])),
+            ]
+        )
+    if mode == 6:
+        return DataFrame(
+            [
+                Series("sum", Column[Float32]([Float32(Float64(integer) / 4)])),
+                Series("count", Column[Int64]([count])),
+                Series(
+                    "mean",
+                    Column[Float64]([Float64(integer) / Float64(4 * count)]),
+                ),
+                Series("min", Column[Float32]([Float32(low) / 4])),
+                Series("max", Column[Float32]([Float32(high) / 4])),
+            ]
+        )
+    if mode == 7:
+        return DataFrame(
+            [
+                Series("min", Column[Int32]([low])),
+                Series("max", Column[Float32]([Float32(high) / 4])),
+                Series("sales", Column[Float32]([Float32(sales)])),
+                Series("count", Column[Int64]([sales_count])),
+                Series("mean", Column[Float64]([sales / Float64(sales_count)])),
+            ]
+        )
     if mode == 0:
         return DataFrame([Series("sum", Column[Int32]([Int32(integer)]))])
     if mode == 1:
@@ -135,6 +175,24 @@ def _reference(rows: Int, nulls: Bool, mode: Int) raises -> DataFrame:
 
 
 def _expressions(mode: Int) -> List[Expr]:
+    if mode == 5 or mode == 6:
+        var value = col("i" if mode == 5 else "a")
+        return [
+            value.sum().alias("sum"),
+            value.count().alias("count"),
+            value.mean().alias("mean"),
+            value.min().alias("min"),
+            value.max().alias("max"),
+        ]
+    if mode == 7:
+        var value = col("a") * col("b")
+        return [
+            col("i").min().alias("min"),
+            col("a").max().alias("max"),
+            value.sum().alias("sales"),
+            value.count().alias("count"),
+            value.mean().alias("mean"),
+        ]
     if mode == 0:
         return [col("i").sum().alias("sum")]
     if mode == 1:
@@ -184,7 +242,7 @@ def main() raises:
             var base = _table(rows, nulls)
             for chunks in [1, 8]:
                 var frame = _chunks(base, chunks)
-                for mode in range(5):
+                for mode in range(8):
                     var expressions = _expressions(mode)
                     var plan = (
                         frame.lazy()
