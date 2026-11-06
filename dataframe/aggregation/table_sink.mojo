@@ -312,9 +312,7 @@ def _chunk_codes(
     var base = strings._offset + v.source_offset
     if not stored.rows:
         for i in range(count):
-            out[unsafe_offset=i] = source[
-                unsafe_offset=base + v.child_row(i)
-            ]
+            out[unsafe_offset=i] = source[unsafe_offset=base + v.child_row(i)]
         return
     var rows = stored.rows.value()[].unsafe_ptr().unsafe_offset(stored.first)
     for i in range(count):

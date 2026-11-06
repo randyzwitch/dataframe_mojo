@@ -747,11 +747,25 @@ def _vector_key(
     if physical == PHYSICAL_VARCHAR:
         if format.sel.is_set():
             _string_key[True](
-                format, count, hashes_at, first_at, second_at, nulls_at, bit, leading
+                format,
+                count,
+                hashes_at,
+                first_at,
+                second_at,
+                nulls_at,
+                bit,
+                leading,
             )
         else:
             _string_key[False](
-                format, count, hashes_at, first_at, second_at, nulls_at, bit, leading
+                format,
+                count,
+                hashes_at,
+                first_at,
+                second_at,
+                nulls_at,
+                bit,
+                leading,
             )
         return
     var hashes = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes_at)
@@ -771,9 +785,9 @@ def _vector_key(
                 first[unsafe_offset=k] = 0
                 nulls[unsafe_offset=k] |= bit
             else:
-                hash_key = UInt64(1) if data[
-                    unsafe_offset=i
-                ] != 0 else UInt64(2)
+                hash_key = UInt64(1) if data[unsafe_offset=i] != 0 else UInt64(
+                    2
+                )
                 first[unsafe_offset=k] = hash_key
             hashes[unsafe_offset=k] = _mix(
                 hash_key
@@ -805,11 +819,23 @@ def _vector_key(
                 if sel.is_set():
                     if has_nulls:
                         _fixed_key[D, True, True](
-                            key, count, hashes_at, first_at, nulls_at, bit, leading
+                            key,
+                            count,
+                            hashes_at,
+                            first_at,
+                            nulls_at,
+                            bit,
+                            leading,
                         )
                     else:
                         _fixed_key[D, True, False](
-                            key, count, hashes_at, first_at, nulls_at, bit, leading
+                            key,
+                            count,
+                            hashes_at,
+                            first_at,
+                            nulls_at,
+                            bit,
+                            leading,
                         )
                 elif has_nulls:
                     _fixed_key[D, False, True](
@@ -902,7 +928,9 @@ def _string_key[
     var first = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=first_at)
     var second = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=second_at)
     var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
-    var strings = Pointer[StringT, MutAnyOrigin](unsafe_from_address=format.data)
+    var strings = Pointer[StringT, MutAnyOrigin](
+        unsafe_from_address=format.data
+    )
     var sel = format.sel
     var validity = format.validity
     var has_nulls = not validity.all_valid()
@@ -1142,7 +1170,6 @@ struct _DictionaryKeys(Movable):
                 hashes[unsafe_offset=k], key
             )
 
-
     def write_vector(
         mut self,
         key: KeyVector,
@@ -1173,9 +1200,7 @@ struct _DictionaryKeys(Movable):
         var has_nulls = not validity.all_valid()
         for k in range(count):
             var hash_key: UInt64
-            if has_nulls and not validity.row_is_valid_unsafe(
-                sel.get_index(k)
-            ):
+            if has_nulls and not validity.row_is_valid_unsafe(sel.get_index(k)):
                 hash_key = _NULL_KEY
                 first[unsafe_offset=k] = 0
                 second[unsafe_offset=k] = 0
