@@ -161,6 +161,7 @@ def _composed_scan[
     with_extrema: Bool,
     compound: Bool = False,
     trees: Bool = False,
+    cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -327,7 +328,9 @@ def _composed_scan[
             var tree_bits = UInt64(0)
             comptime if trees:
                 if kept and ops[field] == UInt32(TREE_OP):
-                    var computed = expression_value[field < float_fields](
+                    var computed = expression_value[
+                        field < float_fields, cases
+                    ](
                         metadata.unsafe_offset(
                             Int(
                                 meta[
@@ -560,6 +563,7 @@ def composed_partials[
     batched: Bool = False,
     compound: Bool = False,
     trees: Bool = False,
+    cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -600,6 +604,7 @@ def composed_partials[
         False,
         compound,
         trees,
+        cases,
     ](
         v0,
         v1,
@@ -642,6 +647,7 @@ def mixed_partials[
     batched: Bool = False,
     compound: Bool = False,
     trees: Bool = False,
+    cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -689,6 +695,7 @@ def mixed_partials[
         True,
         compound,
         trees,
+        cases,
     ](
         v0,
         v1,

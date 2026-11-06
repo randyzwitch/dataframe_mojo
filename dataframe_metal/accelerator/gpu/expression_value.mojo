@@ -17,7 +17,7 @@ from .value_ops import checked_float_value
 
 @always_inline
 def _stack_value[
-    floating: Bool
+    floating: Bool, cases: Bool = True
 ](
     program: Pointer[UInt64, UntrackedOrigin[mut=False]],
     count: Int,
@@ -54,39 +54,45 @@ def _stack_value[
         var op = UInt32(program[unsafe_offset=at])
         var bits = UInt64(0)
         var present = True
-        if op == UInt32(CASE_HEADER):
-            node += 1
-            continue
-        if op == UInt32(CASE_TEST):
-            var selected = predicate_matches(
-                program.unsafe_offset(Int(program[unsafe_offset=at + 1])),
-                row_base,
-                row,
-                v0,
-                v1,
-                v2,
-                v3,
-                v4,
-                v5,
-                v6,
-                v7,
-                predicate,
-                b0,
-                b1,
-                b2,
-                b3,
-                b4,
-                b5,
-                b6,
-                b7,
-                predicate_bits,
-            )
-            node = node + 1 if selected else Int(program[unsafe_offset=at + 3])
-            continue
-        if op == UInt32(CASE_JUMP):
-            node = Int(program[unsafe_offset=at + 3])
-            continue
-        if op == UInt32(CASE_NULL):
+        comptime if cases:
+            if op == UInt32(CASE_HEADER):
+                node += 1
+                continue
+            if op == UInt32(CASE_TEST):
+                var selected = predicate_matches(
+                    program.unsafe_offset(Int(program[unsafe_offset=at + 1])),
+                    row_base,
+                    row,
+                    v0,
+                    v1,
+                    v2,
+                    v3,
+                    v4,
+                    v5,
+                    v6,
+                    v7,
+                    predicate,
+                    b0,
+                    b1,
+                    b2,
+                    b3,
+                    b4,
+                    b5,
+                    b6,
+                    b7,
+                    predicate_bits,
+                )
+                node = node + 1 if selected else Int(
+                    program[unsafe_offset=at + 3]
+                )
+                continue
+            if op == UInt32(CASE_JUMP):
+                node = Int(program[unsafe_offset=at + 3])
+                continue
+        var null_leaf = False
+        comptime if cases:
+            null_leaf = op == UInt32(CASE_NULL)
+        if null_leaf:
             present = False
         elif op == UInt32(COL):
             var slot = Int(program[unsafe_offset=at + 1])
@@ -538,7 +544,7 @@ def _case_branch[
 
 
 @always_inline
-def _case_fixed[
+def _case_selected[
     floating: Bool, shape: Int
 ](
     program: Pointer[UInt64, UntrackedOrigin[mut=False]],
@@ -546,6 +552,7 @@ def _case_fixed[
     row: Int,
     tag: UInt32,
     want_value: Bool,
+    selected: Bool,
     v0: Bytes,
     v1: Bytes,
     v2: Bytes,
@@ -562,35 +569,10 @@ def _case_fixed[
     b5: Bytes,
     b6: Bytes,
     b7: Bytes,
-    predicate: Bytes,
-    predicate_bits: Bytes,
 ) -> Tuple[UInt64, Bool, UInt32]:
     comptime THEN_BINARY = (shape & 1) != 0
     comptime ELSE_BINARY = (shape & 2) != 0
     comptime ELSE = 6 if THEN_BINARY else 4
-    var selected = predicate_matches(
-        program.unsafe_offset(Int(program[unsafe_offset=5])),
-        row_base,
-        row,
-        v0,
-        v1,
-        v2,
-        v3,
-        v4,
-        v5,
-        v6,
-        v7,
-        predicate,
-        b0,
-        b1,
-        b2,
-        b3,
-        b4,
-        b5,
-        b6,
-        b7,
-        predicate_bits,
-    )
     if selected:
         return _case_branch[floating, 2, THEN_BINARY](
             program,
@@ -641,8 +623,45 @@ def _case_fixed[
 
 
 @always_inline
+def _case_shape(
+    program: Pointer[UInt64, UntrackedOrigin[mut=False]], count: Int
+) -> Int:
+    comptime for shape in range(4):
+        comptime THEN_BINARY = (shape & 1) != 0
+        comptime ELSE_BINARY = (shape & 2) != 0
+        comptime ELSE = 6 if THEN_BINARY else 4
+        comptime JUMP = ELSE - 1
+        comptime SIZE = ELSE + (3 if ELSE_BINARY else 1)
+        if (
+            count == SIZE
+            and program[unsafe_offset=4] == UInt64(CASE_TEST)
+            and program[unsafe_offset=7] == UInt64(ELSE)
+            and program[unsafe_offset=JUMP * 4] == UInt64(CASE_JUMP)
+            and program[unsafe_offset=JUMP * 4 + 3] == UInt64(SIZE)
+            and _case_leaf(program, 2)
+            and _case_leaf(program, ELSE)
+        ):
+            var eligible = True
+            comptime if THEN_BINARY:
+                eligible = (
+                    eligible
+                    and _case_leaf(program, 3)
+                    and _case_binary(program, 4)
+                )
+            comptime if ELSE_BINARY:
+                eligible = (
+                    eligible
+                    and _case_leaf(program, ELSE + 1)
+                    and _case_binary(program, ELSE + 2)
+                )
+            if eligible:
+                return shape
+    return -1
+
+
+@always_inline
 def expression_value[
-    floating: Bool
+    floating: Bool, cases: Bool = True
 ](
     program: Pointer[UInt64, UntrackedOrigin[mut=False]],
     count: Int,
@@ -669,87 +688,85 @@ def expression_value[
     predicate: Bytes = Bytes(unsafe_from_address=0),
     predicate_bits: Bytes = Bytes(unsafe_from_address=0),
 ) -> Tuple[UInt64, Bool, UInt32]:
-    if program[unsafe_offset=0] == UInt64(CASE_HEADER):
-        comptime for shape in range(4):
-            comptime THEN_BINARY = (shape & 1) != 0
-            comptime ELSE_BINARY = (shape & 2) != 0
-            comptime ELSE = 6 if THEN_BINARY else 4
-            comptime JUMP = ELSE - 1
-            comptime SIZE = ELSE + (3 if ELSE_BINARY else 1)
-            if (
-                count == SIZE
-                and program[unsafe_offset=4] == UInt64(CASE_TEST)
-                and program[unsafe_offset=7] == UInt64(ELSE)
-                and program[unsafe_offset=JUMP * 4] == UInt64(CASE_JUMP)
-                and program[unsafe_offset=JUMP * 4 + 3] == UInt64(SIZE)
-                and _case_leaf(program, 2)
-                and _case_leaf(program, ELSE)
-            ):
-                var eligible = True
-                comptime if THEN_BINARY:
-                    eligible = (
-                        eligible
-                        and _case_leaf(program, 3)
-                        and _case_binary(program, 4)
-                    )
-                comptime if ELSE_BINARY:
-                    eligible = (
-                        eligible
-                        and _case_leaf(program, ELSE + 1)
-                        and _case_binary(program, ELSE + 2)
-                    )
-                if eligible:
-                    return _case_fixed[floating, shape](
-                        program,
-                        row_base,
-                        row,
-                        tag,
-                        want_value,
-                        v0,
-                        v1,
-                        v2,
-                        v3,
-                        v4,
-                        v5,
-                        v6,
-                        v7,
-                        b0,
-                        b1,
-                        b2,
-                        b3,
-                        b4,
-                        b5,
-                        b6,
-                        b7,
-                        predicate,
-                        predicate_bits,
-                    )
-        return _stack_value[floating](
-            program,
-            count,
-            row_base,
-            row,
-            tag,
-            want_value,
-            v0,
-            v1,
-            v2,
-            v3,
-            v4,
-            v5,
-            v6,
-            v7,
-            b0,
-            b1,
-            b2,
-            b3,
-            b4,
-            b5,
-            b6,
-            b7,
-            predicate,
-            predicate_bits,
-        )
+    comptime if cases:
+        if program[unsafe_offset=0] == UInt64(CASE_HEADER):
+            var layout = _case_shape(program, count)
+            if layout >= 0:
+                var selected = predicate_matches(
+                    program.unsafe_offset(Int(program[unsafe_offset=5])),
+                    row_base,
+                    row,
+                    v0,
+                    v1,
+                    v2,
+                    v3,
+                    v4,
+                    v5,
+                    v6,
+                    v7,
+                    predicate,
+                    b0,
+                    b1,
+                    b2,
+                    b3,
+                    b4,
+                    b5,
+                    b6,
+                    b7,
+                    predicate_bits,
+                )
+                comptime for shape in range(4):
+                    if layout == shape:
+                        return _case_selected[floating, shape](
+                            program,
+                            row_base,
+                            row,
+                            tag,
+                            want_value,
+                            selected,
+                            v0,
+                            v1,
+                            v2,
+                            v3,
+                            v4,
+                            v5,
+                            v6,
+                            v7,
+                            b0,
+                            b1,
+                            b2,
+                            b3,
+                            b4,
+                            b5,
+                            b6,
+                            b7,
+                        )
+            return _stack_value[floating](
+                program,
+                count,
+                row_base,
+                row,
+                tag,
+                want_value,
+                v0,
+                v1,
+                v2,
+                v3,
+                v4,
+                v5,
+                v6,
+                v7,
+                b0,
+                b1,
+                b2,
+                b3,
+                b4,
+                b5,
+                b6,
+                b7,
+                predicate,
+                predicate_bits,
+            )
     if count == 5:
         if program[unsafe_offset=8] > UInt64(1):
             return _fixed[floating, 0](
@@ -918,7 +935,7 @@ def expression_value[
             b6,
             b7,
         )
-    return _stack_value[floating](
+    return _stack_value[floating, False](
         program,
         count,
         row_base,
