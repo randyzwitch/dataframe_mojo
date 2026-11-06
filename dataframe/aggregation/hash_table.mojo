@@ -49,16 +49,16 @@ A string longer than twelve bytes is compared through the address of its
 bytes in the input, which outlives the aggregation; the input is never
 copied.
 """
-from dataframe.storage.buffer import _Buffer
+from dataframe.storage.buffer import _Buffer, _BufferData
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
 from std.collections import Optional
 from std.math import log
 from std.ffi import external_call
-from std.memory import ArcPointer, Pointer
+from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 
-from dataframe.aggregation.reducer import Reducer
+from dataframe.aggregation.reducer import Reducer, float_key
 from dataframe.aggregation.function import (
     AggregateFunction,
     ReducerSpec,
@@ -94,7 +94,7 @@ from dataframe.aggregation.function import (
 )
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
-from dataframe.dtype import DataType, NUMERIC_DTYPES
+from dataframe.dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from dataframe.expr import (
     CORR,
     COV,
@@ -109,11 +109,24 @@ from dataframe.kernels.partition import (
     _hash_bytes,
     _hash_column,
     _mix,
+    _short_hash,
 )
 from dataframe.series import Series, Storage
 from dataframe.kernels.hashing import RowKeys
 from dataframe.trace import trace_path
 from dataframe.storage.string import StringColumn
+from dataframe.vector.data_chunk import _decode_strings
+from dataframe.vector.types import (
+    PHYSICAL_BOOL,
+    PHYSICAL_INT128,
+    PHYSICAL_VARCHAR,
+    STRING_INLINE_BYTES,
+    SelectionVector,
+    StringT,
+    UnifiedVectorFormat,
+    ValidityMask,
+    physical_of,
+)
 
 # A worker's table when more than two work: DuckDB's 32K-entry sink table,
 # cleared at two-thirds full rather than grown.
@@ -675,6 +688,323 @@ def aggregate_layout(
     )
 
 
+@fieldwise_init
+struct KeyVector(Copyable, ImplicitlyCopyable, Movable):
+    """A group key column of a data chunk as the table reads it: its
+    `UnifiedVectorFormat` (DuckDB's group chunk vectors, which
+    `GroupedAggregateHashTable::AddChunk` reads through their unified
+    format), and how its values become key words.
+
+    - `codes`: the address of one dictionary code a row, for a string key
+      whose source stored it dictionary-encoded (the format then gives
+      only each row's validity); its dictionary is the
+      `CategoricalDictionary` at `dictionary`. 0 for none.
+    - `map`: the address of `map_length` UInt32 codes a categorical key's
+      codes are replaced by (equal labels group together); 0 for none.
+    - `mask`: the bits of an integer key's value kept (a grouping set
+      groups by some fields of a packed key); every bit by default.
+    """
+
+    var format: UnifiedVectorFormat
+    var codes: Int
+    var dictionary: Int
+    var map: Int
+    var map_length: Int
+    var mask: UInt64
+
+    @staticmethod
+    def of(format: UnifiedVectorFormat) -> KeyVector:
+        """A key read as its format gives it."""
+        return KeyVector(format, 0, 0, 0, 0, UInt64.MAX)
+
+    def width(self) -> Int:
+        """Key words a row takes: two for a string or a 128-bit decimal."""
+        if (
+            self.format.physical == PHYSICAL_VARCHAR
+            or self.format.physical == PHYSICAL_INT128
+        ):
+            return 2
+        return 1
+
+
+def _vector_key(
+    key: KeyVector,
+    count: Int,
+    hashes_at: Int,
+    first_at: Int,
+    second_at: Int,
+    nulls_at: Int,
+    bit: UInt64,
+    leading: Bool,
+) raises:
+    """A chunk's `count` rows of one key vector: each row's hash (combined
+    into the hashes of the keys before unless `leading`, as
+    VectorOperations::CombineHash) and key words, a null row setting `bit`
+    in its null word. The hashes and words are the ones `_hash_column` and
+    `_column_words` give the same values in a column."""
+    ref format = key.format
+    var physical = format.physical
+    if physical == PHYSICAL_VARCHAR:
+        if format.sel.is_set():
+            _string_key[True](
+                format, count, hashes_at, first_at, second_at, nulls_at, bit, leading
+            )
+        else:
+            _string_key[False](
+                format, count, hashes_at, first_at, second_at, nulls_at, bit, leading
+            )
+        return
+    var hashes = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes_at)
+    var first = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=first_at)
+    var second = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=second_at)
+    var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
+    var sel = format.sel
+    var validity = format.validity
+    var has_nulls = not validity.all_valid()
+    if physical == PHYSICAL_BOOL:
+        var data = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=format.data)
+        for k in range(count):
+            var i = sel.get_index(k)
+            var hash_key: UInt64
+            if has_nulls and not validity.row_is_valid_unsafe(i):
+                hash_key = _NULL_KEY
+                first[unsafe_offset=k] = 0
+                nulls[unsafe_offset=k] |= bit
+            else:
+                hash_key = UInt64(1) if data[
+                    unsafe_offset=i
+                ] != 0 else UInt64(2)
+                first[unsafe_offset=k] = hash_key
+            hashes[unsafe_offset=k] = _mix(
+                hash_key
+            ) if leading else _hash_combine(hashes[unsafe_offset=k], hash_key)
+        return
+    if physical == PHYSICAL_INT128:
+        var data = format.values[DType.int128]()
+        for k in range(count):
+            var i = sel.get_index(k)
+            var hash_key: UInt64
+            if has_nulls and not validity.row_is_valid_unsafe(i):
+                hash_key = _NULL_KEY
+                first[unsafe_offset=k] = 0
+                second[unsafe_offset=k] = 0
+                nulls[unsafe_offset=k] |= bit
+            else:
+                var value = bitcast[DType.uint128](data[unsafe_offset=i])
+                first[unsafe_offset=k] = UInt64(value)
+                second[unsafe_offset=k] = UInt64(value >> 64)
+                hash_key = UInt64(value) ^ UInt64(value >> 64)
+            hashes[unsafe_offset=k] = _mix(
+                hash_key
+            ) if leading else _hash_combine(hashes[unsafe_offset=k], hash_key)
+        return
+    comptime for d in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[d]
+        comptime if D != DType.int128:
+            if physical == physical_of[D]():
+                if sel.is_set():
+                    if has_nulls:
+                        _fixed_key[D, True, True](
+                            key, count, hashes_at, first_at, nulls_at, bit, leading
+                        )
+                    else:
+                        _fixed_key[D, True, False](
+                            key, count, hashes_at, first_at, nulls_at, bit, leading
+                        )
+                elif has_nulls:
+                    _fixed_key[D, False, True](
+                        key, count, hashes_at, first_at, nulls_at, bit, leading
+                    )
+                else:
+                    _fixed_key[D, False, False](
+                        key, count, hashes_at, first_at, nulls_at, bit, leading
+                    )
+                return
+    raise Error("aggregate table: unsupported key vector")
+
+
+def _fixed_key[
+    D: DType, selected: Bool, nullable: Bool
+](
+    key: KeyVector,
+    count: Int,
+    hashes_at: Int,
+    first_at: Int,
+    nulls_at: Int,
+    bit: UInt64,
+    leading: Bool,
+) raises:
+    """`_vector_key` over fixed-width values of `D`: the value's word (a
+    float's canonical key), through a selection when `selected` and a
+    validity mask when `nullable`."""
+    var hashes = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes_at)
+    var first = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=first_at)
+    var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
+    var data = key.format.values[D]()
+    var sel = key.format.sel
+    var validity = key.format.validity
+    var mask = key.mask
+    var map = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=key.map)
+    var mapped = key.map != 0
+    for k in range(count):
+        var i: Int
+        comptime if selected:
+            i = sel.get_index_unsafe(k)
+        else:
+            i = k
+        var hash_key: UInt64
+        var valid = True
+        comptime if nullable:
+            valid = validity.row_is_valid_unsafe(i)
+        if not valid:
+            hash_key = _NULL_KEY
+            first[unsafe_offset=k] = 0
+            nulls[unsafe_offset=k] |= bit
+        else:
+            var value = data[unsafe_offset=i]
+            comptime if D.is_floating_point():
+                hash_key = float_key(Float64(value))
+            elif D.is_unsigned():
+                hash_key = UInt64(value)
+                comptime if D == DType.uint32:
+                    if mapped:
+                        if Int(value) >= key.map_length:
+                            raise Error(
+                                "Categorical code exceeds its dictionary"
+                            )
+                        hash_key = UInt64(map[unsafe_offset=Int(value)])
+                hash_key &= mask
+            else:
+                hash_key = bitcast[DType.uint64](Int64(value)) & mask
+            first[unsafe_offset=k] = hash_key
+        hashes[unsafe_offset=k] = _mix(hash_key) if leading else _hash_combine(
+            hashes[unsafe_offset=k], hash_key
+        )
+
+
+def _string_key[
+    selected: Bool
+](
+    format: UnifiedVectorFormat,
+    count: Int,
+    hashes_at: Int,
+    first_at: Int,
+    second_at: Int,
+    nulls_at: Int,
+    bit: UInt64,
+    leading: Bool,
+):
+    """`_vector_key` over string_t values. A string_t is already the two
+    key words (its length and first four bytes, then its next eight bytes
+    or the address of all of them); the inline bytes past the length are
+    masked off, as `_string_words` gives them."""
+    var hashes = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes_at)
+    var first = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=first_at)
+    var second = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=second_at)
+    var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
+    var strings = Pointer[StringT, MutAnyOrigin](unsafe_from_address=format.data)
+    var sel = format.sel
+    var validity = format.validity
+    var has_nulls = not validity.all_valid()
+    for k in range(count):
+        var i: Int
+        comptime if selected:
+            i = sel.get_index_unsafe(k)
+        else:
+            i = k
+        var hash_key: UInt64
+        if has_nulls and not validity.row_is_valid_unsafe(i):
+            hash_key = _NULL_KEY
+            first[unsafe_offset=k] = 0
+            second[unsafe_offset=k] = 0
+            nulls[unsafe_offset=k] |= bit
+        else:
+            var s = strings[unsafe_offset=i]
+            var length = Int(s.length)
+            if length <= STRING_INLINE_BYTES:
+                var prefix = UInt64(s.prefix)
+                if length < 4:
+                    prefix &= (UInt64(1) << UInt64(8 * length)) - 1
+                var keep = 8 * max(length - 4, 0)
+                var rest = s.rest & (
+                    (UInt64(1) << UInt64(keep)) - 1 if keep < 64 else UInt64.MAX
+                )
+                first[unsafe_offset=k] = UInt64(length) | (prefix << 32)
+                second[unsafe_offset=k] = rest
+                if length <= 8:
+                    hash_key = _short_hash(prefix | (rest << 32), length)
+                else:
+                    hash_key = _hash_bytes(
+                        Span[UInt8, ImmutAnyOrigin](
+                            unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                                unsafe_from_address=format.data + 16 * i + 4
+                            ),
+                            length=length,
+                        )
+                    )
+            else:
+                first[unsafe_offset=k] = UInt64(length) | (
+                    UInt64(s.prefix) << 32
+                )
+                second[unsafe_offset=k] = s.rest
+                hash_key = _hash_bytes(
+                    Span[UInt8, ImmutAnyOrigin](
+                        unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                            unsafe_from_address=Int(s.rest)
+                        ),
+                        length=length,
+                    )
+                )
+        hashes[unsafe_offset=k] = _mix(hash_key) if leading else _hash_combine(
+            hashes[unsafe_offset=k], hash_key
+        )
+
+
+def series_vector(
+    series: Series, mut decoded: List[UInt8]
+) raises -> UnifiedVectorFormat:
+    """An unchunked column's rows as a flat unified format: fixed-width
+    values where they are, strings as string_t and booleans as a byte each
+    decoded into `decoded`, which must outlive the format."""
+    if series._data.isa[StringColumn]():
+        ref strings = series._data[StringColumn]
+        decoded = _decode_strings(strings)
+        return UnifiedVectorFormat(
+            SelectionVector(),
+            Int(decoded.unsafe_ptr()),
+            _series_validity(strings._bits[], strings._offset),
+            PHYSICAL_VARCHAR,
+        )
+    if series._data.isa[BoolColumn]():
+        ref bools = series._data[BoolColumn]
+        decoded = List[UInt8](unsafe_uninit_length=max(1, len(bools)))
+        for i in range(len(bools)):
+            decoded[i] = UInt8(1) if bools._get(i) else UInt8(0)
+        return UnifiedVectorFormat(
+            SelectionVector(),
+            Int(decoded.unsafe_ptr()),
+            _series_validity(bools._bits[], bools._offset),
+            PHYSICAL_BOOL,
+        )
+    comptime for d in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[d]
+        if series._data.isa[Column[Scalar[D]]]():
+            ref column = series._data[Column[Scalar[D]]]
+            return UnifiedVectorFormat(
+                SelectionVector(),
+                Int(column._ptr()),
+                _series_validity(column._bits[], column._offset),
+                physical_of[D](),
+            )
+    raise Error("aggregate table: unsupported key storage")
+
+
+def _series_validity(bits: _BufferData[UInt8], offset: Int) -> ValidityMask:
+    if len(bits) == 0:
+        return ValidityMask()
+    return ValidityMask(Int(bits.unsafe_ptr()), offset)
+
+
 struct _DictionaryKeys(Movable):
     """Cache each dictionary entry's string hash and two key words, and
     compute them only the first time a row uses its code for a given
@@ -706,23 +1036,30 @@ struct _DictionaryKeys(Movable):
         """Ready for a morsel of `strings`, which carries codes: their
         dictionary's entries (reset when it is a new one) and its codes."""
         ref held = strings._codes.value()[]
-        ref dictionary = held.dtype.dictionary()[]
-        var identity = Int(Pointer(to=dictionary))
-        if identity != self.identity:
-            self.identity = identity
-            self.offsets = Int(dictionary.offsets.unsafe_ptr())
-            self.bytes = Int(dictionary.bytes.unsafe_ptr())
-            var n = len(dictionary)
-            self.done = List[Bool](length=n, fill=False)
-            self.keys = List[UInt64](length=n, fill=0)
-            self.first = List[UInt64](length=n, fill=0)
-            self.second = List[UInt64](length=n, fill=0)
+        self.use(Int(Pointer(to=held.dtype.dictionary()[])))
         if len(self.codes) < len(strings):
             self.codes = List[UInt32](length=len(strings), fill=0)
         strings._write_codes(Int(self.codes.unsafe_ptr()))
 
+    def use(mut self, dictionary: Int):
+        """Ready for codes into the `CategoricalDictionary` at address
+        `dictionary`: its entries, reset when it is a new one."""
+        if dictionary == self.identity:
+            return
+        ref entries = Pointer[CategoricalDictionary, ImmutAnyOrigin](
+            unsafe_from_address=dictionary
+        )[]
+        self.identity = dictionary
+        self.offsets = Int(entries.offsets.unsafe_ptr())
+        self.bytes = Int(entries.bytes.unsafe_ptr())
+        var n = len(entries)
+        self.done = List[Bool](length=n, fill=False)
+        self.keys = List[UInt64](length=n, fill=0)
+        self.first = List[UInt64](length=n, fill=0)
+        self.second = List[UInt64](length=n, fill=0)
+
     @no_inline
-    def _entry(mut self, strings: StringColumn, code: Int):
+    def _entry(mut self, code: Int):
         """Entry `code`'s hash key and words: as `_hash_column` and
         `_string_words` give them for the same string."""
         var offsets = Pointer[Int64, ImmutAnyOrigin](
@@ -793,7 +1130,7 @@ struct _DictionaryKeys(Movable):
             else:
                 var code = Int(codes[unsafe_offset=lo + k])
                 if not self.done.unsafe_ptr()[unsafe_offset=code]:
-                    self._entry(strings, code)
+                    self._entry(code)
                 key = self.keys.unsafe_ptr()[unsafe_offset=code]
                 first[unsafe_offset=k] = self.first.unsafe_ptr()[
                     unsafe_offset=code
@@ -804,6 +1141,59 @@ struct _DictionaryKeys(Movable):
             hashes[unsafe_offset=k] = _mix(key) if leading else _hash_combine(
                 hashes[unsafe_offset=k], key
             )
+
+
+    def write_vector(
+        mut self,
+        key: KeyVector,
+        count: Int,
+        hashes_at: Int,
+        first_word: Int,
+        second_word: Int,
+        nulls_at: Int,
+        bit: UInt64,
+        leading: Bool,
+    ):
+        """A chunk's `count` rows of a coded string key (`key.codes`, one
+        code a row; its format gives each row's validity): hashes and key
+        words through their codes, as `write` gives them."""
+        var first = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=first_word
+        )
+        var second = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=second_word
+        )
+        var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
+        var hashes = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=hashes_at
+        )
+        var codes = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=key.codes)
+        var sel = key.format.sel
+        var validity = key.format.validity
+        var has_nulls = not validity.all_valid()
+        for k in range(count):
+            var hash_key: UInt64
+            if has_nulls and not validity.row_is_valid_unsafe(
+                sel.get_index(k)
+            ):
+                hash_key = _NULL_KEY
+                first[unsafe_offset=k] = 0
+                second[unsafe_offset=k] = 0
+                nulls[unsafe_offset=k] |= bit
+            else:
+                var code = Int(codes[unsafe_offset=k])
+                if not self.done.unsafe_ptr()[unsafe_offset=code]:
+                    self._entry(code)
+                hash_key = self.keys.unsafe_ptr()[unsafe_offset=code]
+                first[unsafe_offset=k] = self.first.unsafe_ptr()[
+                    unsafe_offset=code
+                ]
+                second[unsafe_offset=k] = self.second.unsafe_ptr()[
+                    unsafe_offset=code
+                ]
+            hashes[unsafe_offset=k] = _mix(
+                hash_key
+            ) if leading else _hash_combine(hashes[unsafe_offset=k], hash_key)
 
 
 struct _DistinctSinks(Movable):
@@ -1022,6 +1412,30 @@ struct AggregateSink(Movable):
         if bits > self.parts.bits:
             self.parts = self.parts.repartitioned(bits)
 
+    def _held_inputs(mut self, given_inputs: List[Series]) -> List[Series]:
+        """The reductions' inputs as their updates read them: value states
+        over strings hold their bytes' addresses, so their inputs are
+        flattened (a selecting view's descriptors copied out once) and
+        held until the finish."""
+        var inputs = given_inputs.copy()
+        for s in range(len(self.slots)):
+            if self.only >= 0 or not self.slots[s].holds_strings():
+                continue
+            ref strings = inputs[s]._data[StringColumn]
+            if strings._is_view_storage():
+                if strings._view_storage.value()._selects():
+                    var flat = inputs[s].copy()
+                    flat._data = Storage(strings._flat_views())
+                    inputs[s] = flat^
+            self.held.append(inputs[s].copy())
+        return inputs^
+
+    def _word_ptrs(self) -> List[Int]:
+        var word_ptrs = List[Int](capacity=len(self.addressed))
+        for w in range(len(self.addressed)):
+            word_ptrs.append(Int(self.word_rows[w].unsafe_ptr()))
+        return word_ptrs^
+
     def sink(
         mut self,
         given: List[Series],
@@ -1052,25 +1466,9 @@ struct AggregateSink(Movable):
                         keys.append(flat^)
                         continue
             keys.append(given[c].copy())
-        # Value states over strings hold their bytes' addresses: their
-        # inputs are flattened the same way, and held until the finish.
-        var inputs = given_inputs.copy()
-        for s in range(len(self.slots)):
-            if self.only >= 0 or not self.slots[s].holds_strings():
-                continue
-            ref strings = inputs[s]._data[StringColumn]
-            if strings._is_view_storage():
-                if strings._view_storage.value()._selects():
-                    var flat = inputs[s].copy()
-                    flat._data = Storage(strings._flat_views())
-                    inputs[s] = flat^
-            self.held.append(inputs[s].copy())
+        var inputs = self._held_inputs(given_inputs)
         var length = len(keys[0])
-        var width = len(self.addressed)
-        var word_ptrs = List[Int](capacity=width)
-        for w in range(width):
-            word_ptrs.append(Int(self.word_rows[w].unsafe_ptr()))
-        var group_at = self.groups.unsafe_ptr()
+        var word_ptrs = self._word_ptrs()
         var nulls = self.nulls.unsafe_ptr()
         var hash_ptr = self.hashes.unsafe_ptr()
         # String keys carrying their source's dictionary codes are read
@@ -1132,58 +1530,146 @@ struct AggregateSink(Movable):
                         UInt64(1) << UInt64(c),
                     )
                 w = second + 1
-            var kept = len(keep) > 0
-            # Rows a filter dropped are skipped in their own instantiation,
-            # so a sink without a selection runs the loops it always had.
-            if kept:
-                self._insert[True](
-                    count,
-                    first + lo,
-                    Int(hash_ptr),
-                    Int(nulls),
-                    word_ptrs,
-                    Int(group_at),
-                    Int(keep.unsafe_ptr().unsafe_offset(lo)),
-                )
-            else:
-                self._insert[False](
-                    count,
-                    first + lo,
-                    Int(hash_ptr),
-                    Int(nulls),
-                    word_ptrs,
-                    Int(group_at),
-                    0,
-                )
-            if self.numbering:
-                var states_at = 8 * self.parts.states_at
-                var ids = self.row_ids.unsafe_ptr()
-                for k in range(count):
-                    ids[unsafe_offset=first + lo + k] = Int(
-                        _words_at(group_at[unsafe_offset=k] + states_at)[]
-                    )
-            # The batch's states, by the address of each row's group.
-            _update_states(
-                self.slots,
-                inputs,
-                lo,
-                count,
-                group_at,
-                self.parts.states_at,
-                first,
-                Pointer[_ValueArena, MutAnyOrigin](
-                    unsafe_from_address=Int(Pointer(to=self.values))
-                ),
-                Int(self.discard.unsafe_ptr()),
-                Int(self.scratch.unsafe_ptr()),
-                self.only,
-            )
+            self._sink_batch(count, first, lo, inputs, word_ptrs, keep)
         self.sunk += length
         # Each distinct count's (keys, value) pairs into its own table.
         for d in range(len(self.distinct_slots)):
             var pairs = keys.copy()
             pairs.append(inputs[self.distinct_slots[d]].copy())
             self.distinct.at(d).sink(pairs, List[Series](), first, keep)
+
+    def sink_vectors(
+        mut self,
+        keys: List[KeyVector],
+        given_inputs: List[Series],
+        hold: List[Series],
+        first: Int,
+        count: Int,
+    ) raises:
+        """A data chunk's `count` rows (at most a batch) into the table
+        (`GroupedAggregateHashTable::AddChunk`): the group chunk's vectors
+        `keys` are hashed and turned into key words where they are
+        (`FindOrCreateGroups`, the key words being the row layout's), and
+        `inputs` (a row count reads none) are unchunked columns of the
+        chunk's rows. `hold` are the columns the keys' long strings point
+        into, held until the finish; `first` is the source row of the
+        chunk's first."""
+        if len(keys) == 0:
+            raise Error("aggregate table: no keys")
+        if count > _BATCH:
+            raise Error("aggregate table: a chunk is at most a batch")
+        for column in hold:
+            self.held.append(column.copy())
+        var inputs = self._held_inputs(given_inputs)
+        var word_ptrs = self._word_ptrs()
+        var nulls = self.nulls.unsafe_ptr()
+        var hash_ptr = self.hashes.unsafe_ptr()
+        for k in range(count):
+            nulls[unsafe_offset=k] = 0
+        var w = 0
+        for c in range(len(keys)):
+            var second = w + 1 if keys[c].width() == 2 else w
+            if keys[c].codes != 0:
+                self.dictionaries[c].use(keys[c].dictionary)
+                self.dictionaries[c].write_vector(
+                    keys[c],
+                    count,
+                    Int(hash_ptr),
+                    word_ptrs[w],
+                    word_ptrs[second],
+                    Int(nulls),
+                    UInt64(1) << UInt64(c),
+                    c == 0,
+                )
+            else:
+                _vector_key(
+                    keys[c],
+                    count,
+                    Int(hash_ptr),
+                    word_ptrs[w],
+                    word_ptrs[second],
+                    Int(nulls),
+                    UInt64(1) << UInt64(c),
+                    c == 0,
+                )
+            w = second + 1
+        self._sink_batch(count, first, 0, inputs, word_ptrs, List[Bool]())
+        self.sunk += count
+        # Each distinct count's (keys, value) pairs into its own table.
+        for d in range(len(self.distinct_slots)):
+            ref value = inputs[self.distinct_slots[d]]
+            var decoded = List[UInt8]()
+            var pairs = keys.copy()
+            pairs.append(KeyVector.of(series_vector(value, decoded)))
+            var held = hold.copy()
+            if value._data.isa[StringColumn]():
+                held.append(value.copy())
+            self.distinct.at(d).sink_vectors(
+                pairs, List[Series](), held, first, count
+            )
+            _ = decoded^
+
+    def _sink_batch(
+        mut self,
+        count: Int,
+        first: Int,
+        lo: Int,
+        inputs: List[Series],
+        word_ptrs: List[Int],
+        keep: List[Bool],
+    ) raises:
+        """Rows [lo, lo + count) of a morsel whose first is source row
+        `first`, their hashes and key words written: into their groups,
+        then their states updated."""
+        var group_at = self.groups.unsafe_ptr()
+        var nulls = self.nulls.unsafe_ptr()
+        var hash_ptr = self.hashes.unsafe_ptr()
+        var kept = len(keep) > 0
+        # Rows a filter dropped are skipped in their own instantiation,
+        # so a sink without a selection runs the loops it always had.
+        if kept:
+            self._insert[True](
+                count,
+                first + lo,
+                Int(hash_ptr),
+                Int(nulls),
+                word_ptrs,
+                Int(group_at),
+                Int(keep.unsafe_ptr().unsafe_offset(lo)),
+            )
+        else:
+            self._insert[False](
+                count,
+                first + lo,
+                Int(hash_ptr),
+                Int(nulls),
+                word_ptrs,
+                Int(group_at),
+                0,
+            )
+        if self.numbering:
+            var states_at = 8 * self.parts.states_at
+            var ids = self.row_ids.unsafe_ptr()
+            for k in range(count):
+                ids[unsafe_offset=first + lo + k] = Int(
+                    _words_at(group_at[unsafe_offset=k] + states_at)[]
+                )
+        # The batch's states, by the address of each row's group.
+        _update_states(
+            self.slots,
+            inputs,
+            lo,
+            count,
+            group_at,
+            self.parts.states_at,
+            first,
+            Pointer[_ValueArena, MutAnyOrigin](
+                unsafe_from_address=Int(Pointer(to=self.values))
+            ),
+            Int(self.discard.unsafe_ptr()),
+            Int(self.scratch.unsafe_ptr()),
+            self.only,
+        )
 
     def _insert[
         masked: Bool
