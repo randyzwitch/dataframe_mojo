@@ -370,6 +370,8 @@ def _composed_scan[
                         b5,
                         b6,
                         b7,
+                        predicate,
+                        predicate_bits,
                     )
                     tree_bits = computed[0]
                     valid = computed[1]

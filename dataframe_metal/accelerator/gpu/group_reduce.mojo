@@ -48,6 +48,8 @@ def group_value[
     b5: Bytes,
     b6: Bytes,
     b7: Bytes,
+    predicate: Bytes = Bytes(unsafe_from_address=0),
+    predicate_bits: Bytes = Bytes(unsafe_from_address=0),
 ) -> Tuple[UInt64, Bool, UInt32]:
     var descriptor = metadata.unsafe_offset(16 + field * 8)
     var op = UInt32(descriptor[unsafe_offset=0])
@@ -75,6 +77,8 @@ def group_value[
             b5,
             b6,
             b7,
+            predicate,
+            predicate_bits,
         )
     var li = Int(descriptor[unsafe_offset=1]) - 1
     var ri = Int(descriptor[unsafe_offset=2]) - 1
@@ -158,6 +162,8 @@ def update_int64_ticket[
     b5: Bytes,
     b6: Bytes,
     b7: Bytes,
+    predicate: Bytes = Bytes(unsafe_from_address=0),
+    predicate_bits: Bytes = Bytes(unsafe_from_address=0),
 ):
     var expected = Atomic[UInt32].load(ticket)
     while True:
@@ -184,6 +190,8 @@ def update_int64_ticket[
                 b5,
                 b6,
                 b7,
+                predicate,
+                predicate_bits,
             )
             var old = bitcast[DType.int64](previous[0])
             if candidate >= old if minimum else candidate <= old:
@@ -298,6 +306,8 @@ def grouped_partials[
                     b5,
                     b6,
                     b7,
+                    predicate,
+                    predicate_bits,
                 )
                 if value[2]:
                     atomic_or(control.unsafe_offset(1), value[2])
@@ -349,6 +359,8 @@ def grouped_partials[
                                 b5,
                                 b6,
                                 b7,
+                                predicate,
+                                predicate_bits,
                             )
                             update_int64_ticket[False](
                                 state.unsafe_offset(GROUP_MAX),
@@ -372,6 +384,8 @@ def grouped_partials[
                                 b5,
                                 b6,
                                 b7,
+                                predicate,
+                                predicate_bits,
                             )
         row += stride
     if thread_idx.x == 0:
@@ -397,6 +411,8 @@ def resolve_int64_extrema[
     b5: Bytes,
     b6: Bytes,
     b7: Bytes,
+    predicate: Bytes,
+    predicate_bits: Bytes,
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
     states: Pointer[UInt32, UntrackedOrigin[mut=False]],
     resolved: Pointer[Int64, MutUntrackedOrigin],
@@ -434,6 +450,8 @@ def resolve_int64_extrema[
                         b5,
                         b6,
                         b7,
+                        predicate,
+                        predicate_bits,
                     )
                     resolved[unsafe_offset=index * 2 + side] = bitcast[
                         DType.int64

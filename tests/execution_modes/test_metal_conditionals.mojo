@@ -342,3 +342,252 @@ def test_metal_conditionals_checked_faults_only_in_selected_branches() raises:
     with assert_raises(contains="gradual underflow"):
         _ = execute_timed(fault_float)
     same_outcome(fault_float)
+
+
+def test_metal_conditional_constants_limits_and_ninth_predicate_binding() raises:
+    from dataframe_metal.composition_plan import plan_composition
+    from dataframe_metal.predicate_plan import plan_predicates
+
+    var columns = List[Series]()
+    for i in range(8):
+        columns.append(
+            Series("v" + String(i), Column[Int64]([Int64(i + 1), Int64(i + 2)]))
+        )
+    columns.append(Series("p", Column[Int32]([0, 1])))
+    var frame = DataFrame(columns^)
+    var constant = when(lit(True)).then(col("v0")).end()
+    assert_true(Bool(plan_composition(frame.lazy().select(constant.sum()))))
+    assert_true(Bool(plan_composition(frame.lazy().select(constant.count()))))
+    var otherwise = when(lit(False)).then(col("v0")).otherwise(col("v1"))
+    assert_true(Bool(plan_composition(frame.lazy().select(otherwise.sum()))))
+    var outputs = List[Expr]()
+    for i in range(4):
+        var a = col("v" + String(2 * i))
+        var b = col("v" + String(2 * i + 1))
+        var value = when(col("p") > 0).then(a + b).otherwise(a - b)
+        outputs.append(value.sum().alias("s" + String(i)))
+    var compiled = plan_composition(frame.lazy().select_exprs(outputs))
+    assert_true(Bool(compiled))
+    assert_equal(len(compiled.value().inputs), 9)
+    assert_equal(compiled.value().predicate.filter_column, "p")
+    for field in compiled.value().fields:
+        assert_equal(field.conditions[0].slots, List[Int]([8]))
+    # A WHERE over an earlier value slot and CASE over slot9 share the
+    # compound route; a range must not accidentally read the CASE predicate.
+    var filtered = frame.lazy().filter(col("v0") > 0).select_exprs(outputs)
+    assert_false(Bool(plan_composition(filtered)))
+    var predicates = plan_predicates(filtered)
+    assert_true(Bool(predicates))
+    assert_equal(predicates.value().program.slots, List[Int]([0]))
+    assert_equal(predicates.value().bundle.predicate.filter_column, "p")
+    var chain = when(col("p") == 0).then(col("v0"))
+    for i in range(1, 8):
+        chain = chain.when(col("p") == i).then(col("v0"))
+    assert_true(Bool(compile_conditional(chain.end(), frame)))
+    assert_false(
+        Bool(
+            compile_conditional(
+                chain.when(col("p") == 8).then(col("v0")).end(), frame
+            )
+        )
+    )
+    var deep = col("v0")
+    for i in range(7):
+        deep = col("v1") + deep
+    assert_true(
+        Bool(
+            compile_conditional(
+                when(col("p") > 0).then(deep).otherwise(0), frame
+            )
+        )
+    )
+    deep = col("v1") + deep
+    assert_false(
+        Bool(
+            compile_conditional(
+                when(col("p") > 0).then(deep).otherwise(0), frame
+            )
+        )
+    )
+
+
+# requires: metal
+def test_metal_conditional_four_values_eight_inputs_ninth_predicate_and_group_key() raises:
+    from tests.support.metal_outcomes import require_metal
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    var columns = List[Series]()
+    for field in range(8):
+        var values = List[Int64]()
+        var valid = List[Bool]()
+        for row in range(6):
+            values.append(Int64(2 * row + field + 1))
+            valid.append(row != (field % 4 + 1))
+        columns.append(
+            Series("v" + String(field), Column[Int64](values^, valid^))
+        )
+    columns.append(
+        Series(
+            "p",
+            Column[Int32](
+                [0, 1, 0, 1, 1, 0], [True, True, True, False, True, True]
+            ),
+        )
+    )
+    columns.append(Series("k", Column[Int32]([9, 0, 1, 0, 1, 9])))
+    var sliced = DataFrame(columns^).slice(1, 4)
+    var chunked_columns = List[Series]()
+    for field in range(10):
+        var name = (
+            "v" + String(field) if field < 8 else "p" if field == 8 else "k"
+        )
+        var split = field % 3 + 1
+        chunked_columns.append(
+            Series._from_chunks(
+                [
+                    sliced.column(name).slice(0, split),
+                    sliced.column(name).slice(split, 4 - split),
+                ]
+            )
+        )
+    var chunked = DataFrame(chunked_columns^)
+    var outputs = List[Expr]()
+    for field in range(4):
+        var a = col("v" + String(2 * field))
+        var b = col("v" + String(2 * field + 1))
+        var value = when(col("p") > 0).then(a + b).otherwise(a - b)
+        var suffix = String(field)
+        outputs.append(value.sum().alias("s" + suffix))
+        outputs.append(value.count().alias("n" + suffix))
+        outputs.append(value.mean().alias("avg" + suffix))
+        outputs.append(value.min().alias("lo" + suffix))
+        outputs.append(value.max().alias("hi" + suffix))
+    for frame in [sliced^, chunked^]:
+        for grouped in [False, True]:
+            var query = (
+                frame.lazy()
+                .group_by("k", maintain_order=True)
+                .agg(outputs) if grouped else frame.lazy()
+                .select_exprs(outputs)
+            )
+            for copied in [False, True]:
+                var answer = execute_timed(query, zero_copy=not copied)[
+                    0
+                ].copy()
+                assert_equal(answer.height(), 2 if grouped else 1)
+                for group in range(2 if grouped else 1):
+                    for field in range(4):
+                        var total = Int64(0)
+                        var count = Int64(0)
+                        var lo = Int64.MAX
+                        var hi = Int64.MIN
+                        for row in range(1, 5):
+                            if grouped and (row - 1) % 2 != group:
+                                continue
+                            if (
+                                row == (2 * field) % 4 + 1
+                                or row == (2 * field + 1) % 4 + 1
+                            ):
+                                continue
+                            var a = Int64(2 * row + 2 * field + 1)
+                            var b = a + 1
+                            var value = a + b if row == 1 or row == 4 else a - b
+                            total += value
+                            count += 1
+                            lo = min(lo, value)
+                            hi = max(hi, value)
+                        var suffix = String(field)
+                        assert_equal(
+                            answer.item(group, "s" + suffix).int64(), total
+                        )
+                        assert_equal(
+                            answer.item(group, "n" + suffix).int64(), count
+                        )
+                        assert_equal(
+                            answer.item(group, "avg" + suffix).float64(),
+                            Float64(total) / Float64(count),
+                        )
+                        assert_equal(
+                            answer.item(group, "lo" + suffix).int64(), lo
+                        )
+                        assert_equal(
+                            answer.item(group, "hi" + suffix).int64(), hi
+                        )
+                assert_true(query.collect(accelerator=runtime).equals(answer))
+
+
+# requires: metal
+def test_metal_conditional_rounding_ieee_and_constant_predicates() raises:
+    from std.memory import bitcast
+    from tests.support.metal_outcomes import require_metal, same_outcome
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    var tiny = bitcast[DType.float32](UInt32(1))
+    var nan = bitcast[DType.float32](UInt32(0x7FC00017))
+    var frame = DataFrame(
+        [
+            Series(
+                "a",
+                Column[Float32](
+                    [bitcast[DType.float32](UInt32(0x3F800001)), 3, 4, 5]
+                ),
+            ),
+            Series(
+                "b",
+                Column[Float32](
+                    [bitcast[DType.float32](UInt32(0x3F7FFFFE)), 2, 1, 0]
+                ),
+            ),
+            Series(
+                "p",
+                Column[Float32](
+                    [tiny, nan, -tiny, 0], [True, True, True, False]
+                ),
+            ),
+        ]
+    )
+    var rounded = (
+        when(col("p") > 0).then((col("a") * col("b")) - 1).otherwise(0)
+    )
+    assert_equal(
+        execute_timed(frame.lazy().select(rounded.sum()))[0].item().float32(),
+        Float32(0),
+    )
+    var value = (
+        when(~(col("p") > 0))
+        .then(col("a"))
+        .when(col("p").is_null())
+        .then(col("b"))
+        .end()
+    )
+    var query = frame.lazy().select_exprs(
+        [
+            value.sum().alias("s"),
+            value.count().alias("n"),
+            value.min().alias("lo"),
+            value.max().alias("hi"),
+        ]
+    )
+    # NaN satisfies NOT(p>0), a negative subnormal does too. The missing
+    # predicate is unknown in that comparison, then matches IS NULL.
+    var answer = execute_timed(query)[0].copy()
+    assert_equal(answer.item(0, "s").float32(), Float32(7))
+    assert_equal(answer.item(0, "n").int64(), Int64(3))
+    assert_equal(answer.item(0, "lo").float32(), Float32(0))
+    assert_equal(answer.item(0, "hi").float32(), Float32(4))
+    same_outcome(query)
+    var yes = when(lit(True)).then(col("a")).end()
+    var no = when(lit(False)).then(col("a")).end()
+    assert_equal(
+        execute_timed(frame.lazy().select(yes.count()))[0].item().int64(),
+        Int64(4),
+    )
+    assert_equal(
+        execute_timed(frame.lazy().select(no.count()))[0].item().int64(),
+        Int64(0),
+    )
+    assert_true(
+        execute_timed(frame.lazy().select(no.mean()))[0].item().is_null()
+    )

@@ -194,6 +194,8 @@ def _scan_grouped[
                     inputs[5].bits,
                     inputs[6].bits,
                     inputs[7].bits,
+                    predicate.values,
+                    predicate.bits,
                     metadata,
                     states,
                     extrema,

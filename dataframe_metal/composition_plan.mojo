@@ -1,7 +1,7 @@
 """Schema-only matching for arithmetic and column aggregates in one region."""
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Expr, LazyFrame, col
-from dataframe.expr import COL, SUM, COUNT, MEAN, MIN, MAX
+from dataframe.expr import COL, SUM, COUNT, MEAN, MIN, MAX, ADD, SUB, MUL
 from dataframe.lazy import FILTER, SCAN_FRAME, SELECT
 from .filter_plan import FilterSum, plan_region
 from .arithmetic_plan import plan_arithmetic
@@ -9,7 +9,11 @@ from .multi_plan import MAX_FIELDS, ReductionOutput
 from .expression_plan import ValueNode, compile_expression
 from .expression_format import TREE_OP
 from .conditional_plan import compile_conditional
-from .predicate_program import PredicateProgram, bind_predicate_inputs
+from .predicate_program import (
+    PredicateProgram,
+    bind_predicate_inputs,
+    MAX_INPUTS,
+)
 
 comptime MAX_VALUE_INPUTS = 8
 
@@ -87,6 +91,7 @@ def plan_composition(
         len(root.exprs) == 1
         and len(root.exprs[0]._nodes) == 4
         and root.exprs[0]._nodes[3].op == SUM
+        and root.exprs[0]._nodes[2].op in [ADD, SUB, MUL]
         and not include_native
     ):
         return None
@@ -154,7 +159,7 @@ def plan_composition(
             )
             if not predicate:
                 predicate = p^
-        elif size == 4:
+        elif size == 4 and expression._nodes[2].op in [ADD, SUB, MUL]:
             var matched = plan_arithmetic(offered.select(total))
             if not matched:
                 return None
@@ -292,15 +297,27 @@ def plan_composition(
             fields[i].left_input = _input_slot(inputs, fields[i].left)
         if fields[i].op != COL and fields[i].literal_side != 2:
             fields[i].right_input = _input_slot(inputs, fields[i].right)
+    if len(inputs) > MAX_VALUE_INPUTS:
+        return None
     for i in range(len(fields)):
         for j in range(len(fields[i].conditions)):
             if not bind_predicate_inputs(
-                fields[i].conditions[j], inputs, limit=MAX_VALUE_INPUTS
+                fields[i].conditions[j], inputs, limit=MAX_INPUTS
             ):
                 return None
-    if len(inputs) > MAX_VALUE_INPUTS:
-        return None
-    return Composition(predicate.take(), fields^, outputs^, inputs^, precise)
+    var physical_predicate = predicate.take()
+    if len(inputs) == MAX_INPUTS:
+        # The ninth physical binding is shared by all predicates. A distinct
+        # WHERE column is handled by plan_predicates' compound route, whose
+        # truth program can refer to any of the nine canonical inputs.
+        if (
+            physical_predicate.filtered
+            and physical_predicate.filter_column != inputs[8]
+        ):
+            return None
+        physical_predicate.filter_column = inputs[8].copy()
+        physical_predicate.filter_dtype = frame.column(inputs[8]).dtype()
+    return Composition(physical_predicate^, fields^, outputs^, inputs^, precise)
 
 
 def composition_key(plan: Composition) -> String:
