@@ -36,6 +36,7 @@ from dataframe.aggregation.function import (
     states_supported,
 )
 from dataframe.aggregation.hash_table import AggregateLayout, aggregate_layout
+from dataframe.aggregation.table_sink import input_vector
 from dataframe.aggregation.expressions import _stream_reductions
 from dataframe.aggregation.reducer import Reducer
 from dataframe.aggregation.selected_rows import _canonical_int
@@ -63,21 +64,20 @@ from dataframe.expr import (
 from dataframe.dtype import DataType
 from dataframe.execution import _empty
 from dataframe.frame import DataFrame
-from dataframe.series import Series, Storage
+from dataframe.series import Series
 from dataframe.storage.column import Column
-from dataframe.storage.string import StringColumn
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
     _NUMERIC_STORAGE,
-    _from_unified,
-    to_series,
+    storage_physical,
 )
 from dataframe.vector.expression import VectorExpression
 from dataframe.vector.sink import Sink
 from dataframe.vector.types import (
     SelectionVector,
     UnifiedVectorFormat,
+    Vector,
     physical_of,
 )
 
@@ -334,8 +334,10 @@ struct UngroupedSink(Sink):
     var rows: List[Int]
     var scratch: List[UInt64]
     var discard: List[UInt64]
-    # String inputs a value state points into, held until the finish.
+    # String inputs a value state points into, held until the finish, and
+    # the arena columns of this morsel held already.
     var held: List[Series]
+    var held_handles: List[Int]
     # Rows sunk, and the next row's number (from the morsel's, `begin`).
     var count: Int
     var sequence: Int
@@ -361,6 +363,7 @@ struct UngroupedSink(Sink):
         self.scratch = List[UInt64]()
         self.discard = List[UInt64](length=self.groups.stride + 8, fill=0)
         self.held = List[Series]()
+        self.held_handles = List[Int]()
         self.count = 0
         self.sequence = 0
 
@@ -384,6 +387,7 @@ struct UngroupedSink(Sink):
         in its output order, so first and last are the source's whichever
         worker took which morsel."""
         self.sequence = morsel << 32
+        self.held_handles.clear()
 
     def sink(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
         """A chunk of the sink's input into the states (DuckDB's `Sink`):
@@ -410,7 +414,7 @@ struct UngroupedSink(Sink):
                 continue
             if _simple_update(self.slots[s], format, n, state + 8 * offset):
                 continue
-            self._update(s, chunk, arena)
+            self._update(s, chunk, arena, format)
         self.count += n
         self.sequence += n
 
@@ -418,20 +422,26 @@ struct UngroupedSink(Sink):
         mut self, i: Int, mut chunk: DataChunk, mut arena: ColumnArena
     ) raises -> UnifiedVectorFormat:
         """Input i's vector: the chunk's column, or what its expression
-        wrote."""
-        if self.columns[i] >= 0:
-            return chunk.unified(self.columns[i], arena)
+        wrote (`input_vector`). The column a string value state points
+        into is held until the finish."""
+        var physical = storage_physical(self.types[i])
+        var dtype = self.types[i].dtype()
+        var c = self.columns[i]
+        var v: Vector
+        if c >= 0:
+            v = input_vector(chunk, c, arena, physical, dtype)
+        else:
+            v = input_vector(self.output, i, arena, physical, dtype)
+        if i < len(self.slots) and self.slots[i].holds_strings():
+            var known = False
+            for h in self.held_handles:
+                known = known or h == v.source
+            if not known:
+                self.held_handles.append(v.source)
+                self.held.append(arena.columns[v.source].copy())
+        if c >= 0:
+            return chunk.unified(c, arena)
         return self.output.unified(i, arena)
-
-    def _series(
-        mut self, i: Int, mut chunk: DataChunk, mut arena: ColumnArena
-    ) raises -> Series:
-        """Input i as a column of the chunk's rows."""
-        if self.columns[i] >= 0:
-            return to_series(
-                chunk, self.columns[i], arena, "", self.types[i].dtype()
-            )
-        return to_series(self.output, i, arena, "", self.types[i].dtype())
 
     def _scratch(mut self) -> Int:
         """The address of the table update's scratch vectors (values,
@@ -502,15 +512,12 @@ struct UngroupedSink(Sink):
         )
         if _simple_update(self.slots[s], selected, kept, state):
             return
-        # A value of a type the simple updates do not read: its kept rows
-        # as a column, through the table's update.
-        var column = _from_unified(selected, kept, "")
-        if column.dtype() != self.types[s].dtype():
-            column = column.with_dtype(self.types[s].dtype())
+        # A state the simple updates do not keep: the kept rows' vector
+        # through the table's update.
         var one = List[AggregateFunction]()
         one.append(self.slots[s].copy())
-        var lone = List[Series]()
-        lone.append(column^)
+        var lone = List[UnifiedVectorFormat]()
+        lone.append(selected)
         _update_states(
             one,
             lone,
@@ -529,28 +536,23 @@ struct UngroupedSink(Sink):
         )
 
     def _update(
-        mut self, s: Int, mut chunk: DataChunk, mut arena: ColumnArena
+        mut self,
+        s: Int,
+        mut chunk: DataChunk,
+        mut arena: ColumnArena,
+        format: UnifiedVectorFormat,
     ) raises:
-        """State s through the aggregate table's update, its input (and a
-        two-input reduction's second) as a column, every row to the one
-        state row."""
+        """State s through the aggregate table's update from its input's
+        vector `format` (and a two-input reduction's second), every row to
+        the one state row."""
         var n = chunk.count
         var slot = self.slots[s].copy()
-        var pair = slot.kind == _K_COMOMENT
         # The slot alone, its input first and a pair's second after it.
-        var lone = List[Series]()
-        lone.append(self._series(s, chunk, arena))
-        if pair:
-            lone.append(self._series(slot.k, chunk, arena))
+        var lone = List[UnifiedVectorFormat]()
+        lone.append(format)
+        if slot.kind == _K_COMOMENT:
+            lone.append(self._format(slot.k, chunk, arena))
             slot.k = 1
-        if slot.holds_strings():
-            ref strings = lone[0]._data[StringColumn]
-            if strings._is_view_storage():
-                if strings._view_storage.value()._selects():
-                    var flat = lone[0].copy()
-                    flat._data = Storage(strings._flat_views())
-                    lone[0] = flat^
-            self.held.append(lone[0].copy())
         var one = List[AggregateFunction]()
         one.append(slot^)
         for lo in range(0, n, _BATCH):
