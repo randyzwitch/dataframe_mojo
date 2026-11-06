@@ -143,13 +143,16 @@ struct MetalRuntime(AcceleratorBackend):
         from .region_plan import normalize_region
         from .composition_plan import plan_composition
         from .predicate_plan import plan_predicates
+        from .group_plan import plan_grouped
 
         var optimize = settings.optimize
         var offered = query.copy()
         if supports(query):
             var normalized = normalize_region(query)
-            if plan_composition(normalized.value()) or plan_predicates(
-                normalized.value()
+            if (
+                plan_composition(normalized.value())
+                or plan_predicates(normalized.value())
+                or plan_grouped(normalized.value())
             ):
                 offered = normalized.take()
                 optimize = False

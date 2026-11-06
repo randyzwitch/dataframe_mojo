@@ -214,13 +214,18 @@ def _truth(code: List[Int], clauses: Int) -> List[UInt32]:
     return table^
 
 
-def plan_predicates(region: LazyFrame) raises -> Optional[PredicateComposition]:
+def plan_predicates(
+    region: LazyFrame, allow_simple: Bool = False
+) raises -> Optional[PredicateComposition]:
     var n = len(region._plan._nodes)
-    if n < 3 or region._plan._nodes[0].kind != SCAN_FRAME:
+    if (
+        n < (2 if allow_simple else 3)
+        or region._plan._nodes[0].kind != SCAN_FRAME
+    ):
         return None
     # Existing compositions already have their own specialized scan. Keep
     # their execution route aligned with their unchanged calibration key.
-    if plan_composition(region):
+    if not allow_simple and plan_composition(region):
         return None
     ref root = region._plan._nodes[n - 1]
     if root.kind != SELECT or root.left != n - 2:
@@ -276,7 +281,11 @@ def plan_predicates(region: LazyFrame) raises -> Optional[PredicateComposition]:
     bundle.predicate.filter_dtype = frame.column(
         bundle.predicate.filter_column
     ).dtype()
-    var truth = _truth(code, len(clauses))
+    var truth = List[UInt32](length=8, fill=0)
+    if code:
+        truth = _truth(code, len(clauses))
+    else:
+        truth[0] = 1
     return PredicateComposition(
         bundle^, PredicateProgram(clauses^, truth^, slots^)
     )

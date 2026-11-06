@@ -33,6 +33,8 @@ from .composition_reduce import execute_composition
 from .extrema_plan import plan_extrema, extrema_key
 from .extrema_reduce import execute_extrema
 from .predicate_plan import plan_predicates, predicate_key
+from .group_plan import plan_grouped, grouped_key
+from .group_reduce import execute_grouped
 from .predicate_reduce import execute_predicates
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
@@ -72,6 +74,7 @@ def supports(region: LazyFrame) -> Bool:
             or Bool(plan_composition(selected))
             or Bool(plan_extrema(selected))
             or Bool(plan_predicates(selected))
+            or Bool(plan_grouped(selected))
         )
     except:
         return False
@@ -110,6 +113,9 @@ def region_key(region: LazyFrame) raises -> String:
     var extrema = plan_extrema(region)
     if extrema:
         return extrema_key(extrema.value())
+    var grouped = plan_grouped(region)
+    if grouped:
+        return grouped_key(grouped.value())
     var predicates = plan_predicates(region)
     if predicates:
         return predicate_key(predicates.value())
@@ -514,6 +520,9 @@ def execute_timed(
 def _execute_on_device(
     region: LazyFrame, zero_copy: Bool
 ) raises -> Tuple[DataFrame, HandoffTimings]:
+    var grouped = plan_grouped(region)
+    if grouped:
+        return execute_grouped(region, zero_copy)
     var accepted = plan_region(region)
     if not accepted:
         if plan_extrema(region):
