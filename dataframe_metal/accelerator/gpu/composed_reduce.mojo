@@ -14,6 +14,7 @@ from .filter_sum import BLOCK_SIZE, _valid
 from .multi_reduce import Bytes, read_integer
 from .arithmetic_sum import integer_binary
 from .exact_float_state import ExactFloatState
+from .compound_predicate import predicate_matches
 
 comptime HEADER_WORDS = 16
 comptime FIELD_WORDS = 8
@@ -169,6 +170,7 @@ def _composed_scan[
     int32_fields: Int,
     batched: Bool,
     with_extrema: Bool,
+    compound: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -287,6 +289,30 @@ def _composed_scan[
     var row = geometry[1] * BLOCK_SIZE + Int(thread_idx.x)
     while row < Int(rows):
         var kept = True
+        comptime if compound:
+            kept = predicate_matches(
+                metadata.unsafe_offset(Int(meta[unsafe_offset=3] >> 32)),
+                row_base,
+                row,
+                v0,
+                v1,
+                v2,
+                v3,
+                v4,
+                v5,
+                v6,
+                v7,
+                predicate,
+                b0,
+                b1,
+                b2,
+                b3,
+                b4,
+                b5,
+                b6,
+                b7,
+                predicate_bits,
+            )
         var pi = Int64(0)
         var pf = Float32(0)
         if filtered:
@@ -335,6 +361,7 @@ def _composed_scan[
                                     Bool(reuse_r[field]),
                                     row,
                                 )
+                                raw = bitcast[DType.uint32](result[0])
                         else:
                             result = float_value(
                                 lefts[field],
@@ -347,8 +374,10 @@ def _composed_scan[
                                 Bool(reuse_r[field]),
                                 row,
                             )
+                        # Extrema-only arithmetic also needs gradual-underflow
+                        # adjudication; its SUM bit is deliberately absent.
+                        fault |= UInt32(result[1]) << 1
                         if sum_flags & (UInt32(1) << UInt32(field)):
-                            fault |= UInt32(result[1]) << 1
                             comptime if precise:
                                 exact.add[field](result[0])
                             else:
@@ -476,6 +505,7 @@ def composed_partials[
     float_fields: Int,
     int32_fields: Int,
     batched: Bool = False,
+    compound: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -507,7 +537,14 @@ def composed_partials[
     faults: Pointer[UInt32, MutUntrackedOrigin],
 ):
     _composed_scan[
-        precise, wide, arity, float_fields, int32_fields, batched, False
+        precise,
+        wide,
+        arity,
+        float_fields,
+        int32_fields,
+        batched,
+        False,
+        compound,
     ](
         v0,
         v1,
@@ -548,6 +585,7 @@ def mixed_partials[
     float_fields: Int,
     int32_fields: Int,
     batched: Bool = False,
+    compound: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -581,9 +619,19 @@ def mixed_partials[
     var geometry = static_segment_info[batched](
         metadata, metadata_offset, Int(block_idx.x)
     )
-    var extrema_tail = high.unsafe_offset(Int(geometry[0][unsafe_offset=3]))
+    var tail_offset = geometry[0][unsafe_offset=3]
+    comptime if compound:
+        tail_offset &= 0xFFFF_FFFF
+    var extrema_tail = high.unsafe_offset(Int(tail_offset))
     _composed_scan[
-        precise, wide, arity, float_fields, int32_fields, batched, True
+        precise,
+        wide,
+        arity,
+        float_fields,
+        int32_fields,
+        batched,
+        True,
+        compound,
     ](
         v0,
         v1,
