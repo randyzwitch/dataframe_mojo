@@ -1,23 +1,15 @@
-"""Semi-join reduction: when a stream's inner or semi joins build on
-aggregates grouped by the join key, the probe side runs first and its
-distinct keys filter each aggregate's input. Every result equals the same
-joins over the separately collected inputs: two aggregates on one key above
-a selective join chain (PDS-H q21's shape, distinct counts included), a semi
-join, an aggregate on another key, which is left alone, and an aggregate
-grouped on both keys of a two-key join (PDS-H q20's shape).
-
-The other direction too: when the stream's source is an aggregate probed
-on its group keys, the join's filtered build side runs first and its keys
-filter the aggregate's input (DuckDB's join filters through an aggregate's
-groups)."""
+"""Aggregates grouped by a join key on either side of inner and semi
+joins: every result equals the same joins over the separately collected
+inputs. Two aggregates on one key above a selective join chain (PDS-H
+q21's shape, distinct counts included), a semi join, an aggregate on
+another key, an aggregate grouped on both keys of a two-key join (PDS-H
+q20's shape), and an aggregate probed on its group keys by a filtered
+build. The planner's semi-join reduction through aggregates is retired;
+DuckDB's join filters (`joins/join_filter.mojo`) narrow the probe scan
+instead."""
 # contract-group: planner.relational
-from std.testing import assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
 from tests.support.coverage_compare import assert_frame
-from tests.support.group_strategy_reference import (
-    ScopedEnvironment,
-    StrategyTrace,
-)
 
 comptime LINES = 120_000
 
@@ -86,13 +78,7 @@ def test_aggregates_built_on_take_only_the_probe_keys() raises:
         .agg([col("n").sum().alias("n"), col("ln").sum().alias("ln")])
         .sort("s")
     )
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    var observed = StrategyTrace()
     var reduced = query.collect()
-    var took = "dataframe-path: stream.probe_key_reduction\n" in observed.text()
-    _ = observed^
-    _ = trace^
-    assert_true(took, "the aggregates were not reduced by the probe keys")
     var eager = (
         chosen.collect()
         .join(per_order.collect(), on=["o"])
@@ -184,13 +170,7 @@ def test_an_aggregate_on_both_keys_of_a_two_key_join_takes_the_key_pairs() raise
         .agg([col("n").sum().alias("n")])
         .sort("s")
     )
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    var observed = StrategyTrace()
     var reduced = query.collect()
-    var took = "dataframe-path: stream.probe_key_reduction\n" in observed.text()
-    _ = observed^
-    _ = trace^
-    assert_true(took, "the two-key aggregate was not reduced by key pairs")
     var eager = (
         chosen.collect()
         .join(totals.collect(), on=["o", "s"])
@@ -230,13 +210,7 @@ def test_an_aggregate_reached_through_a_renamed_key_takes_the_probe_keys() raise
         .agg([col("o").count().alias("c")])
         .sort("s")
     )
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    var observed = StrategyTrace()
     var reduced = query.collect()
-    var took = "dataframe-path: stream.probe_key_reduction\n" in observed.text()
-    _ = observed^
-    _ = trace^
-    assert_true(took, "the renamed aggregate key was not reduced")
     var eager = (
         chosen.collect()
         .join(split.collect(), left_on=["o"], right_on=["split_o"], how="semi")
@@ -275,13 +249,7 @@ def test_an_aggregate_probing_a_filtered_build_takes_the_build_keys() raises:
         .agg([col("n").sum().alias("n")])
         .sort("s")
     )
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    var observed = StrategyTrace()
     var reduced = query.collect()
-    var took = "dataframe-path: stream.build_key_reduction\n" in observed.text()
-    _ = observed^
-    _ = trace^
-    assert_true(took, "the probing aggregate was not reduced by build keys")
     var eager = (
         totals.collect()
         .join(chosen.collect(), on=["o", "s"])
@@ -320,13 +288,7 @@ def test_a_renamed_probing_aggregate_and_a_left_join_keep_their_results() raises
         .agg([col("order").count().alias("c")])
         .sort("t")
     )
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    var observed = StrategyTrace()
     var reduced = semi.collect()
-    var took = "dataframe-path: stream.build_key_reduction\n" in observed.text()
-    _ = observed^
-    _ = trace^
-    assert_true(took, "the renamed aggregate key was not reduced")
     var eager_semi = (
         busy.collect()
         .join(chosen.collect(), left_on=["order"], right_on=["o"], how="semi")
