@@ -11,6 +11,7 @@ end of its run a worker's table is combined into the global state, the
 list of every worker's partitioned rows (`Combine`), which the table's
 finish merges partition by partition (`Finalize`, `aggregate_finish`).
 """
+from dataframe.aggregation.function import _K_LEN
 from dataframe.aggregation.hash_table import (
     AggregateLayout,
     AggregateSink,
@@ -64,6 +65,8 @@ struct TableSinkLayout(Copyable, Movable):
     var expressions: List[Optional[VectorExpression]]
     var types: List[DataType]
     var physical: List[Int]
+    # Whether the input's state reads its vector (a row count does not).
+    var reads: List[Bool]
 
     def __init__(out self, *, copy: Self):
         self.layout = copy.layout.copy()
@@ -74,6 +77,7 @@ struct TableSinkLayout(Copyable, Movable):
         self.expressions = copy.expressions.copy()
         self.types = copy.types.copy()
         self.physical = copy.physical.copy()
+        self.reads = copy.reads.copy()
 
     def __init__(
         out self,
@@ -117,9 +121,13 @@ struct TableSinkLayout(Copyable, Movable):
         self.expressions = List[Optional[VectorExpression]](capacity=len(given))
         self.types = List[DataType](capacity=len(given))
         self.physical = List[Int](capacity=len(given))
+        self.reads = List[Bool](capacity=len(given))
         for i in range(len(given)):
             self.types.append(inputs[i].dtype())
             self.physical.append(storage_physical(inputs[i]))
+            self.reads.append(
+                i >= len(layout.slots) or layout.slots[i].kind != _K_LEN
+            )
             if not given[i]:
                 self.columns.append(-1)
                 self.expressions.append(None)
@@ -150,6 +158,7 @@ struct TableSinkInputs(Movable):
     var expressions: List[Optional[VectorExpression]]
     var types: List[DataType]
     var physical: List[Int]
+    var reads: List[Bool]
     var output: DataChunk
     # Per key, the canonical code of each categorical code (equal labels
     # group together); empty when its labels do not repeat.
@@ -168,6 +177,7 @@ struct TableSinkInputs(Movable):
         self.expressions = shared.expressions.copy()
         self.types = shared.types.copy()
         self.physical = shared.physical.copy()
+        self.reads = shared.reads.copy()
         self.output = DataChunk(len(shared.expressions))
         self.maps = List[List[UInt32]](capacity=len(self.keys))
         self.codes = List[List[UInt32]](capacity=len(self.keys))
@@ -273,7 +283,9 @@ struct TableSinkInputs(Movable):
             var at = self.columns[i]
             var physical = self.physical[i]
             var dtype = self.types[i]
-            if at >= 0:
+            if not self.reads[i]:
+                inputs.append(UnifiedVectorFormat())
+            elif at >= 0:
                 var v = input_vector(chunk, at, arena, physical, dtype)
                 if v.physical == PHYSICAL_VARCHAR:
                     self._hold(arena, v.source, hold)
