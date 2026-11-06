@@ -231,3 +231,81 @@ def test_metal_expression_trees_nullable_sliced_chunked_and_fused() raises:
                     public.item(0, "avg").float64(),
                     Float64(37 if filtered else 26),
                 )
+
+
+# requires: metal
+def test_metal_expression_trees_four_values_eight_inputs_and_ninth_predicate() raises:
+    from tests.support.metal_outcomes import require_metal
+    from tests.support.metal_matrix_reference import (
+        matrix_frame,
+        matrix_expressions,
+        matrix_reference,
+    )
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    var expected = matrix_reference(False)
+    for fragmented in [False, True]:
+        var frame = matrix_frame(fragmented)
+        var query = (
+            frame.lazy()
+            .filter((col("p") > 0) | col("p").is_null())
+            .select_exprs(matrix_expressions())
+        )
+        for copied in [False, True]:
+            assert_true(
+                execute_timed(query, zero_copy=not copied)[0].equals(expected)
+            )
+        assert_true(query.collect(accelerator=runtime).equals(expected))
+
+
+# requires: metal
+def test_metal_expression_tree_checked_faults_masks_ieee_and_rounding() raises:
+    from std.memory import bitcast
+    from std.testing import assert_raises
+    from tests.support.metal_outcomes import require_metal, same_outcome
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    for kind in range(2):
+        var a = Series(
+            "a", Column[Int32]([Int32.MAX, 1])
+        ) if kind == 0 else Series("a", Column[Int64]([Int64.MAX, 1]))
+        var b = Series(
+            "b", Column[Int32]([0, 2], [False, True])
+        ) if kind == 0 else Series("b", Column[Int64]([0, 2], [False, True]))
+        var frame = DataFrame([a^, b^, Series("p", Column[Int32]([0, 1]))])
+        var value = (col("a") + 1) * col("b")
+        var fault = frame.lazy().select(value.count())
+        with assert_raises(contains="overflow"):
+            _ = execute_timed(fault)
+        same_outcome(fault)
+        var safe = frame.lazy().filter(col("p") > 0).select(value.sum())
+        var answer = execute_timed(safe)[0].copy()
+        if kind == 0:
+            assert_equal(answer.item().int32(), Int32(4))
+        else:
+            assert_equal(answer.item().int64(), Int64(4))
+    var tiny = bitcast[DType.float32](UInt32(1))
+    var small = DataFrame([Series("f", Column[Float32]([tiny, 1]))])
+    var expression = (col("f") * 0.5) + 1
+    var underflow = small.lazy().select(expression.sum())
+    with assert_raises(contains="gradual underflow"):
+        _ = execute_timed(underflow)
+    same_outcome(underflow)
+    var count = small.lazy().select(expression.count())
+    assert_equal(execute_timed(count)[0].item().int64(), Int64(2))
+    var rounded = DataFrame(
+        [
+            Series(
+                "a",
+                Column[Float32]([bitcast[DType.float32](UInt32(0x3F800001))]),
+            ),
+            Series(
+                "b",
+                Column[Float32]([bitcast[DType.float32](UInt32(0x3F7FFFFE))]),
+            ),
+        ]
+    )
+    var rounding = rounded.lazy().select(((col("a") * col("b")) - 1).sum())
+    assert_equal(execute_timed(rounding)[0].item().float32(), Float32(0))
