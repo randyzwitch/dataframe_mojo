@@ -15,7 +15,12 @@ from .composition_plan import (
 )
 from .exact_float import finish_float_bins
 from .expression_format import EXPRESSION_NODE_WORDS
-from .value_program_metadata import value_program_words, pack_value_program
+from .value_program_metadata import (
+    value_program_words,
+    pack_value_program,
+    predicate_words as predicate_program_words,
+    write_predicate,
+)
 from .extrema_reduce import extrema_column
 from .predicate_program import PredicateProgram
 from .accelerator.gpu.compound_predicate import (
@@ -212,10 +217,7 @@ def _scan[
         var base_words = prefix + len(segments) * META_WORDS
         var predicate_words = 0
         comptime if compound:
-            predicate_words = (
-                PREDICATE_HEADER_WORDS
-                + len(program.value().clauses) * PREDICATE_FIELD_WORDS
-            )
+            predicate_words = predicate_program_words(program.value())
         var tree_words = 0
         comptime if trees:
             for value in bundle.fields:
@@ -307,44 +309,7 @@ def _scan[
                 words[at + 3] = UInt64(size if mixed else 0) | (
                     UInt64(program_at) << 32
                 )
-                words[program_at] = UInt64(len(compiled.clauses))
-                for i in range(8):
-                    words[program_at + 1 + i] = UInt64(compiled.truth[i])
-                for i in range(len(compiled.clauses)):
-                    ref leaf = compiled.clauses[i]
-                    ref clause = leaf.bounds
-                    var slot = compiled.slots[i]
-                    ref input = segment[slot]
-                    var base = (
-                        program_at
-                        + PREDICATE_HEADER_WORDS
-                        + i * PREDICATE_FIELD_WORDS
-                    )
-                    words[base] = UInt64(slot)
-                    words[base + 1] = (
-                        UInt64(input.bit_offset)
-                        | (UInt64(input.nullable) << 32)
-                        | (UInt64(input.tag) << 33)
-                    )
-                    words[base + 2] = bitcast[DType.uint64](clause.low)
-                    words[base + 3] = bitcast[DType.uint64](clause.high)
-                    words[base + 4] = UInt64(
-                        bitcast[DType.uint32](clause.low_float)
-                    ) | (UInt64(bitcast[DType.uint32](clause.high_float)) << 32)
-                    if leaf.kind == 2:
-                        ref right = segment[leaf.other_input]
-                        words[base + 2] = UInt64(leaf.other_input)
-                        words[base + 3] = (
-                            UInt64(right.bit_offset)
-                            | (UInt64(right.nullable) << 32)
-                            | (UInt64(right.tag) << 33)
-                        )
-                    words[base + 5] = (
-                        UInt64(clause.inclusive)
-                        | (UInt64(leaf.kind) << 2)
-                        | (UInt64(leaf.inverted) << 4)
-                        | (UInt64(leaf.comparison) << 5)
-                    )
+                write_predicate(words, program_at, compiled, segment)
             output_offset += partials
         var metadata = ctx.enqueue_create_buffer[DType.uint64](len(words))
         try:
