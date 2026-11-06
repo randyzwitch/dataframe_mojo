@@ -6,6 +6,8 @@ from dataframe.lazy import FILTER, SCAN_FRAME, SELECT
 from .filter_plan import FilterSum, plan_region
 from .arithmetic_plan import plan_arithmetic
 from .multi_plan import MAX_FIELDS, ReductionOutput
+from .expression_plan import ValueNode, compile_expression
+from .expression_format import TREE_OP
 
 comptime MAX_VALUE_INPUTS = 8
 
@@ -23,8 +25,14 @@ struct ValueField(Copyable, Movable):
     var needs_mean: Bool
     var left_input: Int
     var right_input: Int
+    var tree: List[ValueNode]
 
     def same_value(self, other: Self) -> Bool:
+        if len(self.tree) != len(other.tree):
+            return False
+        for i in range(len(self.tree)):
+            if not self.tree[i].same_value(other.tree[i]):
+                return False
         return (
             self.left == other.left
             and self.right == other.right
@@ -91,7 +99,7 @@ def plan_composition(
     var precise = False
     for expression in root.exprs:
         var size = len(expression._nodes)
-        if size != 2 and size != 4:
+        if size < 2:
             return None
         ref aggregate = expression._nodes[size - 1]
         if (
@@ -131,10 +139,11 @@ def plan_composition(
                 False,
                 -1,
                 -1,
+                List[ValueNode](),
             )
             if not predicate:
                 predicate = p^
-        else:
+        elif size == 4:
             var matched = plan_arithmetic(offered.select(total))
             if not matched:
                 return None
@@ -151,9 +160,38 @@ def plan_composition(
                 False,
                 -1,
                 -1,
+                List[ValueNode](),
             )
             if not predicate:
                 predicate = p.predicate.copy()
+            arithmetic = True
+        else:
+            if aggregate.left != size - 2:
+                return None
+            var compiled = compile_expression(expression, frame, size - 2)
+            if not compiled:
+                return None
+            var tree = compiled.take()
+            var matched = plan_region(offered.select(col(tree.seed).sum()))
+            if not matched:
+                return None
+            var p = matched.take()
+            value = ValueField(
+                tree.seed.copy(),
+                tree.seed.copy(),
+                tree.dtype,
+                TREE_OP,
+                0,
+                0,
+                0,
+                False,
+                False,
+                -1,
+                -1,
+                tree.nodes.copy(),
+            )
+            if not predicate:
+                predicate = p^
             arithmetic = True
         var slot = -1
         for i in range(len(fields)):
@@ -181,7 +219,11 @@ def plan_composition(
     var binary_slot = -1
     var binary_count = 0
     for i in range(len(fields)):
-        single_float = single_float and fields[i].dtype == DataType.FLOAT32
+        single_float = (
+            single_float
+            and fields[i].dtype == DataType.FLOAT32
+            and not fields[i].tree
+        )
         if fields[i].op != COL:
             binary_slot = i
             binary_count += 1
@@ -211,6 +253,13 @@ def plan_composition(
     fields = packed^
     var inputs = List[String]()
     for i in range(len(fields)):
+        if fields[i].tree:
+            for j in range(len(fields[i].tree)):
+                if fields[i].tree[j].op == COL:
+                    fields[i].tree[j].input = _input_slot(
+                        inputs, fields[i].tree[j].column
+                    )
+            continue
         if fields[i].literal_side != 1:
             fields[i].left_input = _input_slot(inputs, fields[i].left)
         if fields[i].op != COL and fields[i].literal_side != 2:
@@ -224,7 +273,9 @@ def composition_key(plan: Composition) -> String:
     # Names do not affect costs; canonical source slots describe reuse.
     var key = (
         String(
-            "mixed_reductions:v1:" if has_extrema(plan) else (
+            "expression_reductions:v1:" if has_trees(
+                plan
+            ) else "mixed_reductions:v1:" if has_extrema(plan) else (
                 "composed_reductions:v1:" if single_float_composition(
                     plan
                 ) else "composed_reductions:v2:typed_fields:"
@@ -253,6 +304,18 @@ def composition_key(plan: Composition) -> String:
             + (":sum" if field.needs_sum else ":count")
             + (":mean" if field.needs_mean else "")
         )
+    for field in plan.fields:
+        if field.tree:
+            key += ":tree"
+            for node in field.tree:
+                key += (
+                    ":"
+                    + String(node.op)
+                    + ","
+                    + String(node.input)
+                    + ","
+                    + String(node.literal)
+                )
     if has_extrema(plan):
         for i in range(len(plan.fields)):
             key += ":ext" + String(i)
@@ -272,8 +335,15 @@ def has_extrema(plan: Composition) -> Bool:
     return False
 
 
+def has_trees(plan: Composition) -> Bool:
+    for field in plan.fields:
+        if field.tree:
+            return True
+    return False
+
+
 def single_float_composition(plan: Composition) -> Bool:
-    if has_extrema(plan):
+    if has_extrema(plan) or has_trees(plan):
         return False
     var arithmetic = 0
     for field in plan.fields:

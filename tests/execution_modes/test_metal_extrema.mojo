@@ -815,7 +815,7 @@ def test_arithmetic_extrema_schema_shares_expression_state() raises:
             )
         )
     )
-    assert_false(
+    assert_true(
         Bool(plan_composition(frame.lazy().select((col("i") + 1 + 1).min())))
     )
 

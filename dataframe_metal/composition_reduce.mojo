@@ -9,8 +9,10 @@ from .composition_plan import (
     plan_composition,
     single_float_composition,
     has_extrema,
+    has_trees,
 )
 from .exact_float import finish_float_bins
+from .expression_format import EXPRESSION_NODE_WORDS
 from .extrema_reduce import extrema_column
 from .predicate_plan import PredicateProgram
 from .accelerator.gpu.compound_predicate import (
@@ -63,6 +65,7 @@ def _scan[
     mixed: Bool = False,
     native_mixed: Bool = False,
     compound: Bool = False,
+    trees: Bool = False,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -208,8 +211,13 @@ def _scan[
                 PREDICATE_HEADER_WORDS
                 + len(program.value().clauses) * PREDICATE_FIELD_WORDS
             )
+        var tree_words = 0
+        comptime if trees:
+            for value in bundle.fields:
+                tree_words += len(value.tree) * EXPRESSION_NODE_WORDS
+        var tail_words = predicate_words + tree_words
         var words = List[UInt64](
-            length=base_words + len(segments) * predicate_words, fill=0
+            length=base_words + len(segments) * tail_words, fill=0
         )
         if batched:
             words[0] = UInt64(len(segments))
@@ -244,6 +252,7 @@ def _scan[
                 predicate_input + 1 if predicate_input
                 < len(bundle.inputs) else 0
             )
+            var tree_at = base_words + index * tail_words + predicate_words
             for field in range(nf):
                 ref value = bundle.fields[field]
                 var tag = 2 if value.dtype == DataType.FLOAT32 else (
@@ -268,6 +277,20 @@ def _scan[
                 words[base + 7] = UInt64(
                     bitcast[DType.uint32](value.floating)
                 ) if tag == 2 else bitcast[DType.uint64](value.integer)
+                comptime if trees:
+                    if value.tree:
+                        words[base + 6] = UInt64(tree_at)
+                        words[base + 7] = UInt64(len(value.tree))
+                        for node in value.tree:
+                            words[tree_at] = UInt64(node.op)
+                            if node.op == COL:
+                                ref input = segment[node.input]
+                                words[tree_at + 1] = UInt64(node.input)
+                                words[tree_at + 2] = UInt64(
+                                    input.bit_offset
+                                ) | (UInt64(input.nullable) << 32)
+                            words[tree_at + 3] = node.literal
+                            tree_at += EXPRESSION_NODE_WORDS
             comptime if mixed:
                 # One packed tail avoids extra Metal buffer arguments.
                 words[at + 3] = UInt64(size)
@@ -278,7 +301,7 @@ def _scan[
                         )
             comptime if compound:
                 ref compiled = program.value()
-                var program_at = base_words + index * predicate_words
+                var program_at = base_words + index * tail_words
                 words[at + 3] = UInt64(size if mixed else 0) | (
                     UInt64(program_at) << 32
                 )
@@ -355,6 +378,7 @@ def _scan[
                     int32_fields,
                     batched=True,
                     compound=compound,
+                    trees=trees,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=True
                 ] if fast and not compound else composed_partials[
@@ -365,6 +389,7 @@ def _scan[
                     int32_fields,
                     batched=True,
                     compound=compound,
+                    trees=trees,
                 ]
                 comptime kernel_separate = native_float_mixed_partials[
                     precise, wide, batched=False
@@ -376,6 +401,7 @@ def _scan[
                     int32_fields,
                     batched=False,
                     compound=compound,
+                    trees=trees,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=False
                 ] if fast and not compound else composed_partials[
@@ -386,6 +412,7 @@ def _scan[
                     int32_fields,
                     batched=False,
                     compound=compound,
+                    trees=trees,
                 ]
                 if batched:
                     ctx.enqueue_function[kernel_batched](
@@ -702,7 +729,11 @@ def _dispatch[
 
 
 def _mixed_dispatch[
-    precise: Bool, wide: Bool, mixed: Bool = True, compound: Bool = False
+    precise: Bool,
+    wide: Bool,
+    mixed: Bool = True,
+    compound: Bool = False,
+    trees: Bool = False,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -711,7 +742,7 @@ def _mixed_dispatch[
     mut timings: HandoffTimings,
     program: Optional[PredicateProgram] = None,
 ) raises -> ComposedScan:
-    comptime if mixed and not compound:
+    comptime if mixed and not compound and not trees:
         if (
             len(bundle.fields) == 1
             and bundle.fields[0].dtype == DataType.FLOAT32
@@ -745,6 +776,7 @@ def _mixed_dispatch[
                             narrow,
                             mixed=mixed,
                             compound=compound,
+                            trees=trees,
                         ](bundle, frame, scope, zero_copy, timings, program)
     raise Error("Metal mixed field types exceed their arity")
 
@@ -770,7 +802,30 @@ def execute_composition(
     timings.context_ns = Int(perf_counter_ns()) - started
     var result: Tuple[List[Int128], List[Float64], List[Int]]
     var extrema = List[Int64]()
-    if has_extrema(bundle):
+    if has_trees(bundle):
+        var scan: ComposedScan
+        if bundle.precise_float:
+            try:
+                scan = _mixed_dispatch[True, False, trees=True](
+                    bundle, frame, scope, zero_copy, timings
+                )
+            except error:
+                if String(error) != "Metal exact bins need wide scan":
+                    raise error^
+                scan = _mixed_dispatch[True, True, trees=True](
+                    bundle, frame, scope, zero_copy, timings
+                )
+        else:
+            scan = _mixed_dispatch[False, False, trees=True](
+                bundle, frame, scope, zero_copy, timings
+            )
+        extrema = scan.extrema.copy()
+        result = (
+            scan.integers.copy(),
+            scan.floating.copy(),
+            scan.counts.copy(),
+        )
+    elif has_extrema(bundle):
         var scan: ComposedScan
         if bundle.precise_float:
             try:

@@ -1,95 +1,150 @@
-"""Recover supported regions from row expressions shared by the CPU planner.
+"""Inline bounded row expressions while preserving all checked work.
 
-Only row-local binary values immediately below the final projection are
-inlined. Filters must already precede their evaluation; unused or dependent
-with-columns work is declined so errors cannot be pruned by GPU fusion.
+WITH_COLUMNS definitions are parallel within a stage and sequential across
+stages. Versioned bindings preserve overwrites and their dependencies. Every
+definition must feed an output; filters must precede definitions.
 """
 from dataframe import Expr, LazyFrame
-from dataframe.expr import COL, ADD, SUB, MUL, SUM, COUNT, MEAN, MIN, MAX
+from dataframe.expr import COL, SUM, COUNT, MEAN, MIN, MAX, Node
 from dataframe.lazy import SCAN_FRAME, FILTER, WITH_COLUMNS, SELECT
+from .expression_plan import compile_expression
+from .expression_format import MAX_EXPRESSION_NODES
+
+
+def _expand(
+    expression: Expr,
+    names: List[String],
+    versions: List[Int],
+    definitions: List[Expr],
+    mut dependencies: List[Int],
+) -> Optional[Expr]:
+    var nodes = List[Node]()
+    var remap = List[Int]()
+    for i in range(len(expression._nodes)):
+        var node = expression._nodes[i].copy()
+        var version = -1
+        if node.op == COL:
+            for j in range(len(names)):
+                if names[j] == node.text:
+                    version = versions[j]
+        if version >= 0:
+            if version not in dependencies:
+                dependencies.append(version)
+            var offset = len(nodes)
+            for original in definitions[version]._nodes:
+                var expanded = original.copy()
+                if expanded.left >= 0:
+                    expanded.left += offset
+                if expanded.right >= 0:
+                    expanded.right += offset
+                nodes.append(expanded^)
+        else:
+            if node.left >= 0:
+                if node.left >= i:
+                    return None
+                node.left = remap[node.left]
+            if node.right >= 0:
+                if node.right >= i:
+                    return None
+                node.right = remap[node.right]
+            nodes.append(node^)
+        if len(nodes) > MAX_EXPRESSION_NODES + 1:
+            return None
+        remap.append(len(nodes) - 1)
+    return Expr(nodes^, expression._name.copy())
 
 
 def normalize_region(region: LazyFrame) raises -> Optional[LazyFrame]:
     var n = len(region._plan._nodes)
-    if n < 3 or region._plan._nodes[n - 2].kind != WITH_COLUMNS:
-        for node in region._plan._nodes:
-            if node.kind == WITH_COLUMNS:
-                return None
+    var first = -1
+    for i in range(n):
+        if region._plan._nodes[i].kind == WITH_COLUMNS and first < 0:
+            first = i
+    if first < 0:
         return region.copy()
     if (
-        region._plan._nodes[0].kind != SCAN_FRAME
+        first < 1
+        or n < 3
+        or region._plan._nodes[0].kind != SCAN_FRAME
         or region._plan._nodes[n - 1].kind != SELECT
     ):
         return None
-    for i in range(1, n - 2):
+    for i in range(1, n):
+        if region._plan._nodes[i].left != i - 1:
+            return None
+        if i < first and region._plan._nodes[i].kind != FILTER:
+            return None
         if (
-            region._plan._nodes[i].kind != FILTER
-            or region._plan._nodes[i].left != i - 1
+            i >= first
+            and i < n - 1
+            and region._plan._nodes[i].kind != WITH_COLUMNS
         ):
-            return None
-    ref definitions = region._plan._nodes[n - 2].exprs
-    if (
-        not definitions
-        or region._plan._nodes[n - 2].left != n - 3
-        or region._plan._nodes[n - 1].left != n - 2
-    ):
-        return None
-    var names = List[String]()
-    for definition in definitions:
-        if definition._name in names or len(definition._nodes) != 3:
-            return None
-        ref binary = definition._nodes[2]
-        if (
-            (binary.op != ADD and binary.op != SUB and binary.op != MUL)
-            or binary.left != 0
-            or binary.right != 1
-        ):
-            return None
-        names.append(definition._name.copy())
-    # Definitions are parallel expressions over the input. Reject apparent
-    # dependencies/overwrites instead of accidentally substituting twice.
-    for definition in definitions:
-        for value in definition._nodes:
-            if value.op == COL and value.text in names:
-                return None
-    var used = List[Bool](length=len(names), fill=False)
-    var outputs = List[Expr]()
-    for expression in region._plan._nodes[n - 1].exprs:
-        var slot = -1
-        for node in expression._nodes:
-            if node.op == COL and node.text in names:
-                if len(expression._nodes) != 2:
-                    return None
-                for i in range(len(names)):
-                    if node.text == names[i]:
-                        slot = i
-        if slot < 0:
-            outputs.append(expression.copy())
-            continue
-        ref aggregate = expression._nodes[1]
-        if aggregate.left != 0 or (
-            aggregate.op != SUM
-            and aggregate.op != COUNT
-            and aggregate.op != MEAN
-            and aggregate.op != MIN
-            and aggregate.op != MAX
-        ):
-            return None
-        var expanded = definitions[slot].copy()
-        var finish = aggregate.copy()
-        finish.left = len(expanded._nodes) - 1
-        expanded._nodes.append(finish^)
-        expanded._name = expression._name.copy()
-        outputs.append(expanded^)
-        used[slot] = True
-    for present in used:
-        if not present:
             return None
     var frame = region._plan._frames[
         region._plan._nodes[0].source_slot()
     ].copy()
+    var names = List[String]()
+    var versions = List[Int]()
+    var definitions = List[Expr]()
+    var edges = List[List[Int]]()
+    for stage in range(first, n - 1):
+        var added = List[Expr]()
+        var stage_edges = List[List[Int]]()
+        var stage_names = List[String]()
+        for expression in region._plan._nodes[stage].exprs:
+            if expression._name in stage_names:
+                return None
+            stage_names.append(expression._name.copy())
+            var dependencies = List[Int]()
+            var expanded = _expand(
+                expression, names, versions, definitions, dependencies
+            )
+            if not expanded or not compile_expression(expanded.value(), frame):
+                return None
+            added.append(expanded.take())
+            stage_edges.append(dependencies^)
+        if not added:
+            return None
+        # Publish bindings only after the entire parallel stage is expanded.
+        for i in range(len(added)):
+            var version = len(definitions)
+            definitions.append(added[i].copy())
+            edges.append(stage_edges[i].copy())
+            var slot = -1
+            for j in range(len(names)):
+                if names[j] == stage_names[i]:
+                    slot = j
+            if slot < 0:
+                names.append(stage_names[i].copy())
+                versions.append(version)
+            else:
+                versions[slot] = version
+    var used = List[Bool](length=len(definitions), fill=False)
+    var pending = List[Int]()
+    var outputs = List[Expr]()
+    for expression in region._plan._nodes[n - 1].exprs:
+        if not expression._nodes:
+            return None
+        var op = expression._nodes[len(expression._nodes) - 1].op
+        if op != SUM and op != COUNT and op != MEAN and op != MIN and op != MAX:
+            return None
+        var expanded = _expand(
+            expression, names, versions, definitions, pending
+        )
+        if not expanded:
+            return None
+        outputs.append(expanded.take())
+    while pending:
+        var version = pending.pop()
+        if not used[version]:
+            used[version] = True
+            for dependency in edges[version]:
+                pending.append(dependency)
+    for present in used:
+        if not present:
+            return None
     var normalized = frame.lazy()
-    for i in range(1, n - 2):
+    for i in range(1, first):
         if len(region._plan._nodes[i].exprs) != 1:
             return None
         normalized = normalized.filter(region._plan._nodes[i].exprs[0])
