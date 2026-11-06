@@ -372,6 +372,12 @@ COUNT includes non-null NaNs. Empty extrema/means remain typed nulls and SUM
 retains its minimum-count and overflow behavior. Adjacent shared-owner chunks
 batch into one launch; independent allocations retain their segment geometry.
 
+When all outputs share one native Float32 value, a dedicated mixed kernel
+reads that value directly, without binary-operand selection or integer
+accumulator state. SUM/MEAN and extrema reuse its raw bits. It retains the
+same predicate types, exact-bin retries, CPU-order proof and IEEE adjudication
+as the general mixed scan, including copied and chunked inputs.
+
 Mixed programs use `mixed_reductions:v1:` calibration keys. Existing pure
 aggregate paths retain their keys and entry signatures. A changed package
 identity requires fresh calibration before automatic placement uses the mixed
