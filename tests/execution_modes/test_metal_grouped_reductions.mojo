@@ -182,6 +182,34 @@ def test_metal_grouped_cost_properties_distinguish_cardinality_and_skew() raises
     )
 
 
+def test_metal_grouped_layout_key_includes_the_group_key_column() raises:
+    from dataframe_metal.calibration import shape_key
+
+    var keys = Series("k", Column[Int32]([0, 1, 2, 3]))
+    var values = Series("v", Column[Float32]([2, 3, 4, 5]))
+    var flat = (
+        DataFrame([keys.copy(), values.copy()])
+        .lazy()
+        .group_by("k")
+        .agg(col("v").sum())
+    )
+    var chunked = (
+        DataFrame(
+            [
+                Series._from_chunks([keys.slice(0, 1), keys.slice(1, 3)]),
+                values.copy(),
+            ]
+        )
+        .lazy()
+        .group_by("k")
+        .agg(col("v").sum())
+    )
+    var plan = plan_grouped(flat)
+    assert_true(Bool(plan))
+    var operator = grouped_key(plan.value())
+    assert_false(shape_key(flat, operator) == shape_key(chunked, operator))
+
+
 # requires: metal
 def test_metal_grouped_reductions_null_keys_values_extrema_and_order() raises:
     from tests.support.metal_outcomes import require_metal

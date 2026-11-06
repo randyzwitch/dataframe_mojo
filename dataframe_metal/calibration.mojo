@@ -13,6 +13,7 @@ from std.memory.alloc import Layout, alloc
 from std.memory import bitcast
 from dataframe import DataType, LazyFrame, Series
 from dataframe.expr import COL, LIT_INT, LIT_FLOAT
+from dataframe.lazy import AGG
 from dataframe.json.value import JsonValue, json_quote
 from dataframe.parallel import configured_workers
 from dataframe.planning.device_placement import plan_pipeline_cuts
@@ -47,6 +48,10 @@ def shape_key(region: LazyFrame, operator: String) raises -> String:
     """Physical layout and output work, independent of user column names."""
     var names = List[String]()
     for node in region._plan._nodes:
+        if node.kind == AGG:
+            for name in node.group_keys():
+                if name not in names:
+                    names.append(name.copy())
         for expression in node.exprs:
             for value in expression._nodes:
                 if value.op == COL and value.text not in names:
