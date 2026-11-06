@@ -6,10 +6,18 @@ another key, an aggregate grouped on both keys of a two-key join (PDS-H
 q20's shape), and an aggregate probed on its group keys by a filtered
 build. The planner's semi-join reduction through aggregates is retired;
 DuckDB's join filters (`joins/join_filter.mojo`) narrow the probe scan
-instead."""
+instead, and reach the input of an aggregate the probe side reads on its
+group keys (JoinFilterPushdownOptimizer)."""
 # contract-group: planner.relational
+from std.testing import assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
 from tests.support.coverage_compare import assert_frame
+from tests.support.group_strategy_reference import (
+    ScopedEnvironment,
+    StrategyTrace,
+)
+
+comptime THROUGH = "dataframe-path: pipeline.join_filter_through_aggregate\n"
 
 comptime LINES = 120_000
 
@@ -249,7 +257,13 @@ def test_an_aggregate_probing_a_filtered_build_takes_the_build_keys() raises:
         .agg([col("n").sum().alias("n")])
         .sort("s")
     )
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
     var reduced = query.collect()
+    var took = THROUGH in observed.text()
+    _ = observed^
+    _ = trace^
+    assert_true(took, "the build's keys did not reach the aggregate's input")
     var eager = (
         totals.collect()
         .join(chosen.collect(), on=["o", "s"])
@@ -288,7 +302,13 @@ def test_a_renamed_probing_aggregate_and_a_left_join_keep_their_results() raises
         .agg([col("order").count().alias("c")])
         .sort("t")
     )
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
     var reduced = semi.collect()
+    var took = THROUGH in observed.text()
+    _ = observed^
+    _ = trace^
+    assert_true(took, "the renamed group key did not take the build's keys")
     var eager_semi = (
         busy.collect()
         .join(chosen.collect(), left_on=["order"], right_on=["o"], how="semi")

@@ -20,6 +20,11 @@ reaches the pipeline's source unchanged, from the build's non-null keys:
   applied to rows. It pauses, per thread, once the first six vectors it
   looked at kept half their rows or more, and looks again after ten times
   as many vectors as it has paused (`SelectivityStats`).
+
+A key the probe side reads as an aggregate's group key reaches that
+aggregate's input as well (`join_filter_pushdown_optimizer.cpp`
+GetPushdownFilterTargets): the build runs first and the input's pipeline
+takes its filters (`PushedJoinFilter`).
 """
 from std.memory import ArcPointer, Pointer
 
@@ -328,3 +333,32 @@ def keep_rows(
             at[unsafe_offset=k] = UInt8(1) if ok else UInt8(0)
             kept += Int(ok)
     return (looked, kept)
+
+
+@fieldwise_init
+struct PushedJoinFilter(Copyable, Movable):
+    """A finished build's key for a scan below an aggregate on the join's
+    probe side (`JoinFilterPushdownOptimizer::GetPushdownFilterTargets`,
+    the LOGICAL_AGGREGATE_AND_GROUP_BY case): `column` names the group key
+    in the aggregate's input, which the input's pipeline follows to its
+    source column, where `finalize_filters` makes the key's filters."""
+
+    var column: String
+    var key: Series
+    # The join's equality conditions, and its build's rows with no null
+    # key and whether the build side filters (for CanUseBloomFilter).
+    var equalities: Int
+    var build_count: Int
+    var build_filtered: Bool
+
+
+struct PushedJoinFilters(Movable):
+    """The keys pushed into the input of the aggregate at plan node
+    `node`, for its pipeline to filter its source by."""
+
+    var node: Int
+    var filters: List[PushedJoinFilter]
+
+    def __init__(out self, node: Int, var filters: List[PushedJoinFilter]):
+        self.node = node
+        self.filters = filters^
