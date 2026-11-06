@@ -397,9 +397,7 @@ def sink_columns(
         handles.append(arena.add(key))
     for i in range(len(inputs)):
         # A row count's chunk column is never read.
-        handles.append(
-            arena.add(inputs[i]) if reader.reads[i] else handles[0]
-        )
+        handles.append(arena.add(inputs[i]) if reader.reads[i] else handles[0])
     reader.begin()
     var chunk = DataChunk(len(handles))
     var length = len(keys[0])

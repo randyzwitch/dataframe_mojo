@@ -1605,14 +1605,14 @@ struct AggregateSink(Movable):
                 Int(rows),
             )
             for i in range(unique):
-                addresses[unsafe_offset = entries[unsafe_offset=i]] = group_at[
+                addresses[unsafe_offset=entries[unsafe_offset=i]] = group_at[
                     unsafe_offset=i
                 ]
         # The adaptive counters see every row (`AddInput`).
         self.cycle += count - unique
         for k in range(count):
             group_at[unsafe_offset=k] = addresses[
-                unsafe_offset = row_entries[unsafe_offset=k]
+                unsafe_offset=row_entries[unsafe_offset=k]
             ]
 
     def _insert[
@@ -1671,9 +1671,7 @@ struct AggregateSink(Movable):
                     var source = row + k
                     comptime if listed:
                         source = row_at[unsafe_offset=k]
-                    var at = self.parts.append(
-                        hash, null, word_ptrs, k, source
-                    )
+                    var at = self.parts.append(hash, null, word_ptrs, k, source)
                     table[unsafe_offset=slot] = _entry(hash, at)
                     # The sketch sees only new groups: a row whose group
                     # is in the table has had its hash seen already.
