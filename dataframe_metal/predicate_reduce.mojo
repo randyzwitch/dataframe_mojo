@@ -1,7 +1,7 @@
 """One reduction scan over checked native AND/OR predicates."""
 from std.time import perf_counter_ns
 from dataframe import DataFrame, LazyFrame
-from .composition_plan import has_extrema
+from .composition_plan import has_extrema, has_trees
 from .composition_reduce import (
     ComposedScan,
     _mixed_dispatch,
@@ -26,6 +26,10 @@ def _dispatch[
     mut timings: HandoffTimings,
 ) raises -> ComposedScan:
     var program = Optional[PredicateProgram](selected.program.copy())
+    if has_trees(selected.bundle):
+        return _mixed_dispatch[
+            precise, wide, mixed=True, compound=True, trees=True
+        ](selected.bundle, frame, scope, zero_copy, timings, program)
     if has_extrema(selected.bundle):
         return _mixed_dispatch[precise, wide, mixed=True, compound=True](
             selected.bundle, frame, scope, zero_copy, timings, program

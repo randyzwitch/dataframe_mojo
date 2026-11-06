@@ -15,6 +15,9 @@ from .multi_reduce import Bytes, read_integer
 from .arithmetic_sum import integer_binary
 from .exact_float_state import ExactFloatState
 from .compound_predicate import predicate_matches
+from .value_ops import checked_float_value
+from .expression_value import expression_value
+from ...expression_format import TREE_OP
 
 comptime HEADER_WORDS = 16
 comptime FIELD_WORDS = 8
@@ -120,21 +123,7 @@ def float_value(
             unsafe_offset=row
         ]
     )
-    # Metal may flush subnormal operands/results during arithmetic. Reading
-    # raw column bits into exact bins is safe, but arithmetic needs CPU
-    # adjudication when the device cannot preserve gradual underflow.
-    var ar = bitcast[DType.uint32](a) & 0x7FFF_FFFF
-    var br = bitcast[DType.uint32](b) & 0x7FFF_FFFF
-    var ae = ar >> 23
-    var be = br >> 23
-    var tiny = (ar != 0 and ae == 0) or (br != 0 and be == 0)
-    var underflow = (ar != 0 and br != 0 and ae + be <= 127) if op == UInt32(
-        MUL
-    ) else ((ar != 0 and ae <= 24) or (br != 0 and be <= 24))
-    var result = a + b if op == UInt32(ADD) else (
-        a - b if op == UInt32(SUB) else a * b
-    )
-    return (result, tiny or underflow)
+    return checked_float_value(a, b, op)
 
 
 @always_inline
@@ -171,6 +160,7 @@ def _composed_scan[
     batched: Bool,
     with_extrema: Bool,
     compound: Bool = False,
+    trees: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -334,6 +324,56 @@ def _composed_scan[
                 valid = valid & _valid(left_bits[field], loff[field], row)
             if flags[field] & 2:
                 valid = valid & _valid(right_bits[field], roff[field], row)
+            var tree_bits = UInt64(0)
+            comptime if trees:
+                if kept and ops[field] == UInt32(TREE_OP):
+                    var computed = expression_value[field < float_fields](
+                        metadata.unsafe_offset(
+                            Int(
+                                meta[
+                                    unsafe_offset=HEADER_WORDS
+                                    + field * FIELD_WORDS
+                                    + 6
+                                ]
+                            )
+                        ),
+                        Int(
+                            meta[
+                                unsafe_offset=HEADER_WORDS
+                                + field * FIELD_WORDS
+                                + 7
+                            ]
+                        ),
+                        row_base,
+                        row,
+                        UInt32(0 if field < float_fields + int32_fields else 1),
+                        Bool(sum_flags & (UInt32(1) << UInt32(field)))
+                        or (
+                            with_extrema
+                            and Bool(
+                                extent_flags & (UInt32(1) << UInt32(field))
+                            )
+                        ),
+                        v0,
+                        v1,
+                        v2,
+                        v3,
+                        v4,
+                        v5,
+                        v6,
+                        v7,
+                        b0,
+                        b1,
+                        b2,
+                        b3,
+                        b4,
+                        b5,
+                        b6,
+                        b7,
+                    )
+                    tree_bits = computed[0]
+                    valid = computed[1]
+                    fault |= computed[2]
             if valid:
                 nc[field] += 1
                 comptime if field < float_fields:
@@ -343,12 +383,32 @@ def _composed_scan[
                     ):
                         var raw = UInt32(0)
                         var result = (Float32(0), False)
-                        comptime if with_extrema:
-                            if ops[field] == UInt32(COL):
-                                raw = lefts[field].unsafe_bitcast[UInt32]()[
-                                    unsafe_offset=row
-                                ]
-                                result = (bitcast[DType.float32](raw), False)
+                        if trees and ops[field] == UInt32(TREE_OP):
+                            raw = UInt32(tree_bits)
+                            result = (bitcast[DType.float32](raw), False)
+                        else:
+                            comptime if with_extrema:
+                                if ops[field] == UInt32(COL):
+                                    raw = lefts[field].unsafe_bitcast[UInt32]()[
+                                        unsafe_offset=row
+                                    ]
+                                    result = (
+                                        bitcast[DType.float32](raw),
+                                        False,
+                                    )
+                                else:
+                                    result = float_value(
+                                        lefts[field],
+                                        rights[field],
+                                        ops[field],
+                                        sides[field],
+                                        flit[field],
+                                        pf,
+                                        Bool(reuse_l[field]),
+                                        Bool(reuse_r[field]),
+                                        row,
+                                    )
+                                    raw = bitcast[DType.uint32](result[0])
                             else:
                                 result = float_value(
                                     lefts[field],
@@ -361,19 +421,6 @@ def _composed_scan[
                                     Bool(reuse_r[field]),
                                     row,
                                 )
-                                raw = bitcast[DType.uint32](result[0])
-                        else:
-                            result = float_value(
-                                lefts[field],
-                                rights[field],
-                                ops[field],
-                                sides[field],
-                                flit[field],
-                                pf,
-                                Bool(reuse_l[field]),
-                                Bool(reuse_r[field]),
-                                row,
-                            )
                         # Extrema-only arithmetic also needs gradual-underflow
                         # adjudication; its SUM bit is deliberately absent.
                         fault |= UInt32(result[1]) << 1
@@ -422,18 +469,22 @@ def _composed_scan[
                             and (extent_flags & (UInt32(1) << UInt32(field)))
                         )
                     ):
-                        var result = int_value(
-                            lefts[field],
-                            rights[field],
-                            ops[field],
-                            sides[field],
-                            ilit[field],
-                            pi,
-                            Bool(reuse_l[field]),
-                            Bool(reuse_r[field]),
-                            row,
-                            UInt32(TAG),
-                        )
+                        var result = (Int64(0), False)
+                        if trees and ops[field] == UInt32(TREE_OP):
+                            result = (bitcast[DType.int64](tree_bits), False)
+                        else:
+                            result = int_value(
+                                lefts[field],
+                                rights[field],
+                                ops[field],
+                                sides[field],
+                                ilit[field],
+                                pi,
+                                Bool(reuse_l[field]),
+                                Bool(reuse_r[field]),
+                                row,
+                                UInt32(TAG),
+                            )
                         fault |= UInt32(result[1])
                         var value = result[0] if not result[1] else Int64(0)
                         comptime if with_extrema:
@@ -506,6 +557,7 @@ def composed_partials[
     int32_fields: Int,
     batched: Bool = False,
     compound: Bool = False,
+    trees: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -545,6 +597,7 @@ def composed_partials[
         batched,
         False,
         compound,
+        trees,
     ](
         v0,
         v1,
@@ -586,6 +639,7 @@ def mixed_partials[
     int32_fields: Int,
     batched: Bool = False,
     compound: Bool = False,
+    trees: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -632,6 +686,7 @@ def mixed_partials[
         batched,
         True,
         compound,
+        trees,
     ](
         v0,
         v1,
