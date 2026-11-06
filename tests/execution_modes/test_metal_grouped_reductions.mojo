@@ -666,3 +666,141 @@ def test_metal_grouped_shared_key_mapping_and_scratch_budget_lifetime() raises:
         )
     assert_equal(limited.info()[0], 0)
     _ = result^
+
+
+def test_metal_grouped_flat_outputs_preserve_global_finish_semantics() raises:
+    from dataframe import DataType
+    from dataframe.expr import COUNT, MEAN
+    from dataframe_metal.composition_plan import plan_composition
+    from dataframe_metal.composition_reduce import finish_composition
+    from dataframe_metal.group_output import GroupOutput
+    from dataframe_metal.accelerator.gpu.float_predicate import _ordered
+    from std.memory import bitcast
+
+    for kind in range(3):
+        var source = _numbers(kind, "v", [0], [True])
+        var matched = plan_composition(
+            DataFrame([source^])
+            .lazy()
+            .select_exprs(
+                [
+                    col("v").sum().alias("s"),
+                    col("v").count().alias("n"),
+                    col("v").mean().alias("avg"),
+                    col("v").min().alias("lo"),
+                    col("v").max().alias("hi"),
+                    col("v").sum(min_count=4).alias("minimum_count"),
+                ]
+            )
+        )
+        assert_true(Bool(matched))
+        ref bundle = matched.value()
+        var dtype = bundle.fields[0].dtype
+        var outputs = List[GroupOutput]()
+        var references = List[List[Series]]()
+        for output in bundle.outputs:
+            outputs.append(GroupOutput(output, dtype, False))
+            references.append(List[Series]())
+        for sample in range(3):
+            var total = Int128(7 if sample == 0 else 0 if sample == 1 else -9)
+            var count = 3 if sample == 0 else 0 if sample == 1 else 2
+            var lo = Int64(-2 if sample == 0 else 0 if sample == 1 else -7)
+            var hi = Int64(5 if sample == 0 else 0 if sample == 1 else -2)
+            if dtype == DataType.FLOAT32:
+                lo = Int64(_ordered(bitcast[DType.uint32](Float32(lo))))
+                hi = Int64(_ordered(bitcast[DType.uint32](Float32(hi))))
+            var reference = finish_composition(
+                bundle,
+                (
+                    List[Int128]([total]),
+                    List[Float64]([total.cast[DType.float64]()]),
+                    List[Int]([count]),
+                ),
+                List[Int64]([lo, hi, Int64(count), Int64(0)]),
+            )
+            for i in range(len(outputs)):
+                outputs[i].append(
+                    total,
+                    total.cast[DType.float64](),
+                    count,
+                    lo,
+                    hi,
+                    count,
+                    UInt32(0),
+                    count + 1,
+                )
+                references[i].append(reference.column(bundle.outputs[i].name))
+        var flat = List[Series]()
+        var expected = List[Series]()
+        for i in range(len(bundle.outputs)):
+            var column = outputs.pop(0).finish()
+            assert_equal(len(column.chunks()), 1)
+            flat.append(column^)
+            expected.append(Series._from_chunks(references[i]))
+        assert_true(DataFrame(flat^).equals(DataFrame(expected^)))
+        # Empty output still has the correct dtype for each aggregate.
+        for output in bundle.outputs:
+            var empty = GroupOutput(output, dtype, False).finish()
+            assert_equal(len(empty), 0)
+            assert_equal(
+                empty.dtype(),
+                DataType.INT64 if output.op
+                == COUNT else DataType.FLOAT64 if output.op
+                == MEAN else dtype,
+            )
+
+
+def test_metal_grouped_flat_outputs_keep_faults_and_row_counts() raises:
+    from dataframe import DataType
+    from dataframe.expr import SUM, MIN, COUNT
+    from dataframe_metal.multi_plan import ReductionOutput
+    from dataframe_metal.group_output import GroupOutput
+    from std.testing import assert_raises
+
+    var rows = GroupOutput(
+        ReductionOutput(0, "len", COUNT, 0), DataType.INT64, True
+    )
+    rows.append(0, 0, 0, 0, 0, 0, 0, 17)
+    assert_equal(rows^.finish().get(0).int64(), Int64(17))
+    var narrow = GroupOutput(
+        ReductionOutput(0, "s", SUM, 4), DataType.INT32, False
+    )
+    with assert_raises(contains="int32 expression sum overflow"):
+        narrow.append(Int128(Int32.MAX) + 1, 0, 1, 0, 0, 0, 0, 1)
+    var wide = GroupOutput(
+        ReductionOutput(0, "s", SUM, 0), DataType.INT64, False
+    )
+    with assert_raises(contains="int64 expression sum overflow"):
+        wide.append(Int128(Int64.MIN) - 1, 0, 1, 0, 0, 0, 0, 1)
+    var nan = GroupOutput(
+        ReductionOutput(0, "lo", MIN, 0), DataType.FLOAT32, False
+    )
+    with assert_raises(contains="all-NaN Float32 extrema"):
+        nan.append(0, 0, 3, 0, 0, 0, 1, 3)
+    var zeros = GroupOutput(
+        ReductionOutput(0, "lo", MIN, 0), DataType.FLOAT32, False
+    )
+    with assert_raises(contains="mixed signed-zero extrema"):
+        zeros.append(0, 0, 2, Int64(0x80000000), 0, 2, 6, 2)
+
+
+def test_metal_grouped_large_result_order_uses_first_selected_row() raises:
+    from dataframe_metal.group_output import group_order
+
+    for groups in [0, 1, 16, 256, 257, 65536]:
+        var first = List[UInt32](length=groups * 2, fill=UInt32.MAX)
+        for i in range(groups):
+            var ordinal = (i * 40503) % 65536
+            first[i * 2] = (UInt32(ordinal) << 15) + 3
+        var ordered = group_order(first)
+        assert_equal(len(ordered), groups)
+        var seen = List[Bool](length=groups, fill=False)
+        for i in range(groups):
+            var slot = ordered[i]
+            assert_equal(slot % 2, 0)
+            assert_false(seen[slot // 2])
+            seen[slot // 2] = True
+            if i:
+                assert_true(first[ordered[i - 1]] < first[slot])
+        for present in seen:
+            assert_true(present)

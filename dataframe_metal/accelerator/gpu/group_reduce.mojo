@@ -204,11 +204,11 @@ def update_int64_ticket[
 
 @always_inline
 def _update_group_field[
-    arity: Int,
     floating: Bool,
     narrow: Bool,
     cases: Bool,
     conditional_only: Bool,
+    global_state: Bool = False,
 ](
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
     slot: UInt32,
@@ -236,6 +236,7 @@ def _update_group_field[
     predicate_bits: Bytes,
     states: Pointer[UInt32, MutUntrackedOrigin],
     control: Pointer[UInt32, MutUntrackedOrigin],
+    arity: Int,
 ) -> Bool:
     var sum_requested = Bool(flags & (UInt32(1) << UInt32(field)))
     var extrema_requested = Bool(
@@ -270,9 +271,11 @@ def _update_group_field[
         atomic_or(control.unsafe_offset(1), value[2])
         return True
     if value[1]:
+        var state_index = Int(slot)
+        comptime if not global_state:
+            state_index = state_index * Int(blocks) + Int(block_idx.x)
         var state = states.unsafe_offset(
-            ((Int(slot) * Int(blocks) + Int(block_idx.x)) * arity + field)
-            * GROUP_STATE_WORDS
+            (state_index * arity + field) * GROUP_STATE_WORDS
         )
         _ = Atomic[UInt32].fetch_add(
             state.unsafe_offset(GROUP_COUNT), UInt32(1)
@@ -440,7 +443,7 @@ def grouped_partials[
                             end = Int(metadata[unsafe_offset=6])
                         for field in range(begin, min(end, arity)):
                             if _update_group_field[
-                                arity, FLOATING, NARROW, cases, conditional_only
+                                FLOATING, NARROW, cases, conditional_only
                             ](
                                 metadata,
                                 slot,
@@ -468,12 +471,12 @@ def grouped_partials[
                                 predicate_bits,
                                 states,
                                 control,
+                                arity,
                             ):
                                 return
             else:
                 comptime for field in range(arity):
                     if _update_group_field[
-                        arity,
                         field < float_fields,
                         field < float_fields + int32_fields,
                         cases,
@@ -505,6 +508,7 @@ def grouped_partials[
                         predicate_bits,
                         states,
                         control,
+                        arity,
                     ):
                         return
         row += stride

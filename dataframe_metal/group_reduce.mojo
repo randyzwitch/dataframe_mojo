@@ -2,6 +2,7 @@
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
 from .composition_plan import has_conditions, only_conditional_trees
+from .group_partials import GroupedPartials
 from .group_plan import GroupedComposition, plan_grouped
 from .group_metadata import group_metadata
 from .group_finish import finish_grouped
@@ -24,15 +25,6 @@ from .accelerator.gpu.group_reduce import (
     grouped_partials,
     resolve_int64_extrema,
 )
-
-
-@fieldwise_init
-struct GroupedPartials(Movable):
-    var first: List[UInt32]
-    var rows: List[UInt32]
-    var states: List[UInt32]
-    var extrema: List[Int64]
-    var blocks: Int
 
 
 def _scan_grouped[
