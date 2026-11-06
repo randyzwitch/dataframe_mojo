@@ -90,7 +90,7 @@ def test_metal_null_predicates_fused_with_aggregates_and_ieee_values() raises:
             ),
         ]
     )
-    for frame in [sliced, chunked]:
+    for frame in [sliced^, chunked^]:
         var predicates = List[Expr](
             [
                 col("p").is_null(),
