@@ -15,6 +15,7 @@ from .expr import (
     Node,
     Expr,
     COL,
+    RANK,
     _SCALAR_SOURCE,
     ROW_LEN,
     INT_RANGE,
@@ -3109,7 +3110,13 @@ def _full[
 
 from dataframe.kernels.gather import take_parallel
 from .parallel import configured_workers
-from .window_sort import WindowLayout, window_layout
+from .window_sort import (
+    WindowLayout,
+    rank_from_layout,
+    rank_order_keys,
+    partition_ids,
+    window_layout,
+)
 
 
 # DuckDB's STANDARD_VECTOR_SIZE: window tasks are sized in blocks of it.
@@ -3124,10 +3131,22 @@ struct WindowLayouts(Movable):
 
     var keys: List[String]
     var layouts: List[WindowLayout]
+    # Partition ids (and counts) by partition keys, for constant aggregates.
+    var id_keys: List[String]
+    var ids: List[List[Int]]
+    var counts: List[Int]
+    # Key columns made contiguous once for every window that reads them.
+    var flat_names: List[String]
+    var flat: List[Series]
 
     def __init__(out self):
         self.keys = List[String]()
         self.layouts = List[WindowLayout]()
+        self.id_keys = List[String]()
+        self.ids = List[List[Int]]()
+        self.counts = List[Int]()
+        self.flat_names = List[String]()
+        self.flat = List[Series]()
 
     def find(self, keys: String) -> Int:
         for k in range(len(self.keys)):
@@ -3145,6 +3164,132 @@ def _layout_key(node: Node) -> String:
     return key^
 
 
+def _flat_column(
+    name: String, columns: List[Series], cache_address: Int
+) raises -> Optional[Series]:
+    """The named column in one chunk, made contiguous once per frame."""
+    var cache = Pointer[WindowLayouts, MutAnyOrigin](
+        unsafe_from_address=cache_address
+    )
+    for k in range(len(cache[].flat_names)):
+        if cache[].flat_names[k] == name:
+            return cache[].flat[k].copy()
+    for column in columns:
+        if column.name() == name:
+            var flat = column.rechunk() if column.is_chunked() else (
+                column.copy()
+            )
+            cache[].flat_names.append(name)
+            cache[].flat.append(flat.copy())
+            return flat^
+    return None
+
+
+def _partition_keys(
+    node: Node, columns: List[Series], cache_address: Int
+) raises -> List[Series]:
+    """The over() node's partition key columns (none when global)."""
+    var partition_keys = List[Series]()
+    if (node.integer & OVER_GLOBAL) == 0:
+        for name in split_names(node.text2):
+            var column = _flat_column(name, columns, cache_address)
+            if column:
+                partition_keys.append(column.take())
+    return partition_keys^
+
+
+def _over_constant[
+    width: Int
+](
+    node: Node,
+    argument_expr: Expr,
+    inputs: List[Series],
+    columns: List[Series],
+    height: Int,
+    batch_size: Int,
+    cache_address: Int,
+) raises -> Series:
+    """An aggregate over whole partitions (no ORDER BY, so every row's
+    frame is its partition): DuckDB's WindowConstantAggregator. Each
+    partition is aggregated once and the result is broadcast to its rows;
+    the rows are numbered by partition (hash-partitioned, one dictionary
+    per task of hash groups) and never gathered or sorted."""
+    var cache = Pointer[WindowLayouts, MutAnyOrigin](
+        unsafe_from_address=cache_address
+    )
+    var at = -1
+    for k in range(len(cache[].id_keys)):
+        if cache[].id_keys[k] == node.text2:
+            at = k
+    if at < 0:
+        var keys = _partition_keys(node, columns, cache_address)
+        var ids: List[Int]
+        var count: Int
+        if len(keys) == 0 or height == 0:
+            ids = List[Int](length=height, fill=0)
+            count = 1 if height > 0 else 0
+        else:
+            ids = List[Int]()
+            count = partition_ids(keys, height, ids)
+        cache[].id_keys.append(node.text2)
+        cache[].ids.append(ids^)
+        cache[].counts.append(count)
+        at = len(cache[].id_keys) - 1
+    var local = bind(argument_expr, inputs)
+    var values = evaluate[width](
+        local,
+        inputs,
+        height,
+        batch_size=batch_size,
+        grouped=True,
+        groups=cache[].ids[at],
+        group_count=cache[].counts[at],
+    )
+    var spread = take_parallel(
+        [values^], cache[].ids[at].copy(), configured_workers()
+    )
+    var result = spread[0].copy()
+    result._name = argument_expr._name
+    return result^
+
+
+def _over_rank(
+    node: Node,
+    argument_expr: Expr,
+    inputs: List[Series],
+    columns: List[Series],
+    height: Int,
+    cache_address: Int,
+) raises -> Series:
+    """rank() directly under over(): DuckDB plans it as rank() OVER
+    (PARTITION BY keys ORDER BY value), so the value joins the layout's
+    order keys and the ranks are read off its peer boundaries, with no
+    second sort per partition."""
+    ref rank = argument_expr._nodes[len(argument_expr._nodes) - 1]
+    var name = argument_expr._nodes[rank.left].text
+    var value = Series("", Column[Int64](List[Int64]()))
+    for column in inputs:
+        if column.name() == name:
+            value = column.copy()
+    if value.dtype().is_categorical():
+        value = decode(value)
+    var keys = List[Series]()
+    var descending = List[Bool]()
+    var nulls_last = List[Bool]()
+    rank_order_keys(value, rank.min_count == 1, keys, descending, nulls_last)
+    var layout = window_layout(
+        _partition_keys(node, columns, cache_address),
+        keys,
+        descending,
+        nulls_last,
+        height,
+        stable=rank.text == "ordinal",
+    )
+    var result = rank_from_layout(layout, value, rank.text)
+    result._name = argument_expr._name
+    return result^
+
+
 def _layout_index(
     node: Node, columns: List[Series], height: Int, cache_address: Int
 ) raises -> Int:
@@ -3157,18 +3302,13 @@ def _layout_index(
     var at = cache[].find(key)
     if at >= 0:
         return at
-    var partition_keys = List[Series]()
-    if (node.integer & OVER_GLOBAL) == 0:
-        for name in split_names(node.text2):
-            for column in columns:
-                if column.name() == name:
-                    partition_keys.append(column.copy())
+    var partition_keys = _partition_keys(node, columns, cache_address)
     var order_keys = List[Series]()
     if node.min_count > 0:
         for name in split_names(node.text):
-            for column in columns:
-                if column.name() == name:
-                    order_keys.append(column.copy())
+            var column = _flat_column(name, columns, cache_address)
+            if column:
+                order_keys.append(column.take())
     var descending = List[Bool](
         length=len(order_keys), fill=(node.integer & 1) != 0
     )
@@ -3220,6 +3360,9 @@ struct _OverJob(Job):
     var first: Int
     var last: Int
     var batch_size: Int
+    # The over()'s partition keys: a nested over() with the same keys
+    # reads this job's partition numbers.
+    var keys: String
     var result: Series
 
     def __init__(
@@ -3232,6 +3375,7 @@ struct _OverJob(Job):
         lo: Int,
         hi: Int,
         batch_size: Int,
+        keys: String,
     ):
         self.inner = inner.copy()
         self.columns = columns.copy()
@@ -3241,6 +3385,7 @@ struct _OverJob(Job):
         self.lo = lo
         self.hi = hi
         self.batch_size = batch_size
+        self.keys = keys
         self.result = Series("", Column[Int64](List[Int64]()))
 
     def run(mut self) raises:
@@ -3263,6 +3408,10 @@ struct _OverJob(Job):
                 starts[unsafe_offset=g + 1] - self.lo,
             ):
                 ids[unsafe_offset=k] = g - self.first
+        var known = WindowLayouts()
+        known.id_keys.append(self.keys)
+        known.ids.append(groups.copy())
+        known.counts.append(self.last - self.first)
         self.result = evaluate(
             self.inner,
             part,
@@ -3271,7 +3420,17 @@ struct _OverJob(Job):
             grouped=True,
             groups=groups,
             group_count=self.last - self.first,
+            layouts=Int(Pointer(to=known)),
         )
+        _ = known^
+
+
+def _has_windows(expr: Expr) -> Bool:
+    """Whether the expression holds a window function or a nested over()."""
+    for node in expr._nodes:
+        if node.op == OVER or is_window(node.op) or is_sequence(node.op):
+            return True
+    return False
 
 
 def _used_columns(expr: Expr, columns: List[Series]) raises -> List[Bool]:
@@ -3411,9 +3570,10 @@ def _over_mapped[
         if value.dtype() != bound.dtypes[node.left]:
             value = value.cast(bound.dtypes[node.left])
         parts.append(value^)
+    var row_partitions = layout.row_partitions()
     var ids = List[Int](capacity=height)
     for row in range(height):
-        ids.append(appearance[layout.row_partition[row]])
+        ids.append(appearance[row_partitions[row]])
     var prototype = parts[0].slice(0, 0) if len(parts) > 0 else _empty_output(
         inner, columns, len(inner.expr._nodes) - 1
     )
@@ -3473,6 +3633,35 @@ def _over[
         argument_expr = Expr(nodes^, inner.expr._name)
     var owned = WindowLayouts()
     var cache_address = layouts if layouts != 0 else Int(Pointer(to=owned))
+    if not mapped:
+        ref root = argument_expr._nodes[len(argument_expr._nodes) - 1]
+        if (
+            root.op == RANK
+            and node.min_count == 0
+            and argument_expr._nodes[root.left].op == COL
+        ):
+            var ranked = _over_rank(
+                node, argument_expr, inputs, columns, height, cache_address
+            )
+            _ = owned^
+            return ranked^
+    if (
+        not mapped
+        and node.min_count == 0
+        and inner.shape() != ROWS
+        and not _has_windows(argument_expr)
+    ):
+        var constant = _over_constant[width](
+            node,
+            argument_expr,
+            inputs,
+            columns,
+            height,
+            batch_size,
+            cache_address,
+        )
+        _ = owned^
+        return constant^
     var at = _layout_index(node, columns, height, cache_address)
     var cache = Pointer[WindowLayouts, MutAnyOrigin](
         unsafe_from_address=cache_address
@@ -3509,6 +3698,7 @@ def _over[
                 0,
                 height,
                 batch_size,
+                node.text2,
             )
         )
     else:
@@ -3542,6 +3732,7 @@ def _over[
                     layout.starts[first],
                     layout.starts[last],
                     batch_size,
+                    node.text2,
                 )
             )
     if len(jobs) == 1:
@@ -3565,7 +3756,7 @@ def _over[
         _ = owned^
         return combined.rechunk() if combined.is_chunked() else combined^
     var rows = layout.inverse.copy() if local.shape() == ROWS else (
-        layout.row_partition.copy()
+        layout.row_partitions()
     )
     _ = owned^
     var spread = take_parallel([combined^], rows^, lanes)
