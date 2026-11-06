@@ -71,9 +71,11 @@ from dataframe.aggregation.function import (
     _HeldBuffers,
     _KeyColumn,
     _K_COMOMENT,
+    _K_COUNT,
     _K_DECIMAL_SUM,
     _K_DISTINCT,
     _K_LEN,
+    _K_NULLS,
     _K_TOP_ROWS,
     _K_VALUES,
     _VALUE_NONE,
@@ -988,31 +990,44 @@ def _string_key[
         )
 
 
-def series_vector(
-    series: Series, mut decoded: List[UInt8]
+def series_format(
+    series: Series, mut decoded: List[UInt8], values: Bool = True
 ) raises -> UnifiedVectorFormat:
-    """An unchunked column's rows as a flat unified format: fixed-width
-    values where they are, strings as string_t and booleans as a byte each
-    decoded into `decoded`, which must outlive the format."""
+    """An unchunked column's rows as a flat unified format, for the sink's
+    Series fallback (`AggregateSink.sink`, whose callers do not read
+    chunks yet): fixed-width values where they are, strings as string_t
+    and booleans as a byte each decoded into `decoded`, which must outlive
+    the format. Without `values` a string or Boolean column gives only
+    its validity (a count reads nothing else)."""
     if series._data.isa[StringColumn]():
         ref strings = series._data[StringColumn]
-        decoded = _decode_strings(strings)
+        if values:
+            decoded = _decode_strings(strings)
         return UnifiedVectorFormat(
             SelectionVector(),
-            Int(decoded.unsafe_ptr()),
+            Int(decoded.unsafe_ptr()) if values else 0,
             _series_validity(strings._bits[], strings._offset),
             PHYSICAL_VARCHAR,
         )
     if series._data.isa[BoolColumn]():
         ref bools = series._data[BoolColumn]
-        decoded = List[UInt8](unsafe_uninit_length=max(1, len(bools)))
-        for i in range(len(bools)):
-            decoded[i] = UInt8(1) if bools._get(i) else UInt8(0)
+        if values:
+            decoded = List[UInt8](unsafe_uninit_length=max(1, len(bools)))
+            for i in range(len(bools)):
+                decoded[i] = UInt8(1) if bools._get(i) else UInt8(0)
         return UnifiedVectorFormat(
             SelectionVector(),
-            Int(decoded.unsafe_ptr()),
+            Int(decoded.unsafe_ptr()) if values else 0,
             _series_validity(bools._bits[], bools._offset),
             PHYSICAL_BOOL,
+        )
+    if series._data.isa[Column[Int128]]():
+        ref wide = series._data[Column[Int128]]
+        return UnifiedVectorFormat(
+            SelectionVector(),
+            Int(wide._ptr()),
+            _series_validity(wide._bits[], wide._offset),
+            PHYSICAL_INT128,
         )
     comptime for d in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[d]
@@ -1455,6 +1470,34 @@ struct AggregateSink(Movable):
             self.held.append(inputs[s].copy())
         return inputs^
 
+    def _series_formats(
+        self, inputs: List[Series], mut decoded: List[List[UInt8]]
+    ) raises -> List[UnifiedVectorFormat]:
+        """The Series fallback's inputs as the state updates read them:
+        each column's flat format (`series_format`), a string or Boolean
+        decoded only when its state reads values, and none for a row
+        count. `decoded` holds the decoded values."""
+        var formats = List[UnifiedVectorFormat](capacity=len(inputs))
+        for i in range(len(inputs)):
+            var kind = self.slots[i].kind if i < len(self.slots) else -1
+            if self.only >= 0 or kind == _K_LEN:
+                formats.append(UnifiedVectorFormat())
+                continue
+            var one = List[UInt8]()
+            formats.append(
+                series_format(
+                    inputs[i],
+                    one,
+                    not (
+                        kind == _K_COUNT
+                        or kind == _K_NULLS
+                        or kind == _K_DISTINCT
+                    ),
+                )
+            )
+            decoded.append(one^)
+        return formats^
+
     def _word_ptrs(self) -> List[Int]:
         var word_ptrs = List[Int](capacity=len(self.addressed))
         for w in range(len(self.addressed)):
@@ -1492,6 +1535,8 @@ struct AggregateSink(Movable):
                         continue
             keys.append(given[c].copy())
         var inputs = self._held_inputs(given_inputs)
+        var decoded = List[List[UInt8]]()
+        var formats = self._series_formats(inputs, decoded)
         var length = len(keys[0])
         var word_ptrs = self._word_ptrs()
         var nulls = self.nulls.unsafe_ptr()
@@ -1555,7 +1600,8 @@ struct AggregateSink(Movable):
                         UInt64(1) << UInt64(c),
                     )
                 w = second + 1
-            self._sink_batch(count, first, lo, inputs, word_ptrs, keep)
+            self._sink_batch(count, first, lo, formats, word_ptrs, keep)
+        _ = decoded^
         self.sunk += length
         # Each distinct count's (keys, value) pairs into its own table.
         for d in range(len(self.distinct_slots)):
@@ -1566,7 +1612,7 @@ struct AggregateSink(Movable):
     def sink_vectors(
         mut self,
         keys: List[KeyVector],
-        given_inputs: List[Series],
+        inputs: List[UnifiedVectorFormat],
         hold: List[Series],
         first: Int,
         count: Int,
@@ -1575,17 +1621,17 @@ struct AggregateSink(Movable):
         (`GroupedAggregateHashTable::AddChunk`): the group chunk's vectors
         `keys` are hashed and turned into key words where they are
         (`FindOrCreateGroups`, the key words being the row layout's), and
-        `inputs` (a row count reads none) are unchunked columns of the
-        chunk's rows. `hold` are the columns the keys' long strings point
-        into, held until the finish; `first` is the source row of the
-        chunk's first."""
+        the payload chunk's vectors `inputs` (a row count reads none)
+        update the rows' states where they are (`UpdateStates`). `hold`
+        are the columns the keys' and inputs' strings point into, held
+        until the finish; `first` is the source row of the chunk's
+        first."""
         if len(keys) == 0:
             raise Error("aggregate table: no keys")
         if count > _BATCH:
             raise Error("aggregate table: a chunk is at most a batch")
         for column in hold:
             self.held.append(column.copy())
-        var inputs = self._held_inputs(given_inputs)
         var word_ptrs = self._word_ptrs()
         var nulls = self.nulls.unsafe_ptr()
         var hash_ptr = self.hashes.unsafe_ptr()
@@ -1620,26 +1666,21 @@ struct AggregateSink(Movable):
             w = second + 1
         self._sink_batch(count, first, 0, inputs, word_ptrs, List[Bool]())
         self.sunk += count
-        # Each distinct count's (keys, value) pairs into its own table.
+        # Each distinct count's (keys, value) pairs into its own table, the
+        # value's vector read as a key where it is.
         for d in range(len(self.distinct_slots)):
-            ref value = inputs[self.distinct_slots[d]]
-            var decoded = List[UInt8]()
             var pairs = keys.copy()
-            pairs.append(KeyVector.of(series_vector(value, decoded)))
-            var held = hold.copy()
-            if value._data.isa[StringColumn]():
-                held.append(value.copy())
+            pairs.append(KeyVector.of(inputs[self.distinct_slots[d]]))
             self.distinct.at(d).sink_vectors(
-                pairs, List[Series](), held, first, count
+                pairs, List[UnifiedVectorFormat](), hold, first, count
             )
-            _ = decoded^
 
     def _sink_batch(
         mut self,
         count: Int,
         first: Int,
         lo: Int,
-        inputs: List[Series],
+        inputs: List[UnifiedVectorFormat],
         word_ptrs: List[Int],
         keep: List[Bool],
     ) raises:

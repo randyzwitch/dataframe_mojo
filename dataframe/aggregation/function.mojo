@@ -74,6 +74,18 @@ from dataframe.kernels.rank import _key
 from dataframe.series import Series
 from dataframe.text.bytes import _Bytes
 from dataframe.storage.string import StringColumn
+from dataframe.vector.types import (
+    PHYSICAL_BOOL,
+    PHYSICAL_INT128,
+    PHYSICAL_INT32,
+    PHYSICAL_INT64,
+    PHYSICAL_VARCHAR,
+    STRING_INLINE_BYTES,
+    StringT,
+    UnifiedVectorFormat,
+    physical_of,
+    string_data,
+)
 from dataframe.storage.string_view import (
     STRING_VIEW_INLINE_BYTES,
     StringView,
@@ -504,12 +516,11 @@ def _column_words(
     second_at: Int,
     nulls_at: Int,
     bit: UInt64,
-    exact: Bool = False,
 ) raises:
     """A key column's words for rows [start, start + count) of a column
     that is not chunked, written at the given buffer addresses; a null row
     sets `bit` in its null word. A float is its canonical key (-0.0 as 0.0,
-    every NaN one) unless `exact`, which keeps its value's bits."""
+    every NaN one)."""
     if column._data.isa[StringColumn]():
         _string_words(
             column._data[StringColumn],
@@ -567,9 +578,7 @@ def _column_words(
                 var value = values[unsafe_offset=i]
                 comptime if D.is_floating_point():
                     # The hash's canonical float: -0.0 is 0.0, NaNs are one.
-                    first[unsafe_offset=k] = bitcast[DType.uint64](
-                        Float64(value)
-                    ) if exact else float_key(Float64(value))
+                    first[unsafe_offset=k] = float_key(Float64(value))
                 elif D.is_unsigned():
                     first[unsafe_offset=k] = UInt64(value)
                 else:
@@ -802,66 +811,48 @@ def _batch_nulls(
     return _count_set(bits, offset + start, count) < count
 
 
+def _format_nulls(format: UnifiedVectorFormat, start: Int, count: Int) -> Bool:
+    """Whether rows [start, start + count) of a vector may be null
+    (`ValidityMask::CanHaveNull`, which every DuckDB scatter loop checks
+    first): never without a mask. A flat vector's mask is counted over
+    those rows, so an all-valid bitmap (as Parquet columns carry) reads
+    as none."""
+    var validity = format.validity
+    if validity.all_valid():
+        return False
+    if format.sel.is_set():
+        return True
+    var bits = Span[UInt8, ImmutAnyOrigin](
+        unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+            unsafe_from_address=validity.bits
+        ),
+        length=(validity.offset + start + count + 7) // 8,
+    )
+    return _count_set(bits, validity.offset + start, count) < count
+
+
 def _update_counts(
-    bits: _BufferData[UInt8],
-    bit: Int,
+    format: UnifiedVectorFormat,
     kind: Int,
     start: Int,
     count: Int,
     rows: Pointer[Int, _],
     base: Int,
 ):
-    """Count a batch's valid (`_K_COUNT`) or null (`_K_NULLS`) values of
-    rows [start, start + count) into their groups' state words, reading
-    only the column's validity bits (`bits`, row 0 at bit `bit`)."""
-    var nulls = _batch_nulls(bits, bit, start, count)
-    if not nulls:
+    """Count a batch's valid (`_K_COUNT`) or null (`_K_NULLS`) rows
+    [start, start + count) of a vector into their groups' state words,
+    reading only its validity (count(ANY)'s scatter)."""
+    if not _format_nulls(format, start, count):
         if kind == _K_COUNT:
             for k in range(count):
                 _words_at(rows[unsafe_offset=k] + base)[] += 1
         return
-    var valid = bits.unsafe_ptr()
+    var sel = format.sel
+    var validity = format.validity
+    var counted = kind == _K_COUNT
     for k in range(count):
-        if _validity_at(valid, bit + start + k) == (kind == _K_COUNT):
+        if validity.row_is_valid_unsafe(sel.get_index(start + k)) == counted:
             _words_at(rows[unsafe_offset=k] + base)[] += 1
-
-
-def _update_column_counts(
-    part: Series,
-    kind: Int,
-    start: Int,
-    count: Int,
-    rows: Pointer[Int, _],
-    base: Int,
-) raises:
-    """`_update_counts` over a column of any storage."""
-    if part._data.isa[StringColumn]():
-        ref strings = part._data[StringColumn]
-        _update_counts(
-            strings._bits[], strings._offset, kind, start, count, rows, base
-        )
-        return
-    if part._data.isa[BoolColumn]():
-        ref bools = part._data[BoolColumn]
-        _update_counts(
-            bools._bits[], bools._offset, kind, start, count, rows, base
-        )
-        return
-    if part._data.isa[Column[Int128]]():
-        ref wide = part._data[Column[Int128]]
-        _update_counts(
-            wide._bits[], wide._offset, kind, start, count, rows, base
-        )
-        return
-    comptime for t in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[t]
-        if part._data.isa[Column[Scalar[D]]]():
-            ref typed = part._data[Column[Scalar[D]]]
-            _update_counts(
-                typed._bits[], typed._offset, kind, start, count, rows, base
-            )
-            return
-    raise Error("aggregate table: unsupported count input")
 
 
 @always_inline
@@ -878,9 +869,103 @@ def _string_order(at: Int, length: Int, state: Int) -> Int:
     return length - size
 
 
+def _value_words(
+    format: UnifiedVectorFormat,
+    start: Int,
+    count: Int,
+    first_at: Int,
+    second_at: Int,
+    nulls_at: Int,
+) raises:
+    """A value state's words for rows [start, start + count) of a vector,
+    at the given buffer addresses: a string_t's two words (its inline
+    bytes past its length masked off), 1 for true and 2 for false, a
+    128-bit value's halves, or a number's bits (a float's exactly, an
+    integer as Int64 or UInt64). A null row's word is 0 and its null word
+    nonzero. These are the words `_column_words` gives a column's rows."""
+    var first = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=first_at)
+    var second = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=second_at)
+    var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
+    var sel = format.sel
+    var validity = format.validity
+    var has_nulls = _format_nulls(format, start, count)
+    var physical = format.physical
+    if physical == PHYSICAL_VARCHAR:
+        var strings = Pointer[StringT, MutAnyOrigin](
+            unsafe_from_address=format.data
+        )
+        for k in range(count):
+            var i = sel.get_index(start + k)
+            if has_nulls and not validity.row_is_valid_unsafe(i):
+                first[unsafe_offset=k] = 0
+                second[unsafe_offset=k] = 0
+                nulls[unsafe_offset=k] = 1
+                continue
+            var s = strings[unsafe_offset=i]
+            var length = Int(s.length)
+            var prefix = UInt64(s.prefix)
+            var rest = s.rest
+            if length <= STRING_INLINE_BYTES:
+                if length < 4:
+                    prefix &= (UInt64(1) << UInt64(8 * length)) - 1
+                var keep = 8 * max(length - 4, 0)
+                rest &= (
+                    (UInt64(1) << UInt64(keep)) - 1 if keep < 64 else UInt64.MAX
+                )
+            first[unsafe_offset=k] = UInt64(length) | (prefix << 32)
+            second[unsafe_offset=k] = rest
+        return
+    if physical == PHYSICAL_BOOL:
+        var data = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=format.data)
+        for k in range(count):
+            var i = sel.get_index(start + k)
+            if has_nulls and not validity.row_is_valid_unsafe(i):
+                first[unsafe_offset=k] = 0
+                nulls[unsafe_offset=k] = 1
+                continue
+            first[unsafe_offset=k] = UInt64(1) if data[
+                unsafe_offset=i
+            ] != 0 else UInt64(2)
+        return
+    if physical == PHYSICAL_INT128:
+        var data = format.values[DType.int128]()
+        for k in range(count):
+            var i = sel.get_index(start + k)
+            if has_nulls and not validity.row_is_valid_unsafe(i):
+                first[unsafe_offset=k] = 0
+                second[unsafe_offset=k] = 0
+                nulls[unsafe_offset=k] = 1
+                continue
+            var value = bitcast[DType.uint128](data[unsafe_offset=i])
+            first[unsafe_offset=k] = UInt64(value)
+            second[unsafe_offset=k] = UInt64(value >> 64)
+        return
+    comptime for d in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[d]
+        if physical == physical_of[D]():
+            var data = format.values[D]()
+            for k in range(count):
+                var i = sel.get_index(start + k)
+                if has_nulls and not validity.row_is_valid_unsafe(i):
+                    first[unsafe_offset=k] = 0
+                    nulls[unsafe_offset=k] = 1
+                    continue
+                var value = data[unsafe_offset=i]
+                comptime if D.is_floating_point():
+                    first[unsafe_offset=k] = bitcast[DType.uint64](
+                        Float64(value)
+                    )
+                elif D.is_unsigned():
+                    first[unsafe_offset=k] = UInt64(value)
+                else:
+                    first[unsafe_offset=k] = bitcast[DType.uint64](Int64(value))
+            return
+    raise Error("aggregate table: unsupported value vector")
+
+
 def _update_values(
     slot: AggregateFunction,
-    part: Series,
+    format: UnifiedVectorFormat,
     start: Int,
     count: Int,
     rows: Pointer[Int, _],
@@ -889,24 +974,22 @@ def _update_values(
     scratch: Int,
 ) raises:
     """A batch into its groups' value states (first, last, a string's
-    minimum or maximum, logic flags). The rows' value words are written as
-    a key column's (`_column_words`, floats exact) into `scratch` (three
-    vectors of words: first words, second words, null flags), then each
-    row's state takes them or keeps its own."""
+    minimum or maximum, logic flags). The rows' value words
+    (`_value_words`) are written into `scratch` (three vectors of words:
+    first words, second words, null flags), then each row's state takes
+    them or keeps its own."""
     var first_words = _words_at(scratch)
     var second_words = _words_at(scratch + 8 * _BATCH)
     var nulls = _words_at(scratch + 16 * _BATCH)
     for k in range(count):
         nulls[unsafe_offset=k] = 0
-    _column_words(
-        part,
+    _value_words(
+        format,
         start,
         count,
         scratch,
         scratch + 8 * _BATCH,
         scratch + 16 * _BATCH,
-        1,
-        exact=True,
     )
     var kind = slot.kind
     if kind == _K_LOGIC:
@@ -933,20 +1016,22 @@ def _update_values(
                 unsafe_offset=k
             ] != 0 else UInt64(3)
         return
-    # A string's minimum or maximum: a row replaces the held value only
-    # when it orders before (after) it.
+    # A string's minimum or maximum (`MinMaxStringState`): a row replaces
+    # the held value only when it orders before (after) it.
     var is_max = kind == _K_STRING_MAX
-    var strings = _Bytes(part._data[StringColumn])
+    var sel = format.sel
     for k in range(count):
         if nulls[unsafe_offset=k] != 0:
             continue
         var state = rows[unsafe_offset=k] + base
         var at = _words_at(state)
         if at[unsafe_offset=2] != 0:
-            var bytes = strings.get(start + k)
-            var order = _string_order(
-                Int(bytes.unsafe_ptr()), len(bytes), state
+            var entry = format.data + 16 * sel.get_index(start + k)
+            var length = Int(
+                Pointer[StringT, MutAnyOrigin](unsafe_from_address=entry)[
+                ].length
             )
+            var order = _string_order(string_data(entry), length, state)
             if (is_max and order <= 0) or (not is_max and order >= 0):
                 continue
         at[] = first_words[unsafe_offset=k]
@@ -958,7 +1043,7 @@ def _update_wide[
     D: DType
 ](
     slot: AggregateFunction,
-    column: Column[Scalar[D]],
+    format: UnifiedVectorFormat,
     start: Int,
     count: Int,
     rows: Pointer[Int, _],
@@ -966,13 +1051,14 @@ def _update_wide[
 ):
     """A batch's decimal values (unscaled, at their storage width) into
     their groups' 128-bit minima or maxima."""
-    var values = column._ptr()
-    var nulls = _batch_nulls(column._bits[], column._offset, start, count)
-    var valid = column._bits[].unsafe_ptr()
+    var values = format.values[D]()
+    var sel = format.sel
+    var validity = format.validity
+    var nulls = _format_nulls(format, start, count)
     var is_max = slot.kind == _K_WIDE_MAX
     for k in range(count):
-        var i = start + k
-        if nulls and not _validity_at(valid, column._offset + i):
+        var i = sel.get_index(start + k)
+        if nulls and not validity.row_is_valid_unsafe(i):
             continue
         var at = _words_at(rows[unsafe_offset=k] + base)
         var x = values[unsafe_offset=i].cast[DType.int128]()
@@ -990,10 +1076,10 @@ def _update_wide[
 
 
 def _update_slot[
-    D: DType
+    D: DType, selected: Bool
 ](
     slot: AggregateFunction,
-    column: Column[Scalar[D]],
+    format: UnifiedVectorFormat,
     start: Int,
     count: Int,
     rows: Pointer[Int, _],
@@ -1001,23 +1087,23 @@ def _update_slot[
     arena: Pointer[_ValueArena, MutAnyOrigin],
     discard: Int,
 ):
-    """Update group state words with a batch's column values from rows
-    [start, start + count). `base` is the byte offset in each group row,
-    and `rows` holds the group-row addresses."""
-    var values = column._ptr()
-    var nulls = _batch_nulls(column._bits[], column._offset, start, count)
-    var valid = column._bits[].unsafe_ptr()
-    var bit = column._offset
+    """Update group state words with a batch's values of `D`, rows
+    [start, start + count) of a vector (DuckDB's `UnaryScatterLoop`,
+    through the vector's selection when `selected`). `base` is the byte
+    offset in each group row, and `rows` holds the group-row addresses."""
+    var values = format.values[D]()
+    var sel = format.sel
+    var validity = format.validity
+    var nulls = _format_nulls(format, start, count)
     var kind = slot.kind
-    if kind == _K_COUNT or kind == _K_NULLS:
-        _update_counts(
-            column._bits[], column._offset, kind, start, count, rows, base
-        )
-        return
     if kind == _K_VALUES:
         for k in range(count):
-            var i = start + k
-            if nulls and not _validity_at(valid, bit + i):
+            var i: Int
+            comptime if selected:
+                i = sel.get_index_unsafe(start + k)
+            else:
+                i = start + k
+            if nulls and not validity.row_is_valid_unsafe(i):
                 continue
             # Rows a filter dropped keep no value.
             if rows[unsafe_offset=k] == discard:
@@ -1029,8 +1115,12 @@ def _update_slot[
             )
         return
     for k in range(count):
-        var i = start + k
-        if nulls and not _validity_at(valid, bit + i):
+        var i: Int
+        comptime if selected:
+            i = sel.get_index_unsafe(start + k)
+        else:
+            i = start + k
+        if nulls and not validity.row_is_valid_unsafe(i):
             continue
         var at = _words_at(rows[unsafe_offset=k] + base)
         var w = 0
@@ -1115,7 +1205,7 @@ def _update_decimal[
     D: DType
 ](
     slot: AggregateFunction,
-    column: Column[Scalar[D]],
+    format: UnifiedVectorFormat,
     start: Int,
     count: Int,
     rows: Pointer[Int, _],
@@ -1124,20 +1214,23 @@ def _update_decimal[
     """A batch's decimal values (unscaled, at their storage width) into
     their groups' 128-bit totals and counts, each total held to the
     state's precision."""
-    var values = column._ptr()
-    var nulls = _batch_nulls(column._bits[], column._offset, start, count)
-    var valid = column._bits[].unsafe_ptr()
+    var values = format.values[D]()
+    var sel = format.sel
+    var validity = format.validity
+    var nulls = _format_nulls(format, start, count)
     var limit = precision_limit(slot.dtype.precision())
     for k in range(count):
-        var i = start + k
-        if nulls and not _validity_at(valid, column._offset + i):
+        var i = sel.get_index(start + k)
+        if nulls and not validity.row_is_valid_unsafe(i):
             continue
         var at = _words_at(rows[unsafe_offset=k] + base)
         var total = bitcast[DType.int128](
             (UInt128(at[unsafe_offset=1]) << 64) | UInt128(at[unsafe_offset=0])
         )
         total = check_limit(
-            total + Int128(values[unsafe_offset=i]), limit, slot.dtype
+            total + values[unsafe_offset=i].cast[DType.int128](),
+            limit,
+            slot.dtype,
         )
         var word = bitcast[DType.uint128](total)
         at[unsafe_offset=0] = UInt64(word)
@@ -1145,55 +1238,39 @@ def _update_decimal[
         at[unsafe_offset=2] += 1
 
 
-def _batch_floats[
-    D: DType
-](
-    column: Column[Scalar[D]],
-    start: Int,
-    count: Int,
-    values_at: Int,
-    valid_at: Int,
-):
-    """Rows [start, start + count) of a column as Float64 and validity, at
-    the addresses `values_at` and `valid_at`."""
-    var values = Pointer[Float64, MutAnyOrigin](unsafe_from_address=values_at)
-    var valid = Pointer[Bool, MutAnyOrigin](unsafe_from_address=valid_at)
-    var data = column._ptr()
-    var nulls = _batch_nulls(column._bits[], column._offset, start, count)
-    var bits = column._bits[].unsafe_ptr()
-    for k in range(count):
-        values[unsafe_offset=k] = data[unsafe_offset=start + k].cast[
-            DType.float64
-        ]()
-        valid[unsafe_offset=k] = not nulls or _validity_at(
-            bits, column._offset + start + k
-        )
-
-
 def _load_floats(
-    part: Series,
+    format: UnifiedVectorFormat,
     start: Int,
     count: Int,
     values_at: Int,
     valid_at: Int,
 ) raises:
+    """Rows [start, start + count) of a numeric vector as Float64 and
+    validity, at the addresses `values_at` and `valid_at`."""
+    var values = Pointer[Float64, MutAnyOrigin](unsafe_from_address=values_at)
+    var valid = Pointer[Bool, MutAnyOrigin](unsafe_from_address=valid_at)
+    var sel = format.sel
+    var validity = format.validity
+    var nulls = _format_nulls(format, start, count)
     comptime for t in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[t]
-        if part._data.isa[Column[Scalar[D]]]():
-            _batch_floats[D](
-                part._data[Column[Scalar[D]]],
-                start,
-                count,
-                values_at,
-                valid_at,
-            )
+        if format.physical == physical_of[D]():
+            var data = format.values[D]()
+            for k in range(count):
+                var i = sel.get_index(start + k)
+                values[unsafe_offset=k] = data[unsafe_offset=i].cast[
+                    DType.float64
+                ]()
+                valid[unsafe_offset=k] = (
+                    not nulls or validity.row_is_valid_unsafe(i)
+                )
             return
     raise Error("aggregate table: unsupported pair input")
 
 
 def _update_comoment(
-    x: Series,
-    y: Series,
+    x: UnifiedVectorFormat,
+    y: UnifiedVectorFormat,
     start: Int,
     count: Int,
     rows: Pointer[Int, _],
@@ -1201,9 +1278,9 @@ def _update_comoment(
     scratch: Int,
 ) raises:
     """A batch's (x, y) pairs into their groups' co-moment states; a pair
-    with a null on either side is dropped. The pairs are loaded into
-    `scratch` (three vectors of words: x values, y values, then both
-    validity flags), allocated once per sink."""
+    with a null on either side is dropped (DuckDB's `BinaryScatterLoop`).
+    The pairs are loaded into `scratch` (three vectors of words: x values,
+    y values, then both validity flags), allocated once per sink."""
     var xs = Pointer[Float64, MutAnyOrigin](unsafe_from_address=scratch)
     var ys = Pointer[Float64, MutAnyOrigin](
         unsafe_from_address=scratch + 8 * _BATCH
@@ -1246,7 +1323,7 @@ def _update_comoment(
 
 def _update_states(
     slots: List[AggregateFunction],
-    inputs: List[Series],
+    inputs: List[UnifiedVectorFormat],
     start: Int,
     count: Int,
     rows: Pointer[Int, _],
@@ -1257,13 +1334,15 @@ def _update_states(
     scratch: Int,
     only: Int = -1,
 ) raises:
-    """Every reduction's `update` for a batch (`inputs` are the morsel's
-    slices, one chunk each; `rows` the addresses of the rows' groups, whose
-    states start at word `states_at`; `first` the source row of the
-    morsel's first, rows numbered on from it; `scratch` three vectors of
-    words for value states). With `only`, each row adds one to that
-    reduction's state alone (a distinct table's groups into their distinct
-    counts)."""
+    """Every reduction's `update` for a batch (DuckDB's
+    `RowOperations::UpdateStates`, each aggregate's scatter over its
+    input's `UnifiedVectorFormat`): `inputs` are the reductions' vectors,
+    rows [start, start + count) of each; `rows` the addresses of the
+    rows' groups, whose states start at word `states_at`; `first` the
+    source row of the vectors' first, rows numbered on from it; `scratch`
+    three vectors of words for value states. With `only`, each row adds
+    one to that reduction's state alone (a distinct table's groups into
+    their distinct counts)."""
     if only >= 0:
         var base = 8 * (states_at + slots[only].offset)
         for k in range(count):
@@ -1278,9 +1357,10 @@ def _update_states(
             for k in range(count):
                 _words_at(rows[unsafe_offset=k] + base)[] += 1
             continue
-        ref part = inputs[s]
+        var format = inputs[s]
+        var physical = format.physical
         if slot.kind == _K_COUNT or slot.kind == _K_NULLS:
-            _update_column_counts(part, slot.kind, start, count, rows, base)
+            _update_counts(format, slot.kind, start, count, rows, base)
             continue
         if (
             slot.kind == _K_FIRST
@@ -1289,73 +1369,72 @@ def _update_states(
             or slot.kind == _K_STRING_MAX
             or slot.kind == _K_LOGIC
         ):
-            _update_values(slot, part, start, count, rows, base, first, scratch)
+            _update_values(
+                slot, format, start, count, rows, base, first, scratch
+            )
             continue
         if slot.kind == _K_WIDE_MIN or slot.kind == _K_WIDE_MAX:
-            if part._data.isa[Column[Int64]]():
+            if physical == PHYSICAL_INT64:
                 _update_wide[DType.int64](
-                    slot, part._data[Column[Int64]], start, count, rows, base
+                    slot, format, start, count, rows, base
                 )
-            elif part._data.isa[Column[Int32]]():
+            elif physical == PHYSICAL_INT32:
                 _update_wide[DType.int32](
-                    slot, part._data[Column[Int32]], start, count, rows, base
+                    slot, format, start, count, rows, base
+                )
+            elif physical == PHYSICAL_INT128:
+                _update_wide[DType.int128](
+                    slot, format, start, count, rows, base
                 )
             else:
-                _update_wide[DType.int128](
-                    slot, part._data[Column[Int128]], start, count, rows, base
-                )
+                raise Error("aggregate table: unsupported decimal input")
             continue
         if slot.kind == _K_COMOMENT:
             _update_comoment(
-                part, inputs[slot.k], start, count, rows, base, scratch
+                format, inputs[slot.k], start, count, rows, base, scratch
             )
             continue
         if slot.kind == _K_TOP_ROWS:
             var placed = False
             comptime for t in range(len(NUMERIC_DTYPES)):
                 comptime D = NUMERIC_DTYPES[t]
-                if not placed and part._data.isa[Column[Scalar[D]]]():
+                if not placed and physical == physical_of[D]():
                     _update_top_rows[D](
-                        slot,
-                        part._data[Column[Scalar[D]]],
-                        start,
-                        count,
-                        rows,
-                        base,
-                        first,
+                        slot, format, start, count, rows, base, first
                     )
                     placed = True
             if not placed:
                 raise Error("aggregate table: unsupported top-rows input")
             continue
         if slot.kind == _K_DECIMAL_SUM:
-            if part._data.isa[Column[Int64]]():
+            if physical == PHYSICAL_INT64:
                 _update_decimal[DType.int64](
-                    slot, part._data[Column[Int64]], start, count, rows, base
+                    slot, format, start, count, rows, base
                 )
-            elif part._data.isa[Column[Int32]]():
+            elif physical == PHYSICAL_INT32:
                 _update_decimal[DType.int32](
-                    slot, part._data[Column[Int32]], start, count, rows, base
+                    slot, format, start, count, rows, base
+                )
+            elif physical == PHYSICAL_INT128:
+                _update_decimal[DType.int128](
+                    slot, format, start, count, rows, base
                 )
             else:
-                _update_decimal[DType.int128](
-                    slot, part._data[Column[Int128]], start, count, rows, base
-                )
+                raise Error("aggregate table: unsupported decimal input")
             continue
         var done = False
+        var selected = format.sel.is_set()
         comptime for t in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[t]
-            if not done and part._data.isa[Column[Scalar[D]]]():
-                _update_slot[D](
-                    slot,
-                    part._data[Column[Scalar[D]]],
-                    start,
-                    count,
-                    rows,
-                    base,
-                    arena,
-                    discard,
-                )
+            if not done and physical == physical_of[D]():
+                if selected:
+                    _update_slot[D, True](
+                        slot, format, start, count, rows, base, arena, discard
+                    )
+                else:
+                    _update_slot[D, False](
+                        slot, format, start, count, rows, base, arena, discard
+                    )
                 done = True
         if not done:
             raise Error("aggregate table: unsupported reduction input")
@@ -1394,7 +1473,7 @@ def _update_top_rows[
     D: DType
 ](
     slot: AggregateFunction,
-    column: Column[Scalar[D]],
+    format: UnifiedVectorFormat,
     start: Int,
     count: Int,
     rows: Pointer[Int, _],
@@ -1403,18 +1482,19 @@ def _update_top_rows[
 ):
     """A batch's values into their groups' top-rows states; a null value
     has no rank and is not kept."""
-    var values = column._ptr()
-    var nulls = _batch_nulls(column._bits[], column._offset, start, count)
-    var valid = column._bits[].unsafe_ptr()
+    var values = format.values[D]()
+    var sel = format.sel
+    var validity = format.validity
+    var nulls = _format_nulls(format, start, count)
     for k in range(count):
-        var i = start + k
-        if nulls and not _validity_at(valid, column._offset + i):
+        var i = sel.get_index(start + k)
+        if nulls and not validity.row_is_valid_unsafe(i):
             continue
         _keep_top(
             _words_at(rows[unsafe_offset=k] + base),
             slot.k,
             _key[D](values[unsafe_offset=i], slot.descending),
-            UInt64(first + i),
+            UInt64(first + start + k),
         )
 
 
