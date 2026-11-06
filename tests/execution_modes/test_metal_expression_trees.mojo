@@ -309,3 +309,76 @@ def test_metal_expression_tree_checked_faults_masks_ieee_and_rounding() raises:
     )
     var rounding = rounded.lazy().select(((col("a") * col("b")) - 1).sum())
     assert_equal(execute_timed(rounding)[0].item().float32(), Float32(0))
+
+
+# requires: metal
+def test_metal_expression_tree_fixed_topologies_keep_native_semantics() raises:
+    from tests.support.metal_outcomes import require_metal
+    from tests.support.metal_matrix_reference import _typed
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    var expressions = List[Expr](
+        [
+            col("a") * col("b") - col("c"),
+            col("a") - (col("b") * col("c")),
+            ((col("a") + col("b")) * col("c")) - col("d"),
+            (col("a") * col("b")) - (col("c") + col("d")),
+            (col("a") + (col("b") * col("c"))) - col("d"),
+            col("a") - ((col("b") * col("c")) + col("d")),
+            col("a") - (col("b") * (col("c") + col("d"))),
+            (col("a") * col("b")) - (1 - col("c")),
+        ]
+    )
+    var expected_values = List[Float64](
+        [Float64(2), -10, 19, 1, 13, -11, -13, 9]
+    )
+    for kind in range(3):
+        var columns = List[Series]()
+        for input in range(4):
+            var name = (
+                "a" if input
+                == 0 else "b" if input
+                == 1 else "c" if input
+                == 2 else "d"
+            )
+            var value = Float64(
+                2 if input == 0 else 3 if input == 1 else 4 if input == 2 else 1
+            )
+            var valid = List[Bool](length=4, fill=True)
+            if input == 0:
+                valid[2] = False
+            if input == 2:
+                valid[1] = False
+            columns.append(
+                _typed(kind, name, List[Float64](length=4, fill=value), valid)
+            )
+        var frame = DataFrame(columns^)
+        for index in range(len(expressions)):
+            var value = expected_values[index]
+            var valid = List[Bool]([True])
+            var expected = DataFrame(
+                [
+                    _typed(kind, "s", List[Float64]([value * 2]), valid),
+                    Series("n", Column[Int64]([Int64(2)])),
+                    Series("avg", Column[Float64]([value])),
+                    _typed(kind, "lo", List[Float64]([value]), valid),
+                    _typed(kind, "hi", List[Float64]([value]), valid),
+                ]
+            )
+            var query = frame.lazy().select_exprs(
+                [
+                    expressions[index].sum().alias("s"),
+                    expressions[index].count().alias("n"),
+                    expressions[index].mean().alias("avg"),
+                    expressions[index].min().alias("lo"),
+                    expressions[index].max().alias("hi"),
+                ]
+            )
+            for copied in [False, True]:
+                assert_true(
+                    execute_timed(query, zero_copy=not copied)[0].equals(
+                        expected
+                    )
+                )
+            assert_true(query.collect(accelerator=runtime).equals(expected))
