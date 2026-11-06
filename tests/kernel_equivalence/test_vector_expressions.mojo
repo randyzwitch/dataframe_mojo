@@ -281,3 +281,44 @@ def test_abs_of_the_minimum_raises_as_the_column_kernel() raises:
     except e:
         message = String(e)
     assert_equal(message, "Int64 abs overflow")
+
+
+def test_adaptive_conjunctions_keep_the_eager_rows() raises:
+    # Nested AND / OR nodes reorder their children while one compiled
+    # expression runs over many chunks (AdaptiveFilter: 5 warmup calls,
+    # then a trial swap every 20 observed for 10): every chunk's rows stay
+    # the eager filter's, in row order.
+    var source = frame()
+    var schema = source.clear()._columns.copy()
+    var nested: List[Expr] = [
+        (col("b") > lit(Int32(3)))
+        & ((col("a") != lit(Int64(7))) | (col("f") < lit(0.0)))
+        & (col("s") != lit("k4")),
+        (
+            (col("a") > lit(Int64(10)))
+            & (col("b") < lit(Int32(12)))
+            & col("s").is_not_null()
+        )
+        | (col("f") < lit(-5.0))
+        | col("s").str().starts_with("a long"),
+    ]
+    for p in nested:
+        var compiled = VectorExpression(p, schema)
+        for call in range(120):
+            var offset = (call * 37) % 2900
+            var keep_every = 1 + call % 3
+            var arena = ColumnArena()
+            var chunk = chunk_of(source, arena, offset, 2048, keep_every)
+            var rows = expected_rows(source, offset, 2048, keep_every)
+            var out = DataChunk()
+            var target = out.new_selection()
+            var kept = compiled.select(
+                chunk, arena, SelectionVector(), chunk.count, target
+            )
+            var expected = rows.filter(p)
+            assert_equal(kept, expected.height())
+            var picked = List[Int]()
+            for k in range(kept):
+                picked.append(target.get_index(k))
+            assert_frame(rows.take(picked), expected)
+            _ = out^
