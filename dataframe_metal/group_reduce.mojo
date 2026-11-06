@@ -217,7 +217,27 @@ def _scan_grouped[
                 owners^,
                 reservation^,
             )
+            _ = (
+                table^,
+                control^,
+                first^,
+                rows^,
+                states^,
+                extrema^,
+                metadata^,
+                empty^,
+            )
             raise error^
+        _ = (
+            table^,
+            control^,
+            first^,
+            rows^,
+            states^,
+            extrema^,
+            metadata^,
+            empty^,
+        )
         _ = (
             words^,
             inputs^,
