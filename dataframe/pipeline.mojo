@@ -483,7 +483,6 @@ def _window_bounds(series: Series) -> Optional[Tuple[Int64, Int64]]:
     return (least, most)
 
 
-
 def _zoned_bounds(part: Series) -> Tuple[Bool, Int64, Int64]:
     """An unchunked integer window's bounds, from its buffer's statistics
     when it has them, else from its rows."""
