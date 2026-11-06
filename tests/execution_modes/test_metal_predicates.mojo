@@ -294,7 +294,24 @@ def test_compound_predicates_types_nulls_operators_slices_chunks_and_aggregates(
                     assert_true(
                         "HANDOFF metal" in query.explain(accelerator=runtime)
                     )
-                    assert_true(execute_timed(query)[0].equals(expected))
+                    var actual = execute_timed(query)[0].copy()
+                    assert_true(
+                        actual.equals(expected),
+                        String("nulls=")
+                        + String(Int(nulls))
+                        + "; rows="
+                        + String(frame.height())
+                        + "; chunks="
+                        + String(frame.column("i").n_chunks())
+                        + "; mode="
+                        + String(mode)
+                        + "; key="
+                        + region_key(query)
+                        + "\nActual:\n"
+                        + actual.to_string()
+                        + "\nExpected:\n"
+                        + expected.to_string(),
+                    )
                     assert_true(
                         execute_timed(query, zero_copy=False)[0].equals(
                             expected
