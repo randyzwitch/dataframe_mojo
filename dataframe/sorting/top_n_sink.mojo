@@ -229,9 +229,7 @@ struct TopNSink(Sink):
                     # copied into the payload's layout afterwards.
                     var picked = List[Int](capacity=len(matches))
                     for i in range(len(matches)):
-                        picked.append(
-                            v.source_offset + v.child_row(matches[i])
-                        )
+                        picked.append(v.source_offset + v.child_row(matches[i]))
                     columns.append(
                         _copied_strings(
                             arena.columns[v.source],

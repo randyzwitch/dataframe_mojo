@@ -726,15 +726,13 @@ comptime _VECTOR_NUMERIC = [
 def _vector_row(first: Int, rows: Int, i: Int) -> Int:
     if rows == 0:
         return first + i
-    return Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)[
-        unsafe_offset=i
-    ]
+    return Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)[unsafe_offset=i]
 
 
 @always_inline
-def _vector_string(format: UnifiedVectorFormat, index: Int) -> Span[
-    UInt8, ImmutAnyOrigin
-]:
+def _vector_string(
+    format: UnifiedVectorFormat, index: Int
+) -> Span[UInt8, ImmutAnyOrigin]:
     """The bytes of the string_t at `index`."""
     var entry = format.data + 16 * index
     var s = Pointer[StringT, MutAnyOrigin](unsafe_from_address=entry)[]
@@ -1192,9 +1190,7 @@ def encode_selected(
         rows.append(lo + s)
     if layout.vectors:
         # The vectors are read at the selected rows where they are.
-        var picked = _encode_rows(
-            layout, 0, len(rows), Int(rows.unsafe_ptr())
-        )
+        var picked = _encode_rows(layout, 0, len(rows), Int(rows.unsafe_ptr()))
         _ = rows^
         return picked^
     var sub = layout.copy()
