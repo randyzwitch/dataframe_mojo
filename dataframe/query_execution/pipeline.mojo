@@ -83,9 +83,16 @@ from dataframe.kernels.join_keys import (
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
+    JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
+    JOIN_RIGHT,
     JOIN_SEMI,
+)
+from dataframe.joins.join_filter import (
+    PushedJoinFilter,
+    PushedJoinFilters,
+    supports_join_filters,
 )
 from dataframe.parallel import (
     Job,
@@ -133,6 +140,7 @@ from dataframe.planning.graph import (
 from dataframe.planning.model import (
     AGG,
     DROP,
+    EXPLODE,
     FILTER,
     GROUPING_SETS,
     JOIN,
@@ -145,6 +153,7 @@ from dataframe.planning.model import (
     SELECT,
     SLICE,
     SORT,
+    UNNEST,
     WITH_COLUMNS,
 )
 from dataframe.planning.cost.aggregation import (
@@ -422,6 +431,13 @@ def plan_stream_execute(
     var operation_nodes = List[Int]()
     var joins = List[DataFrame]()
     var indexes = List[Optional[JoinHashTable]]()
+    # Join filters through an aggregate the stream starts from: the
+    # builds above it run first, and the plan with their results runs.
+    var through = plan_push_filters_through_aggregate(self, cursor, batch_size)
+    if through:
+        return _stream_after_materialization(
+            through.value(), index, batch_size, sink
+        )
     if self._prefetched and not self._report:
         plan_prefetch_breakers(self, cursor, batch_size)
     # A computed source (a union, an aggregate, a sort) is run in full
@@ -1409,6 +1425,15 @@ def plan_stream_execute(
             finish = self._finish_above
             finish_nodes = self._finish_above.value()[].above.copy()
         var finish_operations = List[PlanNode](capacity=len(finish_nodes))
+        # Join keys pushed into this aggregate's input from above it
+        # (`plan_push_filters_through_aggregate`).
+        var pushed = List[PushedJoinFilter]()
+        if (
+            self._pushed_filters
+            and self._pushed_filters.value()[].node == index
+            and terminal.kind == AGG
+        ):
+            pushed = self._pushed_filters.value()[].filters.copy()
         for n in finish_nodes:
             finish_operations.append(self._nodes[n].copy())
         var piped_result = run_pipeline(
@@ -1437,6 +1462,7 @@ def plan_stream_execute(
             table=decision.uses_aggregate_table(),
             set_masks=set_masks,
             finish_steps=_steps_of(finish_operations),
+            pushed=pushed,
         )
         if finish:
             finish.value()[].applied = True
@@ -1988,3 +2014,164 @@ def _stream_after_materialization(
         if streamed:
             return streamed^
     return plan._execute(index, False, True, batch_size)
+
+
+# How a join key fares on its way down to an aggregate
+# (`_aggregate_group_key`).
+comptime _KEY_DROPPED = 0
+comptime _KEY_GROUPED = 1
+comptime _KEY_BAIL = 2
+
+
+def _aggregate_group_key(
+    self: QueryContext, index: Int, aggregate: Int, key: String
+) raises -> Tuple[Int, String]:
+    """Where join key `key`, read from node `index`, goes on the way down
+    to `aggregate`, by JoinFilterPushdownOptimizer::GetPushdownFilterTargets:
+    through filters, a projection that passes it on (renamed or not), the
+    left input of joins and explodes of other columns, to one of the
+    aggregate's group keys (_KEY_GROUPED, with its name there). A
+    projection that computes it drops it from the filters (_KEY_DROPPED);
+    anything else, or a column that is not a group key, ends the join's
+    pushdown (_KEY_BAIL)."""
+    var at = index
+    var name = key
+    while at >= 0:
+        ref node = self._nodes[at]
+        if at == aggregate:
+            if name in node.names:
+                return (_KEY_GROUPED, name)
+            return (_KEY_BAIL, String())
+        if node.kind == JOIN:
+            # The probe side's columns keep their names; a coalesced key
+            # of a right or full join may take the build side's value.
+            var passes = node.how in [
+                JOIN_INNER,
+                JOIN_LEFT,
+                JOIN_SEMI,
+                JOIN_ANTI,
+                JOIN_CROSS,
+            ] or (
+                (node.how == JOIN_RIGHT or node.how == JOIN_FULL)
+                and not node.coalesce
+            )
+            if not passes or name not in plan_columns_of(self, node.left):
+                return (_KEY_BAIL, String())
+            at = node.left
+            continue
+        if node.kind == EXPLODE or node.kind == UNNEST:
+            # LOGICAL_UNNEST: not through the column it unnests.
+            if name in node.names or name == node.text:
+                return (_KEY_BAIL, String())
+            if name not in plan_columns_of(self, node.left):
+                return (_KEY_BAIL, String())
+            at = node.left
+            continue
+        if not (_stream_rows(node) or node.kind == DROP):
+            return (_KEY_BAIL, String())
+        var below = plan_input_name(self, at, name)
+        if not below:
+            if node.kind == SELECT or node.kind == WITH_COLUMNS:
+                return (_KEY_DROPPED, String())
+            return (_KEY_BAIL, String())
+        name = below.value()
+        at = node.left
+    return (_KEY_BAIL, String())
+
+
+def _keyed_rows(frame: DataFrame, keys: List[String]) raises -> Int:
+    """The rows of a build whose keys are all non-null: those its hash
+    table holds (`JoinHashTable.inserted`)."""
+    if len(keys) == 1:
+        return frame.height() - frame.column(keys[0]).null_count()
+    return frame.select(keys).drop_nulls().height()
+
+
+def plan_push_filters_through_aggregate(
+    self: QueryContext, top: Int, batch_size: Int
+) raises -> Optional[QueryContext]:
+    """DuckDB's join filters through an aggregate's group keys
+    (`JoinFilterPushdownOptimizer::GenerateJoinFilters` and
+    `GetPushdownFilterTargets`, the LOGICAL_AGGREGATE_AND_GROUP_BY case):
+    when the stream below `top` starts from an aggregate, each inner, semi
+    or right join above it whose probe keys reach the aggregate as group
+    keys (all of them, but those a projection computes) has its build
+    side run first, and the aggregate's input pipeline filters its source
+    by the build's keys, as a hash join's dynamic filters reach the scan
+    under the aggregate. A probe row whose keys no build row has joins
+    nothing, and a filter on group keys removes whole groups, so the
+    result is unchanged. DuckDB makes the probe side's pipelines wait for
+    the build (`PhysicalJoin::BuildJoinPipelines`); here the builds run
+    before the stream and replace their inputs, so nothing runs twice.
+    None when no join qualifies."""
+    if self._pushed_filters:
+        return None
+    var first = top
+    var above = -1
+    while first >= 0:
+        ref step = self._nodes[first]
+        if _stream_rows(step) or _stream_join(step):
+            above = first
+            first = step.left
+        else:
+            break
+    if (
+        first < 0
+        or first == top
+        or self._nodes[first].kind != AGG
+        or len(self._nodes[first].names) == 0
+    ):
+        return None
+    var plan = self.copy()
+    var pushed = List[PushedJoinFilter]()
+    var probe = top
+    while probe >= 0 and probe != first:
+        var j = probe
+        var node = self._nodes[j].copy()
+        probe = node.left
+        if node.kind != JOIN or not supports_join_filters(node.how):
+            continue
+        if len(node.names) == 0 or len(node.names) != len(node.right_keys):
+            continue
+        var keys = List[Int]()
+        var grouped = List[String]()
+        var bail = False
+        for k in range(len(node.names)):
+            var found = _aggregate_group_key(
+                self, node.left, first, node.names[k]
+            )
+            if found[0] == _KEY_BAIL:
+                bail = True
+                break
+            if found[0] == _KEY_GROUPED:
+                keys.append(k)
+                grouped.append(found[1])
+        if bail or len(keys) == 0:
+            continue
+        var filtered = plan_is_filtering(self, node.right)
+        var built = plan._execute(node.right, False, True, batch_size)
+        var count = _keyed_rows(built, node.right_keys)
+        for i in range(len(keys)):
+            pushed.append(
+                PushedJoinFilter(
+                    grouped[i],
+                    built.column(node.right_keys[keys[i]]),
+                    len(node.names),
+                    count,
+                    filtered,
+                )
+            )
+        plan._frames.append(built^)
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
+        plan._nodes[j].right = len(plan._nodes) - 1
+    if len(pushed) == 0:
+        return None
+    trace_path("stream.join_filter_through_aggregate")
+    # The filters belong to this stream's read of the aggregate: a copy of
+    # its node takes them, so another reader of the node reads it whole.
+    plan._nodes.append(self._nodes[first].copy())
+    var aggregate = len(plan._nodes) - 1
+    plan._nodes[above].left = aggregate
+    plan._pushed_filters = ArcPointer(PushedJoinFilters(aggregate, pushed^))
+    return plan^

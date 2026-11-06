@@ -129,6 +129,7 @@ from dataframe.joins.join_filter import (
     BF_CHECK_N,
     BF_THRESHOLD,
     JoinFilter,
+    PushedJoinFilter,
     SelectivityStats,
     finalize_filters,
     keep_rows,
@@ -503,12 +504,15 @@ def _join_filters(
     steps: List[Step],
     joins: List[DataFrame],
     indexes: List[Optional[JoinHashTable]],
+    pushed: List[PushedJoinFilter],
     mut scan: TableFilterSet,
 ) raises -> List[JoinFilter]:
     """DuckDB's join filter pushdown into the source: for each inner, semi
     or right join among `steps` whose probe key is a source column no
     earlier step replaces (every build is finished before the first
-    morsel), its statistics filters go into `scan` and its row filters
+    morsel), and for each key `pushed` from a join above the aggregate
+    these steps feed whose column of the steps' output is such a source
+    column, its statistics filters go into `scan` and its row filters
     come back (`join_filter.finalize_filters`)."""
     var filters = List[JoinFilter]()
     # Names the steps so far show for untouched source columns.
@@ -562,6 +566,25 @@ def _join_filters(
             for e in step.exprs:
                 if e._name in source:
                     _ = source.pop(e._name)
+    for p in pushed:
+        var probe = source.get(p.column)
+        if not probe:
+            continue
+        var name = probe.value()
+        var made = finalize_filters(
+            name,
+            frame.column(name).dtype(),
+            p.key,
+            -1,
+            p.equalities,
+            p.build_count,
+            frame.height(),
+            p.build_filtered,
+            scan,
+        )
+        if made:
+            trace_path("pipeline.join_filter_through_aggregate")
+            filters.append(made.take())
     return filters^
 
 
@@ -3681,6 +3704,7 @@ def run_pipeline(
     table: Bool = False,
     set_masks: List[List[Int64]] = List[List[Int64]](),
     finish_steps: List[Step] = List[Step](),
+    pushed: List[PushedJoinFilter] = List[PushedJoinFilter](),
 ) raises -> DataFrame:
     """Run the steps over `frame` in morsels on `workers` threads, into a
     materialize sink, or a reduce sink when `expressions` are reductions
@@ -3696,7 +3720,8 @@ def run_pipeline(
     that pack several coded keys). `finish_steps` are row-local steps (no
     joins) over the reduce sink's output, run where it is made: on each
     worker finishing a part of the aggregate table, else as a pipeline
-    over the output.
+    over the output. `pushed` are join keys from above an aggregate these
+    steps feed, for the source's join filters (`_join_filters`).
     `counts` receives the rows fed, then each step's input and output
     rows, then each finish step's."""
     var finish_counts = List[Int]()
@@ -3727,6 +3752,7 @@ def run_pipeline(
         set_masks,
         finish_steps,
         finish_counts,
+        pushed,
     )
     if len(finish_steps) > 0 and len(finish_counts) == 0:
         # The sink finished the output whole: the steps run over it as
@@ -3760,6 +3786,7 @@ def run_pipeline(
             List[List[Int64]](),
             List[Step](),
             finish_counts,
+            List[PushedJoinFilter](),
         )
         for k in range(len(finish_steps)):
             finish_counts.append(inner[2 * k + 1])
@@ -3971,6 +3998,7 @@ def _run_pipeline(
     set_masks: List[List[Int64]],
     finish_steps: List[Step],
     mut finish_counts: List[Int],
+    pushed: List[PushedJoinFilter],
 ) raises -> DataFrame:
     """`run_pipeline`; `finish_counts` receives each finish step's input
     and output rows when the aggregate table's finish ran them, and stays
@@ -4155,7 +4183,7 @@ def _run_pipeline(
     top_filter.row_ids = top_row_ids
     var join_scan_filters = TableFilterSet()
     var join_filters = _join_filters(
-        frame, steps, joins[], indexes[], join_scan_filters
+        frame, steps, joins[], indexes[], pushed, join_scan_filters
     )
     if len(join_filters) > 0:
         trace_path("pipeline.join_filter")

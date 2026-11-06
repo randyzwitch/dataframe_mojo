@@ -17,6 +17,9 @@ from dataframe.io.csv import (
 from dataframe.joins.hash_table import (
     JoinHashTable,
 )
+from dataframe.joins.join_filter import (
+    PushedJoinFilters,
+)
 from dataframe.planning.model import (
     HANDOFF_OFF,
     PlanNode,
@@ -152,6 +155,9 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # Nodes over an aggregate this run's stream of it may run in the
     # aggregate's finish (`_row_steps_above`); None otherwise.
     var _finish_above: Optional[ArcPointer[FinishAbove]]
+    # Join build keys pushed through an aggregate's group keys into its
+    # input (`plan_push_filters_through_aggregate`); None otherwise.
+    var _pushed_filters: Optional[ArcPointer[PushedJoinFilters]]
 
     var _executor: def(
         QueryContext, Int, Bool, Bool, Int
@@ -188,6 +194,7 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._handoff = HANDOFF_OFF
         self._optimized = False
         self._finish_above = None
+        self._pushed_filters = None
         self._executor = executor
         self._collector = collector
         self._supports = supports
