@@ -172,11 +172,12 @@ python3 scripts/metal_calibration.py build/metal-capture.jsonl --output-dir buil
 export DATAFRAME_HANDOFF_CALIBRATION=/absolute/path/printed/by/the/fitter.json
 ```
 
-The built-in capture uses 50M, 75M and 100M rows, eight representative operator
+The built-in capture uses 50M, 75M and 100M rows, eleven representative operator
 shapes, contiguous/eight-chunk inputs and independent nullable masks. Optional
 row counts follow the repetition count. It checks answers against a periodic
 scalar oracle, includes shared Float32 arithmetic SUM/COUNT/MEAN and mixed
-Float32-mean bundles and mixed MIN/MAX/SUM/COUNT/MEAN projections. It alternates
+Float32-mean bundles, mixed MIN/MAX/SUM/COUNT/MEAN projections, arithmetic
+extrema and multi-column AND/OR filters. It alternates
 CPU/Metal timing order and records unsupported or
 CPU-adjudicated cases explicitly. Every Metal timing requires direct GPU
 execution. These are development calibration workloads, not external-suite
@@ -384,3 +385,24 @@ Mixed programs use `mixed_reductions:v1:` calibration keys. Existing pure
 aggregate paths retain their keys and entry signatures. A changed package
 identity requires fresh calibration before automatic placement uses the mixed
 program; unmeasured shapes stay on CPU.
+
+### Predicates across numeric columns
+
+Aggregate projections can combine range comparisons on different Int32,
+Int64 and Float32 columns using `&` and `|`. Bounds follow the existing
+exactly representable, untyped-literal rules. Conjunctions on one column fold
+into one range; separate filter calls compose as AND. Up to eight distinct
+range leaves and nine total value/predicate input columns are supported.
+
+The GPU evaluates ranges and combines their is-true bits through a small
+truth table inside the aggregate scan. This preserves filter selection with
+nulls: a missing comparison can qualify through another true OR branch.
+It supports the existing native and binary SUM/COUNT/MEAN/MIN/MAX projections,
+with the same chunk mapping, checked arithmetic and IEEE adjudication. No
+intermediate filtered table is materialized. NOT and column-to-column
+comparisons remain outside this numeric-range path.
+
+These regions use `predicate_reductions:v1:` calibration keys, including the
+range inputs, bounds and Boolean program. Existing single-range paths retain
+their specialized kernels and keys; automatic placement requires matching
+measurements for the new regions.
