@@ -1,6 +1,7 @@
 """Numeric predicate extensions preserve null selection independently."""
 # contract-group: execution.backends
 from std.memory import bitcast
+from std.utils.numerics import inf
 from std.testing import assert_equal, assert_true, assert_false
 from dataframe import Column, DataFrame, Expr, Series, col
 from dataframe_metal.predicate_plan import (
@@ -90,7 +91,7 @@ def test_metal_null_predicates_fused_with_aggregates_and_ieee_values() raises:
             ),
         ]
     )
-    for frame in [sliced, chunked]:
+    for frame in [sliced^, chunked^]:
         var predicates = List[Expr](
             [
                 col("p").is_null(),
@@ -357,8 +358,6 @@ def test_metal_column_comparisons_boundaries_masks_chunks_and_ieee() raises:
             columns.append(Series("a", Column[Int64](a^, valid_a)))
             columns.append(Series("b", Column[Int64](b^, valid_b)))
         else:
-            from std.utils.numerics import inf
-
             var nan = bitcast[DType.float32](UInt32(0x7FC00017))
             var tiny = bitcast[DType.float32](UInt32(1))
             var negative_zero = bitcast[DType.float32](UInt32(0x80000000))
@@ -427,7 +426,7 @@ def test_metal_column_comparisons_boundaries_masks_chunks_and_ieee() raises:
         )
         var float_sums = List[Int32]([Int32(4), 15, 5, 16, 11, 10])
         var float_counts = List[Int64]([Int64(1), 4, 1, 4, 3, 3])
-        for frame in [contiguous, chunked]:
+        for frame in [contiguous^, chunked^]:
             var predicates = List[Expr](
                 [
                     col("a") > col("b"),
