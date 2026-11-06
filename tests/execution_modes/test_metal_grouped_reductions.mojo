@@ -338,8 +338,8 @@ def test_metal_grouped_reductions_null_keys_values_extrema_and_order() raises:
                             "avg",
                             Column[Float64](
                                 [
-                                    Float64(4.5 if filtered else 2),
-                                    Float64(0 if filtered else 4.5),
+                                    Float64(4.5 if filtered else 2.0),
+                                    Float64(0.0 if filtered else 4.5),
                                     6,
                                 ],
                                 nonempty,
