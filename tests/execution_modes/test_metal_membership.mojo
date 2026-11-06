@@ -264,7 +264,7 @@ def test_metal_membership_native_pairs_chunks_nulls_negation_and_case() raises:
             for frame in [source^, chunked^]:
                 var member = col("p").is_in(literals)
                 for inverted in [False, True]:
-                    var predicate = ~member if inverted else member
+                    var predicate = ~member if inverted else member.copy()
                     var query = (
                         frame.lazy()
                         .filter(predicate)
@@ -426,7 +426,7 @@ def test_metal_membership_ieee_empty_and_large_sets() raises:
     for inverted in [False, True]:
         var query = (
             frame.lazy()
-            .filter(~member if inverted else member)
+            .filter(~member if inverted else member.copy())
             .select_exprs(
                 [col("v").sum().alias("s"), col("v").count().alias("n")]
             )
@@ -467,13 +467,41 @@ def test_metal_membership_ieee_empty_and_large_sets() raises:
     for inverted in [False, True]:
         var query = (
             ints.lazy()
-            .filter(~large if inverted else large)
+            .filter(~large if inverted else large.copy())
             .select(col("v").sum())
         )
         assert_equal(
             execute_timed(query)[0].item().int64(), Int64(12 if inverted else 9)
         )
         same_outcome(query)
+    # Exercise the largest public Float32 expansion, not just raw lookup metadata.
+    var float_large = DataFrame(
+        [
+            Series(
+                "p",
+                Column[Float32](
+                    [-1, 0, 7, 4095, 4096, 8192, 0],
+                    [True, True, True, True, True, True, False],
+                ),
+            ),
+            Series("v", Column[Int64]([1, 2, 3, 4, 5, 6, 7])),
+        ]
+    )
+    var float_candidates = List[Expr]()
+    for i in reversed(range(MAX_MEMBERS)):
+        float_candidates.append(lit(Float32(i)))
+    var float_set = col("p").is_in(float_candidates)
+    for inverted in [False, True]:
+        var large_query = (
+            float_large.lazy()
+            .filter(~float_set if inverted else float_set.copy())
+            .select(col("v").sum())
+        )
+        assert_equal(
+            execute_timed(large_query)[0].item().int64(),
+            Int64(12 if inverted else 9),
+        )
+        same_outcome(large_query)
     # A Float32 public IN list expands past the CASE instruction limit in
     # source form but lowers to one membership leaf plus seven value nodes.
     var candidates = List[Expr]()
