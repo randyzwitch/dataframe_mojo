@@ -68,9 +68,6 @@ from dataframe.optimizer.passes import (
 from dataframe.parallel import (
     run_jobs,
 )
-from dataframe.pipeline import (
-    _int_bounds,
-)
 from dataframe.planning.context import (
     QueryContext,
 )
@@ -117,7 +114,6 @@ from dataframe.planning.properties import (
     _chain_member,
     _comparison_edge,
     _is_scan,
-    _key_set_filter,
     _references,
 )
 
@@ -381,334 +377,6 @@ def plan_order_joins(
         plan_push_projections(self)
 
 
-def plan_push_join_key_sets(
-    mut self: QueryContext, streaming: Bool, batch_size: Int
-) raises:
-    """An inner or semi join where one input is a filtered in-memory
-    table or a join chain over tables at most a quarter the size of
-    the other side's largest runs that input first, and each key's
-    values become a filter on the other side's key when a sample of the table
-    supplying it says the filter keeps at most one row in eight;
-    predicate pushdown then moves it toward that table. Rows whose key no left
-    row has join nothing, so the result is unchanged. Up to 50
-    distinct keys filter as a list (an equality per value per row);
-    larger sets use their min-max range. The left input is replaced by its
-    result, so it does not run twice. Only for a right side with a
-    join of its own, which the filter then reaches first. TPC-DS q37
-    and q82 join four items to an 11.7M-row inventory that is joined
-    to dates first; q72 joins 1999's sales to inventory by week, and
-    the weeks' range narrows the dates the inventory joins; q59 joins
-    a year's weeks (the small right side) to weekly sales, whose week
-    filter passes the group_by down to the date join.
-    """
-    var root = len(self._nodes) - 1
-    var changed = True
-    while changed:
-        changed = False
-        var parents = plan_live_parents(self, root)
-        for j in range(len(self._nodes)):
-            if parents[j] == -2:
-                continue
-            ref node = self._nodes[j]
-            if node.kind != JOIN or not (
-                node.how == JOIN_INNER or node.how == JOIN_SEMI
-            ):
-                continue
-            if len(node.names) != len(node.right_keys):
-                continue
-            if plan_key_set_side(self, j, True, streaming, batch_size):
-                changed = True
-            elif plan_key_set_side(self, j, False, streaming, batch_size):
-                changed = True
-            if changed:
-                root = len(self._nodes) - 1
-                break
-
-
-def plan_key_set_side(
-    mut self: QueryContext,
-    j: Int,
-    small_left: Bool,
-    streaming: Bool,
-    batch_size: Int,
-) raises -> Bool:
-    """One direction of `_push_join_key_sets` for the join at `j`: the
-    small side (left when `small_left`) runs first and its keys filter
-    the other side. True when the plan changed."""
-    var small = self._nodes[j].left if small_left else self._nodes[j].right
-    var large = self._nodes[j].right if small_left else self._nodes[j].left
-    # A filtered table, or a join chain: inputs that keep few rows of
-    # what they read. A bare table keeps all of them.
-    if not (plan_filtered_table(self, small) or plan_has_join(self, small)):
-        return False
-    # Only a large side that does more than scan and filter before this
-    # join (a join of its own) gains: against a bare table the join
-    # already builds on its smaller side, and a filter there only
-    # copies rows (TPC-DS q43, 2x).
-    if not plan_has_join(self, large):
-        return False
-    # A small right side already filters the left one inside the
-    # stream, where the join order puts the selective joins first;
-    # its keys pay only when a group_by on the left would otherwise
-    # aggregate rows the join then drops (TPC-DS q59's weekly sales).
-    # Pushed into plain join chains they cost PDS-H q8 5x and q21 2x.
-    if not small_left and not plan_has_kind(self, large, AGG):
-        return False
-    var large_rows = plan_largest_scan(self, large)
-    # The tables under the small side, unfiltered, must be at most a
-    # quarter of the other side's largest: then running it first and
-    # keeping its result costs at most a quarter of reading that table
-    # (TPC-DS q72's sales chain reads 1.9M demographics against 11.7M
-    # inventory rows).
-    var small_bound = plan_height_bound(self, small)
-    if small_bound < 0:
-        small_bound = plan_largest_scan(self, small)
-    if large_rows <= 0 or small_bound <= 0:
-        return False
-    # Against a left side the join probes anyway, a right side is run
-    # early only when it is tiny next to it (32x: TPC-DS q59's weeks
-    # against store sales are 39x smaller); PDS-H q21's 1.5M orders
-    # against 6M lineitem rows ran twice and filtered nothing.
-    if (4 if small_left else 32) * small_bound > large_rows:
-        return False
-    var small_keys = (
-        self._nodes[j]
-        .names.copy() if small_left else self._nodes[j]
-        .right_keys.copy()
-    )
-    var large_keys = (
-        self._nodes[j]
-        .right_keys.copy() if small_left else self._nodes[j]
-        .names.copy()
-    )
-    # Each key's table on the large side and its name there (through
-    # renames and group_by keys); computed keys get none.
-    var providers = List[Tuple[Int, String]]()
-    var any = False
-    for k in range(len(large_keys)):
-        var found = plan_provider_scan(self, large, large_keys[k])
-        any = any or found[0] >= 0
-        providers.append(found)
-    if not any:
-        return False
-    # Read before the plan changes: the join's inequality conditions,
-    # as (large side column, comparison, small side column).
-    var comparisons = plan_side_comparisons(self, j, small_left)
-    var result = self._execute(small, False, streaming, batch_size)
-    if not small_left and not plan_any_selective(
-        self, result, small_keys, providers
-    ):
-        # Nothing to pass: keep a right input as written, so the join
-        # order still ranks it by its filters (a table already run looks
-        # unfiltered, and PDS-H q21 then ran its selective supplier join
-        # last). A left input is the stream's base, which nothing ranks:
-        # its result is kept below, so it does not run twice.
-        return False
-    if small_left:
-        trace_path("lazy.key_set_left")
-    else:
-        trace_path("lazy.key_set_right")
-    self._frames.append(result.copy())
-    self._schemas.append(Optional[CsvSchema]())
-    self._nodes.append(_frame_scan_node(slot=len(self._frames) - 1))
-    if small_left:
-        self._nodes[j].left = len(self._nodes) - 1
-    else:
-        self._nodes[j].right = len(self._nodes) - 1
-    var marker = len(self._frames) - 1
-    var added = False
-    for k in range(len(providers)):
-        var scan = providers[k][0]
-        if scan < 0:
-            continue
-        var base = providers[k][1]
-        var dtype = (
-            self._frames[self._nodes[scan].source_slot()].column(base).dtype()
-        )
-        var keys = result.column(small_keys[k])
-        var sampled = _key_set_filter(keys, base, dtype)
-        if not sampled or not plan_selective_on(self, scan, sampled.value()):
-            continue
-        var pushed = _key_set_filter(keys, large_keys[k], dtype)
-        var target = self._nodes[j].right if small_left else self._nodes[j].left
-        self._nodes.append(_filter_node(left=target, exprs=[pushed.take()]))
-        if small_left:
-            self._nodes[j].right = len(self._nodes) - 1
-        else:
-            self._nodes[j].left = len(self._nodes) - 1
-        added = True
-    # An inequality condition passes the small side's greatest value
-    # (for < and <=) or least (for > and >=) to the large side as a
-    # bound, as DuckDB's join filters do for these comparisons
-    # (`JoinFilterPushdownInfo::FinalizeFilters`). TPC-DS q72's stock
-    # on hand below the quantity ordered keeps the inventory rows
-    # under the largest quantity.
-    for comparison in comparisons:
-        var name = comparison[0]
-        var found = plan_provider_scan(self, large, name)
-        if found[0] < 0:
-            continue
-        ref source = self._frames[self._nodes[found[0]].source_slot()]
-        var dtype = source.column(found[1]).dtype()
-        var other = result.column(comparison[2])
-        if (
-            not (dtype == DataType.INT64 or dtype == DataType.INT32)
-            or other.dtype() != dtype
-        ):
-            continue
-        var bounds = _int_bounds(other)
-        if not bounds:
-            continue
-        var op = comparison[1]
-        var bound = (
-            bounds.value()[1] if op == LT or op == LE else bounds.value()[0]
-        )
-        var sampled = _bound_filter(found[1], op, bound, dtype)
-        if not plan_selective_on(self, found[0], sampled):
-            continue
-        var target = self._nodes[j].right if small_left else self._nodes[j].left
-        self._nodes.append(
-            _filter_node(
-                left=target, exprs=[_bound_filter(name, op, bound, dtype)]
-            )
-        )
-        if small_left:
-            self._nodes[j].right = len(self._nodes) - 1
-        else:
-            self._nodes[j].left = len(self._nodes) - 1
-        added = True
-    plan_reorder(self)
-    if not added:
-        return True
-    # Not split again: splitting a merged filter and merging it back
-    # reverses its parts, and the written order is the order they are
-    # evaluated in (ClickBench q21 then ran its string search first).
-    plan_push_predicates(self)
-    plan_merge_filters(self)
-    if small_left:
-        # The right side is built next whatever happens: run it now,
-        # filtered, so the join sees both real heights and builds on
-        # the smaller side (TPC-DS q72 built its two-key index on 2.4M
-        # stock rows for 8,689 sales).
-        for at in range(len(self._nodes)):
-            ref joined = self._nodes[at]
-            if (
-                joined.kind == JOIN
-                and joined.left >= 0
-                and self._nodes[joined.left].kind == SCAN_FRAME
-                and self._nodes[joined.left].source_slot() == marker
-            ):
-                var right = self._execute(
-                    joined.right, False, streaming, batch_size
-                )
-                self._frames.append(right^)
-                self._schemas.append(Optional[CsvSchema]())
-                self._nodes.append(_frame_scan_node(slot=len(self._frames) - 1))
-                self._nodes[at].right = len(self._nodes) - 1
-                break
-        plan_reorder(self)
-    return True
-
-
-def plan_side_comparisons(
-    self: QueryContext, j: Int, small_left: Bool
-) raises -> List[Tuple[String, Int, String]]:
-    """The inequalities between a column of each input of the inner
-    join at `j` in filters directly above it, represented as join
-    conditions: each as (large side column, its comparison with
-    the small side column, small side column), the large side being
-    the right input when `small_left`. Only columns that one input
-    alone names."""
-    var found = List[Tuple[String, Int, String]]()
-    if self._nodes[j].how != JOIN_INNER:
-        return found^
-    var parents = plan_live_parents(self, len(self._nodes) - 1)
-    var pairs = List[Tuple[String, Int, String]]()
-    var at = parents[j]
-    while at >= 0 and self._nodes[at].kind == FILTER:
-        for part in conjuncts(self._nodes[at].exprs[0]):
-            if len(part._nodes) != 3:
-                continue
-            ref root = part._nodes[2]
-            if not (
-                root.op == LT or root.op == LE or root.op == GT or root.op == GE
-            ):
-                continue
-            if root.left < 0 or root.right < 0:
-                continue
-            ref a = part._nodes[root.left]
-            ref b = part._nodes[root.right]
-            if a.op == COL and b.op == COL:
-                pairs.append((a.text, root.op, b.text))
-        at = parents[at]
-    if len(pairs) == 0:
-        return found^
-    var large_cols = plan_columns_of(
-        self, self._nodes[j].right if small_left else self._nodes[j].left
-    )
-    var small_cols = plan_columns_of(
-        self, self._nodes[j].left if small_left else self._nodes[j].right
-    )
-    for pair in pairs:
-        var a = pair[0]
-        var op = pair[1]
-        var b = pair[2]
-        var a_large = a in large_cols and a not in small_cols
-        var b_large = b in large_cols and b not in small_cols
-        var a_small = a in small_cols and a not in large_cols
-        var b_small = b in small_cols and b not in large_cols
-        if a_large and b_small:
-            found.append((a, op, b))
-        elif b_large and a_small:
-            # `a op b` is `b flipped a`.
-            var flipped = GT
-            if op == LE:
-                flipped = GE
-            elif op == GT:
-                flipped = LT
-            elif op == GE:
-                flipped = LE
-            found.append((b, flipped, a))
-    return found^
-
-
-def plan_selective_on(
-    mut self: QueryContext, scan: Int, keys: Expr
-) raises -> Bool:
-    """Whether `keys` keeps at most one row in eight of the table at
-    node `scan`, estimated on evenly spaced runs of it
-    (`_estimated_rows`). A key set spanning most of the right side's
-    keys filters nothing and only moves the join off its better
-    build side."""
-    var height = self._frames[self._nodes[scan].source_slot()].height()
-    self._nodes.append(_filter_node(left=scan, exprs=[keys.copy()]))
-    var estimated = plan_estimated_rows(self, len(self._nodes) - 1)
-    _ = self._nodes.pop()
-    return estimated >= 0 and 8 * estimated <= height
-
-
-def plan_any_selective(
-    mut self: QueryContext,
-    result: DataFrame,
-    keys: List[String],
-    providers: List[Tuple[Int, String]],
-) raises -> Bool:
-    """Whether any key of `result` would filter its provider table to at
-    most one row in eight (`_selective_on`)."""
-    for k in range(len(providers)):
-        var scan = providers[k][0]
-        if scan < 0:
-            continue
-        var base = providers[k][1]
-        var dtype = (
-            self._frames[self._nodes[scan].source_slot()].column(base).dtype()
-        )
-        var sampled = _key_set_filter(result.column(keys[k]), base, dtype)
-        if sampled and plan_selective_on(self, scan, sampled.value()):
-            return True
-    return False
-
-
 def plan_cost_order_joins(
     mut self: QueryContext, root: Int, streaming: Bool, batch_size: Int
 ) raises -> Bool:
@@ -895,8 +563,7 @@ def plan_cost_order_joins(
         # runs in full whatever the order, unless it is the largest input
         # and streams: run it now and count it, rather than sample its
         # filter and then run it anyway. Its result replaces it, so
-        # nothing runs twice, and its keys can then narrow the scans that
-        # probe it (`_push_join_key_sets`), as the measured chain order
+        # nothing runs twice, as the measured chain order
         # (`_order_chain`) does. A relation that narrows nothing yields
         # exactly its table's rows, and a narrowing one at most its
         # table's: one whose table is no larger than some relation that
@@ -987,11 +654,11 @@ def plan_cost_order_joins(
                 estimates.append(plan_relation_estimate(self, relations[r]))
             if estimates[r] < 0:
                 runs.append(r)
-        # A left join's right relation is built whole in every order (no
-        # key set narrows a left join's build side). With no estimate,
-        # when other relations must run anyway, it runs with them, at
-        # once, and is counted: independent pipelines run together, as
-        # `_prefetch_breakers` runs them, not one after another.
+        # A left join's right relation is built whole in every order. With
+        # no estimate, when other relations must run anyway, it runs with
+        # them, at once, and is counted: independent pipelines run
+        # together, as `_prefetch_breakers` runs them, not one after
+        # another.
         if len(runs) > 0:
             for r in range(n):
                 if uncounted & (1 << r) != 0:
