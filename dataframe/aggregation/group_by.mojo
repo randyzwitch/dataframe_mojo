@@ -6,14 +6,18 @@ from dataframe.aggregation.hash_table import (
     AggregateLayout,
     AggregateSink,
     _Cursor,
-    _one_chunk,
     aggregate_finish,
     aggregate_layout,
-    aggregate_table,
     ReducerSpec,
     key_supported,
     reduction_supported,
     states_supported,
+)
+from dataframe.aggregation.table_sink import (
+    TableSinkInputs,
+    TableSinkLayout,
+    aggregate_table,
+    sink_columns,
 )
 from dataframe.aggregation.expressions import (
     count_rows_by,
@@ -297,6 +301,7 @@ struct _BatchSinkJob(Job):
     var keys: List[Series]
     var expressions: List[Expr]
     var layout: AggregateLayout
+    var shared: TableSinkLayout
     var ranges: List[Int]
     var cursor: _Cursor
     var workers: Int
@@ -309,6 +314,8 @@ struct _BatchSinkJob(Job):
         keys: List[Series],
         expressions: List[Expr],
         layout: AggregateLayout,
+        empty_keys: List[Series],
+        empty: List[Series],
         ranges: List[Int],
         cursor: _Cursor,
         workers: Int,
@@ -318,6 +325,7 @@ struct _BatchSinkJob(Job):
         self.keys = keys.copy()
         self.expressions = expressions.copy()
         self.layout = layout.copy()
+        self.shared = TableSinkLayout(layout, empty_keys, empty)
         self.ranges = ranges.copy()
         self.cursor = cursor.copy()
         self.workers = workers
@@ -326,6 +334,7 @@ struct _BatchSinkJob(Job):
 
     def run(mut self) raises:
         var sink = AggregateSink(self.layout, self.workers)
+        var reader = TableSinkInputs(self.shared)
         var morsels = len(self.ranges) // 2
         while True:
             var m = self.cursor.take()
@@ -338,13 +347,11 @@ struct _BatchSinkJob(Job):
                 var n = min(self.batch, length - lo)
                 var keys = List[Series](capacity=len(self.keys))
                 for key in self.keys:
-                    keys.append(_one_chunk(key.slice(start, n)))
+                    keys.append(key.slice(start, n))
                 var inputs = table_inputs(
                     self.frame.slice(start, n), keys, self.expressions
                 )
-                for i in range(len(inputs)):
-                    inputs[i] = _one_chunk(inputs[i])
-                sink.sink(keys, inputs, start)
+                sink_columns(sink, reader, keys, inputs, start)
         self.sinks.append(sink^)
 
 
@@ -647,6 +654,8 @@ struct GroupBy(Copyable):
                     keys,
                     expressions,
                     layout,
+                    empty_keys,
+                    empty,
                     ranges,
                     cursor,
                     workers,
