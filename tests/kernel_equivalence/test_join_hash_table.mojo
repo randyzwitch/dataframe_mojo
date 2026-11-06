@@ -1,6 +1,7 @@
-"""DuckDB's join hash table (`dataframe/joins/hash_table.mojo`): a build of
-more than PARALLEL_CONSTRUCT_THRESHOLD rows inserts on every worker with
-compare-and-swap and keeps every duplicate and null of the build; an eager
+"""DuckDB's join hash table (`dataframe/joins/hash_table.mojo`): a build on
+several workers, one hash partition each (Polars' partitioned build), keeps
+every duplicate and null of the build and lists each key's rows in
+ascending order; an eager
 join builds on the side of the smaller hash table and, when its rows are
 read in order, returns them in the unflipped join's order."""
 # contract-group: table.join
@@ -8,11 +9,7 @@ from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, Series
 from dataframe.join_type import JOIN_INNER, JOIN_LEFT
-from dataframe.joins.hash_table import (
-    JoinHashTable,
-    PARALLEL_CONSTRUCT_THRESHOLD,
-    probe_pairs,
-)
+from dataframe.joins.hash_table import JoinHashTable, probe_pairs
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
     StrategyTrace,
@@ -20,21 +17,10 @@ from tests.support.group_strategy_reference import (
 from tests.support.join_worker_setting import JoinWorkers
 
 
-def _sorted(var values: List[Int]) -> List[Int]:
-    for i in range(1, len(values)):
-        var v = values[i]
-        var j = i - 1
-        while j >= 0 and values[j] > v:
-            values[j + 1] = values[j]
-            j -= 1
-        values[j + 1] = v
-    return values^
-
-
-def test_parallel_build_keeps_every_duplicate_null_and_row() raises:
+def test_partitioned_build_keeps_every_duplicate_null_and_row() raises:
     var setting = JoinWorkers(4)
     var domain = 600_000
-    var n = PARALLEL_CONSTRUCT_THRESHOLD + 100_003
+    var n = 700_003
     var values = List[Int64]()
     var valid = List[Bool]()
     for row in range(n):
@@ -42,6 +28,7 @@ def test_parallel_build_keeps_every_duplicate_null_and_row() raises:
         valid.append(row % 97 != 2)
     var build = Series("k", Column[Int64](values^, valid))
     var table = JoinHashTable([build.copy()])
+    assert_equal(table.parts, 4)
     assert_true(table.chains_longer_than_one)
     assert_true(table.has_null)
     var probes: List[Int64] = [
@@ -68,8 +55,7 @@ def test_parallel_build_keeps_every_duplicate_null_and_row() raises:
                     if j % 97 != 2:
                         expected.append(j)
                     j += domain
-            # A probe row's matches come out together; a parallel build's
-            # chain lists them in no particular order.
+            # A probe row's matches come out together, in build order.
             var actual = List[Int]()
             while k < len(pairs[0]) and pairs[0][k] == i:
                 actual.append(pairs[1][k])
@@ -77,7 +63,7 @@ def test_parallel_build_keeps_every_duplicate_null_and_row() raises:
             if outer and len(expected) == 0:
                 assert_equal(actual, [-1])
             else:
-                assert_equal(_sorted(actual^), expected)
+                assert_equal(actual, expected)
         assert_equal(k, len(pairs[0]))
     _ = setting^
 
