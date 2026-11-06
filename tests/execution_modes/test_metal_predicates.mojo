@@ -8,6 +8,35 @@ from dataframe_metal.handoff import execute_timed, region_key
 from tests.support.metal_outcomes import require_metal, same_outcome
 
 
+def test_arithmetic_and_compound_calibration_corpus_matches_cpu() raises:
+    from benchmarks.bench_metal_calibration import (
+        _table,
+        _chunks,
+        _query,
+        _reference,
+    )
+    from dataframe_metal.calibration_capture import _check
+
+    for rows in [32, 65, 127]:
+        for nulls in [False, True]:
+            var source = _table(rows, nulls)
+            for count in [1, 8]:
+                var frame = _chunks(source, count)
+                for mode in range(11):
+                    var query = _query(frame, mode)
+                    if mode >= 8:
+                        assert_true(
+                            region_key(query).startswith(
+                                "mixed_reductions:v1:" if mode
+                                == 8 else "predicate_reductions:v1:"
+                            )
+                        )
+                    _check(
+                        query.collect(engine="cpu"),
+                        _reference(rows, nulls, mode),
+                    )
+
+
 def test_compound_predicate_truth_tables_select_sql_true_with_nulls() raises:
     var a = List[Int32]()
     var b = List[Int64]()
