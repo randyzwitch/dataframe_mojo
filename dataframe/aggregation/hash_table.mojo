@@ -1552,9 +1552,11 @@ struct AggregateSink(Movable):
             var owner = Int(Pointer(to=self.buffered[s])) if ordered else Int(
                 Pointer(to=self.owned[s])
             )
-            var made = self.buffered[s].groups if ordered else self.owned[
-                s
-            ].group_count
+            var made = (
+                self.buffered[s]
+                .groups if ordered else self.owned[s]
+                .group_count
+            )
             var ordinals = List[Int](unsafe_uninit_length=count)
             var spare = -1
             for k in range(count):
