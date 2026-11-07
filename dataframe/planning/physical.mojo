@@ -65,8 +65,10 @@ from dataframe.optimizer.passes import (
     plan_push_predicates,
     plan_push_projections,
 )
-from dataframe.parallel import (
-    run_jobs,
+from dataframe.scheduler import (
+    META_REGULAR,
+    MetaPipeline,
+    run_pipelines,
 )
 from dataframe.planning.context import (
     QueryContext,
@@ -99,7 +101,7 @@ from dataframe.planning.graph import (
     plan_spine_rows,
 )
 from dataframe.planning.inputs import (
-    _SubplanJob,
+    _SubplanPipeline,
 )
 from dataframe.planning.model import (
     AGG,
@@ -1029,20 +1031,19 @@ def plan_run_relations(
 ) raises:
     """Run join-graph relations `runs` for their counts (`estimates`),
     each replaced by its result so nothing runs twice. They are
-    independent pipelines: run at once, as Polars and DuckDB run
-    independent pipelines (`_prefetch_breakers`), not one after another
-    on a crew their serial phases leave partly idle."""
+    independent pipelines, scheduled to run at once (`run_pipelines`),
+    not one after another on a crew their serial phases leave partly
+    idle."""
     if len(runs) == 0:
         return
-    var jobs = List[_SubplanJob](capacity=len(runs))
+    var jobs = List[_SubplanPipeline](capacity=len(runs))
+    var metas = List[MetaPipeline](capacity=len(runs))
     for r in runs:
         jobs.append(
-            _SubplanJob(self.copy(), relations[r], streaming, batch_size)
+            _SubplanPipeline(self.copy(), relations[r], streaming, batch_size)
         )
-    if len(jobs) == 1:
-        jobs[0].run()
-    else:
-        run_jobs(jobs)
+        metas.append(MetaPipeline(META_REGULAR))
+    run_pipelines(jobs, metas)
     for k in range(len(runs)):
         var r = runs[k]
         estimates[r] = jobs[k].result.height()

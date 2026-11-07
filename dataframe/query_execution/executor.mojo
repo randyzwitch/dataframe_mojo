@@ -45,14 +45,19 @@ from dataframe.join_type import (
     JOIN_INNER,
     JOIN_LEFT,
 )
-from dataframe.parallel import (
-    run_jobs,
+from dataframe.scheduler import (
+    META_REGULAR,
+    MetaPipeline,
+    run_pipelines,
 )
 from dataframe.planning.context import (
     QueryContext,
 )
 from dataframe.planning.inputs import (
-    _SubplanJob,
+    _SubplanPipeline,
+)
+from dataframe.query_execution.materialize import (
+    plan_take_prefetched,
 )
 from dataframe.planning.model import (
     AGG,
@@ -550,17 +555,36 @@ def plan_both_inputs(
     streaming: Bool,
     batch_size: Int,
 ) raises -> Tuple[DataFrame, DataFrame]:
-    """A two-input node's inputs, executed at once as jobs on their own
-    copies of the plan outside the empty-schema run and when no
-    execution report is kept (both share the crew's thread budget),
-    else one after the other."""
+    """A two-input node's inputs, executed at once as two independent
+    pipelines on their own copies of the plan (`run_pipelines`) outside
+    the empty-schema run and when no execution report is kept, else one
+    after the other. An input a stream already ran ahead
+    (`plan_schedule_inputs`) is taken, not run again."""
     ref node = self._nodes[index]
     if not empty and not self._report:
-        var jobs = List[_SubplanJob](capacity=2)
-        jobs.append(_SubplanJob(self.copy(), node.left, streaming, batch_size))
-        jobs.append(_SubplanJob(self.copy(), node.right, streaming, batch_size))
-        run_jobs(jobs)
-        return (jobs[0].result.copy(), jobs[1].result.copy())
+        var ready = List[Optional[DataFrame]]()
+        ready.append(plan_take_prefetched(self, node.left))
+        ready.append(plan_take_prefetched(self, node.right))
+        var jobs = List[_SubplanPipeline](capacity=2)
+        var metas = List[MetaPipeline](capacity=2)
+        var slots = List[Int](length=2, fill=-1)
+        var sides = [node.left, node.right]
+        for k in range(2):
+            if ready[k]:
+                continue
+            slots[k] = len(jobs)
+            jobs.append(
+                _SubplanPipeline(self.copy(), sides[k], streaming, batch_size)
+            )
+            metas.append(MetaPipeline(META_REGULAR))
+        run_pipelines(jobs, metas)
+        var frames = List[DataFrame](capacity=2)
+        for k in range(2):
+            if slots[k] < 0:
+                frames.append(ready[k].take())
+            else:
+                frames.append(jobs[slots[k]].result.copy())
+        return (frames[0].copy(), frames[1].copy())
     var left = self._execute(node.left, empty, streaming, batch_size)
     var right = self._execute(node.right, empty, streaming, batch_size)
     return (left^, right^)

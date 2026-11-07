@@ -6,8 +6,8 @@ from dataframe.joins.hash_table import (
     JoinHashTable,
 )
 from dataframe.join_type import JOIN_INNER
-from dataframe.parallel import (
-    Job,
+from dataframe.scheduler import (
+    SchedulablePipeline,
 )
 from dataframe.planning.context import (
     QueryContext,
@@ -53,13 +53,13 @@ def finish_build(
     return JoinHashTable(sources, perfect=how == JOIN_INNER)
 
 
-struct _SubplanJob(Job):
-    """One subplan (a union's or a join's input, a stream's breaker input),
-    executed from its own copy of the plan. A join's build side given its
-    keys also finishes as a build (`finish_build`), on this job's thread,
-    so the hash index of one build is made while sibling inputs still
-    run, as DuckDB's build pipelines each finalize on their own
-    dependencies (`BuildPipelineSchedule`)."""
+struct _SubplanPipeline(SchedulablePipeline):
+    """One subplan (a union's or a join's input, a stream's build side or
+    breaker input), executed from its own copy of the plan as one
+    scheduled pipeline (`run_pipelines`). A join's build side given its
+    keys finishes as a build (`finish_build`) in its finish event, as
+    DuckDB's hash join finalizes its table in its build pipeline's
+    `PipelineFinishEvent`."""
 
     var plan: QueryContext
     var index: Int
@@ -95,9 +95,20 @@ struct _SubplanJob(Job):
         self.how = how
         self.built = None
 
-    def run(mut self) raises:
+    def initialize(mut self) raises:
+        pass
+
+    def execute_tasks(self) -> Int:
+        return 1
+
+    def execute(mut self, task: Int) raises:
         self.result = self.plan._execute(
             self.index, False, self.streaming, self.batch_size
         )
+
+    def prepare_finalize(mut self) raises:
+        pass
+
+    def finalize(mut self) raises:
         if len(self.keys) > 0:
             self.built = finish_build(self.result, self.keys, self.how)

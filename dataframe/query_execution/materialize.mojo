@@ -14,9 +14,12 @@ from dataframe.frame import (
 from dataframe.join_type import (
     JOIN_CROSS,
 )
-from dataframe.parallel import (
-    Job,
-    run_jobs,
+from dataframe.scheduler import (
+    META_JOIN_BUILD,
+    META_REGULAR,
+    MetaPipeline,
+    SchedulablePipeline,
+    run_pipelines,
 )
 from dataframe.planning.context import (
     QueryContext,
@@ -28,6 +31,7 @@ from dataframe.planning.graph import (
     plan_cover,
     plan_ends_in_breaker,
     plan_height_bound,
+    plan_known_height,
     plan_reorder,
     plan_spine_rows,
     plan_spine_source,
@@ -35,7 +39,7 @@ from dataframe.planning.graph import (
     plan_subplan_classes,
 )
 from dataframe.planning.inputs import (
-    _SubplanJob,
+    _SubplanPipeline,
 )
 from dataframe.planning.model import (
     AGG,
@@ -194,8 +198,10 @@ def _holds(self: QueryContext, index: Int, marked: List[Bool]) -> Bool:
     return False
 
 
-struct _SharedJob(Job):
-    """One shared subtree, collected from its own copy of the plan."""
+struct _SharedPipeline(SchedulablePipeline):
+    """One shared subtree, collected from its own copy of the plan as a
+    scheduled pipeline, as DuckDB materializes a CTE in a pipeline of its
+    own."""
 
     var plan: QueryContext
     var aggregated: Bool
@@ -223,10 +229,22 @@ struct _SharedJob(Job):
         self.origin_table = None
         self.origin_names = Dict[String, String]()
 
-    def run(mut self) raises:
-        var frame = self.plan._collect(
+    def initialize(mut self) raises:
+        pass
+
+    def execute_tasks(self) -> Int:
+        return 1
+
+    def execute(mut self, task: Int) raises:
+        self.result = self.plan._collect(
             optimize=True, streaming=self.streaming, batch_size=self.batch_size
         )
+
+    def prepare_finalize(mut self) raises:
+        pass
+
+    def finalize(mut self) raises:
+        var frame = self.result.copy()
         # A result holding every row of its table reads its columns'
         # distinct counts from that table: they are the same columns, as
         # DuckDB carries a column's count through a projection into a
@@ -279,19 +297,20 @@ def plan_collect_shared(
     mut origin_names: List[Dict[String, String]],
 ) raises -> List[DataFrame]:
     """Each shared subtree in `picks`, collected on its own. The subtrees
-    are independent, so outside an execution report they run as jobs at
-    once, sharing the crew's thread budget, as DuckDB schedules the
-    pipelines of independent materialized CTEs together: one subtree's
+    are independent, so outside an execution report they are scheduled
+    as pipelines that run at once (`run_pipelines`), as DuckDB schedules
+    the pipelines of independent materialized CTEs together: one subtree's
     serial steps (its planning, a small eager input, an aggregate's
     final frame) then overlap another's parallel work. The plan around
     them already optimized each, so only the passes after optimization
     run on it again (sharing, join order)."""
-    var jobs = List[_SharedJob](capacity=len(picks))
+    var jobs = List[_SharedPipeline](capacity=len(picks))
+    var metas = List[MetaPipeline](capacity=len(picks))
     for k in range(len(picks)):
         var sub = plan_subplan(self, picks[k])
         sub._optimized = True
         jobs.append(
-            _SharedJob(
+            _SharedPipeline(
                 sub^,
                 plan_aggregated(self, picks[k]),
                 origins[k],
@@ -299,11 +318,8 @@ def plan_collect_shared(
                 batch_size,
             )
         )
-    if len(jobs) > 1 and not self._report:
-        run_jobs(jobs)
-    else:
-        for k in range(len(jobs)):
-            jobs[k].run()
+        metas.append(MetaPipeline(META_REGULAR))
+    run_pipelines(jobs, metas, parallel=not self._report)
     var frames = List[DataFrame](capacity=len(jobs))
     for k in range(len(jobs)):
         frames.append(jobs[k].result.copy())
@@ -349,35 +365,36 @@ def plan_read_whole(
     return copies >= 2
 
 
-def plan_prefetch_breakers(
+def plan_schedule_inputs(
     self: QueryContext, top: Int, batch_size: Int
 ) raises:
-    """Compute at once, ahead of the stream below `top`, the inputs it
-    will execute in full whatever it decides: its joins' build sides
-    and its source, where each ends in a pipeline breaker. TPC-DS q78
-    aggregated web and catalog sales to build on, then store sales to
-    probe with, one after another on a crew that the aggregates'
-    serial phases left partly idle. These independent inputs can run
-    concurrently. The stream's decisions do not
-    change: each result waits in `_prefetched` for the `_execute` call
-    that would have computed it.
+    """Run at once, ahead of the stream below `top`, the inputs it will
+    execute in full whatever it decides: every join's build side that
+    must run to be known (a table already in memory is not run), and
+    its source where that ends in a pipeline breaker. Each is a
+    MetaPipeline of the stream's pipeline: a build side is a JOIN_BUILD
+    child, the source a REGULAR one, as DuckDB's `MetaPipeline::Build`
+    makes them, and none depends on another, so `run_pipelines` runs
+    them at the same time (TPC-DS q78 aggregated web and catalog sales
+    to build on, then store sales to probe with, one after another on a
+    crew that the aggregates' serial phases left partly idle). The
+    stream's decisions do not change: each result waits in
+    `_prefetched` for the `_execute` call that would have computed it.
 
-    A build side's job also finishes it as a build (`finish_build`): its
-    columns in one chunk and its keys' hash index, made on that job's
-    thread as soon as its rows are in, while the other inputs still run.
-    DuckDB finalizes each hash join's table at the end of its own build
-    pipeline, which depends on nothing but that pipeline
-    (`BuildPipelineSchedule`); TPC-DS q97, its full join streamed,
-    hashed its catalog side's distinct pairs only after the store side's
-    aggregate had finished, with most of the crew idle. The index waits
-    in `_prefetched_indexes` for the stream, which takes it where it
-    would have made the same one."""
+    A build side's finish event also finishes it as a build
+    (`finish_build`): its columns in one chunk and its keys' hash
+    index, as DuckDB finalizes each hash join's table in its build
+    pipeline's finish event. Sibling builds all execute before any
+    finishes (`BuildPipelineSchedule`). The index waits in
+    `_prefetched_indexes` for the stream, which takes it where it would
+    have made the same one."""
     var ahead = self._prefetched.value()
     var wanted = List[Int]()
     # A build side's keys, as the stream prepares its table (none for the
     # source or a cross join).
     var keys = List[List[String]]()
     var hows = List[Int]()
+    var metas = List[MetaPipeline]()
     var probe = top
     while probe >= 0:
         ref step = self._nodes[probe]
@@ -385,7 +402,7 @@ def plan_prefetch_breakers(
             probe = step.left
         elif _stream_join(step):
             if (
-                plan_ends_in_breaker(self, step.right)
+                plan_known_height(self, step.right) < 0
                 and step.right not in ahead[]
             ):
                 wanted.append(step.right)
@@ -394,6 +411,7 @@ def plan_prefetch_breakers(
                 else:
                     keys.append(List[String]())
                 hows.append(step.how)
+                metas.append(MetaPipeline(META_JOIN_BUILD))
             probe = step.left
         else:
             break
@@ -406,13 +424,14 @@ def plan_prefetch_breakers(
         wanted.append(probe)
         keys.append(List[String]())
         hows.append(JOIN_CROSS)
+        metas.append(MetaPipeline(META_REGULAR))
     if len(wanted) < 2:
         return
-    trace_path("stream.prefetch_breakers")
-    var jobs = List[_SubplanJob](capacity=len(wanted))
+    trace_path("stream.scheduled_inputs")
+    var jobs = List[_SubplanPipeline](capacity=len(wanted))
     for k in range(len(wanted)):
         jobs.append(
-            _SubplanJob(
+            _SubplanPipeline(
                 self.copy(),
                 wanted[k],
                 True,
@@ -421,10 +440,24 @@ def plan_prefetch_breakers(
                 hows[k],
             )
         )
-    run_jobs(jobs)
+    run_pipelines(jobs, metas)
     for k in range(len(wanted)):
         ahead[][wanted[k]] = jobs[k].result.copy()
         if jobs[k].built and self._prefetched_indexes:
             self._prefetched_indexes.value()[][wanted[k]] = _ReadyIndex(
                 keys[k], hows[k], jobs[k].built.value().copy()
             )
+
+
+def plan_take_prefetched(
+    self: QueryContext, index: Int
+) raises -> Optional[DataFrame]:
+    """The result `plan_schedule_inputs` computed for node `index`, taken
+    from the plan's memo, if there is one: a subplan run on its own copy
+    of the plan has a memo of its own and would compute it again."""
+    if not self._prefetched:
+        return None
+    var ahead = self._prefetched.value()
+    if index in ahead[]:
+        return ahead[].pop(index)
+    return None
