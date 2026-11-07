@@ -22,7 +22,7 @@ scan, with checked arithmetic and optional numeric Boolean predicates.
 | Values | Native columns, binary arithmetic, bounded trees of `+`, `-`, `*` |
 | Conditional values | Numeric `when/then/otherwise` chains feeding reductions |
 | Filters | Literal ranges, same-dtype column comparisons, null tests, AND/OR/NOT |
-| Grouping | One native Int32/Int64 key, at most 256 groups including null |
+| Grouping | Up to four native Int32/Int64 keys, at most 65,536 groups including null tuples |
 | Input layout | Native nullable columns, slices and chunked inputs |
 | CPU execution | Other input types, joins, sorting, windows, distinct and unsupported expressions |
 
@@ -490,28 +490,40 @@ before automatic execution selects Metal.
 
 ### Bounded grouped reductions
 
-One native Int32 or Int64 key can group the same numeric aggregate values,
-including checked binary expressions and bounded trees. Arbitrary signed key
-values and a null group are supported, with an initial limit of 256 total
-groups. Group existence and row counts include rows whose aggregate values
-are null. Empty inputs produce typed empty columns; all-null groups preserve
-SUM/COUNT/MEAN/MIN/MAX null and minimum-count rules.
+Up to four native Int32/Int64 keys can group the same numeric aggregate
+values, including CASE, membership conditions and bounded arithmetic trees.
+Arbitrary signed values and independent nulls are supported in each key.
+A tuple's null pattern participates in equality; null payload bytes do not.
+The limit is 65,536 actual groups. Group existence and row counts include
+rows whose aggregate values are null. LEN outputs use the existing row
+counter, without consuming an aggregate value or an input binding. Four
+values/eight value inputs and a ninth independent predicate can therefore
+share a scan with four keys and row-count aliases. Empty inputs produce typed
+empty columns; all-null groups preserve reduction and minimum-count rules.
 
-A GPU hash table uses immutable source-row tickets and 32-bit atomics. Each
-workgroup keeps its own aggregate partials. Exact integer word sums and
-Float32 exponent bins avoid 64-bit atomics and floating atomic sums. Int64
-extrema record winning row tickets and resolve them after aggregation.
-The host merges bounded partial states and orders groups by their first
-qualifying row; it does not scan input keys to discover groups. Independent
-chunk allocations use an explicit upload when row-ticket lookup requires one
-contiguous logical buffer. Shared native spans map in place.
+GPU hashing uses immutable source-row tickets and 32-bit atomics. Ordinary
+single-key, low-cardinality workloads retain per-workgroup partial states.
+A bounded key sample chooses workgroup or global state for the general tuple
+scan; higher cardinalities share one state per group rather than multiplying
+scratch by the workgroup count. A sample cannot prove the cardinality limit:
+if an initial table fills, the query retries on GPU with the full supported
+table. Capacity and checked numeric faults have separate flags, so a retry
+cannot hide an arithmetic error. Excessive cardinality beyond the supported
+limit and checked data faults retain CPU adjudication.
 
-Excessive cardinality and checked data faults use CPU adjudication. Float32
-sums and means require a proof that the CPU's Float64 additions are exact;
-non-finite inputs and ambiguous extrema use CPU adjudication. Direct GPU
-measurement rejects adjudication rather than recording it as a Metal win.
+Exact wide integer sums, Float32 exponent bins and winning row tickets for
+Int64 extrema retain the existing numeric policies without 64-bit atomics.
+Float32 sums/means require the CPU-order proof; non-finite sums and ambiguous
+extrema use CPU adjudication. Device measurements reject adjudication as a
+Metal timing. Scratch buffers share one bounded allocation; native key,
+value and bitmap buffers remain separate mapped views. Independent chunk
+allocations use an explicit upload when random ticket lookup requires one
+logical span. Shared key/value/predicate mappings reuse their reservation.
 
-`grouped_reductions:v1:` costs distinguish key dtype and layout, aggregate and
-predicate programs, and bounded samples of cardinality, skew and null
-frequency. Sampling describes placement cost only; GPU hashing independently
-checks actual cardinality. Unmeasured shapes retain CPU placement.
+The host merges GPU-discovered partials and orders groups by their first
+qualifying row. Large results use radix ordering and one flat native column
+per output, without per-group column allocations or retained input key
+buffers. Grouped costs use `grouped_reductions:v2:tuple:` identities, including
+key types/layouts, programs, output work and bounded cardinality/skew/null
+samples. Sampling describes cost only; GPU hashing computes every group.
+Unmeasured shapes retain CPU placement.

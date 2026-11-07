@@ -8,6 +8,7 @@ from std.memory import Pointer, bitcast
 from max.gpu import global_idx, block_idx
 from .multi_reduce import Bytes, read_integer
 from .filter_sum import _valid
+from ...group_layout import GROUP_CAPACITY_FAULT
 
 comptime GROUP_LIMIT = 256
 comptime HASH_CAPACITY = 512
@@ -24,6 +25,16 @@ def _key_hash(value: Int64) -> UInt32:
     hashed ^= hashed >> 15
     hashed *= 0x846C_A68B
     return hashed ^ (hashed >> 16)
+
+
+@always_inline
+def mark_capacity_fault(fault: Pointer[UInt32, MutUntrackedOrigin]):
+    var expected = Atomic[UInt32].load(fault)
+    while not (expected & GROUP_CAPACITY_FAULT):
+        if Atomic[UInt32].compare_exchange[weak=True](
+            fault, expected, expected | GROUP_CAPACITY_FAULT
+        ):
+            return
 
 
 @always_inline
@@ -57,7 +68,7 @@ def claim_group(
                 address, expected, UInt32(row) + 1
             ):
                 if Atomic[UInt32].fetch_add(distinct, UInt32(1)) >= GROUP_LIMIT:
-                    Atomic[UInt32].store(fault, UInt32(1))
+                    mark_capacity_fault(fault)
                     return NO_GROUP
                 return slot
             # Metal exposes weak CAS only. A spurious failure must retry the
@@ -69,7 +80,7 @@ def claim_group(
             return slot
         slot = 1 if slot == HASH_CAPACITY else slot + 1
         probes += 1
-    Atomic[UInt32].store(fault, UInt32(1))
+    mark_capacity_fault(fault)
     return NO_GROUP
 
 
