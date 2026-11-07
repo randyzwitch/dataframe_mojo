@@ -247,20 +247,15 @@ from dataframe.planning.model import (
     WITH_COLUMNS,
 )
 from dataframe.planning.physical import (
-    plan_any_selective,
     plan_cost_order_joins,
     plan_direct_key,
     plan_joins_below,
-    plan_key_set_side,
     plan_order_chain,
     plan_order_joins,
     plan_probe_largest_input,
     plan_probe_largest_inputs,
-    plan_push_join_key_sets,
     plan_restore_measured_chain,
-    plan_selective_on,
     plan_selectivity,
-    plan_side_comparisons,
     plan_swap_join_sides,
     plan_swap_left_join_sides,
 )
@@ -295,7 +290,6 @@ from dataframe.query_execution.operators import (
     plan_join_frames,
 )
 from dataframe.query_execution.pipeline import (
-    plan_reduce_by_probe_keys,
     plan_stream_execute,
 )
 from dataframe.query_execution.placement import (
@@ -1659,7 +1653,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
         if optimize:
-            plan._push_join_key_sets(True, batch_size)
             plan._share_subplans(True, batch_size)
             plan._order_joins(True, batch_size)
         plan._plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
@@ -1897,7 +1890,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
         if optimize:
-            plan._push_join_key_sets(streaming, batch_size)
             plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
         plan._plan._report = Optional(ArcPointer(ExecutionReport()))
@@ -2044,7 +2036,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
         if optimize:
-            plan._push_join_key_sets(streaming, batch_size)
             plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
         plan._plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
@@ -2135,13 +2126,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _key_source(self, index: Int, key: String) raises -> Optional[Series]:
         return plan_key_source(self._plan, index=index, key=key)
-
-    def _reduce_by_probe_keys(
-        self, top: Int, index: Int, batch_size: Int
-    ) raises -> Optional[DataFrame]:
-        return plan_reduce_by_probe_keys(
-            self._plan, top=top, index=index, batch_size=batch_size
-        )
 
     def _ends_in_breaker(self, index: Int) -> Bool:
         return plan_ends_in_breaker(self._plan, index=index)
@@ -2303,27 +2287,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _order_joins(mut self, streaming: Bool, batch_size: Int) raises:
         plan_order_joins(self._plan, streaming=streaming, batch_size=batch_size)
 
-    def _push_join_key_sets(mut self, streaming: Bool, batch_size: Int) raises:
-        plan_push_join_key_sets(
-            self._plan, streaming=streaming, batch_size=batch_size
-        )
-
-    def _key_set_side(
-        mut self, j: Int, small_left: Bool, streaming: Bool, batch_size: Int
-    ) raises -> Bool:
-        return plan_key_set_side(
-            self._plan,
-            j=j,
-            small_left=small_left,
-            streaming=streaming,
-            batch_size=batch_size,
-        )
-
-    def _side_comparisons(
-        self, j: Int, small_left: Bool
-    ) raises -> List[Tuple[String, Int, String]]:
-        return plan_side_comparisons(self._plan, j=j, small_left=small_left)
-
     def _filtered_table(self, index: Int) -> Bool:
         return plan_filtered_table(self._plan, index=index)
 
@@ -2331,19 +2294,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         self, index: Int, name: String
     ) raises -> Tuple[Int, String]:
         return plan_provider_scan(self._plan, index=index, name=name)
-
-    def _selective_on(mut self, scan: Int, keys: Expr) raises -> Bool:
-        return plan_selective_on(self._plan, scan=scan, keys=keys)
-
-    def _any_selective(
-        mut self,
-        result: DataFrame,
-        keys: List[String],
-        providers: List[Tuple[Int, String]],
-    ) raises -> Bool:
-        return plan_any_selective(
-            self._plan, result=result, keys=keys, providers=providers
-        )
 
     def _has_kind(self, index: Int, kind: Int) -> Bool:
         return plan_has_kind(self._plan, index=index, kind=kind)
