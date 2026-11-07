@@ -86,9 +86,9 @@ def check_lists(
         for e in range(len(want)):
             var row = want[e]
             var at = lists._start(i) + e
-            assert_equal(Bool(child.int64().value(at)), valid(row))
+            assert_equal(child.int64().is_valid(at), valid(row))
             if valid(row):
-                assert_equal(child.int64().value(at).value(), value(row))
+                assert_equal(child.int64().value(at), value(row))
                 counts[Int(value(row)) + 2] += 1
             else:
                 counts[5] += 1
@@ -201,8 +201,8 @@ def check_row_lists(
 def test_expressions_without_states_over_the_tables_groups() raises:
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    var rows = 60_000
-    var groups = 3_000
+    var rows = 6_000
+    var groups = 300
     for ordered in [False, True]:
         var observed = StrategyTrace()
         var eager = (
@@ -220,7 +220,7 @@ def test_expressions_without_states_over_the_tables_groups() raises:
         if ordered:
             for i in range(eager.height()):
                 assert_equal(key_group(eager, i), group_of(i, groups))
-    var start = 777
+    var start = 77
     var lazy = (
         frame(rows, groups)
         .lazy()

@@ -381,7 +381,9 @@ def plan_stream_execute(
     elif terminal.kind == AGG or terminal.kind == SELECT:
         # A grouped median or quantile streams only into the aggregate
         # table (checked below): its other routes keep no such state.
-        if _stream_reductions(terminal.exprs, terminal.kind == AGG):
+        if _stream_reductions(
+            terminal.exprs, terminal.kind == AGG, terminal.kind == AGG
+        ):
             expressions = terminal.exprs.copy()
             if terminal.kind == AGG:
                 keys = terminal.names.copy()
