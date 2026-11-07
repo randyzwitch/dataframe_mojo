@@ -9,9 +9,8 @@ from std.math import isfinite, isinf
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
 from dataframe.json.value import json_quote
-from .calibration import identity_json, shape_key, pipeline_key
-from .handoff import execute_timed, region_key, supports
-from .region_plan import normalize_region
+from .calibration import identity_json, pipeline_key
+from .handoff import execute_timed, layout_key, supports
 
 
 def _check(actual: DataFrame, expected: DataFrame) raises:
@@ -77,9 +76,7 @@ def capture(
     var prefix = '{"schema_version":2,"identity":' + identity
     if not supports(region):
         return prefix + ',"status":"skipped","reason":"unsupported region"}'
-    var normalized = normalize_region(region)
-    var selected = normalized.take()
-    var key = shape_key(selected, region_key(selected))
+    var key = layout_key(region)
     var rows = region._plan._frames[
         region._plan._nodes[0].source_slot()
     ].height()

@@ -1,8 +1,7 @@
-"""Unrouted global moment scans and mathematical finishing.
+"""Fused global moment scans with bounded mathematical finishing.
 
-This module supplies the fused execution foundation. It deliberately has no
-provider registration: CPU compatibility/adjudication and grouped finishing
-must be completed before public VAR/STD handoffs are enabled.
+Integer statistical inputs use Float64 conversion; exact moments avoid
+cancellation before the final Float64 operations. See docs/design/metal-moments.md.
 """
 from std.time import perf_counter_ns
 from std.math import sqrt
@@ -18,6 +17,7 @@ from .composition_reduce import (
     finish_composition,
 )
 from .accelerator.gpu.query_scope import Scope, shared_service
+from .accelerator.gpu.target import METAL_TARGET
 from .accelerator.gpu.reduction_inputs import HandoffTimings
 
 
@@ -77,8 +77,8 @@ def finish_global_moments_math(
 ) raises -> DataFrame:
     """Finish exact moments, retaining ordinary aggregate output semantics.
 
-    Mathematical accuracy alone does not prove agreement with ill-conditioned
-    CPU variance. This function is internal to the unrouted execution module.
+    Direct GPU completion follows the documented mathematical error bound;
+    CPU accumulation order is not part of the variance accuracy contract.
     """
     if plan.grouped:
         raise Error("Global moment finishing cannot consume grouped states")
@@ -164,28 +164,48 @@ def execute_global_moments_math(
         region._plan._nodes[0].source_slot()
     ].copy()
     if frame.height() >= Int(Int32.MAX):
-        raise Error("Metal moments require fewer than 2**31 input rows")
-    var scope = Scope(service=shared_service())
+        raise Error("Metal unsupported [handoff]: 2**31 or more rows")
     var timings = HandoffTimings()
-    var started = Int(perf_counter_ns())
-    _ = scope.context()
-    timings.context_ns = Int(perf_counter_ns()) - started
-    var result: ComposedScan
-    if plan.selected.bundle.precise_float:
-        try:
-            result = _dispatch_global_moments[True, False](
-                plan, frame, scope, zero_copy, timings
-            )
-        except error:
-            if String(error) != "Metal exact bins need wide scan":
-                raise error^
-            result = _dispatch_global_moments[True, True](
-                plan, frame, scope, zero_copy, timings
-            )
-    else:
-        result = _dispatch_global_moments[False, False](
-            plan, frame, scope, zero_copy, timings
+    if frame.height() == 0:
+        var nf = len(plan.selected.bundle.fields)
+        var moments = List[List[Int128]]()
+        var extrema = List[Int64](length=nf * 4, fill=0)
+        for field in range(nf):
+            moments.append(List[Int128](length=28, fill=0))
+            extrema[field * 4] = Int64.MAX
+            extrema[field * 4 + 1] = Int64.MIN
+        var empty = ComposedScan(
+            List[Int128](length=nf, fill=0),
+            List[Float64](length=nf, fill=0),
+            List[Int](length=nf, fill=0),
+            extrema^,
+            moments^,
+            List[UInt64](length=nf, fill=0),
         )
-    var answer = finish_global_moments_math(plan, result)
-    scope.mark_success()
-    return (answer^, timings^)
+        return (finish_global_moments_math(plan, empty), timings^)
+    comptime if not METAL_TARGET:
+        raise Error("Metal moments require an Apple compilation target")
+    else:
+        var scope = Scope(service=shared_service())
+        var started = Int(perf_counter_ns())
+        _ = scope.context()
+        timings.context_ns = Int(perf_counter_ns()) - started
+        var result: ComposedScan
+        if plan.selected.bundle.precise_float:
+            try:
+                result = _dispatch_global_moments[True, False](
+                    plan, frame, scope, zero_copy, timings
+                )
+            except error:
+                if String(error) != "Metal exact bins need wide scan":
+                    raise error^
+                result = _dispatch_global_moments[True, True](
+                    plan, frame, scope, zero_copy, timings
+                )
+        else:
+            result = _dispatch_global_moments[False, False](
+                plan, frame, scope, zero_copy, timings
+            )
+        var answer = finish_global_moments_math(plan, result)
+        scope.mark_success()
+        return (answer^, timings^)

@@ -37,6 +37,9 @@ from .group_plan import plan_grouped, grouped_key
 from .group_properties import sample_group_tuples
 from .group_reduce import execute_grouped
 from .predicate_reduce import execute_predicates
+from .moment_plan import plan_moments, moment_key
+from .moment_reduce import execute_global_moments_math
+from .moment_group_reduce import execute_grouped_moments_math
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
     _place_chunks,
@@ -64,6 +67,8 @@ def supports(region: LazyFrame) -> Bool:
     comptime if not METAL_TARGET:
         return False
     try:
+        if plan_moments(region):
+            return True
         var normalized = normalize_region(region)
         if not normalized:
             return False
@@ -99,6 +104,17 @@ def operator_key(plan: FilterSum) -> String:
 
 def region_key(region: LazyFrame) raises -> String:
     """Schema-only operator identity shared by placement and capture."""
+    var moments = plan_moments(region)
+    if moments:
+        var key = moment_key(moments.value())
+        if moments.value().grouped:
+            ref source = region._plan._frames[
+                region._plan._nodes[0].source_slot()
+            ]
+            key += sample_group_tuples(
+                source, moments.value().grouped.value().keys.names
+            ).key()
+        return key^
     var accepted = plan_region(region)
     if accepted:
         return operator_key(accepted.value())
@@ -127,19 +143,27 @@ def region_key(region: LazyFrame) raises -> String:
     return String()
 
 
+def layout_key(region: LazyFrame) raises -> String:
+    """One operator/layout key for placement, capture and execution traces."""
+    var moments = plan_moments(region)
+    if moments:
+        return shape_key(moments.value().matching_region, region_key(region))
+    var normalized = normalize_region(region)
+    if not normalized:
+        return String()
+    var selected = normalized.take()
+    var operator = region_key(selected)
+    return shape_key(selected, operator) if operator else String()
+
+
 def estimate_costs(
     region: LazyFrame, rows: Int
 ) -> Tuple[String, Float64, Float64]:
     """Measured Metal cost only for this build, host, threads and layout."""
     try:
-        var normalized = normalize_region(region)
-        if not normalized:
+        var key = layout_key(region)
+        if not key:
             return (String(), Float64(-1), Float64(-1))
-        var selected = normalized.take()
-        var operator = region_key(selected)
-        if not operator:
-            return (String(), Float64(-1), Float64(-1))
-        var key = shape_key(selected, operator)
         var costs = measured_costs(key, rows)
         return (key^, costs[0], costs[1])
     except:
@@ -511,6 +535,11 @@ def execute_timed(
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
+        var moments = plan_moments(region)
+        if moments:
+            if moments.value().grouped:
+                return execute_grouped_moments_math(region, zero_copy)
+            return execute_global_moments_math(region, zero_copy)
         var normalized = normalize_region(region)
         if not normalized:
             raise Error(

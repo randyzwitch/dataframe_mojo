@@ -1,4 +1,4 @@
-"""Schema matching for fused moments; public execution is not enabled here.
+"""Schema matching for fused moments with exact mathematical finishing.
 
 The existing expression, predicate and grouping matchers own native type and
 resource limits. MEAN is an internal matching surrogate only: moment outputs
@@ -126,7 +126,7 @@ def plan_moments(region: LazyFrame) raises -> Optional[MomentPlan]:
 
 
 def moment_key(plan: MomentPlan) -> String:
-    var key = String("moments:v1:")
+    var key = String("moments:v1:exact:")
     if plan.grouped:
         key += grouped_key(plan.grouped.value())
     else:

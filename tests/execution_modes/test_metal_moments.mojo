@@ -1286,3 +1286,354 @@ def test_metal_moment_layout_keys_use_inlined_native_inputs() raises:
             shape_key(matched.matching_region, moment_key(matched)),
             shape_key(equivalent.matching_region, moment_key(equivalent)),
         )
+
+
+def _assert_moment_answer(actual: DataFrame, expected: DataFrame) raises:
+    from dataframe import DataType
+
+    assert_equal(actual.columns(), expected.columns())
+    assert_equal(actual.height(), expected.height())
+    for name in expected.columns():
+        assert_equal(actual.column(name).dtype(), expected.column(name).dtype())
+        if expected.column(name).dtype() != DataType.FLOAT64:
+            assert_true(actual.column(name).equals(expected.column(name)), name)
+            continue
+        for row in range(expected.height()):
+            var value = actual.item(row, name)
+            var reference = expected.item(row, name)
+            assert_equal(value.is_null(), reference.is_null())
+            if not reference.is_null():
+                var a = Int128(bitcast[DType.uint64](value.float64()))
+                var b = Int128(bitcast[DType.uint64](reference.float64()))
+                assert_true(abs(a - b) <= 4, name)
+
+
+def test_metal_moment_provider_layout_key_keeps_derived_ddof() raises:
+    from dataframe import DataType, col
+    from dataframe_metal.handoff import layout_key, region_key
+
+    var frame = _cast_moment_frame()
+    var value = col("n").cast(DataType.INT64) * col("w")
+    for grouped in [False, True]:
+        var derived = frame.lazy().with_columns([value.alias("derived")])
+        var direct = frame.lazy()
+        if grouped:
+            derived = derived.group_by(["k", "j"], maintain_order=True).agg(
+                [col("derived").var(1).alias("variance")]
+            )
+            direct = direct.group_by(["k", "j"], maintain_order=True).agg(
+                [value.var(1).alias("renamed")]
+            )
+        else:
+            derived = derived.select(col("derived").var(1).alias("variance"))
+            direct = direct.select(value.var(1).alias("renamed"))
+        assert_true(region_key(derived).startswith("moments:v1:exact:"))
+        assert_equal(layout_key(derived), layout_key(direct))
+    assert_true(
+        layout_key(frame.lazy().select(value.var(0)))
+        != layout_key(frame.lazy().select(value.var(1)))
+    )
+    assert_true(
+        layout_key(frame.lazy().select(value.var(0)))
+        != layout_key(frame.lazy().select(value.mean()))
+    )
+
+
+def test_metal_global_moments_empty_input_keeps_schema_without_device() raises:
+    from dataframe import Column, DataFrame, Series, col
+    from dataframe_metal.moment_reduce import execute_global_moments_math
+
+    var frame = DataFrame([Series("v", Column[Float32](List[Float32]()))])
+    var result = execute_global_moments_math(
+        frame.lazy().select_exprs(
+            [col("v").var(0).alias("v"), col("v").std(1).alias("s")]
+        ),
+        True,
+    )[0].copy()
+    assert_equal(result.height(), 1)
+    assert_true(result.item(0, "v").is_null())
+    assert_true(result.item(0, "s").is_null())
+    from dataframe import DataType
+
+    assert_equal(result.column("v").dtype(), DataType.FLOAT64)
+    assert_equal(result.column("s").dtype(), DataType.FLOAT64)
+
+
+# requires: metal
+def test_metal_moments_public_native_nullable_slices_chunks_and_groups() raises:
+    from std.math import sqrt
+    from dataframe import Column, DataFrame, Series, Expr, col
+    from tests.support.metal_outcomes import require_metal
+    from dataframe_metal.handoff import execute_timed, supports
+
+    _ = require_metal()
+    for dtype in range(3):
+        var value = Series(
+            "v",
+            Column[Int32](
+                [99, -2, 0, 3, 8, 99], [True, True, False, True, True, True]
+            ),
+        )
+        if dtype == 1:
+            value = Series(
+                "v",
+                Column[Int64](
+                    [99, -2, 0, 3, 8, 99], [True, True, False, True, True, True]
+                ),
+            )
+        elif dtype == 2:
+            value = Series(
+                "v",
+                Column[Float32](
+                    [99, -2, 0, 3, 8, 99], [True, True, False, True, True, True]
+                ),
+            )
+        var original = DataFrame(
+            [value^, Series("key", Column[Int32]([99, 1, 1, 2, 2, 99]))]
+        ).slice(1, 4)
+        for chunked in [False, True]:
+            var frame = original.copy()
+            if chunked:
+                var columns = List[Series]()
+                for name in original.columns():
+                    var column = original.column(name)
+                    columns.append(
+                        Series._from_chunks(
+                            [column.slice(0, 1), column.slice(1, 3)]
+                        )
+                    )
+                frame = DataFrame(columns^)
+            for grouped in [False, True]:
+                var outputs = List[Expr](
+                    [
+                        col("v").var(0).alias("population"),
+                        col("v").var(1).alias("sample"),
+                        col("v").std(1).alias("deviation"),
+                        col("v").count().alias("count"),
+                    ]
+                )
+                var query = frame.lazy().select_exprs(outputs)
+                var expected = DataFrame(
+                    [
+                        Series(
+                            "population", Column[Float64]([Float64(50) / 3])
+                        ),
+                        Series("sample", Column[Float64]([25])),
+                        Series("deviation", Column[Float64]([5])),
+                        Series("count", Column[Int64]([3])),
+                    ]
+                )
+                if grouped:
+                    query = (
+                        frame.lazy()
+                        .group_by("key", maintain_order=True)
+                        .agg(outputs)
+                    )
+                    expected = DataFrame(
+                        [
+                            Series("key", Column[Int32]([1, 2])),
+                            Series("population", Column[Float64]([0, 6.25])),
+                            Series(
+                                "sample",
+                                Column[Float64]([0, 12.5], [False, True]),
+                            ),
+                            Series(
+                                "deviation",
+                                Column[Float64](
+                                    [0, sqrt(Float64(12.5))], [False, True]
+                                ),
+                            ),
+                            Series("count", Column[Int64]([1, 2])),
+                        ]
+                    )
+                assert_true(supports(query))
+                for copied in [False, True]:
+                    _assert_moment_answer(
+                        execute_timed(query, zero_copy=not copied)[0], expected
+                    )
+                _assert_public_moment(query, expected)
+
+
+# requires: metal
+def test_metal_moments_public_cancellation_subnormals_and_wide_retry() raises:
+    from std.math import sqrt
+    from dataframe import Column, DataFrame, Series, Expr, col
+    from tests.support.metal_outcomes import require_metal
+    from dataframe_metal.handoff import execute_timed
+
+    _ = require_metal()
+    for family in range(3):
+        var value = Series(
+            "v", Column[Int64]([Int64(1) << 60, (Int64(1) << 60) + 256])
+        )
+        var population = Float64(16384)
+        if family == 1:
+            value = Series(
+                "v",
+                Column[Float32](
+                    [
+                        bitcast[DType.float32](UInt32(1)),
+                        bitcast[DType.float32](UInt32(3)),
+                    ]
+                ),
+            )
+            population = bitcast[DType.float64](UInt64(725) << 52)
+        elif family == 2:
+            value = Series(
+                "v", Column[Float32]([Float32.MAX_FINITE, -Float32.MAX_FINITE])
+            )
+            population = Float64(Float32.MAX_FINITE) * Float64(
+                Float32.MAX_FINITE
+            )
+        var frame = DataFrame([value^, Series("key", Column[Int32]([7, 7]))])
+        for grouped in [False, True]:
+            var outputs = List[Expr](
+                [
+                    col("v").var(0).alias("population"),
+                    col("v").var(1).alias("sample"),
+                    col("v").std(1).alias("deviation"),
+                ]
+            )
+            var query = frame.lazy().select_exprs(outputs)
+            var columns = List[Series]()
+            if grouped:
+                query = (
+                    frame.lazy()
+                    .group_by("key", maintain_order=True)
+                    .agg(outputs)
+                )
+                columns.append(Series("key", Column[Int32]([7])))
+            columns.extend(
+                [
+                    Series("population", Column[Float64]([population])),
+                    Series("sample", Column[Float64]([population * 2])),
+                    Series(
+                        "deviation", Column[Float64]([sqrt(population * 2)])
+                    ),
+                ]
+            )
+            var expected = DataFrame(columns^)
+            _assert_moment_answer(execute_timed(query)[0], expected)
+            _assert_public_moment(query, expected)
+
+
+def _assert_public_moment(query: LazyFrame, expected: DataFrame) raises:
+    from tests.support.metal_outcomes import require_metal
+
+    var observed = query.profile(accelerator=require_metal())
+    _assert_moment_answer(observed[0], expected)
+    ref report = observed[1]
+    assert_true("fault_adjudication" not in report.columns())
+    var handed = False
+    for row in range(report.height()):
+        if report.item(row, "executor").string() == "accel":
+            assert_equal(report.item(row, "algorithm").string(), "handoff")
+            handed = True
+    assert_true(handed, "Moment query must complete through the GPU handoff")
+
+
+# requires: metal
+def test_metal_moments_public_derived_casts_membership_and_tuple_groups() raises:
+    from std.math import sqrt
+    from dataframe import Column, DataFrame, Series, DataType, col, lit
+    from tests.support.metal_outcomes import require_metal
+    from dataframe_metal.handoff import execute_timed, supports, layout_key
+
+    _ = require_metal()
+    var frame = _cast_moment_frame()
+    for filtered in [False, True]:
+        for grouped in [False, True]:
+            var source = frame.lazy()
+            if filtered:
+                source = source.filter(col("p").is_in([lit(Int32(1))]))
+            var value = col("n").cast(DataType.INT64) * col("w")
+            source = source.with_columns([value.alias("derived")])
+            var outputs = List(
+                [
+                    col("derived").var(0).alias("variance"),
+                    col("derived").std(0).alias("deviation"),
+                    col("derived").count().alias("count"),
+                ]
+            )
+            var query = source.select_exprs(outputs)
+            var columns = List[Series]()
+            if grouped:
+                query = source.group_by(["k", "j"], maintain_order=True).agg(
+                    outputs
+                )
+                columns.extend(
+                    [
+                        Series(
+                            "k",
+                            Column[Int32](
+                                List[Int32]([Int32(4)]) if filtered else List[
+                                    Int32
+                                ]([Int32(9), 4])
+                            ),
+                        ),
+                        Series(
+                            "j",
+                            Column[Int64](
+                                List[Int64]([Int64(30)]) if filtered else List[
+                                    Int64
+                                ]([Int64(20), 30])
+                            ),
+                        ),
+                    ]
+                )
+            var variances = List[Float64]([Float64(484)]) if filtered else List[
+                Float64
+            ]([Float64(196), 484]) if grouped else List[Float64]([Float64(421)])
+            var deviations = List[Float64]()
+            for v in variances:
+                deviations.append(sqrt(v))
+            columns.extend(
+                [
+                    Series("variance", Column[Float64](variances^)),
+                    Series("deviation", Column[Float64](deviations^)),
+                    Series(
+                        "count",
+                        Column[Int64](
+                            List[Int64]([Int64(2)]) if filtered else List[
+                                Int64
+                            ]([Int64(2), 2]) if grouped else List[Int64](
+                                [Int64(4)]
+                            )
+                        ),
+                    ),
+                ]
+            )
+            var expected = DataFrame(columns^)
+            assert_true(supports(query))
+            assert_true(layout_key(query).startswith("moments:v1:exact:"))
+            _assert_moment_answer(execute_timed(query)[0], expected)
+            _assert_public_moment(query, expected)
+
+
+# requires: metal
+def test_metal_moments_public_faults_and_invalid_ddof_keep_cpu_rules() raises:
+    from dataframe import Column, DataFrame, Series, DataType, col, lit
+    from tests.support.metal_outcomes import require_metal, same_outcome
+
+    var runtime = require_metal()
+    var frame = DataFrame(
+        [
+            Series(
+                "v",
+                Column[Float32](
+                    [bitcast[DType.float32](UInt32(0x7F800000)), 1]
+                ),
+            )
+        ]
+    )
+    var query = frame.lazy().select_exprs(
+        [col("v").var(0).alias("v"), col("v").std(1).alias("s")]
+    )
+    same_outcome(query)
+    var profiled = query.profile(accelerator=runtime)
+    assert_true("fault_adjudication" in profiled[1].columns())
+    same_outcome(frame.lazy().select(col("v").cast(DataType.INT32).var(0)))
+    same_outcome(frame.lazy().select(col("v").var(-1)))
+    var tiny = bitcast[DType.float32](UInt32(1))
+    var finite = DataFrame([Series("v", Column[Float32]([tiny, tiny * 2]))])
+    same_outcome(finite.lazy().select((col("v") * lit(Float32(1))).var(0)))

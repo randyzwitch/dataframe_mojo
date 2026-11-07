@@ -1,8 +1,8 @@
-"""Unrouted grouped moment execution and exact mathematical finishing.
+"""Grouped moment execution and exact mathematical finishing.
 
 The ordinary and moment aggregates share tuple discovery, predicate/value
-evaluation, group counters and one readback. CPU numerical compatibility
-must be established separately before registering public VAR/STD handoffs.
+evaluation, group counters and one readback. Direct GPU completion follows
+an explicit mathematical accuracy bound, described in docs/design/metal-moments.md.
 """
 from std.memory import bitcast
 from std.time import perf_counter_ns
@@ -178,7 +178,7 @@ def execute_grouped_moments_math(
         region._plan._nodes[0].source_slot()
     ].copy()
     if frame.height() >= Int(Int32.MAX):
-        raise Error("Metal grouped moments require fewer than 2**31 input rows")
+        raise Error("Metal unsupported [handoff]: 2**31 or more rows")
     var timings = HandoffTimings()
     if frame.height() == 0:
         var empty = GroupedPartials(
