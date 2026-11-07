@@ -8,7 +8,7 @@ median/quantile keep every valid value of a group.
 """
 from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
-from std.memory import bitcast
+from std.memory import ArcPointer, bitcast
 from dataframe.kernels.approx_distinct import CardinalitySketch, update_sketches
 from dataframe.storage.boolean import BoolColumn, true_count
 from dataframe.storage.column import Column, _validity_at
@@ -1017,6 +1017,9 @@ struct Reducer(Movable):
     # (DuckDB's FinalizeStates): `finish` returns it, and no state above
     # is held.
     var finished: Optional[Series]
+    # An implode's input field metadata (Arrow application metadata), which
+    # its lists' child keeps, as the evaluator's implode keeps it.
+    var metadata: Optional[ArcPointer[List[UInt8]]]
     var sketches: List[CardinalitySketch]
 
     def __init__(
@@ -1173,6 +1176,7 @@ struct Reducer(Movable):
             length=n if op == PRODUCT and not exact else 0, fill=1
         )
         self.finished = None
+        self.metadata = None
         self.sketches = List[CardinalitySketch]()
         if op == APPROX_N_UNIQUE:
             for _ in range(n):
@@ -2167,11 +2171,12 @@ struct Reducer(Movable):
         if self.op == IMPLODE:
             # No rows reached the groups' lists (the aggregate table fills
             # `finished` for groups that have rows): each list is empty.
+            var child = Series.full_null("item", self.logical, 0)
+            child._field_metadata = self.metadata
             return Series(
                 "",
                 ListColumn(
-                    List[Int64](length=self.group_count + 1, fill=0),
-                    Series.full_null("item", self.logical, 0),
+                    List[Int64](length=self.group_count + 1, fill=0), child^
                 ),
             )
         var op = self.op

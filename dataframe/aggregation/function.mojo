@@ -40,7 +40,7 @@ from dataframe.storage.buffer import _Buffer, _BufferData
 from std.collections import Optional
 from std.math import isnan
 from std.ffi import external_call
-from std.memory import Pointer, bitcast
+from std.memory import ArcPointer, Pointer, bitcast
 
 from dataframe.aggregation.reducer import (
     Reducer,
@@ -2404,15 +2404,11 @@ struct _Finalizer(Movable):
             for count in self.list_counts:
                 total += count
                 offsets.append(Int64(total))
-            state.finished = Series(
-                "",
-                ListColumn(
-                    offsets^,
-                    _gather_rows(
-                        self.pick_owners, self.pick_owner, self.pick_rows
-                    ),
-                ),
-            )
+            var child = _gather_rows(
+                self.pick_owners, self.pick_owner, self.pick_rows
+            ).renamed("item")
+            child._field_metadata = state.metadata
+            state.finished = Series("", ListColumn(offsets^, child^))
             return state^
         if self.mode == _F_VALUE:
             var values = self.values^
@@ -2501,6 +2497,8 @@ struct ReducerSpec(Copyable, Movable):
     var floating: Float64
     var text: String
     var logical: DataType
+    # An implode's input field metadata (`Reducer.metadata`).
+    var metadata: Optional[ArcPointer[List[UInt8]]]
 
     @staticmethod
     def of(template: Reducer) -> ReducerSpec:
@@ -2512,10 +2510,11 @@ struct ReducerSpec(Copyable, Movable):
             template.floating,
             template.text,
             template.logical,
+            template.metadata,
         )
 
     def make(self, groups: Int) -> Reducer:
-        return Reducer(
+        var reducer = Reducer(
             self.op,
             self.input,
             groups,
@@ -2525,6 +2524,8 @@ struct ReducerSpec(Copyable, Movable):
             self.text,
             Optional(self.logical),
         )
+        reducer.metadata = self.metadata
+        return reducer^
 
 
 struct _HeldBuffers(Movable):

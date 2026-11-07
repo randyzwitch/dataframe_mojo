@@ -1540,6 +1540,15 @@ struct _ReduceJob[width: Int](Job):
         self.grouped = grouped
         self.groups = groups
         self.reducer = _new_reducer(bound, node, group_count)
+        if node.op == IMPLODE:
+            # The lists' child keeps its input's field metadata, as the
+            # evaluator's implode does (`_empty_output`).
+            try:
+                self.reducer.metadata = _empty_output(
+                    bound, columns, node.left
+                )._field_metadata
+            except:
+                pass
 
     def into_reducer(deinit self) -> Reducer:
         return self.reducer^

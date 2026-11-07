@@ -571,7 +571,7 @@ def aggregate_top_rows(
     across workers at the finish. `k` is at most `TOP_ROWS_INLINE`; nulls
     are never kept."""
     var count_spec = ReducerSpec(
-        LEN, DataType.INT64, 0, 0, 0.0, String(), DataType.INT64
+        LEN, DataType.INT64, 0, 0, 0.0, String(), DataType.INT64, None
     )
     var layout = aggregate_layout(keys, [value.copy()], [count_spec^])
     var dtype = layout.slots[0].dtype
