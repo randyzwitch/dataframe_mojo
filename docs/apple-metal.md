@@ -527,3 +527,30 @@ buffers. Grouped costs use `grouped_reductions:v2:tuple:` identities, including
 key types/layouts, programs, output work and bounded cardinality/skew/null
 samples. Sampling describes cost only; GPU hashing computes every group.
 Unmeasured shapes retain CPU placement.
+
+### Native casts inside aggregate values
+
+Explicit casts between Int32, Int64 and Float32 can share the existing
+aggregate scan, including bounded arithmetic trees and integer-key grouping.
+For example, `(col("quantity").cast(DataType.FLOAT32) * col("price")).sum()`
+reads the original integer and Float32 buffers without a cast result column.
+Arithmetic operands must have matching types after casting, as the CPU API
+requires. Float64 input columns and Float64 cast targets remain on CPU.
+
+Integer-to-Float32 conversion rounds to nearest, ties to even using integer
+bit operations. Float32-to-integer conversion truncates toward zero and
+checks the target range, infinities and NaNs. Strict invalid conversions use
+CPU adjudication to preserve its error; non-strict conversions produce null.
+Input nulls remain null. Checked integer operations retain their own native
+width before a later widening cast, including overflow before a later null.
+
+Count-only values omit Float32 loads and arithmetic when no Float32-to-integer
+cast needs those values for validity or checked errors. Integer arithmetic and
+range checks still execute. Required Float32 arithmetic retains intermediate
+rounding and gradual-underflow adjudication. Row-local cast definitions can
+be inlined under the existing definition-order and checked-work rules.
+
+Typed programs have separate `typed_reductions:v1:` identities. Existing
+homogeneous arithmetic and proven simple CASE kernels keep their specialized
+routes; typed stacks use the general value path. Automatic placement requires
+matching measurements for the current build, types and physical layout.
