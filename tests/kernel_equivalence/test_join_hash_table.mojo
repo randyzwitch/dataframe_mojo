@@ -8,7 +8,7 @@ read in order, returns them in the unflipped join's order."""
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, Series
-from dataframe.join_type import JOIN_INNER, JOIN_LEFT
+from dataframe.join_type import JOIN_ANTI, JOIN_INNER, JOIN_LEFT, JOIN_SEMI
 from dataframe.joins.hash_table import JoinHashTable, probe_pairs
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
@@ -65,6 +65,53 @@ def test_partitioned_build_keeps_every_duplicate_null_and_row() raises:
             else:
                 assert_equal(actual, expected)
         assert_equal(k, len(pairs[0]))
+    _ = setting^
+
+
+def test_partitioned_key_set_finds_exactly_the_build_keys() raises:
+    # The keys-only table of semi, anti and mark joins (Polars' grouper per
+    # partition): duplicates kept once, null keys left out, large enough
+    # that its lookups prefetch.
+    var setting = JoinWorkers(4)
+    var domain = 300_000
+    var n = 500_001
+    var values = List[Int64]()
+    var valid = List[Bool]()
+    for row in range(n):
+        values.append(Int64(3 * (row % domain)))
+        valid.append(row % 89 != 5)
+    var build = Series("k", Column[Int64](values^, valid))
+    var table = JoinHashTable([build.copy()], keys_only=True)
+    assert_equal(table.parts, 4)
+    assert_true(table.keys_only)
+    assert_true(table.has_null)
+    var probes = List[Int64]()
+    var probe_valid = List[Bool]()
+    for i in range(70_001):
+        probes.append(Int64(i * 13 - 7))
+        probe_valid.append(i % 31 != 4)
+    var probe = Series("k", Column[Int64](probes.copy(), probe_valid))
+    var semi = List[Int]()
+    var anti = List[Int]()
+    for i in range(len(probes)):
+        var v = probes[i]
+        var hit = (
+            probe_valid[i] and v >= 0 and v % 3 == 0 and v < Int64(3 * domain)
+        )
+        if hit:
+            # Value v/3 is in the build unless every row holding it is
+            # null: rows v/3 and v/3 + domain (when below n).
+            var r = Int(v // 3)
+            var any = r % 89 != 5
+            if r + domain < n:
+                any = any or (r + domain) % 89 != 5
+            hit = any
+        if hit:
+            semi.append(i)
+        else:
+            anti.append(i)
+    assert_equal(probe_pairs(table, [probe.copy()], JOIN_SEMI, 0)[0], semi)
+    assert_equal(probe_pairs(table, [probe.copy()], JOIN_ANTI, 0)[0], anti)
     _ = setting^
 
 

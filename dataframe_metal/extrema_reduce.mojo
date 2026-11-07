@@ -3,6 +3,7 @@ from std.time import perf_counter_ns
 from std.memory import bitcast
 from dataframe import Column, DataFrame, DataType, Series, LazyFrame
 from dataframe.expr import MIN
+from .extrema_value import float_extrema_bits
 from .extrema_plan import ExtremaBundle, plan_extrema
 from .accelerator.faults import data_fault
 from .accelerator.gpu.erased_input import NumericView, numeric_views
@@ -198,21 +199,7 @@ def extrema_column(
     name: String, dtype: DataType, value: Int64, valid: Bool, flags: UInt32
 ) raises -> Series:
     if dtype == DataType.FLOAT32:
-        if not valid and flags & 1:
-            raise data_fault(
-                "all-NaN Float32 extrema require CPU payload adjudication"
-            )
-        var raw = UInt32(0)
-        if valid:
-            var key = UInt32(value)
-            raw = key ^ 0x8000_0000 if key >> 31 else ~key
-            if raw & 0x7FFF_FFFF == 0:
-                if flags & 6 == 6:
-                    raise data_fault(
-                        "mixed signed-zero extrema require CPU tie adjudication"
-                    )
-                if flags & 4:
-                    raw = 0x8000_0000
+        var raw = float_extrema_bits(value, valid, flags)
         return Series(
             name, Column[Float32]([bitcast[DType.float32](raw)], [valid])
         )

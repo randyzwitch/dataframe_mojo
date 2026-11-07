@@ -32,18 +32,20 @@ def atomic_or(words: Pointer[UInt32, MutUntrackedOrigin], bits: UInt32):
             return
 
 
+@always_inline
+def initial_group_word(offset: Int) -> UInt32:
+    return UInt32.MAX if offset == GROUP_MIN or offset == GROUP_MAX else (
+        UInt32(512) if offset == GROUP_LEAST_BIT else UInt32(0)
+    )
+
+
 def initialize_group_states(
     states: Pointer[UInt32, MutUntrackedOrigin],
     words: UInt32,
 ):
     var row = global_idx.x
     if row < Int(words):
-        var offset = row % GROUP_STATE_WORDS
-        states[
-            unsafe_offset=row
-        ] = UInt32.MAX if offset == GROUP_MIN or offset == GROUP_MAX else (
-            UInt32(512) if offset == GROUP_LEAST_BIT else UInt32(0)
-        )
+        states[unsafe_offset=row] = initial_group_word(row % GROUP_STATE_WORDS)
 
 
 @always_inline

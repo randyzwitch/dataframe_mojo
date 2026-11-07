@@ -4,6 +4,7 @@ from dataframe.frame import (
 )
 from dataframe.joins.hash_table import (
     JoinHashTable,
+    keys_only_join,
 )
 from dataframe.join_type import JOIN_INNER
 from dataframe.parallel import (
@@ -50,7 +51,9 @@ def finish_build(
         sources.append(key.copy())
     if not supported:
         return None
-    return JoinHashTable(sources, perfect=how == JOIN_INNER)
+    return JoinHashTable(
+        sources, perfect=how == JOIN_INNER, keys_only=keys_only_join(how)
+    )
 
 
 struct _SubplanJob(Job):
