@@ -1065,3 +1065,37 @@ def test_metal_grouped_moments_empty_input_retains_schema_without_device() raise
     assert_equal(answer[0].column("count").dtype(), DataType.INT64)
     assert_equal(answer[1].context_ns, 0)
     assert_equal(answer[1].kernel_ns, 0)
+
+
+def test_metal_moment_word_rounding_covers_limb_boundaries_and_ties() raises:
+    from dataframe_metal.moment_finish import MomentMagnitude
+
+    var one = MomentMagnitude.from_bins(List[Int128]([Int128(1)]))
+    for shift in range(1, 588):
+        var power = MomentMagnitude()
+        power.digits[shift // 32] = UInt32(1) << UInt32(shift % 32)
+        var half = MomentMagnitude()
+        half.digits[(shift - 1) // 32] = UInt32(1) << UInt32((shift - 1) % 32)
+        for parity in range(3):
+            # Two adjacent integer significands test ties in both directions;
+            # the last also rounds through a change in the Float64 exponent.
+            var significand = (Int64(1) << 52) + Int64(parity)
+            if parity == 2:
+                if shift == 587:
+                    continue
+                significand = (Int64(1) << 53) - 1
+            var next = MomentMagnitude.from_bins(
+                List[Int128]([Int128(significand) + 1])
+            )
+            var upper = next.multiply(power)
+            var midpoint = upper.subtract(half)
+            for side in range(3):
+                var value = midpoint.copy()
+                if side == 0:
+                    value = midpoint.subtract(one)
+                elif side == 2:
+                    value = upper.subtract(half.subtract(one))
+                var rounded = significand + Int64(
+                    side == 2 or (side == 1 and Bool(significand & 1))
+                )
+                assert_equal(value.scaled(-shift), Float64(rounded))

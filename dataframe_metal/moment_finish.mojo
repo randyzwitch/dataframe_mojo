@@ -7,6 +7,7 @@ No floating arithmetic occurs until after their exact subtraction.
 """
 from std.memory import bitcast
 from std.math import sqrt
+from std.bit import count_leading_zeros
 from .accelerator.faults import data_fault
 
 comptime MOMENT_WORDS = 20
@@ -105,26 +106,26 @@ struct MomentMagnitude(Copyable, Movable):
         var top = self.used() - 1
         if top < 0:
             return 0
-        var leading = self.digits[top]
-        var bits = 0
-        while leading:
-            leading >>= 1
-            bits += 1
-        var width = top * 32 + bits
+        var width = top * 32 + 32 - Int(count_leading_zeros(self.digits[top]))
         var shift = max(0, width - 53)
-        var significand = UInt64(0)
-        for i in reversed(range(shift, width)):
-            significand = (significand << 1) | UInt64(
-                (self.digits[i // 32] >> UInt32(i % 32)) & 1
-            )
+        var first = shift // 32
+        var offset = shift % 32
+        var significand = UInt64(self.digits[first]) >> UInt64(offset)
+        if first + 1 < MOMENT_WORDS:
+            significand |= UInt64(self.digits[first + 1]) << UInt64(32 - offset)
+        if offset > 11 and first + 2 < MOMENT_WORDS:
+            significand |= UInt64(self.digits[first + 2]) << UInt64(64 - offset)
         if shift:
-            var halfway = (
-                self.digits[(shift - 1) // 32] >> UInt32((shift - 1) % 32)
-            ) & 1
+            var guard_word = (shift - 1) // 32
+            var guard_bit = (shift - 1) % 32
+            var halfway = (self.digits[guard_word] >> UInt32(guard_bit)) & 1
             var sticky = False
-            for i in range(shift - 1):
+            for word in range(guard_word):
+                sticky = sticky or self.digits[word] != 0
+            if guard_bit:
                 sticky = sticky or Bool(
-                    (self.digits[i // 32] >> UInt32(i % 32)) & 1
+                    self.digits[guard_word]
+                    & ((UInt32(1) << UInt32(guard_bit)) - 1)
                 )
             if halfway and (sticky or Bool(significand & 1)):
                 significand += 1
