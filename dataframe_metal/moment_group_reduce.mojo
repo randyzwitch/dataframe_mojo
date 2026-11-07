@@ -160,7 +160,6 @@ def finish_grouped_moments_math(
                     non_finite,
                 )
                 if cpu_compatible and answer:
-                    require_cpu_moment_precision(squares, count)
                     require_cpu_moment_compatibility(
                         sums,
                         count,
@@ -168,6 +167,8 @@ def finish_grouped_moments_math(
                         -149 if floating else 0,
                         answer.value(),
                     )
+                    if answer.value() != 0:
+                        require_cpu_moment_precision(squares, count)
                 values.append(answer.value() if answer else Float64(0))
                 validity.append(Bool(answer))
             if shared[i]:

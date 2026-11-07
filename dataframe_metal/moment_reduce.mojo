@@ -145,7 +145,6 @@ def finish_global_moments_math(
                 data[27] != 0,
             )
             if cpu_compatible and answer:
-                require_cpu_moment_precision(squares, scan.counts[field])
                 require_cpu_moment_compatibility(
                     sums,
                     scan.counts[field],
@@ -153,6 +152,8 @@ def finish_global_moments_math(
                     -149 if floating else 0,
                     answer.value(),
                 )
+                if answer.value() != 0:
+                    require_cpu_moment_precision(squares, scan.counts[field])
             cached[i] = answer.copy()
         if answer and output.op == STD:
             answer = sqrt(answer.value())
