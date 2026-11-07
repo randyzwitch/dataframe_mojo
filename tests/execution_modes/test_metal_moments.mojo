@@ -892,6 +892,7 @@ def test_metal_grouped_moments_share_states_and_finish_all_native_types() raises
                     col("w").var(0).alias("w_population"),
                     col("f").sum().alias("f_sum"),
                     col("i").count().alias("i_count"),
+                    col("f").len().alias("rows"),
                 ]
             )
         )
@@ -966,6 +967,40 @@ def test_metal_grouped_moments_share_states_and_finish_all_native_types() raises
         assert_true(result.item(2, "f_population").is_null())
         assert_true(result.item(2, "i_std").is_null())
         assert_true(result.item(2, "w_population").is_null())
+        var moments_only = plan.copy()
+        _ = moments_only.outputs.pop()
+        _ = moments_only.outputs.pop()
+        _ = moments_only.outputs.pop()
+        for with_rows in [False, True]:
+            if with_rows:
+                moments_only.outputs.append(
+                    plan.outputs[len(plan.outputs) - 1].copy()
+                )
+            var reduced = finish_grouped_moments_math(
+                moments_only, frame, partials
+            )
+            assert_equal(reduced.height(), 3)
+            assert_equal(reduced.width(), 6 if with_rows else 5)
+            assert_equal(reduced.item(0, "key").int32(), Int32(9))
+            assert_equal(reduced.item(1, "key").int32(), Int32(4))
+            assert_true(reduced.item(2, "key").is_null())
+            for row in range(2):
+                assert_equal(
+                    reduced.item(row, "f_population").float64(), Float64(4)
+                )
+                assert_equal(
+                    reduced.item(row, "f_sample").float64(), Float64(8)
+                )
+                assert_equal(reduced.item(row, "i_std").float64(), Float64(2))
+            assert_equal(
+                reduced.item(0, "w_population").float64(), Float64(16384)
+            )
+            assert_true(reduced.item(2, "f_population").is_null())
+            assert_true(reduced.item(2, "i_std").is_null())
+            assert_true(reduced.item(2, "w_population").is_null())
+            if with_rows:
+                for row in range(3):
+                    assert_equal(reduced.item(row, "rows").int64(), Int64(2))
 
 
 def test_metal_grouped_moment_atomic_carries_match_exact_variance() raises:

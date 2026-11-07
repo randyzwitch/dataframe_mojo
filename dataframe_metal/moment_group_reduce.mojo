@@ -50,21 +50,13 @@ def finish_grouped_moments_math(
         or len(partials.rows) != capacity * blocks
     ):
         raise Error("Metal grouped moment result does not match its schema")
-    # Existing finalization owns key ordering, typed sums/extrema and row
-    # counts. Compact only the bounded group states, never input payloads.
-    var ordinary_states = List[UInt32](
-        length=entries * GROUP_VALUE_WORDS, fill=0
-    )
-    for entry in range(entries):
-        for word in range(GROUP_VALUE_WORDS):
-            ordinary_states[entry * GROUP_VALUE_WORDS + word] = partials.states[
-                entry * GROUP_MOMENT_WORDS + word
-            ]
     grouped.outputs = List[ReductionOutput]()
+    var ordinary_fields = False
     for field in range(nf):
         grouped.selected.bundle.fields[field].needs_sum = False
     for output in plan.outputs:
         if output.op != VAR and output.op != STD:
+            ordinary_fields = ordinary_fields or output.field >= 0
             grouped.outputs.append(
                 ReductionOutput(
                     output.field,
@@ -75,6 +67,20 @@ def finish_grouped_moments_math(
             )
             if output.field >= 0 and (output.op == SUM or output.op == MEAN):
                 grouped.selected.bundle.fields[output.field].needs_sum = True
+    # Key ordering and row counts need no per-value state. Moment-only and
+    # moment-plus-LEN queries avoid both compaction and ordinary decoding.
+    var ordinary_states = List[UInt32]()
+    if ordinary_fields:
+        ordinary_states = List[UInt32](
+            length=entries * GROUP_VALUE_WORDS, fill=0
+        )
+        for entry in range(entries):
+            for word in range(GROUP_VALUE_WORDS):
+                ordinary_states[
+                    entry * GROUP_VALUE_WORDS + word
+                ] = partials.states[entry * GROUP_MOMENT_WORDS + word]
+    else:
+        grouped.selected.bundle.fields.clear()
     var ordinary = finish_grouped(
         grouped,
         frame,
@@ -96,7 +102,7 @@ def finish_grouped_moments_math(
         if field < 0 or field >= nf:
             raise Error("Metal grouped moment output has an invalid field")
         var floating = (
-            grouped.selected.bundle.fields[field].dtype == DataType.FLOAT32
+            plan.selected.bundle.fields[field].dtype == DataType.FLOAT32
         )
         var values = List[Float64]()
         var validity = List[Bool]()
