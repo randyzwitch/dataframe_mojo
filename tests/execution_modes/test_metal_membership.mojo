@@ -497,11 +497,20 @@ def test_metal_membership_ieee_empty_and_large_sets() raises:
             .filter(~float_set if inverted else float_set.copy())
             .select(col("v").sum())
         )
+        # The CPU baseline expands this Float32 set to a recursive OR tree;
+        # its evaluator exhausts the default stack at this 4096-key boundary.
+        # Keep an independent scalar oracle and cover every Metal entry path.
+        var expected = Int64(12 if inverted else 9)
+        for copied in [False, True]:
+            assert_equal(
+                execute_timed(large_query, zero_copy=not copied)[0]
+                .item()
+                .int64(),
+                expected,
+            )
         assert_equal(
-            execute_timed(large_query)[0].item().int64(),
-            Int64(12 if inverted else 9),
+            large_query.collect(accelerator=runtime).item().int64(), expected
         )
-        same_outcome(large_query)
     # A Float32 public IN list expands past the CASE instruction limit in
     # source form but lowers to one membership leaf plus seven value nodes.
     var candidates = List[Expr]()
