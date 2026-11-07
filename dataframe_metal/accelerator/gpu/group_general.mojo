@@ -44,8 +44,9 @@ def initialize_general_groups[
 
 def general_grouped_partials[
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
     global_state: Bool = True,
+    value_types: Int = 7,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -76,6 +77,7 @@ def general_grouped_partials[
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
     scratch: Pointer[UInt32, MutUntrackedOrigin],
 ):
+    comptime assert 1 <= value_types and value_types <= 7
     var layout = GroupLayout(
         Int(metadata[unsafe_offset=3]),
         Int(metadata[unsafe_offset=6]),
@@ -138,51 +140,52 @@ def general_grouped_partials[
             )
             _ = Atomic[UInt32].min(first.unsafe_offset(Int(slot)), UInt32(row))
             comptime for kind in range(3):
-                var begin = 0
-                var end = Int(metadata[unsafe_offset=7])
-                comptime if kind == 1:
-                    begin = end
-                    end += Int(metadata[unsafe_offset=8])
-                elif kind == 2:
-                    begin = end + Int(metadata[unsafe_offset=8])
-                    end = layout.fields
-                for field in range(begin, end):
-                    if _update_group_field[
-                        kind == 0,
-                        kind < 2,
-                        cases,
-                        conditional_only,
-                        global_state,
-                    ](
-                        metadata,
-                        slot,
-                        UInt32(layout.blocks),
-                        flags,
-                        field,
-                        row,
-                        v0,
-                        v1,
-                        v2,
-                        v3,
-                        v4,
-                        v5,
-                        v6,
-                        v7,
-                        b0,
-                        b1,
-                        b2,
-                        b3,
-                        b4,
-                        b5,
-                        b6,
-                        b7,
-                        predicate,
-                        predicate_bits,
-                        states,
-                        scratch,
-                        layout.fields,
-                    ):
-                        return
+                comptime if (value_types & (1 << kind)) != 0:
+                    var begin = 0
+                    var end = Int(metadata[unsafe_offset=7])
+                    comptime if kind == 1:
+                        begin = end
+                        end += Int(metadata[unsafe_offset=8])
+                    elif kind == 2:
+                        begin = end + Int(metadata[unsafe_offset=8])
+                        end = layout.fields
+                    for field in range(begin, end):
+                        if _update_group_field[
+                            kind == 0,
+                            kind < 2,
+                            cases,
+                            simple_cases,
+                            global_state,
+                        ](
+                            metadata,
+                            slot,
+                            UInt32(layout.blocks),
+                            flags,
+                            field,
+                            row,
+                            v0,
+                            v1,
+                            v2,
+                            v3,
+                            v4,
+                            v5,
+                            v6,
+                            v7,
+                            b0,
+                            b1,
+                            b2,
+                            b3,
+                            b4,
+                            b5,
+                            b6,
+                            b7,
+                            predicate,
+                            predicate_bits,
+                            states,
+                            scratch,
+                            layout.fields,
+                        ):
+                            return
         row += Int(metadata[unsafe_offset=1])
     if thread_idx.x == 0:
         _ = Atomic[UInt32].fetch_add(scratch.unsafe_offset(2), UInt32(1))
@@ -190,7 +193,7 @@ def general_grouped_partials[
 
 def resolve_general_int64[
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
     global_state: Bool = True,
 ](
     v0: Bytes,
@@ -232,7 +235,7 @@ def resolve_general_int64[
                     unsafe_offset=index * GROUP_VALUE_WORDS + 4 + side
                 ]
                 if ticket != UInt32.MAX:
-                    var value = group_value[False, cases, conditional_only](
+                    var value = group_value[False, cases, simple_cases](
                         metadata,
                         field,
                         Int(ticket),

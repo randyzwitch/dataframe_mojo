@@ -151,6 +151,82 @@ def int_value(
 
 
 @always_inline
+def conditional_tree_fields[
+    floating: Bool, simple_cases: Bool
+](
+    metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
+    descriptors: Pointer[UInt64, UntrackedOrigin[mut=False]],
+    first: Int,
+    end: Int,
+    row_base: Int,
+    row: Int,
+    tag: UInt32,
+    requested: UInt32,
+    v0: Bytes,
+    v1: Bytes,
+    v2: Bytes,
+    v3: Bytes,
+    v4: Bytes,
+    v5: Bytes,
+    v6: Bytes,
+    v7: Bytes,
+    b0: Bytes,
+    b1: Bytes,
+    b2: Bytes,
+    b3: Bytes,
+    b4: Bytes,
+    b5: Bytes,
+    b6: Bytes,
+    b7: Bytes,
+    predicate: Bytes,
+    predicate_bits: Bytes,
+) -> Tuple[SIMD[DType.uint64, 4], SIMD[DType.uint32, 4], UInt32]:
+    """Share one checked evaluator across a native dtype's CASE fields.
+
+    Runtime metadata bounds keep the machine-code compiler from duplicating
+    the entire conditional evaluator for every field. Reduction accumulators
+    remain statically typed in the caller; no row values are materialized.
+    """
+    var values = SIMD[DType.uint64, 4](0)
+    var valid = SIMD[DType.uint32, 4](0)
+    var fault = UInt32(0)
+    for field in range(first, end):
+        var at = HEADER_WORDS + field * FIELD_WORDS
+        if UInt32(descriptors[unsafe_offset=at]) != UInt32(TREE_OP):
+            continue
+        var value = expression_value[floating, True, simple_cases](
+            metadata.unsafe_offset(Int(descriptors[unsafe_offset=at + 6])),
+            Int(descriptors[unsafe_offset=at + 7]),
+            row_base,
+            row,
+            tag,
+            Bool(requested & (UInt32(1) << UInt32(field))),
+            v0,
+            v1,
+            v2,
+            v3,
+            v4,
+            v5,
+            v6,
+            v7,
+            b0,
+            b1,
+            b2,
+            b3,
+            b4,
+            b5,
+            b6,
+            b7,
+            predicate,
+            predicate_bits,
+        )
+        values[field] = value[0]
+        valid[field] = UInt32(value[1])
+        fault |= value[2]
+    return (values, valid, fault)
+
+
+@always_inline
 def _composed_scan[
     precise: Bool,
     wide: Bool,
@@ -162,7 +238,7 @@ def _composed_scan[
     compound: Bool = False,
     trees: Bool = False,
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -320,6 +396,60 @@ def _composed_scan[
             else:
                 pi = read_integer(predicate_values, predicate_tag, row)
                 kept = kept & (pi >= low_bound) & (pi <= high_bound)
+        var case_values = SIMD[DType.uint64, 4](0)
+        var case_valid = SIMD[DType.uint32, 4](0)
+        comptime if cases:
+            if kept:
+                # Bits 16..18 carry the field count; zero accepts older probe
+                # metadata while retaining a runtime loop bound.
+                var bound = Int((meta[unsafe_offset=14] >> 16) & 7)
+                if bound == 0:
+                    bound = arity
+                var requested = sum_flags
+                comptime if with_extrema:
+                    requested |= extent_flags
+                comptime for kind in range(3):
+                    comptime FIRST = 0 if kind == 0 else (
+                        float_fields if kind
+                        == 1 else float_fields + int32_fields
+                    )
+                    comptime END = float_fields if kind == 0 else (
+                        float_fields + int32_fields if kind == 1 else arity
+                    )
+                    comptime if END > FIRST:
+                        var evaluated = conditional_tree_fields[
+                            kind == 0, simple_cases
+                        ](
+                            metadata,
+                            meta,
+                            FIRST,
+                            min(bound, END),
+                            row_base,
+                            row,
+                            UInt32(2 if kind == 0 else (0 if kind == 1 else 1)),
+                            requested,
+                            v0,
+                            v1,
+                            v2,
+                            v3,
+                            v4,
+                            v5,
+                            v6,
+                            v7,
+                            b0,
+                            b1,
+                            b2,
+                            b3,
+                            b4,
+                            b5,
+                            b6,
+                            b7,
+                            predicate,
+                            predicate_bits,
+                        )
+                        case_values |= evaluated[0]
+                        case_valid |= evaluated[1]
+                        fault |= evaluated[2]
         comptime for field in range(arity):
             var valid = kept
             if flags[field] & 1:
@@ -329,57 +459,63 @@ def _composed_scan[
             var tree_bits = UInt64(0)
             comptime if trees:
                 if kept and ops[field] == UInt32(TREE_OP):
-                    var computed = expression_value[
-                        field < float_fields, cases, conditional_only
-                    ](
-                        metadata.unsafe_offset(
+                    comptime if cases:
+                        tree_bits = case_values[field]
+                        valid = Bool(case_valid[field])
+                    else:
+                        var computed = expression_value[
+                            field < float_fields, cases, simple_cases
+                        ](
+                            metadata.unsafe_offset(
+                                Int(
+                                    meta[
+                                        unsafe_offset=HEADER_WORDS
+                                        + field * FIELD_WORDS
+                                        + 6
+                                    ]
+                                )
+                            ),
                             Int(
                                 meta[
                                     unsafe_offset=HEADER_WORDS
                                     + field * FIELD_WORDS
-                                    + 6
+                                    + 7
                                 ]
-                            )
-                        ),
-                        Int(
-                            meta[
-                                unsafe_offset=HEADER_WORDS
-                                + field * FIELD_WORDS
-                                + 7
-                            ]
-                        ),
-                        row_base,
-                        row,
-                        UInt32(0 if field < float_fields + int32_fields else 1),
-                        Bool(sum_flags & (UInt32(1) << UInt32(field)))
-                        or (
-                            with_extrema
-                            and Bool(
-                                extent_flags & (UInt32(1) << UInt32(field))
-                            )
-                        ),
-                        v0,
-                        v1,
-                        v2,
-                        v3,
-                        v4,
-                        v5,
-                        v6,
-                        v7,
-                        b0,
-                        b1,
-                        b2,
-                        b3,
-                        b4,
-                        b5,
-                        b6,
-                        b7,
-                        predicate,
-                        predicate_bits,
-                    )
-                    tree_bits = computed[0]
-                    valid = computed[1]
-                    fault |= computed[2]
+                            ),
+                            row_base,
+                            row,
+                            UInt32(
+                                0 if field < float_fields + int32_fields else 1
+                            ),
+                            Bool(sum_flags & (UInt32(1) << UInt32(field)))
+                            or (
+                                with_extrema
+                                and Bool(
+                                    extent_flags & (UInt32(1) << UInt32(field))
+                                )
+                            ),
+                            v0,
+                            v1,
+                            v2,
+                            v3,
+                            v4,
+                            v5,
+                            v6,
+                            v7,
+                            b0,
+                            b1,
+                            b2,
+                            b3,
+                            b4,
+                            b5,
+                            b6,
+                            b7,
+                            predicate,
+                            predicate_bits,
+                        )
+                        tree_bits = computed[0]
+                        valid = computed[1]
+                        fault |= computed[2]
             if valid:
                 nc[field] += 1
                 comptime if field < float_fields:
@@ -565,7 +701,7 @@ def composed_partials[
     compound: Bool = False,
     trees: Bool = False,
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -607,7 +743,7 @@ def composed_partials[
         compound,
         trees,
         cases,
-        conditional_only,
+        simple_cases,
     ](
         v0,
         v1,
@@ -651,7 +787,7 @@ def mixed_partials[
     compound: Bool = False,
     trees: Bool = False,
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -700,7 +836,7 @@ def mixed_partials[
         compound,
         trees,
         cases,
-        conditional_only,
+        simple_cases,
     ](
         v0,
         v1,

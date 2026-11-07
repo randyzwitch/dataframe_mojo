@@ -1647,3 +1647,21 @@ def plan_share_copy_schemas(
             stack.append(left^)
         if right[0] >= 0:
             stack.append(right^)
+
+
+def plan_is_filtering(self: QueryContext, index: Int) -> Bool:
+    """Whether the subplan at `index` filters its tables
+    (JoinFilterPushdownOptimizer::IsFiltering): a filter, a top-N, or a
+    scan with predicates of its own, anywhere below."""
+    if index < 0:
+        return False
+    ref node = self._nodes[index]
+    if node.kind == FILTER:
+        return True
+    if node.kind == SORT and node.sort_limit() >= 0:
+        return True
+    if _is_scan(node.kind):
+        return len(node.exprs) > 0
+    return plan_is_filtering(self, node.left) or plan_is_filtering(
+        self, node.right
+    )

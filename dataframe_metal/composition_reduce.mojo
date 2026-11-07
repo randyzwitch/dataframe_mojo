@@ -11,7 +11,7 @@ from .composition_plan import (
     has_extrema,
     has_trees,
     has_conditions,
-    only_conditional_trees,
+    simple_conditional_trees,
 )
 from .exact_float import finish_float_bins
 from .expression_format import EXPRESSION_NODE_WORDS
@@ -75,7 +75,7 @@ def _scan[
     compound: Bool = False,
     trees: Bool = False,
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -259,6 +259,7 @@ def _scan[
                 predicate_input + 1 if predicate_input
                 < len(bundle.inputs) else 0
             )
+            words[at + 14] |= UInt64(nf) << 16
             var tree_at = base_words + index * tail_words + predicate_words
             for field in range(nf):
                 ref value = bundle.fields[field]
@@ -346,7 +347,7 @@ def _scan[
                     compound=compound,
                     trees=trees,
                     cases=cases,
-                    conditional_only=conditional_only,
+                    simple_cases=simple_cases,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=True
                 ] if fast and not compound else composed_partials[
@@ -359,7 +360,7 @@ def _scan[
                     compound=compound,
                     trees=trees,
                     cases=cases,
-                    conditional_only=conditional_only,
+                    simple_cases=simple_cases,
                 ]
                 comptime kernel_separate = native_float_mixed_partials[
                     precise, wide, batched=False
@@ -373,7 +374,7 @@ def _scan[
                     compound=compound,
                     trees=trees,
                     cases=cases,
-                    conditional_only=conditional_only,
+                    simple_cases=simple_cases,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=False
                 ] if fast and not compound else composed_partials[
@@ -386,7 +387,7 @@ def _scan[
                     compound=compound,
                     trees=trees,
                     cases=cases,
-                    conditional_only=conditional_only,
+                    simple_cases=simple_cases,
                 ]
                 if batched:
                     ctx.enqueue_function[kernel_batched](
@@ -744,7 +745,7 @@ def _mixed_dispatch[
                         # CASE values are tree programs. Native/binary bundles
                         # cannot use these variants; omit their instantiations.
                         comptime if trees:
-                            if only_conditional_trees(bundle):
+                            if simple_conditional_trees(bundle):
                                 return _scan[
                                     precise,
                                     wide,
@@ -756,7 +757,7 @@ def _mixed_dispatch[
                                     compound=compound,
                                     trees=trees,
                                     cases=True,
-                                    conditional_only=True,
+                                    simple_cases=True,
                                 ](
                                     bundle,
                                     frame,

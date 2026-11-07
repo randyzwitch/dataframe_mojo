@@ -93,7 +93,6 @@ from dataframe.planning.properties import (
     _key_group_bound,
     _key_pairs,
     _key_read,
-    _key_set_filter,
     _keys_repeat,
     _late_key_build,
     _merge_copy_needs,

@@ -661,7 +661,7 @@ def _case_shape(
 
 @always_inline
 def expression_value[
-    floating: Bool, cases: Bool = True, conditional_only: Bool = False
+    floating: Bool, cases: Bool = True, simple_cases: Bool = False
 ](
     program: Pointer[UInt64, UntrackedOrigin[mut=False]],
     count: Int,
@@ -741,34 +741,36 @@ def expression_value[
                             b6,
                             b7,
                         )
-            return _stack_value[floating](
-                program,
-                count,
-                row_base,
-                row,
-                tag,
-                want_value,
-                v0,
-                v1,
-                v2,
-                v3,
-                v4,
-                v5,
-                v6,
-                v7,
-                b0,
-                b1,
-                b2,
-                b3,
-                b4,
-                b5,
-                b6,
-                b7,
-                predicate,
-                predicate_bits,
-            )
-    # Conditional-only bundles never need ordinary fixed-tree variants.
-    comptime if not conditional_only:
+            comptime if not simple_cases:
+                return _stack_value[floating](
+                    program,
+                    count,
+                    row_base,
+                    row,
+                    tag,
+                    want_value,
+                    v0,
+                    v1,
+                    v2,
+                    v3,
+                    v4,
+                    v5,
+                    v6,
+                    v7,
+                    b0,
+                    b1,
+                    b2,
+                    b3,
+                    b4,
+                    b5,
+                    b6,
+                    b7,
+                    predicate,
+                    predicate_bits,
+                )
+    # The planner proves simple CASE programs need neither the general CASE
+    # stack nor ordinary arithmetic-tree fallback variants.
+    comptime if not simple_cases:
         if count == 5:
             if program[unsafe_offset=8] > UInt64(1):
                 return _fixed[floating, 0](
@@ -937,29 +939,34 @@ def expression_value[
                 b6,
                 b7,
             )
-    return _stack_value[floating, False](
-        program,
-        count,
-        row_base,
-        row,
-        tag,
-        want_value,
-        v0,
-        v1,
-        v2,
-        v3,
-        v4,
-        v5,
-        v6,
-        v7,
-        b0,
-        b1,
-        b2,
-        b3,
-        b4,
-        b5,
-        b6,
-        b7,
-        predicate,
-        predicate_bits,
-    )
+    comptime if not simple_cases:
+        return _stack_value[floating, False](
+            program,
+            count,
+            row_base,
+            row,
+            tag,
+            want_value,
+            v0,
+            v1,
+            v2,
+            v3,
+            v4,
+            v5,
+            v6,
+            v7,
+            b0,
+            b1,
+            b2,
+            b3,
+            b4,
+            b5,
+            b6,
+            b7,
+            predicate,
+            predicate_bits,
+        )
+    else:
+        # A schema/metadata mismatch must preserve the CPU outcome rather
+        # than executing an unproven program in the specialized kernel.
+        return (UInt64(0), False, UInt32(1))

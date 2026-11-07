@@ -6,6 +6,7 @@ from .group_partials import GroupedPartials
 from .group_properties import sample_group_tuples
 from .group_layout import GROUP_CAPACITY_FAULT, GROUP_CAPACITY_RETRY
 from .group_general_reduce import general_partials
+
 from .group_plan import GroupedComposition, plan_grouped
 from .group_metadata import group_metadata
 from .group_finish import finish_grouped
@@ -35,7 +36,7 @@ def _scan_grouped[
     floats: Int,
     narrow: Int,
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
 ](
     plan: GroupedComposition,
     frame: DataFrame,
@@ -144,7 +145,7 @@ def _scan_grouped[
                 block_dim=256,
             )
             ctx.enqueue_function[
-                grouped_partials[arity, floats, narrow, cases, conditional_only]
+                grouped_partials[arity, floats, narrow, cases, simple_cases]
             ](
                 inputs[0].values,
                 inputs[1].values,
@@ -179,7 +180,7 @@ def _scan_grouped[
             comptime if floats + narrow < arity:
                 ctx.enqueue_function[
                     resolve_int64_extrema[
-                        arity, floats, narrow, cases, conditional_only
+                        arity, floats, narrow, cases, simple_cases
                     ]
                 ](
                     inputs[0].values,
@@ -363,6 +364,7 @@ def _dispatch_grouped(
                     and floats == nf
                     and narrow == ni
                 ):
+
                     return _scan_grouped[arity, nf, ni](
                         plan, frame, scope, zero_copy, timings
                     )
