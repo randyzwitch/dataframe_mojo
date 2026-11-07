@@ -319,8 +319,8 @@ def test_parallel_sort_runs_merge_into_complete_stable_permutations() raises:
     _ = setting^
 
 
-def test_parallel_numeric_rank_large_partition_bucketed_and_sparse_one_sort_routes_reassociate_every_row() raises:
-    from dataframe.kernels.rank import rank_numeric
+def test_parallel_rank_rows_one_large_partition_and_dense_and_sparse_partitions_rank_every_row() raises:
+    from dataframe.window_sort import rank_rows
     from tests.support.parallel_key_reference import expected_parallel_ranks
 
     var setting = WorkerSetting(4)
@@ -332,19 +332,9 @@ def test_parallel_numeric_rank_large_partition_bucketed_and_sparse_one_sort_rout
         if route > 0:
             for row in range(n):
                 ids.append(row % 257 if route == 1 else row * 3 + 7)
-        var partition_count = (
-            1 if route == 0 else 257 if route == 1 else (n - 1) * 3 + 8
-        )
-        var threads = min(configured_workers(), n // 65536)
-        if route < 2:
-            assert_true(partition_count * threads <= n)
-        else:
-            assert_true(partition_count * threads > n)
         for method in ["ordinal", "min", "max", "dense", "average"]:
             for descending in [False, True]:
-                var actual = rank_numeric(source, ids, method, descending)
-                assert_true(Bool(actual))
-                var got = actual.take()
+                var got = rank_rows(source, ids, method, descending)
                 var expected = expected_parallel_ranks(
                     n, ids, method, descending
                 )

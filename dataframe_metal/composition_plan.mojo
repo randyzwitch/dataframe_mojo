@@ -1,13 +1,30 @@
 """Schema-only matching for arithmetic and column aggregates in one region."""
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Expr, LazyFrame, col
-from dataframe.expr import COL, SUM, COUNT, MEAN, MIN, MAX, ADD, SUB, MUL
+from dataframe.expr import (
+    COL,
+    SUM,
+    COUNT,
+    MEAN,
+    MIN,
+    MAX,
+    ADD,
+    SUB,
+    MUL,
+    LIT_INT,
+)
 from dataframe.lazy import FILTER, SCAN_FRAME, SELECT
 from .filter_plan import FilterSum, plan_region
 from .arithmetic_plan import plan_arithmetic
 from .multi_plan import MAX_FIELDS, ReductionOutput
 from .expression_plan import ValueNode, compile_expression
-from .expression_format import TREE_OP
+from .expression_format import (
+    TREE_OP,
+    CASE_HEADER,
+    CASE_TEST,
+    CASE_JUMP,
+    CASE_NULL,
+)
 from .conditional_plan import compile_conditional
 from .predicate_program import (
     PredicateProgram,
@@ -463,5 +480,52 @@ def only_conditional_trees(plan: Composition) -> Bool:
     """Native and binary fields bypass the tree evaluator entirely."""
     for field in plan.fields:
         if field.op == TREE_OP and not field.conditions:
+            return False
+    return has_conditions(plan)
+
+
+def simple_case_layout(nodes: List[ValueNode]) -> Int:
+    """Classify only CASE layouts implemented by the register evaluator."""
+    if not nodes or nodes[0].op != CASE_HEADER:
+        return -1
+    for shape in range(4):
+        var then_binary = Bool(shape & 1)
+        var else_binary = Bool(shape & 2)
+        var otherwise = 6 if then_binary else 4
+        var jump = otherwise - 1
+        var size = otherwise + (3 if else_binary else 1)
+        if len(nodes) != size:
+            continue
+        if (
+            nodes[1].op != CASE_TEST
+            or nodes[1].literal != UInt64(otherwise)
+            or nodes[jump].op != CASE_JUMP
+            or nodes[jump].literal != UInt64(size)
+        ):
+            continue
+        var eligible = True
+        for at in [2, otherwise]:
+            eligible = eligible and nodes[at].op in [COL, LIT_INT, CASE_NULL]
+        if then_binary:
+            eligible = eligible and nodes[3].op in [COL, LIT_INT, CASE_NULL]
+            eligible = eligible and nodes[4].op in [ADD, SUB, MUL]
+        if else_binary:
+            eligible = eligible and nodes[otherwise + 1].op in [
+                COL,
+                LIT_INT,
+                CASE_NULL,
+            ]
+            eligible = eligible and nodes[otherwise + 2].op in [ADD, SUB, MUL]
+        if eligible:
+            return shape
+    return -1
+
+
+def simple_conditional_trees(plan: Composition) -> Bool:
+    """Prove the CASE stack evaluator is unnecessary for this projection."""
+    for field in plan.fields:
+        if field.op == TREE_OP and (
+            not field.conditions or simple_case_layout(field.tree) < 0
+        ):
             return False
     return has_conditions(plan)

@@ -70,11 +70,7 @@ def plan_share_subplans(
     compared. The largest such subtree is collected on its own, and
     every node holding it becomes a scan of the result; the next
     largest that holds no copy of it is collected at the same time
-    (`plan_collect_shared`). Runs after join key sets pass sideways: copies that
-    receive different key sets are left apart, since one shared
-    result could not take either set (TPC-DS q59's weekly sales per
-    store are joined with a different year's weeks on each side, and
-    shared whole cost 40 to 56 ms).
+    (`plan_collect_shared`).
 
     A subtree holding an aggregation or a unique is shared: its result
     is small next to its input, and holding it whole costs little. A
@@ -289,7 +285,7 @@ def plan_collect_shared(
     serial steps (its planning, a small eager input, an aggregate's
     final frame) then overlap another's parallel work. The plan around
     them already optimized each, so only the passes after optimization
-    run on it again (join key sets, sharing, join order)."""
+    run on it again (sharing, join order)."""
     var jobs = List[_SharedJob](capacity=len(picks))
     for k in range(len(picks)):
         var sub = plan_subplan(self, picks[k])

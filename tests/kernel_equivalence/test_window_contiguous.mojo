@@ -36,6 +36,7 @@ def test_layout_groups_rows_by_key_in_row_order_for_any_count() raises:
         assert_equal(layout.starts[0], 0)
         assert_equal(layout.starts[count], 10_000)
         var seen = List[Bool](length=count, fill=False)
+        var row_partitions = layout.row_partitions()
         for g in range(count):
             var previous = -1
             var id = ids[layout.order[layout.starts[g]]]
@@ -46,7 +47,7 @@ def test_layout_groups_rows_by_key_in_row_order_for_any_count() raises:
                 assert_equal(ids[row], id)
                 assert_true(row > previous, "rows out of order")
                 previous = row
-                assert_equal(layout.row_partition[row], g)
+                assert_equal(row_partitions[row], g)
                 if not layout.in_place:
                     assert_equal(layout.inverse[row], k)
                 assert_equal(
