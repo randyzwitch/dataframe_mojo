@@ -1085,3 +1085,64 @@ def test_metal_general_group_case_dispatch_requires_register_shape() raises:
     )
     assert_true(Bool(mixed))
     assert_equal(general_case_mode(mixed.value().selected.bundle), 1)
+
+
+def test_metal_group_monotone_bounds_keep_ieee_flags_and_extrema() raises:
+    from std.memory import Pointer, bitcast
+    from std.testing import assert_equal
+    from dataframe_metal.accelerator.gpu.group_state import (
+        initial_group_word,
+        add_float_sum,
+        add_ordered_extrema,
+        GROUP_MIN,
+        GROUP_MAX,
+        GROUP_SPECIAL,
+        GROUP_NUMERIC_COUNT,
+        GROUP_LEAST_BIT,
+        GROUP_GREATEST_BIT,
+    )
+
+    var words = List[UInt32]()
+    for word in range(32):
+        words.append(initial_group_word(word))
+    var state = Pointer[UInt32, MutUntrackedOrigin](
+        unsafe_from_address=Int(words.unsafe_ptr())
+    )
+    var raw = List[UInt32](
+        [
+            UInt32(0x40000000),
+            0x3F800000,
+            0x40000000,
+            0xBF800000,
+            0xC0000000,
+            0,
+            0x80000000,
+            1,
+            0x80000001,
+            0x00800000,
+            0x7F7FFFFF,
+            0x7F800000,
+            0xFF800000,
+            0x7FC00001,
+        ]
+    )
+    for _ in range(2):
+        for value in raw:
+            add_float_sum(state, value)
+            add_ordered_extrema(state, value, True)
+    assert_equal(words[GROUP_LEAST_BIT], UInt32(0))
+    assert_equal(words[GROUP_GREATEST_BIT], UInt32(276))
+    assert_equal(words[GROUP_MIN], UInt32(0x007FFFFF))
+    assert_equal(words[GROUP_MAX], UInt32(0x007FFFFF))
+    assert_equal(words[GROUP_SPECIAL], UInt32(31))
+    assert_equal(words[GROUP_NUMERIC_COUNT], UInt32(26))
+    for word in range(32):
+        words[word] = initial_group_word(word)
+    for value in List[Int32](
+        [Int32.MAX, 0, -1, Int32.MIN, Int32.MAX, Int32.MIN]
+    ):
+        add_ordered_extrema(state, bitcast[DType.uint32](value), False)
+    assert_equal(words[GROUP_MIN], UInt32(0))
+    assert_equal(words[GROUP_MAX], UInt32(0))
+    assert_equal(words[GROUP_SPECIAL], UInt32(0))
+    assert_equal(words[GROUP_NUMERIC_COUNT], UInt32(6))

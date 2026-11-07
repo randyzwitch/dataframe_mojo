@@ -69,14 +69,16 @@ def add_float_sum(state: Pointer[UInt32, MutUntrackedOrigin], raw: UInt32):
     if significand == 0:
         return
     var shift = exponent - 1 if exponent else UInt32(0)
-    _ = Atomic[UInt32].min(
-        state.unsafe_offset(GROUP_LEAST_BIT),
-        shift + UInt32(count_trailing_zeros(significand)),
-    )
-    _ = Atomic[UInt32].max(
-        state.unsafe_offset(GROUP_GREATEST_BIT),
-        shift + 31 - UInt32(count_leading_zeros(significand)),
-    )
+    # These bounds only widen. A stale load can cause an extra atomic update,
+    # but cannot hide a value that would improve the final bound.
+    var least = state.unsafe_offset(GROUP_LEAST_BIT)
+    var low = shift + UInt32(count_trailing_zeros(significand))
+    if low < Atomic[UInt32].load(least):
+        _ = Atomic[UInt32].min(least, low)
+    var greatest = state.unsafe_offset(GROUP_GREATEST_BIT)
+    var high = shift + 31 - UInt32(count_leading_zeros(significand))
+    if high > Atomic[UInt32].load(greatest):
+        _ = Atomic[UInt32].max(greatest, high)
     var index = Int(shift >> 5)
     var shifted = UInt64(significand) << UInt64(shift & 31)
     var sign = Int64(-1) if raw >> 31 else Int64(1)
@@ -109,6 +111,10 @@ def add_ordered_extrema(
     _ = Atomic[UInt32].fetch_add(
         state.unsafe_offset(GROUP_NUMERIC_COUNT), UInt32(1)
     )
-    _ = Atomic[UInt32].min(state.unsafe_offset(GROUP_MIN), key)
+    var minimum = state.unsafe_offset(GROUP_MIN)
+    if key < Atomic[UInt32].load(minimum):
+        _ = Atomic[UInt32].min(minimum, key)
     # MAX uses complemented ordered keys so both extrema can start at MAX.
-    _ = Atomic[UInt32].min(state.unsafe_offset(GROUP_MAX), ~key)
+    var maximum_inverse = state.unsafe_offset(GROUP_MAX)
+    if ~key < Atomic[UInt32].load(maximum_inverse):
+        _ = Atomic[UInt32].min(maximum_inverse, ~key)
