@@ -20,12 +20,14 @@ from .multi_plan import MAX_FIELDS, ReductionOutput
 from .expression_plan import ValueNode, compile_expression
 from .expression_format import (
     TREE_OP,
+    TYPED_HEADER,
     CASE_HEADER,
     CASE_TEST,
     CASE_JUMP,
     CASE_NULL,
 )
 from .conditional_plan import compile_conditional
+from .typed_expression_plan import compile_typed_expression
 from .predicate_program import (
     PredicateProgram,
     bind_predicate_inputs,
@@ -216,6 +218,10 @@ def plan_composition(
             else:
                 var compiled = compile_expression(expression, frame, size - 2)
                 if not compiled:
+                    compiled = compile_typed_expression(
+                        expression, frame, size - 2
+                    )
+                if not compiled:
                     return None
                 var tree = compiled.take()
                 seed = tree.seed.copy()
@@ -341,7 +347,9 @@ def composition_key(plan: Composition) -> String:
     # Names do not affect costs; canonical source slots describe reuse.
     var key = (
         String(
-            "conditional_reductions:v1:" if has_conditions(
+            "typed_reductions:v1:" if has_typed_values(
+                plan
+            ) else "conditional_reductions:v1:" if has_conditions(
                 plan
             ) else "expression_reductions:v1:" if has_trees(
                 plan
@@ -387,6 +395,7 @@ def composition_key(plan: Composition) -> String:
                     + String(node.input)
                     + ","
                     + String(node.literal)
+                    + (",type" + String(node.tag) if node.tag >= 0 else "")
                 )
     if has_extrema(plan):
         for i in range(len(plan.fields)):
@@ -529,3 +538,15 @@ def simple_conditional_trees(plan: Composition) -> Bool:
         ):
             return False
     return has_conditions(plan)
+
+
+def has_typed_values(plan: Composition) -> Bool:
+    for field in plan.fields:
+        if field.tree and field.tree[0].op == TYPED_HEADER:
+            return True
+    return False
+
+
+def needs_general_values(plan: Composition) -> Bool:
+    """Use the general value path for branches or per-node native types."""
+    return has_conditions(plan) or has_typed_values(plan)
