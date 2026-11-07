@@ -496,15 +496,17 @@ def aggregate_table(
     templates: List[ReducerSpec],
     ranges: List[Int],
     workers: Int,
+    ordered: Bool,
 ) raises -> AggregateResult:
     """Group `keys` and reduce each of `inputs` with its `templates` state,
     over the (offset, length) morsels `ranges` (within chunks) on `workers`
     threads. Returns per finish partition its groups' keys, first rows and
-    states (unfinished), partitions in hash order. Every reduction's state
-    must fit inline (`states_supported`)."""
+    states (unfinished), partitions in hash order; each partition's groups
+    in first-row order when `ordered`, otherwise in no particular order.
+    Every reduction's state must fit inline (`states_supported`)."""
     var layout = aggregate_layout(keys, inputs, templates)
     var sinks = _sink_jobs(keys, inputs, layout, ranges, workers)
-    return aggregate_finish(sinks, layout)
+    return aggregate_finish(sinks, layout, ordered=ordered)
 
 
 def aggregate_top_rows(
@@ -531,7 +533,7 @@ def aggregate_top_rows(
     )
     layout.state_words = layout.slots[0].state_size()
     var sinks = _sink_jobs(keys, [value.copy()], layout, ranges, workers)
-    var result = aggregate_finish(sinks, layout)
+    var result = aggregate_finish(sinks, layout, ordered=False)
     var rows = List[Int]()
     swap(rows, result.top_rows)
     return rows^

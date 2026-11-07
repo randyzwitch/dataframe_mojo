@@ -450,6 +450,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def group_by(
         self, keys: List[String], *, maintain_order: Bool = False
     ) -> LazyGroupBy:
+        """Group by one or more columns, as DataFrame.group_by: the group
+        output order is unspecified (it may differ between runs and thread
+        counts) unless maintain_order=True, which guarantees
+        first-occurrence order."""
         return LazyGroupBy(
             self.copy(), keys.copy(), maintain_order, List[Expr]()
         )
