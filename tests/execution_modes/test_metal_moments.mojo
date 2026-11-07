@@ -495,3 +495,56 @@ def test_metal_moment_square_words_cover_every_float32_exponent() raises:
         UInt32(0xFF800001),
     ]:
         assert_true(float32_square_words(raw)[4])
+
+
+def test_metal_moment_integer_rounding_and_square_words() raises:
+    from dataframe_metal.accelerator.gpu.moment_squares import (
+        integer_moment_magnitude,
+        integer_square_words,
+    )
+
+    var cases = List[Int64](
+        [
+            Int64.MIN,
+            Int64.MIN + 1,
+            Int64.MAX,
+            Int64.MAX - 1,
+            -9007199254740995,
+            -9007199254740993,
+            -9007199254740991,
+            -2147483648,
+            -1,
+            0,
+            1,
+            2147483647,
+            9007199254740991,
+            9007199254740993,
+            9007199254740995,
+        ]
+    )
+    for value in cases:
+        var raw = bitcast[DType.uint64](value)
+        var magnitude = UInt64(0) - raw if value < 0 else raw
+        var actual = integer_moment_magnitude(value)
+        var expected = Float64(magnitude).cast[DType.uint64]()
+        assert_equal(actual[0], expected)
+        assert_equal(actual[1], value < 0)
+    var state = UInt64(0x9E3779B97F4A7C15)
+    for i in range(2048):
+        state = state * UInt64(6364136223846793005) + 1
+        var value = UInt64.MAX if i == 0 else (UInt64(0) if i == 1 else state)
+        var actual = integer_square_words(value)
+        var reconstructed = (
+            UInt128(actual[0])
+            + (UInt128(actual[1]) << 32)
+            + (UInt128(actual[2]) << 64)
+            + (UInt128(actual[3]) << 96)
+        )
+        assert_equal(reconstructed, UInt128(value) * UInt128(value))
+        # Also compare randomized signed casts with the CPU's conversion.
+        var signed = bitcast[DType.int64](state)
+        var magnitude = UInt64(0) - state if signed < 0 else state
+        assert_equal(
+            integer_moment_magnitude(signed)[0],
+            Float64(magnitude).cast[DType.uint64](),
+        )
