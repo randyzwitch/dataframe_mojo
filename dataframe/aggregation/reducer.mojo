@@ -8,7 +8,7 @@ median/quantile keep every valid value of a group.
 """
 from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
-from std.memory import bitcast
+from std.memory import ArcPointer, bitcast
 from dataframe.kernels.approx_distinct import CardinalitySketch, update_sketches
 from dataframe.storage.boolean import BoolColumn, true_count
 from dataframe.storage.column import Column, _validity_at
@@ -37,6 +37,7 @@ from dataframe.expr import (
     LEN,
     ARG_MIN,
     ARG_MAX,
+    IMPLODE,
     MODE,
     SKEW,
     KURTOSIS,
@@ -1016,6 +1017,9 @@ struct Reducer(Movable):
     # (DuckDB's FinalizeStates): `finish` returns it, and no state above
     # is held.
     var finished: Optional[Series]
+    # An implode's input field metadata (Arrow application metadata), which
+    # its lists' child keeps, as the evaluator's implode keeps it.
+    var metadata: Optional[ArcPointer[List[UInt8]]]
     var sketches: List[CardinalitySketch]
 
     def __init__(
@@ -1172,6 +1176,7 @@ struct Reducer(Movable):
             length=n if op == PRODUCT and not exact else 0, fill=1
         )
         self.finished = None
+        self.metadata = None
         self.sketches = List[CardinalitySketch]()
         if op == APPROX_N_UNIQUE:
             for _ in range(n):
@@ -1993,12 +1998,12 @@ struct Reducer(Movable):
                         self.mode_decimals[g][item.key] = (
                             self.mode_decimals[g].get(item.key, 0) + item.value
                         )
-                elif len(self.mode_ints) > 0:
+                elif self._mode_ints():
                     for item in other.mode_ints[source].items():
                         self.mode_ints[g][item.key] = (
                             self.mode_ints[g].get(item.key, 0) + item.value
                         )
-                elif len(self.mode_floats) > 0:
+                elif self._mode_floats():
                     for item in other.mode_floats[source].items():
                         var seen = self.mode_floats[g].get(item.key, 0)
                         if seen == 0:
@@ -2163,6 +2168,17 @@ struct Reducer(Movable):
     def finish(self) raises -> Series:
         if self.finished:
             return self.finished.value().copy()
+        if self.op == IMPLODE:
+            # No rows reached the groups' lists (the aggregate table fills
+            # `finished` for groups that have rows): each list is empty.
+            var child = Series.full_null("item", self.logical, 0)
+            child._field_metadata = self.metadata
+            return Series(
+                "",
+                ListColumn(
+                    List[Int64](length=self.group_count + 1, fill=0), child^
+                ),
+            )
         var op = self.op
         if op == APPROX_N_UNIQUE:
             var counts = List[UInt32](capacity=self.group_count)
@@ -2212,6 +2228,15 @@ struct Reducer(Movable):
             return _from_canonical(result, self.input)
         return result^
 
+    def _mode_ints(self) -> Bool:
+        """Whether a mode or value count keeps its values as integers (its
+        state's type, so a reducer of no groups finishes in it too)."""
+        return self.dtype == DataType.INT64 or self.input == DataType.BOOL
+
+    def _mode_floats(self) -> Bool:
+        """Whether a mode or value count keeps its values as floats."""
+        return self.dtype == DataType.FLOAT64
+
     def _finish_mode(self) raises -> Series:
         """Each group's most frequent values as a list: ascending, NaN above
         numbers, null last. A group with no rows has an empty list."""
@@ -2242,7 +2267,7 @@ struct Reducer(Movable):
                     total = len(values)
                 offsets.append(Int64(total))
             child = self._decimal_distribution(values^, valid^)
-        elif len(self.mode_ints) > 0:
+        elif self._mode_ints():
             var values = List[Int64]()
             var valid = List[Bool]()
             for g in range(n):
@@ -2272,7 +2297,7 @@ struct Reducer(Movable):
                 child = _from_canonical(
                     Series("", Column[Int64](values^, valid)), self.input
                 )
-        elif len(self.mode_floats) > 0:
+        elif self._mode_floats():
             var values = List[Float64]()
             var valid = List[Bool]()
             for g in range(n):
@@ -2363,7 +2388,7 @@ struct Reducer(Movable):
                 sort(keys_d)
                 for key in keys_d:
                     key_counts.append(self.mode_decimals[g][key])
-            elif len(self.mode_ints) > 0:
+            elif self._mode_ints():
                 var ordered = List[Int64]()
                 for key in self.mode_ints[g].keys():
                     ordered.append(key)
@@ -2371,7 +2396,7 @@ struct Reducer(Movable):
                 for key in ordered:
                     keys_i.append(key)
                     key_counts.append(self.mode_ints[g][key])
-            elif len(self.mode_floats) > 0:
+            elif self._mode_floats():
                 var numbers = List[Float64]()
                 var nans = List[Float64]()
                 var lookup = Dict[UInt64, Int64]()
@@ -2446,7 +2471,7 @@ struct Reducer(Movable):
         var values: Series
         if self.dtype.is_decimal():
             values = self._decimal_distribution(values_d^, valid.copy())
-        elif len(self.mode_ints) > 0:
+        elif self._mode_ints():
             if self.input == DataType.BOOL:
                 var flags = List[Bool](capacity=len(values_i))
                 for value in values_i:
@@ -2457,7 +2482,7 @@ struct Reducer(Movable):
                     Series("", Column[Int64](values_i^, valid.copy())),
                     self.input,
                 )
-        elif len(self.mode_floats) > 0:
+        elif self._mode_floats():
             values = _from_canonical(
                 Series("", Column[Float64](values_f^, valid.copy())),
                 self.input,
