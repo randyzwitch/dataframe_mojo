@@ -1309,7 +1309,10 @@ struct AggregateSink(Movable):
         # share among them.
         self.memory = _worker_memory(workers) // max(1, shares)
         self.capacity = _SINK_CAPACITY
-        self.entries = huge_list(self.capacity, UInt64(0))
+        # Made at the first probe, as DuckDB makes a local table at its
+        # first `Sink` (`if (!lstate.ht)`): a worker that sinks nothing
+        # here (every reduction a distinct count) never clears one.
+        self.entries = List[UInt64]()
         self.live = 0
         self.made = 0
         self.sunk = 0
@@ -1348,6 +1351,16 @@ struct AggregateSink(Movable):
                         distinct=False,
                     )
                 )
+
+    @always_inline
+    def _ensure_table(mut self):
+        """The table's entries, made at the first probe."""
+        if len(self.entries) == 0:
+            self._make_table()
+
+    @no_inline
+    def _make_table(mut self):
+        self.entries = huge_list(self.capacity, UInt64(0))
 
     def _full(mut self, count: Int):
         """Handle a table without room for `count` more groups: grow it
@@ -1441,11 +1454,20 @@ struct AggregateSink(Movable):
         probed (`FindOrCreateGroups`). DuckDB's dictionary path also takes
         a dictionary without an id when it has fewer than half the chunk's
         rows; here every dictionary-coded key comes from a stored
-        dictionary (an id), so that case does not arise."""
+        dictionary (an id), so that case does not arise.
+
+        When every reduction is a distinct count, only the distinct tables
+        take the chunk (`CanSkipRegularSink`): the main table's groups and
+        counts all come from their finished groups."""
         if len(keys) == 0:
             raise Error("aggregate table: no keys")
         if count > _BATCH:
             raise Error("aggregate table: a chunk is at most a batch")
+        if len(self.distinct_slots) > 0 and len(self.distinct_slots) == len(
+            self.slots
+        ):
+            self._sink_distinct(keys, inputs, hold, first, count)
+            return
         for column in hold:
             self.held.append(column.copy())
         var constant = count > 1
@@ -1475,8 +1497,18 @@ struct AggregateSink(Movable):
             self.only,
         )
         self.sunk += count
-        # Each distinct count's (keys, value) pairs into its own table, the
-        # value's vector read as a key where it is.
+        self._sink_distinct(keys, inputs, hold, first, count)
+
+    def _sink_distinct(
+        mut self,
+        keys: List[KeyVector],
+        inputs: List[UnifiedVectorFormat],
+        hold: List[Series],
+        first: Int,
+        count: Int,
+    ) raises:
+        """Each distinct count's (keys, value) pairs into its own table,
+        the value's vector read as a key where it is (`SinkDistinct`)."""
         for d in range(len(self.distinct_slots)):
             var pairs = keys.copy()
             pairs.append(KeyVector.of(inputs[self.distinct_slots[d]]))
@@ -1555,6 +1587,7 @@ struct AggregateSink(Movable):
         entry; every row then takes its entry's group."""
         # Room first for the chunk's rows, so no table clearing within
         # the probe below moves the groups already found.
+        self._ensure_table()
         if 3 * (self.live + count) >= 2 * self.capacity:
             self._full(count)
         self.dictionaries[0].use(key.dictionary)
@@ -1634,6 +1667,7 @@ struct AggregateSink(Movable):
         var null_ptr = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls)
         var group_at = Pointer[Int, MutAnyOrigin](unsafe_from_address=groups)
         var row_at = Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)
+        self._ensure_table()
         if 3 * (self.live + count) >= 2 * self.capacity:
             self._full(count)
         self.cycle += count
@@ -1806,9 +1840,13 @@ struct AggregateSink(Movable):
         `len(widths) - 1` columns, each `widths` words; the value the last)
         and hashed as `_hash_column` hashes the same values, so the groups
         meet the workers' rows of the same keys at the finish. A group whose
-        value is null adds nothing unless `nulls_count`. DuckDB scans the
-        distinct table a vector at a time and sinks it into the main table
-        (`HashAggregateDistinctFinalizeTask`)."""
+        value is null makes its group but adds nothing unless
+        `nulls_count`, so a group of only nulls counts 0 even when the
+        workers sank no rows into the main table (`CanSkipRegularSink`);
+        each group's first row is its pair's, so the earliest pair's row is
+        the group's. DuckDB scans the distinct table a vector at a time and
+        sinks it into the main table (`HashAggregateDistinctFinalizeTask`).
+        """
         var keys = len(widths) - 1
         var width = len(self.addressed)
         var word_ptrs = List[Int](capacity=width)
@@ -1819,12 +1857,18 @@ struct AggregateSink(Movable):
         var group_at = self.groups.unsafe_ptr()
         var value_null = UInt64(1) << UInt64(keys)
         var base = 8 * (self.parts.states_at + self.slots[self.only].offset)
+        var firsts = List[Int](length=_BATCH, fill=0)
+        var adds = List[UInt64](length=_BATCH, fill=0)
+        var first_at = firsts.unsafe_ptr()
+        var add_at = adds.unsafe_ptr()
         var count = 0
         for g in range(groups.count()):
             var address = groups.at(g)
             var row = _words_at(address)
-            if not nulls_count and row[unsafe_offset=1] & value_null != 0:
-                continue
+            add_at[unsafe_offset=count] = UInt64(
+                1
+            ) if nulls_count or row[unsafe_offset=1] & value_null == 0 else 0
+            first_at[unsafe_offset=count] = Int(row[unsafe_offset=2])
             var hash = UInt64(0)
             var w = 0
             for c in range(keys):
@@ -1864,29 +1908,37 @@ struct AggregateSink(Movable):
             nulls[unsafe_offset=count] = row[unsafe_offset=1] & (value_null - 1)
             count += 1
             if count == _BATCH:
-                self._count_batch(count, word_ptrs, base)
+                self._count_batch(count, word_ptrs, base, firsts, adds)
                 count = 0
         if count > 0:
-            self._count_batch(count, word_ptrs, base)
+            self._count_batch(count, word_ptrs, base, firsts, adds)
 
     def _count_batch(
-        mut self, count: Int, word_ptrs: List[Int], base: Int
+        mut self,
+        count: Int,
+        word_ptrs: List[Int],
+        base: Int,
+        firsts: List[Int],
+        adds: List[UInt64],
     ) raises:
         """A batch of keys in the batch buffers into their groups (made
-        when new, their first rows past every input row's), each adding one
+        when new, with the first rows `firsts`), each adding its `adds`
         to the count at byte `base` of its group's row."""
         var group_at = self.groups.unsafe_ptr()
-        self._insert[False](
+        self._insert[True](
             count,
-            1 << 50,
+            0,
             Int(self.hashes.unsafe_ptr()),
             Int(self.nulls.unsafe_ptr()),
             word_ptrs,
             Int(group_at),
-            0,
+            Int(firsts.unsafe_ptr()),
         )
+        var add_at = adds.unsafe_ptr()
         for k in range(count):
-            _words_at(group_at[unsafe_offset=k] + base)[] += 1
+            _words_at(group_at[unsafe_offset=k] + base)[] += add_at[
+                unsafe_offset=k
+            ]
         self.sunk += count
 
     def _merge_group_rows(
@@ -2396,11 +2448,12 @@ struct _CombineJob(Job):
 
 
 struct _DistinctJob(Job):
-    """One finish job's merged (keys, value) groups of a distinct table
-    sunk into a new sink of the main table, each adding one to its
-    group's distinct count (DuckDB's `HashAggregateDistinctFinalizeTask`)."""
+    """Finish runs' merged (keys, value) groups of a distinct table sunk
+    into one new sink of the main table, each adding one to its group's
+    distinct count (DuckDB's `HashAggregateDistinctFinalizeTask`, whose
+    local sink takes every partition the task scans)."""
 
-    var groups: Int
+    var groups: List[Int]
     var widths: List[Int]
     var slot: Int
     var nulls: Bool
@@ -2410,14 +2463,14 @@ struct _DistinctJob(Job):
 
     def __init__(
         out self,
-        groups: Int,
+        groups: List[Int],
         widths: List[Int],
         slot: Int,
         nulls: Bool,
         layout: AggregateLayout,
         workers: Int,
     ):
-        self.groups = groups
+        self.groups = groups.copy()
         self.widths = widths.copy()
         self.slot = slot
         self.nulls = nulls
@@ -2428,11 +2481,12 @@ struct _DistinctJob(Job):
     def run(mut self) raises:
         var sink = AggregateSink(self.layout, self.workers, distinct=False)
         sink.only = self.slot
-        sink.count_group_rows(
-            Pointer[_Groups, MutAnyOrigin](unsafe_from_address=self.groups)[],
-            self.widths,
-            self.nulls,
-        )
+        for groups in self.groups:
+            sink.count_group_rows(
+                Pointer[_Groups, MutAnyOrigin](unsafe_from_address=groups)[],
+                self.widths,
+                self.nulls,
+            )
         self.sinks.append(sink^)
 
 
@@ -2441,9 +2495,10 @@ def _finalize_distinct(
 ) raises:
     """DuckDB's `FinalizeDistinct`: each distinct count's tables (one per
     worker) merged into their (keys, value) groups, whose rows are sunk
-    into new sinks of the main table, one per finish job, on their own
-    threads; those sinks join `sinks`, and the main finish merges their
-    counts into the groups. The long strings their keys point at stay in
+    into new sinks of the main table, on their own threads: as many as
+    there are runs, at most one per worker (`CreateGlobalSources` and
+    `MaxThreads`), each taking every run its task scans. Those sinks join
+    `sinks`, and the main finish merges their counts into the groups. The long strings their keys point at stay in
     the tables' held columns, which the new sinks hold too."""
     # The workers' sinks; the new sinks join the list after them.
     var workers = len(sinks)
@@ -2456,19 +2511,18 @@ def _finalize_distinct(
         var pairs = aggregate_finish(tables, table_layout, rows_only=True)
         var widths = layout_widths(table_layout)
         var nulls = layout.templates[slot].integer == 0
-        var jobs = List[_DistinctJob]()
+        var runs = List[Int]()
         for p in range(len(pairs.rows)):
-            if pairs.rows[p].count() == 0:
-                continue
+            if pairs.rows[p].count() > 0:
+                runs.append(Int(Pointer(to=pairs.rows[p])))
+        var tasks = min(len(runs), workers)
+        var jobs = List[_DistinctJob](capacity=tasks)
+        for t in range(tasks):
+            var share = List[Int]()
+            for r in range(t, len(runs), tasks):
+                share.append(runs[r])
             jobs.append(
-                _DistinctJob(
-                    Int(Pointer(to=pairs.rows[p])),
-                    widths,
-                    slot,
-                    nulls,
-                    layout,
-                    workers,
-                )
+                _DistinctJob(share, widths, slot, nulls, layout, workers)
             )
         run_jobs(jobs)
         var held = List[Series]()
