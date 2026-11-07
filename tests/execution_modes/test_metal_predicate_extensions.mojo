@@ -464,3 +464,67 @@ def test_metal_column_comparisons_boundaries_masks_chunks_and_ieee() raises:
                 var public = query.collect(accelerator=runtime)
                 assert_equal(public.item(0, "s").int32(), sum)
                 assert_equal(public.item(0, "n").int64(), count)
+
+
+def test_metal_shared_predicate_compiler_truth_and_input_binding() raises:
+    from dataframe_metal.predicate_program import (
+        compile_predicate,
+        bind_predicate_inputs,
+    )
+
+    var frame = DataFrame(
+        [
+            Series("v", Column[Float32]([1, 2])),
+            Series("p", Column[Int32]([0, 1])),
+            Series("q", Column[Int64]([1, 2])),
+            Series("r", Column[Int64]([2, 2])),
+        ]
+    )
+    var expression = ((col("p") > 0) & ~(col("q") == col("r"))) | col(
+        "v"
+    ).is_null()
+    var compiled = compile_predicate(expression, frame)
+    assert_true(Bool(compiled))
+    var program = compiled.take()
+    assert_equal(len(program.clauses), 3)
+    assert_equal(len(program.slots), 0)
+    for mask in range(8):
+        var expected = (Bool(mask & 1) and Bool(mask & 2)) or Bool(mask & 4)
+        assert_equal(
+            Bool(program.truth[0] & (UInt32(1) << UInt32(mask))), expected
+        )
+    var names = List[String](["v"])
+    assert_true(bind_predicate_inputs(program, names))
+    assert_equal(names, List[String](["v", "p", "q", "r"]))
+    assert_equal(program.slots, List[Int]([1, 2, 0]))
+    assert_equal(program.clauses[1].other_input, 3)
+    # Binding can be repeated after another aggregate installs its inputs.
+    names = List[String](["r", "q", "p", "v"])
+    assert_true(bind_predicate_inputs(program, names))
+    assert_equal(program.slots, List[Int]([2, 1, 3]))
+    assert_equal(program.clauses[1].other_input, 0)
+
+
+def test_metal_shared_predicate_binding_declines_without_partial_mutation() raises:
+    from dataframe_metal.predicate_program import (
+        compile_predicate,
+        bind_predicate_inputs,
+    )
+
+    var frame = DataFrame(
+        [
+            Series("a", Column[Int32]([1])),
+            Series("b", Column[Int32]([2])),
+            Series("s", Column[String](["x"])),
+        ]
+    )
+    var compiled = compile_predicate(col("a") > col("b"), frame)
+    assert_true(Bool(compiled))
+    var program = compiled.take()
+    var names = List[String](["s"])
+    assert_false(bind_predicate_inputs(program, names, limit=2))
+    assert_equal(names, List[String](["s"]))
+    assert_equal(len(program.slots), 0)
+    assert_equal(program.clauses[0].other_input, -1)
+    assert_false(Bool(compile_predicate(col("s") == "x", frame)))
+    assert_false(Bool(compile_predicate(col("a") > 0, frame, root=99)))

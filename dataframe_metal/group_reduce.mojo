@@ -1,6 +1,7 @@
 """Host ownership and submission for bounded GPU hash aggregation."""
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
+from .composition_plan import has_conditions, simple_conditional_trees
 from .group_plan import GroupedComposition, plan_grouped
 from .group_metadata import group_metadata
 from .group_finish import finish_grouped
@@ -35,7 +36,11 @@ struct GroupedPartials(Movable):
 
 
 def _scan_grouped[
-    arity: Int, floats: Int, narrow: Int
+    arity: Int,
+    floats: Int,
+    narrow: Int,
+    cases: Bool = False,
+    simple_cases: Bool = False,
 ](
     plan: GroupedComposition,
     frame: DataFrame,
@@ -143,7 +148,9 @@ def _scan_grouped[
                 grid_dim=(state_words + 255) // 256,
                 block_dim=256,
             )
-            ctx.enqueue_function[grouped_partials[arity, floats, narrow]](
+            ctx.enqueue_function[
+                grouped_partials[arity, floats, narrow, cases, simple_cases]
+            ](
                 inputs[0].values,
                 inputs[1].values,
                 inputs[2].values,
@@ -176,7 +183,9 @@ def _scan_grouped[
             scope.record_launches(2)
             comptime if floats + narrow < arity:
                 ctx.enqueue_function[
-                    resolve_int64_extrema[arity, floats, narrow]
+                    resolve_int64_extrema[
+                        arity, floats, narrow, cases, simple_cases
+                    ]
                 ](
                     inputs[0].values,
                     inputs[1].values,
@@ -194,6 +203,8 @@ def _scan_grouped[
                     inputs[5].bits,
                     inputs[6].bits,
                     inputs[7].bits,
+                    predicate.values,
+                    predicate.bits,
                     metadata,
                     states,
                     extrema,
@@ -338,6 +349,14 @@ def _dispatch_grouped(
                     and floats == nf
                     and narrow == ni
                 ):
+                    if simple_conditional_trees(plan.selected.bundle):
+                        return _scan_grouped[arity, nf, ni, True, True](
+                            plan, frame, scope, zero_copy, timings
+                        )
+                    if has_conditions(plan.selected.bundle):
+                        return _scan_grouped[arity, nf, ni, True](
+                            plan, frame, scope, zero_copy, timings
+                        )
                     return _scan_grouped[arity, nf, ni](
                         plan, frame, scope, zero_copy, timings
                     )
