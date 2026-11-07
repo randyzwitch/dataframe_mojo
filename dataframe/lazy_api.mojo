@@ -167,7 +167,6 @@ from dataframe.planning.explain import (
 )
 from dataframe.planning.graph import (
     plan_aggregated,
-    plan_available,
     plan_canonical_slot,
     GraphJoin,
     plan_collect_graph,
@@ -188,23 +187,19 @@ from dataframe.planning.graph import (
     plan_input_name,
     plan_keeps_column,
     plan_key_source,
-    plan_known_height,
     plan_largest_scan,
     plan_live_parents,
-    plan_measurable,
     plan_merge_inputs,
     plan_node_hash,
     plan_order_free_above,
     plan_parents,
     plan_projection_visits,
     plan_provider_scan,
-    plan_relation_estimate,
     plan_remember_schemas,
     plan_reorder,
     plan_repeats_a_scan,
     plan_same_node,
     plan_share_copy_schemas,
-    plan_spine_distinct,
     plan_spine_frame,
     plan_spine_rows,
     plan_subplan_classes,
@@ -249,12 +244,13 @@ from dataframe.planning.model import (
 from dataframe.planning.physical import (
     plan_cost_order_joins,
     plan_joins_below,
-    plan_order_chain,
     plan_order_joins,
-    plan_probe_largest_input,
-    plan_probe_largest_inputs,
-    plan_restore_measured_chain,
-    plan_selectivity,
+)
+from dataframe.planning.statistics import (
+    DistinctCount,
+    PlanStatistics,
+    plan_cardinality,
+    plan_distinct,
 )
 from dataframe.planning.cost.aggregation import (
     plan_row_number_shape,
@@ -2095,9 +2091,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _ends_in_breaker(self, index: Int) -> Bool:
         return plan_ends_in_breaker(self._plan, index=index)
 
-    def _known_height(self, index: Int) -> Int:
-        return plan_known_height(self._plan, index=index)
-
     def _stream_execute(
         self, index: Int, batch_size: Int
     ) raises -> Optional[DataFrame]:
@@ -2302,28 +2295,16 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             self._plan, root=root, streaming=streaming, batch_size=batch_size
         )
 
-    def _probe_largest_inputs(
-        mut self, root: Int, streaming: Bool, batch_size: Int
-    ) raises -> Bool:
-        return plan_probe_largest_inputs(
-            self._plan, root=root, streaming=streaming, batch_size=batch_size
-        )
+    def _estimate(self, index: Int) raises -> Int:
+        var stats = PlanStatistics()
+        return plan_cardinality(self._plan, stats, index)
 
-    def _probe_largest_input(
-        mut self, top: Int, streaming: Bool, batch_size: Int
-    ) raises -> Bool:
-        return plan_probe_largest_input(
-            self._plan, top=top, streaming=streaming, batch_size=batch_size
-        )
-
-    def _relation_estimate(self, index: Int) raises -> Int:
-        return plan_relation_estimate(self._plan, index=index)
+    def _distinct(self, index: Int, name: String) raises -> DistinctCount:
+        var stats = PlanStatistics()
+        return plan_distinct(self._plan, stats, index, name)
 
     def _spine_frame(self, index: Int) -> Optional[DataFrame]:
         return plan_spine_frame(self._plan, index=index)
-
-    def _spine_distinct(self, index: Int, name: String) raises -> Int:
-        return plan_spine_distinct(self._plan, index=index, name=name)
 
     def _aggregated(self, index: Int) -> Bool:
         return plan_aggregated(self._plan, index=index)
@@ -2331,43 +2312,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _spine_rows(self, index: Int) -> Int:
         return plan_spine_rows(self._plan, index=index)
 
-    def _measurable(self, index: Int) -> Bool:
-        return plan_measurable(self._plan, index=index)
-
-    def _selectivity(
-        mut self, index: Int, streaming: Bool, batch_size: Int
-    ) raises -> Float64:
-        return plan_selectivity(
-            self._plan, index=index, streaming=streaming, batch_size=batch_size
-        )
-
-    def _order_chain(
-        mut self, top: Int, streaming: Bool, batch_size: Int
-    ) raises -> Bool:
-        return plan_order_chain(
-            self._plan, top=top, streaming=streaming, batch_size=batch_size
-        )
-
-    def _restore_measured_chain(mut self, var saved: List[PlanNode]):
-        plan_restore_measured_chain(self._plan, saved^)
-
     def _compact_scan_slots(mut self):
         plan_compact_scan_slots(self._plan)
-
-    def _available(
-        self,
-        names: List[String],
-        provider: Dict[String, Int],
-        owner: List[Int],
-        placed: List[Bool],
-    ) raises -> Bool:
-        return plan_available(
-            self._plan,
-            names=names,
-            provider=provider,
-            owner=owner,
-            placed=placed,
-        )
 
     def _remember_schemas(mut self) -> Bool:
         return plan_remember_schemas(self._plan)

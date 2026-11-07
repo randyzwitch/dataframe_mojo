@@ -79,7 +79,6 @@ from std.collections import (
     Dict,
     Optional,
 )
-from std.math import exp
 from std.memory import (
     ArcPointer,
 )
@@ -244,31 +243,6 @@ def plan_ends_in_breaker(self: QueryContext, index: Int) -> Bool:
             continue
         return False
     return False
-
-
-def plan_known_height(self: QueryContext, index: Int) -> Int:
-    """Exact cheap cardinalities only; -1 means execution is required."""
-    ref node = self._nodes[index]
-    if node.kind == SCAN_FRAME:
-        return self._frames[node.source_slot()].height()
-    if (
-        node.kind == DROP
-        or node.kind == UNNEST
-        or (
-            (node.kind == SELECT or node.kind == WITH_COLUMNS)
-            and _stream_rows(node)
-        )
-    ):
-        return plan_known_height(self, node.left)
-    if node.kind == SLICE and node.slice_offset() >= 0:
-        var height = plan_known_height(self, node.left)
-        if height >= 0:
-            height = max(0, height - node.slice_offset())
-            return (
-                min(height, node.slice_length()) if node.slice_length()
-                >= 0 else height
-            )
-    return -1
 
 
 def plan_cover(self: QueryContext, index: Int, mut covered: List[Bool]):
@@ -1125,73 +1099,6 @@ def plan_collect_graph(
     plan_collect_graph(self, node.left, relations, pairs, filters, joins)
 
 
-def plan_relation_estimate(self: QueryContext, index: Int) raises -> Int:
-    """Rows a join-graph relation yields, estimated without running it:
-    `_estimated_rows`, else, for a join the order cannot reorder,
-    combine its inputs' estimates: a semi or anti join keeps its left
-    input's rows; other joins use the larger input's estimate. A UNION
-    ALL yields its inputs' rows together, as DuckDB's estimate of a set
-    operation (`RelationStatisticsHelper`). -1 when an input has no
-    estimate."""
-    var known = plan_estimated_rows(self, index)
-    if known >= 0:
-        return known
-    ref node = self._nodes[index]
-    if node.kind == CONCAT:
-        var left = plan_relation_estimate(self, node.left)
-        var right = plan_relation_estimate(self, node.right)
-        if left < 0 or right < 0:
-            return -1
-        return left + right
-    if node.kind == DROP or (
-        (node.kind == SELECT or node.kind == WITH_COLUMNS)
-        and _stream_rows(node)
-    ):
-        return plan_relation_estimate(self, node.left)
-    if node.kind == AGG:
-        return plan_aggregate_estimate(self, index)
-    if node.kind != JOIN or node.how == JOIN_INNER or node.how == JOIN_CROSS:
-        return -1
-    var left = plan_relation_estimate(self, node.left)
-    if left < 0:
-        return -1
-    if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
-        return left
-    var right = plan_relation_estimate(self, node.right)
-    if right < 0:
-        return -1
-    return max(left, right)
-
-
-def plan_aggregate_estimate(self: QueryContext, index: Int) raises -> Int:
-    """Groups aggregate node `index` yields, estimated without running it,
-    as DuckDB estimates an aggregate relation (`ExtractAggregationStats`,
-    `EstimateDistinctCardinality`): from its input's estimate and its
-    group keys' distinct counts in the table under it. The keys' counts
-    multiply, each key after the first taking 5% off for correlation,
-    and so many distinct values drawn from that many input rows give
-    product * (1 - e^(-rows / product)) groups, at most the input's
-    rows. One row with no keys; -1 when the input has no estimate or a
-    key has no distinct count."""
-    ref node = self._nodes[index]
-    var rows = plan_relation_estimate(self, node.left)
-    if rows < 0:
-        return -1
-    if len(node.names) == 0:
-        return 1
-    var product = 1.0
-    for key in node.names:
-        var count = plan_spine_distinct(self, node.left, key)
-        if count < 0:
-            return -1
-        product *= Float64(max(count, 1))
-    product *= 0.95 ** Float64(len(node.names) - 1)
-    var multiplier = 1.0 - exp(-Float64(rows) / product)
-    var estimate = Float64(rows) if multiplier == 0.0 else product * multiplier
-    var result = Int(min(estimate, Float64(rows)))
-    return max(result, 1) if rows > 0 else 0
-
-
 def plan_spine_source(
     self: QueryContext, index: Int, name: String
 ) raises -> Optional[Tuple[Int, String]]:
@@ -1236,28 +1143,6 @@ def plan_spine_source(
             continue
         return None
     return None
-
-
-def plan_spine_distinct(
-    self: QueryContext, index: Int, name: String
-) raises -> Int:
-    """Column `name`'s distinct count from the statistics of the table
-    under `index`, through renames (`plan_spine_source`), as DuckDB's
-    `ExtractProjectionStats` carries a column's distinct count through a
-    projection by its binding. -1 for a computed column, no table under
-    it, or a table without statistics."""
-    var source = plan_spine_source(self, index, name)
-    if not source:
-        return -1
-    var found = source.value()
-    var count = self._frames[found[0]]._distinct_count(found[1])
-    if count < 0 and found[0] in self._origin_tables:
-        ref names = self._origin_names[found[0]]
-        if found[1] in names:
-            return self._origin_tables[found[0]]._distinct_count(
-                names[found[1]]
-            )
-    return count
 
 
 def plan_spine_frame(self: QueryContext, index: Int) -> Optional[DataFrame]:
@@ -1314,45 +1199,6 @@ def plan_aggregated(self: QueryContext, index: Int) -> Bool:
     return False
 
 
-def plan_aggregate_input_rows(self: QueryContext, index: Int) -> Int:
-    """Rows of the table under the aggregation at or under node `index`
-    (through the steps `plan_aggregated` passes), along its input's
-    spine (`plan_spine_rows`) and the left inputs of semi and anti
-    joins, which keep at most their left rows; -1 when there is none or
-    it is unknown. TPC-DS q8's listed zip codes are a distinct over a
-    semi join of filtered addresses."""
-    var cursor = index
-    while cursor >= 0:
-        ref node = self._nodes[cursor]
-        if node.kind == AGG:
-            var below = node.left
-            while below >= 0:
-                ref step = self._nodes[below]
-                if step.kind == JOIN and (
-                    step.how == JOIN_SEMI or step.how == JOIN_ANTI
-                ):
-                    below = step.left
-                elif step.kind == DROP or (
-                    (step.kind == SELECT or step.kind == WITH_COLUMNS)
-                    and _stream_rows(step)
-                ):
-                    below = step.left
-                else:
-                    break
-            return plan_spine_rows(self, below)
-        if not (
-            node.kind == FILTER
-            or node.kind == DROP
-            or (
-                (node.kind == SELECT or node.kind == WITH_COLUMNS)
-                and _stream_rows(node)
-            )
-        ):
-            return -1
-        cursor = node.left
-    return -1
-
-
 def plan_spine_rows(self: QueryContext, index: Int) -> Int:
     """Rows of the table under `index` along steps that keep, drop or
     join rows (a filter, a projection, an inner join's left input);
@@ -1378,16 +1224,6 @@ def plan_spine_rows(self: QueryContext, index: Int) -> Int:
             continue
         return -1
     return -1
-
-
-def plan_measurable(self: QueryContext, index: Int) -> Bool:
-    """Whether `_selectivity` measures node `index`: a known table
-    narrowed by steps above it, or a shared subplan's result, which
-    knows the table it narrowed."""
-    ref node = self._nodes[index]
-    if node.kind == SCAN_FRAME:
-        return node.source_slot() in self._origin_rows
-    return plan_spine_rows(self, index) > 0
 
 
 def plan_compact_scan_slots(mut self: QueryContext):
@@ -1421,21 +1257,6 @@ def plan_compact_scan_slots(mut self: QueryContext):
     self._origin_rows = origins^
     self._origin_tables = tables^
     self._origin_names = names^
-
-
-def plan_available(
-    self: QueryContext,
-    names: List[String],
-    provider: Dict[String, Int],
-    owner: List[Int],
-    placed: List[Bool],
-) raises -> Bool:
-    """Whether every name comes from the base or a placed step."""
-    for name in names:
-        var p = provider[name]
-        if p >= 0 and not placed[owner[p]]:
-            return False
-    return True
 
 
 def plan_remember_schemas(mut self: QueryContext) -> Bool:
