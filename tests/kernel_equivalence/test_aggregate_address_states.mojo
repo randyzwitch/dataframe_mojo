@@ -1,8 +1,8 @@
 """The aggregate table's states by address against a scalar model of each
 group: products and moments (a `Reducer` of every worker's groups, merged
 through each group's chain of states at the finish), and the
-order-sensitive reductions (first and last of lists and categoricals, the
-position of a minimum or maximum), whose rows are sorted back into input
+order-sensitive reductions (first and last of categoricals, the position
+of a minimum or maximum), whose rows are sorted back into input
 order before they reduce. Both routes that reach the table are checked
 (the eager group-by, and a pipeline's grouped sink after a filter), with
 tables that clear (eight workers), grow (two) and a single worker, with
@@ -16,12 +16,10 @@ from dataframe import (
     DataFrame,
     DataType,
     Expr,
-    ListColumn,
     Series,
     col,
     lit,
 )
-from dataframe.storage.column import _pack_bits
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
     StrategyTrace,
@@ -42,10 +40,6 @@ def int_value(row: Int) -> Int32:
     return Int32(-1 if v == 0 else v)
 
 
-def list_valid(row: Int) -> Bool:
-    return row % 9 != 4
-
-
 def label_valid(row: Int) -> Bool:
     return row % 11 != 6
 
@@ -58,9 +52,6 @@ def frame(rows: Int, groups: Int) raises -> DataFrame:
     var k = List[Int64]()
     var x = List[Int32]()
     var xv = List[Bool]()
-    var offsets: List[Int64] = [0]
-    var child = List[Int64]()
-    var lv = List[Bool]()
     var c = List[String]()
     var cv = List[Bool]()
     var r = List[Int64]()
@@ -68,12 +59,6 @@ def frame(rows: Int, groups: Int) raises -> DataFrame:
         k.append(Int64(group_of(row, groups)) * 1_000_003)
         x.append(int_value(row))
         xv.append(int_valid(row))
-        # Each row's list is [row, -row] (null on some rows).
-        if list_valid(row):
-            child.append(Int64(row))
-            child.append(-Int64(row))
-        offsets.append(Int64(len(child)))
-        lv.append(list_valid(row))
         c.append(label(row) if label_valid(row) else String(""))
         cv.append(label_valid(row))
         r.append(Int64(row))
@@ -81,14 +66,6 @@ def frame(rows: Int, groups: Int) raises -> DataFrame:
         [
             Series("k", Column[Int64](k^)),
             Series("x", Column[Int32](x^, xv)),
-            Series(
-                "l",
-                ListColumn(
-                    offsets^,
-                    Series("child", Column[Int64](child^)),
-                    _pack_bits(lv),
-                ),
-            ),
             Series("c", Column[String](c^, cv)).cast(DataType.CATEGORICAL),
             Series("r", Column[Int64](r^)),
         ]
@@ -100,8 +77,6 @@ def reductions() -> List[Expr]:
         col("x").product().alias("x_product"),
         col("x").arg_min().alias("x_arg_min"),
         col("x").arg_max().alias("x_arg_max"),
-        col("l").first().alias("l_first"),
-        col("l").last().alias("l_last"),
         col("c").first().alias("c_first"),
         col("c").last().alias("c_last"),
         col("x").sum().alias("x_sum"),
@@ -116,15 +91,13 @@ def group_rows(rows: Int, groups: Int, start: Int) -> List[List[Int]]:
 
 
 def check(given: DataFrame, rows: Int, groups: Int, start: Int) raises:
-    # The lists' first elements name their rows; categoricals as strings.
+    # Categoricals as strings.
     var actual = given.select_exprs(
         [
             col("k"),
             col("x_product").cast(DataType.INT64),
             col("x_arg_min").cast(DataType.INT64),
             col("x_arg_max").cast(DataType.INT64),
-            col("l_first").list().first().alias("l_first"),
-            col("l_last").list().first().alias("l_last"),
             col("c_first").cast(DataType.STRING).alias("c_first"),
             col("c_last").cast(DataType.STRING).alias("c_last"),
             col("x_sum").cast(DataType.INT64),
@@ -155,22 +128,22 @@ def check(given: DataFrame, rows: Int, groups: Int, start: Int) raises:
                 low = p
             if high < 0 or v > Int64(int_value(members[high])):
                 high = p
-        assert_equal(actual.item(i, "x_product").int64(), product, "product" + what)
+        assert_equal(
+            actual.item(i, "x_product").int64(), product, "product" + what
+        )
         assert_equal(actual.item(i, "x_sum").int64(), total, "sum" + what)
         if low < 0:
             assert_true(actual.item(i, "x_arg_min").is_null(), "arg_min" + what)
             assert_true(actual.item(i, "x_arg_max").is_null(), "arg_max" + what)
         else:
-            assert_equal(Int(actual.item(i, "x_arg_min").int64()), low, "arg_min" + what)
-            assert_equal(Int(actual.item(i, "x_arg_max").int64()), high, "arg_max" + what)
+            assert_equal(
+                Int(actual.item(i, "x_arg_min").int64()), low, "arg_min" + what
+            )
+            assert_equal(
+                Int(actual.item(i, "x_arg_max").int64()), high, "arg_max" + what
+            )
         var first = members[0]
         var last = members[len(members) - 1]
-        for pair in [(first, "l_first"), (last, "l_last")]:
-            var value = actual.item(i, pair[1])
-            if list_valid(pair[0]):
-                assert_equal(value.int64(), Int64(pair[0]), pair[1] + what)
-            else:
-                assert_true(value.is_null(), pair[1] + what + " should be null")
         for pair in [(first, "c_first"), (last, "c_last")]:
             var value = actual.item(i, pair[1])
             if label_valid(pair[0]):

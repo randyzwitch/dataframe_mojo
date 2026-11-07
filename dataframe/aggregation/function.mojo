@@ -1780,9 +1780,10 @@ struct _OrderedBuffer(Movable):
         counting sort, so each group's rows stay in input order)."""
         if self.values or len(self.batches) == 0:
             return
-        self.values = Series._from_chunks(
-            self.batches
-        ).rechunk() if len(self.batches) > 1 else self.batches[0].copy()
+        self.values = (
+            Series._from_chunks(self.batches).rechunk() if len(self.batches)
+            > 1 else self.batches[0].copy()
+        )
         self.batches = List[Series]()
         self.starts = List[Int](length=self.groups + 1, fill=0)
         for o in self.ordinals:
@@ -1946,9 +1947,7 @@ def _replay_ordered(
     var owner_of = List[Int]()
     var positions = List[Int]()
     var targets = List[Int]()
-    _ordered_rows(
-        slot, groups, lo, hi, owners, owner_of, positions, targets
-    )
+    _ordered_rows(slot, groups, lo, hi, owners, owner_of, positions, targets)
     if len(positions) == 0:
         return
     reducer.update(
