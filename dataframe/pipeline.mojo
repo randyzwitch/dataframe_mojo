@@ -4106,6 +4106,12 @@ def _run_pipeline(
             for node in expression._nodes:
                 if is_reduction(node.op) and not reaggregable(node.op):
                     merges = False
+        # A state by address links the states it merges into a chain
+        # through their rows, which a derived set's merge would change in
+        # its source set's rows.
+        for slot in layout[0].slots:
+            if slot.by_address():
+                merges = False
         if merges:
             # A set's size counts its key columns' mask bits (a whole key
             # all 64), so a set holding another's keys is the larger.
