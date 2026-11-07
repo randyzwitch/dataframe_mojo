@@ -12,6 +12,7 @@ from dataframe.expr import VAR, STD, SUM, MEAN
 from .moment_plan import MomentPlan, plan_moments, moment_output_sources
 from .moment_reduce import moment_masks
 from .moment_finish import finish_variance
+from .moment_compatibility import require_cpu_moment_compatibility
 from .group_layout import GROUP_VALUE_WORDS, GROUP_MOMENT_WORDS
 from .group_partials import GroupedPartials
 from .group_general_reduce import general_partials
@@ -35,7 +36,10 @@ def _signed_bin(words: List[UInt32], at: Int) -> Int128:
 
 
 def finish_grouped_moments_math(
-    plan: MomentPlan, frame: DataFrame, partials: GroupedPartials
+    plan: MomentPlan,
+    frame: DataFrame,
+    partials: GroupedPartials,
+    cpu_compatible: Bool = False,
 ) raises -> DataFrame:
     if not plan.grouped:
         raise Error("Grouped moment finishing requires grouped states")
@@ -152,6 +156,14 @@ def finish_grouped_moments_math(
                     False,
                     non_finite,
                 )
+                if cpu_compatible and answer:
+                    require_cpu_moment_compatibility(
+                        sums,
+                        count,
+                        Int(output.parameter),
+                        -149 if floating else 0,
+                        answer.value(),
+                    )
                 values.append(answer.value() if answer else Float64(0))
                 validity.append(Bool(answer))
             if shared[i]:
@@ -202,7 +214,9 @@ def execute_grouped_moments_math(
             moment_mask=masks[0],
         )
         started = Int(perf_counter_ns())
-        var answer = finish_grouped_moments_math(plan, frame, partials)
+        var answer = finish_grouped_moments_math(
+            plan, frame, partials, cpu_compatible=True
+        )
         timings.finish_ns = Int(perf_counter_ns()) - started
         scope.mark_success()
         return (answer^, timings^)

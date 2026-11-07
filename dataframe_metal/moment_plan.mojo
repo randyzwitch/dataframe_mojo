@@ -125,8 +125,26 @@ def plan_moments(region: LazyFrame) raises -> Optional[MomentPlan]:
     return MomentPlan(selected^, grouped^, outputs^, needs^, offered^)
 
 
+def moment_execution_region(plan: MomentPlan) -> LazyFrame:
+    """Inline row expressions while retaining the logical moment operations.
+
+    Matching uses MEAN surrogates; execution must restore VAR/STD and each
+    output's ddof before offering the normalized region to the handoff.
+    """
+    var region = plan.matching_region.copy()
+    ref root = region._plan._nodes[len(region._plan._nodes) - 1]
+    for i in range(len(plan.outputs)):
+        ref output = plan.outputs[i]
+        if output.op == VAR or output.op == STD:
+            ref expression = root.exprs[i]
+            ref aggregate = expression._nodes[len(expression._nodes) - 1]
+            aggregate.op = output.op
+            aggregate.integer = output.parameter
+    return region^
+
+
 def moment_key(plan: MomentPlan) -> String:
-    var key = String("moments:v1:exact:")
+    var key = String("moments:v2:cpu:")
     if plan.grouped:
         key += grouped_key(plan.grouped.value())
     else:

@@ -9,6 +9,7 @@ from dataframe import Column, DataFrame, DataType, LazyFrame, Series
 from dataframe.expr import VAR, STD, SUM, MEAN
 from .moment_plan import MomentPlan, plan_moments, moment_output_sources
 from .moment_finish import finish_variance
+from .moment_compatibility import require_cpu_moment_compatibility
 from .multi_plan import ReductionOutput
 from .composition_plan import has_trees
 from .composition_reduce import (
@@ -73,12 +74,13 @@ def _dispatch_global_moments[
 
 
 def finish_global_moments_math(
-    plan: MomentPlan, scan: ComposedScan
+    plan: MomentPlan, scan: ComposedScan, cpu_compatible: Bool = False
 ) raises -> DataFrame:
     """Finish exact moments, retaining ordinary aggregate output semantics.
 
-    Direct GPU completion follows the documented mathematical error bound;
-    CPU accumulation order is not part of the variance accuracy contract.
+    The internal mathematical primitive can be tested independently. Public
+    execution requests CPU-compatible completion and adjudicates sensitive
+    centering through the ordinary CPU executor.
     """
     if plan.grouped:
         raise Error("Global moment finishing cannot consume grouped states")
@@ -139,6 +141,14 @@ def finish_global_moments_math(
                 False,
                 data[27] != 0,
             )
+            if cpu_compatible and answer:
+                require_cpu_moment_compatibility(
+                    sums,
+                    scan.counts[field],
+                    Int(output.parameter),
+                    -149 if floating else 0,
+                    answer.value(),
+                )
             cached[i] = answer.copy()
         if answer and output.op == STD:
             answer = sqrt(answer.value())
@@ -206,6 +216,8 @@ def execute_global_moments_math(
             result = _dispatch_global_moments[False, False](
                 plan, frame, scope, zero_copy, timings
             )
-        var answer = finish_global_moments_math(plan, result)
+        var answer = finish_global_moments_math(
+            plan, result, cpu_compatible=True
+        )
         scope.mark_success()
         return (answer^, timings^)

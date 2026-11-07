@@ -11,6 +11,39 @@ from dataframe_metal.moment_finish import finish_variance, MomentMagnitude
 from dataframe import DataFrame, LazyFrame
 
 
+def test_metal_moments_cpu_compatibility_adjudicates_sensitive_centering() raises:
+    from dataframe_metal.moment_compatibility import (
+        require_cpu_moment_compatibility,
+    )
+
+    # Exact population variance of [2**60, 2**60+256] is 16384, while
+    # Mojo CPU, DuckDB and Polars return 32768. Preserve CPU completion.
+    with assert_raises(contains="variance centering needs CPU adjudication"):
+        require_cpu_moment_compatibility(
+            List[Int128]([Int128(256), Int128(1) << 29]), 2, 0, 0, 16384
+        )
+    # A constant wide integer can also expose CPU block-mean rounding.
+    with assert_raises(contains="variance centering needs CPU adjudication"):
+        require_cpu_moment_compatibility(
+            List[Int128]([Int128(0), Int128(1) << 35]), 128, 0, 0, 0
+        )
+    # Ordinary spread, exact narrow constants and singleton/null cases
+    # retain GPU completion, including nonzero mean and ddof conversion.
+    require_cpu_moment_compatibility(List[Int128]([Int128(4)]), 2, 0, 0, 1)
+    require_cpu_moment_compatibility(List[Int128]([Int128(4)]), 2, 1, 0, 2)
+    require_cpu_moment_compatibility(List[Int128]([Int128(128)]), 128, 0, 0, 0)
+    require_cpu_moment_compatibility(List[Int128]([Int128(0)]), 1, 0, 0, 0)
+    require_cpu_moment_compatibility(List[Int128]([Int128(0)]), 0, 0, 0, 0)
+    # Float32 subnormal values [2**-149, 3*2**-149] are well conditioned.
+    require_cpu_moment_compatibility(
+        List[Int128]([Int128(4)]),
+        2,
+        0,
+        -149,
+        bitcast[DType.float64](UInt64(725) << 52),
+    )
+
+
 def test_metal_moment_exact_cancellation_ddof_and_full_float32_range() raises:
     # signed_zero
     var sums_signed_zero = List[Int128]([Int128(0), 0, 0, 0, 0, 0, 0, 0, 0])
@@ -1234,10 +1267,14 @@ def test_metal_moments_combine_native_casts_case_and_tuple_grouping() raises:
 
 def test_metal_moment_layout_keys_use_inlined_native_inputs() raises:
     from dataframe import DataType, col
-    from dataframe_metal.moment_plan import plan_moments, moment_key
+    from dataframe_metal.moment_plan import (
+        plan_moments,
+        moment_key,
+        moment_execution_region,
+    )
     from dataframe_metal.calibration import shape_key
     from dataframe_metal.region_plan import normalize_region
-    from dataframe.expr import COL
+    from dataframe.expr import COL, VAR, STD, MEAN
     from dataframe.lazy import WITH_COLUMNS
 
     var frame = _cast_moment_frame()
@@ -1276,6 +1313,38 @@ def test_metal_moment_layout_keys_use_inlined_native_inputs() raises:
         assert_true(not Bool(normalize_region(derived)))
         var matched = plan_moments(derived).value().copy()
         var equivalent = plan_moments(direct).value().copy()
+        var executable = moment_execution_region(matched)
+        ref executable_root = executable._plan._nodes[
+            len(executable._plan._nodes) - 1
+        ]
+        ref population = executable_root.exprs[0]._nodes[
+            len(executable_root.exprs[0]._nodes) - 1
+        ]
+        ref sample_std = executable_root.exprs[1]._nodes[
+            len(executable_root.exprs[1]._nodes) - 1
+        ]
+        assert_equal(population.op, VAR)
+        assert_equal(population.integer, Int64(0))
+        assert_equal(sample_std.op, STD)
+        assert_equal(sample_std.integer, Int64(1))
+        for node in executable._plan._nodes:
+            assert_true(node.kind != WITH_COLUMNS)
+            for expression in node.exprs:
+                for item in expression._nodes:
+                    assert_true(item.op != COL or item.text != "derived")
+        assert_equal(
+            moment_key(plan_moments(executable).value()), moment_key(matched)
+        )
+        # The executable copy must not replace the calibration surrogate.
+        ref matching_root = matched.matching_region._plan._nodes[
+            len(matched.matching_region._plan._nodes) - 1
+        ]
+        assert_equal(
+            matching_root.exprs[0]
+            ._nodes[len(matching_root.exprs[0]._nodes) - 1]
+            .op,
+            MEAN,
+        )
         for node in matched.matching_region._plan._nodes:
             assert_true(node.kind != WITH_COLUMNS)
             for expression in node.exprs:
@@ -1327,7 +1396,7 @@ def test_metal_moment_provider_layout_key_keeps_derived_ddof() raises:
         else:
             derived = derived.select(col("derived").var(1).alias("variance"))
             direct = direct.select(value.var(1).alias("renamed"))
-        assert_true(region_key(derived).startswith("moments:v1:exact:"))
+        assert_true(region_key(derived).startswith("moments:v2:cpu:"))
         assert_equal(layout_key(derived), layout_key(direct))
     assert_true(
         layout_key(frame.lazy().select(value.var(0)))
@@ -1568,6 +1637,22 @@ def test_metal_moments_public_cancellation_subnormals_and_wide_retry() raises:
                 ]
             )
             var expected = DataFrame(columns^)
+            if family == 0:
+                # Preserve the statistical behavior users obtain from CPU,
+                # DuckDB and Polars, rather than returning an exact answer
+                # that materially differs from the library's CPU result.
+                with assert_raises(
+                    contains="variance centering needs CPU adjudication"
+                ):
+                    _ = execute_timed(query)
+                var cpu = query.collect(engine="cpu")
+                var profiled = query.profile(accelerator=require_metal())
+                _assert_moment_answer(profiled[0], cpu)
+                assert_true("fault_adjudication" in profiled[1].columns())
+                assert_equal(
+                    cpu.item(0, "population").float64(), Float64(32768)
+                )
+                continue
             _assert_moment_answer(execute_timed(query)[0], expected)
             _assert_public_moment(query, expected)
 
@@ -1660,7 +1745,7 @@ def test_metal_moments_public_derived_casts_membership_and_tuple_groups() raises
             )
             var expected = DataFrame(columns^)
             assert_true(supports(query))
-            assert_true(layout_key(query).startswith("moments:v1:exact:"))
+            assert_true(layout_key(query).startswith("moments:v2:cpu:"))
             _assert_moment_answer(execute_timed(query)[0], expected)
             _assert_public_moment(query, expected)
 

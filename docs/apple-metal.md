@@ -563,11 +563,13 @@ Int32, Int64 or Float32. The GPU accumulates exact first and second moments,
 and the host subtracts them exactly before Float64 finishing. Ordinary values
 use narrow bins, with wider retries for extreme Float32 inputs.
 
-Direct GPU results follow a mathematical accuracy policy: relative error is
-at most `4 * 2**-53` after the statistical API's input conversion. Int64 values
-first round to Float64; Int32 and Float32 values convert exactly. CPU and Metal
-can differ materially when the CPU's accumulation loses precision at large
-offsets. Empty inputs and insufficient counts return typed nulls. Negative
+Public results preserve CPU statistical behavior within the floating-point
+tolerance `abs(metal-cpu) <= 1e-10*(1+abs(cpu))`. Int64 values first round to
+Float64; Int32 and Float32 values convert exactly. Sensitive centering at
+large offsets uses explicit CPU adjudication, preserving the behavior shared
+with DuckDB and Polars rather than returning a materially different exact
+answer. The internal mathematical finisher remains independently tested.
+Empty inputs and insufficient counts return typed nulls. Negative
 `ddof` stays on CPU; non-finite values and checked expression faults retain
 CPU adjudication. Float64 input columns remain on CPU.
 

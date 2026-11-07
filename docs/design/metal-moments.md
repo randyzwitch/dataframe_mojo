@@ -1,24 +1,32 @@
 # Metal variance and standard deviation
 
-Direct Metal completion computes mathematical variance from exact first and
-second moments. It preserves the statistical API's input conversion:
+Public Metal completion preserves the CPU library's statistical behavior
+within the floating-point tolerance `abs(metal-cpu) <= 1e-10*(1+abs(cpu))`.
+Consistency with CPU, DuckDB and Polars takes precedence over a different
+mathematically exact answer. It preserves the statistical API's input conversion:
 Float32 values are represented exactly, Int32 converts exactly to Float64,
 and Int64 first rounds to Float64 with round-to-nearest-even. Integer
 arithmetic and explicit casts are evaluated in their declared types before
 that statistical conversion. Float64 input columns remain unsupported.
 
-For a valid count `n` and nonnegative `ddof < n`, the returned variance and
+The internal exact-moment primitive remains independently testable. For a
+valid count `n` and nonnegative `ddof < n`, its mathematical variance and
 standard deviation have relative error at most `4u`, where `u = 2**-53`.
 Exact zero variance returns zero. The guarantee concerns the converted
 per-row values, including the existing Float32 expression rounding rules.
-It does not require reproducing the CPU's accumulation order. CPU and Metal
-must both satisfy the shared accuracy contract and agree within its tolerance.
-A material discrepancy is a correctness defect and blocks release; returning
-an inaccurate CPU result through fallback does not satisfy that requirement.
+Public execution guards sensitive centering and uses explicit CPU adjudication
+when the exact result might materially differ from CPU accumulation behavior.
 For example, the population variance of `[2**60, 2**60 + 256]` is 16,384.
 Both inputs are exactly representable in Float64. Conversely,
 `[2**60 + 1, 2**60 + 2]` converts to two identical Float64 values, so its
 statistical variance is zero under this API's conversion rule.
+
+The conditioning guard compares the estimated Float64 centering resolution
+against the population standard deviation, with a 128-operation margin.
+Constant Float32 values and small constant integers retain GPU completion;
+wide constant integers can require CPU adjudication. This guard is
+conservative; it is not a universal proof of the CPU algorithm's rounding
+error. CPU/Metal comparison contracts are also required before release.
 
 Empty inputs and `n <= ddof` return typed Float64 nulls. Negative `ddof`,
 unsupported expressions and unsupported input types remain on CPU. Non-finite
@@ -98,28 +106,23 @@ compiler logs, strict Float64 IR and hashes under
 `build/metal-moment-accuracy/`. GPU and public-execution contracts separately
 validate accumulation, retries and provider routing.
 
-Moment calibration keys include `moments:v1:exact:`, logical operations and
+Moment calibration keys include `moments:v2:cpu:`, logical operations and
 each output's `ddof`, as well as expression, predicate, grouping and physical
 input properties. Layout matching uses normalized native inputs while the
 logical plan retains VAR/STD. Unmeasured shapes remain on CPU. Calibration
-must use independent mathematical references; incorrect CPU answers are not
-valid placement-training measurements.
+uses independent mathematical references for well-conditioned timing cases
+and also checks CPU/Metal agreement. Adjudicated cases are not GPU timings
+and cannot train a GPU placement region.
 
-Release validation must check both engines against the independent reference
-and check their agreement within the shared tolerance, including large-offset
-and cancellation cases. The observed CPU result of 32,768 for the example
-whose exact population variance is 16,384 is an unresolved correctness
-blocker, not an accepted numerical policy. An independent Linux CPU
-reproduction at main `12f1d93c` confirms the defect in all 72 combinations
-of 2/128/65,536 rows, nullable/nonnullable inputs, contiguous/offset/chunked
-storage, global/grouped aggregation and `ddof` 0/1. Variance relative errors
-range from 0.999267578125 to 1.0; standard-deviation errors range from
-0.41395458842389976 to 0.41421356237309515. These are correctness failures,
-not timing measurements. Apple CPU confirmation and retesting after a CPU
-fix remain required. The Metal work does not modify the CPU implementation.
+Release validation checks internal mathematical primitives against exact
+references, and public results against CPU behavior within the shared
+tolerance, including large offsets and cancellation. For the example whose
+exact population variance is 16,384, public Metal must preserve CPU's 32,768
+through adjudication. The retained CPU diagnostics describe the mathematical
+difference; they do not require a change to the CPU implementation.
 
-DuckDB 2.0.0's built-in `var_pop` also returns 32,768 for the two-value
-example, matching the CPU result. This is a shared numerical limitation,
+DuckDB 2.0.0 and Polars 2.0.0's built-in population variance also return 32,768
+for the two-value example, matching the CPU result. This is a shared numerical limitation,
 not a CPU-only discrepancy against that oracle. DuckDB returns 16,384 after
 subtracting the common `2**60` offset before aggregation. Independently,
 forming `(n*sum(x*x)-sum(x)**2)/(n*n)` with DuckDB HUGEINT arithmetic gives
@@ -128,7 +131,7 @@ compatibility and mathematical accuracy therefore need separate checks for
 these stress cases; built-in floating aggregates alone are insufficient as
 the numerical oracle.
 
-Run the CPU regression from a source checkout (it currently exits nonzero):
+Run the mathematical-reference CPU diagnostic from a source checkout:
 
 ```sh
 mojo run -O3 --target-accelerator=unknown -I providers/cpu -I . \
