@@ -277,3 +277,52 @@ def test_ungrouped_n_unique_counts_in_a_table() raises:
             assert_equal(
                 Int(lazy.item(0, "u").numeric[DType.int64]()), with_null
             )
+
+
+def test_perfect_hash_keys_without_nulls() raises:
+    # Flat key vectors with every row valid take the location pass eight
+    # rows at a time; narrow, unsigned and negative keys all qualify.
+    var n = 5000
+    var small = List[Int16]()
+    var wide = List[UInt64]()
+    var v = List[Int64]()
+    for row in range(n):
+        small.append(Int16(row % 37 - 5))
+        wide.append(UInt64(1) << 63 | UInt64(row % 11))
+        v.append(Int64(row % 13))
+    var frame = DataFrame(
+        [
+            Series("s", Column[Int16](small^)),
+            Series("w", Column[UInt64](wide^)),
+            Series("v", Column[Int64](v^)),
+        ]
+    )
+    frame = frame.with_column(
+        frame.column("s").cast(DataType.STRING).renamed("ss")
+    )
+    frame = frame.with_column(
+        frame.column("w").cast(DataType.STRING).renamed("sw")
+    )
+    assert_true(perfect_hash([frame.column("s"), frame.column("w")]).used())
+    var actual = frame.group_by(["s", "w"], maintain_order=True).agg(
+        [col("v").sum().alias("sum"), col("v").len().alias("len")]
+    )
+    var expected = frame.group_by(["ss", "sw"], maintain_order=True).agg(
+        [col("v").sum().alias("sum"), col("v").len().alias("len")]
+    )
+    assert_equal(actual.height(), expected.height())
+    for row in range(actual.height()):
+        _assert_close(
+            DataFrame([actual.column("s").cast(DataType.STRING)]).item(
+                row, "s"
+            ),
+            expected.item(row, "ss"),
+        )
+        _assert_close(
+            DataFrame([actual.column("w").cast(DataType.STRING)]).item(
+                row, "w"
+            ),
+            expected.item(row, "sw"),
+        )
+        _assert_close(actual.item(row, "sum"), expected.item(row, "sum"))
+        _assert_close(actual.item(row, "len"), expected.item(row, "len"))

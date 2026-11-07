@@ -201,7 +201,30 @@ def _locations[
     var codes = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=map)
     var by = UInt64(shift)
     var base = UInt64(1) - low
-    for k in range(count):
+    var start = 0
+    comptime if not selected:
+        if not nulls and map == 0:
+            # A flat vector with every row valid: eight rows at a time.
+            var lanes = SIMD[DType.uint64, 8](base)
+            var shifts = SIMD[DType.uint64, 8](by)
+            var into = locations.unsafe_bitcast[UInt64]()
+            while start + 8 <= count:
+                var words: SIMD[DType.uint64, 8]
+                comptime if D.is_unsigned():
+                    words = data.unsafe_load[width=8](start).cast[
+                        DType.uint64
+                    ]()
+                else:
+                    words = bitcast[DType.uint64, 8](
+                        data.unsafe_load[width=8](start).cast[DType.int64]()
+                    )
+                into.unsafe_store(
+                    start,
+                    into.unsafe_load[width=8](start)
+                    + ((words + lanes) << shifts),
+                )
+                start += 8
+    for k in range(start, count):
         var i: Int
         comptime if selected:
             i = sel.get_index_unsafe(k)
