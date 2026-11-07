@@ -423,7 +423,11 @@ def test_metal_native_casts_all_nine_pairs_nullable_slices_and_groups() raises:
                 )
                 var query = frame.lazy().select_exprs(outputs)
                 if grouped:
-                    query = frame.lazy().group_by("key").agg(outputs)
+                    query = (
+                        frame.lazy()
+                        .group_by("key", maintain_order=True)
+                        .agg(outputs)
+                    )
                 var cpu = query.collect(engine="cpu")
                 for copied in [False, True]:
                     assert_true(
@@ -533,7 +537,7 @@ def test_metal_cast_faults_and_non_strict_nulls_keep_cpu_outcomes() raises:
         var value = col(name).cast(DataType.INT32, strict=False)
         var grouped = (
             frame.lazy()
-            .group_by("p")
+            .group_by("p", maintain_order=True)
             .agg(
                 [
                     value.sum().alias("sum"),
