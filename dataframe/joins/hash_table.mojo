@@ -35,10 +35,14 @@ every chain holds rows with equal keys, so a probe compares keys once per
 chain. Each region's rows go in descending row order, so each chain lists
 its rows in ascending order.
 
-A probe (`ScanStructure`) hashes a chunk of up to 2,048 rows, finds each
-row's partition, then its chain by linear probing in that partition's
-region (salts compared once the table is larger than 8,192 entries,
-`USE_SALT_THRESHOLD`), compares the keys of the candidates (`RowMatcher`),
+A probe (`ScanStructure`) hashes a chunk of up to 2,048 rows and splits
+its rows by partition, as Polars' probe does (`gen_idxs_per_partition`,
+equi_join.rs:1045-1051). Partition by partition, it then finds each
+row's chain by linear probing in that partition's region (salts compared
+once the table is larger than 8,192 entries, `USE_SALT_THRESHOLD`),
+prefetching 256 rows' entries at a time on tables of 32,768 entries or
+more (Polars' BLOCK_SIZE and MIN_PREFETCH_BUCKETS), and compares the
+keys of the candidates (`RowMatcher`),
 and emits at most 2,048 matches per call to `next`, walking each probe
 row's chain before the next row's, so the matches come out in probe order.
 Rows with a null key match nothing.
@@ -53,6 +57,7 @@ RIGHT_ANTI: the probe only flags build rows, and the scan emits the flagged
 from std.collections import Optional
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
+from std.sys.intrinsics import prefetch
 
 from dataframe.aggregation.reducer import float_key
 from dataframe.dtype import NUMERIC_DTYPES
@@ -89,6 +94,11 @@ comptime USE_SALT_THRESHOLD = 8192
 # JoinHashTable::DEFAULT_LOAD_FACTOR and MINIMUM_CAPACITY.
 comptime DEFAULT_LOAD_FACTOR = 2.0
 comptime MINIMUM_CAPACITY = 16384
+# Polars' probe blocks (polars-expr `hash_keys.rs:25-27`): keys are hashed
+# and their buckets prefetched BLOCK_SIZE at a time, once a table holds at
+# least MIN_PREFETCH_BUCKETS buckets (smaller ones stay in the cache).
+comptime BLOCK_SIZE = 256
+comptime MIN_PREFETCH_BUCKETS = 32768
 # HashPartitioner::new(num_partitions, 0)'s multiplier (polars-utils
 # `hashing.rs:82-95`): seed 0 folded through its three constants, made odd.
 comptime PARTITION_SEED = UInt64(0xA88F4BCFCCEF9ADF)
@@ -946,6 +956,10 @@ struct ScanStructure(Movable):
     var region: List[UInt64]
     var masks: List[UInt64]
     var todo: List[Int32]
+    # The partition split's scratch: each pending row's partition and each
+    # partition's first place.
+    var part_of: List[Int32]
+    var part_starts: List[Int]
     var compare: List[Int32]
     var no_match: List[Int32]
     # Emission state: the probe row emitting, and its chain's next row.
@@ -974,6 +988,8 @@ struct ScanStructure(Movable):
         self.region = List[UInt64](unsafe_uninit_length=n)
         self.masks = List[UInt64](unsafe_uninit_length=n)
         self.todo = List[Int32](unsafe_uninit_length=n)
+        self.part_of = List[Int32](unsafe_uninit_length=n)
+        self.part_starts = List[Int](length=table.parts + 1, fill=0)
         self.compare = List[Int32](unsafe_uninit_length=n)
         self.no_match = List[Int32](unsafe_uninit_length=n)
         self.row = 0
@@ -1075,38 +1091,94 @@ struct ScanStructure(Movable):
         var records = Int(self.records.unsafe_ptr())
         var region = self.region.unsafe_ptr()
         var bitmasks = self.masks.unsafe_ptr()
-        # Each row's partition (Polars' partition_and_probe,
-        # equi_join.rs:1036), then its place in that partition's region.
-        for t in range(pending):
-            var i = Int(todo[unsafe_offset=t])
-            var hash = hashes[unsafe_offset=i]
-            var p = partition_of(hash, parts) if parts > 1 else 0
-            var base = bases[unsafe_offset=p]
-            var mask = masks[unsafe_offset=p]
-            region[unsafe_offset=i] = base
-            bitmasks[unsafe_offset=i] = mask
-            offsets[unsafe_offset=i] = base + (hash & mask)
+        # Polars' partition_and_probe (equi_join.rs:1045-1051): the
+        # chunk's rows are split by partition first
+        # (`gen_idxs_per_partition`, a counting pass and a placing pass,
+        # each partition's rows in ascending order), so the lookups then
+        # run one partition's region at a time.
+        if parts > 1:
+            var starts = self.part_starts.unsafe_ptr()
+            var part_of = self.part_of.unsafe_ptr()
+            for p in range(parts + 1):
+                starts[unsafe_offset=p] = 0
+            for t in range(pending):
+                var i = Int(todo[unsafe_offset=t])
+                var p = partition_of(hashes[unsafe_offset=i], parts)
+                part_of[unsafe_offset=t] = Int32(p)
+                starts[unsafe_offset=p + 1] += 1
+            for p in range(parts):
+                starts[unsafe_offset=p + 1] += starts[unsafe_offset=p]
+            for t in range(pending):
+                var p = Int(part_of[unsafe_offset=t])
+                var at = starts[unsafe_offset=p]
+                compare[unsafe_offset=at] = todo[unsafe_offset=t]
+                starts[unsafe_offset=p] = at + 1
+            var placed = 0
+            for p in range(parts):
+                var base = bases[unsafe_offset=p]
+                var mask = masks[unsafe_offset=p]
+                var end = starts[unsafe_offset=p]
+                while placed < end:
+                    var i = Int(compare[unsafe_offset=placed])
+                    todo[unsafe_offset=placed] = Int32(i)
+                    region[unsafe_offset=i] = base
+                    bitmasks[unsafe_offset=i] = mask
+                    offsets[unsafe_offset=i] = base + (
+                        hashes[unsafe_offset=i] & mask
+                    )
+                    placed += 1
+        else:
+            var base = bases[unsafe_offset=0]
+            var mask = masks[unsafe_offset=0]
+            for t in range(pending):
+                var i = Int(todo[unsafe_offset=t])
+                region[unsafe_offset=i] = base
+                bitmasks[unsafe_offset=i] = mask
+                offsets[unsafe_offset=i] = base + (
+                    hashes[unsafe_offset=i] & mask
+                )
+        # Polars prefetches each block's buckets before looking any of
+        # them up, once its table no longer fits the cache
+        # (`should_prefetch`: MIN_PREFETCH_BUCKETS, BLOCK_SIZE,
+        # polars-expr hash_keys.rs:25-27).
+        var fetch = self.table.capacity >= MIN_PREFETCH_BUCKETS
         while pending > 0:
             # ProbeForPointers: walk to an empty entry or a salt match.
             var candidates = 0
-            for t in range(pending):
-                var i = Int(todo[unsafe_offset=t])
-                var hash = hashes[unsafe_offset=i]
-                var salt = hash | POINTER_MASK
-                var offset = offsets[unsafe_offset=i]
-                var base = region[unsafe_offset=i]
-                var mask = bitmasks[unsafe_offset=i]
-                while True:
-                    var entry = table[unsafe_offset=Int(offset)]
-                    if entry == 0:
-                        break
-                    if not salted or (entry | POINTER_MASK) == salt:
-                        heads[unsafe_offset=i] = entry & POINTER_MASK
-                        compare[unsafe_offset=candidates] = Int32(i)
-                        candidates += 1
-                        break
-                    offset = base + ((offset - base + 1) & mask)
-                offsets[unsafe_offset=i] = offset
+            for block in range(0, pending, BLOCK_SIZE):
+                var block_end = min(block + BLOCK_SIZE, pending)
+                if fetch:
+                    for t in range(block, block_end):
+                        var i = Int(todo[unsafe_offset=t])
+                        prefetch(
+                            table.unsafe_offset(Int(offsets[unsafe_offset=i]))
+                        )
+                for t in range(block, block_end):
+                    var i = Int(todo[unsafe_offset=t])
+                    var hash = hashes[unsafe_offset=i]
+                    var salt = hash | POINTER_MASK
+                    var offset = offsets[unsafe_offset=i]
+                    var base = region[unsafe_offset=i]
+                    var mask = bitmasks[unsafe_offset=i]
+                    while True:
+                        var entry = table[unsafe_offset=Int(offset)]
+                        if entry == 0:
+                            break
+                        if not salted or (entry | POINTER_MASK) == salt:
+                            var head = entry & POINTER_MASK
+                            heads[unsafe_offset=i] = head
+                            compare[unsafe_offset=candidates] = Int32(i)
+                            candidates += 1
+                            if fetch:
+                                # The candidate's row, for RowMatcher.
+                                prefetch(
+                                    Pointer[UInt64, MutAnyOrigin](
+                                        unsafe_from_address=Int(head) + _KEYS
+                                    )
+                                )
+                            break
+                        offset = base + ((offset - base + 1) & mask)
+                    offsets[unsafe_offset=i] = offset
             # RowMatcher: compare the candidates' keys; a mismatch goes on
             # probing from the next entry.
             var misses = 0

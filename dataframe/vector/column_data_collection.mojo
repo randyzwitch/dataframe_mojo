@@ -131,14 +131,16 @@ struct ColumnDataCollection(Movable):
     its vectors are fixed-width and its type is their storage type (or
     the values were computed, typed afterwards), and otherwise appended
     as values; a column switches to values the first time a vector cannot
-    be copied raw."""
+    be copied raw. Values are kept as one piece per chunk, as DuckDB keeps
+    a collection's chunks in segments, and joined once by `frame` (an
+    append per chunk copied every row so far again: quadratic)."""
 
     var schema: DataFrame
     var modes: List[Int]
     var raw: List[List[UInt8]]
     var raw_bits: List[List[UInt8]]
     var raw_physical: List[Int]
-    var values: List[Series]
+    var values: List[List[Series]]
     var count: Int
     # The rows the collection is expected to take: raw storage is sized
     # for them once.
@@ -152,9 +154,9 @@ struct ColumnDataCollection(Movable):
         self.raw = List[List[UInt8]](length=width, fill=List[UInt8]())
         self.raw_bits = List[List[UInt8]](length=width, fill=List[UInt8]())
         self.raw_physical = List[Int](length=width, fill=0)
-        self.values = List[Series](capacity=width)
+        self.values = List[List[Series]](capacity=width)
         for c in range(width):
-            self.values.append(schema._columns[c].copy())
+            self.values.append([schema._columns[c].copy()])
         self.count = 0
 
     def append(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
@@ -192,11 +194,11 @@ struct ColumnDataCollection(Movable):
                 )
                 continue
             if mode == _COPY_RAW:
-                self.values[c] = self._raw_column(c)
+                self.values[c] = [self._raw_column(c)]
                 self.raw[c] = List[UInt8]()
                 self.raw_bits[c] = List[UInt8]()
             self.modes[c] = _COPY_VALUES
-            self.values[c]._append_series(
+            self.values[c].append(
                 to_series(
                     chunk, c, arena, self.schema._columns[c].name(), dtype
                 )
@@ -218,7 +220,11 @@ struct ColumnDataCollection(Movable):
             if self.modes[c] == _COPY_RAW:
                 columns.append(self._raw_column(c))
             else:
-                columns.append(self.values[c].copy())
+                ref pieces = self.values[c]
+                if len(pieces) == 1:
+                    columns.append(pieces[0].copy())
+                else:
+                    columns.append(Series._from_chunks(pieces).rechunk())
         return DataFrame(columns^, height=self.count)
 
 
