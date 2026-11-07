@@ -832,3 +832,236 @@ def test_metal_moment_math_keeps_cast_rounded_sums_separate_from_integer_sum() r
     assert_equal(
         answer.item(0, "native_sum").int64(), native_sum.cast[DType.int64]()
     )
+
+
+def test_metal_grouped_moments_share_states_and_finish_all_native_types() raises:
+    from std.memory import bitcast, Pointer
+    from dataframe import Column, DataFrame, DataType, Series, col
+    from dataframe_metal.moment_plan import plan_moments
+    from dataframe_metal.moment_group_reduce import finish_grouped_moments_math
+    from dataframe_metal.group_partials import GroupedPartials
+    from dataframe_metal.group_layout import GroupLayout, GROUP_MOMENT_WORDS
+    from dataframe_metal.accelerator.gpu.group_state import (
+        initial_group_word,
+        add_float_sum,
+        add_integer_sum,
+    )
+    from dataframe_metal.accelerator.gpu.group_moments import (
+        add_group_float_moment,
+        add_group_integer_moment,
+    )
+
+    var frame = DataFrame(
+        [
+            Series(
+                "key",
+                Column[Int32](
+                    [9, 4, 9, 4, 0, 0], [True, True, True, True, False, False]
+                ),
+            ),
+            Series(
+                "f",
+                Column[Float32](
+                    [1, 2, 5, 6, 0, 0], [True, True, True, True, False, False]
+                ),
+            ),
+            Series(
+                "i",
+                Column[Int32](
+                    [1, 2, 5, 6, 0, 0], [True, True, True, True, False, False]
+                ),
+            ),
+            Series(
+                "w",
+                Column[Int64](
+                    [Int64(1) << 60, 3, (Int64(1) << 60) + 256, 7, 0, 0],
+                    [True, True, True, True, False, False],
+                ),
+            ),
+        ]
+    )
+    var plan = (
+        plan_moments(
+            frame.lazy()
+            .group_by("key")
+            .agg(
+                [
+                    col("f").var(0).alias("f_population"),
+                    col("f").var(1).alias("f_sample"),
+                    col("i").std(0).alias("i_std"),
+                    col("w").var(0).alias("w_population"),
+                    col("f").sum().alias("f_sum"),
+                    col("i").count().alias("i_count"),
+                ]
+            )
+        )
+        .value()
+        .copy()
+    )
+    for blocks in [1, 2]:
+        var layout = GroupLayout(
+            512, 3, blocks, blocks == 1, GROUP_MOMENT_WORDS
+        )
+        layout.check()
+        assert_equal(
+            layout.words(), layout.states_offset() + layout.entries() * 80
+        )
+        var first = List[UInt32](length=512, fill=UInt32.MAX)
+        # Deliberately put the first input group after the next one in hash order.
+        first[7] = 0
+        first[2] = 1
+        first[11] = 4
+        var rows = List[UInt32](length=512 * blocks, fill=0)
+        var states = List[UInt32](length=layout.entries() * 80, fill=0)
+        for entry in range(layout.entries()):
+            for word in range(80):
+                states[entry * 80 + word] = initial_group_word(word)
+        for row in range(6):
+            var slot = 7 if row % 2 == 0 else 2
+            if row >= 4:
+                slot = 11
+            var block = row % blocks
+            rows[slot * blocks + block] += 1
+            if row >= 4:
+                continue
+            for field in range(3):
+                var at = ((slot * blocks + block) * 3 + field) * 80
+                states[at] += 1
+                var pointer = Pointer[UInt32, MutUntrackedOrigin](
+                    unsafe_from_address=Int(
+                        states.unsafe_ptr().unsafe_offset(at)
+                    )
+                )
+                if field == 0:
+                    var raw = bitcast[DType.uint32](
+                        frame.item(row, "f").float32()
+                    )
+                    add_float_sum(pointer, raw)
+                    add_group_float_moment(pointer, raw)
+                else:
+                    var value = (
+                        Int64(frame.item(row, "i").int32()) if field
+                        == 1 else frame.item(row, "w").int64()
+                    )
+                    add_integer_sum(pointer, value)
+                    add_group_integer_moment(pointer, value)
+        var partials = GroupedPartials(
+            first^, rows^, states^, List[Int64](), blocks
+        )
+        var result = finish_grouped_moments_math(plan, frame, partials)
+        assert_equal(result.height(), 3)
+        assert_equal(result.item(0, "key").int32(), Int32(9))
+        assert_equal(result.item(1, "key").int32(), Int32(4))
+        assert_true(result.item(2, "key").is_null())
+        for row in range(2):
+            assert_equal(result.item(row, "f_population").float64(), Float64(4))
+            assert_equal(result.item(row, "f_sample").float64(), Float64(8))
+            assert_equal(result.item(row, "i_std").float64(), Float64(2))
+            assert_equal(result.item(row, "i_count").int64(), Int64(2))
+        assert_equal(result.item(0, "w_population").float64(), Float64(16384))
+        assert_equal(result.item(1, "w_population").float64(), Float64(4))
+        assert_equal(result.item(0, "f_sum").float32(), Float32(6))
+        assert_equal(result.item(1, "f_sum").float32(), Float32(8))
+        assert_equal(result.item(2, "i_count").int64(), Int64(0))
+        assert_true(result.item(2, "f_population").is_null())
+        assert_true(result.item(2, "i_std").is_null())
+        assert_true(result.item(2, "w_population").is_null())
+
+
+def test_metal_grouped_moment_atomic_carries_match_exact_variance() raises:
+    from std.memory import Pointer, bitcast
+    from std.testing import assert_equal
+    from dataframe_metal.accelerator.gpu.group_state import add_float_sum
+    from dataframe_metal.accelerator.gpu.group_moments import (
+        add_group_float_moment,
+        add_group_integer_moment,
+    )
+    from dataframe_metal.moment_finish import finish_variance
+
+    var words = List[UInt32](length=80, fill=0)
+    var p = Pointer[UInt32, MutUntrackedOrigin](
+        unsafe_from_address=Int(words.unsafe_ptr())
+    )
+    for n in range(2056):
+        var value = Int64(n % 257 - 128) * 1000003
+        add_group_integer_moment(p, value)
+    var sums = List[Int128](length=2, fill=0)
+    var squares = List[Int128](length=4, fill=0)
+    for bin in range(2):
+        sums[bin] = Int128(
+            bitcast[DType.int64](
+                UInt64(words[68 + bin * 2])
+                | (UInt64(words[69 + bin * 2]) << 32)
+            )
+        )
+    for bin in range(4):
+        squares[bin] = Int128(
+            bitcast[DType.int64](
+                UInt64(words[32 + bin * 2])
+                | (UInt64(words[33 + bin * 2]) << 32)
+            )
+        )
+    assert_equal(
+        finish_variance(sums, squares, 2056, 0, 0).value(),
+        Float64(5504033024049536),
+    )
+    for i in range(80):
+        words[i] = 0
+    for n in range(2056):
+        var value = Float32((n % 257 - 128) * 256)
+        var raw = bitcast[DType.uint32](value)
+        add_float_sum(p, raw)
+        add_group_float_moment(p, raw)
+    sums = List[Int128](length=9, fill=0)
+    squares = List[Int128](length=18, fill=0)
+    for bin in range(9):
+        sums[bin] = Int128(
+            bitcast[DType.int64](
+                UInt64(words[10 + bin * 2])
+                | (UInt64(words[11 + bin * 2]) << 32)
+            )
+        )
+    for bin in range(18):
+        squares[bin] = Int128(
+            bitcast[DType.int64](
+                UInt64(words[32 + bin * 2])
+                | (UInt64(words[33 + bin * 2]) << 32)
+            )
+        )
+    assert_equal(
+        finish_variance(sums, squares, 2056, 0, -149).value(),
+        Float64(360710144),
+    )
+    _ = words^
+
+
+def test_metal_grouped_moments_empty_input_retains_schema_without_device() raises:
+    from dataframe import Column, DataFrame, DataType, Series, col
+    from dataframe_metal.moment_group_reduce import execute_grouped_moments_math
+
+    var frame = DataFrame(
+        [
+            Series("key", Column[Int32](List[Int32]())),
+            Series("f", Column[Float32](List[Float32]())),
+            Series("i", Column[Int64](List[Int64]())),
+        ]
+    )
+    var answer = execute_grouped_moments_math(
+        frame.lazy()
+        .group_by("key")
+        .agg(
+            [
+                col("f").var(0).alias("variance"),
+                col("i").std(1).alias("deviation"),
+                col("i").count().alias("count"),
+            ]
+        ),
+        True,
+    )
+    assert_equal(answer[0].height(), 0)
+    assert_equal(answer[0].column("key").dtype(), DataType.INT32)
+    assert_equal(answer[0].column("variance").dtype(), DataType.FLOAT64)
+    assert_equal(answer[0].column("deviation").dtype(), DataType.FLOAT64)
+    assert_equal(answer[0].column("count").dtype(), DataType.INT64)
+    assert_equal(answer[1].context_ns, 0)
+    assert_equal(answer[1].kernel_ns, 0)

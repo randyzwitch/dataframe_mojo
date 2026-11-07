@@ -11,7 +11,7 @@ from .group_properties import sample_group_tuples
 from .group_types import group_value_types
 from .group_plan import GroupedComposition
 from .group_partials import GroupedPartials
-from .group_layout import GroupLayout, GROUP_CAPACITY_RETRY
+from .group_layout import GroupLayout, GROUP_CAPACITY_RETRY, GROUP_MOMENT_WORDS
 from .group_metadata import general_group_metadata
 from .accelerator.faults import data_fault
 from .accelerator.gpu.erased_input import (
@@ -37,6 +37,7 @@ def scan_general_groups[
     simple_cases: Bool = False,
     global_state: Bool = True,
     value_types: Int = 7,
+    moments: Bool = False,
 ](
     plan: GroupedComposition,
     frame: DataFrame,
@@ -44,12 +45,22 @@ def scan_general_groups[
     zero_copy: Bool,
     mut timings: HandoffTimings,
     capacity: Int,
+    moment_mask: UInt32 = 0,
 ) raises -> GroupedPartials:
     comptime if not METAL_TARGET:
         raise Error(
             "Metal grouped hand-off requires an Apple compilation target"
         )
     else:
+        comptime if moments:
+            if (
+                moment_mask == 0
+                or (moment_mask >> UInt32(len(plan.selected.bundle.fields)))
+                != 0
+            ):
+                raise Error(
+                    "Metal grouped moment mask does not match its schema"
+                )
         var started = Int(perf_counter_ns())
         var ctx = scope.context()
         var empty = ctx.enqueue_create_buffer[DType.uint8](1)
@@ -102,10 +113,16 @@ def scan_general_groups[
         var predicate = inputs[predicate_input].copy()
         var blocks = min(128, max(1, (frame.height() + 255) // 256))
         var layout = GroupLayout(
-            capacity, len(bundle.fields), blocks, global_state
+            capacity,
+            len(bundle.fields),
+            blocks,
+            global_state,
+            GROUP_MOMENT_WORDS if moments else GROUP_STATE_WORDS,
         )
         layout.check()
         var words = general_group_metadata(plan, inputs, keys, layout)
+        comptime if moments:
+            words[9] |= UInt64(moment_mask) << 24
         var needs_resolver = False
         for output in bundle.outputs:
             if output.op == MIN or output.op == MAX:
@@ -120,7 +137,7 @@ def scan_general_groups[
                 NumericView(empty.copy(), empty.copy(), 0, 0, 0, False)
             )
         var entries = layout.entries()
-        var state_words = entries * GROUP_STATE_WORDS
+        var state_words = entries * layout.value_words
         var count_words = capacity * layout.state_blocks()
         var resolved_values = entries * 2 if needs_resolver else 0
         var reservation = _NativeReservation(
@@ -143,7 +160,9 @@ def scan_general_groups[
             ctx.enqueue_copy(metadata, words.unsafe_ptr())
             if needs_resolver:
                 ctx.enqueue_memset(extrema, Int64(0))
-            ctx.enqueue_function[initialize_general_groups[global_state]](
+            ctx.enqueue_function[
+                initialize_general_groups[global_state, moments]
+            ](
                 metadata,
                 scratch,
                 grid_dim=(layout.words() + 255) // 256,
@@ -151,7 +170,7 @@ def scan_general_groups[
             )
             ctx.enqueue_function[
                 general_grouped_partials[
-                    cases, simple_cases, global_state, value_types
+                    cases, simple_cases, global_state, value_types, moments
                 ]
             ](
                 inputs[0].values,
@@ -188,7 +207,9 @@ def scan_general_groups[
             scope.record_launches(2)
             if needs_resolver:
                 ctx.enqueue_function[
-                    resolve_general_int64[cases, simple_cases, global_state]
+                    resolve_general_int64[
+                        cases, simple_cases, global_state, moments
+                    ]
                 ](
                     inputs[0].values,
                     inputs[1].values,
@@ -303,7 +324,7 @@ def general_case_mode(bundle: Composition) -> Int:
 
 
 def _dispatch_general[
-    global_state: Bool
+    global_state: Bool, moments: Bool = False
 ](
     plan: GroupedComposition,
     frame: DataFrame,
@@ -311,6 +332,7 @@ def _dispatch_general[
     zero_copy: Bool,
     mut timings: HandoffTimings,
     capacity: Int,
+    moment_mask: UInt32 = 0,
 ) raises -> GroupedPartials:
     var dtypes = List[DataType]()
     for field in plan.selected.bundle.fields:
@@ -320,36 +342,45 @@ def _dispatch_general[
     comptime for mask in range(1, 8):
         if selected == mask:
             if case_mode == 2:
-                return scan_general_groups[True, True, global_state, mask](
-                    plan, frame, scope, zero_copy, timings, capacity
-                )
+                return scan_general_groups[
+                    True, True, global_state, mask, moments
+                ](plan, frame, scope, zero_copy, timings, capacity, moment_mask)
             if case_mode == 1:
-                return scan_general_groups[True, False, global_state, mask](
-                    plan, frame, scope, zero_copy, timings, capacity
-                )
-            return scan_general_groups[False, False, global_state, mask](
-                plan, frame, scope, zero_copy, timings, capacity
-            )
+                return scan_general_groups[
+                    True, False, global_state, mask, moments
+                ](plan, frame, scope, zero_copy, timings, capacity, moment_mask)
+            return scan_general_groups[
+                False, False, global_state, mask, moments
+            ](plan, frame, scope, zero_copy, timings, capacity, moment_mask)
     raise Error("Metal grouped value dtype mask was not dispatched")
 
 
-def general_partials(
+def general_partials[
+    moments: Bool = False
+](
     plan: GroupedComposition,
     frame: DataFrame,
     scope: Scope,
     zero_copy: Bool,
     mut timings: HandoffTimings,
     force_global: Bool = False,
+    moment_mask: UInt32 = 0,
 ) raises -> GroupedPartials:
     var sample = sample_group_tuples(frame, plan.keys.names)
     var capacity = sample.capacity()
     try:
         if force_global or sample.global_state():
-            return _dispatch_general[True](
-                plan, frame, scope, zero_copy, timings, max(1024, capacity)
+            return _dispatch_general[True, moments](
+                plan,
+                frame,
+                scope,
+                zero_copy,
+                timings,
+                max(1024, capacity),
+                moment_mask,
             )
-        return _dispatch_general[False](
-            plan, frame, scope, zero_copy, timings, 512
+        return _dispatch_general[False, moments](
+            plan, frame, scope, zero_copy, timings, 512, moment_mask
         )
     except error:
         if String(error) != GROUP_CAPACITY_RETRY:
@@ -361,8 +392,8 @@ def general_partials(
     # Sampling describes cost, not coverage. Capacity overflow always retries
     # the complete query on GPU with the full supported table.
     try:
-        return _dispatch_general[True](
-            plan, frame, scope, zero_copy, timings, 131072
+        return _dispatch_general[True, moments](
+            plan, frame, scope, zero_copy, timings, 131072, moment_mask
         )
     except error:
         if String(error) != GROUP_CAPACITY_RETRY:

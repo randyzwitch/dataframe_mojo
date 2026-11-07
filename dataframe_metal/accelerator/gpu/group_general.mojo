@@ -1,7 +1,7 @@
 """Packed scratch keeps native tuple buffers within a bounded kernel ABI."""
 from std.memory import Pointer
 from max.gpu import global_idx
-from ...group_layout import GroupLayout, GROUP_VALUE_WORDS
+from ...group_layout import GroupLayout, GROUP_VALUE_WORDS, GROUP_MOMENT_WORDS
 from .group_state import initial_group_word
 
 from std.atomic import Atomic
@@ -15,7 +15,7 @@ from std.memory import bitcast
 
 
 def initialize_general_groups[
-    global_state: Bool
+    global_state: Bool, moments: Bool = False
 ](
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
     scratch: Pointer[UInt32, MutUntrackedOrigin],
@@ -25,12 +25,13 @@ def initialize_general_groups[
         Int(metadata[unsafe_offset=6]),
         Int(metadata[unsafe_offset=2]),
         global_state,
+        GROUP_MOMENT_WORDS if moments else GROUP_VALUE_WORDS,
     )
     var index = global_idx.x
     if index < layout.words():
         if index >= layout.states_offset():
             scratch[unsafe_offset=index] = initial_group_word(
-                (index - layout.states_offset()) % GROUP_VALUE_WORDS
+                (index - layout.states_offset()) % layout.value_words
             )
         elif index >= layout.first_offset() and index < layout.rows_offset():
             scratch[unsafe_offset=index] = UInt32.MAX
@@ -47,6 +48,7 @@ def general_grouped_partials[
     simple_cases: Bool = False,
     global_state: Bool = True,
     value_types: Int = 7,
+    moments: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -83,6 +85,7 @@ def general_grouped_partials[
         Int(metadata[unsafe_offset=6]),
         Int(metadata[unsafe_offset=2]),
         global_state,
+        GROUP_MOMENT_WORDS if moments else GROUP_VALUE_WORDS,
     )
     var table = scratch.unsafe_offset(layout.table_offset())
     var first = scratch.unsafe_offset(layout.first_offset())
@@ -156,6 +159,7 @@ def general_grouped_partials[
                             cases,
                             simple_cases,
                             global_state,
+                            moments,
                         ](
                             metadata,
                             slot,
@@ -195,6 +199,7 @@ def resolve_general_int64[
     cases: Bool = False,
     simple_cases: Bool = False,
     global_state: Bool = True,
+    moments: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -224,6 +229,7 @@ def resolve_general_int64[
         Int(metadata[unsafe_offset=6]),
         Int(metadata[unsafe_offset=2]),
         global_state,
+        GROUP_MOMENT_WORDS if moments else GROUP_VALUE_WORDS,
     )
     var index = global_idx.x
     if index < layout.entries():
@@ -232,7 +238,7 @@ def resolve_general_int64[
             var states = scratch.unsafe_offset(layout.states_offset())
             for side in range(2):
                 var ticket = states[
-                    unsafe_offset=index * GROUP_VALUE_WORDS + 4 + side
+                    unsafe_offset=index * layout.value_words + 4 + side
                 ]
                 if ticket != UInt32.MAX:
                     var value = group_value[False, cases, simple_cases](
