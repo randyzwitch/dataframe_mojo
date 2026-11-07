@@ -72,6 +72,28 @@ def _compare_float_bits(a: UInt32, b: UInt32, op: UInt32) -> Bool:
 
 
 @always_inline
+def _in_members(
+    members: Pointer[UInt64, UntrackedOrigin[mut=False]],
+    count: Int,
+    key: UInt64,
+) -> Bool:
+    if count <= 8:
+        var found = False
+        for i in range(count):
+            found = found | (members[unsafe_offset=i] == key)
+        return found
+    var low = 0
+    var high = count
+    while low < high:
+        var mid = low + (high - low) // 2
+        if members[unsafe_offset=mid] < key:
+            low = mid + 1
+        else:
+            high = mid
+    return low < count and members[unsafe_offset=low] == key
+
+
+@always_inline
 def predicate_matches(
     program: Pointer[UInt64, UntrackedOrigin[mut=False]],
     row_base: Int,
@@ -148,6 +170,24 @@ def predicate_matches(
                     read_integer(right_values, right_tag, row),
                     comparison,
                 )
+        elif kind == 3:
+            if valid:
+                var key = UInt64(0)
+                var comparable = True
+                if tag == 2:
+                    var raw = values.unsafe_bitcast[UInt32]()[unsafe_offset=row]
+                    comparable = (raw & 0x7FFF_FFFF) <= 0x7F80_0000
+                    key = UInt64(_ordered(raw))
+                else:
+                    key = bitcast[DType.uint64](
+                        read_integer(values, tag, row)
+                    ) ^ (UInt64(1) << 63)
+                if comparable:
+                    matched = _in_members(
+                        program.unsafe_offset(Int(clause[unsafe_offset=2])),
+                        Int(clause[unsafe_offset=3]),
+                        key,
+                    )
         elif tag == 2:
             var bounds = clause[unsafe_offset=4]
             matched = float_in_range(

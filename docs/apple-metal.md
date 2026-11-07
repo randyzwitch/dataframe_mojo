@@ -20,6 +20,7 @@ scan, with checked arithmetic and optional numeric Boolean predicates.
 | Area | Accepted regions |
 | --- | --- |
 | Values | Native columns, binary arithmetic, bounded trees of `+`, `-`, `*` |
+| Conditional values | Numeric `when/then/otherwise` chains feeding reductions |
 | Filters | Literal ranges, same-dtype column comparisons, null tests, AND/OR/NOT |
 | Grouping | One native Int32/Int64 key, at most 256 groups including null |
 | Input layout | Native nullable columns, slices and chunked inputs |
@@ -437,6 +438,55 @@ shared definitions can be inlined when all definitions feed outputs and
 filters precede them; grouping keys cannot be replaced by this transformation.
 These programs use `expression_reductions:v1:` keys. Existing native and
 one-binary kernels retain their specialized routes.
+
+### Conditional aggregate values
+
+SUM, COUNT, MEAN, MIN and MAX can share a conditional value, for example
+`when(col("quantity") > 0).then(col("price") * 2).otherwise(0)`.
+Conditions use the same native numeric comparison, null-test and AND/OR/NOT
+rules as filters; predicate and value columns may have different native dtypes.
+All branches of one value retain the same Int32, Int64 or Float32 dtype.
+Exactly representable literals, nested/chained CASE, constant Boolean
+conditions and omitted ELSE (null) are supported. Supported arithmetic can
+appear inside a branch or around a conditional value. Global filters run first.
+
+Only the selected branch evaluates arithmetic. A null condition takes ELSE,
+and overflow in an untaken branch does not fault. A selected checked fault
+uses the existing CPU adjudication policy, including integer intermediates
+in COUNT-only projections. Float32 reductions retain their existing exact-mean,
+rounding, extrema and IEEE policies. Identical conditional values share their
+computed value and reduction state across aliases and aggregate outputs.
+
+Programs have at most 64 instructions, 8 conditions and 8 value-stack entries.
+Up to 4 distinct values share 8 value inputs plus a ninth predicate binding.
+The same values can feed bounded grouped aggregation. No conditional result
+column is materialized. Shared row definitions are inlined only when doing so
+preserves eager checked work: an earlier WITH_COLUMNS arithmetic expression
+cannot be moved into a CASE branch that would suppress its errors.
+Conditional programs use `conditional_reductions:v1:` calibration keys;
+unmeasured shapes retain CPU placement.
+
+### Numeric membership predicates
+
+Numeric `is_in` and its negation can filter existing global/grouped reductions
+and provide CASE conditions. The input is a native Int32, Int64 or Float32
+column; candidates must bind to that dtype without losing precision. Up to
+4,096 distinct candidate keys are supported. Duplicate candidates share one
+key. Small sets use a linear lookup; larger sets use binary search over
+sorted keys, without expanding the GPU predicate into one comparison per key.
+
+Membership follows the engine's public API: null inputs remain null under
+both membership and negation, so neither selects a null row in a filter.
+Null candidates are ignored. Float32 signed zeros compare equal; NaN inputs
+never match, including NaN candidates, and therefore pass negated membership
+when non-null. Infinities and subnormals retain their native comparison
+semantics through ordered integer keys. An empty set matches no non-null
+value; its negation selects every non-null value.
+
+Canonical candidate contents are included in predicate and conditional-value
+identities. Membership uses `predicate_reductions:v3:` predicate keys and the
+existing build-matched placement policy; new shapes require measurements
+before automatic execution selects Metal.
 
 ### Bounded grouped reductions
 

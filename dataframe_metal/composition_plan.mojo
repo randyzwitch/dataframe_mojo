@@ -1,13 +1,36 @@
 """Schema-only matching for arithmetic and column aggregates in one region."""
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Expr, LazyFrame, col
-from dataframe.expr import COL, SUM, COUNT, MEAN, MIN, MAX
+from dataframe.expr import (
+    COL,
+    SUM,
+    COUNT,
+    MEAN,
+    MIN,
+    MAX,
+    ADD,
+    SUB,
+    MUL,
+    LIT_INT,
+)
 from dataframe.lazy import FILTER, SCAN_FRAME, SELECT
 from .filter_plan import FilterSum, plan_region
 from .arithmetic_plan import plan_arithmetic
 from .multi_plan import MAX_FIELDS, ReductionOutput
 from .expression_plan import ValueNode, compile_expression
-from .expression_format import TREE_OP
+from .expression_format import (
+    TREE_OP,
+    CASE_HEADER,
+    CASE_TEST,
+    CASE_JUMP,
+    CASE_NULL,
+)
+from .conditional_plan import compile_conditional
+from .predicate_program import (
+    PredicateProgram,
+    bind_predicate_inputs,
+    MAX_INPUTS,
+)
 
 comptime MAX_VALUE_INPUTS = 8
 
@@ -26,8 +49,16 @@ struct ValueField(Copyable, Movable):
     var left_input: Int
     var right_input: Int
     var tree: List[ValueNode]
+    var conditions: List[PredicateProgram]
 
     def same_value(self, other: Self) -> Bool:
+        if len(self.conditions) != len(other.conditions):
+            return False
+        for i in range(len(self.conditions)):
+            if condition_key(self.conditions[i]) != condition_key(
+                other.conditions[i]
+            ):
+                return False
         if len(self.tree) != len(other.tree):
             return False
         for i in range(len(self.tree)):
@@ -77,6 +108,7 @@ def plan_composition(
         len(root.exprs) == 1
         and len(root.exprs[0]._nodes) == 4
         and root.exprs[0]._nodes[3].op == SUM
+        and root.exprs[0]._nodes[2].op in [ADD, SUB, MUL]
         and not include_native
     ):
         return None
@@ -140,10 +172,11 @@ def plan_composition(
                 -1,
                 -1,
                 List[ValueNode](),
+                List[PredicateProgram](),
             )
             if not predicate:
                 predicate = p^
-        elif size == 4:
+        elif size == 4 and expression._nodes[2].op in [ADD, SUB, MUL]:
             var matched = plan_arithmetic(offered.select(total))
             if not matched:
                 return None
@@ -161,6 +194,7 @@ def plan_composition(
                 -1,
                 -1,
                 List[ValueNode](),
+                List[PredicateProgram](),
             )
             if not predicate:
                 predicate = p.predicate.copy()
@@ -168,18 +202,33 @@ def plan_composition(
         else:
             if aggregate.left != size - 2:
                 return None
-            var compiled = compile_expression(expression, frame, size - 2)
-            if not compiled:
-                return None
-            var tree = compiled.take()
-            var matched = plan_region(offered.select(col(tree.seed).sum()))
+            var conditional = compile_conditional(expression, frame, size - 2)
+            var conditions = List[PredicateProgram]()
+            var tree_nodes = List[ValueNode]()
+            var seed = String()
+            var dtype = DataType.INT32
+            if conditional:
+                var conditional_value = conditional.take()
+                seed = conditional_value.seed.copy()
+                dtype = conditional_value.dtype
+                tree_nodes = conditional_value.nodes.copy()
+                conditions = conditional_value.conditions.copy()
+            else:
+                var compiled = compile_expression(expression, frame, size - 2)
+                if not compiled:
+                    return None
+                var tree = compiled.take()
+                seed = tree.seed.copy()
+                dtype = tree.dtype
+                tree_nodes = tree.nodes.copy()
+            var matched = plan_region(offered.select(col(seed).sum()))
             if not matched:
                 return None
             var p = matched.take()
             value = ValueField(
-                tree.seed.copy(),
-                tree.seed.copy(),
-                tree.dtype,
+                seed.copy(),
+                seed.copy(),
+                dtype,
                 TREE_OP,
                 0,
                 0,
@@ -188,7 +237,8 @@ def plan_composition(
                 False,
                 -1,
                 -1,
-                tree.nodes.copy(),
+                tree_nodes^,
+                conditions^,
             )
             if not predicate:
                 predicate = p^
@@ -266,16 +316,38 @@ def plan_composition(
             fields[i].right_input = _input_slot(inputs, fields[i].right)
     if len(inputs) > MAX_VALUE_INPUTS:
         return None
-    return Composition(predicate.take(), fields^, outputs^, inputs^, precise)
+    for i in range(len(fields)):
+        for j in range(len(fields[i].conditions)):
+            if not bind_predicate_inputs(
+                fields[i].conditions[j], inputs, limit=MAX_INPUTS
+            ):
+                return None
+    var physical_predicate = predicate.take()
+    if len(inputs) == MAX_INPUTS:
+        # The ninth physical binding is shared by all predicates. A distinct
+        # WHERE column is handled by plan_predicates' compound route, whose
+        # truth program can refer to any of the nine canonical inputs.
+        if (
+            physical_predicate.filtered
+            and physical_predicate.filter_column != inputs[8]
+        ):
+            return None
+        physical_predicate.filter_column = inputs[8].copy()
+        physical_predicate.filter_dtype = frame.column(inputs[8]).dtype()
+    return Composition(physical_predicate^, fields^, outputs^, inputs^, precise)
 
 
 def composition_key(plan: Composition) -> String:
     # Names do not affect costs; canonical source slots describe reuse.
     var key = (
         String(
-            "expression_reductions:v1:" if has_trees(
+            "conditional_reductions:v1:" if has_conditions(
                 plan
-            ) else "mixed_reductions:v1:" if has_extrema(plan) else (
+            ) else "expression_reductions:v1:" if has_trees(
+                plan
+            ) else "mixed_reductions:v1:" if has_extrema(
+                plan
+            ) else (
                 "composed_reductions:v1:" if single_float_composition(
                     plan
                 ) else "composed_reductions:v2:typed_fields:"
@@ -325,6 +397,9 @@ def composition_key(plan: Composition) -> String:
                         key += ":min" if op == MIN else ":max"
                         break
     key += ":exact_float" if plan.precise_float else ":native"
+    for field in plan.fields:
+        for condition in field.conditions:
+            key += ":" + condition_key(condition, names=False)
     return key + (":single_float_v1" if single_float_composition(plan) else "")
 
 
@@ -351,3 +426,106 @@ def single_float_composition(plan: Composition) -> Bool:
             return False
         arithmetic += Int(field.op != COL)
     return arithmetic == 1
+
+
+def condition_key(program: PredicateProgram, names: Bool = True) -> String:
+    var key = String("case_predicate:v1")
+    for i in range(len(program.clauses)):
+        ref leaf = program.clauses[i]
+        ref p = leaf.bounds
+        key += ":" + (p.filter_column if names else String(program.slots[i]))
+        key += ":" + (leaf.other if names else String(leaf.other_input))
+        key += (
+            ":"
+            + p.filter_dtype.name()
+            + ":"
+            + String(leaf.kind)
+            + ":"
+            + String(Int(leaf.inverted))
+            + ":"
+            + String(leaf.comparison)
+        )
+        key += (
+            ":"
+            + String(p.low)
+            + ":"
+            + String(p.high)
+            + ":"
+            + String(p.inclusive)
+        )
+        key += (
+            ":"
+            + String(bitcast[DType.uint32](p.low_float))
+            + ":"
+            + String(bitcast[DType.uint32](p.high_float))
+        )
+    for leaf in program.clauses:
+        if leaf.kind == 3:
+            key += ":members"
+            for member in leaf.members:
+                key += "," + String(member)
+    for word in program.truth:
+        key += ":" + String(word)
+    return key
+
+
+def has_conditions(plan: Composition) -> Bool:
+    for field in plan.fields:
+        if field.conditions:
+            return True
+    return False
+
+
+def only_conditional_trees(plan: Composition) -> Bool:
+    """Native and binary fields bypass the tree evaluator entirely."""
+    for field in plan.fields:
+        if field.op == TREE_OP and not field.conditions:
+            return False
+    return has_conditions(plan)
+
+
+def simple_case_layout(nodes: List[ValueNode]) -> Int:
+    """Classify only CASE layouts implemented by the register evaluator."""
+    if not nodes or nodes[0].op != CASE_HEADER:
+        return -1
+    for shape in range(4):
+        var then_binary = Bool(shape & 1)
+        var else_binary = Bool(shape & 2)
+        var otherwise = 6 if then_binary else 4
+        var jump = otherwise - 1
+        var size = otherwise + (3 if else_binary else 1)
+        if len(nodes) != size:
+            continue
+        if (
+            nodes[1].op != CASE_TEST
+            or nodes[1].literal != UInt64(otherwise)
+            or nodes[jump].op != CASE_JUMP
+            or nodes[jump].literal != UInt64(size)
+        ):
+            continue
+        var eligible = True
+        for at in [2, otherwise]:
+            eligible = eligible and nodes[at].op in [COL, LIT_INT, CASE_NULL]
+        if then_binary:
+            eligible = eligible and nodes[3].op in [COL, LIT_INT, CASE_NULL]
+            eligible = eligible and nodes[4].op in [ADD, SUB, MUL]
+        if else_binary:
+            eligible = eligible and nodes[otherwise + 1].op in [
+                COL,
+                LIT_INT,
+                CASE_NULL,
+            ]
+            eligible = eligible and nodes[otherwise + 2].op in [ADD, SUB, MUL]
+        if eligible:
+            return shape
+    return -1
+
+
+def simple_conditional_trees(plan: Composition) -> Bool:
+    """Prove the CASE stack evaluator is unnecessary for this projection."""
+    for field in plan.fields:
+        if field.op == TREE_OP and (
+            not field.conditions or simple_case_layout(field.tree) < 0
+        ):
+            return False
+    return has_conditions(plan)
