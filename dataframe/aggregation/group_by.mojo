@@ -615,7 +615,9 @@ struct GroupBy(Copyable):
                 ranges.append(length)
                 at += length
             start = end
-        var result = aggregate_table(keys, inputs, specs, ranges, workers)
+        var result = aggregate_table(
+            keys, inputs, specs, ranges, workers, self._maintain_order
+        )
         return table_frame(template, result^, self._maintain_order)
 
     def _agg_batches(
@@ -672,7 +674,9 @@ struct GroupBy(Copyable):
         for j in range(len(jobs)):
             while len(jobs[j].sinks) > 0:
                 sinks.append(jobs[j].sinks.pop())
-        var result = aggregate_finish(sinks, layout)
+        var result = aggregate_finish(
+            sinks, layout, ordered=self._maintain_order
+        )
         return table_frame(template, result^, self._maintain_order)
 
     def _counts_distinct(self, expressions: List[Expr]) -> Bool:
