@@ -1410,6 +1410,10 @@ def test_metal_moments_public_native_nullable_slices_chunks_and_groups() raises:
                         col("v").var(1).alias("sample"),
                         col("v").std(1).alias("deviation"),
                         col("v").count().alias("count"),
+                        col("v").sum().alias("sum"),
+                        col("v").mean().alias("mean"),
+                        col("v").min().alias("minimum"),
+                        col("v").max().alias("maximum"),
                     ]
                 )
                 var query = frame.lazy().select_exprs(outputs)
@@ -1446,6 +1450,57 @@ def test_metal_moments_public_native_nullable_slices_chunks_and_groups() raises:
                             Series("count", Column[Int64]([1, 2])),
                         ]
                     )
+                var complete = List[Series]()
+                for name in expected.columns():
+                    complete.append(expected.column(name))
+                for statistic in range(3):
+                    var name = "sum" if statistic == 0 else (
+                        "minimum" if statistic == 1 else "maximum"
+                    )
+                    var values = List[Int64](
+                        [
+                            Int64(
+                                9 if statistic
+                                == 0 else (-2 if statistic == 1 else 8)
+                            )
+                        ]
+                    )
+                    if grouped:
+                        values = List[Int64](
+                            [
+                                Int64(-2),
+                                Int64(
+                                    11 if statistic
+                                    == 0 else (3 if statistic == 1 else 8)
+                                ),
+                            ]
+                        )
+                    var column = Series(name, Column[Int64](values.copy()))
+                    if dtype == 0:
+                        var narrow = List[Int32]()
+                        for value in values:
+                            narrow.append(Int32(value))
+                        column = Series(name, Column[Int32](narrow^))
+                    elif dtype == 2:
+                        var floating = List[Float32]()
+                        for value in values:
+                            floating.append(Float32(value))
+                        column = Series(name, Column[Float32](floating^))
+                    complete.append(column^)
+                    if statistic == 0:
+                        complete.append(
+                            Series(
+                                "mean",
+                                Column[Float64](
+                                    List[Float64](
+                                        [Float64(-2), 5.5]
+                                    ) if grouped else List[Float64](
+                                        [Float64(3)]
+                                    )
+                                ),
+                            )
+                        )
+                expected = DataFrame(complete^)
                 assert_true(supports(query))
                 for copied in [False, True]:
                     _assert_moment_answer(
