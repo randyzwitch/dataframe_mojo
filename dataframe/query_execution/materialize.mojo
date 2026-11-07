@@ -31,7 +31,6 @@ from dataframe.planning.graph import (
     plan_cover,
     plan_ends_in_breaker,
     plan_height_bound,
-    plan_known_height,
     plan_reorder,
     plan_spine_rows,
     plan_spine_source,
@@ -367,16 +366,18 @@ def plan_read_whole(
 
 def plan_schedule_inputs(self: QueryContext, top: Int, batch_size: Int) raises:
     """Run at once, ahead of the stream below `top`, the inputs it will
-    execute in full whatever it decides: every join's build side that
-    must run to be known (a table already in memory is not run), and
-    its source where that ends in a pipeline breaker. Each is a
+    execute in full: every join's build side, a table already in memory
+    included (its build finishes into a hash index like any other), and
+    its source where that ends in a pipeline breaker. Build sides are
+    chosen before this (`plan_build_probe_sides`), so no build made here
+    is one a swap would stream instead. Each is a
     MetaPipeline of the stream's pipeline: a build side is a JOIN_BUILD
     child, the source a REGULAR one, as DuckDB's `MetaPipeline::Build`
     makes them, and none depends on another, so `run_pipelines` runs
     them at the same time (TPC-DS q78 aggregated web and catalog sales
     to build on, then store sales to probe with, one after another on a
-    crew that the aggregates' serial phases left partly idle). The
-    stream's decisions do not change: each result waits in
+    crew that the aggregates' serial phases left partly idle). Each
+    result waits in
     `_prefetched` for the `_execute` call that would have computed it.
 
     A build side's finish event also finishes it as a build
@@ -399,10 +400,7 @@ def plan_schedule_inputs(self: QueryContext, top: Int, batch_size: Int) raises:
         if _stream_rows(step):
             probe = step.left
         elif _stream_join(step):
-            if (
-                plan_known_height(self, step.right) < 0
-                and step.right not in ahead[]
-            ):
+            if step.right not in ahead[]:
                 wanted.append(step.right)
                 if step.how != JOIN_CROSS and len(step.names) > 0:
                     keys.append(step.right_keys.copy())

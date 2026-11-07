@@ -248,7 +248,6 @@ from dataframe.planning.model import (
 )
 from dataframe.planning.physical import (
     plan_cost_order_joins,
-    plan_direct_key,
     plan_joins_below,
     plan_order_chain,
     plan_order_joins,
@@ -256,8 +255,6 @@ from dataframe.planning.physical import (
     plan_probe_largest_inputs,
     plan_restore_measured_chain,
     plan_selectivity,
-    plan_swap_join_sides,
-    plan_swap_left_join_sides,
 )
 from dataframe.planning.cost.aggregation import (
     plan_row_number_shape,
@@ -2061,19 +2058,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _joins_below(self, index: Int) -> Bool:
         return plan_joins_below(self._plan, index=index)
 
-    def _direct_key(self, index: Int, names: List[String]) raises -> Bool:
-        return plan_direct_key(self._plan, index=index, names=names)
-
-    def _swap_join_sides(
-        self, at: Int, built: DataFrame, batch_size: Int
-    ) raises -> Optional[LazyFrame]:
-        var swapped = plan_swap_join_sides(
-            self._plan, at=at, built=built, batch_size=batch_size
-        )
-        if swapped:
-            return Optional(_from_context(swapped.take()))
-        return None
-
     def _row_number_shape(
         self,
         source: Int,
@@ -2092,16 +2076,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             joins=joins,
             operations=operations,
         )
-
-    def _swap_left_join_sides(
-        self, at: Int, built: DataFrame, batch_size: Int
-    ) raises -> Optional[LazyFrame]:
-        var swapped = plan_swap_left_join_sides(
-            self._plan, at=at, built=built, batch_size=batch_size
-        )
-        if swapped:
-            return Optional(_from_context(swapped.take()))
-        return None
 
     def _height_bound(self, index: Int) -> Int:
         return plan_height_bound(self._plan, index=index)

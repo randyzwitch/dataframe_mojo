@@ -328,11 +328,16 @@ def test_joins_and_aggregates() raises:
         frame.lazy().with_row_index().join(names.lazy().reverse(), on=["k"]),
         frame.with_row_index().join(names.reverse(), on=["k"]),
     )
+    # A join promises no row order (either side may build), so the
+    # numbered rows are compared in rank order.
     check(
         names.lazy()
         .with_row_index("rank")
-        .join(frame.lazy(), on=["k"], how="left"),
-        names.with_row_index("rank").join(frame, on=["k"], how="left"),
+        .join(frame.lazy(), on=["k"], how="left")
+        .sort(["rank"]),
+        names.with_row_index("rank")
+        .join(frame, on=["k"], how="left")
+        .sort(["rank"]),
     )
     check(
         frame.lazy().shift(1).join(names.lazy(), on=["k"], how="semi"),

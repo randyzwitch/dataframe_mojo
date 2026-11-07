@@ -4,8 +4,6 @@ dense integer lookup `replace` uses.
 - `int64_progression`: whether a key ascends by one step (kept with its
   buffer, `_BufferFacts.progression`). No join reads it since the hash
   join port; it stays with the buffer facts it publishes.
-- `prefer_left_build`: the planner's streaming build-side rule (gate audit
-  #32); the pipeline scheduler port (step 6) replaces it.
 - `_perfect_slots`: integer keys' rows by `key - least` within
   `_PERFECT_SPAN`, DuckDB's perfect hash join span.
 """
@@ -198,17 +196,3 @@ def _perfect_slots(key: Series) -> Optional[Tuple[Int64, List[Int32]]]:
             return None
         table[unsafe_offset=at] = Int32(i)
     return (least, slots^)
-
-
-def prefer_left_build(left_rows: Int, right_rows: Int) -> Bool:
-    """Measured conservative crossover; see docs/join-performance-followups.md.
-
-    Small probe tables lose on M1 despite a large ratio. Require both a
-    512K-row probe table and a 32:1 imbalance before restoring logical order.
-    """
-    return (
-        right_rows >= 524288
-        and left_rows > 0
-        and left_rows <= Int(Int32.MAX)
-        and left_rows <= right_rows // 32
-    )
