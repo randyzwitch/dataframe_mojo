@@ -4387,7 +4387,7 @@ def _run_pipeline(
             for j in range(len(combined)):
                 sinks.append(combined[j].tables.pop(place))
             _ = remaining.pop(place)
-            var result = aggregate_finish(sinks, layout[s])
+            var result = aggregate_finish(sinks, layout[s], ordered=False)
             var finished = table_frame(template[s], result^, False)
             if len(sets[s]) == 0:
                 if finished.height() == 0:
@@ -4414,12 +4414,12 @@ def _run_pipeline(
         # read them out.
         var finished: DataFrame
         if len(finish_steps) == 0:
-            var result = aggregate_finish(sinks, layout[0])
+            var result = aggregate_finish(sinks, layout[0], ordered=ordered)
             finished = table_frame(template[0], result^, ordered)
         elif ordered:
             # The groups in first-occurrence order (each group row's first
             # sequence number), then the steps over them.
-            var result = aggregate_finish(sinks, layout[0])
+            var result = aggregate_finish(sinks, layout[0], ordered=True)
             finished = _steps_over_frame(
                 table_frame(template[0], result^, True),
                 finish_steps,
@@ -4443,7 +4443,9 @@ def _run_pipeline(
                     Int(Pointer(to=having.value())),
                     _having_keep,
                 )
-            var result = aggregate_finish(sinks, layout[0], filter)
+            var result = aggregate_finish(
+                sinks, layout[0], filter, ordered=False
+            )
             _ = having^
             var merged = result.merged
             var kept = 0

@@ -3057,7 +3057,9 @@ struct DataFrame(Copyable, Sized, Writable):
         """Group by one or more columns of any dtype.
 
         Group output order is unspecified unless maintain_order=True, which
-        guarantees first-occurrence order. Null keys form their own groups.
+        guarantees first-occurrence order. Without it, as in Polars and
+        DuckDB, the order may differ between runs and thread counts; sort
+        the result when the order matters. Null keys form their own groups.
         """
         if len(keys) == 0:
             raise Error("group_by requires at least one key")
