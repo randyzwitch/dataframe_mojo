@@ -623,7 +623,22 @@ def _case_selected[
 
 
 @always_inline
-def _case_shape(
+def _case_shape[
+    classified: Bool = False
+](program: Pointer[UInt64, UntrackedOrigin[mut=False]], count: Int) -> Int:
+    var shape_tag = program[unsafe_offset=1]
+    if shape_tag > 0 and shape_tag <= 4:
+        return Int(shape_tag) - 1
+    comptime if classified:
+        # The specialized route requires a host proof. A missing/invalid tag
+        # is a metadata fault, never permission to execute an unproven tree.
+        return -1
+    else:
+        return _legacy_case_shape(program, count)
+
+
+@always_inline
+def _legacy_case_shape(
     program: Pointer[UInt64, UntrackedOrigin[mut=False]], count: Int
 ) -> Int:
     comptime for shape in range(4):
@@ -690,7 +705,7 @@ def expression_value[
 ) -> Tuple[UInt64, Bool, UInt32]:
     comptime if cases:
         if program[unsafe_offset=0] == UInt64(CASE_HEADER):
-            var layout = _case_shape(program, count)
+            var layout = _case_shape[simple_cases](program, count)
             if layout >= 0:
                 var selected = predicate_matches(
                     program.unsafe_offset(Int(program[unsafe_offset=5])),

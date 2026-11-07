@@ -3,7 +3,8 @@ from std.memory import bitcast
 from dataframe.expr import COL
 from .expression_plan import ValueNode
 from .predicate_program import PredicateProgram
-from .expression_format import CASE_TEST, EXPRESSION_NODE_WORDS
+from .expression_format import CASE_HEADER, CASE_TEST, EXPRESSION_NODE_WORDS
+from .conditional_layout import case_shape_tag
 from .accelerator.gpu.erased_input import NumericView
 from .accelerator.gpu.compound_predicate import (
     PREDICATE_HEADER_WORDS,
@@ -92,4 +93,8 @@ def pack_value_program(
         elif node.op == CASE_TEST:
             words[at + 1] = UInt64(starts[node.input])
         words[at + 3] = node.literal
+    # Header word1 is unused by the stack interpreter. Simple variants read
+    # this host-proven tag instead of inspecting instruction shape per row.
+    if nodes and nodes[0].op == CASE_HEADER:
+        words[1] = case_shape_tag(nodes)
     return words^

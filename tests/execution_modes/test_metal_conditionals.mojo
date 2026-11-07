@@ -672,7 +672,7 @@ def test_metal_conditional_field_loop_keeps_offsets_nulls_and_native_fields() ra
                     List[UInt64](
                         [
                             UInt64(CASE_HEADER),
-                            0,
+                            1,
                             0,
                             0,
                             UInt64(CASE_TEST),
@@ -801,6 +801,7 @@ def test_metal_simple_case_dispatch_proves_register_layout_without_narrowing_sup
         simple_conditional_trees,
     )
     from dataframe_metal.accelerator.gpu.expression_value import _case_shape
+    from dataframe_metal.conditional_layout import case_shape_tag
     from std.memory import Pointer
 
     var frame = DataFrame(
@@ -838,6 +839,15 @@ def test_metal_simple_case_dispatch_proves_register_layout_without_narrowing_sup
             unsafe_from_address=Int(packed.unsafe_ptr())
         )
         assert_equal(_case_shape(pointer, len(plan.fields[0].tree)), shape)
+        assert_equal(case_shape_tag(plan.fields[0].tree), UInt64(shape + 1))
+        packed[1] = case_shape_tag(plan.fields[0].tree)
+        assert_equal(
+            _case_shape[True](pointer, len(plan.fields[0].tree)), shape
+        )
+        packed[1] = 0
+        assert_equal(_case_shape[True](pointer, len(plan.fields[0].tree)), -1)
+        packed[1] = 5
+        assert_equal(_case_shape[True](pointer, len(plan.fields[0].tree)), -1)
         _ = packed^
     var complex = List[Expr](
         [
@@ -858,6 +868,7 @@ def test_metal_simple_case_dispatch_proves_register_layout_without_narrowing_sup
         )
         assert_true(Bool(selected))
         assert_false(simple_conditional_trees(selected.value()))
+        assert_equal(case_shape_tag(selected.value().fields[0].tree), UInt64(0))
     var mixed = plan_composition(
         frame.lazy().select_exprs(
             [
@@ -874,3 +885,54 @@ def test_metal_simple_case_dispatch_proves_register_layout_without_narrowing_sup
     )
     assert_true(Bool(native))
     assert_false(simple_conditional_trees(native.value()))
+
+
+def test_metal_conditional_metadata_stamps_shape_preserving_jumps_and_literals() raises:
+    from std.memory import Pointer
+    from std.testing import assert_equal
+    from dataframe.expr import LIT_INT
+    from dataframe_metal.expression_plan import ValueNode
+    from dataframe_metal.expression_format import (
+        CASE_HEADER,
+        CASE_TEST,
+        CASE_JUMP,
+    )
+    from dataframe_metal.predicate_program import (
+        PredicateProgram,
+        PredicateClause,
+    )
+    from dataframe_metal.value_program_metadata import pack_value_program
+    from dataframe_metal.accelerator.gpu.erased_input import NumericView
+    from dataframe_metal.accelerator.gpu.expression_value import _case_shape
+
+    var nodes = List[ValueNode](
+        [
+            ValueNode(CASE_HEADER, "", -1, 0),
+            ValueNode(CASE_TEST, "", 0, 4),
+            ValueNode(LIT_INT, "", -1, 9),
+            ValueNode(CASE_JUMP, "", -1, 5),
+            ValueNode(LIT_INT, "", -1, 7),
+        ]
+    )
+    var truth = List[UInt32](length=8, fill=0)
+    truth[0] = 1
+    var condition = PredicateProgram(
+        List[PredicateClause](), truth^, List[Int]()
+    )
+    var words = pack_value_program(
+        nodes, List[PredicateProgram]([condition^]), List[NumericView]()
+    )
+    assert_equal(words[1], UInt64(1))
+    assert_equal(words[5], UInt64(20))
+    assert_equal(words[7], UInt64(4))
+    assert_equal(words[11], UInt64(9))
+    assert_equal(words[15], UInt64(5))
+    assert_equal(words[19], UInt64(7))
+    var pointer = Pointer[UInt64, UntrackedOrigin[mut=False]](
+        unsafe_from_address=Int(words.unsafe_ptr())
+    )
+    assert_equal(_case_shape[True](pointer, 5), 0)
+    print(
+        "PASS production CASE metadata: classified shape, predicate relocation, jumps and literals"
+    )
+    _ = words^
