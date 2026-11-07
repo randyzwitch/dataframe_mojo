@@ -466,6 +466,28 @@ cannot be moved into a CASE branch that would suppress its errors.
 Conditional programs use `conditional_reductions:v1:` calibration keys;
 unmeasured shapes retain CPU placement.
 
+### Numeric membership predicates
+
+Numeric `is_in` and its negation can filter existing global/grouped reductions
+and provide CASE conditions. The input is a native Int32, Int64 or Float32
+column; candidates must bind to that dtype without losing precision. Up to
+4,096 distinct candidate keys are supported. Duplicate candidates share one
+key. Small sets use a linear lookup; larger sets use binary search over
+sorted keys, without expanding the GPU predicate into one comparison per key.
+
+Membership follows the engine's public API: null inputs remain null under
+both membership and negation, so neither selects a null row in a filter.
+Null candidates are ignored. Float32 signed zeros compare equal; NaN inputs
+never match, including NaN candidates, and therefore pass negated membership
+when non-null. Infinities and subnormals retain their native comparison
+semantics through ordered integer keys. An empty set matches no non-null
+value; its negation selects every non-null value.
+
+Canonical candidate contents are included in predicate and conditional-value
+identities. Membership uses `predicate_reductions:v3:` predicate keys and the
+existing build-matched placement policy; new shapes require measurements
+before automatic execution selects Metal.
+
 ### Bounded grouped reductions
 
 One native Int32 or Int64 key can group the same numeric aggregate values,

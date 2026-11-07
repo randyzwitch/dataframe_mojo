@@ -459,6 +459,11 @@ def condition_key(program: PredicateProgram, names: Bool = True) -> String:
             + ":"
             + String(bitcast[DType.uint32](p.high_float))
         )
+    for leaf in program.clauses:
+        if leaf.kind == 3:
+            key += ":members"
+            for member in leaf.members:
+                key += "," + String(member)
     for word in program.truth:
         key += ":" + String(word)
     return key
