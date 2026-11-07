@@ -260,9 +260,7 @@ from dataframe.planning.physical import (
     plan_swap_left_join_sides,
 )
 from dataframe.planning.cost.aggregation import (
-    plan_batch_states_win,
     plan_row_number_shape,
-    plan_sampled_groups,
 )
 from dataframe.planning.properties import (
     _bare_column,
@@ -2060,16 +2058,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         for field in frame.schema():
             out.append(field.name + ": " + field.dtype.name())
         return out^
-
-    def _sampled_groups(self, keys: List[String], frame: Int) raises -> Int:
-        return plan_sampled_groups(self._plan, keys=keys, frame=frame)
-
-    def _batch_states_win(
-        self, keys: List[String], frame: Int, batch_size: Int
-    ) raises -> Bool:
-        return plan_batch_states_win(
-            self._plan, keys=keys, frame=frame, batch_size=batch_size
-        )
 
     def _joins_below(self, index: Int) -> Bool:
         return plan_joins_below(self._plan, index=index)
