@@ -33,7 +33,8 @@ from .accelerator.gpu.erased_input import (
     numeric_views,
     single_native_span,
 )
-from .accelerator.gpu.typed_storage import NativeColumnAny
+from .accelerator.gpu.typed_storage import NativeColumnAny, _NativeReservation
+from .moment_format import MOMENT_PARTIAL_WORDS, MOMENT_FLAG_SHIFT
 from .accelerator.gpu.composed_reduce import (
     composed_partials,
     mixed_partials,
@@ -53,13 +54,32 @@ from .accelerator.gpu.query_scope import Scope, shared_service
 from .accelerator.gpu.target import METAL_TARGET
 
 
-@fieldwise_init
 struct ComposedScan(Movable):
     var integers: List[Int128]
     var floating: List[Float64]
     var counts: List[Int]
     # Four native words per field: minimum, maximum, numeric count, flags.
     var extrema: List[Int64]
+    # Optional mathematical moments: nine sum bins, eighteen square bins and
+    # one non-finite flag per value. Integer values use two/four leading bins.
+    var moment_data: List[List[Int128]]
+    var moment_largest: List[UInt64]
+
+    def __init__(
+        out self,
+        var integers: List[Int128],
+        var floating: List[Float64],
+        var counts: List[Int],
+        var extrema: List[Int64],
+        var moment_data: List[List[Int128]] = List[List[Int128]](),
+        var moment_largest: List[UInt64] = List[UInt64](),
+    ):
+        self.integers = integers^
+        self.floating = floating^
+        self.counts = counts^
+        self.extrema = extrema^
+        self.moment_data = moment_data^
+        self.moment_largest = moment_largest^
 
 
 def _scan[
@@ -76,6 +96,7 @@ def _scan[
     trees: Bool = False,
     cases: Bool = False,
     simple_cases: Bool = False,
+    moments: Bool = False,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -83,16 +104,36 @@ def _scan[
     zero_copy: Bool,
     mut timings: HandoffTimings,
     program: Optional[PredicateProgram] = None,
+    moment_mask: UInt32 = 0,
+    mean_proof_mask: UInt32 = UInt32.MAX,
 ) raises -> ComposedScan:
+    comptime assert not moments or (mixed and not native_mixed and not fast)
     comptime assert not native_mixed or (
         mixed and arity == 1 and float_fields == 1 and not fast and not compound
     )
     comptime FIRST_BIN = 0 if wide else 3
     comptime BIN_COUNT = 9 if wide else 3
     var nf = arity
+    comptime if moments:
+        if moment_mask == 0 or (moment_mask >> UInt32(nf)) != 0:
+            raise Error("Metal moment mask does not match its value fields")
+        for field in range(nf):
+            if moment_mask & (UInt32(1) << UInt32(field)):
+                if not bundle.fields[field].needs_sum or (
+                    field < float_fields and not precise
+                ):
+                    raise Error(
+                        "Metal moment fields need their exact first sums"
+                    )
     var integers = List[Int128](length=nf, fill=0)
     var floating = List[Float64](length=nf, fill=0)
     var counts_out = List[Int](length=nf, fill=0)
+    var moment_data = List[List[Int128]]()
+    var moment_largest = List[UInt64]()
+    comptime if moments:
+        for field in range(nf):
+            moment_data.append(List[Int128](length=28, fill=0))
+            moment_largest.append(0)
     var extrema_out = List[Int64](length=nf * 4 if mixed else 0, fill=0)
     var extrema_fields = UInt32(0)
     comptime if mixed:
@@ -103,7 +144,14 @@ def _scan[
             extrema_out[field * 4] = Int64.MAX
             extrema_out[field * 4 + 1] = Int64.MIN
     if frame.height() == 0:
-        return ComposedScan(integers^, floating^, counts_out^, extrema_out^)
+        return ComposedScan(
+            integers^,
+            floating^,
+            counts_out^,
+            extrema_out^,
+            moment_data^,
+            moment_largest^,
+        )
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
@@ -189,8 +237,14 @@ def _scan[
         for segment in segments:
             total_parts += _chunk_partials(segment[0].rows, frame.height())
         var size = total_parts * nf
+        var moment_reservation = Optional[_NativeReservation]()
+        comptime if moments:
+            moment_reservation = _NativeReservation(
+                scope, size * MOMENT_PARTIAL_WORDS * 8
+            )
         var high = ctx.enqueue_create_buffer[DType.int64](
-            size * (5 if mixed else 1)
+            size
+            * ((5 if mixed else 1) + (MOMENT_PARTIAL_WORDS if moments else 0))
         )
         var low = ctx.enqueue_create_buffer[DType.uint64](size)
         var sums = ctx.enqueue_create_buffer[DType.float32](size)
@@ -202,7 +256,11 @@ def _scan[
         var specials = ctx.enqueue_create_buffer[DType.uint32](
             size * 6 if precise else 1
         )
-        var hp = List[Int64](length=size * (5 if mixed else 1), fill=0)
+        var hp = List[Int64](
+            length=size
+            * ((5 if mixed else 1) + (MOMENT_PARTIAL_WORDS if moments else 0)),
+            fill=0,
+        )
         var lp = List[UInt64](length=size, fill=0)
         var sp = List[Float32](length=size, fill=0)
         var cp = List[Float32](length=size, fill=0)
@@ -255,6 +313,10 @@ def _scan[
             words[at + 13] = UInt64(starts[index]) if batched else UInt64(
                 len(bundle.inputs)
             )
+            comptime if moments:
+                words[at + 14] |= UInt64(moment_mask) << UInt64(
+                    MOMENT_FLAG_SHIFT
+                )
             words[at + 15] = UInt64(
                 predicate_input + 1 if predicate_input
                 < len(bundle.inputs) else 0
@@ -348,6 +410,7 @@ def _scan[
                     trees=trees,
                     cases=cases,
                     simple_cases=simple_cases,
+                    moments=moments,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=True
                 ] if fast and not compound else composed_partials[
@@ -375,6 +438,7 @@ def _scan[
                     trees=trees,
                     cases=cases,
                     simple_cases=simple_cases,
+                    moments=moments,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=False
                 ] if fast and not compound else composed_partials[
@@ -475,11 +539,13 @@ def _scan[
             _ = (high^, low^, sums^, compensation^, counts^, bins^, specials^)
             _ = (segments^, empty^, words^, metadata^, faults^)
             _ = owners^
+            _ = moment_reservation^
             raise error^
         # Explicit last use keeps typed reservations alive through the drain.
         _ = (high^, low^, sums^, compensation^, counts^, bins^, specials^)
         _ = (segments^, empty^, words^, metadata^, faults^)
         _ = owners^
+        _ = moment_reservation^
         _check_ran(np)
         _check_ran(fp)
         for fault in fp:
@@ -545,10 +611,48 @@ def _scan[
                         and not negative
                         and least < 512
                         and greatest - least + 1 + growth > 53
+                        and (
+                            not moments
+                            or Bool(
+                                mean_proof_mask & (UInt32(1) << UInt32(field))
+                            )
+                        )
                     ):
                         raise data_fault(
                             "float32 mean needs CPU accumulation order"
                         )
+            comptime if moments:
+                if moment_mask & (UInt32(1) << UInt32(field)):
+                    ref data = moment_data[field]
+                    var is_float = (
+                        bundle.fields[field].dtype == DataType.FLOAT32
+                    )
+                    if is_float:
+                        for bin in range(9):
+                            data[bin] = exact[bin]
+                        data[27] = Int128(nan or positive or negative)
+                    for part in range(total_parts):
+                        var i = part * nf + field
+                        var at = 5 * size + i * MOMENT_PARTIAL_WORDS
+                        if is_float:
+                            for bin in range(18):
+                                data[9 + bin] += Int128(hp[at + bin])
+                            moment_largest[field] = max(
+                                moment_largest[field], UInt64(hp[at + 18])
+                            )
+                        else:
+                            data[0] += Int128(hp[at])
+                            data[1] += Int128(hp[at + 1])
+                            for bin in range(4):
+                                data[9 + bin] += Int128(hp[at + 2 + bin])
+                            if hp[at + 6] != Int64(np[i]):
+                                raise Error(
+                                    "Metal integer moment count differs from its shared value count"
+                                )
+                            moment_largest[field] = max(
+                                moment_largest[field],
+                                bitcast[DType.uint64](hp[at + 7]),
+                            )
         comptime if mixed:
             for field in range(nf):
                 if not (extrema_fields & (UInt32(1) << UInt32(field))):
@@ -565,7 +669,14 @@ def _scan[
                     extrema_out[field * 4 + 2] += hp[at + 2]
                     extrema_out[field * 4 + 3] |= hp[at + 3]
         timings.finish_ns = Int(perf_counter_ns()) - started
-        return ComposedScan(integers^, floating^, counts_out^, extrema_out^)
+        return ComposedScan(
+            integers^,
+            floating^,
+            counts_out^,
+            extrema_out^,
+            moment_data^,
+            moment_largest^,
+        )
 
 
 def _run[
@@ -709,6 +820,7 @@ def _mixed_dispatch[
     mixed: Bool = True,
     compound: Bool = False,
     trees: Bool = False,
+    moments: Bool = False,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -716,8 +828,10 @@ def _mixed_dispatch[
     zero_copy: Bool,
     mut timings: HandoffTimings,
     program: Optional[PredicateProgram] = None,
+    moment_mask: UInt32 = 0,
+    mean_proof_mask: UInt32 = UInt32.MAX,
 ) raises -> ComposedScan:
-    comptime if mixed and not compound and not trees:
+    comptime if mixed and not compound and not trees and not moments:
         if (
             len(bundle.fields) == 1
             and bundle.fields[0].dtype == DataType.FLOAT32
@@ -754,6 +868,7 @@ def _mixed_dispatch[
                                     False,
                                     narrow,
                                     mixed=mixed,
+                                    moments=moments,
                                     compound=compound,
                                     trees=trees,
                                     cases=True,
@@ -765,6 +880,8 @@ def _mixed_dispatch[
                                     zero_copy,
                                     timings,
                                     program,
+                                    moment_mask,
+                                    mean_proof_mask,
                                 )
                             if has_conditions(bundle):
                                 return _scan[
@@ -775,6 +892,7 @@ def _mixed_dispatch[
                                     False,
                                     narrow,
                                     mixed=mixed,
+                                    moments=moments,
                                     compound=compound,
                                     trees=trees,
                                     cases=True,
@@ -785,6 +903,8 @@ def _mixed_dispatch[
                                     zero_copy,
                                     timings,
                                     program,
+                                    moment_mask,
+                                    mean_proof_mask,
                                 )
                         return _scan[
                             precise,
@@ -794,9 +914,19 @@ def _mixed_dispatch[
                             False,
                             narrow,
                             mixed=mixed,
+                            moments=moments,
                             compound=compound,
                             trees=trees,
-                        ](bundle, frame, scope, zero_copy, timings, program)
+                        ](
+                            bundle,
+                            frame,
+                            scope,
+                            zero_copy,
+                            timings,
+                            program,
+                            moment_mask,
+                            mean_proof_mask,
+                        )
     raise Error("Metal mixed field types exceed their arity")
 
 

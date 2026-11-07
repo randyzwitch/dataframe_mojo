@@ -649,3 +649,186 @@ def test_metal_moment_planner_grouped_and_row_local_values() raises:
     assert_true(
         not Bool(plan_moments(frame.lazy().select((col("k") / 2).var())))
     )
+
+
+def test_metal_moment_narrow_square_window_and_retry_flags() raises:
+    from dataframe_metal.accelerator.gpu.moment_squares import SquareBins
+
+    assert_equal(SquareBins[4, False].WIDTH, 32)
+    assert_equal(SquareBins[4].WIDTH, 128)
+    var raw = List[UInt32](
+        [
+            UInt32(0),
+            0x80000000,
+            1,
+            0x25000000,
+            0x24800000,
+            0x3F800000,
+            0xBF800000,
+            0x40600000,
+            0x55000000,
+            0x7F7FFFFF,
+            0x7F800000,
+            0xFF800000,
+            0x7FC12345,
+            0x25000001,
+        ]
+    )
+    for i in range(len(raw)):
+        var state = SquareBins[1, False]()
+        state.add[0](raw[i])
+        assert_equal(state.non_finite[0], UInt32(i >= 10 and i <= 12))
+        assert_equal(
+            state.outside[0], UInt32(i == 2 or i == 4 or i == 9 or i == 13)
+        )
+        for bin in range(8):
+            var expected = Int64(0)
+            if bin == 0 and (i == 3 or i == 13):
+                expected = 1
+            if bin == 3 and (i == 5 or i == 6):
+                expected = 1024
+            if bin == 3 and i == 7:
+                expected = 12544
+            if bin == 6 and i == 8:
+                expected = 1
+            assert_equal(state.words[bin], expected)
+    var fields = SquareBins[4, False]()
+    fields.add[0](UInt32(0x3F800000))
+    fields.add[1](UInt32(0x40600000))
+    fields.add[2](UInt32(0x24800000))
+    fields.add[3](UInt32(0x7F800000))
+    assert_equal(fields.words[3], Int64(1024))
+    assert_equal(fields.words[11], Int64(12544))
+    assert_equal(fields.outside[2], UInt32(1))
+    assert_equal(fields.non_finite[3], UInt32(1))
+    assert_equal(fields.largest[0], UInt32(0x3F800000))
+    assert_equal(fields.largest[1], UInt32(0x40600000))
+    assert_equal(fields.largest[3], UInt32(0x7F800000))
+
+
+def test_metal_moment_math_finish_preserves_shared_outputs_and_typed_nulls() raises:
+    from std.math import sqrt
+    from dataframe import Column, DataFrame, Series, col
+    from dataframe_metal.moment_plan import plan_moments
+    from dataframe_metal.moment_reduce import (
+        finish_global_moments_math,
+        moment_masks,
+    )
+    from dataframe_metal.composition_reduce import ComposedScan
+
+    for floating in [False, True]:
+        var series = Series("v", Column[Int64]([1, 3]))
+        if floating:
+            series = Series("v", Column[Float32]([1, 3]))
+        var frame = DataFrame([series^])
+        var matched = plan_moments(
+            frame.lazy().select_exprs(
+                [
+                    col("v").var(0).alias("population"),
+                    col("v").var(1).alias("sample"),
+                    col("v").std(1).alias("deviation"),
+                    col("v").sum().alias("total"),
+                    col("v").mean().alias("average"),
+                    col("v").count().alias("count"),
+                ]
+            )
+        )
+        assert_true(Bool(matched))
+        ref plan = matched.value()
+        assert_equal(moment_masks(plan), (UInt32(1), UInt32(1)))
+        var data = List[Int128](length=28, fill=0)
+        if floating:
+            data[4] = 8388608
+            data[18] = 10240
+        else:
+            data[0] = 4
+            data[9] = 10
+        var scan = ComposedScan(
+            List[Int128]([Int128(4)]),
+            List[Float64]([Float64(4)]),
+            List[Int]([2]),
+            List[Int64](),
+            List[List[Int128]]([data^]),
+            List[UInt64]([UInt64(3)]),
+        )
+        var answer = finish_global_moments_math(plan, scan)
+        assert_equal(answer.item(0, "population").float64(), Float64(1))
+        assert_equal(answer.item(0, "sample").float64(), Float64(2))
+        assert_equal(answer.item(0, "deviation").float64(), sqrt(Float64(2)))
+        assert_equal(answer.item(0, "average").float64(), Float64(2))
+        assert_equal(answer.item(0, "count").int64(), Int64(2))
+        if floating:
+            assert_equal(answer.item(0, "total").float32(), Float32(4))
+        else:
+            assert_equal(answer.item(0, "total").int64(), Int64(4))
+        var empty = ComposedScan(
+            List[Int128]([Int128(0)]),
+            List[Float64]([Float64(0)]),
+            List[Int]([0]),
+            List[Int64](),
+            List[List[Int128]]([List[Int128](length=28, fill=0)]),
+            List[UInt64]([UInt64(0)]),
+        )
+        var nulls = finish_global_moments_math(plan, empty)
+        assert_true(nulls.item(0, "population").is_null())
+        assert_true(nulls.item(0, "sample").is_null())
+        assert_true(nulls.item(0, "deviation").is_null())
+        assert_true(nulls.item(0, "average").is_null())
+        assert_equal(nulls.item(0, "count").int64(), Int64(0))
+    var legacy = ComposedScan(
+        List[Int128](), List[Float64](), List[Int](), List[Int64]()
+    )
+    assert_equal(len(legacy.moment_data), 0)
+    assert_equal(len(legacy.moment_largest), 0)
+
+
+def test_metal_moment_math_keeps_cast_rounded_sums_separate_from_integer_sum() raises:
+    from dataframe import Column, DataFrame, Series, col
+    from dataframe_metal.moment_plan import plan_moments
+    from dataframe_metal.moment_reduce import finish_global_moments_math
+    from dataframe_metal.composition_reduce import ComposedScan
+
+    var frame = DataFrame(
+        [
+            Series(
+                "v",
+                Column[Int64](
+                    [Int64(1152921504606846977), 1152921504606847233]
+                ),
+            )
+        ]
+    )
+    var plan = (
+        plan_moments(
+            frame.lazy().select_exprs(
+                [
+                    col("v").var(0).alias("variance"),
+                    col("v").sum().alias("native_sum"),
+                ]
+            )
+        )
+        .value()
+        .copy()
+    )
+    # Independent radix moments of the CPU's binary64-cast input values:
+    # [2**60,2**60+256]. The native integer sum also retains both low bits.
+    var data = List[Int128](length=28, fill=0)
+    data[0] = 256
+    data[1] = 536870912
+    data[9] = 65536
+    data[11] = 32
+    data[12] = 33554432
+    var native_sum = (Int128(1) << 61) + 258
+    var scan = ComposedScan(
+        List[Int128]([native_sum]),
+        List[Float64]([Float64(0)]),
+        List[Int]([2]),
+        List[Int64](),
+        List[List[Int128]]([data^]),
+        List[UInt64]([UInt64(1152921504606847232)]),
+    )
+    var answer = finish_global_moments_math(plan, scan)
+    assert_equal(answer.item(0, "variance").float64(), Float64(16384))
+    assert_equal(
+        answer.item(0, "native_sum").int64(), native_sum.cast[DType.int64]()
+    )
