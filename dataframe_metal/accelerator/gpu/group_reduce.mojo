@@ -21,6 +21,8 @@ from .group_state import (
     add_float_sum,
     add_ordered_extrema,
 )
+from ...group_layout import GROUP_MOMENT_WORDS
+from .group_moments import add_group_float_moment, add_group_integer_moment
 
 
 @always_inline
@@ -209,6 +211,8 @@ def _update_group_field[
     cases: Bool,
     simple_cases: Bool,
     global_state: Bool = False,
+    moments: Bool = False,
+    with_extrema: Bool = True,
 ](
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
     slot: UInt32,
@@ -239,15 +243,20 @@ def _update_group_field[
     arity: Int,
 ) -> Bool:
     var sum_requested = Bool(flags & (UInt32(1) << UInt32(field)))
-    var extrema_requested = Bool(
-        (flags >> 4 | flags >> 8) & (UInt32(1) << UInt32(field))
-    )
+    var extrema_requested = False
+    comptime if with_extrema:
+        extrema_requested = Bool(
+            (flags >> 4 | flags >> 8) & (UInt32(1) << UInt32(field))
+        )
+    var moment_requested = False
+    comptime if moments:
+        moment_requested = Bool((flags >> 24) & (UInt32(1) << UInt32(field)))
     var value = group_value[floating, cases, simple_cases](
         metadata,
         field,
         row,
         UInt32(0 if narrow else 1),
-        sum_requested or extrema_requested,
+        sum_requested or extrema_requested or moment_requested,
         v0,
         v1,
         v2,
@@ -275,71 +284,81 @@ def _update_group_field[
         comptime if not global_state:
             state_index = state_index * Int(blocks) + Int(block_idx.x)
         var state = states.unsafe_offset(
-            (state_index * arity + field) * GROUP_STATE_WORDS
+            (state_index * arity + field)
+            * (GROUP_MOMENT_WORDS if moments else GROUP_STATE_WORDS)
         )
         _ = Atomic[UInt32].fetch_add(
             state.unsafe_offset(GROUP_COUNT), UInt32(1)
         )
+        comptime if moments:
+            if moment_requested:
+                comptime if floating:
+                    add_group_float_moment(state, UInt32(value[0]))
+                else:
+                    add_group_integer_moment(
+                        state, bitcast[DType.int64](value[0])
+                    )
         if sum_requested:
             comptime if floating:
                 add_float_sum(state, UInt32(value[0]))
             else:
                 add_integer_sum(state, bitcast[DType.int64](value[0]))
-        if extrema_requested:
-            comptime if narrow:
-                add_ordered_extrema(state, UInt32(value[0]), floating)
-            else:
-                var candidate = bitcast[DType.int64](value[0])
-                update_int64_ticket[True, cases, simple_cases](
-                    state.unsafe_offset(GROUP_MIN),
-                    candidate,
-                    metadata,
-                    field,
-                    row,
-                    v0,
-                    v1,
-                    v2,
-                    v3,
-                    v4,
-                    v5,
-                    v6,
-                    v7,
-                    b0,
-                    b1,
-                    b2,
-                    b3,
-                    b4,
-                    b5,
-                    b6,
-                    b7,
-                    predicate,
-                    predicate_bits,
-                )
-                update_int64_ticket[False, cases, simple_cases](
-                    state.unsafe_offset(GROUP_MAX),
-                    candidate,
-                    metadata,
-                    field,
-                    row,
-                    v0,
-                    v1,
-                    v2,
-                    v3,
-                    v4,
-                    v5,
-                    v6,
-                    v7,
-                    b0,
-                    b1,
-                    b2,
-                    b3,
-                    b4,
-                    b5,
-                    b6,
-                    b7,
-                    predicate,
-                    predicate_bits,
-                )
+        comptime if with_extrema:
+            if extrema_requested:
+                comptime if narrow:
+                    add_ordered_extrema(state, UInt32(value[0]), floating)
+                else:
+                    var candidate = bitcast[DType.int64](value[0])
+                    update_int64_ticket[True, cases, simple_cases](
+                        state.unsafe_offset(GROUP_MIN),
+                        candidate,
+                        metadata,
+                        field,
+                        row,
+                        v0,
+                        v1,
+                        v2,
+                        v3,
+                        v4,
+                        v5,
+                        v6,
+                        v7,
+                        b0,
+                        b1,
+                        b2,
+                        b3,
+                        b4,
+                        b5,
+                        b6,
+                        b7,
+                        predicate,
+                        predicate_bits,
+                    )
+                    update_int64_ticket[False, cases, simple_cases](
+                        state.unsafe_offset(GROUP_MAX),
+                        candidate,
+                        metadata,
+                        field,
+                        row,
+                        v0,
+                        v1,
+                        v2,
+                        v3,
+                        v4,
+                        v5,
+                        v6,
+                        v7,
+                        b0,
+                        b1,
+                        b2,
+                        b3,
+                        b4,
+                        b5,
+                        b6,
+                        b7,
+                        predicate,
+                        predicate_bits,
+                    )
     return False
 
 

@@ -5,14 +5,30 @@ comptime GENERAL_GROUP_LIMIT = 65536
 comptime GENERAL_TABLE_LIMIT = GENERAL_GROUP_LIMIT * 2
 comptime GROUP_CONTROL_WORDS = 4
 comptime GROUP_VALUE_WORDS = 32
+comptime GROUP_MOMENT_WORDS = 80
 
 
-@fieldwise_init
 struct GroupLayout(Copyable, Movable):
     var capacity: Int
     var fields: Int
     var blocks: Int
     var global_state: Bool
+    var value_words: Int
+
+    @always_inline
+    def __init__(
+        out self,
+        capacity: Int,
+        fields: Int,
+        blocks: Int,
+        global_state: Bool,
+        value_words: Int = GROUP_VALUE_WORDS,
+    ):
+        self.capacity = capacity
+        self.fields = fields
+        self.blocks = blocks
+        self.global_state = global_state
+        self.value_words = value_words
 
     @always_inline
     def state_blocks(self) -> Int:
@@ -40,13 +56,20 @@ struct GroupLayout(Copyable, Movable):
 
     @always_inline
     def words(self) -> Int:
-        return self.states_offset() + self.entries() * GROUP_VALUE_WORDS
+        return self.states_offset() + self.entries() * self.value_words
 
     @always_inline
     def resolved_values(self) -> Int:
         return self.entries() * 2
 
     def check(self) raises:
+        if (
+            self.value_words != GROUP_VALUE_WORDS
+            and self.value_words != GROUP_MOMENT_WORDS
+        ):
+            raise Error(
+                "Metal group state width does not match a supported layout"
+            )
         if (
             self.capacity < 512
             or self.capacity > GENERAL_TABLE_LIMIT
