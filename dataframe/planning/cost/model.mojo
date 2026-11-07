@@ -5,7 +5,6 @@ from std.os import getenv
 
 comptime BATCH_STREAM = 0
 comptime MORSEL_PIPELINE = 1
-comptime INSERT_PIPELINE = 2
 comptime TABLE_PIPELINE = 3
 comptime EAGER_FRAME = 4
 
@@ -28,10 +27,6 @@ struct AggregationDecision(Copyable, Movable):
     var route: Int
     var reason: String
     var eligibility_reason: String
-    var sample_rows: Int
-    var sample_groups: Int
-    var group_bound: Int
-    var pending_string_sample: Bool
     var code_late_keys: Bool
     var row_holder: Int
     var row_names: List[String]
@@ -42,10 +37,6 @@ struct AggregationDecision(Copyable, Movable):
         self.route = route
         self.reason = reason.copy()
         self.eligibility_reason = reason.copy()
-        self.sample_rows = -1
-        self.sample_groups = -1
-        self.group_bound = -1
-        self.pending_string_sample = False
         self.code_late_keys = False
         self.row_holder = -1
         self.row_names = List[String]()
@@ -53,14 +44,7 @@ struct AggregationDecision(Copyable, Movable):
         self.row_merge = List[Expr]()
 
     def uses_pipeline(self) -> Bool:
-        return (
-            self.route == MORSEL_PIPELINE
-            or self.route == INSERT_PIPELINE
-            or self.route == TABLE_PIPELINE
-        )
-
-    def inserts_groups(self) -> Bool:
-        return self.route == INSERT_PIPELINE
+        return self.route == MORSEL_PIPELINE or self.route == TABLE_PIPELINE
 
     def uses_aggregate_table(self) -> Bool:
         return self.route == TABLE_PIPELINE
@@ -72,16 +56,11 @@ struct AggregationDecision(Copyable, Movable):
         self.route = route
         self.reason = reason.copy()
 
-    def choose_insertion(mut self, preferred: Bool, reason: String):
-        self.choose(INSERT_PIPELINE if preferred else MORSEL_PIPELINE, reason)
-
     def name(self) -> String:
         if self.route == BATCH_STREAM:
             return "batch_stream"
         if self.route == MORSEL_PIPELINE:
             return "morsel_pipeline"
-        if self.route == INSERT_PIPELINE:
-            return "insert_pipeline"
         if self.route == TABLE_PIPELINE:
             return "table_pipeline"
         return "eager_frame"
@@ -89,11 +68,6 @@ struct AggregationDecision(Copyable, Movable):
     def explain(self) -> String:
         var out = self.name() + ": " + self.reason
         out += "; eligibility=" + self.eligibility_reason
-        if self.sample_rows >= 0:
-            out += "; sampled_groups=" + String(self.sample_groups)
-            out += "; sampled_rows=" + String(self.sample_rows)
-        if self.group_bound >= 0:
-            out += "; group_bound=" + String(self.group_bound)
         return out
 
 

@@ -10,7 +10,6 @@ from dataframe.planning.node_builders import (
 )
 from dataframe.planning.cost.aggregation import (
     select_aggregation_strategy,
-    refine_string_sample,
 )
 from dataframe.kernels.distinct_statistics import distinct_estimate
 from dataframe.planning.cost.eligibility import (
@@ -157,9 +156,7 @@ from dataframe.planning.model import (
     WITH_COLUMNS,
 )
 from dataframe.planning.cost.aggregation import (
-    plan_batch_states_win,
     plan_row_number_shape,
-    plan_sampled_groups,
 )
 from dataframe.planning.physical import (
     plan_direct_key,
@@ -384,7 +381,9 @@ def plan_stream_execute(
     elif terminal.kind == AGG or terminal.kind == SELECT:
         # A grouped median or quantile streams only into the aggregate
         # table (checked below): its other routes keep no such state.
-        if _stream_reductions(terminal.exprs, terminal.kind == AGG):
+        if _stream_reductions(
+            terminal.exprs, terminal.kind == AGG, terminal.kind == AGG
+        ):
             expressions = terminal.exprs.copy()
             if terminal.kind == AGG:
                 keys = terminal.names.copy()
@@ -1169,7 +1168,6 @@ def plan_stream_execute(
                 operations[0].exprs = [conjunction(scanned.value().remaining)]
     else:
         input = self._execute(cursor, False, True, batch_size)
-    decision = refine_string_sample(decision^, input, keys, operations)
     trace_decision(decision)
     if decision.is_eager():
         return None
@@ -1444,7 +1442,6 @@ def plan_stream_execute(
             expressions,
             keys,
             ordered,
-            decision.inserts_groups(),
             workers,
             rows_per_batch,
             batch_size,

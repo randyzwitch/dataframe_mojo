@@ -1,8 +1,4 @@
 """Central streaming-reduction strategy selection and cost preferences."""
-from dataframe.aggregation.group_by import (
-    group_by_workers,
-    range_states,
-)
 from dataframe.kernels.distinct_statistics import (
     _identity,
     distinct_estimate,
@@ -13,17 +9,11 @@ from dataframe.planning.graph import (
     plan_spine_rows,
     plan_spine_source,
 )
-from dataframe.dtype import (
-    DataType,
-)
 from dataframe.expr import (
     Expr,
 )
 from dataframe.frame import (
     DataFrame,
-)
-from dataframe.kernels.hashing import (
-    encode_rows,
 )
 from dataframe.parallel import configured_workers
 from dataframe.join_type import (
@@ -43,14 +33,8 @@ from dataframe.planning.cost.model import (
     TABLE_PIPELINE,
 )
 from dataframe.planning.cost.sampling import (
-    _batch_shows_many_groups,
     _key_group_bound,
-    _keys_repeat,
-    _stream_split_groups,
     _unique_key_column,
-)
-from dataframe.planning.expression_inputs import (
-    _references,
 )
 from dataframe.planning.model import (
     JOIN,
@@ -59,88 +43,10 @@ from dataframe.planning.model import (
 )
 from dataframe.planning.cost.eligibility import (
     _counts_distinct,
-    _filters,
     _has_quantile,
-    _key_read,
-    _order_sensitive,
     _row_merge_reductions,
     _row_steps_only,
 )
-from dataframe.series import (
-    Series,
-)
-from dataframe.trace import (
-    trace_path,
-)
-
-
-def plan_sampled_groups(
-    self: QueryContext, keys: List[String], frame: Int
-) raises -> Int:
-    """Distinct grouping keys among 4,096 evenly spaced rows of an
-    in-memory frame, or -1 when the frame does not hold every key (one
-    made by an earlier step).
-    """
-    ref source = self._frames[frame]
-    var height = source.height()
-    var sample = min(height, 4096)
-    if sample == 0:
-        return -1
-    var rows = List[Int](capacity=sample)
-    for k in range(sample):
-        rows.append(k * height // sample)
-    var picked = List[Series](capacity=len(keys))
-    for name in keys:
-        if name not in source.columns():
-            return -1
-        picked.append(source.column(name).take(rows))
-    return encode_rows(picked, nulls_equal=True).count()
-
-
-def plan_batch_states_win(
-    self: QueryContext, keys: List[String], frame: Int, batch_size: Int
-) raises -> Bool:
-    """Whether an unfiltered grouped reduction over in-memory `frame`
-    runs faster as batches, each reduced into a state of its own, than
-    through the eager group-by (#608). Each route's own tests decide,
-    not a count of groups:
-    - The eager group-by keeps private per-worker states when its keys
-      have few values (`range_states`); batch states are the same work
-      plus batching and a merge per batch.
-    - Otherwise it hash-partitions every row, which costs more than
-      batch states while a batch holds few of its rows' groups. A
-      batch that shows many (`_batch_shows_many_groups`, the stream's
-      own test) makes the stream collect its batches into that same
-      partitioned group-by, which then also pays the copy.
-    - The stream reduces one batch per worker, so with fewer batches
-      than the eager group-by has workers (or one worker) it leaves
-      threads idle.
-    Measured on generated int, string and two-key frames of 100K to
-    10M rows, 50 to 5,000 groups, uniform and skewed, one and six
-    aggregates, 1 and 8 threads: batch states won only where all three
-    hold (int and string keys of about 190 to 1,000 groups at 1M and
-    10M rows, 8 threads: 0.4-0.85 of the eager time); everywhere else
-    the eager route was as fast or faster (up to 2.6 times)."""
-    ref source = self._frames[frame]
-    var height = source.height()
-    var columns = List[Series](capacity=len(keys))
-    for name in keys:
-        if name not in source.columns():
-            # Made by an earlier step: ClickBench q18's (UserID,
-            # minute, SearchPhrase) took 354 ms eagerly, 1,645 batched.
-            return False
-        columns.append(source.column(name).copy())
-    var workers = group_by_workers(height)
-    if workers <= 1 or (height + batch_size - 1) // batch_size < workers:
-        return False
-    if range_states(columns) or _batch_shows_many_groups(
-        source.slice(0, min(height, batch_size)),
-        keys,
-        _stream_split_groups(),
-    ):
-        return False
-    trace_path("stream.batch_states")
-    return True
 
 
 def _build_distinct(
@@ -274,110 +180,6 @@ def select_aggregation_strategy(
     ):
         choice.choose(EAGER_FRAME, "inline_table_required")
         return choice^
-    if (
-        choice.uses_pipeline()
-        and len(keys) > 0
-        and not choice.uses_aggregate_table()
-    ):
-        var frame = self._nodes[cursor].source_slot()
-        ref source_frame = self._frames[frame]
-        var fixed = True
-        # String keys group exactly in the insert tables (a long
-        # string's bytes compared, `_PartIndex`); collected, they stay
-        # on the eager route (below).
-        var string_keys = False
-        var used = keys.copy()
-        for expression in expressions:
-            var reads = _references(expression)
-            if not reads:
-                fixed = False
-                break
-            for name in reads.value():
-                if name not in used:
-                    used.append(name)
-        for name in used:
-            if not fixed:
-                break
-            if name in late_names:
-                # Grouped by codes if the plan inserts (below).
-                continue
-            var dtype = DataType.INT64
-            if name in source_frame.columns():
-                dtype = source_frame.column(name).dtype()
-            else:
-                # A join's build column, or made by a step (then its
-                # dtype is not known here).
-                var found = False
-                for build in joins:
-                    if name in build.columns():
-                        dtype = build.column(name).dtype()
-                        found = True
-                        break
-                if not found:
-                    continue
-            if (
-                dtype.physical() == DataType.STRING
-                and name in keys
-                and not _key_read(name, expressions)
-            ):
-                string_keys = True
-            elif (
-                dtype.is_nested()
-                or dtype.is_decimal()
-                or dtype.physical() == DataType.STRING
-            ):
-                fixed = False
-        if not fixed and len(operations) > 0:
-            choice.choose(BATCH_STREAM, "variable_width_payload")
-        elif fixed and not _order_sensitive(expressions):
-            # Sampled only when the mode is still open: the sample
-            # takes and encodes 4,096 key rows (a millisecond on
-            # strings, an eighth of ClickBench q38).
-            var sample = min(source_frame.height(), 4096)
-            # A key from a join's build side is not in the source to
-            # sample (and the source's key columns are not taken).
-            var sampled = -1 if len(late_names) > 0 else (
-                -1 if string_keys else plan_sampled_groups(self, keys, frame)
-            )
-            if string_keys:
-                # String keys insert behind a filter, which the eager
-                # route pays for by gathering the kept rows' strings
-                # (ClickBench q37: 22.7 -> 15.9 ms). Without one, the
-                # eager route reads the keys in place, and inserting
-                # many groups was slower (q16 119 -> 176 ms, q33 189
-                # -> 235).
-                # Whether the keys repeat is sampled once the input
-                # is narrowed (below); a plan with joins keeps the
-                # eager route, which would redo their builds if the
-                # sample sent it back (TPC-DS q45: 5.9 -> 16.8 ms).
-                choice.choose_insertion(
-                    _filters(operations) and len(joins) == 0,
-                    "filtered_string_keys",
-                )
-                choice.pending_string_sample = choice.inserts_groups()
-            elif sampled >= 0:
-                choice.sample_rows = sample
-                choice.sample_groups = sampled
-                choice.choose_insertion(
-                    4 * sampled <= sample, "sampled_key_density"
-                )
-            else:
-                # The groups' bound from where each key is stored,
-                # held to the sampled rule's density: at most a
-                # quarter of the sample's rows.
-                var bound = _key_group_bound(
-                    keys, source_frame, joins, sample // 4
-                )
-                choice.group_bound = bound
-                choice.choose_insertion(bound >= 0, "bounded_group_domain")
-        if string_keys and not choice.inserts_groups() and len(operations) > 0:
-            # Collected strings gather slower than the eager route's
-            # per-chunk filter (ClickBench q12: 85 ms against 48).
-            choice.choose(BATCH_STREAM, "string_key_collection")
-    if distinct and choice.inserts_groups():
-        # Distinct counts are collected for the eager group-by.
-        choice.choose(MORSEL_PIPELINE, "distinct_requires_collection")
-
     var late_table_codes_pay = False
     if choice.uses_aggregate_table() and len(late_names) > 0:
         ref source_frame = self._frames[self._nodes[cursor].source_slot()]
@@ -419,16 +221,15 @@ def select_aggregation_strategy(
         late_table_codes_pay = rows >= 0 and rows * width / shared > (
             coded + groups * width
         )
-    choice.code_late_keys = len(late_names) > 0 and (
-        choice.uses_pipeline()
-        and (late_table_codes_pay or (choice.inserts_groups() and not grouping))
+    choice.code_late_keys = (
+        len(late_names) > 0 and choice.uses_pipeline() and late_table_codes_pay
     )
     if len(late_names) > 0 and not choice.code_late_keys:
-        # Coded keys pay only in the insert tables: collecting them
-        # for the finish's group-by ran slower than the eager route
-        # their strings take (TPC-DS q45 5.9 -> 13.4 ms, q24 40 -> 81),
-        # so those plans take the strings' route, as before; the
-        # aggregate table groups the strings themselves.
+        # Collecting coded keys for the finish's group-by ran slower
+        # than the eager route their strings take (TPC-DS q45 5.9 ->
+        # 13.4 ms, q24 40 -> 81), so those plans take the strings'
+        # route, as before; the aggregate table groups the strings
+        # themselves.
         if len(operations) > 0 and not choice.uses_aggregate_table():
             choice.choose(BATCH_STREAM, "uncoded_build_keys")
         # Several of these keys from one build side, under the aggregate
@@ -526,32 +327,13 @@ def select_aggregation_strategy(
             choice.choose(EAGER_FRAME, "in_memory_distinct_reduction")
             return choice^
         elif len(keys) > 0:
-            if _filters(operations):
-                choice.choose(EAGER_FRAME, "filtered_frame_grouping")
-                return choice^
-            if not plan_batch_states_win(
-                self, keys, self._nodes[cursor].source_slot(), batch_size
-            ):
-                choice.choose(EAGER_FRAME, "eager_grouping_preferred")
-                return choice^
+            # The eager group-by is the aggregate table over the frame.
+            choice.choose(EAGER_FRAME, "in_memory_grouping")
+            return choice^
     if (
         top >= 0
         and len(operations) == 0
         and self._nodes[cursor].kind == SCAN_FRAME
     ):
         choice.choose(EAGER_FRAME, "in_memory_topk_without_steps")
-    return choice^
-
-
-def refine_string_sample(
-    var choice: AggregationDecision,
-    input: DataFrame,
-    keys: List[String],
-    operations: List[PlanNode],
-) raises -> AggregationDecision:
-    """Judge deferred string-key density after the original input narrowing."""
-    if choice.pending_string_sample:
-        if not _keys_repeat(input, keys, operations):
-            choice.choose(EAGER_FRAME, "filtered_strings_mostly_distinct")
-        choice.pending_string_sample = False
     return choice^

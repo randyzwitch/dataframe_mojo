@@ -40,7 +40,7 @@ from dataframe.storage.buffer import _Buffer, _BufferData
 from std.collections import Optional
 from std.math import isnan
 from std.ffi import external_call
-from std.memory import Pointer, bitcast
+from std.memory import ArcPointer, Pointer, bitcast
 
 from dataframe.aggregation.reducer import (
     Reducer,
@@ -50,6 +50,7 @@ from dataframe.aggregation.reducer import (
 from dataframe.categorical import decode
 from dataframe.decimal import check_limit, decimal_mean, precision_limit
 from dataframe.storage.boolean import BoolColumn
+from dataframe.storage.nested import ListColumn
 from dataframe.storage.column import (
     Column,
     _count_set,
@@ -66,12 +67,14 @@ from dataframe.expr import (
     COUNT,
     COV,
     FIRST,
+    IMPLODE,
     LAST,
     LEN,
     MAX,
     MEAN,
     MEDIAN,
     MIN,
+    MODE,
     NULL_COUNT,
     PRODUCT,
     QUANTILE,
@@ -164,13 +167,16 @@ def table_reduction(op: Int) -> Bool:
     """Whether the aggregate table holds a reduction's state for groups:
     an `AggregateFunction` of its own (`reduction_supported`), or a state by
     address (`_K_STATE`, `_K_ORDERED`) for the positional, product and
-    moment reductions."""
+    moment reductions, mode (DuckDB's mode state, a count per value) and
+    implode (DuckDB's list aggregate, its rows kept in input order)."""
     return reduction_supported(op) or op in [
         ARG_MIN,
         ARG_MAX,
         SKEW,
         KURTOSIS,
         PRODUCT,
+        MODE,
+        IMPLODE,
     ]
 
 
@@ -673,7 +679,7 @@ def _address_kind(op: Int) -> Int:
     `_K_ORDERED` for one whose answer depends on the order of the group's
     rows (first, last, the position of an extreme), `_K_STATE` for any
     other a `Reducer` holds, or -1."""
-    if op in [FIRST, LAST, ARG_MIN, ARG_MAX]:
+    if op in [FIRST, LAST, ARG_MIN, ARG_MAX, IMPLODE]:
         return _K_ORDERED
     if op in [
         SUM,
@@ -693,6 +699,7 @@ def _address_kind(op: Int) -> Int:
         PRODUCT,
         CORR,
         COV,
+        MODE,
     ]:
         return _K_STATE
     return -1
@@ -1979,6 +1986,9 @@ comptime _F_WIDE = 11
 # An ordered first or last (`_K_ORDERED`): the value of the group's
 # earliest or latest buffered row, of any type.
 comptime _F_PICK = 12
+# An ordered implode (`_K_ORDERED`, DuckDB's list aggregate): every row of
+# the group in input order, as a list.
+comptime _F_LIST = 13
 
 
 def _finalize_mode(slot: AggregateFunction, template: Reducer) -> Int:
@@ -1991,6 +2001,8 @@ def _finalize_mode(slot: AggregateFunction, template: Reducer) -> Int:
         return _F_SKIP
     if kind == _K_ORDERED and (template.op == FIRST or template.op == LAST):
         return _F_PICK
+    if kind == _K_ORDERED and template.op == IMPLODE:
+        return _F_LIST
     if kind == _K_STATE or kind == _K_ORDERED:
         return _F_STATES
     if (
@@ -2060,10 +2072,13 @@ struct _Finalizer(Movable):
     # A value state's column (one, for `_F_VALUE`).
     var values: List[_ValueColumn]
     # An ordered first or last's picked rows (`_F_PICK`): the buffers,
-    # and each group's row as a buffer and a position in it.
+    # and each group's row as a buffer and a position in it. An implode's
+    # (`_F_LIST`) are every row of each group in turn, and `list_counts`
+    # each group's number of rows.
     var pick_owners: List[Int]
     var pick_owner: List[Int]
     var pick_rows: List[Int]
+    var list_counts: List[Int]
 
     def __init__(
         out self,
@@ -2097,11 +2112,12 @@ struct _Finalizer(Movable):
         )
         self.valid = List[Bool](
             unsafe_uninit_length=n if (direct and self.mode != _F_COUNTS)
-            or (self.mode >= _F_LOGIC and self.mode != _F_PICK) else 0
+            or (self.mode >= _F_LOGIC and self.mode < _F_PICK) else 0
         )
         self.pick_owners = List[Int]()
         self.pick_owner = List[Int](capacity=n if self.mode == _F_PICK else 0)
         self.pick_rows = List[Int](capacity=n if self.mode == _F_PICK else 0)
+        self.list_counts = List[Int](capacity=n if self.mode == _F_LIST else 0)
         self.nulls = False
         self.values = List[_ValueColumn]()
         if self.mode == _F_VALUE:
@@ -2150,6 +2166,38 @@ struct _Finalizer(Movable):
                 var e = chosen[g]
                 self.pick_owner.append(owner_of[e])
                 self.pick_rows.append(positions[e])
+            return
+        if self.mode == _F_LIST:
+            # The rows in input order, then by group (a stable counting
+            # sort), so each group's list keeps its input order.
+            var owner_of = List[Int]()
+            var positions = List[Int]()
+            var targets = List[Int]()
+            _ordered_rows(
+                self.slot,
+                groups,
+                lo,
+                hi,
+                self.pick_owners,
+                owner_of,
+                positions,
+                targets,
+            )
+            var starts = List[Int](length=hi - lo + 1, fill=0)
+            for e in range(len(targets)):
+                starts[targets[e] - lo + 1] += 1
+            for g in range(hi - lo):
+                self.list_counts.append(starts[g + 1])
+                starts[g + 1] += starts[g]
+            var base = len(self.pick_rows)
+            self.pick_owner.resize(base + len(targets), 0)
+            self.pick_rows.resize(base + len(targets), 0)
+            for e in range(len(targets)):
+                var g = targets[e] - lo
+                var at = base + starts[g]
+                starts[g] += 1
+                self.pick_owner[at] = owner_of[e]
+                self.pick_rows[at] = positions[e]
             return
         var at = groups.rows.unsafe_ptr()
         var stride = groups.stride
@@ -2347,6 +2395,21 @@ struct _Finalizer(Movable):
                 _gather_rows(self.pick_owners, self.pick_owner, self.pick_rows),
             )
             return state^
+        if self.mode == _F_LIST:
+            if len(self.list_counts) == 0:
+                return state^
+            var offsets = List[Int64](capacity=len(self.list_counts) + 1)
+            offsets.append(0)
+            var total = 0
+            for count in self.list_counts:
+                total += count
+                offsets.append(Int64(total))
+            var child = _gather_rows(
+                self.pick_owners, self.pick_owner, self.pick_rows
+            ).renamed("item")
+            child._field_metadata = state.metadata
+            state.finished = Series("", ListColumn(offsets^, child^))
+            return state^
         if self.mode == _F_VALUE:
             var values = self.values^
             state.finished = values.pop().column()
@@ -2434,6 +2497,8 @@ struct ReducerSpec(Copyable, Movable):
     var floating: Float64
     var text: String
     var logical: DataType
+    # An implode's input field metadata (`Reducer.metadata`).
+    var metadata: Optional[ArcPointer[List[UInt8]]]
 
     @staticmethod
     def of(template: Reducer) -> ReducerSpec:
@@ -2445,10 +2510,11 @@ struct ReducerSpec(Copyable, Movable):
             template.floating,
             template.text,
             template.logical,
+            template.metadata,
         )
 
     def make(self, groups: Int) -> Reducer:
-        return Reducer(
+        var reducer = Reducer(
             self.op,
             self.input,
             groups,
@@ -2458,6 +2524,8 @@ struct ReducerSpec(Copyable, Movable):
             self.text,
             Optional(self.logical),
         )
+        reducer.metadata = self.metadata
+        return reducer^
 
 
 struct _HeldBuffers(Movable):

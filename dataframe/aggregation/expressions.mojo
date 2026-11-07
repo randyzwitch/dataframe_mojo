@@ -14,6 +14,7 @@ from dataframe.expr import (
     COV,
     Expr,
     FIRST,
+    IMPLODE,
     KURTOSIS,
     LAST,
     LEN,
@@ -21,6 +22,7 @@ from dataframe.expr import (
     MEAN,
     MEDIAN,
     MIN,
+    MODE,
     NULL_COUNT,
     N_UNIQUE,
     OVER,
@@ -125,7 +127,13 @@ def _row_local(exprs: List[Expr]) -> Bool:
     return True
 
 
-def _stream_reductions(expressions: List[Expr], holistic: Bool = False) -> Bool:
+def _stream_reductions(
+    expressions: List[Expr], holistic: Bool = False, listed: Bool = False
+) -> Bool:
+    """Whether every expression is reductions of row-local inputs, combined
+    row by row. `holistic` admits medians and quantiles; `listed` also
+    mode and implode, whose states the aggregate table holds by address
+    (DuckDB's mode and list aggregates)."""
     if len(expressions) == 0:
         return False
     for expression in expressions:
@@ -147,6 +155,8 @@ def _stream_reductions(expressions: List[Expr], holistic: Bool = False) -> Bool:
                 continue
             if is_reduction(node.op):
                 if holistic and (node.op == MEDIAN or node.op == QUANTILE):
+                    pass
+                elif listed and (node.op == MODE or node.op == IMPLODE):
                     pass
                 elif node.op not in [
                     SUM,

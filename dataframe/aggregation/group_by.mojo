@@ -505,12 +505,14 @@ struct GroupBy(Copyable):
             var table = self._agg_table(expressions, workers, batch_size)
             if table:
                 return _pack_struct_keys(table.value())
-        return _pack_struct_keys(self._agg_whole(bound, batch_size))
+        return _pack_struct_keys(self._agg_groups(bound, batch_size))
 
     def _table_supported(self, expressions: List[Expr]) raises -> Bool:
         """Whether the aggregate table (`aggregate_table.mojo`) groups these
         keys and reduces these expressions."""
-        if len(self._keys) == 0 or not _stream_reductions(expressions, True):
+        if len(self._keys) == 0 or not _stream_reductions(
+            expressions, True, True
+        ):
             return False
         for expression in expressions:
             for node in expression._nodes:
@@ -786,37 +788,58 @@ struct GroupBy(Copyable):
         )
         return reduction.finish()
 
-    def _agg_whole(
+    def _agg_groups(
         self, bound: List[BoundExpr], batch_size: Int
     ) raises -> DataFrame:
-        """Serial key encoding, then the parallel per-group reduce."""
-        trace_path("group_by.whole")
-        var groups: RowKeys
-        if len(self._keys) == 1 and self._keys[0]._data.isa[StringColumn]():
-            groups = encode_string_rows_parallel(
-                self._keys[0], True, worker_count(self._frame.height())
-            )
-        else:
-            groups = encode_rows_parallel(
-                self._keys, True, worker_count(self._frame.height())
-            )
-        # First-occurrence representatives are ordered by source row.
-        var columns = take_sorted_chunked(
-            self._keys, groups.representatives.copy(), 1
+        """Expressions the aggregate table has no state for, over the
+        groups it finds: each group's row numbers come out of the table as
+        a list (an implode, DuckDB's list aggregate, in input order), as
+        Polars' group_by finds each group's row indices, and the grouped
+        evaluator reduces every expression over those groups (Polars'
+        AggregationContext)."""
+        trace_path("group_by.row_lists")
+        var height = self._frame.height()
+        var numbers = List[Int64](capacity=height)
+        for r in range(height):
+            numbers.append(Int64(r))
+        var listed = GroupBy(
+            self._frame.with_column(
+                Series(_GROUP_ROWS, Column[Int64](numbers^))
+            ),
+            self._keys.copy(),
+            self._maintain_order,
+        )._agg_table(
+            [col(_GROUP_ROWS).implode().alias(_GROUP_ROWS)],
+            group_by_workers(height),
+            batch_size,
         )
+        if not listed:
+            raise Error("aggregate table: no state for a group's rows")
+        var grouped = listed.take()
+        var count = grouped.height()
+        var lists = grouped.column(_GROUP_ROWS).rechunk().list_column()
+        var rows = lists.child().rechunk()
+        ref values = rows._data[Column[Int64]]
+        var ids = List[Int](length=height, fill=0)
+        for g in range(count):
+            for e in range(lists._start(g), lists._end(g)):
+                ids[Int(values._get(e))] = g
+        var columns = List[Series](capacity=len(self._keys) + len(bound))
+        for c in range(len(self._keys)):
+            columns.append(grouped._columns[c].copy())
         for expression in bound:
             columns.append(
                 evaluate(
                     expression,
                     self._frame._columns,
-                    self._frame.height(),
+                    height,
                     batch_size=batch_size,
                     grouped=True,
-                    groups=groups.ids,
-                    group_count=groups.count(),
+                    groups=ids,
+                    group_count=count,
                 )
             )
-        return DataFrame(columns^, height=groups.count())
+        return DataFrame(columns^, height=count)
 
     def len(self, name: String = "len") raises -> DataFrame:
         """Row count per group, including rows with null values."""
@@ -921,6 +944,9 @@ def _reduce_column(
     raise Error("Unknown group reduction: " + reduction)
 
 
+# The column of row numbers whose implode gives each group's rows
+# (`_agg_groups`).
+comptime _GROUP_ROWS = "__group_rows"
 # Rows a worker takes at a time: DuckDB's DEFAULT_ROW_GROUP_SIZE, the unit
 # its table scans hand to threads.
 comptime _MORSEL_ROWS = 122_880
@@ -931,10 +957,3 @@ def group_by_workers(height: Int) -> Int:
     morsel of `_MORSEL_ROWS`, at most the configured threads (DuckDB runs at
     most one thread per row group)."""
     return max(1, min(configured_workers(), -(-height // _MORSEL_ROWS)))
-
-
-def range_states(keys: List[Series]) raises -> Bool:
-    """Whether the keys have few values (`low_cardinality`) or form few
-    groups (`small_key_product`), by their sampled tests; read by the
-    planner's batch-states decision (`plan_batch_states_win`)."""
-    return low_cardinality(keys) or small_key_product(keys)
