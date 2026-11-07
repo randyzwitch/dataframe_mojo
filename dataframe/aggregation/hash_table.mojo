@@ -1930,8 +1930,9 @@ struct AggregateSink(Movable):
         adds: List[UInt64],
     ) raises:
         """A batch of keys in the batch buffers into their groups (made
-        when new, with the first rows `firsts`), each adding its `adds`
-        to the count at byte `base` of its group's row."""
+        when new, with the first rows `firsts`; one found again keeps the
+        earlier), each adding its `adds` to the count at byte `base` of its
+        group's row."""
         var group_at = self.groups.unsafe_ptr()
         self._insert[True](
             count,
@@ -1943,10 +1944,15 @@ struct AggregateSink(Movable):
             Int(firsts.unsafe_ptr()),
         )
         var add_at = adds.unsafe_ptr()
+        var first_at = firsts.unsafe_ptr()
         for k in range(count):
-            _words_at(group_at[unsafe_offset=k] + base)[] += add_at[
-                unsafe_offset=k
-            ]
+            var group = group_at[unsafe_offset=k]
+            _words_at(group + base)[] += add_at[unsafe_offset=k]
+            # A group found again keeps the earlier first row.
+            var head = _words_at(group)
+            var first = UInt64(first_at[unsafe_offset=k])
+            if first < head[unsafe_offset=2]:
+                head[unsafe_offset=2] = first
         self.sunk += count
 
     def _merge_group_rows(
