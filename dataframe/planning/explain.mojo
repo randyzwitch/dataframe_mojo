@@ -2,9 +2,6 @@
 from dataframe.aggregation.expressions import (
     _stream_reductions,
 )
-from dataframe.kernels.join_keys import (
-    prefer_left_build,
-)
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -14,9 +11,6 @@ from dataframe.join_type import (
 )
 from dataframe.planning.context import (
     QueryContext,
-)
-from dataframe.planning.graph import (
-    plan_known_height,
 )
 from dataframe.planning.model import (
     AGG,
@@ -255,17 +249,7 @@ def plan_describe(
             JOIN_ANTI,
             JOIN_CROSS,
         ]:
-            if (
-                plan_known_height(self, node.left) <= 65536
-                and (node.how == JOIN_INNER or node.how == JOIN_LEFT)
-                and prefer_left_build(
-                    plan_known_height(self, node.left),
-                    plan_known_height(self, node.right),
-                )
-            ):
-                label += " [small left input; materialize unless compact progression]"
-            else:
-                label += " [stream probe; materialize build]"
+            label += " [stream probe; materialize build]"
         elif node.kind == SORT and node.sort_limit() >= 0:
             label += " [stream top-k state]"
         elif node.kind == SLICE and node.slice_offset() >= 0:
