@@ -11,10 +11,12 @@ from dataframe.expr import (
     COL,
     Expr,
     FIRST,
+    IMPLODE,
     LAST,
     MAX,
     MEDIAN,
     MIN,
+    MODE,
     N_UNIQUE,
     QUANTILE,
     SUM,
@@ -156,10 +158,11 @@ def _order_sensitive(expressions: List[Expr]) -> Bool:
 
 
 def _has_quantile(expressions: List[Expr]) -> Bool:
-    """Whether some expression reduces to a median or quantile."""
+    """Whether some expression reduces to a median, quantile, mode or
+    implode: a state only the aggregate table holds for groups."""
     for expression in expressions:
         for node in expression._nodes:
-            if node.op == MEDIAN or node.op == QUANTILE:
+            if node.op in [MEDIAN, QUANTILE, MODE, IMPLODE]:
                 return True
     return False
 

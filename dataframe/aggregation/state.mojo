@@ -448,7 +448,7 @@ def table_supported(
     """Whether the aggregate table groups `frame` (empty is enough: only
     types are read) by `keys` and holds every reduction's state of
     `expressions`, inline or by address."""
-    if len(keys) == 0 or not _stream_reductions(expressions, True):
+    if len(keys) == 0 or not _stream_reductions(expressions, True, True):
         return False
     for expression in expressions:
         for node in expression._nodes:
