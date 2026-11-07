@@ -254,13 +254,18 @@ def test_ungrouped_n_unique_counts_in_a_table() raises:
                     col(name).n_unique(ignore_nulls=True).alias("i"),
                 ]
             )
-            assert_equal(eager.item(0, "u").numeric[DType.int64](), with_null)
             assert_equal(
-                eager.item(0, "i").numeric[DType.int64](), with_null - nulls
+                Int(eager.item(0, "u").numeric[DType.int64]()), with_null
             )
+            assert_equal(
+                Int(eager.item(0, "i").numeric[DType.int64]()),
+                with_null - nulls,
+            )
+            # The filter keeps every row, so the pipeline's ungrouped sink
+            # (not the in-memory route) counts them.
             var lazy = (
                 frame.lazy()
-                .filter(col("v") > -1000)
+                .filter(col("f").is_null() | (col("f") > -1000.0))
                 .select_exprs(
                     [
                         col(name).n_unique().alias("u"),
@@ -269,4 +274,6 @@ def test_ungrouped_n_unique_counts_in_a_table() raises:
                 )
                 .collect()
             )
-            assert_equal(lazy.item(0, "u").numeric[DType.int64](), with_null)
+            assert_equal(
+                Int(lazy.item(0, "u").numeric[DType.int64]()), with_null
+            )

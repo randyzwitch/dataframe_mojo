@@ -113,7 +113,9 @@ def perfect_hash(keys: List[Series]) raises -> PerfectHash:
         else:
             if len(key) == 0:
                 return PerfectHash.none()
-            var part = key.chunks()[0].copy() if key.is_chunked() else key.copy()
+            var part = key.chunks()[
+                0
+            ].copy() if key.is_chunked() else key.copy()
             var width = _integer_storage(part)
             if width == 0:
                 return PerfectHash.none()

@@ -90,6 +90,7 @@ from dataframe.vector.data_chunk import (
 from dataframe.vector.expression import VectorExpression
 from dataframe.vector.sink import Sink
 from dataframe.vector.types import (
+    PHYSICAL_VARCHAR,
     SelectionVector,
     UnifiedVectorFormat,
     Vector,
@@ -475,7 +476,11 @@ struct UngroupedSink(Sink):
         else:
             v = input_vector(self.output, i, arena, physical, dtype)
         if i < len(self.slots) and (
-            self.slots[i].holds_strings() or self.slots[i].kind == _K_DISTINCT
+            self.slots[i].holds_strings()
+            or (
+                self.slots[i].kind == _K_DISTINCT
+                and v.physical == PHYSICAL_VARCHAR
+            )
         ):
             var known = False
             for h in self.held_handles:
@@ -692,9 +697,7 @@ def distinct_values(
     """The distinct values every worker's distinct table (`layout`, the
     value its one key) holds together: their groups merged, a null value
     left out when `ignore_nulls`."""
-    var groups = aggregate_finish(
-        tables, layout, rows_only=True, ordered=False
-    )
+    var groups = aggregate_finish(tables, layout, rows_only=True, ordered=False)
     var values = 0
     for p in range(len(groups.rows)):
         ref part = groups.rows[p]

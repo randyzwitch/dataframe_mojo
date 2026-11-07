@@ -1595,9 +1595,7 @@ struct AggregateSink(Movable):
         against the table's size (statistics that do not hold for the
         data raise, as DuckDB's do), the slot marked set (with the row, its
         first) and its row's address into `groups`."""
-        var slots = self.hashes.unsafe_ptr().unsafe_origin_cast[
-            MutAnyOrigin
-        ]()
+        var slots = self.hashes.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
         for k in range(count):
             slots[unsafe_offset=k] = 0
         var shift = self.perfect.total_bits
@@ -2634,9 +2632,7 @@ def _scan_groups(
         ref chosen = filter.value()
         var results = List[Reducer](capacity=len(chosen.slots))
         for s in chosen.slots:
-            var one = _Finalizer(
-                slots[s], templates[s], final.count(), held
-            )
+            var one = _Finalizer(slots[s], templates[s], final.count(), held)
             for lo in range(0, final.count(), _BATCH):
                 one.scan(final, lo, min(final.count(), lo + _BATCH), held)
             results.append(one^.reducer())
@@ -2665,12 +2661,8 @@ def _scan_groups(
             for g in range(count):
                 var w = g * final.stride + w0
                 for p in range(Int(words[unsafe_offset=w])):
-                    top_rows.append(
-                        Int(words[unsafe_offset=w + 2 + 2 * p])
-                    )
-        outputs.append(
-            _Finalizer(slots[s], templates[s], count, held)
-        )
+                    top_rows.append(Int(words[unsafe_offset=w + 2 + 2 * p]))
+        outputs.append(_Finalizer(slots[s], templates[s], count, held))
     var key_columns = List[_KeyColumn](capacity=len(key_templates))
     var w = 0
     for c in range(len(key_templates)):
@@ -2870,7 +2862,9 @@ struct _PerfectScanJob(Job):
             var into = base + slot * bytes
             var mine = _words_at(into)
             for j in range(1, len(jobs)):
-                var other = Int(jobs[j].perfect_rows.unsafe_ptr()) + slot * bytes
+                var other = (
+                    Int(jobs[j].perfect_rows.unsafe_ptr()) + slot * bytes
+                )
                 var theirs = _words_at(other)
                 if theirs[unsafe_offset=1] == 0:
                     continue
