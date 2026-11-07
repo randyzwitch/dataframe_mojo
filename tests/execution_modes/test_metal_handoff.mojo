@@ -1279,6 +1279,50 @@ def test_metal_calibration_corpus_checks_shared_arithmetic_mean_and_both_null_ma
                 _check(plan.collect(engine="cpu"), _reference(rows, nulls, 4))
 
 
+def test_metal_calibration_check_preserves_exact_grouped_answers() raises:
+    from dataframe_metal.calibration_capture import _check
+
+    var a = List[Int64]()
+    var b = List[Int64]()
+    for row in range(65536):
+        a.append((Int64(1) << 60) + Int64(row))
+        b.append((Int64(1) << 60) + Int64(row))
+    var expected = DataFrame([Series("key", Column[Int64](a^))])
+    var actual = DataFrame([Series("key", Column[Int64](b^))])
+    _check(actual, expected)
+    _check(concat([actual.slice(0, 13), actual.slice(13, 65523)]), expected)
+    var different = DataFrame(
+        [Series("key", Column[Int64]([(Int64(1) << 60) + 1]))]
+    )
+    with assert_raises(contains="integer answer differs"):
+        _check(different, expected.slice(0, 1))
+    var absent = DataFrame([Series("key", Column[Int64]([0], [False]))])
+    with assert_raises(contains="answer null differs"):
+        _check(absent, expected.slice(0, 1))
+    _check(absent, DataFrame([Series("key", Column[Int64]([99], [False]))]))
+    var float_expected = DataFrame(
+        [Series("f", Column[Float64]([Float64("nan"), Float64("inf"), 0, 1]))]
+    )
+    _check(
+        DataFrame(
+            [
+                Series(
+                    "f",
+                    Column[Float64](
+                        [Float64("nan"), Float64("inf"), -0.0, 1 + 1e-13]
+                    ),
+                )
+            ]
+        ),
+        float_expected,
+    )
+    with assert_raises(contains="floating answer differs"):
+        _check(
+            DataFrame([Series("f", Column[Float64]([0, 0, 0, 1]))]),
+            float_expected,
+        )
+
+
 def _typed_composition_cases() raises -> List[LazyFrame]:
     var columns = List[Series]()
     var valid = List[Bool]([True, False, True])
