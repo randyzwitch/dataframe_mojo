@@ -1611,6 +1611,107 @@ def test_metal_moments_public_derived_casts_membership_and_tuple_groups() raises
 
 
 # requires: metal
+def test_metal_moments_public_four_cast_case_values_share_one_scan() raises:
+    from std.math import sqrt
+    from dataframe import Column, DataFrame, Series, col, lit
+    from tests.support.metal_outcomes import require_metal
+    from dataframe_metal.handoff import execute_timed, supports
+
+    _ = require_metal()
+    var frame = _cast_moment_frame()
+    for filtered in [False, True]:
+        for grouped in [False, True]:
+            var original = _cast_moment_query(frame, grouped)
+            var outputs = original._plan._nodes[
+                len(original._plan._nodes) - 1
+            ].exprs.copy()
+            var source = frame.lazy()
+            if filtered:
+                source = source.filter(col("p").is_in([lit(Int32(1))]))
+            var query = source.select_exprs(outputs)
+            var columns = List[Series]()
+            if grouped:
+                query = source.group_by(["k", "j"], maintain_order=True).agg(
+                    outputs
+                )
+                columns.extend(
+                    [
+                        Series(
+                            "k",
+                            Column[Int32](
+                                List[Int32]([Int32(4)]) if filtered else List[
+                                    Int32
+                                ]([Int32(9), 4])
+                            ),
+                        ),
+                        Series(
+                            "j",
+                            Column[Int64](
+                                List[Int64]([Int64(30)]) if filtered else List[
+                                    Int64
+                                ]([Int64(20), 30])
+                            ),
+                        ),
+                    ]
+                )
+            var floating = List[Float64]([Float64(100)]) if filtered else (
+                List[Float64]([Float64(36), 100]) if grouped else List[Float64](
+                    [Float64(84)]
+                )
+            )
+            var deviation = List[Float64](
+                [sqrt(Float64(200))]
+            ) if filtered else (
+                List[Float64](
+                    [sqrt(Float64(72)), sqrt(Float64(200))]
+                ) if grouped else List[Float64]([sqrt(Float64(112))])
+            )
+            var narrow = List[Float64]([Float64(1)]) if filtered else (
+                List[Float64]([Float64(1), 1]) if grouped else List[Float64](
+                    [Float64(1.25)]
+                )
+            )
+            var wide = List[Float64]([Float64(484)]) if filtered else (
+                List[Float64]([Float64(196), 484]) if grouped else List[
+                    Float64
+                ]([Float64(421)])
+            )
+            var conditional = List[Float64]([Float64(4)]) if filtered else (
+                List[Float64]([Float64(0), 4]) if grouped else List[Float64](
+                    [Float64(14.25)]
+                )
+            )
+            var total = List[Int64]([Int64(68)]) if filtered else (
+                List[Int64]([Int64(32), 68]) if grouped else List[Int64](
+                    [Int64(100)]
+                )
+            )
+            var count = List[Int64]([Int64(2)]) if filtered else (
+                List[Int64]([Int64(2), 2]) if grouped else List[Int64](
+                    [Int64(4)]
+                )
+            )
+            columns.extend(
+                [
+                    Series("floating_var", Column[Float64](floating^)),
+                    Series("floating_std", Column[Float64](deviation^)),
+                    Series("narrow_var", Column[Float64](narrow^)),
+                    Series("wide_var", Column[Float64](wide^)),
+                    Series("case_var", Column[Float64](conditional^)),
+                    Series("wide_sum", Column[Int64](total^)),
+                    Series("narrow_count", Column[Int64](count^)),
+                ]
+            )
+            var expected = DataFrame(columns^)
+            assert_true(supports(query))
+            for copied in [False, True]:
+                _assert_moment_answer(
+                    execute_timed(query, zero_copy=not copied)[0], expected
+                )
+            _assert_public_moment(query, expected)
+
+
+# requires: metal
 def test_metal_moments_public_faults_and_invalid_ddof_keep_cpu_rules() raises:
     from dataframe import Column, DataFrame, Series, DataType, col, lit
     from tests.support.metal_outcomes import require_metal, same_outcome
