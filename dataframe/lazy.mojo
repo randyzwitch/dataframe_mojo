@@ -26,9 +26,6 @@ from dataframe.optimizer.expressions import (
     _same_literal,
     _shared_text,
 )
-from dataframe.planning.inputs import (
-    _SubplanJob,
-)
 from dataframe.planning.model import (
     AGG,
     ASOF,

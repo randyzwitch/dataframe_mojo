@@ -759,6 +759,11 @@ comptime _POSTINGS = 64
 # A posting's state bit set by `retire`: no helper may join it again, nor
 # hand back a slot it took (bit 31 of the running count's word).
 comptime _CLOSED = Int64(1) << 31
+# Set in a posting's job-list address (which is 8-byte aligned) when only
+# an idle crew thread may join it, never a caller waiting in `_help`: an
+# executor's workers (`dataframe.scheduler`) wait for the whole schedule,
+# including the task of that schedule the waiting caller is running.
+comptime _UNHELPABLE = Int64(1)
 # How long a crew thread looks for work before parking. A thread that sleeps
 # wakes on a core the CPU governor (schedutil) has clocked down, and ran a
 # group-by's jobs 1.5x slower than a thread started fresh (PDS-H q1); one
@@ -943,13 +948,27 @@ struct _Crew(Movable):
                 continue
             var state = self._state(q).load()
             while (state >> 32) > 0:
+                if self._claims(q).load() & _UNHELPABLE != 0:
+                    break
                 if not self._state(q).compare_exchange(
                     state, state - (Int64(1) << 32) + 1
                 ):
                     state = self._state(q).load()
                     continue
+                # Joined, the posting stays put: read its list again, as
+                # the slot may have been reposted since the check above.
+                var claims = self._claims(q).load()
+                if claims & _UNHELPABLE != 0:
+                    while True:
+                        var now = self._state(q).load()
+                        var back = now - 1
+                        if now & _CLOSED == 0:
+                            back += Int64(1) << 32
+                        if self._state(q).compare_exchange(now, back):
+                            break
+                    break
                 Pointer[_Claims, MutAnyOrigin](
-                    unsafe_from_address=Int(self._claims(q).load())
+                    unsafe_from_address=Int(claims)
                 )[].run()
                 _ = self._state(q).fetch_sub(1)
                 return True
@@ -1005,7 +1024,7 @@ def _crew_worker(address: Int) abi("C") -> Int:
             _ = external_call["pthread_mutex_unlock", Int32](crew._mutex())
             continue
         Pointer[_Claims, MutAnyOrigin](
-            unsafe_from_address=Int(crew._claims(p).load())
+            unsafe_from_address=Int(crew._claims(p).load() & ~_UNHELPABLE)
         )[].run()
         # Out of work: give the thread back to the budget now, as
         # `_claim_worker` does, so a job still running can start helpers.
@@ -1157,10 +1176,14 @@ struct Crew(Movable):
 
 def _run_on_crew[
     J: Job
-](mut slots: List[_Slot[J]], entry: Int, threads: Int) -> Bool:
+](
+    mut slots: List[_Slot[J]], entry: Int, threads: Int, helpable: Bool = True
+) -> Bool:
     """Run every slot with crew threads and the caller; False (nothing
     run) when no crew is running or every posting is taken. Crew threads
-    join while jobs remain, each as the budget frees a thread for it."""
+    join while jobs remain, each as the budget frees a thread for it;
+    a waiting caller (`_Crew._help`) joins too unless `helpable` is
+    False (`_UNHELPABLE`)."""
     var address = Int(_current_crew().load())
     if address == 0:
         return False
@@ -1174,7 +1197,10 @@ def _run_on_crew[
         Int(slots.unsafe_ptr()), size_of[_Slot[J]](), len(slots), entry
     )
     var claims_address = Int(Pointer(to=claims))
-    var p = crew.post(claims_address, helpers)
+    var posted = claims_address
+    if not helpable:
+        posted |= Int(_UNHELPABLE)
+    var p = crew.post(posted, helpers)
     if p < 0:
         return False
     claims.run()
@@ -1197,8 +1223,12 @@ def run_jobs[J: Job](mut jobs: List[J]) raises:
     _run_jobs(jobs, Int.MAX)
 
 
-def _run_jobs[J: Job](mut jobs: List[J], limit: Int) raises:
-    """`run_jobs` on at most `limit` threads, the caller included."""
+def _run_jobs[
+    J: Job
+](mut jobs: List[J], limit: Int, helpable: Bool = True) raises:
+    """`run_jobs` on at most `limit` threads, the caller included. Jobs
+    that wait on each other's work, as an executor's workers do, pass
+    `helpable=False` (`_UNHELPABLE`)."""
     if len(jobs) == 0:
         return
     if len(jobs) > 1 and limit > 1 and _current_crew().load() == 0:
@@ -1209,7 +1239,7 @@ def _run_jobs[J: Job](mut jobs: List[J], limit: Int) raises:
         var crew = Crew.start()
         if crew.address != 0:
             try:
-                _run_jobs(jobs, limit)
+                _run_jobs(jobs, limit, helpable)
             except e:
                 crew.release()
                 raise e^
@@ -1220,7 +1250,7 @@ def _run_jobs[J: Job](mut jobs: List[J], limit: Int) raises:
         slots.append(_Slot[J](jobs.pop(0)))
     var entry: _Entry = _entry[J]
     var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
-    if len(slots) > 1 and _run_on_crew(slots, entry_address, limit):
+    if len(slots) > 1 and _run_on_crew(slots, entry_address, limit, helpable):
         for t in range(len(slots)):
             if slots[t].failed:
                 raise Error(slots[t].message)

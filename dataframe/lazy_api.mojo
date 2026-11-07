@@ -280,7 +280,6 @@ from dataframe.query_execution.executor import (
     plan_execute_node,
 )
 from dataframe.query_execution.materialize import (
-    plan_prefetch_breakers,
     plan_read_whole,
     plan_share_subplans,
 )
@@ -2121,9 +2120,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _ends_in_breaker(self, index: Int) -> Bool:
         return plan_ends_in_breaker(self._plan, index=index)
-
-    def _prefetch_breakers(self, top: Int, batch_size: Int) raises:
-        plan_prefetch_breakers(self._plan, top=top, batch_size=batch_size)
 
     def _known_height(self, index: Int) -> Int:
         return plan_known_height(self._plan, index=index)
