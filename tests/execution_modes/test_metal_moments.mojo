@@ -634,7 +634,7 @@ def test_metal_moment_planner_shares_values_but_preserves_each_ddof() raises:
         .op,
         VAR,
     )
-    assert_true(moment_key(plan).startswith("moments:v1:"))
+    assert_true(moment_key(plan).startswith("moments:v2:cpu:"))
     assert_true(not Bool(plan_moments(frame.lazy().select(value.var(-1)))))
     var changed = plan_moments(frame.lazy().select(value.var(1)))
     var original = plan_moments(frame.lazy().select(value.var(0)))
