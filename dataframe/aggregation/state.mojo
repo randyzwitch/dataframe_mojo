@@ -6,8 +6,8 @@ from dataframe.aggregation.hash_table import (
     AggregateResult,
     ReducerSpec,
     key_supported,
-    reduction_supported,
-    states_supported,
+    table_reduction,
+    table_states_supported,
 )
 from dataframe.aggregation.expressions import (
     _stream_reductions,
@@ -446,13 +446,13 @@ def table_supported(
     frame: DataFrame, keys: List[String], expressions: List[Expr]
 ) raises -> Bool:
     """Whether the aggregate table groups `frame` (empty is enough: only
-    types are read) by `keys` and keeps every reduction's state of
-    `expressions` inline."""
+    types are read) by `keys` and holds every reduction's state of
+    `expressions`, inline or by address."""
     if len(keys) == 0 or not _stream_reductions(expressions, True):
         return False
     for expression in expressions:
         for node in expression._nodes:
-            if is_reduction(node.op) and not reduction_supported(node.op):
+            if is_reduction(node.op) and not table_reduction(node.op):
                 return False
     var columns = List[Series](capacity=len(keys))
     for name in keys:
@@ -463,7 +463,7 @@ def table_supported(
             return False
         columns.append(column^)
     var template = _StreamReduction(frame.clear(), expressions, keys)
-    return states_supported(
+    return table_states_supported(
         table_specs(template), table_inputs(frame, columns, expressions)
     )
 
