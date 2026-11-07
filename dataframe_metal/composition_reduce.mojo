@@ -10,7 +10,7 @@ from .composition_plan import (
     single_float_composition,
     has_extrema,
     has_trees,
-    has_conditions,
+    needs_general_values,
     simple_conditional_trees,
 )
 from .exact_float import finish_float_bins
@@ -766,7 +766,7 @@ def _mixed_dispatch[
                                     timings,
                                     program,
                                 )
-                            if has_conditions(bundle):
+                            if needs_general_values(bundle):
                                 return _scan[
                                     precise,
                                     wide,

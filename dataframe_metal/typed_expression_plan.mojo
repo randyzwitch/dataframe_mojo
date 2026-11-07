@@ -1,0 +1,108 @@
+"""Bind native casts without changing CPU promotion or checked intermediates."""
+from std.memory import bitcast
+from dataframe import DataFrame, DataType, Expr
+from dataframe.binding import bind, BoundExpr
+from dataframe.expr import COL, LIT_INT, LIT_FLOAT, CAST, ADD, SUB, MUL
+from .expression_plan import ValueNode, ExpressionTree
+from .expression_format import (
+    TYPED_HEADER,
+    MAX_EXPRESSION_NODES,
+    MAX_EXPRESSION_STACK,
+)
+
+
+def numeric_tag(dtype: DataType) -> Int:
+    return (
+        0 if dtype
+        == DataType.INT32 else 1 if dtype
+        == DataType.INT64 else 2 if dtype
+        == DataType.FLOAT32 else -1
+    )
+
+
+def compile_typed_expression(
+    expression: Expr, frame: DataFrame, root: Int = -1
+) raises -> Optional[ExpressionTree]:
+    var last = len(expression._nodes) - 1 if root < 0 else root
+    if (
+        last < 0
+        or last >= len(expression._nodes)
+        or last >= MAX_EXPRESSION_NODES
+    ):
+        return None
+    var has_cast = False
+    for i in range(last + 1):
+        has_cast = has_cast or expression._nodes[i].op == CAST
+    if not has_cast:
+        return None
+    var bound: BoundExpr
+    try:
+        bound = bind(expression, frame._columns, fuse=False)
+    except:
+        return None
+    var nodes = List[ValueNode]([ValueNode(TYPED_HEADER, "", -1, 0)])
+    var stack = List[Int]()
+    var seed = String()
+    for i in range(last + 1):
+        ref original = expression._nodes[i]
+        ref node = bound.expr._nodes[i]
+        var tag = numeric_tag(bound.dtypes[i])
+        if tag < 0 or node.extra >= 0:
+            return None
+        if node.op == COL:
+            if (
+                node.left >= 0
+                or node.right >= 0
+                or node.text not in frame.columns()
+            ):
+                return None
+            if not seed:
+                seed = node.text.copy()
+            nodes.append(ValueNode(COL, node.text.copy(), -1, 0, tag))
+        elif node.op == LIT_INT or node.op == LIT_FLOAT:
+            if node.left >= 0 or node.right >= 0:
+                return None
+            var bits = UInt64(0)
+            if tag == 2:
+                var value = Float32(
+                    node.floating
+                ) if node.op == LIT_FLOAT else Float32(node.integer)
+                bits = UInt64(bitcast[DType.uint32](value))
+            elif node.op == LIT_INT:
+                bits = bitcast[DType.uint64](node.integer)
+            else:
+                return None
+            nodes.append(ValueNode(LIT_INT, "", -1, bits, tag))
+        elif node.op == CAST:
+            if not stack or node.right >= 0 or original.left != stack.pop():
+                return None
+            var source = numeric_tag(bound.dtypes[node.left])
+            if source < 0 or (node.integer != 0 and node.integer != 1):
+                return None
+            if source == 2 and tag != 2:
+                nodes[0].literal = 1
+            nodes.append(
+                ValueNode(
+                    CAST,
+                    "",
+                    -1,
+                    (UInt64(source) << 8) | UInt64(node.integer),
+                    tag,
+                )
+            )
+        elif node.op == ADD or node.op == SUB or node.op == MUL:
+            if len(stack) < 2:
+                return None
+            var right = stack.pop()
+            var left = stack.pop()
+            if original.left != left or original.right != right:
+                return None
+            nodes.append(ValueNode(node.op, "", -1, 0, tag))
+        else:
+            return None
+        stack.append(i)
+        if len(stack) > MAX_EXPRESSION_STACK:
+            return None
+    if len(stack) != 1 or stack[0] != last or not seed:
+        return None
+    return ExpressionTree(bound.dtypes[last], nodes^, seed^)

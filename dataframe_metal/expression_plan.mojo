@@ -6,18 +6,33 @@ from .filter_plan import supported_dtype
 from .expression_format import MAX_EXPRESSION_NODES, MAX_EXPRESSION_STACK
 
 
-@fieldwise_init
 struct ValueNode(Copyable, Movable):
     var op: Int
     var column: String
     var input: Int
     var literal: UInt64
+    var tag: Int
+
+    def __init__(
+        out self,
+        op: Int,
+        column: String,
+        input: Int,
+        literal: UInt64,
+        tag: Int = -1,
+    ):
+        self.op = op
+        self.column = column.copy()
+        self.input = input
+        self.literal = literal
+        self.tag = tag
 
     def same_value(self, other: Self) -> Bool:
         return (
             self.op == other.op
             and self.column == other.column
             and self.literal == other.literal
+            and self.tag == other.tag
         )
 
 
