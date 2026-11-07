@@ -257,6 +257,7 @@ def _scan[
                 predicate_input + 1 if predicate_input
                 < len(bundle.inputs) else 0
             )
+            words[at + 14] |= UInt64(nf) << 16
             var tree_at = base_words + index * tail_words + predicate_words
             for field in range(nf):
                 ref value = bundle.fields[field]

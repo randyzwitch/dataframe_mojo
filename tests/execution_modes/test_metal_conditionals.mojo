@@ -614,3 +614,181 @@ def test_metal_conditional_rounding_ieee_and_constant_predicates() raises:
     assert_true(
         execute_timed(frame.lazy().select(no.mean()))[0].item().is_null()
     )
+
+
+def test_metal_conditional_field_loop_keeps_offsets_nulls_and_native_fields() raises:
+    from std.memory import Pointer, bitcast
+    from dataframe_metal.accelerator.gpu.composed_reduce import (
+        conditional_tree_fields,
+    )
+    from dataframe_metal.accelerator.gpu.multi_reduce import Bytes
+    from dataframe_metal.expression_format import TREE_OP
+
+    for kind in range(3):
+        for base in [0, 5]:
+            var data = List[List[UInt8]]()
+            for slot in range(8):
+                var values = List[UInt8](length=72, fill=0)
+                for row in range(4):
+                    var number = Int64(slot * 10 + row + 1)
+                    if kind == 0:
+                        values.unsafe_ptr().unsafe_bitcast[Int32]()[
+                            unsafe_offset=base + row
+                        ] = Int32(number)
+                    elif kind == 1:
+                        values.unsafe_ptr().unsafe_bitcast[Int64]()[
+                            unsafe_offset=base + row
+                        ] = number
+                    else:
+                        values.unsafe_ptr().unsafe_bitcast[Float32]()[
+                            unsafe_offset=base + row
+                        ] = Float32(number)
+                data.append(values^)
+            var bitmap = List[UInt8](length=8, fill=255)
+            var predicate_bitmap = List[UInt8](length=8, fill=255)
+            for row in [1, 3]:
+                var bit = 3 + base + row
+                predicate_bitmap[bit // 8] &= ~(UInt8(1) << UInt8(bit % 8))
+            var pointers = List[Bytes]()
+            for slot in range(8):
+                pointers.append(
+                    Bytes(unsafe_from_address=Int(data[slot].unsafe_ptr()))
+                )
+            var valid = Bytes(unsafe_from_address=Int(bitmap.unsafe_ptr()))
+            var pb = Bytes(
+                unsafe_from_address=Int(predicate_bitmap.unsafe_ptr())
+            )
+            # Descriptors belong to a later segment, while program and clause
+            # offsets remain absolute relative to the submission's root.
+            var descriptor_base = 7
+            var words = List[UInt64](length=descriptor_base + 48, fill=0)
+            for field in range(4):
+                var at = descriptor_base + 16 + field * 8
+                var start = len(words)
+                words[at] = UInt64(TREE_OP)
+                words[at + 6] = UInt64(start)
+                words[at + 7] = 5
+                words.extend(
+                    List[UInt64](
+                        [
+                            UInt64(CASE_HEADER),
+                            0,
+                            0,
+                            0,
+                            UInt64(CASE_TEST),
+                            UInt64(20),
+                            0,
+                            4,
+                            0,
+                            UInt64(2 * field),
+                            0,
+                            0,
+                            UInt64(CASE_JUMP),
+                            0,
+                            0,
+                            5,
+                            0,
+                            UInt64(2 * field + 1),
+                            0,
+                            0,
+                            1,
+                            2,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            8,
+                            UInt64(3) | (UInt64(1) << 32),
+                            0,
+                            0,
+                            0,
+                            4,
+                        ]
+                    )
+                )
+            var root = Pointer[UInt64, UntrackedOrigin[mut=False]](
+                unsafe_from_address=Int(words.unsafe_ptr())
+            )
+            for native_field in [-1, 2]:
+                if native_field >= 0:
+                    words[descriptor_base + 16 + native_field * 8] = 0
+                for first in [0, 1]:
+                    for row in range(4):
+                        var result: Tuple[
+                            SIMD[DType.uint64, 4], SIMD[DType.uint32, 4], UInt32
+                        ]
+                        if kind == 2:
+                            result = conditional_tree_fields[True, True](
+                                root,
+                                root.unsafe_offset(descriptor_base),
+                                first,
+                                4,
+                                base,
+                                row,
+                                UInt32(kind),
+                                15,
+                                pointers[0],
+                                pointers[1],
+                                pointers[2],
+                                pointers[3],
+                                pointers[4],
+                                pointers[5],
+                                pointers[6],
+                                pointers[7],
+                                valid,
+                                valid,
+                                valid,
+                                valid,
+                                valid,
+                                valid,
+                                valid,
+                                valid,
+                                pointers[0],
+                                pb,
+                            )
+                        else:
+                            result = conditional_tree_fields[False, True](
+                                root,
+                                root.unsafe_offset(descriptor_base),
+                                first,
+                                4,
+                                base,
+                                row,
+                                UInt32(kind),
+                                15,
+                                pointers[0],
+                                pointers[1],
+                                pointers[2],
+                                pointers[3],
+                                pointers[4],
+                                pointers[5],
+                                pointers[6],
+                                pointers[7],
+                                valid,
+                                valid,
+                                valid,
+                                valid,
+                                valid,
+                                valid,
+                                valid,
+                                valid,
+                                pointers[0],
+                                pb,
+                            )
+                        assert_equal(result[2], UInt32(0))
+                        for field in range(4):
+                            var present = (
+                                field >= first and field != native_field
+                            )
+                            assert_equal(result[1][field], UInt32(present))
+                            if present:
+                                var slot = 2 * field + Int(row % 2 == 0)
+                                var value = Int64(slot * 10 + row + 1)
+                                var expected = UInt64(
+                                    bitcast[DType.uint32](Float32(value))
+                                ) if kind == 2 else UInt64(value)
+                                assert_equal(result[0][field], expected)
+            _ = (data^, bitmap^, predicate_bitmap^, words^)
