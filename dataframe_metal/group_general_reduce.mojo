@@ -6,6 +6,7 @@ from .composition_plan import (
     Composition,
     needs_general_values,
     simple_conditional_trees,
+    has_extrema,
 )
 from .group_properties import sample_group_tuples
 from .group_types import group_value_types
@@ -168,42 +169,56 @@ def scan_general_groups[
                 grid_dim=(layout.words() + 255) // 256,
                 block_dim=256,
             )
-            ctx.enqueue_function[
-                general_grouped_partials[
-                    cases, simple_cases, global_state, value_types, moments
-                ]
-            ](
-                inputs[0].values,
-                inputs[1].values,
-                inputs[2].values,
-                inputs[3].values,
-                inputs[4].values,
-                inputs[5].values,
-                inputs[6].values,
-                inputs[7].values,
-                inputs[0].bits,
-                inputs[1].bits,
-                inputs[2].bits,
-                inputs[3].bits,
-                inputs[4].bits,
-                inputs[5].bits,
-                inputs[6].bits,
-                inputs[7].bits,
-                predicate.values,
-                predicate.bits,
-                keys[0].values,
-                keys[1].values,
-                keys[2].values,
-                keys[3].values,
-                keys[0].bits,
-                keys[1].bits,
-                keys[2].bits,
-                keys[3].bits,
-                metadata,
-                scratch,
-                grid_dim=blocks,
-                block_dim=256,
-            )
+            # Int64 extrema reevaluate winning expressions under a ticket lock.
+            # Compile those paths only when a moment query requests MIN/MAX.
+            # Ordinary grouped kernels retain their existing specialization.
+            comptime for mode in range(2 if moments else 1):
+                comptime WITH_EXTREMA = mode == 0
+                if (
+                    not moments
+                    or has_extrema(plan.selected.bundle) == WITH_EXTREMA
+                ):
+                    ctx.enqueue_function[
+                        general_grouped_partials[
+                            cases,
+                            simple_cases,
+                            global_state,
+                            value_types,
+                            moments,
+                            WITH_EXTREMA,
+                        ]
+                    ](
+                        inputs[0].values,
+                        inputs[1].values,
+                        inputs[2].values,
+                        inputs[3].values,
+                        inputs[4].values,
+                        inputs[5].values,
+                        inputs[6].values,
+                        inputs[7].values,
+                        inputs[0].bits,
+                        inputs[1].bits,
+                        inputs[2].bits,
+                        inputs[3].bits,
+                        inputs[4].bits,
+                        inputs[5].bits,
+                        inputs[6].bits,
+                        inputs[7].bits,
+                        predicate.values,
+                        predicate.bits,
+                        keys[0].values,
+                        keys[1].values,
+                        keys[2].values,
+                        keys[3].values,
+                        keys[0].bits,
+                        keys[1].bits,
+                        keys[2].bits,
+                        keys[3].bits,
+                        metadata,
+                        scratch,
+                        grid_dim=blocks,
+                        block_dim=256,
+                    )
             scope.record_launches(2)
             if needs_resolver:
                 ctx.enqueue_function[

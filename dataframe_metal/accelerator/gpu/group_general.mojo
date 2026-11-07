@@ -49,6 +49,7 @@ def general_grouped_partials[
     global_state: Bool = True,
     value_types: Int = 7,
     moments: Bool = False,
+    with_extrema: Bool = True,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -160,6 +161,7 @@ def general_grouped_partials[
                             simple_cases,
                             global_state,
                             moments,
+                            with_extrema,
                         ](
                             metadata,
                             slot,
