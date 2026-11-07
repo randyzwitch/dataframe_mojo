@@ -1917,7 +1917,9 @@ struct Reducer(Movable):
         (ties keep the earlier value) match a single-threaded pass. `groups`
         maps other's group ids to this reducer's. `sources` instead selects
         other's groups in order, into this reducer's groups 0, 1, ...; a
-        streaming state uses it to copy one hash part's groups (#326).
+        streaming state uses it to copy one hash part's groups (#326). Both
+        merge other's group `sources[k]` into this one's `groups[k]` (the
+        aggregate table's states by address, `_K_STATE`).
         """
         var op = self.op
         var is_max = op == MAX
@@ -1927,9 +1929,11 @@ struct Reducer(Movable):
         var steps = len(sources) if len(sources) else other.group_count
         for step in range(steps):
             var source = sources[step] if len(sources) else step
-            var g = step if len(sources) else (
-                groups[source] if len(groups) else source
-            )
+            var g: Int
+            if len(sources):
+                g = groups[step] if len(groups) else step
+            else:
+                g = groups[source] if len(groups) else source
             if op == APPROX_N_UNIQUE:
                 self.sketches[g].merge(other.sketches[source])
             elif op == COUNT or op == NULL_COUNT or op == LEN:
