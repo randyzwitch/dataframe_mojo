@@ -1230,3 +1230,59 @@ def test_metal_moments_combine_native_casts_case_and_tuple_grouping() raises:
         )
         if grouped:
             assert_equal(len(plan.grouped.value().keys.names), 2)
+
+
+def test_metal_moment_layout_keys_use_inlined_native_inputs() raises:
+    from dataframe import DataType, col
+    from dataframe_metal.moment_plan import plan_moments, moment_key
+    from dataframe_metal.calibration import shape_key
+    from dataframe_metal.region_plan import normalize_region
+    from dataframe.expr import COL
+    from dataframe.lazy import WITH_COLUMNS
+
+    var frame = _cast_moment_frame()
+    var value = col("n").cast(DataType.INT64) * col("w")
+    for grouped in [False, True]:
+        var derived = frame.lazy().with_columns([value.alias("derived")])
+        var direct = frame.lazy()
+        if grouped:
+            derived = derived.group_by(["k", "j"], maintain_order=True).agg(
+                [
+                    col("derived").var(0).alias("variance"),
+                    col("derived").std(1).alias("deviation"),
+                ]
+            )
+            direct = direct.group_by(["k", "j"], maintain_order=True).agg(
+                [
+                    value.var(0).alias("renamed_variance"),
+                    value.std(1).alias("renamed_deviation"),
+                ]
+            )
+        else:
+            derived = derived.select_exprs(
+                [
+                    col("derived").var(0).alias("variance"),
+                    col("derived").std(1).alias("deviation"),
+                ]
+            )
+            direct = direct.select_exprs(
+                [
+                    value.var(0).alias("renamed_variance"),
+                    value.std(1).alias("renamed_deviation"),
+                ]
+            )
+        # Generic reduction normalization does not accept VAR/STD bindings.
+        # Moment matching rewrites their matching surrogates before inlining.
+        assert_true(not Bool(normalize_region(derived)))
+        var matched = plan_moments(derived).value().copy()
+        var equivalent = plan_moments(direct).value().copy()
+        for node in matched.matching_region._plan._nodes:
+            assert_true(node.kind != WITH_COLUMNS)
+            for expression in node.exprs:
+                for item in expression._nodes:
+                    assert_true(item.op != COL or item.text != "derived")
+        assert_equal(moment_key(matched), moment_key(equivalent))
+        assert_equal(
+            shape_key(matched.matching_region, moment_key(matched)),
+            shape_key(equivalent.matching_region, moment_key(equivalent)),
+        )

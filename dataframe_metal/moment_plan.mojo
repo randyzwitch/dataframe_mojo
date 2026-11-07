@@ -26,6 +26,9 @@ struct MomentPlan(Copyable, Movable):
     var grouped: Optional[GroupedComposition]
     var outputs: List[MomentOutput]
     var needs_moments: List[Bool]
+    # MEAN-surrogate region for physical layout matching after inlining.
+    # Original VAR/STD operations and parameters remain in outputs.
+    var matching_region: LazyFrame
 
 
 def moment_output_sources(outputs: List[MomentOutput]) -> List[Int]:
@@ -119,7 +122,7 @@ def plan_moments(region: LazyFrame) raises -> Optional[MomentPlan]:
                 binding.field, binding.name.copy(), operations[i], parameters[i]
             )
         )
-    return MomentPlan(selected^, grouped^, outputs^, needs^)
+    return MomentPlan(selected^, grouped^, outputs^, needs^, offered^)
 
 
 def moment_key(plan: MomentPlan) -> String:
