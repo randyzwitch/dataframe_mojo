@@ -1,13 +1,17 @@
 """Independent inputs run at once, each from its own copy of the plan: a
 union's inputs (stacked in input order, nested unions included), a join's
-two computed inputs, and a stream's aggregate builds and source, which run
-ahead of it. Results match the inputs computed one by one, and an error in
+two computed inputs, and a stream's build sides (filtered or aggregated)
+and breaker source, which run ahead of it as scheduled pipelines. Results match the inputs computed one by one, and an error in
 any input reaches the caller."""
 # contract-group: planner.relational
 from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col, lit
 from dataframe.frame import concat
 from tests.support.coverage_compare import assert_frame
+from tests.support.group_strategy_reference import (
+    ScopedEnvironment,
+    StrategyTrace,
+)
 
 comptime ROWS = 200_000
 
@@ -231,3 +235,59 @@ def test_whole_input_selections_cross_joined_run_ahead_and_match() raises:
     var top = len(plan._plan._nodes) - 1
     assert_true(plan._ends_in_breaker(plan._plan._nodes[top].right))
     assert_frame(plan.collect(), eager.take())
+
+
+def test_filtered_build_sides_run_ahead_as_scheduled_pipelines() raises:
+    """Two filtered build sides, neither a breaker, are scheduled as
+    sibling join-build pipelines before the stream probes them; the
+    stream takes both results and their indexes, and the sums are what
+    joining the separately collected inputs gives. Unoptimized, so the
+    join order pass runs no input ahead itself."""
+    var frame = source()
+    var evens = (
+        frame.lazy()
+        .filter((col("k") % lit(Int64(2))) == lit(Int64(0)))
+        .select(["k"])
+        .unique()
+        .with_columns([lit(Int64(1)).alias("even")])
+    )
+    var small = (
+        frame.lazy()
+        .filter(col("k") < lit(Int64(400)))
+        .select(["k"])
+        .unique()
+        .with_columns([lit(Int64(2)).alias("small")])
+        .filter(col("small") > lit(Int64(0)))
+    )
+    var dims_a = evens.collect()
+    var dims_b = small.collect()
+    var a = dims_a.lazy().filter(col("k") > lit(Int64(10)))
+    var b = dims_b.lazy().filter(col("k") > lit(Int64(20)))
+    var probe = frame.lazy().filter(col("v") > lit(Int64(-400)))
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var streamed = (
+        probe.join(a, ["k"])
+        .join(b, ["k"])
+        .group_by("s")
+        .agg([col("v").sum().alias("v"), col("small").sum().alias("n")])
+        .sort("s")
+        .collect(optimize=False)
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "stream.scheduled_inputs" in paths, "the builds were not scheduled"
+    )
+    var eager = (
+        probe.collect()
+        .join(a.collect(), on=["k"])
+        .join(b.collect(), on=["k"])
+        .group_by(["s"])
+        .agg([col("v").sum().alias("v"), col("small").sum().alias("n")])
+        .sort(["s"])
+    )
+    assert_frame(streamed, eager)

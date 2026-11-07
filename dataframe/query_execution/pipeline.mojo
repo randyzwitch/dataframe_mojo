@@ -196,7 +196,7 @@ from dataframe.planning.cost.sampling import (
     _stream_split_groups,
 )
 from dataframe.query_execution.materialize import (
-    plan_prefetch_breakers,
+    plan_schedule_inputs,
 )
 from dataframe.query_execution.operators import (
     _set_rows,
@@ -438,7 +438,7 @@ def plan_stream_execute(
             through.value(), index, batch_size, sink
         )
     if self._prefetched and not self._report:
-        plan_prefetch_breakers(self, cursor, batch_size)
+        plan_schedule_inputs(self, cursor, batch_size)
     # A computed source (a union, an aggregate, a sort) is run in full
     # whatever the stream does with it; as an in-memory table its rows
     # run through the morsel pipelines and the aggregate table on every

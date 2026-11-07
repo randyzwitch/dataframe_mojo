@@ -479,7 +479,7 @@ def _stream_join(node: PlanNode) -> Bool:
     """Whether a stream runs join `node` as one of its steps: its right
     side is built in full first, and the left side's rows probe it. The
     stream itself, and the inputs computed ahead of it
-    (`plan_prefetch_breakers`), walk the same joins, so every build side
+    (`plan_schedule_inputs`), walk the same joins, so every build side
     the stream will run is known before it starts."""
     if node.kind != JOIN:
         return False
