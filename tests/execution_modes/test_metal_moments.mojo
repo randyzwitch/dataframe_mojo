@@ -14,6 +14,10 @@ from dataframe import DataFrame, LazyFrame
 def test_metal_moments_cpu_compatibility_adjudicates_sensitive_centering() raises:
     from dataframe_metal.moment_compatibility import (
         require_cpu_moment_compatibility,
+        require_cpu_moment_precision,
+    )
+    from dataframe_metal.accelerator.gpu.moment_squares import (
+        float32_square_words,
     )
 
     # Exact population variance of [2**60, 2**60+256] is 16384, while
@@ -42,6 +46,32 @@ def test_metal_moments_cpu_compatibility_adjudicates_sensitive_centering() raise
         -149,
         bitcast[DType.float64](UInt64(725) << 52),
     )
+    # A zero mean does not prevent running-M2 accumulation drift. This
+    # alternating Float32 case differs by 6.1e-10 at 100M rows in the native
+    # CPU recurrence and DuckDB, exceeding our public comparison tolerance.
+    var words = float32_square_words(UInt32(0x3F9E0651))
+    var parts = List[UInt32]([words[1], words[2], words[3]])
+    var squares = List[Int128](length=18, fill=0)
+    for word in range(3):
+        squares[Int(words[0]) + word] = Int128(parts[word]) * 100000000
+    with assert_raises(contains="variance accumulation needs CPU adjudication"):
+        require_cpu_moment_precision(squares, 100000000)
+    require_cpu_moment_precision(squares, 65536)
+    # Quantized high-row-count fixtures retain a <=53-bit square-sum span.
+    require_cpu_moment_precision(List[Int128]([Int128(6400000000)]), 100000000)
+    # All benchmark values are quarter-unit multiples bounded by 112.
+    # This mixture establishes their worst common quantum and upper span.
+    var quantized = List[Int128](length=18, fill=0)
+    var examples = List[Float32]([Float32(0.25), Float32(112)])
+    for index in range(2):
+        var term = float32_square_words(bitcast[DType.uint32](examples[index]))
+        var pieces = List[UInt32]([term[1], term[2], term[3]])
+        var weight = 1 if index == 0 else 99999999
+        for word in range(3):
+            quantized[Int(term[0]) + word] += Int128(pieces[word]) * Int128(
+                weight
+            )
+    require_cpu_moment_precision(quantized, 100000000)
 
 
 def test_metal_moment_exact_cancellation_ddof_and_full_float32_range() raises:
@@ -1878,3 +1908,68 @@ def test_metal_moments_public_faults_and_invalid_ddof_keep_cpu_rules() raises:
     var tiny = bitcast[DType.float32](UInt32(1))
     var finite = DataFrame([Series("v", Column[Float32]([tiny, tiny * 2]))])
     same_outcome(finite.lazy().select((col("v") * lit(Float32(1))).var(0)))
+
+
+# requires: metal
+def test_metal_moments_public_precision_boundary_keeps_cpu_results() raises:
+    from dataframe import Column, DataFrame, Series, col
+    from tests.support.metal_outcomes import require_metal
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    var value = bitcast[DType.float32](UInt32(0x3F9E0651))
+    for count in [65536, 65538]:
+        var values = List[Float32]()
+        for row in range(count):
+            values.append(value if row % 2 == 0 else -value)
+        var frame = DataFrame(
+            [
+                Series("v", Column[Float32](values^)),
+                Series("key", Column[Int32](List[Int32](length=count, fill=7))),
+            ]
+        )
+        for grouped in [False, True]:
+            var outputs = List([col("v").var(0).alias("variance")])
+            var query = frame.lazy().select_exprs(outputs)
+            if grouped:
+                query = (
+                    frame.lazy()
+                    .group_by("key", maintain_order=True)
+                    .agg(outputs)
+                )
+            if count == 65536:
+                var measured = execute_timed(query)
+                var direct = measured[0].copy()
+                assert_true(measured[1].finish_ns > 0)
+                assert_true(
+                    abs(
+                        direct.item(0, "variance").float64()
+                        - Float64(value) * Float64(value)
+                    )
+                    <= 1e-10
+                )
+                _assert_public_moment(query, direct)
+            else:
+                with assert_raises(
+                    contains="variance accumulation needs CPU adjudication"
+                ):
+                    _ = execute_timed(query)
+                var cpu = query.collect(engine="cpu")
+                var observed = query.profile(accelerator=runtime)
+                assert_equal(observed[0].columns(), cpu.columns())
+                assert_equal(observed[0].height(), cpu.height())
+                for name in cpu.columns():
+                    assert_equal(
+                        observed[0].column(name).dtype(),
+                        cpu.column(name).dtype(),
+                    )
+                    if name != "variance":
+                        assert_true(
+                            observed[0].column(name).equals(cpu.column(name))
+                        )
+                assert_true("fault_adjudication" in observed[1].columns())
+                var actual = observed[0].item(0, "variance").float64()
+                var expected = cpu.item(0, "variance").float64()
+                assert_true(
+                    abs(actual - expected) <= 1e-10 * (1 + abs(expected))
+                )

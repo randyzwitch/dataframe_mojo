@@ -9,7 +9,10 @@ from dataframe import Column, DataFrame, DataType, LazyFrame, Series
 from dataframe.expr import VAR, STD, SUM, MEAN
 from .moment_plan import MomentPlan, plan_moments, moment_output_sources
 from .moment_finish import finish_variance
-from .moment_compatibility import require_cpu_moment_compatibility
+from .moment_compatibility import (
+    require_cpu_moment_compatibility,
+    require_cpu_moment_precision,
+)
 from .multi_plan import ReductionOutput
 from .composition_plan import has_trees
 from .composition_reduce import (
@@ -142,6 +145,7 @@ def finish_global_moments_math(
                 data[27] != 0,
             )
             if cpu_compatible and answer:
+                require_cpu_moment_precision(squares, scan.counts[field])
                 require_cpu_moment_compatibility(
                     sums,
                     scan.counts[field],
@@ -216,8 +220,10 @@ def execute_global_moments_math(
             result = _dispatch_global_moments[False, False](
                 plan, frame, scope, zero_copy, timings
             )
+        started = Int(perf_counter_ns())
         var answer = finish_global_moments_math(
             plan, result, cpu_compatible=True
         )
+        timings.finish_ns = Int(perf_counter_ns()) - started
         scope.mark_success()
         return (answer^, timings^)

@@ -28,6 +28,18 @@ wide constant integers can require CPU adjudication. This guard is
 conservative; it is not a universal proof of the CPU algorithm's rounding
 error. CPU/Metal comparison contracts are also required before release.
 
+Zero mean is not sufficient to ensure agreement: at 100 million alternating
+Float32 values with bits `0x3F9E0651`, the native CPU recurrence and DuckDB
+return a variance about `6.1e-10` away from the exact result in the public
+scaled-error metric. A second guard handles accumulation precision. Above
+65,536 valid values, raw nonnegative square bins must establish a common
+binary quantum whose entire accumulated span fits in Float64's 53-bit
+significand. Otherwise public execution uses CPU adjudication. This test
+proves exact square summation, not the complete CPU Welford recurrence.
+High-precision Float32 populations can therefore finish on CPU even without
+a large offset. Quantized Float32 and bounded integer fixtures remain GPU
+candidates. Such fallback must be reported and excluded from GPU timings.
+
 Empty inputs and `n <= ddof` return typed Float64 nulls. Negative `ddof`,
 unsupported expressions and unsupported input types remain on CPU. Non-finite
 values and checked expression faults use CPU adjudication, preserving the

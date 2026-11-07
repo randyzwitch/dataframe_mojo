@@ -5,10 +5,41 @@ offset can make CPU centering sensitive to Float64 rounding; those values
 must use the CPU implementation rather than a different numerical answer.
 """
 from std.math import sqrt
+from std.bit import count_leading_zeros
 from .accelerator.faults import data_fault
 from .moment_finish import MomentMagnitude
 
 comptime MOMENT_CPU_TOLERANCE = Float64(1e-10)
+comptime MOMENT_SMALL_ACCUMULATION_ROWS = 65536
+
+
+def require_cpu_moment_precision(squares: List[Int128], count: Int) raises:
+    """Adjudicate large, high-precision second-moment accumulations.
+
+    Raw square bins are nonnegative sums of individual 32-bit words, before
+    carrying between bins. Zero lower bins therefore give a common binary
+    quantum for every contribution. A span of at most 53 bits proves that
+    all partial sums of these squared values are exactly representable in
+    Float64. Larger spans can expose CPU running-M2 accumulation drift even
+    when the mean is zero; centering sensitivity alone does not detect it.
+    This proof concerns square summation, not the entire Welford recurrence.
+    """
+    if count <= MOMENT_SMALL_ACCUMULATION_ROWS:
+        return
+    var magnitude = MomentMagnitude.from_bins(squares)
+    var used = magnitude.used()
+    if not used:
+        return
+    var first = 0
+    while first < len(squares) and squares[first] == 0:
+        first += 1
+    var width = (
+        (used - 1) * 32
+        + 32
+        - Int(count_leading_zeros(magnitude.digits[used - 1]))
+    )
+    if width - first * 32 > 53:
+        raise data_fault("variance accumulation needs CPU adjudication")
 
 
 def require_cpu_moment_compatibility(

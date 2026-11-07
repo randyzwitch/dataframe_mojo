@@ -12,7 +12,10 @@ from dataframe.expr import VAR, STD, SUM, MEAN
 from .moment_plan import MomentPlan, plan_moments, moment_output_sources
 from .moment_reduce import moment_masks
 from .moment_finish import finish_variance
-from .moment_compatibility import require_cpu_moment_compatibility
+from .moment_compatibility import (
+    require_cpu_moment_compatibility,
+    require_cpu_moment_precision,
+)
 from .group_layout import GROUP_VALUE_WORDS, GROUP_MOMENT_WORDS
 from .group_partials import GroupedPartials
 from .group_general_reduce import general_partials
@@ -157,6 +160,7 @@ def finish_grouped_moments_math(
                     non_finite,
                 )
                 if cpu_compatible and answer:
+                    require_cpu_moment_precision(squares, count)
                     require_cpu_moment_compatibility(
                         sums,
                         count,
