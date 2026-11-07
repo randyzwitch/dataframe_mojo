@@ -28,11 +28,12 @@ def finish_grouped(
         keys64.append(List[Int64]())
         key_valid.append(List[Bool]())
     var columns = List[GroupOutput]()
-    for output in bundle.outputs:
+    for output in plan.outputs:
         columns.append(
             GroupOutput(
                 output,
-                bundle.fields[output.field].dtype,
+                DataType.INT64 if output.field
+                < 0 else bundle.fields[output.field].dtype,
                 output.name in plan.row_counts,
             )
         )
@@ -149,8 +150,11 @@ def finish_grouped(
                 keys32[i].append(key.int32() if present else Int32(0))
             else:
                 keys64[i].append(key.int64() if present else Int64(0))
-        for i in range(len(bundle.outputs)):
-            var field = bundle.outputs[i].field
+        for i in range(len(plan.outputs)):
+            var field = plan.outputs[i].field
+            if field < 0:
+                columns[i].append(0, 0, 0, 0, 0, 0, 0, kept)
+                continue
             columns[i].append(
                 integers[field],
                 floating[field],

@@ -58,6 +58,7 @@ struct GroupSample(Copyable, Movable):
     var hottest: Int
     var nulls: Int
     var samples: Int
+    var population: Int
 
     def global_state(self) -> Bool:
         return self.distinct > 256
@@ -66,7 +67,7 @@ struct GroupSample(Copyable, Movable):
         if not self.global_state():
             return 512
         var wanted = self.distinct * 2
-        if self.samples == 4096:
+        if self.samples < self.population:
             # A mostly-distinct sample cannot bound the full cardinality.
             wanted = (
                 131072 if self.distinct * 4
@@ -133,4 +134,4 @@ def sample_group_tuples(
         else:
             counts[identity] = 1
         hottest = max(hottest, counts[identity])
-    return GroupSample(len(counts), hottest, nulls, samples)
+    return GroupSample(len(counts), hottest, nulls, samples, frame.height())

@@ -1,11 +1,12 @@
 """Mapped-input ownership and packed scratch for general grouped scans."""
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType
+from dataframe.expr import MIN, MAX
 from .composition_plan import has_conditions, only_conditional_trees
 from .group_properties import sample_group_tuples
 from .group_plan import GroupedComposition
 from .group_partials import GroupedPartials
-from .group_layout import GroupLayout
+from .group_layout import GroupLayout, GROUP_CAPACITY_RETRY
 from .group_metadata import general_group_metadata
 from .accelerator.faults import data_fault
 from .accelerator.gpu.erased_input import (
@@ -24,8 +25,6 @@ from .accelerator.gpu.group_general import (
     general_grouped_partials,
     resolve_general_int64,
 )
-
-comptime GROUP_CAPACITY_RETRY = "Metal grouped capacity retry required"
 
 
 def scan_general_groups[
@@ -102,8 +101,12 @@ def scan_general_groups[
         layout.check()
         var words = general_group_metadata(plan, inputs, keys, layout)
         var needs_resolver = False
-        for field in bundle.fields:
-            needs_resolver = needs_resolver or field.dtype == DataType.INT64
+        for output in bundle.outputs:
+            if output.op == MIN or output.op == MAX:
+                needs_resolver = (
+                    needs_resolver
+                    or bundle.fields[output.field].dtype == DataType.INT64
+                )
         while len(keys) < 4:
             keys.append(NumericView(empty.copy(), empty.copy(), 0, 0, 0, False))
         while len(inputs) < 8:
@@ -113,22 +116,27 @@ def scan_general_groups[
         var entries = layout.entries()
         var state_words = entries * GROUP_STATE_WORDS
         var count_words = capacity * layout.state_blocks()
+        var resolved_values = entries * 2 if needs_resolver else 0
         var reservation = _NativeReservation(
-            scope, layout.words() * 4 + entries * 16 + len(words) * 8
+            scope,
+            layout.words() * 4 + max(1, resolved_values) * 8 + len(words) * 8,
         )
         var scratch = ctx.enqueue_create_buffer[DType.uint32](layout.words())
-        var extrema = ctx.enqueue_create_buffer[DType.int64](entries * 2)
+        var extrema = ctx.enqueue_create_buffer[DType.int64](
+            max(1, resolved_values)
+        )
         var metadata = ctx.enqueue_create_buffer[DType.uint64](len(words))
         var hp = List[UInt32](length=capacity, fill=UInt32.MAX)
         var rp = List[UInt32](length=count_words, fill=0)
         var sp = List[UInt32](length=state_words, fill=0)
-        var xp = List[Int64](length=entries * 2, fill=0)
+        var xp = List[Int64](length=resolved_values, fill=0)
         var cp = List[UInt32](length=4, fill=0)
         timings.upload_ns += Int(perf_counter_ns()) - started
         started = Int(perf_counter_ns())
         try:
             ctx.enqueue_copy(metadata, words.unsafe_ptr())
-            ctx.enqueue_memset(extrema, Int64(0))
+            if needs_resolver:
+                ctx.enqueue_memset(extrema, Int64(0))
             ctx.enqueue_function[initialize_general_groups[global_state]](
                 metadata,
                 scratch,
@@ -218,7 +226,8 @@ def scan_general_groups[
                     layout.states_offset(), state_words
                 ),
             )
-            ctx.enqueue_copy(xp.unsafe_ptr(), extrema)
+            if needs_resolver:
+                ctx.enqueue_copy(xp.unsafe_ptr(), extrema)
             ctx.enqueue_copy(
                 cp.unsafe_ptr(), scratch.create_sub_buffer[DType.uint32](0, 4)
             )

@@ -5,9 +5,12 @@ from .multi_reduce import Bytes, read_integer
 from .filter_sum import _valid
 from .group_hash import _key_hash, NO_GROUP
 from .group_state import atomic_or
-from ...group_layout import GENERAL_GROUP_LIMIT, GENERAL_TABLE_LIMIT
+from ...group_layout import (
+    GENERAL_GROUP_LIMIT,
+    GENERAL_TABLE_LIMIT,
+    GROUP_CAPACITY_FAULT,
+)
 
-comptime GROUP_CAPACITY_FAULT = UInt32(0x8000_0000)
 comptime MAX_GENERAL_GROUPS = GENERAL_GROUP_LIMIT
 comptime MAX_GENERAL_CAPACITY = GENERAL_TABLE_LIMIT
 

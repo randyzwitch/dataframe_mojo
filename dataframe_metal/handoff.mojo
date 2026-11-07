@@ -34,7 +34,7 @@ from .extrema_plan import plan_extrema, extrema_key
 from .extrema_reduce import execute_extrema
 from .predicate_plan import plan_predicates, predicate_key
 from .group_plan import plan_grouped, grouped_key
-from .group_properties import group_properties
+from .group_properties import sample_group_tuples
 from .group_reduce import execute_grouped
 from .predicate_reduce import execute_predicates
 from .accelerator.gpu.reduction_inputs import (
@@ -116,8 +116,10 @@ def region_key(region: LazyFrame) raises -> String:
         return extrema_key(extrema.value())
     var grouped = plan_grouped(region)
     if grouped:
-        return grouped_key(grouped.value()) + group_properties(
-            region, grouped.value().key
+        ref source = region._plan._frames[region._plan._nodes[0].source_slot()]
+        return (
+            grouped_key(grouped.value())
+            + sample_group_tuples(source, grouped.value().keys.names).key()
         )
     var predicates = plan_predicates(region)
     if predicates:

@@ -47,7 +47,7 @@ def test_metal_grouped_reduction_schema_and_predicate_programs() raises:
     assert_equal(len(matched.value().selected.program.clauses), 0)
     assert_equal(matched.value().selected.program.truth[0], UInt32(1))
     assert_true(
-        grouped_key(matched.value()).startswith("grouped_reductions:v1:")
+        grouped_key(matched.value()).startswith("grouped_reductions:v2:tuple:")
     )
     var filtered = (
         frame.lazy()
@@ -64,7 +64,7 @@ def test_metal_grouped_reduction_schema_and_predicate_programs() raises:
     assert_equal(counted.value().row_counts[0], "len")
     assert_false(Bool(plan_grouped(frame.lazy().group_by("v").agg(outputs))))
     assert_false(Bool(plan_grouped(frame.lazy().group_by("s").agg(outputs))))
-    assert_false(
+    assert_true(
         Bool(plan_grouped(frame.lazy().group_by(["k", "p"]).agg(outputs)))
     )
     assert_false(
@@ -515,17 +515,13 @@ def test_metal_grouped_cardinality_limit_empty_inputs_and_count_rows() raises:
                 ]
             )
         )
-        if distinct == 256:
-            var answer = execute_timed(query)[0].copy()
-            assert_equal(answer.height(), 256)
-            for row in range(256):
-                assert_equal(answer.item(row, "k").int32(), Int32(row))
-                assert_equal(answer.item(row, "s").int64(), Int64(row + 1))
-                assert_equal(answer.item(row, "n").int64(), Int64(1))
-        else:
-            with assert_raises(contains="cardinality"):
-                _ = execute_timed(query)
-            same_outcome(query)
+        var answer = execute_timed(query)[0].copy()
+        assert_equal(answer.height(), distinct)
+        for row in range(distinct):
+            assert_equal(answer.item(row, "k").int32(), Int32(row))
+            assert_equal(answer.item(row, "s").int64(), Int64(row + 1))
+            assert_equal(answer.item(row, "n").int64(), Int64(1))
+        assert_true(query.collect(accelerator=runtime).equals(answer))
         var empty = (
             frame.slice(0, 0)
             .lazy()

@@ -1,4 +1,6 @@
 """Bounded scratch layout shared by general grouped host/device paths."""
+comptime GROUP_CAPACITY_FAULT = UInt32(0x8000_0000)
+comptime GROUP_CAPACITY_RETRY = "Metal grouped capacity retry required"
 comptime GENERAL_GROUP_LIMIT = 65536
 comptime GENERAL_TABLE_LIMIT = GENERAL_GROUP_LIMIT * 2
 comptime GROUP_CONTROL_WORDS = 4

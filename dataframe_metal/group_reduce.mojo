@@ -1,8 +1,11 @@
 """Host ownership and submission for bounded GPU hash aggregation."""
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
-from .composition_plan import has_conditions, only_conditional_trees
+from .composition_plan import has_conditions
 from .group_partials import GroupedPartials
+from .group_properties import sample_group_tuples
+from .group_layout import GROUP_CAPACITY_FAULT, GROUP_CAPACITY_RETRY
+from .group_general_reduce import general_partials
 from .group_plan import GroupedComposition, plan_grouped
 from .group_metadata import group_metadata
 from .group_finish import finish_grouped
@@ -260,16 +263,18 @@ def _scan_grouped[
             owners^,
             reservation^,
         )
-        if cp[1]:
+        timings.kernel_ns += Int(perf_counter_ns()) - started
+        if cp[1] & ~GROUP_CAPACITY_FAULT:
             raise data_fault(
-                "bounded grouped reduction exceeded its cardinality or checked-value limits"
+                "bounded grouped reduction exceeded checked-value limits"
             )
+        if cp[1] & GROUP_CAPACITY_FAULT:
+            raise Error(GROUP_CAPACITY_RETRY)
         if cp[0] > GROUP_LIMIT or cp[2] != UInt32(blocks):
             raise Error("Metal grouped kernel did not complete")
         comptime if floats + narrow < arity:
             if cp[3] != UInt32((entries + 255) // 256):
                 raise Error("Metal grouped extrema resolver did not complete")
-        timings.kernel_ns = Int(perf_counter_ns()) - started
         return GroupedPartials(hp^, rp^, sp^, xp^, blocks)
 
 
@@ -305,7 +310,18 @@ def execute_grouped(
     var started = Int(perf_counter_ns())
     _ = scope.context()
     timings.context_ns = Int(perf_counter_ns()) - started
-    var partials = _dispatch_grouped(plan, frame, scope, zero_copy, timings)
+    var partials: GroupedPartials
+    if len(plan.keys.names) == 1 and not has_conditions(plan.selected.bundle):
+        try:
+            partials = _dispatch_grouped(plan, frame, scope, zero_copy, timings)
+        except error:
+            if String(error) != GROUP_CAPACITY_RETRY:
+                raise error^
+            partials = general_partials(
+                plan, frame, scope, zero_copy, timings, force_global=True
+            )
+    else:
+        partials = general_partials(plan, frame, scope, zero_copy, timings)
     started = Int(perf_counter_ns())
     var result = finish_grouped(
         plan,
@@ -328,6 +344,12 @@ def _dispatch_grouped(
     zero_copy: Bool,
     mut timings: HandoffTimings,
 ) raises -> GroupedPartials:
+    if (
+        len(plan.keys.names) != 1
+        or has_conditions(plan.selected.bundle)
+        or sample_group_tuples(frame, plan.keys.names).global_state()
+    ):
+        return general_partials(plan, frame, scope, zero_copy, timings)
     var floats = 0
     var narrow = 0
     for field in plan.selected.bundle.fields:
@@ -341,14 +363,6 @@ def _dispatch_grouped(
                     and floats == nf
                     and narrow == ni
                 ):
-                    if only_conditional_trees(plan.selected.bundle):
-                        return _scan_grouped[arity, nf, ni, True, True](
-                            plan, frame, scope, zero_copy, timings
-                        )
-                    if has_conditions(plan.selected.bundle):
-                        return _scan_grouped[arity, nf, ni, True](
-                            plan, frame, scope, zero_copy, timings
-                        )
                     return _scan_grouped[arity, nf, ni](
                         plan, frame, scope, zero_copy, timings
                     )
