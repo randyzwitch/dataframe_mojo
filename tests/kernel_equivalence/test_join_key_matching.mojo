@@ -2,7 +2,8 @@
 fields) on several keys, against a nested-loop model: probes longer than a
 chunk, strings stored as offsets or as Arrow views (inline lengths 0 to 12,
 and long strings that share their first bytes), floats with NaN and signed
-zero, Bool and Int128 keys, and a null in each key; every join type."""
+zero, Bool and Int128 keys, and a null in each key; every join type, and
+the keys-only table of semi, anti and mark joins."""
 # contract-group: kernel.order_keys
 from std.testing import assert_equal
 
@@ -174,6 +175,11 @@ def check(left: Side, right: Side, keys: Int) raises:
     var table = JoinHashTable(build)
     assert_equal(probe_pairs(table, probe, JOIN_SEMI, 0)[0], semi)
     assert_equal(probe_pairs(table, probe, JOIN_ANTI, 0)[0], anti)
+    # The key set a semi, anti or mark join builds (Polars' grouper):
+    # each distinct key once, in its slot.
+    var keyset = JoinHashTable(build, keys_only=True)
+    assert_equal(probe_pairs(keyset, probe, JOIN_SEMI, 0)[0], semi)
+    assert_equal(probe_pairs(keyset, probe, JOIN_ANTI, 0)[0], anti)
     # A right join: the matched pairs, then the build rows none matched;
     # a full join also keeps the unmatched probe rows in place.
     var unmatched = List[Int]()
@@ -213,7 +219,7 @@ def check(left: Side, right: Side, keys: Int) raises:
     )
     # A mark join: every probe row, with whether it matched (2: unknown,
     # a null probe key or no match against a build holding a null key).
-    var scan = ScanStructure(table, JOIN_MARK)
+    var scan = ScanStructure(keyset, JOIN_MARK)
     var low = 0
     var build_null = False
     for key in build:

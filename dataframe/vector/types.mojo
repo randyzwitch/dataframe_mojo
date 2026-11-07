@@ -45,6 +45,11 @@ comptime PHYSICAL_UINT64 = 8
 comptime PHYSICAL_INT64 = 9
 comptime PHYSICAL_FLOAT = 11
 comptime PHYSICAL_DOUBLE = 12
+# Nested types (STRUCT = 100, LIST = 101 in DuckDB). A vector of either
+# is still OPAQUE in the chunk: it is read through its at-rest column. The
+# row layout (`tuple_data_layout.mojo`) uses these to describe columns.
+comptime PHYSICAL_STRUCT = 100
+comptime PHYSICAL_LIST = 101
 comptime PHYSICAL_VARCHAR = 200
 comptime PHYSICAL_INT128 = 204
 comptime PHYSICAL_OPAQUE = 254

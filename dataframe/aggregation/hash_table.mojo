@@ -41,9 +41,11 @@ The algorithm has two phases:
    `Reducer`s for finalization, and keys are read from group rows, so each
    row is read once. A run containing one worker's rows from a table that
    never cleared its entries has each group only once, so its rows can be
-   copied directly. Groups are emitted by partition at the greatest bit
-   depth reached by the workers (in first-row order for one worker), then
-   by first row, giving stable order for a fixed worker count.
+   copied directly. Without maintain_order, groups come out in whatever
+   order they merge, as DuckDB's GROUP BY and Polars' group_by give no
+   order. With it, groups are emitted by partition at the greatest bit
+   depth the workers could reach, then by first row, which the caller
+   merges into first-occurrence order.
 
 A string longer than twelve bytes is compared through the address of its
 bytes in the input, which outlives the aggregation; the input is never
@@ -75,8 +77,11 @@ from dataframe.aggregation.function import (
     _K_DISTINCT,
     _K_LEN,
     _K_NULLS,
+    _K_ORDERED,
+    _K_STATE,
     _K_TOP_ROWS,
     _K_VALUES,
+    _OrderedBuffer,
     _VALUE_NONE,
     _ValueArena,
     _storage_kind,
@@ -87,9 +92,13 @@ from dataframe.aggregation.function import (
     _slot_kind,
     _words_at,
     combine,
+    reducer_input,
     reaggregable,
     reduction_supported,
     states_supported,
+    table_kind,
+    table_reduction,
+    table_states_supported,
 )
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
@@ -588,8 +597,8 @@ def aggregate_layout(
     keys: List[Series], inputs: List[Series], templates: List[ReducerSpec]
 ) raises -> AggregateLayout:
     """The layout of a table grouping columns like `keys` and reducing
-    columns like `inputs` (only their types are read). Every reduction's
-    state must fit inline (`states_supported`)."""
+    columns like `inputs` (only their types are read). Every reduction
+    has a state here, inline or by address (`table_states_supported`)."""
     var width = 0
     var addressed = List[Bool]()
     for key in keys:
@@ -608,17 +617,15 @@ def aggregate_layout(
     var state_words = 0
     for s in range(len(templates)):
         var second = 0
-        var kind: Int
         if templates[s].op == CORR or templates[s].op == COV:
             second = _second_input(templates, s)
-            kind = (
-                _pair_kind(templates[s], inputs[s], inputs[second]) if second
-                < len(inputs) else -1
-            )
-        else:
-            kind = _slot_kind(templates[s], inputs[s])
+        var kind = table_kind(templates, inputs, s)
         if kind < 0:
-            raise Error("aggregate table: a state that is not inline")
+            raise Error("aggregate table: a reduction with no state here")
+        if kind == _K_STATE:
+            trace_path("aggregate_table.state_by_address")
+        elif kind == _K_ORDERED:
+            trace_path("aggregate_table.ordered_state")
         var floating = False
         if kind != _K_LEN and kind != _K_DECIMAL_SUM and kind != _K_COMOMENT:
             # None for a decimal's counts, which hold no values.
@@ -1292,6 +1299,14 @@ struct AggregateSink(Movable):
     # groups (`count_group_rows`) makes them in the distinct table's
     # order instead.
     var in_order: Bool
+    # The reductions whose states the rows hold by address, and per
+    # reduction the owner of those states: a `Reducer` of every group's
+    # state (`_K_STATE`) or a buffer of input rows (`_K_ORDERED`). Each
+    # list is made once, at its full length, so an owner's address is
+    # fixed while the sink moves.
+    var by_address: List[Int]
+    var owned: List[Reducer]
+    var buffered: List[_OrderedBuffer]
 
     def __init__(
         out self,
@@ -1346,6 +1361,14 @@ struct AggregateSink(Movable):
         self.distinct_slots = List[Int]()
         self.only = -1
         self.in_order = True
+        self.by_address = List[Int]()
+        self.owned = List[Reducer](capacity=len(layout.slots))
+        self.buffered = List[_OrderedBuffer](capacity=len(layout.slots))
+        for s in range(len(layout.slots)):
+            if layout.slots[s].by_address():
+                self.by_address.append(s)
+            self.owned.append(layout.templates[s].make(0))
+            self.buffered.append(_OrderedBuffer())
         if distinct:
             self.distinct_slots = layout.distinct.copy()
             for d in range(len(layout.distinct)):
@@ -1444,6 +1467,7 @@ struct AggregateSink(Movable):
         hold: List[Series],
         first: Int,
         count: Int,
+        columns: List[Series] = List[Series](),
     ) raises:
         """A data chunk's `count` rows (at most a batch) into the table
         (`GroupedAggregateHashTable::AddChunk`): each row's group from the
@@ -1457,7 +1481,10 @@ struct AggregateSink(Movable):
         one group once (`TryAddConstantGroups`), and a sole key whose
         strings index a stored dictionary finds a group once per entry
         (`TryAddDictionaryGroups`); otherwise every row is hashed and
-        probed (`FindOrCreateGroups`). DuckDB's dictionary path also takes
+        probed (`FindOrCreateGroups`). The reductions whose states the rows
+        hold by address read their input as `columns` (by input, the
+        chunk's rows as a column; DuckDB's states that own memory update
+        through the same addresses). DuckDB's dictionary path also takes
         a dictionary without an id when it has fewer than half the chunk's
         rows; here every dictionary-coded key comes from a stored
         dictionary (an id), so that case does not arise.
@@ -1502,8 +1529,72 @@ struct AggregateSink(Movable):
             Int(self.scratch.unsafe_ptr()),
             self.only,
         )
+        if len(self.by_address) > 0 and self.only < 0:
+            self._update_by_address(columns, first, count)
         self.sunk += count
         self._sink_distinct(keys, inputs, hold, first, count)
+
+    def _update_by_address(
+        mut self, columns: List[Series], first: Int, count: Int
+    ) raises:
+        """The batch's states held by address: a group row's state with no
+        owner yet is made (DuckDB's `initialize` of a new group's state),
+        its owner's address and its ordinal there written into the row;
+        then each owner takes the batch's rows by their states' ordinals,
+        a `Reducer` updating them and a buffer keeping the rows with their
+        sequence numbers (`first` onward)."""
+        var rows = self.groups.unsafe_ptr()
+        var discard = Int(self.discard.unsafe_ptr())
+        for s in self.by_address:
+            ref slot = self.slots[s]
+            var base = 8 * (self.parts.states_at + slot.offset)
+            var ordered = slot.kind == _K_ORDERED
+            var owner = Int(Pointer(to=self.buffered[s])) if ordered else Int(
+                Pointer(to=self.owned[s])
+            )
+            var made = (
+                self.buffered[s]
+                .groups if ordered else self.owned[s]
+                .group_count
+            )
+            var ordinals = List[Int](unsafe_uninit_length=count)
+            var spare = -1
+            for k in range(count):
+                var row = rows[unsafe_offset=k]
+                if row == discard:
+                    # A row that joins no group updates a state no row holds.
+                    if not ordered and spare < 0:
+                        spare = made
+                        made += 1
+                    ordinals[k] = spare
+                    continue
+                var state = _words_at(row + base)
+                if state[] == 0:
+                    state[] = UInt64(owner)
+                    state[unsafe_offset=1] = UInt64(made + 1)
+                    state[unsafe_offset=2] = 0
+                    made += 1
+                ordinals[k] = Int(state[unsafe_offset=1]) - 1
+            if ordered:
+                self.buffered[s].add(columns[s], ordinals, first, made)
+                continue
+            self.owned[s].grow(made)
+            if slot.kind == _K_STATE and (
+                self.owned[s].op == CORR or self.owned[s].op == COV
+            ):
+                self.owned[s].update_pair(
+                    columns[s], columns[slot.k], 0, True, ordinals
+                )
+            else:
+                self.owned[s].update(
+                    reducer_input(self.owned[s], columns[s]), 0, True, ordinals
+                )
+
+    def prepare_ordered(mut self) raises:
+        """Every buffer of input rows ready for the finish to read."""
+        for s in self.by_address:
+            if self.slots[s].kind == _K_ORDERED:
+                self.buffered[s].prepare()
 
     def _sink_distinct(
         mut self,
@@ -2156,6 +2247,10 @@ struct _FinishJob(Job):
     # distinct table's, which the main table counts from.
     var rows_only: Bool
     var rows: List[_Groups]
+    # Whether the groups come out in the output order (by partition, then
+    # by first row); otherwise in whatever order they merge, as DuckDB's
+    # GROUP BY and Polars' group_by without maintain_order give them.
+    var ordered: Bool
 
     def __init__(
         out self,
@@ -2172,11 +2267,14 @@ struct _FinishJob(Job):
         var run_starts: List[Int],
         var run_rows: List[Int],
         filter: Optional[GroupFilter],
-        rows_only: Bool = False,
+        rows_only: Bool,
+        ordered: Bool,
     ):
         self.filter = filter.copy()
         self.merged = 0
         self.rows_only = rows_only
+        # A distinct table's groups are only counted: never in order.
+        self.ordered = ordered and not rows_only
         self.rows = List[_Groups]()
         self.sinks = sinks
         self.run_starts = run_starts^
@@ -2207,9 +2305,9 @@ struct _FinishJob(Job):
             self.total,
         )
         var stride = final.stride
-        # Groups come out by partition, then by first row, so the output
-        # order depends on the rows alone, not on which worker took which
-        # morsel. A worker takes morsels in order and makes a group's row
+        # Ordered (`ordered`), groups come out by partition, then by first
+        # row, so the output order depends on the rows alone, not on which
+        # worker took which morsel. A worker takes morsels in order and makes a group's row
         # at its first sight in a fill cycle, so each worker's rows of a
         # partition are in first-row order: merging them makes every group
         # at its earliest row, in that order, with no sort and no second
@@ -2244,7 +2342,7 @@ struct _FinishJob(Job):
                         var first = Int(words[unsafe_offset=r * stride + 2])
                         in_order = in_order and first > last
                         last = first
-            if in_order and self.bits < self.order_bits and not self.rows_only:
+            if in_order and self.bits < self.order_bits and self.ordered:
                 # Into the output order as they are copied (see below).
                 _by_partition(spans, sizes, self.order_bits, final)
                 ordered = True
@@ -2265,11 +2363,10 @@ struct _FinishJob(Job):
             var mask = 0
             var run = 0
             # Rows merged in first-row order only where that order comes
-            # out: not for a distinct table's groups (`rows_only`), which
-            # are only counted, nor when some sink's rows are out of it,
-            # whose groups are sorted below. Those merge sink by sink, as
-            # DuckDB's finalize does.
-            var sequential = self.rows_only
+            # out: not for groups in no order (`ordered` false), nor when
+            # some sink's rows are out of it, whose groups are sorted below.
+            # Those merge sink by sink, as DuckDB's finalize does.
+            var sequential = not self.ordered
             for j in range(sinks):
                 sequential = sequential or not jobs[j].in_order
             if sequential:
@@ -2350,10 +2447,10 @@ struct _FinishJob(Job):
                         parts, p, block[best], row_in[best]
                     )
             _ = entries^
-        # A distinct table's (keys, value) groups (`rows_only`) are only
-        # counted into the main table, whose finish orders its own groups,
-        # so they skip the output order.
-        if self.rows_only:
+        # Groups in no order skip the output order: a distinct table's
+        # (keys, value) groups (`rows_only`), only counted into the main
+        # table, and a group-by's without maintain_order.
+        if not self.ordered:
             pass
         elif not in_order:
             # A worker's rows were not in first-row order: sort the groups.
@@ -2553,7 +2650,9 @@ def _finalize_distinct(
         for j in range(workers):
             tables.append(sinks[j].distinct.take(d))
         var table_layout = layout.distinct_layout(d)
-        var pairs = aggregate_finish(tables, table_layout, rows_only=True)
+        var pairs = aggregate_finish(
+            tables, table_layout, rows_only=True, ordered=False
+        )
         var widths = layout_widths(table_layout)
         var nulls = layout.templates[slot].integer == 0
         var runs = List[Int]()
@@ -2589,17 +2688,25 @@ def aggregate_finish(
     layout: AggregateLayout,
     filter: Optional[GroupFilter] = None,
     rows_only: Bool = False,
+    *,
+    ordered: Bool,
 ) raises -> AggregateResult:
     """Phase 2 over every worker's sink: runs of consecutive partitions
     holding about half a 256 KiB block of rows each. This bounds each
     working set so its table and rows can stay in cache while runs merge
     on separate threads. With `filter`, only the groups it keeps come
-    out (`GroupFilter`); the result's `merged` counts them all."""
+    out (`GroupFilter`); the result's `merged` counts them all. With
+    `ordered`, each partition's groups come out in first-row order (by
+    partition at the most bits the sinks could reach, then first row),
+    which `table_frame` merges into first-occurrence order; otherwise in
+    no particular order."""
     var result = AggregateResult()
     if len(sinks) == 0:
         return result^
     if len(layout.distinct) > 0:
         _finalize_distinct(sinks, layout)
+    for j in range(len(sinks)):
+        sinks[j].prepare_ordered()
     # Every sink's rows at the shared bits first, each on its own thread
     # (DuckDB's `Combine`, which repartitions to the global bits).
     var bits = Int(layout.radix[].bits.load())
@@ -2688,6 +2795,7 @@ def aggregate_finish(
                         run_rows^,
                         filter,
                         rows_only,
+                        ordered,
                     )
                 )
             starts = List[Int]()

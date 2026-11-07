@@ -1,9 +1,10 @@
 """A pipeline sinking into the aggregate table gives the scalar groups for
-every worker count and batch size, and the same rows in the same order on
-every run: groups come back by hash partition and then by where each group's
-first row sits in the input, never by which worker took which morsel. That
-order comes from merging the workers' rows, each in first-row order, without
-a sort.
+every worker count and batch size. Without maintain_order the groups come
+back in no particular order (as Polars' group_by and DuckDB's GROUP BY give
+them), so runs are compared as sets of groups. With maintain_order they come
+back in first-occurrence order on every run, whichever worker took which
+morsel: the finish merges the workers' rows, each in first-row order,
+without a sort.
 
 Rounding policy: integer states and keys are exact on every run. A floating
 state sums each worker's partial sums, and which rows a worker reduced
@@ -68,66 +69,84 @@ def test_every_worker_count_and_batch_size_gives_the_scalar_groups() raises:
     for threads in [1, 2, 3, 8]:
         var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
         for batch in [997, 4096, 65536]:
-            var observed = StrategyTrace()
-            var actual = (
-                frame.lazy()
-                .filter(col("r") >= lit(Int64(start)))
-                .group_by(["s", "i", "f", "b"])
-                .agg(reductions())
-                .collect(batch_size=batch)
-            )
-            assert_true(
-                "dataframe-path: pipeline.group_table\n" in observed.text(),
-                "no aggregate table sink at "
-                + String(threads)
-                + " workers, batch "
-                + String(batch),
-            )
-            # Each worker's rows arrive in first-row order, so the finish
-            # merges them into that order without sorting the groups.
-            assert_true(
-                "dataframe-path: aggregate_table.sorted_groups\n"
-                not in observed.text(),
-                "groups needed a sort at "
-                + String(threads)
-                + " workers, batch "
-                + String(batch),
-            )
-            _ = observed^
-            assert_groups(actual, models, True)
+            for ordered in [False, True]:
+                var observed = StrategyTrace()
+                var actual = (
+                    frame.lazy()
+                    .filter(col("r") >= lit(Int64(start)))
+                    .group_by(["s", "i", "f", "b"], maintain_order=ordered)
+                    .agg(reductions())
+                    .collect(batch_size=batch)
+                )
+                var label = (
+                    String(" at ")
+                    + String(threads)
+                    + " workers, batch "
+                    + String(batch)
+                )
+                assert_true(
+                    "dataframe-path: pipeline.group_table\n" in observed.text(),
+                    "no aggregate table sink" + label,
+                )
+                # Groups in no order are never sorted; ordered ones arrive
+                # in first-row order from each worker, so the finish merges
+                # them into that order without sorting them either.
+                assert_true(
+                    "dataframe-path: aggregate_table.sorted_groups\n"
+                    not in observed.text(),
+                    "groups needed a sort" + label,
+                )
+                _ = observed^
+                assert_groups(actual, models, True)
         _ = workers^
     _ = trace^
 
 
-def test_repeated_runs_return_the_same_rows_in_the_same_order() raises:
+def test_repeated_runs_return_the_same_rows() raises:
+    # The same groups on every run; in the same order only under
+    # maintain_order.
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
     var rows = 72_000
     var groups = 9_000
     var frame = aggregate_frame(rows, groups)
-    var plan = (
-        frame.lazy()
-        .filter(col("r") >= lit(Int64(7)))
-        .group_by(["s", "i"])
-        .agg(reductions())
-    )
-    var first = plan.collect(batch_size=1024)
-    assert_groups(first, group_models(rows, groups, 7), False)
-    for _ in range(4):
-        assert_same_run(plan.collect(batch_size=1024), first)
     var eager = frame.filter(col("r") >= lit(Int64(7)))
-    var grouped = eager.group_by(["s", "i"]).agg(reductions())
-    for _ in range(4):
-        assert_same_run(eager.group_by(["s", "i"]).agg(reductions()), grouped)
+    for ordered in [False, True]:
+        var plan = (
+            frame.lazy()
+            .filter(col("r") >= lit(Int64(7)))
+            .group_by(["s", "i"], maintain_order=ordered)
+            .agg(reductions())
+        )
+        var first = plan.collect(batch_size=1024)
+        assert_groups(first, group_models(rows, groups, 7), False)
+        var grouped = eager.group_by(["s", "i"], maintain_order=ordered).agg(
+            reductions()
+        )
+        if ordered:
+            assert_same_run(grouped, first)
+        else:
+            first = first.sort(["s", "i"])
+            assert_same_run(grouped.sort(["s", "i"]), first)
+        for _ in range(4):
+            var again = plan.collect(batch_size=1024)
+            var eager_again = eager.group_by(
+                ["s", "i"], maintain_order=ordered
+            ).agg(reductions())
+            if not ordered:
+                again = again.sort(["s", "i"])
+                eager_again = eager_again.sort(["s", "i"])
+            assert_same_run(again, first)
+            assert_same_run(eager_again, first)
     _ = workers^
 
 
-def test_repartitioned_sinks_return_the_same_order_on_every_run() raises:
+def test_repartitioned_sinks_keep_the_ordered_groups_in_order() raises:
     # Partitions start at one per worker and multiply as tables clear: 60K
     # groups fill every table at three and eight workers, so how many
     # partitions the sinks reach depends on which worker took which
-    # morsel. Groups still come back in one order on every run with the
-    # same workers. One worker copies its rows without merging them, in
-    # first-row order.
+    # morsel. Ordered groups still come back in first-occurrence order on
+    # every run and at every worker count; the others are the same groups.
+    # One worker copies its rows without merging them.
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var rows = 240_000
     var groups = 60_000
@@ -139,6 +158,14 @@ def test_repartitioned_sinks_return_the_same_order_on_every_run() raises:
         .group_by(["s", "i"])
         .agg(reductions())
     )
+    var ordered_plan = (
+        frame.lazy()
+        .filter(col("r") >= lit(Int64(0)))
+        .group_by(["s", "i"], maintain_order=True)
+        .agg(reductions())
+    )
+    var reference = frame.clear()
+    var sorted_reference = frame.clear()
     for threads in [1, 2, 3, 8]:
         var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
         var observed = StrategyTrace()
@@ -149,19 +176,15 @@ def test_repartitioned_sinks_return_the_same_order_on_every_run() raises:
                 in observed.text(),
                 "one worker's rows were merged rather than copied",
             )
-            # With one partition, that is first-occurrence order.
-            assert_same_run(
-                frame.lazy()
-                .filter(col("r") >= lit(Int64(0)))
-                .group_by(["s", "i"], maintain_order=True)
-                .agg(reductions())
-                .collect(),
-                first,
-            )
+            reference = ordered_plan.collect()
+            assert_groups(reference, models, False)
+            sorted_reference = reference.sort(["s", "i"])
         _ = observed^
         assert_groups(first, models, False)
+        assert_same_run(first.sort(["s", "i"]), sorted_reference)
         for _ in range(3):
-            assert_same_run(plan.collect(), first)
+            assert_same_run(plan.collect().sort(["s", "i"]), sorted_reference)
+            assert_same_run(ordered_plan.collect(), reference)
         _ = workers^
     _ = trace^
 

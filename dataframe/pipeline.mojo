@@ -4106,6 +4106,12 @@ def _run_pipeline(
             for node in expression._nodes:
                 if is_reduction(node.op) and not reaggregable(node.op):
                     merges = False
+        # A state by address links the states it merges into a chain
+        # through their rows, which a derived set's merge would change in
+        # its source set's rows.
+        for slot in layout[0].slots:
+            if slot.by_address():
+                merges = False
         if merges:
             # A set's size counts its key columns' mask bits (a whole key
             # all 64), so a set holding another's keys is the larger.
@@ -4387,7 +4393,7 @@ def _run_pipeline(
             for j in range(len(combined)):
                 sinks.append(combined[j].tables.pop(place))
             _ = remaining.pop(place)
-            var result = aggregate_finish(sinks, layout[s])
+            var result = aggregate_finish(sinks, layout[s], ordered=False)
             var finished = table_frame(template[s], result^, False)
             if len(sets[s]) == 0:
                 if finished.height() == 0:
@@ -4414,12 +4420,12 @@ def _run_pipeline(
         # read them out.
         var finished: DataFrame
         if len(finish_steps) == 0:
-            var result = aggregate_finish(sinks, layout[0])
+            var result = aggregate_finish(sinks, layout[0], ordered=ordered)
             finished = table_frame(template[0], result^, ordered)
         elif ordered:
             # The groups in first-occurrence order (each group row's first
             # sequence number), then the steps over them.
-            var result = aggregate_finish(sinks, layout[0])
+            var result = aggregate_finish(sinks, layout[0], ordered=True)
             finished = _steps_over_frame(
                 table_frame(template[0], result^, True),
                 finish_steps,
@@ -4443,7 +4449,9 @@ def _run_pipeline(
                     Int(Pointer(to=having.value())),
                     _having_keep,
                 )
-            var result = aggregate_finish(sinks, layout[0], filter)
+            var result = aggregate_finish(
+                sinks, layout[0], filter, ordered=False
+            )
             _ = having^
             var merged = result.merged
             var kept = 0

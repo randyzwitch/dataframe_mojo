@@ -14,6 +14,7 @@ starts.
 from std.memory import Pointer, unsafe_memcpy
 
 from dataframe.frame import DataFrame, concat
+from dataframe.parallel import Job, run_jobs
 from dataframe.series import Series
 from dataframe.storage.column import Column
 from dataframe.vector.data_chunk import ColumnArena, DataChunk, to_series
@@ -131,14 +132,16 @@ struct ColumnDataCollection(Movable):
     its vectors are fixed-width and its type is their storage type (or
     the values were computed, typed afterwards), and otherwise appended
     as values; a column switches to values the first time a vector cannot
-    be copied raw."""
+    be copied raw. Values are kept as one piece per chunk, as DuckDB keeps
+    a collection's chunks in segments, and joined once by `frame` (an
+    append per chunk copied every row so far again: quadratic)."""
 
     var schema: DataFrame
     var modes: List[Int]
     var raw: List[List[UInt8]]
     var raw_bits: List[List[UInt8]]
     var raw_physical: List[Int]
-    var values: List[Series]
+    var values: List[List[Series]]
     var count: Int
     # The rows the collection is expected to take: raw storage is sized
     # for them once.
@@ -152,9 +155,9 @@ struct ColumnDataCollection(Movable):
         self.raw = List[List[UInt8]](length=width, fill=List[UInt8]())
         self.raw_bits = List[List[UInt8]](length=width, fill=List[UInt8]())
         self.raw_physical = List[Int](length=width, fill=0)
-        self.values = List[Series](capacity=width)
+        self.values = List[List[Series]](capacity=width)
         for c in range(width):
-            self.values.append(schema._columns[c].copy())
+            self.values.append([schema._columns[c].copy()])
         self.count = 0
 
     def append(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
@@ -192,11 +195,11 @@ struct ColumnDataCollection(Movable):
                 )
                 continue
             if mode == _COPY_RAW:
-                self.values[c] = self._raw_column(c)
+                self.values[c] = [self._raw_column(c)]
                 self.raw[c] = List[UInt8]()
                 self.raw_bits[c] = List[UInt8]()
             self.modes[c] = _COPY_VALUES
-            self.values[c]._append_series(
+            self.values[c].append(
                 to_series(
                     chunk, c, arena, self.schema._columns[c].name(), dtype
                 )
@@ -218,7 +221,11 @@ struct ColumnDataCollection(Movable):
             if self.modes[c] == _COPY_RAW:
                 columns.append(self._raw_column(c))
             else:
-                columns.append(self.values[c].copy())
+                ref pieces = self.values[c]
+                if len(pieces) == 1:
+                    columns.append(pieces[0].copy())
+                else:
+                    columns.append(Series._from_chunks(pieces).rechunk())
         return DataFrame(columns^, height=self.count)
 
 
@@ -264,13 +271,32 @@ struct MaterializeSink(Sink):
         combined.append(self^)
 
 
+struct _FrameJob(Job):
+    """One batch's collection turned into its frame, on a worker: each
+    batch's columns are copied out of its collection in parallel, as
+    Polars' in-memory sink keeps every morsel's frame as it came (no
+    serial pass over the result's rows)."""
+
+    var collection: Int
+    var frame: DataFrame
+
+    def __init__(out self, collection: Int, schema: DataFrame):
+        self.collection = collection
+        self.frame = schema.copy()
+
+    def run(mut self) raises:
+        self.frame = Pointer[ColumnDataCollection, MutAnyOrigin](
+            unsafe_from_address=self.collection
+        )[].frame()
+
+
 def materialize_finish(
     mut sinks: List[MaterializeSink], schema: DataFrame
 ) raises -> DataFrame:
     """Every batch in batch index order, one chunk each (the workers'
     batches are each in the order the worker took them, so a merge by
     batch index over the workers orders all)."""
-    var parts = List[DataFrame]()
+    var jobs = List[_FrameJob]()
     var next = List[Int](length=len(sinks), fill=0)
     while True:
         var best = -1
@@ -283,10 +309,20 @@ def materialize_finish(
                     best_batch = batch
         if best < 0:
             break
-        parts.append(sinks[best].collections[next[best]].frame())
+        jobs.append(
+            _FrameJob(
+                Int(Pointer(to=sinks[best].collections[next[best]])),
+                schema,
+            )
+        )
         next[best] += 1
-    if len(parts) == 0:
+    if len(jobs) == 0:
         return schema.copy()
-    if len(parts) == 1:
-        return parts[0].copy()
+    if len(jobs) == 1:
+        jobs[0].run()
+        return jobs[0].frame.copy()
+    run_jobs(jobs)
+    var parts = List[DataFrame](capacity=len(jobs))
+    for k in range(len(jobs)):
+        parts.append(jobs[k].frame.copy())
     return concat(parts)
