@@ -99,6 +99,7 @@ from dataframe.planning.inputs import (
 )
 from dataframe.planning.model import (
     AGG,
+    CONCAT,
     DROP,
     FILTER,
     JOIN,
@@ -124,6 +125,7 @@ from dataframe.aggregation.expressions import (
 from dataframe.trace import (
     trace_path,
 )
+from std.math import exp
 from std.collections import (
     Dict,
     Optional,
@@ -162,20 +164,22 @@ comptime _DEFAULT_SELECTIVITY = 0.2
 
 
 def plan_side_estimate(self: QueryContext, index: Int) raises -> Int:
-    """Rows node `index` yields, estimated before it runs, as the build
-    side optimizer reads a child's estimated cardinality:
-    `plan_relation_estimate`, else through row-local steps, where a
-    filter keeps DuckDB's default fifth of its rows
-    (`DEFAULT_SELECTIVITY`), a semi or anti join its left input's rows,
-    a left join the larger input's, and an inner join DuckDB's estimate
-    of joining two relations (`CardinalityEstimator`): their rows
-    multiplied, divided by the key pairs' largest total domain, a key's
-    distinct count where its table keeps statistics, else the fewest
-    rows of a table holding the key. -1 when an input has no estimate."""
-    var known = plan_relation_estimate(self, index)
-    if known >= 0:
-        return known
+    """Rows node `index` yields, estimated from statistics before it runs,
+    as the build side optimizer reads a child's estimated cardinality
+    (`RelationStatisticsHelper`), with nothing sampled or run: a table's
+    rows; through row-local steps, where a filter keeps DuckDB's default
+    fifth of its rows (`DEFAULT_SELECTIVITY`); a union's inputs' rows
+    together; an aggregate's groups from its keys' distinct counts
+    (`plan_aggregate_estimate`'s formula); a semi or anti join its left
+    input's rows, a left join the larger input's, and an inner join
+    DuckDB's estimate of joining two relations (`CardinalityEstimator`):
+    their rows multiplied, divided by the key pairs' largest total
+    domain, a key's distinct count where its table keeps statistics,
+    else the fewest rows of a table holding the key. -1 when an input
+    has no estimate."""
     ref node = self._nodes[index]
+    if node.kind == SCAN_FRAME:
+        return self._frames[node.source_slot()].height()
     if node.kind == DROP or (
         (node.kind == SELECT or node.kind == WITH_COLUMNS)
         and _stream_rows(node)
@@ -186,6 +190,31 @@ def plan_side_estimate(self: QueryContext, index: Int) raises -> Int:
         if rows < 0:
             return -1
         return Int(Float64(rows) * _DEFAULT_SELECTIVITY)
+    if node.kind == CONCAT:
+        var first = plan_side_estimate(self, node.left)
+        var second = plan_side_estimate(self, node.right)
+        if first < 0 or second < 0:
+            return -1
+        return first + second
+    if node.kind == AGG:
+        var rows = plan_side_estimate(self, node.left)
+        if rows < 0:
+            return -1
+        if len(node.names) == 0:
+            return 1
+        var product = 1.0
+        for key in node.names:
+            var count = plan_spine_distinct(self, node.left, key)
+            if count < 0:
+                return -1
+            product *= Float64(max(count, 1))
+        product *= 0.95 ** Float64(len(node.names) - 1)
+        var multiplier = 1.0 - exp(-Float64(rows) / product)
+        var groups = (
+            Float64(rows) if multiplier == 0.0 else product * multiplier
+        )
+        var result = Int(min(groups, Float64(rows)))
+        return max(result, 1) if rows > 0 else 0
     if node.kind != JOIN or len(node.names) == 0:
         return -1
     var left = plan_side_estimate(self, node.left)
