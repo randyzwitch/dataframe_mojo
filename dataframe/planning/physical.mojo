@@ -106,6 +106,7 @@ from dataframe.planning.model import (
     PlanNode,
     SCAN_FRAME,
     SELECT,
+    SORT,
     WITH_COLUMNS,
 )
 from dataframe.planning.properties import (
@@ -167,7 +168,8 @@ def plan_side_estimate(self: QueryContext, index: Int) raises -> Int:
     """Rows node `index` yields, estimated from statistics before it runs,
     as the build side optimizer reads a child's estimated cardinality
     (`RelationStatisticsHelper`), with nothing sampled or run: a table's
-    rows; through row-local steps, where a filter keeps DuckDB's default
+    rows; through projections, windows, sorts (a top-N at most its
+    limit) and row-local filters, where a filter keeps DuckDB's default
     fifth of its rows (`DEFAULT_SELECTIVITY`); a union's inputs' rows
     together; an aggregate's groups from its keys' distinct counts
     (`plan_aggregate_estimate`'s formula); a semi or anti join its left
@@ -180,11 +182,18 @@ def plan_side_estimate(self: QueryContext, index: Int) raises -> Int:
     ref node = self._nodes[index]
     if node.kind == SCAN_FRAME:
         return self._frames[node.source_slot()].height()
-    if node.kind == DROP or (
-        (node.kind == SELECT or node.kind == WITH_COLUMNS)
-        and _stream_rows(node)
+    if (
+        node.kind == DROP
+        or node.kind == WITH_COLUMNS
+        or (node.kind == SELECT and _stream_rows(node))
     ):
+        # Projections and windows keep their input's rows.
         return plan_side_estimate(self, node.left)
+    if node.kind == SORT:
+        var rows = plan_side_estimate(self, node.left)
+        if rows < 0 or node.sort_limit() < 0:
+            return rows
+        return min(rows, node.sort_limit())
     if node.kind == FILTER and _row_local(node.exprs):
         var rows = plan_side_estimate(self, node.left)
         if rows < 0:
