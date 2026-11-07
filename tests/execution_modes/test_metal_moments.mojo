@@ -8,6 +8,7 @@ Public GPU routing and performance are validated separately.
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe_metal.moment_finish import finish_variance, MomentMagnitude
+from dataframe import DataFrame, LazyFrame
 
 
 def test_metal_moment_exact_cancellation_ddof_and_full_float32_range() raises:
@@ -1156,3 +1157,76 @@ def test_metal_moment_word_rounding_covers_limb_boundaries_and_ties() raises:
                     side == 2 or (side == 1 and Bool(significand & 1))
                 )
                 assert_equal(value.scaled(-shift), Float64(rounded))
+
+
+def _cast_moment_frame() raises -> DataFrame:
+    from dataframe import Column, DataFrame, Series
+
+    return DataFrame(
+        [
+            Series("n", Column[Int32]([1, 3, 5, 7])),
+            Series("w", Column[Int64]([2, 4, 6, 8])),
+            Series("f", Column[Float32]([0.5, 1.5, 2.5, 3.5])),
+            Series("p", Column[Int32]([-1, 1, -1, 1])),
+            Series("k", Column[Int32]([9, 4, 9, 4])),
+            Series("j", Column[Int64]([20, 30, 20, 30])),
+        ]
+    )
+
+
+def _cast_moment_query(frame: DataFrame, grouped: Bool) raises -> LazyFrame:
+    from dataframe import DataFrame, DataType, Expr, LazyFrame, col, when
+
+    var floating = col("n").cast(DataType.FLOAT32) * col("f")
+    var narrow = col("f").cast(DataType.INT32, strict=False)
+    var wide = col("n").cast(DataType.INT64) * col("w")
+    var conditional = when(col("p") > 0).then(col("w") + 1).otherwise(0)
+    var outputs = List[Expr](
+        [
+            floating.var(0).alias("floating_var"),
+            floating.std(1).alias("floating_std"),
+            narrow.var(0).alias("narrow_var"),
+            wide.var(0).alias("wide_var"),
+            conditional.var(0).alias("case_var"),
+            wide.sum().alias("wide_sum"),
+            narrow.count().alias("narrow_count"),
+        ]
+    )
+    if grouped:
+        return (
+            frame.lazy().group_by(["k", "j"], maintain_order=True).agg(outputs)
+        )
+    return frame.lazy().select_exprs(outputs)
+
+
+def test_metal_moments_combine_native_casts_case_and_tuple_grouping() raises:
+    from dataframe import DataType
+    from dataframe_metal.moment_plan import plan_moments, moment_output_sources
+    from dataframe_metal.moment_reduce import moment_masks
+    from dataframe_metal.composition_plan import (
+        needs_general_values,
+        has_typed_values,
+    )
+    from dataframe_metal.group_general_reduce import general_case_mode
+
+    var frame = _cast_moment_frame()
+    for grouped in [False, True]:
+        var matched = plan_moments(_cast_moment_query(frame, grouped))
+        assert_true(Bool(matched))
+        ref plan = matched.value()
+        assert_equal(Bool(plan.grouped), grouped)
+        assert_equal(len(plan.selected.bundle.fields), 4)
+        assert_equal(plan.selected.bundle.fields[0].dtype, DataType.FLOAT32)
+        assert_equal(plan.selected.bundle.fields[1].dtype, DataType.INT32)
+        assert_equal(plan.selected.bundle.fields[2].dtype, DataType.INT64)
+        assert_equal(plan.selected.bundle.fields[3].dtype, DataType.INT64)
+        assert_true(has_typed_values(plan.selected.bundle))
+        assert_true(needs_general_values(plan.selected.bundle))
+        assert_equal(general_case_mode(plan.selected.bundle), 1)
+        assert_equal(moment_masks(plan)[0], UInt32(15))
+        assert_equal(
+            moment_output_sources(plan.outputs),
+            List[Int]([0, 1, 2, 3, 4, 5, 6]),
+        )
+        if grouped:
+            assert_equal(len(plan.grouped.value().keys.names), 2)

@@ -1,7 +1,7 @@
 """Host ownership and submission for bounded GPU hash aggregation."""
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
-from .composition_plan import has_conditions
+from .composition_plan import needs_general_values
 from .group_partials import GroupedPartials
 from .group_properties import sample_group_tuples
 from .group_layout import GROUP_CAPACITY_FAULT, GROUP_CAPACITY_RETRY
@@ -312,7 +312,9 @@ def execute_grouped(
     _ = scope.context()
     timings.context_ns = Int(perf_counter_ns()) - started
     var partials: GroupedPartials
-    if len(plan.keys.names) == 1 and not has_conditions(plan.selected.bundle):
+    if len(plan.keys.names) == 1 and not needs_general_values(
+        plan.selected.bundle
+    ):
         try:
             partials = _dispatch_grouped(plan, frame, scope, zero_copy, timings)
         except error:
@@ -347,7 +349,7 @@ def _dispatch_grouped(
 ) raises -> GroupedPartials:
     if (
         len(plan.keys.names) != 1
-        or has_conditions(plan.selected.bundle)
+        or needs_general_values(plan.selected.bundle)
         or sample_group_tuples(frame, plan.keys.names).global_state()
     ):
         return general_partials(plan, frame, scope, zero_copy, timings)
