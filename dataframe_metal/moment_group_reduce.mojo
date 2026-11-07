@@ -6,9 +6,10 @@ must be established separately before registering public VAR/STD handoffs.
 """
 from std.memory import bitcast
 from std.time import perf_counter_ns
+from std.math import sqrt
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series
 from dataframe.expr import VAR, STD, SUM, MEAN
-from .moment_plan import MomentPlan, plan_moments
+from .moment_plan import MomentPlan, plan_moments, moment_output_sources
 from .moment_reduce import moment_masks
 from .moment_finish import finish_variance
 from .group_layout import GROUP_VALUE_WORDS, GROUP_MOMENT_WORDS
@@ -94,51 +95,74 @@ def finish_grouped_moments_math(
     for name in grouped.keys.names:
         columns.append(ordinary.column(name).copy())
     var order = group_order(partials.first)
-    for output in plan.outputs:
+    var sources = moment_output_sources(plan.outputs)
+    var shared = List[Bool](length=len(plan.outputs), fill=False)
+    for i in range(len(sources)):
+        if sources[i] != i:
+            shared[sources[i]] = True
+    var cached_values = List[List[Float64]]()
+    var cached_validity = List[List[Bool]]()
+    for _ in plan.outputs:
+        cached_values.append(List[Float64]())
+        cached_validity.append(List[Bool]())
+    for i in range(len(plan.outputs)):
+        ref output = plan.outputs[i]
         if output.op != VAR and output.op != STD:
             columns.append(ordinary.column(output.name).copy())
             continue
-        var field = output.field
-        if field < 0 or field >= nf:
-            raise Error("Metal grouped moment output has an invalid field")
-        var floating = (
-            plan.selected.bundle.fields[field].dtype == DataType.FLOAT32
-        )
         var values = List[Float64]()
         var validity = List[Bool]()
-        for slot in order:
-            var sums = List[Int128](length=9 if floating else 2, fill=0)
-            var squares = List[Int128](length=18 if floating else 4, fill=0)
-            var count = 0
-            var non_finite = False
-            for block in range(blocks):
-                var at = (
-                    (slot * blocks + block) * nf + field
-                ) * GROUP_MOMENT_WORDS
-                count += Int(partials.states[at])
-                non_finite = non_finite or Bool(
-                    partials.states[at + GROUP_MOMENT_SPECIAL]
-                )
-                for bin in range(len(sums)):
-                    sums[bin] += _signed_bin(
-                        partials.states,
-                        at + (10 if floating else GROUP_MOMENT_SUM) + bin * 2,
-                    )
-                for bin in range(len(squares)):
-                    squares[bin] += _signed_bin(
-                        partials.states, at + GROUP_SQUARES + bin * 2
-                    )
-            var answer = finish_variance(
-                sums,
-                squares,
-                count,
-                Int(output.parameter),
-                -149 if floating else 0,
-                output.op == STD,
-                non_finite,
+        if sources[i] == i:
+            var field = output.field
+            if field < 0 or field >= nf:
+                raise Error("Metal grouped moment output has an invalid field")
+            var floating = (
+                plan.selected.bundle.fields[field].dtype == DataType.FLOAT32
             )
-            values.append(answer.value() if answer else Float64(0))
-            validity.append(Bool(answer))
+            for slot in order:
+                var sums = List[Int128](length=9 if floating else 2, fill=0)
+                var squares = List[Int128](length=18 if floating else 4, fill=0)
+                var count = 0
+                var non_finite = False
+                for block in range(blocks):
+                    var at = (
+                        (slot * blocks + block) * nf + field
+                    ) * GROUP_MOMENT_WORDS
+                    count += Int(partials.states[at])
+                    non_finite = non_finite or Bool(
+                        partials.states[at + GROUP_MOMENT_SPECIAL]
+                    )
+                    for bin in range(len(sums)):
+                        sums[bin] += _signed_bin(
+                            partials.states,
+                            at
+                            + (10 if floating else GROUP_MOMENT_SUM)
+                            + bin * 2,
+                        )
+                    for bin in range(len(squares)):
+                        squares[bin] += _signed_bin(
+                            partials.states, at + GROUP_SQUARES + bin * 2
+                        )
+                var answer = finish_variance(
+                    sums,
+                    squares,
+                    count,
+                    Int(output.parameter),
+                    -149 if floating else 0,
+                    False,
+                    non_finite,
+                )
+                values.append(answer.value() if answer else Float64(0))
+                validity.append(Bool(answer))
+            if shared[i]:
+                cached_values[i] = values.copy()
+                cached_validity[i] = validity.copy()
+        else:
+            values = cached_values[sources[i]].copy()
+            validity = cached_validity[sources[i]].copy()
+        if output.op == STD:
+            for row in range(len(values)):
+                values[row] = sqrt(values[row])
         columns.append(Series(output.name, Column[Float64](values^, validity)))
     return DataFrame(columns^)
 

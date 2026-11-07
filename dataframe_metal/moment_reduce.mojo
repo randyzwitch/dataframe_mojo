@@ -5,9 +5,10 @@ provider registration: CPU compatibility/adjudication and grouped finishing
 must be completed before public VAR/STD handoffs are enabled.
 """
 from std.time import perf_counter_ns
+from std.math import sqrt
 from dataframe import Column, DataFrame, DataType, LazyFrame, Series
 from dataframe.expr import VAR, STD, SUM, MEAN
-from .moment_plan import MomentPlan, plan_moments
+from .moment_plan import MomentPlan, plan_moments, moment_output_sources
 from .moment_finish import finish_variance
 from .multi_plan import ReductionOutput
 from .composition_plan import has_trees
@@ -99,36 +100,48 @@ def finish_global_moments_math(
         scan.extrema,
     )
     var columns = List[Series]()
-    for output in plan.outputs:
+    var sources = moment_output_sources(plan.outputs)
+    var cached = List[Optional[Float64]](
+        length=len(plan.outputs), fill=Optional[Float64]()
+    )
+    for i in range(len(plan.outputs)):
+        ref output = plan.outputs[i]
         if output.op != VAR and output.op != STD:
             columns.append(ordinary.column(output.name).copy())
             continue
-        var field = output.field
-        if (
-            field < 0
-            or field >= len(scan.moment_data)
-            or len(scan.moment_data[field]) != 28
-        ):
-            raise Error("Metal moment result does not match its schema")
-        ref data = scan.moment_data[field]
-        var floating = (
-            plan.selected.bundle.fields[field].dtype == DataType.FLOAT32
-        )
-        var sums = List[Int128]()
-        var squares = List[Int128]()
-        for bin in range(9 if floating else 2):
-            sums.append(data[bin])
-        for bin in range(18 if floating else 4):
-            squares.append(data[9 + bin])
-        var answer = finish_variance(
-            sums,
-            squares,
-            scan.counts[field],
-            Int(output.parameter),
-            -149 if floating else 0,
-            output.op == STD,
-            data[27] != 0,
-        )
+        var answer = Optional[Float64]()
+        if sources[i] != i:
+            answer = cached[sources[i]].copy()
+        else:
+            var field = output.field
+            if (
+                field < 0
+                or field >= len(scan.moment_data)
+                or len(scan.moment_data[field]) != 28
+            ):
+                raise Error("Metal moment result does not match its schema")
+            ref data = scan.moment_data[field]
+            var floating = (
+                plan.selected.bundle.fields[field].dtype == DataType.FLOAT32
+            )
+            var sums = List[Int128]()
+            var squares = List[Int128]()
+            for bin in range(9 if floating else 2):
+                sums.append(data[bin])
+            for bin in range(18 if floating else 4):
+                squares.append(data[9 + bin])
+            answer = finish_variance(
+                sums,
+                squares,
+                scan.counts[field],
+                Int(output.parameter),
+                -149 if floating else 0,
+                False,
+                data[27] != 0,
+            )
+            cached[i] = answer.copy()
+        if answer and output.op == STD:
+            answer = sqrt(answer.value())
         columns.append(
             Series(
                 output.name,

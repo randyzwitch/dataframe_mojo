@@ -28,6 +28,24 @@ struct MomentPlan(Copyable, Movable):
     var needs_moments: List[Bool]
 
 
+def moment_output_sources(outputs: List[MomentOutput]) -> List[Int]:
+    """Share variance finishing across aliases and matching VAR/STD pairs."""
+    var sources = List[Int]()
+    for i in range(len(outputs)):
+        var source = i
+        if outputs[i].op == VAR or outputs[i].op == STD:
+            for j in range(i):
+                if (
+                    (outputs[j].op == VAR or outputs[j].op == STD)
+                    and outputs[j].field == outputs[i].field
+                    and outputs[j].parameter == outputs[i].parameter
+                ):
+                    source = sources[j]
+                    break
+        sources.append(source)
+    return sources^
+
+
 def plan_moments(region: LazyFrame) raises -> Optional[MomentPlan]:
     var size = len(region._plan._nodes)
     if size < 2:

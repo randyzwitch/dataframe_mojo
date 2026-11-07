@@ -709,7 +709,7 @@ def test_metal_moment_narrow_square_window_and_retry_flags() raises:
 def test_metal_moment_math_finish_preserves_shared_outputs_and_typed_nulls() raises:
     from std.math import sqrt
     from dataframe import Column, DataFrame, Series, col
-    from dataframe_metal.moment_plan import plan_moments
+    from dataframe_metal.moment_plan import plan_moments, moment_output_sources
     from dataframe_metal.moment_reduce import (
         finish_global_moments_math,
         moment_masks,
@@ -724,17 +724,23 @@ def test_metal_moment_math_finish_preserves_shared_outputs_and_typed_nulls() rai
         var matched = plan_moments(
             frame.lazy().select_exprs(
                 [
+                    col("v").std(0).alias("population_std"),
                     col("v").var(0).alias("population"),
                     col("v").var(1).alias("sample"),
                     col("v").std(1).alias("deviation"),
                     col("v").sum().alias("total"),
                     col("v").mean().alias("average"),
                     col("v").count().alias("count"),
+                    col("v").var(0).alias("population_alias"),
                 ]
             )
         )
         assert_true(Bool(matched))
         ref plan = matched.value()
+        assert_equal(
+            moment_output_sources(plan.outputs),
+            List[Int]([0, 0, 2, 2, 4, 5, 6, 0]),
+        )
         assert_equal(moment_masks(plan), (UInt32(1), UInt32(1)))
         var data = List[Int128](length=28, fill=0)
         if floating:
@@ -753,6 +759,8 @@ def test_metal_moment_math_finish_preserves_shared_outputs_and_typed_nulls() rai
         )
         var answer = finish_global_moments_math(plan, scan)
         assert_equal(answer.item(0, "population").float64(), Float64(1))
+        assert_equal(answer.item(0, "population_std").float64(), Float64(1))
+        assert_equal(answer.item(0, "population_alias").float64(), Float64(1))
         assert_equal(answer.item(0, "sample").float64(), Float64(2))
         assert_equal(answer.item(0, "deviation").float64(), sqrt(Float64(2)))
         assert_equal(answer.item(0, "average").float64(), Float64(2))
@@ -771,6 +779,8 @@ def test_metal_moment_math_finish_preserves_shared_outputs_and_typed_nulls() rai
         )
         var nulls = finish_global_moments_math(plan, empty)
         assert_true(nulls.item(0, "population").is_null())
+        assert_true(nulls.item(0, "population_std").is_null())
+        assert_true(nulls.item(0, "population_alias").is_null())
         assert_true(nulls.item(0, "sample").is_null())
         assert_true(nulls.item(0, "deviation").is_null())
         assert_true(nulls.item(0, "average").is_null())
@@ -836,6 +846,7 @@ def test_metal_moment_math_keeps_cast_rounded_sums_separate_from_integer_sum() r
 
 def test_metal_grouped_moments_share_states_and_finish_all_native_types() raises:
     from std.memory import bitcast, Pointer
+    from std.math import sqrt
     from dataframe import Column, DataFrame, DataType, Series, col
     from dataframe_metal.moment_plan import plan_moments
     from dataframe_metal.moment_group_reduce import finish_grouped_moments_math
@@ -888,7 +899,9 @@ def test_metal_grouped_moments_share_states_and_finish_all_native_types() raises
                 [
                     col("f").var(0).alias("f_population"),
                     col("f").var(1).alias("f_sample"),
+                    col("f").std(1).alias("f_sample_std"),
                     col("i").std(0).alias("i_std"),
+                    col("w").std(0).alias("w_std"),
                     col("w").var(0).alias("w_population"),
                     col("f").sum().alias("f_sum"),
                     col("i").count().alias("i_count"),
@@ -980,7 +993,7 @@ def test_metal_grouped_moments_share_states_and_finish_all_native_types() raises
                 moments_only, frame, partials
             )
             assert_equal(reduced.height(), 3)
-            assert_equal(reduced.width(), 6 if with_rows else 5)
+            assert_equal(reduced.width(), 8 if with_rows else 7)
             assert_equal(reduced.item(0, "key").int32(), Int32(9))
             assert_equal(reduced.item(1, "key").int32(), Int32(4))
             assert_true(reduced.item(2, "key").is_null())
@@ -998,6 +1011,15 @@ def test_metal_grouped_moments_share_states_and_finish_all_native_types() raises
             assert_true(reduced.item(2, "f_population").is_null())
             assert_true(reduced.item(2, "i_std").is_null())
             assert_true(reduced.item(2, "w_population").is_null())
+            for row in range(2):
+                assert_equal(
+                    reduced.item(row, "f_sample_std").float64(),
+                    sqrt(Float64(8)),
+                )
+            assert_equal(reduced.item(0, "w_std").float64(), Float64(128))
+            assert_equal(reduced.item(1, "w_std").float64(), Float64(2))
+            assert_true(reduced.item(2, "f_sample_std").is_null())
+            assert_true(reduced.item(2, "w_std").is_null())
             if with_rows:
                 for row in range(3):
                     assert_equal(reduced.item(row, "rows").int64(), Int64(2))
