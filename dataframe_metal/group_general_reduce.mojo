@@ -4,6 +4,7 @@ from dataframe import DataFrame, DataType
 from dataframe.expr import MIN, MAX
 from .composition_plan import has_conditions, only_conditional_trees
 from .group_properties import sample_group_tuples
+from .group_types import group_value_types
 from .group_plan import GroupedComposition
 from .group_partials import GroupedPartials
 from .group_layout import GroupLayout, GROUP_CAPACITY_RETRY
@@ -31,6 +32,7 @@ def scan_general_groups[
     cases: Bool = False,
     conditional_only: Bool = False,
     global_state: Bool = True,
+    value_types: Int = 7,
 ](
     plan: GroupedComposition,
     frame: DataFrame,
@@ -144,7 +146,9 @@ def scan_general_groups[
                 block_dim=256,
             )
             ctx.enqueue_function[
-                general_grouped_partials[cases, conditional_only, global_state]
+                general_grouped_partials[
+                    cases, conditional_only, global_state, value_types
+                ]
             ](
                 inputs[0].values,
                 inputs[1].values,
@@ -297,17 +301,24 @@ def _dispatch_general[
     mut timings: HandoffTimings,
     capacity: Int,
 ) raises -> GroupedPartials:
-    if only_conditional_trees(plan.selected.bundle):
-        return scan_general_groups[True, True, global_state](
-            plan, frame, scope, zero_copy, timings, capacity
-        )
-    if has_conditions(plan.selected.bundle):
-        return scan_general_groups[True, False, global_state](
-            plan, frame, scope, zero_copy, timings, capacity
-        )
-    return scan_general_groups[False, False, global_state](
-        plan, frame, scope, zero_copy, timings, capacity
-    )
+    var dtypes = List[DataType]()
+    for field in plan.selected.bundle.fields:
+        dtypes.append(field.dtype)
+    var selected = group_value_types(dtypes)
+    comptime for mask in range(1, 8):
+        if selected == mask:
+            if only_conditional_trees(plan.selected.bundle):
+                return scan_general_groups[True, True, global_state, mask](
+                    plan, frame, scope, zero_copy, timings, capacity
+                )
+            if has_conditions(plan.selected.bundle):
+                return scan_general_groups[True, False, global_state, mask](
+                    plan, frame, scope, zero_copy, timings, capacity
+                )
+            return scan_general_groups[False, False, global_state, mask](
+                plan, frame, scope, zero_copy, timings, capacity
+            )
+    raise Error("Metal grouped value dtype mask was not dispatched")
 
 
 def general_partials(

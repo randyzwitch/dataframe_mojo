@@ -1009,3 +1009,37 @@ def test_metal_group_tuple_checked_branches_and_ieee_adjudication() raises:
     with assert_raises(contains="all-NaN"):
         _ = execute_timed(only_nan)
     same_outcome(only_nan)
+
+
+def test_metal_group_value_type_specialization_uses_schema_only() raises:
+    from dataframe import DataType
+    from dataframe_metal.group_types import group_value_types
+    from std.testing import assert_raises
+
+    for mask in range(1, 8):
+        var dtypes = List[DataType]()
+        for bit in range(3):
+            if mask & (1 << bit):
+                dtypes.append(
+                    DataType.FLOAT32 if bit
+                    == 0 else (DataType.INT32 if bit == 1 else DataType.INT64)
+                )
+        assert_equal(group_value_types(dtypes), mask)
+        dtypes.append(dtypes[0])
+        assert_equal(group_value_types(dtypes), mask)
+        var reversed_types = List[DataType]()
+        for i in reversed(range(len(dtypes))):
+            reversed_types.append(dtypes[i])
+        assert_equal(group_value_types(reversed_types), mask)
+    assert_equal(
+        group_value_types(
+            List[DataType](
+                [DataType.INT64, DataType.INT64, DataType.INT64, DataType.INT64]
+            )
+        ),
+        4,
+    )
+    with assert_raises(contains="empty"):
+        _ = group_value_types(List[DataType]())
+    with assert_raises(contains="native"):
+        _ = group_value_types(List[DataType]([DataType.FLOAT64]))
