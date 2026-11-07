@@ -2,6 +2,7 @@
 from std.memory import bitcast
 from dataframe import DataType
 from dataframe.expr import COL, MIN, MAX
+from .group_layout import GroupLayout
 from .group_plan import GroupedComposition
 from .expression_format import EXPRESSION_NODE_WORDS
 from .value_program_metadata import (
@@ -77,4 +78,38 @@ def group_metadata(
                 output.field + (4 if output.op == MIN else 8)
             )
     write_predicate(words, predicate_at, compiled, inputs)
+    return words^
+
+
+def general_group_metadata(
+    plan: GroupedComposition,
+    inputs: List[NumericView],
+    keys: List[NumericView],
+    layout: GroupLayout,
+) raises -> List[UInt64]:
+    layout.check()
+    if len(keys) != len(plan.keys.names) or not keys or len(keys) > 4:
+        raise Error("Metal general group key bindings do not match the schema")
+    var words = group_metadata(plan, inputs, keys[0], layout.blocks)
+    if layout.fields != len(plan.selected.bundle.fields):
+        raise Error("Metal general group field count does not match the schema")
+    words[3] = UInt64(layout.capacity)
+    words[4] = UInt64(layout.capacity // 2)
+    words[5] = UInt64(layout.global_state)
+    words[11] = UInt64(len(keys))
+    for i in range(len(keys)):
+        if keys[i].rows != keys[0].rows:
+            raise Error("Metal general group key lengths do not match")
+        var expected_tag = 0 if plan.keys.dtypes[i] == DataType.INT32 else 1
+        if (
+            keys[i].tag != expected_tag
+            or keys[i].bit_offset < 0
+            or keys[i].bit_offset > Int(UInt32.MAX)
+        ):
+            raise Error("Metal general group key has invalid native metadata")
+        words[12 + i] = (
+            UInt64(keys[i].tag)
+            | (UInt64(keys[i].nullable) << 1)
+            | (UInt64(keys[i].bit_offset) << 2)
+        )
     return words^

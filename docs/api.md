@@ -1368,6 +1368,7 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False) -> LazyGroupBy`
   Group by computed keys, as DataFrame.group_by(List[Expr]): each key is evaluated once and named by its output name, and the aggregations still read the input's columns. Keys that are columns under their own names group as names do.
 - `def group_by(self, keys: List[String], *, maintain_order: Bool = False) -> LazyGroupBy`
+  Group by one or more columns, as DataFrame.group_by: the group output order is unspecified (it may differ between runs and thread counts) unless maintain_order=True, which guarantees first-occurrence order.
 - `def group_by_rollup(self, keys: List[String]) -> LazyGroupingSets`
   Expand to the rollup sets (k1, k2, ...), (k1, ..., k(n-1)), ..., (k1), and () in one plan. Finish with `agg`; see LazyGroupingSets for the output.
 - `def group_by_cube(self, keys: List[String]) -> LazyGroupingSets`

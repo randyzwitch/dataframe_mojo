@@ -10,6 +10,7 @@ from dataframe.lazy import SCAN_FRAME, FILTER, WITH_COLUMNS, SELECT, AGG
 from .expression_plan import compile_expression
 from .expression_format import MAX_CASE_SOURCE_NODES
 from .conditional_plan import compile_conditional
+from .typed_expression_plan import compile_typed_expression
 
 
 def _expand(
@@ -116,9 +117,11 @@ def normalize_region(region: LazyFrame) raises -> Optional[LazyFrame]:
             for node in expression._nodes:
                 if node.op == WHEN and dependencies:
                     return None
-            if not compile_expression(
-                expanded.value(), frame
-            ) and not compile_conditional(expanded.value(), frame):
+            if (
+                not compile_expression(expanded.value(), frame)
+                and not compile_conditional(expanded.value(), frame)
+                and not compile_typed_expression(expanded.value(), frame)
+            ):
                 return None
             added.append(expanded.take())
             stage_edges.append(dependencies^)

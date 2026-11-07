@@ -10,8 +10,8 @@ from dataframe.aggregation.hash_table import (
     aggregate_layout,
     ReducerSpec,
     key_supported,
-    reduction_supported,
-    states_supported,
+    table_reduction,
+    table_states_supported,
 )
 from dataframe.aggregation.table_sink import (
     TableSinkInputs,
@@ -514,7 +514,7 @@ struct GroupBy(Copyable):
             return False
         for expression in expressions:
             for node in expression._nodes:
-                if is_reduction(node.op) and not reduction_supported(node.op):
+                if is_reduction(node.op) and not table_reduction(node.op):
                     return False
         for key in self._keys:
             if not key_supported(key):
@@ -574,7 +574,7 @@ struct GroupBy(Copyable):
         )
         var specs = table_specs(template)
         var empty = table_inputs(self._frame.clear(), empty_keys, expressions)
-        if not states_supported(specs, empty):
+        if not table_states_supported(specs, empty):
             return None
         trace_path("group_by.aggregate_table")
         if not _plain_inputs(expressions, self._frame):
@@ -615,7 +615,9 @@ struct GroupBy(Copyable):
                 ranges.append(length)
                 at += length
             start = end
-        var result = aggregate_table(keys, inputs, specs, ranges, workers)
+        var result = aggregate_table(
+            keys, inputs, specs, ranges, workers, self._maintain_order
+        )
         return table_frame(template, result^, self._maintain_order)
 
     def _agg_batches(
@@ -672,7 +674,9 @@ struct GroupBy(Copyable):
         for j in range(len(jobs)):
             while len(jobs[j].sinks) > 0:
                 sinks.append(jobs[j].sinks.pop())
-        var result = aggregate_finish(sinks, layout)
+        var result = aggregate_finish(
+            sinks, layout, ordered=self._maintain_order
+        )
         return table_frame(template, result^, self._maintain_order)
 
     def _counts_distinct(self, expressions: List[Expr]) -> Bool:

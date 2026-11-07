@@ -58,10 +58,16 @@ def _check(actual: DataFrame, expected: DataFrame) raises:
                     raise Error(
                         "Metal calibration floating answer differs from independent reference"
                     )
-            elif not actual.column(name).equals(expected.column(name)):
-                raise Error(
-                    "Metal calibration integer answer differs from independent reference"
-                )
+        # Structural equality scans the column. Checking it inside the row
+        # loop makes verification quadratic for grouped integer outputs.
+        if (
+            expected.column(name).dtype() != DataType.FLOAT32
+            and expected.column(name).dtype() != DataType.FLOAT64
+            and not actual.column(name).equals(expected.column(name))
+        ):
+            raise Error(
+                "Metal calibration integer answer differs from independent reference"
+            )
 
 
 def capture(

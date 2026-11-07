@@ -20,7 +20,16 @@ States by kind:
   whether the state is set) of every type, with the row's sequence number,
   so a combine keeps the earlier (first) or later (last) row whichever
   worker saw it: Polars' first and last by row order;
-- any and all (Kleene flags: true, false and null seen).
+- any and all (Kleene flags: true, false and null seen);
+- any other state by address (DuckDB's aggregates whose state owns memory:
+  `initialize` allocates it, `destroy` frees it): the row holds the
+  address of its owner, the worker's `Reducer` of such states, and the
+  state's ordinal there (`_K_STATE`);
+- an order-sensitive reduction of any type (DuckDB's ordered aggregate,
+  `SortedAggregateFunction`): the row holds the address of the worker's
+  buffer of the reduction's input rows and their sequence numbers, which
+  the finish sorts by sequence before the rows reach the reduction
+  (`_K_ORDERED`).
 
 A string state never copies its bytes: the input column outlives the
 aggregation (the sink holds it, as it holds string keys), so a long string
@@ -38,6 +47,7 @@ from dataframe.aggregation.reducer import (
     _from_canonical,
     quantile_in,
 )
+from dataframe.categorical import decode
 from dataframe.decimal import check_limit, decimal_mean, precision_limit
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import (
@@ -49,6 +59,8 @@ from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
     ALL,
     ANY,
+    ARG_MAX,
+    ARG_MIN,
     CORR,
     N_UNIQUE,
     COUNT,
@@ -61,7 +73,10 @@ from dataframe.expr import (
     MEDIAN,
     MIN,
     NULL_COUNT,
+    PRODUCT,
     QUANTILE,
+    KURTOSIS,
+    SKEW,
     STD,
     SUM,
     VAR,
@@ -145,6 +160,20 @@ def reduction_supported(op: Int) -> Bool:
     ]
 
 
+def table_reduction(op: Int) -> Bool:
+    """Whether the aggregate table holds a reduction's state for groups:
+    an `AggregateFunction` of its own (`reduction_supported`), or a state by
+    address (`_K_STATE`, `_K_ORDERED`) for the positional, product and
+    moment reductions."""
+    return reduction_supported(op) or op in [
+        ARG_MIN,
+        ARG_MAX,
+        SKEW,
+        KURTOSIS,
+        PRODUCT,
+    ]
+
+
 # What a state slot holds, in words after the group's key words.
 comptime _K_LEN = 0  # rows
 comptime _K_COUNT = 1  # valid values
@@ -200,6 +229,24 @@ comptime _K_WIDE_MAX = 19
 # groups adds to its group (`AggregateSink.distinct`); a row's update
 # leaves it alone.
 comptime _K_DISTINCT = 20
+# A state by address (DuckDB's `state_size` of a pointer, with an
+# `initialize` that allocates and a `destructor` that frees): the address
+# of its owner, the worker's `Reducer` of such states (one per reduction),
+# the state's ordinal there plus one, and the address of the next state
+# merged into this group's (0 for none). A combine links the other
+# group's states after this one's, as quantile value chains are linked,
+# so no state is copied until the finish folds the chain into one
+# `Reducer` of the job's groups. The owner's states live as long as the
+# worker's sink, and go with it.
+comptime _K_STATE = 21
+# An order-sensitive reduction's state (DuckDB's `SortedAggregateFunction`,
+# whose state buffers its arguments and their sort keys): the same three
+# words, the owner being the worker's `_OrderedBuffer` of the reduction's
+# input rows and their sequence numbers. The finish sorts the group's
+# buffered rows by sequence (their input order) and only then reduces them:
+# first and last take the row at either end, the others replay the rows
+# into a `Reducer` in that order.
+comptime _K_ORDERED = 22
 # The most pairs a group row holds inline: 33 state words, four cache lines.
 comptime TOP_ROWS_INLINE = 16
 
@@ -364,7 +411,9 @@ struct AggregateFunction(Copyable, Movable):
         if self.kind == _K_LOGIC:
             return 1
         if (
-            self.kind == _K_INT_SUM
+            self.kind == _K_STATE
+            or self.kind == _K_ORDERED
+            or self.kind == _K_INT_SUM
             or self.kind == _K_VALUES
             or self.kind == _K_MOMENTS
             or self.kind == _K_DECIMAL_SUM
@@ -399,9 +448,15 @@ struct AggregateFunction(Copyable, Movable):
             or self.kind == _K_STRING_MAX
         )
 
+    def by_address(self) -> Bool:
+        """Whether the row holds the state's address (`_K_STATE`,
+        `_K_ORDERED`) rather than the state."""
+        return self.kind == _K_STATE or self.kind == _K_ORDERED
+
     def destroy(self, state: Int):
-        """DuckDB's `destructor`: nothing, since no state owns memory of
-        its own (value chains live in the sink's arena)."""
+        """DuckDB's `destructor`: nothing per row. Value chains live in
+        the sink's arena, and states by address in the sink's `Reducer`s
+        and buffers, all freed with the sink."""
         pass
 
 
@@ -609,6 +664,63 @@ def states_supported(specs: List[ReducerSpec], inputs: List[Series]) -> Bool:
             ):
                 return False
         elif _slot_kind(specs[s], inputs[s]) < 0:
+            return False
+    return True
+
+
+def _address_kind(op: Int) -> Int:
+    """The state by address of a reduction with no inline state:
+    `_K_ORDERED` for one whose answer depends on the order of the group's
+    rows (first, last, the position of an extreme), `_K_STATE` for any
+    other a `Reducer` holds, or -1."""
+    if op in [FIRST, LAST, ARG_MIN, ARG_MAX]:
+        return _K_ORDERED
+    if op in [
+        SUM,
+        MEAN,
+        MIN,
+        MAX,
+        COUNT,
+        NULL_COUNT,
+        STD,
+        VAR,
+        MEDIAN,
+        QUANTILE,
+        ANY,
+        ALL,
+        SKEW,
+        KURTOSIS,
+        PRODUCT,
+        CORR,
+        COV,
+    ]:
+        return _K_STATE
+    return -1
+
+
+def table_kind(specs: List[ReducerSpec], inputs: List[Series], s: Int) -> Int:
+    """The state kind of reduction s in a group row: its inline kind, else
+    its state by address (`_address_kind`), else -1."""
+    var kind: Int
+    if specs[s].op == CORR or specs[s].op == COV:
+        var at = _second_input(specs, s)
+        if at >= len(inputs):
+            return -1
+        kind = _pair_kind(specs[s], inputs[s], inputs[at])
+    else:
+        kind = _slot_kind(specs[s], inputs[s])
+    if kind >= 0:
+        return kind
+    return _address_kind(specs[s].op)
+
+
+def table_states_supported(
+    specs: List[ReducerSpec], inputs: List[Series]
+) -> Bool:
+    """Whether the aggregate table holds every reduction's state for
+    groups, inline or by address (`table_kind`)."""
+    for s in range(len(specs)):
+        if table_kind(specs, inputs, s) < 0:
             return False
     return True
 
@@ -1159,7 +1271,8 @@ def _update_states(
     for s in range(len(slots)):
         ref slot = slots[s]
         var base = 8 * (states_at + slot.offset)
-        if slot.kind == _K_DISTINCT:
+        if slot.kind == _K_DISTINCT or slot.by_address():
+            # States by address are the sink's (`AggregateSink`).
             continue
         if slot.kind == _K_LEN:
             for k in range(count):
@@ -1317,6 +1430,22 @@ def combine(slots: List[AggregateFunction], into: Int, other: Int) raises:
         var kind = slots[s].kind
         if kind == _K_LOGIC:
             a[unsafe_offset=w] |= b[unsafe_offset=w]
+        elif kind == _K_STATE or kind == _K_ORDERED:
+            # The other group's chain of states, then the rest of this
+            # one's, after this one's first: linked, never copied. The
+            # other row stays where it is (a sink's block) until the finish
+            # reads the chain.
+            if b[unsafe_offset=w] == 0:
+                continue
+            if a[unsafe_offset=w] == 0:
+                for i in range(3):
+                    a[unsafe_offset=w + i] = b[unsafe_offset=w + i]
+                continue
+            var tail = other + 8 * w
+            while _words_at(tail)[unsafe_offset=2] != 0:
+                tail = Int(_words_at(tail)[unsafe_offset=2])
+            _words_at(tail)[unsafe_offset=2] = a[unsafe_offset=w + 2]
+            a[unsafe_offset=w + 2] = UInt64(other + 8 * w)
         elif kind == _K_FIRST or kind == _K_LAST:
             # The value of the earlier (first) or later (last) row.
             var width = slots[s].width
@@ -1522,6 +1651,12 @@ def _unload(
     """A reduction's states of groups [lo, hi), from their rows into a
     `Reducer` sized for every group, which finishes them as every other
     route does."""
+    if slot.kind == _K_STATE:
+        _unload_states(slot, groups, reducer, lo, hi)
+        return
+    if slot.kind == _K_ORDERED:
+        _replay_ordered(slot, groups, reducer, lo, hi)
+        return
     var at = groups.rows.unsafe_ptr()
     var stride = groups.stride
     var w0 = groups.states_at + slot.offset
@@ -1595,6 +1730,234 @@ def _unload(
                 reducer.ints[g] = bitcast[DType.int64](at[unsafe_offset=w])
 
 
+struct _OrderedBuffer(Movable):
+    """A worker's buffered input rows of one order-sensitive reduction
+    (DuckDB's `SortedAggregateState`, which holds a group's arguments and
+    sort keys): each row's value, its group's ordinal among this buffer's
+    groups and its sequence number (its place in the input). `prepare`
+    makes the values one column and indexes the rows by group, once the
+    worker's run is over."""
+
+    var batches: List[Series]
+    var ordinals: List[Int]
+    var sequences: List[Int]
+    var groups: Int
+    var values: Optional[Series]
+    # Each group's rows, in input order: those of ordinal o are
+    # rows[starts[o]:starts[o + 1]].
+    var starts: List[Int]
+    var rows: List[Int]
+
+    def __init__(out self):
+        self.batches = List[Series]()
+        self.ordinals = List[Int]()
+        self.sequences = List[Int]()
+        self.groups = 0
+        self.values = None
+        self.starts = List[Int]()
+        self.rows = List[Int]()
+
+    def add(
+        mut self, batch: Series, ordinals: List[Int], first: Int, groups: Int
+    ) raises:
+        """A batch's rows, the k-th of group ordinal `ordinals[k]` (-1 for a
+        row that joins no group) and sequence number `first + k`."""
+        var kept = List[Int]()
+        for k in range(len(ordinals)):
+            if ordinals[k] < 0:
+                continue
+            kept.append(k)
+            self.ordinals.append(ordinals[k])
+            self.sequences.append(first + k)
+        if len(kept) == len(ordinals):
+            self.batches.append(batch.copy())
+        elif len(kept) > 0:
+            self.batches.append(batch.take(kept))
+        self.groups = groups
+
+    def prepare(mut self) raises:
+        """The values as one column and the rows by group (a stable
+        counting sort, so each group's rows stay in input order)."""
+        if self.values or len(self.batches) == 0:
+            return
+        self.values = (
+            Series._from_chunks(self.batches).rechunk() if len(self.batches)
+            > 1 else self.batches[0].copy()
+        )
+        self.batches = List[Series]()
+        self.starts = List[Int](length=self.groups + 1, fill=0)
+        for o in self.ordinals:
+            self.starts[o + 1] += 1
+        for g in range(self.groups):
+            self.starts[g + 1] += self.starts[g]
+        var place = self.starts.copy()
+        self.rows = List[Int](length=len(self.ordinals), fill=0)
+        for r in range(len(self.ordinals)):
+            var o = self.ordinals[r]
+            self.rows[place[o]] = r
+            place[o] += 1
+
+
+def reducer_input(reducer: Reducer, chunk: Series) raises -> Series:
+    """A batch as `reducer` reads it: categorical labels as strings when
+    its type is not categorical (the eager evaluator's `_feed` does the
+    same)."""
+    if chunk.dtype().is_categorical() and not reducer.logical.is_categorical():
+        return decode(chunk)
+    return chunk.copy()
+
+
+@always_inline
+def _owner_index(mut owners: List[Int], address: Int) -> Int:
+    """The index of `address` among `owners` (a sink's each), added when
+    new: a job's groups have at most one owner per worker."""
+    for o in range(len(owners)):
+        if owners[o] == address:
+            return o
+    owners.append(address)
+    return len(owners) - 1
+
+
+def _unload_states(
+    slot: AggregateFunction,
+    groups: _Groups,
+    mut reducer: Reducer,
+    lo: Int,
+    hi: Int,
+) raises:
+    """States by address (`_K_STATE`) of groups [lo, hi): every state of a
+    group's chain merged into the group's state in `reducer`, owner by
+    owner (DuckDB's `Combine` of the states into the finalize's)."""
+    var owners = List[Int]()
+    var sources = List[List[Int]]()
+    var targets = List[List[Int]]()
+    var base = 8 * (groups.states_at + slot.offset)
+    for g in range(lo, hi):
+        var at = groups.at(g) + base
+        while at != 0:
+            var state = _words_at(at)
+            if state[] != 0:
+                var o = _owner_index(owners, Int(state[]))
+                if o == len(sources):
+                    sources.append(List[Int]())
+                    targets.append(List[Int]())
+                sources[o].append(Int(state[unsafe_offset=1]) - 1)
+                targets[o].append(g)
+            at = Int(state[unsafe_offset=2])
+    for o in range(len(owners)):
+        reducer.merge(
+            Pointer[Reducer, MutAnyOrigin](unsafe_from_address=owners[o])[],
+            groups=targets[o],
+            sources=sources[o],
+        )
+
+
+def _ordered_rows(
+    slot: AggregateFunction,
+    groups: _Groups,
+    lo: Int,
+    hi: Int,
+    mut owners: List[Int],
+    mut owner_of: List[Int],
+    mut positions: List[Int],
+    mut targets: List[Int],
+):
+    """The buffered rows of groups [lo, hi) (`_K_ORDERED`), every one
+    of each group's chain, sorted by sequence number: each row's buffer
+    (an index into `owners`), its position in that buffer's values and
+    its group."""
+    var keyed = List[UInt128]()
+    var found_owner = List[Int]()
+    var found_row = List[Int]()
+    var found_group = List[Int]()
+    var base = 8 * (groups.states_at + slot.offset)
+    for g in range(lo, hi):
+        var at = groups.at(g) + base
+        while at != 0:
+            var state = _words_at(at)
+            if state[] != 0:
+                var o = _owner_index(owners, Int(state[]))
+                ref buffer = Pointer[_OrderedBuffer, MutAnyOrigin](
+                    unsafe_from_address=Int(state[])
+                )[]
+                var ordinal = Int(state[unsafe_offset=1]) - 1
+                for r in range(
+                    buffer.starts[ordinal], buffer.starts[ordinal + 1]
+                ):
+                    var row = buffer.rows[r]
+                    keyed.append(
+                        (UInt128(buffer.sequences[row]) << 64)
+                        | UInt128(len(found_row))
+                    )
+                    found_owner.append(o)
+                    found_row.append(row)
+                    found_group.append(g)
+            at = Int(state[unsafe_offset=2])
+    sort(keyed)
+    for key in keyed:
+        var e = Int(UInt64(key & 0xFFFFFFFFFFFFFFFF))
+        owner_of.append(found_owner[e])
+        positions.append(found_row[e])
+        targets.append(found_group[e])
+
+
+def _gather_rows(
+    owners: List[Int], owner_of: List[Int], positions: List[Int]
+) raises -> Series:
+    """The values of buffered rows, the k-th at `positions[k]` of buffer
+    `owners[owner_of[k]]`, in that order: gathered buffer by buffer, then
+    put in order when they come from more than one."""
+    var picks = List[List[Int]](capacity=len(owners))
+    for _ in range(len(owners)):
+        picks.append(List[Int]())
+    for k in range(len(positions)):
+        picks[owner_of[k]].append(positions[k])
+    var pieces = List[Series](capacity=len(owners))
+    for o in range(len(owners)):
+        ref buffer = Pointer[_OrderedBuffer, MutAnyOrigin](
+            unsafe_from_address=owners[o]
+        )[]
+        pieces.append(buffer.values.value().take(picks[o]))
+    if len(pieces) == 1:
+        return pieces[0].copy()
+    var starts = List[Int](capacity=len(owners))
+    var at = 0
+    for o in range(len(owners)):
+        starts.append(at)
+        at += len(picks[o])
+    var order = List[Int](capacity=len(positions))
+    for k in range(len(positions)):
+        order.append(starts[owner_of[k]])
+        starts[owner_of[k]] += 1
+    return Series._from_chunks(pieces).rechunk().take(order)
+
+
+def _replay_ordered(
+    slot: AggregateFunction,
+    groups: _Groups,
+    mut reducer: Reducer,
+    lo: Int,
+    hi: Int,
+) raises:
+    """An order-sensitive reduction of groups [lo, hi) (`_K_ORDERED`):
+    their buffered rows sorted into input order, then into `reducer`
+    (DuckDB's `SortedAggregateFunction::Finalize`, which sorts a group's
+    buffered arguments before the inner aggregate's update)."""
+    var owners = List[Int]()
+    var owner_of = List[Int]()
+    var positions = List[Int]()
+    var targets = List[Int]()
+    _ordered_rows(slot, groups, lo, hi, owners, owner_of, positions, targets)
+    if len(positions) == 0:
+        return
+    reducer.update(
+        reducer_input(reducer, _gather_rows(owners, owner_of, positions)),
+        0,
+        True,
+        targets,
+    )
+
+
 # How a reduction's result is made from its group rows (`_Finalizer`):
 # its states unloaded into a `Reducer` that finishes them; nothing (top
 # rows, read separately); or the result column written straight from the
@@ -1613,6 +1976,9 @@ comptime _F_DECIMAL_MEAN = 8
 comptime _F_VALUE = 9
 comptime _F_LOGIC = 10
 comptime _F_WIDE = 11
+# An ordered first or last (`_K_ORDERED`): the value of the group's
+# earliest or latest buffered row, of any type.
+comptime _F_PICK = 12
 
 
 def _finalize_mode(slot: AggregateFunction, template: Reducer) -> Int:
@@ -1623,6 +1989,10 @@ def _finalize_mode(slot: AggregateFunction, template: Reducer) -> Int:
     var kind = slot.kind
     if kind == _K_TOP_ROWS:
         return _F_SKIP
+    if kind == _K_ORDERED and (template.op == FIRST or template.op == LAST):
+        return _F_PICK
+    if kind == _K_STATE or kind == _K_ORDERED:
+        return _F_STATES
     if (
         kind == _K_FIRST
         or kind == _K_LAST
@@ -1689,6 +2059,11 @@ struct _Finalizer(Movable):
     var nulls: Bool
     # A value state's column (one, for `_F_VALUE`).
     var values: List[_ValueColumn]
+    # An ordered first or last's picked rows (`_F_PICK`): the buffers,
+    # and each group's row as a buffer and a position in it.
+    var pick_owners: List[Int]
+    var pick_owner: List[Int]
+    var pick_rows: List[Int]
 
     def __init__(
         out self,
@@ -1722,8 +2097,11 @@ struct _Finalizer(Movable):
         )
         self.valid = List[Bool](
             unsafe_uninit_length=n if (direct and self.mode != _F_COUNTS)
-            or self.mode >= _F_LOGIC else 0
+            or (self.mode >= _F_LOGIC and self.mode != _F_PICK) else 0
         )
+        self.pick_owners = List[Int]()
+        self.pick_owner = List[Int](capacity=n if self.mode == _F_PICK else 0)
+        self.pick_rows = List[Int](capacity=n if self.mode == _F_PICK else 0)
         self.nulls = False
         self.values = List[_ValueColumn]()
         if self.mode == _F_VALUE:
@@ -1743,6 +2121,35 @@ struct _Finalizer(Movable):
             return
         if self.mode == _F_STATES:
             _unload(self.slot, groups, self.state, lo, hi)
+            return
+        if self.mode == _F_PICK:
+            # Every group has a row, so each takes the first (or last) of
+            # its rows in input order.
+            var owner_of = List[Int]()
+            var positions = List[Int]()
+            var targets = List[Int]()
+            _ordered_rows(
+                self.slot,
+                groups,
+                lo,
+                hi,
+                self.pick_owners,
+                owner_of,
+                positions,
+                targets,
+            )
+            var first = self.op == FIRST
+            # Rows in input order: a group's first is the earliest of its
+            # rows here, its last the latest.
+            var chosen = List[Int](length=hi - lo, fill=-1)
+            for e in range(len(targets)):
+                var g = targets[e] - lo
+                if chosen[g] < 0 or not first:
+                    chosen[g] = e
+            for g in range(hi - lo):
+                var e = chosen[g]
+                self.pick_owner.append(owner_of[e])
+                self.pick_rows.append(positions[e])
             return
         var at = groups.rows.unsafe_ptr()
         var stride = groups.stride
@@ -1931,6 +2338,15 @@ struct _Finalizer(Movable):
         if self.mode < _F_COUNTS:
             return self.state^
         var state = self.state^
+        if self.mode == _F_PICK:
+            if len(self.pick_rows) == 0:
+                # No groups: an empty part, which is never read.
+                return state^
+            state.finished = reducer_input(
+                state,
+                _gather_rows(self.pick_owners, self.pick_owner, self.pick_rows),
+            )
+            return state^
         if self.mode == _F_VALUE:
             var values = self.values^
             state.finished = values.pop().column()
