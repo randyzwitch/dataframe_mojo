@@ -164,7 +164,8 @@ def finish_variance(
     if unit_exponent < -149 or unit_exponent > 0:
         raise data_fault("variance scale exceeds native numeric inputs")
     if count == 0:
-        # The CPU permits negative ddof, including on empty input.
+        # The mathematical primitive permits negative ddof. Public CPU
+        # queries reject it; the moment planner declines those queries.
         return Float64(0)
     for word in squares:
         if word < 0:

@@ -548,3 +548,104 @@ def test_metal_moment_integer_rounding_and_square_words() raises:
             integer_moment_magnitude(signed)[0],
             Float64(magnitude).cast[DType.uint64](),
         )
+
+
+def test_metal_moment_planner_shares_values_but_preserves_each_ddof() raises:
+    from dataframe import Column, DataFrame, Series, col
+    from dataframe.expr import VAR, STD, SUM
+    from dataframe_metal.moment_plan import plan_moments, moment_key
+
+    var frame = DataFrame(
+        [
+            Series("i", Column[Int32]([1, 2, 3])),
+            Series("f", Column[Float32]([2, 3, 4])),
+        ]
+    )
+    var value = (col("i") * 2) - 1
+    var query = (
+        frame.lazy()
+        .filter((col("i") > 0) & col("f").is_not_null())
+        .select_exprs(
+            [
+                value.var(0).alias("population"),
+                value.std(1).alias("sample_std"),
+                value.var(2).alias("second_ddof"),
+                value.sum().alias("sum"),
+                col("f").mean().alias("float_mean"),
+            ]
+        )
+    )
+    var matched = plan_moments(query)
+    assert_true(Bool(matched))
+    ref plan = matched.value()
+    assert_true(not Bool(plan.grouped))
+    assert_equal(len(plan.selected.bundle.fields), 2)
+    assert_equal(plan.selected.bundle.fields[0].dtype.name(), "float32")
+    assert_equal(plan.outputs[0].field, 1)
+    assert_equal(plan.outputs[0].op, VAR)
+    assert_equal(plan.outputs[1].op, STD)
+    assert_equal(plan.outputs[2].parameter, 2)
+    assert_equal(plan.outputs[3].op, SUM)
+    assert_true(not plan.needs_moments[0])
+    assert_true(plan.needs_moments[1])
+    for i in range(4):
+        assert_equal(plan.outputs[i].field, 1)
+    assert_equal(plan.outputs[0].parameter, 0)
+    assert_equal(plan.outputs[1].parameter, 1)
+    # Matching must not rewrite the caller's variance to its internal mean.
+    assert_equal(
+        query._plan._nodes[len(query._plan._nodes) - 1]
+        .exprs[0]
+        ._nodes[len(value._nodes)]
+        .op,
+        VAR,
+    )
+    assert_true(moment_key(plan).startswith("moments:v1:"))
+    assert_true(not Bool(plan_moments(frame.lazy().select(value.var(-1)))))
+    var changed = plan_moments(frame.lazy().select(value.var(1)))
+    var original = plan_moments(frame.lazy().select(value.var(0)))
+    assert_true(moment_key(changed.value()) != moment_key(original.value()))
+    assert_true(not Bool(plan_moments(frame.lazy().select(col("i").sum()))))
+
+
+def test_metal_moment_planner_grouped_and_row_local_values() raises:
+    from dataframe import Column, DataFrame, Series, col
+    from dataframe_metal.moment_plan import plan_moments
+
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int32]([1, 1, 2])),
+            Series("j", Column[Int64]([2, 3, 4])),
+            Series("f", Column[Float32]([2, 3, 4])),
+            Series("d", Column[Float64]([1, 2, 3])),
+        ]
+    )
+    var grouped = plan_moments(
+        frame.lazy()
+        .group_by(["k", "j"])
+        .agg(
+            [
+                col("f").var(1).alias("v"),
+                col("f").std(0).alias("s"),
+                col("f").len().alias("rows"),
+            ]
+        )
+    )
+    assert_true(Bool(grouped))
+    assert_true(Bool(grouped.value().grouped))
+    assert_equal(len(grouped.value().grouped.value().keys.names), 2)
+    assert_equal(len(grouped.value().selected.bundle.fields), 1)
+    assert_equal(grouped.value().outputs[2].field, -1)
+    assert_equal(grouped.value().outputs[0].parameter, 1)
+    assert_equal(grouped.value().outputs[1].parameter, 0)
+    var row_local = plan_moments(
+        frame.lazy()
+        .with_columns([(col("f") * 2).alias("x")])
+        .select_exprs([col("x").var().alias("v"), col("x").sum().alias("sum")])
+    )
+    assert_true(Bool(row_local))
+    assert_equal(len(row_local.value().selected.bundle.fields), 1)
+    assert_true(not Bool(plan_moments(frame.lazy().select(col("d").var()))))
+    assert_true(
+        not Bool(plan_moments(frame.lazy().select((col("k") / 2).var())))
+    )
