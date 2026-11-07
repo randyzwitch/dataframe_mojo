@@ -2,7 +2,11 @@
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType
 from dataframe.expr import MIN, MAX
-from .composition_plan import has_conditions, only_conditional_trees
+from .composition_plan import (
+    Composition,
+    has_conditions,
+    simple_conditional_trees,
+)
 from .group_properties import sample_group_tuples
 from .group_types import group_value_types
 from .group_plan import GroupedComposition
@@ -30,7 +34,7 @@ from .accelerator.gpu.group_general import (
 
 def scan_general_groups[
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
     global_state: Bool = True,
     value_types: Int = 7,
 ](
@@ -147,7 +151,7 @@ def scan_general_groups[
             )
             ctx.enqueue_function[
                 general_grouped_partials[
-                    cases, conditional_only, global_state, value_types
+                    cases, simple_cases, global_state, value_types
                 ]
             ](
                 inputs[0].values,
@@ -184,7 +188,7 @@ def scan_general_groups[
             scope.record_launches(2)
             if needs_resolver:
                 ctx.enqueue_function[
-                    resolve_general_int64[cases, conditional_only, global_state]
+                    resolve_general_int64[cases, simple_cases, global_state]
                 ](
                     inputs[0].values,
                     inputs[1].values,
@@ -291,6 +295,13 @@ def scan_general_groups[
         return GroupedPartials(hp^, rp^, sp^, xp^, layout.state_blocks())
 
 
+def general_case_mode(bundle: Composition) -> Int:
+    """0 ordinary,1 general CASE,2 host-proven register-only CASE."""
+    if simple_conditional_trees(bundle):
+        return 2
+    return Int(has_conditions(bundle))
+
+
 def _dispatch_general[
     global_state: Bool
 ](
@@ -305,13 +316,14 @@ def _dispatch_general[
     for field in plan.selected.bundle.fields:
         dtypes.append(field.dtype)
     var selected = group_value_types(dtypes)
+    var case_mode = general_case_mode(plan.selected.bundle)
     comptime for mask in range(1, 8):
         if selected == mask:
-            if only_conditional_trees(plan.selected.bundle):
+            if case_mode == 2:
                 return scan_general_groups[True, True, global_state, mask](
                     plan, frame, scope, zero_copy, timings, capacity
                 )
-            if has_conditions(plan.selected.bundle):
+            if case_mode == 1:
                 return scan_general_groups[True, False, global_state, mask](
                     plan, frame, scope, zero_copy, timings, capacity
                 )

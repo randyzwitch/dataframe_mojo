@@ -25,7 +25,7 @@ from .group_state import (
 
 @always_inline
 def group_value[
-    floating: Bool, cases: Bool = False, conditional_only: Bool = False
+    floating: Bool, cases: Bool = False, simple_cases: Bool = False
 ](
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
     field: Int,
@@ -54,7 +54,7 @@ def group_value[
     var descriptor = metadata.unsafe_offset(16 + field * 8)
     var op = UInt32(descriptor[unsafe_offset=0])
     if op == UInt32(TREE_OP):
-        return expression_value[floating, cases, conditional_only](
+        return expression_value[floating, cases, simple_cases](
             metadata.unsafe_offset(Int(descriptor[unsafe_offset=6])),
             Int(descriptor[unsafe_offset=7]),
             0,
@@ -139,7 +139,7 @@ def group_value[
 
 @always_inline
 def update_int64_ticket[
-    minimum: Bool, cases: Bool = False, conditional_only: Bool = False
+    minimum: Bool, cases: Bool = False, simple_cases: Bool = False
 ](
     ticket: Pointer[UInt32, MutUntrackedOrigin],
     candidate: Int64,
@@ -168,7 +168,7 @@ def update_int64_ticket[
     var expected = Atomic[UInt32].load(ticket)
     while True:
         if expected != UInt32.MAX:
-            var previous = group_value[False, cases, conditional_only](
+            var previous = group_value[False, cases, simple_cases](
                 metadata,
                 field,
                 Int(expected),
@@ -207,7 +207,7 @@ def _update_group_field[
     floating: Bool,
     narrow: Bool,
     cases: Bool,
-    conditional_only: Bool,
+    simple_cases: Bool,
     global_state: Bool = False,
 ](
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
@@ -242,7 +242,7 @@ def _update_group_field[
     var extrema_requested = Bool(
         (flags >> 4 | flags >> 8) & (UInt32(1) << UInt32(field))
     )
-    var value = group_value[floating, cases, conditional_only](
+    var value = group_value[floating, cases, simple_cases](
         metadata,
         field,
         row,
@@ -290,7 +290,7 @@ def _update_group_field[
                 add_ordered_extrema(state, UInt32(value[0]), floating)
             else:
                 var candidate = bitcast[DType.int64](value[0])
-                update_int64_ticket[True, cases, conditional_only](
+                update_int64_ticket[True, cases, simple_cases](
                     state.unsafe_offset(GROUP_MIN),
                     candidate,
                     metadata,
@@ -315,7 +315,7 @@ def _update_group_field[
                     predicate,
                     predicate_bits,
                 )
-                update_int64_ticket[False, cases, conditional_only](
+                update_int64_ticket[False, cases, simple_cases](
                     state.unsafe_offset(GROUP_MAX),
                     candidate,
                     metadata,
@@ -348,7 +348,7 @@ def grouped_partials[
     float_fields: Int,
     int32_fields: Int,
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -443,7 +443,7 @@ def grouped_partials[
                             end = Int(metadata[unsafe_offset=6])
                         for field in range(begin, min(end, arity)):
                             if _update_group_field[
-                                FLOATING, NARROW, cases, conditional_only
+                                FLOATING, NARROW, cases, simple_cases
                             ](
                                 metadata,
                                 slot,
@@ -480,7 +480,7 @@ def grouped_partials[
                         field < float_fields,
                         field < float_fields + int32_fields,
                         cases,
-                        conditional_only,
+                        simple_cases,
                     ](
                         metadata,
                         slot,
@@ -521,7 +521,7 @@ def resolve_int64_extrema[
     float_fields: Int,
     int32_fields: Int,
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -556,7 +556,7 @@ def resolve_int64_extrema[
                     unsafe_offset=index * GROUP_STATE_WORDS + GROUP_MIN + side
                 ]
                 if ticket != UInt32.MAX:
-                    var value = group_value[False, cases, conditional_only](
+                    var value = group_value[False, cases, simple_cases](
                         metadata,
                         field,
                         Int(ticket),

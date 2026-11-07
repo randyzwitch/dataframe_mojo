@@ -55,7 +55,6 @@ from dataframe.aggregation.reducer import quantile_of, _checked_product
 from .decimal import check_limit, pow10, precision_limit
 from dataframe.aggregation.scalar_states import WideInt
 from .series import Series, FixedElements
-from dataframe.kernels.rank import rank_numeric
 from .window_segment_tree import (
     FrameState,
     SegmentTree,
@@ -65,12 +64,7 @@ from .window_segment_tree import (
     RANK_MIN,
     RANK_MAX,
 )
-from .window_sort import (
-    PARTITION_START,
-    PEER_START,
-    mark_changes,
-    sort_key_rows,
-)
+from .window_sort import rank_rows
 from std.collections import Optional
 from std.math import isnan, floor, sqrt, isfinite
 
@@ -279,10 +273,9 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
         if running:
             return running.take()
     if op_code == RANK:
-        # Numeric columns sort once per partition, in parallel (#330).
-        var fast = rank_numeric(input, ids, node.text, node.min_count == 1)
-        if fast:
-            return fast.value().copy()
+        # rank() OVER (PARTITION BY ids ORDER BY input): the window layout
+        # and its peer boundaries.
+        return rank_rows(input, ids, node.text, node.min_count == 1)
     var parts = _contiguous(len(input), ids)
     if len(parts.order) == 0:
         return _window_ranges(node, input, parts.starts)
@@ -402,8 +395,6 @@ def _window_ranges(
         return _interpolate(input, _range_lists(starts), node.text)
     if op == CUT or op == QCUT:
         return _bins(input, _range_lists(starts), node)
-    if op == RANK:
-        return _rank(input, starts, node.text, reverse)
     if op == ROLLING_STD or op == ROLLING_VAR:
         return _rolling_moments(input, valid, _range_lists(starts), node)
     if (
@@ -1064,92 +1055,6 @@ def _rolling_frames(
         )
     _ = floats^
     return Series("", Column[Float64](out^, out_valid))
-
-
-def _rank(
-    input: Series, starts: List[Int], method: String, descending: Bool
-) raises -> Series:
-    """Rank within each partition (row ranges) from peer boundaries, as
-    DuckDB's rank executors do: the rows are sorted by partition and value
-    (the fields of a struct in turn), runs of equal values are peers, and
-    each method reads its rank off the run. Nulls rank as null, and
-    ordinal breaks ties by row order (the sort is stable)."""
-    var n = len(input)
-    var ids = List[Int64](unsafe_uninit_length=n)
-    for p in range(len(starts) - 1):
-        for j in range(starts[p], starts[p + 1]):
-            ids[j] = Int64(p)
-    var present = validity(input)
-    var keys = List[Series]()
-    keys.append(Series("", Column[Int64](ids^)))
-    var descending_flags = List[Bool]()
-    descending_flags.append(False)
-    # Null rows sort first within their partition, apart from every value.
-    var nulls = List[Int64](unsafe_uninit_length=n)
-    for j in range(n):
-        nulls[j] = Int64(0) if present[j] else Int64(-1)
-    keys.append(Series("", Column[Int64](nulls^)))
-    descending_flags.append(False)
-    if input.dtype().is_struct():
-        var structs = input.struct_column()
-        for k in range(structs.field_count()):
-            keys.append(structs.field(k))
-            descending_flags.append(descending)
-    else:
-        keys.append(input.copy())
-        descending_flags.append(descending)
-    # A struct field's nulls are its smallest values (Polars).
-    var nulls_last = List[Bool](length=len(keys), fill=descending)
-    nulls_last[0] = False
-    nulls_last[1] = False
-    var order = sort_key_rows(keys, descending_flags, nulls_last)
-    var sorted = List[Series](capacity=len(keys))
-    for key in keys:
-        sorted.append(key.take(order))
-    var flags = List[UInt8](length=n, fill=0)
-    var address = Int(flags.unsafe_ptr())
-    mark_changes(sorted[0], address, 0, n, PARTITION_START)
-    for k in range(len(sorted)):
-        mark_changes(sorted[k], address, 0, n, PEER_START)
-    if n > 0:
-        flags[0] = PARTITION_START | PEER_START
-    var fp = flags.unsafe_ptr()
-    var average = method == "average"
-    var ints = List[Int64](length=0 if average else n, fill=0)
-    var floats = List[Float64](length=n if average else 0, fill=0)
-    var out_valid = List[Bool](length=n, fill=False)
-    var base = 0
-    var start = 0
-    var dense = 0
-    while start < n:
-        if (fp[unsafe_offset=start] & PARTITION_START) != 0:
-            base = start
-            dense = 0
-        var end = start + 1
-        while end < n and (fp[unsafe_offset=end] & PEER_START) == 0:
-            end += 1
-        if present[order[start]]:
-            dense += 1
-            for position in range(start, end):
-                var row = order[position]
-                out_valid[row] = True
-                if average:
-                    floats[row] = Float64(start + 1 + end - 2 * base) / 2
-                elif method == "min":
-                    ints[row] = Int64(start - base + 1)
-                elif method == "max":
-                    ints[row] = Int64(end - base)
-                elif method == "dense":
-                    ints[row] = Int64(dense)
-                else:
-                    ints[row] = Int64(position - base + 1)
-        else:
-            # Nulls come first in a partition; ranks count from after them.
-            base = end
-        start = end
-    if average:
-        return Series("", Column[Float64](floats^, out_valid))
-    return Series("", Column[Int64](ints^, out_valid))
 
 
 def _rolling_moments(

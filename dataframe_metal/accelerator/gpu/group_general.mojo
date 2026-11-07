@@ -44,7 +44,7 @@ def initialize_general_groups[
 
 def general_grouped_partials[
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
     global_state: Bool = True,
     value_types: Int = 7,
 ](
@@ -154,7 +154,7 @@ def general_grouped_partials[
                             kind == 0,
                             kind < 2,
                             cases,
-                            conditional_only,
+                            simple_cases,
                             global_state,
                         ](
                             metadata,
@@ -193,7 +193,7 @@ def general_grouped_partials[
 
 def resolve_general_int64[
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
     global_state: Bool = True,
 ](
     v0: Bytes,
@@ -235,7 +235,7 @@ def resolve_general_int64[
                     unsafe_offset=index * GROUP_VALUE_WORDS + 4 + side
                 ]
                 if ticket != UInt32.MAX:
-                    var value = group_value[False, cases, conditional_only](
+                    var value = group_value[False, cases, simple_cases](
                         metadata,
                         field,
                         Int(ticket),

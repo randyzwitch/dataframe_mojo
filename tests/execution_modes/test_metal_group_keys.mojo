@@ -1043,3 +1043,45 @@ def test_metal_group_value_type_specialization_uses_schema_only() raises:
         _ = group_value_types(List[DataType]())
     with assert_raises(contains="native"):
         _ = group_value_types(List[DataType]([DataType.FLOAT64]))
+
+
+def test_metal_general_group_case_dispatch_requires_register_shape() raises:
+    from dataframe import Expr, col, when
+    from dataframe_metal.group_plan import plan_grouped
+    from dataframe_metal.group_general_reduce import general_case_mode
+
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int32]([1, 1, 2])),
+            Series("j", Column[Int32]([3, 4, 5])),
+            Series("v", Column[Int64]([2, 3, 4])),
+            Series("w", Column[Int64]([5, 6, 7])),
+        ]
+    )
+    var values = List[Expr](
+        [
+            col("v"),
+            when(col("j") > 0)
+            .then((col("v") + col("w")) * col("v"))
+            .otherwise(0),
+            when(col("j") > 0).then(col("v") + 1).otherwise(0),
+        ]
+    )
+    for mode in range(3):
+        var matched = plan_grouped(
+            frame.lazy().group_by(["k", "j"]).agg(values[mode].sum())
+        )
+        assert_true(Bool(matched))
+        assert_equal(general_case_mode(matched.value().selected.bundle), mode)
+    var mixed = plan_grouped(
+        frame.lazy()
+        .group_by(["k", "j"])
+        .agg(
+            [
+                values[2].sum().alias("case"),
+                ((col("v") + col("w")) * col("v")).sum().alias("ordinary_tree"),
+            ]
+        )
+    )
+    assert_true(Bool(mixed))
+    assert_equal(general_case_mode(mixed.value().selected.bundle), 1)

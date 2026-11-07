@@ -824,60 +824,6 @@ def _joined(names: List[String]) -> String:
     return out^
 
 
-def _key_set_filter(
-    keys: Series, name: String, dtype: DataType
-) raises -> Optional[Expr]:
-    """A filter keeping the rows whose `name` is among `keys`' non-null
-    values: the values themselves when there are at most 50, else their
-    min-max range. None when the dtypes differ or the key is neither an
-    integer (other than UInt64) nor a string."""
-    if keys.dtype() != dtype:
-        return None
-    var distinct = keys.unique()
-    if distinct.is_chunked():
-        distinct = distinct.rechunk()
-    if dtype == DataType.STRING:
-        var values = List[String]()
-        for i in range(len(distinct)):
-            var cell = distinct.get(i)
-            if not cell.is_null():
-                values.append(cell.string())
-        if len(values) > 50:
-            return None
-        if len(values) == 0:
-            return Optional(lit(False))
-        return Optional(col(name).is_in(values))
-    comptime for d in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[d]
-        comptime if D.is_integral() and D != DType.uint64:
-            if distinct._data.isa[Column[Scalar[D]]]():
-                ref column = distinct._data[Column[Scalar[D]]]
-                # Bounds first: a literal per value only for a short list
-                # (PDS-H q21 built 729K literals for a range).
-                var count = 0
-                var low = Scalar[D].MAX
-                var high = Scalar[D].MIN
-                for i in range(len(column)):
-                    if not column._valid(i):
-                        continue
-                    var value = column._get(i)
-                    low = min(low, value)
-                    high = max(high, value)
-                    count += 1
-                if count == 0:
-                    return Optional(lit(False))
-                if count > 50:
-                    return Optional(
-                        (col(name) >= lit(low)) & (col(name) <= lit(high))
-                    )
-                var literals = List[Expr](capacity=count)
-                for i in range(len(column)):
-                    if column._valid(i):
-                        literals.append(lit(column._get(i)))
-                return Optional(col(name).is_in(literals))
-    return None
-
-
 def _bound_filter(name: String, op: Int, bound: Int64, dtype: DataType) -> Expr:
     """`col(name) op bound`, the bound a literal of the column's integer
     type (Int64 or Int32)."""
