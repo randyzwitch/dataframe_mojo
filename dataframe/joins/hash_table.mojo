@@ -53,6 +53,17 @@ then emits the build rows no probe matched, as DuckDB's ScanFullOuter. A
 semi or anti join built on its left input runs as DuckDB's RIGHT_SEMI or
 RIGHT_ANTI: the probe only flags build rows, and the scan emits the flagged
 (semi) or unflagged (anti) ones.
+
+A semi, anti or mark join that probes its build needs no build row, only
+whether a key is there. Its table (`keys_only`) is the key set Polars 2.0's
+semi/anti join builds (polars-stream `nodes/joins/semi_anti_join.rs`
+`BuildState::finalize`, one `Grouper` per partition; polars-expr
+`groups/single_key.rs` `SingleKeyHashGrouper`, whose slots hold the key
+itself): each distinct key once, in a slot of its partition's region that
+holds the hash (low bit set, so no slot of a key is empty) and the key
+fields, so a probe that finds its key reads one slot, where a chained
+table reads the entry and then the row. The build rows are dropped once
+the slots are filled.
 """
 from std.collections import Optional
 from std.ffi import external_call
@@ -440,6 +451,8 @@ struct _TableData(Movable):
 
     var rows: List[UInt8]
     var entries: List[UInt64]
+    # A keys-only table's slots: per slot, the tagged hash and key fields.
+    var keyset: List[UInt64]
     var found: List[UInt8]
     var keys: List[Series]
     var slots: List[Int32]
@@ -451,6 +464,7 @@ struct _TableData(Movable):
     def __init__(out self, var keys: List[Series]):
         self.rows = List[UInt8]()
         self.entries = List[UInt64]()
+        self.keyset = List[UInt64]()
         self.found = List[UInt8]()
         self.keys = keys^
         self.slots = List[Int32]()
@@ -546,7 +560,10 @@ struct _InsertJob(Job):
     table is built by one task): zero it, then insert its rows in
     descending order. `lists` holds (address, length) of the partition's
     ascending row lists, one per scatter job in row order; with none, the
-    region is the whole table and its rows are build rows [0, count)."""
+    region is the whole table and its rows are build rows [0, count).
+    With `slot_words` (a keys-only table), the region is of key slots of
+    that many words, and each distinct key takes one (Polars'
+    `insert_keys_subset` on the partition's grouper)."""
 
     var layout: KeyLayout
     var rows: Int
@@ -555,6 +572,7 @@ struct _InsertJob(Job):
     var base: Int
     var bitmask: UInt64
     var lists: List[Tuple[Int, Int]]
+    var slot_words: Int
     var chained: Bool
     var kinds_at: Int
     var offsets_at: Int
@@ -568,6 +586,7 @@ struct _InsertJob(Job):
         base: Int,
         bitmask: UInt64,
         var lists: List[Tuple[Int, Int]],
+        slot_words: Int = 0,
     ):
         self.layout = layout.copy()
         self.rows = rows
@@ -576,6 +595,7 @@ struct _InsertJob(Job):
         self.base = base
         self.bitmask = bitmask
         self.lists = lists^
+        self.slot_words = slot_words
         self.chained = False
         self.kinds_at = 0
         self.offsets_at = 0
@@ -583,15 +603,16 @@ struct _InsertJob(Job):
     def run(mut self) raises:
         self.kinds_at = Int(self.layout.kinds.unsafe_ptr())
         self.offsets_at = Int(self.layout.offsets.unsafe_ptr())
-        var region = self.entries + 8 * self.base
+        var words = max(self.slot_words, 1)
+        var region = self.entries + 8 * words * self.base
         _ = external_call["memset", Int](
-            region, Int32(0), 8 * (Int(self.bitmask) + 1)
+            region, Int32(0), 8 * words * (Int(self.bitmask) + 1)
         )
         var table = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=region)
         if len(self.lists) == 0:
             var r = self.count - 1
             while r >= 0:
-                self._insert(table, r)
+                self._place(table, region, r)
                 r -= 1
             return
         var l = len(self.lists) - 1
@@ -601,9 +622,58 @@ struct _InsertJob(Job):
             )
             var r = self.lists[l][1] - 1
             while r >= 0:
-                self._insert(table, Int(listed[unsafe_offset=r]))
+                self._place(table, region, Int(listed[unsafe_offset=r]))
                 r -= 1
             l -= 1
+
+    @always_inline
+    def _place(
+        mut self, table: Pointer[UInt64, MutAnyOrigin], region: Int, r: Int
+    ):
+        if self.slot_words > 0:
+            self._insert_key(region, r)
+        else:
+            self._insert(table, r)
+
+    @always_inline
+    def _insert_key(mut self, region: Int, r: Int):
+        """Polars' `insert_impl`: find the row's key by linear probing from
+        its hash's low bits; an empty slot takes it, a slot holding it
+        already leaves it out."""
+        var row = self.rows + r * self.layout.width
+        if _load8(row + self.layout.valid_offset) == 0:
+            return
+        var hash = _load64(row + _NEXT)
+        var tag = hash | 1
+        var slot_bytes = 8 * self.slot_words
+        var offset = Int(hash & self.bitmask)
+        while True:
+            var at = region + offset * slot_bytes
+            var seen = _load64(at)
+            if seen == 0:
+                _store64(at, tag)
+                unsafe_memcpy(
+                    dest=Pointer[UInt8, MutAnyOrigin](
+                        unsafe_from_address=at + 8
+                    ),
+                    src=Pointer[UInt8, MutAnyOrigin](
+                        unsafe_from_address=row + _KEYS
+                    ),
+                    count=self.layout.key_bytes,
+                )
+                return
+            if seen == tag and _same_keys(
+                self.kinds_at,
+                self.offsets_at,
+                len(self.layout.kinds),
+                self.layout.key_bytes,
+                self.layout.text,
+                at + 8,
+                row + _KEYS,
+            ):
+                self.chained = True
+                return
+            offset = Int((UInt64(offset) + 1) & self.bitmask)
 
     @always_inline
     def _insert(mut self, table: Pointer[UInt64, MutAnyOrigin], r: Int):
@@ -736,6 +806,12 @@ def _perfect_heads(
                 return
 
 
+def keys_only_join(how: Int) -> Bool:
+    """Whether a join of physical type `how` reads only whether its probe
+    keys are in the build (semi, anti, mark), so its table is a key set."""
+    return how == JOIN_SEMI or how == JOIN_ANTI or how == JOIN_MARK
+
+
 def _next_power_of_two(value: Int) -> Int:
     var power = 1
     while power < value:
@@ -765,14 +841,25 @@ struct JoinHashTable(Copyable, Movable):
     var chains_longer_than_one: Bool
     # Whether a build key is null (a mark join's unknown results).
     var has_null: Bool
+    # A key set (`keys_only_join`): `data.keyset` holds `slot_words` words
+    # a slot, and the build rows are gone.
+    var keys_only: Bool
+    var slot_words: Int
     # Whether the build's subplan filters its tables (JoinFilterPushdownInfo
     # `build_side_has_filter`), which the join's bloom filter rule reads.
     var build_filtered: Bool
 
-    def __init__(out self, keys: List[Series], perfect: Bool = False) raises:
+    def __init__(
+        out self,
+        keys: List[Series],
+        perfect: Bool = False,
+        keys_only: Bool = False,
+    ) raises:
         """Build and finalize the table over `keys` (one column per
         equality condition, all of one length). `perfect`: the join is an
-        inner join, which may run as a perfect hash join."""
+        inner join, which may run as a perfect hash join. `keys_only`: the
+        join is a semi, anti or mark join (`keys_only_join`), and the
+        table is the set of its distinct keys."""
         var unchunked = List[Series](capacity=len(keys))
         for key in keys:
             if key.dtype().is_nested():
@@ -781,6 +868,8 @@ struct JoinHashTable(Copyable, Movable):
                 )
             unchunked.append(key.rechunk() if key.is_chunked() else key.copy())
         self.layout = KeyLayout.of(unchunked)
+        self.keys_only = keys_only
+        self.slot_words = 1 + self.layout.key_bytes // 8 if keys_only else 0
         self.count = len(unchunked[0]) if len(unchunked) > 0 else 0
         if self.count > Int(Int32.MAX):
             raise Error("A join build exceeds 2^31 - 1 rows")
@@ -788,7 +877,9 @@ struct JoinHashTable(Copyable, Movable):
         self.data[].rows = huge_uninit[UInt8](
             max(self.count, 1) * self.layout.width
         )
-        self.data[].found = List[UInt8](length=max(self.count, 1), fill=0)
+        self.data[].found = List[UInt8](
+            length=1 if keys_only else max(self.count, 1), fill=0
+        )
         var rows = Int(self.data[].rows.unsafe_ptr())
         # Sink: every row laid out and hashed on the crew, each worker
         # listing its rows by partition: one partition per worker, as
@@ -823,7 +914,12 @@ struct JoinHashTable(Copyable, Movable):
         self.perfect_span = 0
         self.chains_longer_than_one = False
         self.capacity = 0
-        if perfect and len(unchunked) == 1 and self.inserted > 0:
+        if (
+            perfect
+            and not keys_only
+            and len(unchunked) == 1
+            and self.inserted > 0
+        ):
             # PerfectHashJoinExecutor::BuildPerfectHashTable, else (a
             # repeated key, a wide range) the hash table.
             var slots = _perfect_slots(unchunked[0], self.inserted)
@@ -839,7 +935,9 @@ struct JoinHashTable(Copyable, Movable):
                 return
         # Finalize: each partition's region, sized by PointerTableCapacity
         # for its rows (the regions together at least MINIMUM_CAPACITY),
-        # zeroed and filled by one job per partition.
+        # zeroed and filled by one job per partition. A key set's slots
+        # are sized the same: each partition's grouper reserves for its
+        # rows, as Polars' finalize does (semi_anti_join.rs:579-640).
         var floor = _next_power_of_two(
             (MINIMUM_CAPACITY + self.parts - 1) // self.parts
         )
@@ -861,8 +959,15 @@ struct JoinHashTable(Copyable, Movable):
             self.data[].masks.append(UInt64(size - 1))
             self.capacity += size
             lists.append(listed^)
-        self.data[].entries = huge_uninit[UInt64](self.capacity)
-        var entries = Int(self.data[].entries.unsafe_ptr())
+        var entries: Int
+        if keys_only:
+            self.data[].keyset = huge_uninit[UInt64](
+                self.capacity * self.slot_words
+            )
+            entries = Int(self.data[].keyset.unsafe_ptr())
+        else:
+            self.data[].entries = huge_uninit[UInt64](self.capacity)
+            entries = Int(self.data[].entries.unsafe_ptr())
         var inserts = List[_InsertJob](capacity=self.parts)
         for p in range(self.parts):
             inserts.append(
@@ -874,6 +979,7 @@ struct JoinHashTable(Copyable, Movable):
                     Int(self.data[].bases[p]),
                     self.data[].masks[p],
                     lists[p].copy(),
+                    self.slot_words,
                 )
             )
         if len(inserts) == 1:
@@ -885,6 +991,9 @@ struct JoinHashTable(Copyable, Movable):
             self.chains_longer_than_one = (
                 self.chains_longer_than_one or inserts[p].chained
             )
+        if keys_only:
+            # The slots hold the keys: no probe reads a build row.
+            self.data[].rows = List[UInt8]()
 
     def keys(self) -> List[Series]:
         return self.data[].keys.copy()
@@ -1009,6 +1118,8 @@ struct ScanStructure(Movable):
     def probe(mut self, keys: List[Series], start: Int, count: Int) raises:
         """Probe rows [start, start + count) of the unchunked `keys` (at
         most STANDARD_VECTOR_SIZE rows): JoinHashTable::Probe."""
+        if self.table.keys_only and not keys_only_join(self.how):
+            raise Error("a keys-only join table probed by a join of build rows")
         self.count = count
         self.row = 0
         self.cursor = 0
@@ -1142,6 +1253,9 @@ struct ScanStructure(Movable):
         # (`should_prefetch`: MIN_PREFETCH_BUCKETS, BLOCK_SIZE,
         # polars-expr hash_keys.rs:25-27).
         var fetch = self.table.capacity >= MIN_PREFETCH_BUCKETS
+        if self.table.keys_only:
+            self._find_keys(pending, fetch)
+            return
         while pending > 0:
             # ProbeForPointers: walk to an empty entry or a salt match.
             var candidates = 0
@@ -1215,6 +1329,70 @@ struct ScanStructure(Movable):
                 )
                 todo[unsafe_offset=m] = Int32(i)
             pending = misses
+
+    def _find_keys(mut self, pending: Int, fetch: Bool):
+        """A key set's lookup (Polars' `probe_partitions`,
+        groups/single_key.rs): each block's slots prefetched, then each
+        row's key found by linear probing from its slot to an empty one
+        (`heads` 1 when found)."""
+        var slots = Int(self.table.data[].keyset.unsafe_ptr())
+        var slot_bytes = 8 * self.table.slot_words
+        var hashes = self.hashes.unsafe_ptr()
+        var offsets = self.offsets.unsafe_ptr()
+        var heads = self.heads.unsafe_ptr()
+        var todo = self.todo.unsafe_ptr()
+        var region = self.region.unsafe_ptr()
+        var bitmasks = self.masks.unsafe_ptr()
+        ref layout = self.table.layout
+        var kinds = Int(layout.kinds.unsafe_ptr())
+        var key_offsets = Int(layout.offsets.unsafe_ptr())
+        var fields = len(layout.kinds)
+        var key_bytes = layout.key_bytes
+        var text = layout.text
+        var word = not text and key_bytes == 8
+        var records = Int(self.records.unsafe_ptr())
+        for block in range(0, pending, BLOCK_SIZE):
+            var block_end = min(block + BLOCK_SIZE, pending)
+            if fetch:
+                for t in range(block, block_end):
+                    var i = Int(todo[unsafe_offset=t])
+                    prefetch(
+                        Pointer[UInt64, MutAnyOrigin](
+                            unsafe_from_address=slots
+                            + Int(offsets[unsafe_offset=i]) * slot_bytes
+                        )
+                    )
+            for t in range(block, block_end):
+                var i = Int(todo[unsafe_offset=t])
+                var tag = hashes[unsafe_offset=i] | 1
+                var offset = offsets[unsafe_offset=i]
+                var base = region[unsafe_offset=i]
+                var mask = bitmasks[unsafe_offset=i]
+                var record = records + i * key_bytes
+                var hit = UInt64(0)
+                while True:
+                    var at = slots + Int(offset) * slot_bytes
+                    var seen = _load64(at)
+                    if seen == 0:
+                        break
+                    if seen == tag:
+                        if word:
+                            if _load64(at + 8) == _load64(record):
+                                hit = 1
+                                break
+                        elif _same_keys(
+                            kinds,
+                            key_offsets,
+                            fields,
+                            key_bytes,
+                            text,
+                            at + 8,
+                            record,
+                        ):
+                            hit = 1
+                            break
+                    offset = base + ((offset - base + 1) & mask)
+                heads[unsafe_offset=i] = hit
 
     def matched(self, i: Int) -> Bool:
         """Whether chunk row i found a chain."""

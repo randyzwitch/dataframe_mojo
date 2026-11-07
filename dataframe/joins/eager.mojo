@@ -31,6 +31,7 @@ from dataframe.join_type import (
 )
 from dataframe.joins.hash_table import (
     JoinHashTable,
+    keys_only_join,
     probe_pairs,
 )
 from dataframe.parallel import (
@@ -308,7 +309,11 @@ def join_frames(
             probe_keys.append(right._columns[right_keys[k]].copy())
             build_keys.append(self._columns[left_keys[k]].copy())
     trace_path("join.hash_table")
-    var table = JoinHashTable(build_keys, perfect=physical == JOIN_INNER)
+    var table = JoinHashTable(
+        build_keys,
+        perfect=physical == JOIN_INNER,
+        keys_only=keys_only_join(physical),
+    )
     var pairs = probe_pairs(table, probe_keys, physical, 0)
     if how == JOIN_SEMI or how == JOIN_ANTI:
         var kept = List[Int]()
