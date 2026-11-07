@@ -1,7 +1,8 @@
 """Bounded postfix value-program format shared by host and GPU.
 
-Operation word2 stays zero and is opaque to the device compiler. Scalar
-Float32 fast paths use it to preserve rounding between arithmetic nodes.
+The low 32 bits of arithmetic word2 stay zero and opaque to the device
+compiler, preserving Float32 rounding between nodes. Typed programs carry
+their per-node dtype above those bits; legacy programs keep the whole word zero.
 """
 
 comptime TREE_OP = 0xFFFF_FFFF
@@ -20,3 +21,7 @@ comptime MAX_CASE_STACK = 8
 
 # A large membership predicate may have many source nodes but one GPU leaf.
 comptime MAX_CASE_SOURCE_NODES = 262144
+
+# A separate program header preserves the legacy homogeneous evaluators.
+comptime TYPED_HEADER = 0xFFFF_FFFA
+comptime VALUE_TYPE_SHIFT = 40

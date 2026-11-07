@@ -4,7 +4,7 @@ from dataframe import DataFrame, DataType
 from dataframe.expr import MIN, MAX
 from .composition_plan import (
     Composition,
-    has_conditions,
+    needs_general_values,
     simple_conditional_trees,
 )
 from .group_properties import sample_group_tuples
@@ -299,7 +299,7 @@ def general_case_mode(bundle: Composition) -> Int:
     """0 ordinary,1 general CASE,2 host-proven register-only CASE."""
     if simple_conditional_trees(bundle):
         return 2
-    return Int(has_conditions(bundle))
+    return Int(needs_general_values(bundle))
 
 
 def _dispatch_general[

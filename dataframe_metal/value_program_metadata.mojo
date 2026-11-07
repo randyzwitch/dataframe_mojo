@@ -3,7 +3,11 @@ from std.memory import bitcast
 from dataframe.expr import COL
 from .expression_plan import ValueNode
 from .predicate_program import PredicateProgram
-from .expression_format import CASE_TEST, EXPRESSION_NODE_WORDS
+from .expression_format import (
+    CASE_TEST,
+    EXPRESSION_NODE_WORDS,
+    VALUE_TYPE_SHIFT,
+)
 from .accelerator.gpu.erased_input import NumericView
 from .accelerator.gpu.compound_predicate import (
     PREDICATE_HEADER_WORDS,
@@ -107,5 +111,7 @@ def pack_value_program(
             )
         elif node.op == CASE_TEST:
             words[at + 1] = UInt64(starts[node.input])
+        if node.tag >= 0:
+            words[at + 2] |= UInt64(node.tag + 1) << VALUE_TYPE_SHIFT
         words[at + 3] = node.literal
     return words^
