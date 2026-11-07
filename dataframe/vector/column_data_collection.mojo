@@ -14,6 +14,7 @@ starts.
 from std.memory import Pointer, unsafe_memcpy
 
 from dataframe.frame import DataFrame, concat
+from dataframe.parallel import Job, run_jobs
 from dataframe.series import Series
 from dataframe.storage.column import Column
 from dataframe.vector.data_chunk import ColumnArena, DataChunk, to_series
@@ -270,13 +271,32 @@ struct MaterializeSink(Sink):
         combined.append(self^)
 
 
+struct _FrameJob(Job):
+    """One batch's collection turned into its frame, on a worker: each
+    batch's columns are copied out of its collection in parallel, as
+    Polars' in-memory sink keeps every morsel's frame as it came (no
+    serial pass over the result's rows)."""
+
+    var collection: Int
+    var frame: DataFrame
+
+    def __init__(out self, collection: Int, schema: DataFrame):
+        self.collection = collection
+        self.frame = schema.copy()
+
+    def run(mut self) raises:
+        self.frame = Pointer[ColumnDataCollection, MutAnyOrigin](
+            unsafe_from_address=self.collection
+        )[].frame()
+
+
 def materialize_finish(
     mut sinks: List[MaterializeSink], schema: DataFrame
 ) raises -> DataFrame:
     """Every batch in batch index order, one chunk each (the workers'
     batches are each in the order the worker took them, so a merge by
     batch index over the workers orders all)."""
-    var parts = List[DataFrame]()
+    var jobs = List[_FrameJob]()
     var next = List[Int](length=len(sinks), fill=0)
     while True:
         var best = -1
@@ -289,10 +309,20 @@ def materialize_finish(
                     best_batch = batch
         if best < 0:
             break
-        parts.append(sinks[best].collections[next[best]].frame())
+        jobs.append(
+            _FrameJob(
+                Int(Pointer(to=sinks[best].collections[next[best]])),
+                schema,
+            )
+        )
         next[best] += 1
-    if len(parts) == 0:
+    if len(jobs) == 0:
         return schema.copy()
-    if len(parts) == 1:
-        return parts[0].copy()
+    if len(jobs) == 1:
+        jobs[0].run()
+        return jobs[0].frame.copy()
+    run_jobs(jobs)
+    var parts = List[DataFrame](capacity=len(jobs))
+    for k in range(len(jobs)):
+        parts.append(jobs[k].frame.copy())
     return concat(parts)

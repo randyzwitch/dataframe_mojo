@@ -31,6 +31,7 @@ from std.memory import ArcPointer, Pointer
 from dataframe.dtype import DataType
 from dataframe.join_type import JOIN_INNER, JOIN_RIGHT, JOIN_SEMI
 from dataframe.kernels.runtime_filter import KeyBloom, build_bloom
+from dataframe.parallel import Job, partitions, run_jobs, worker_count
 from dataframe.series import Series
 from dataframe.storage.column import Column, _validity_at
 from dataframe.storage.statistics import (
@@ -117,34 +118,76 @@ def _row_key(dtype: DataType) -> Bool:
     return physical == DataType.INT64 or physical == DataType.INT32
 
 
-def _bounds(key: Series) -> Optional[Tuple[Int64, Int64]]:
-    """The least and greatest non-null value of an integer key."""
-    var least = Int64.MAX
-    var most = Int64.MIN
-    var found = False
-    var physical = key.dtype().physical()
-    for part in key.chunks():
-        var n = len(part)
-        if physical == DataType.INT64:
-            ref column = part._data[Column[Int64]]
-            var values = column._ptr()
-            var valid = column.null_count() == 0
+struct _BoundsJob(Job):
+    """The least and greatest non-null value of one slice of an integer
+    key, as each DuckDB build thread keeps its keys' min and max in its
+    local join filter state (JoinFilterLocalState::Sink)."""
+
+    var key: Series
+    var least: Int64
+    var most: Int64
+    var found: Bool
+
+    def __init__(out self, var key: Series):
+        self.key = key^
+        self.least = Int64.MAX
+        self.most = Int64.MIN
+        self.found = False
+
+    def run(mut self) raises:
+        var physical = self.key.dtype().physical()
+        for part in self.key.chunks():
+            if physical == DataType.INT64:
+                self._scan(part._data[Column[Int64]])
+            else:
+                self._scan(part._data[Column[Int32]])
+
+    def _scan[D: DType](mut self, column: Column[Scalar[D]]):
+        var values = column._ptr()
+        var n = len(column)
+        var least = self.least
+        var most = self.most
+        if column.null_count() == 0:
             for i in range(n):
-                if valid or column._valid(i):
-                    var v = values[unsafe_offset=i]
-                    least = min(least, v)
-                    most = max(most, v)
-                    found = True
+                var v = Int64(values[unsafe_offset=i])
+                least = min(least, v)
+                most = max(most, v)
+            self.found = self.found or n > 0
         else:
-            ref column = part._data[Column[Int32]]
-            var values = column._ptr()
-            var valid = column.null_count() == 0
             for i in range(n):
-                if valid or column._valid(i):
+                if column._valid(i):
                     var v = Int64(values[unsafe_offset=i])
                     least = min(least, v)
                     most = max(most, v)
-                    found = True
+                    self.found = True
+        self.least = least
+        self.most = most
+
+
+def _bounds(key: Series) raises -> Optional[Tuple[Int64, Int64]]:
+    """The least and greatest non-null value of an integer key: each
+    worker's slice's, combined (JoinFilterGlobalState's Combine)."""
+    var n = len(key)
+    var parts = worker_count(n)
+    var bounds = partitions(n, parts, 1)
+    var jobs = List[_BoundsJob](capacity=parts)
+    for p in range(parts):
+        if bounds[p] < bounds[p + 1]:
+            jobs.append(
+                _BoundsJob(key.slice(bounds[p], bounds[p + 1] - bounds[p]))
+            )
+    if len(jobs) == 1:
+        jobs[0].run()
+    elif len(jobs) > 1:
+        run_jobs(jobs)
+    var least = Int64.MAX
+    var most = Int64.MIN
+    var found = False
+    for j in range(len(jobs)):
+        if jobs[j].found:
+            least = min(least, jobs[j].least)
+            most = max(most, jobs[j].most)
+            found = True
     if not found:
         return None
     return (least, most)

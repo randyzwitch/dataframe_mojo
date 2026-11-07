@@ -10,7 +10,7 @@ from std.memory import ArcPointer, Pointer
 
 from dataframe.storage.column import Column
 from dataframe.dtype import DataType
-from dataframe.parallel import Job, run_jobs, worker_count
+from dataframe.parallel import Job, partitions, run_jobs, worker_count
 from dataframe.series import Series
 
 # Bits per key a filter is sized for, and the smallest and largest filter
@@ -124,22 +124,55 @@ struct KeyBloom(Movable):
 
 
 struct _BloomBuild(Job):
-    """One worker's filter over a slice of the build's keys."""
+    """One worker's filter over a slice of the build's keys, zeroed and
+    filled on the worker."""
 
     var keys: Series
-    var bloom: KeyBloom
+    var blocks: Int
+    var words: List[UInt64]
 
     def __init__(out self, var keys: Series, blocks: Int):
         self.keys = keys^
-        self.bloom = KeyBloom(blocks)
+        self.blocks = blocks
+        self.words = List[UInt64]()
 
     def run(mut self) raises:
+        var bloom = KeyBloom(self.blocks)
         var physical = self.keys.dtype().physical()
         for part in self.keys.chunks():
             if physical == DataType.INT64:
-                self.bloom.add_column(part._data[Column[Int64]])
+                bloom.add_column(part._data[Column[Int64]])
             else:
-                self.bloom.add_column(part._data[Column[Int32]])
+                bloom.add_column(part._data[Column[Int32]])
+        swap(self.words, bloom.words)
+
+
+struct _BloomMerge(Job):
+    """Words [start, end) of the merged filter: every worker's or-ed."""
+
+    var filters: List[Int]
+    var target: Int
+    var start: Int
+    var end: Int
+
+    def __init__(
+        out self, filters: List[Int], target: Int, start: Int, end: Int
+    ):
+        self.filters = filters.copy()
+        self.target = target
+        self.start = start
+        self.end = end
+
+    def run(mut self) raises:
+        var into = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=self.target
+        )
+        for f in range(len(self.filters)):
+            var words = Pointer[UInt64, MutAnyOrigin](
+                unsafe_from_address=self.filters[f]
+            )
+            for w in range(self.start, self.end):
+                into[unsafe_offset=w] |= words[unsafe_offset=w]
 
 
 def build_bloom(
@@ -148,7 +181,11 @@ def build_bloom(
     """A filter over the non-null values of an integer key column of up to
     `rows` keys, or None when it would be larger than is built. The keys
     are split over the workers, each filling a filter of its own, and the
-    filters are merged by or-ing their words."""
+    filters are merged by or-ing their words, each worker a range of them.
+    DuckDB's build threads insert into one filter with atomic ors
+    (BloomFilter::InsertOne); here that took 4 ms of join-092's build (1M
+    keys, eight threads), the threads contending for the filter's words,
+    so each worker fills its own and the merge runs on every worker."""
     var blocks = bloom_blocks_for(rows)
     if blocks == 0:
         return None
@@ -166,9 +203,24 @@ def build_bloom(
     else:
         run_jobs(jobs)
     var merged = KeyBloom(1)
-    swap(merged.words, jobs[0].bloom.words)
+    swap(merged.words, jobs[0].words)
     merged.blocks = blocks
-    for j in range(1, parts):
-        for w in range(blocks):
-            merged.words[w] |= jobs[j].bloom.words[w]
+    if parts > 1:
+        var others = List[Int](capacity=parts - 1)
+        for j in range(1, parts):
+            others.append(Int(jobs[j].words.unsafe_ptr()))
+        var bounds = partitions(blocks, parts, 8)
+        var merges = List[_BloomMerge](capacity=parts)
+        for p in range(parts):
+            if bounds[p] < bounds[p + 1]:
+                merges.append(
+                    _BloomMerge(
+                        others,
+                        Int(merged.words.unsafe_ptr()),
+                        bounds[p],
+                        bounds[p + 1],
+                    )
+                )
+        run_jobs(merges)
+    _ = jobs^
     return Optional(ArcPointer(merged^))
