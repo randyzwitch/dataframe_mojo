@@ -269,9 +269,9 @@ struct TupleDataCollection(Movable):
         if state.segment_index >= len(self.segments):
             result.reset()
             return False
-        var count = self.segments[
-            state.segment_index
-        ].initialize_chunk_state(state.chunk_state, state.chunk_index, False)
+        var count = self.segments[state.segment_index].initialize_chunk_state(
+            state.chunk_state, state.chunk_index, False
+        )
         state.chunk_index += 1
         result.reset()
         self.gather(
@@ -380,7 +380,9 @@ def _storage_format(
             entries[2 * i + 1] = UInt64(list._end(i) - start)
         var validity = ValidityMask()
         if len(list._bits[]) > 0:
-            validity = ValidityMask(Int(list._bits[].unsafe_ptr()), list._offset)
+            validity = ValidityMask(
+                Int(list._bits[].unsafe_ptr()), list._offset
+            )
         var child = list.child().slice(low, high - low)
         ref format = state.vector_data[f]
         format.entries = entries^

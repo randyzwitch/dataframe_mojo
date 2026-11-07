@@ -73,9 +73,7 @@ struct TupleDataChunkPart(Copyable, ImplicitlyCopyable, Movable):
 
     @staticmethod
     def empty() -> TupleDataChunkPart:
-        return TupleDataChunkPart(
-            0, 0, _INVALID_INDEX, _INVALID_INDEX, 0, 0, 0
-        )
+        return TupleDataChunkPart(0, 0, _INVALID_INDEX, _INVALID_INDEX, 0, 0, 0)
 
     def set_heap_empty(mut self):
         self.heap_block_index = _INVALID_INDEX
@@ -200,7 +198,10 @@ struct TupleDataSegment(Copyable, Movable):
         ref chunk = self.chunks[chunk_index]
         chunk.count += part.count
         chunk.row_block_ids.insert(part.row_block_index)
-        if not self.allocator.layout.all_constant() and part.total_heap_size > 0:
+        if (
+            not self.allocator.layout.all_constant()
+            and part.total_heap_size > 0
+        ):
             chunk.heap_block_ids.insert(part.heap_block_index)
         chunk.part_ids.insert(len(self.chunk_parts))
         self.chunk_parts.append(part)

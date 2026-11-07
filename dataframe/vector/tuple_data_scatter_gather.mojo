@@ -92,9 +92,9 @@ def _load[D: DType](address: Int) -> Scalar[D]:
 
 @always_inline
 def _store[D: DType](address: Int, value: Scalar[D]):
-    Pointer[Scalar[D], MutAnyOrigin](
-        unsafe_from_address=address
-    ).unsafe_store[alignment=1](value)
+    Pointer[Scalar[D], MutAnyOrigin](unsafe_from_address=address).unsafe_store[
+        alignment=1
+    ](value)
 
 
 @always_inline
@@ -269,9 +269,7 @@ def _collection_within_heap_sizes(
     var child_f = state.vector_data[f].children[0]
     var combined_sel = List[UInt32](length=max(child_count, 1), fill=0)
     var sel_at = combined_sel.unsafe_ptr()
-    var combined_entries = List[UInt64](
-        length=2 * STANDARD_VECTOR_SIZE, fill=0
-    )
+    var combined_entries = List[UInt64](length=2 * STANDARD_VECTOR_SIZE, fill=0)
     var entries_at = combined_entries.unsafe_ptr()
     var combined_validity = List[UInt8](
         length=STANDARD_VECTOR_SIZE // 8, fill=255
@@ -374,7 +372,9 @@ def scatter(
             )
     for k in range(len(state.column_ids)):
         var col = state.column_ids[k]
-        _scatter(layout, 0, col, state, col, append_sel, append_count, Int(rows))
+        _scatter(
+            layout, 0, col, state, col, append_sel, append_count, Int(rows)
+        )
 
 
 def _scatter(
@@ -586,7 +586,11 @@ def _scatter_list(
         else:
             _bytes(row)[unsafe_offset=entry] &= ~(UInt8(1) << bit)
     _scatter_within(
-        state, state.vector_data[f].children[0], append_sel, append_count, source
+        state,
+        state.vector_data[f].children[0],
+        append_sel,
+        append_count,
+        source,
     )
 
 
@@ -602,11 +606,8 @@ def _scatter_within(
     var physical = state.vector_data[f].physical
     var source = state.vector_data[f].unified
     var heap_at = _ints(state.heaps())
-    var size = (
-        _WITHIN_LIST_STRING_SIZE if physical
-        == PHYSICAL_VARCHAR else (
-            8 if physical == PHYSICAL_LIST else physical_size(physical)
-        )
+    var size = _WITHIN_LIST_STRING_SIZE if physical == PHYSICAL_VARCHAR else (
+        8 if physical == PHYSICAL_LIST else physical_size(physical)
     )
     for i in range(append_count):
         var list_idx = list_data.sel.get_index(append_sel.get_index(i))
@@ -1297,9 +1298,10 @@ def _collection_within_gather(
                 target_child_offset += child_length
             else:
                 set_invalid(bits, e)
-        combined_at[unsafe_offset=2 * target_idx + 1] = UInt64(
-            target_child_offset
-        ) - combined_at[unsafe_offset=2 * target_idx]
+        combined_at[unsafe_offset=2 * target_idx + 1] = (
+            UInt64(target_child_offset)
+            - combined_at[unsafe_offset=2 * target_idx]
+        )
         heap_at[unsafe_offset=i] = heap
         target_offset += length
     nodes[target].list_size = target_child_offset

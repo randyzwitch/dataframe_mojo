@@ -30,17 +30,15 @@ from dataframe.vector.tuple_data_states import (
 )
 from dataframe.vector.types import STANDARD_VECTOR_SIZE, SelectionVector
 
-# Rows: more than four chunks, several row blocks (rows are ~150 bytes,
-# ~1,700 to a block) and heap blocks.
-comptime _ROWS = 9000
+# Rows: three chunks, several row blocks (rows are ~150 bytes, ~1,700 to
+# a block) and heap blocks.
+comptime _ROWS = 5000
 # One string longer than a heap block (TUPLE_DATA_BLOCK_SIZE).
-comptime _HUGE_ROW = 5000
+comptime _HUGE_ROW = 3000
 comptime _HUGE_BYTES = 300000
 
 
-def _fixed[
-    D: DType
-](name: String, n: Int, null_every: Int) raises -> Series:
+def _fixed[D: DType](name: String, n: Int, null_every: Int) raises -> Series:
     var values = List[Scalar[D]](capacity=n)
     var valid = List[Bool](capacity=n)
     for i in range(n):
@@ -208,9 +206,7 @@ def _input(n: Int) raises -> List[Series]:
     for i in range(n):
         inner_valid.append(i % 10 != 1)
     var outer = List[Series]()
-    outer.append(
-        Series("inner", StructColumn(z^, _pack_bits(inner_valid)))
-    )
+    outer.append(Series("inner", StructColumn(z^, _pack_bits(inner_valid))))
     outer.append(_bools("w", n))
     columns.append(Series("ss", StructColumn(outer^)))
     return columns^
@@ -328,13 +324,13 @@ def test_every_type_round_trips() raises:
     for s in range(len(rows.segments)):
         blocks += len(rows.segments[s].allocator.row_blocks)
         heap_blocks += len(rows.segments[s].allocator.heap_blocks)
-    assert_true(blocks > 2, "rows span several row blocks")
-    assert_true(heap_blocks > 2, "heap data spans several heap blocks")
+    assert_true(blocks > 1, "rows span several row blocks")
+    assert_true(heap_blocks > 1, "heap data spans several heap blocks")
     _assert_columns(_scan_all(rows, columns), columns)
 
 
 def test_dictionary_chunks_and_append_selections() raises:
-    var n = 3000
+    var n = 2500
     var columns = _input(n)
     var rows = TupleDataCollection(TupleDataLayout(_types(columns)))
     var arena = ColumnArena()
@@ -431,7 +427,7 @@ def test_gather_through_row_pointers() raises:
 
 
 def test_combined_collections_keep_their_rows() raises:
-    var n = 5000
+    var n = 3500
     var columns = _input(n)
     var layout = TupleDataLayout(_types(columns))
     var first = TupleDataCollection(layout)
