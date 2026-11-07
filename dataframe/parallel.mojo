@@ -1250,9 +1250,7 @@ def _run_jobs[
         slots.append(_Slot[J](jobs.pop(0)))
     var entry: _Entry = _entry[J]
     var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
-    if len(slots) > 1 and _run_on_crew(
-        slots, entry_address, limit, helpable
-    ):
+    if len(slots) > 1 and _run_on_crew(slots, entry_address, limit, helpable):
         for t in range(len(slots)):
             if slots[t].failed:
                 raise Error(slots[t].message)

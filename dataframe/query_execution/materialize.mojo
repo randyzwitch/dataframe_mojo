@@ -365,9 +365,7 @@ def plan_read_whole(
     return copies >= 2
 
 
-def plan_schedule_inputs(
-    self: QueryContext, top: Int, batch_size: Int
-) raises:
+def plan_schedule_inputs(self: QueryContext, top: Int, batch_size: Int) raises:
     """Run at once, ahead of the stream below `top`, the inputs it will
     execute in full whatever it decides: every join's build side that
     must run to be known (a table already in memory is not run), and
