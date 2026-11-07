@@ -1,7 +1,8 @@
-"""A stream builds a join on its left side when that side, estimated, is the
-smaller, flipping the join inside the pipeline (a join promises no row
-order): the result has every row the written join gives, and a join whose
-left cannot be the smaller keeps building on its right."""
+"""A stream builds a join on its left side when that side's hash table,
+estimated before the stream starts, is the smaller (DuckDB's
+BuildProbeSideOptimizer), flipping the join inside the pipeline (a join
+promises no row order): the result has every row the written join gives,
+and a join whose left cannot be the smaller keeps building on its right."""
 # contract-group: planner.relational
 from std.testing import assert_true
 from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col, lit
@@ -90,7 +91,7 @@ def test_a_left_that_cannot_be_smaller_builds_on_the_right() raises:
     var observed = StrategyTrace()
     var rows = query.collect()
     assert_true(
-        "dataframe-path: stream.smaller_left_build\n" not in observed.text(),
+        "dataframe-path: lazy.swap_join_sides\n" not in observed.text(),
         "a large left side was built",
     )
     _ = observed^

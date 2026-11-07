@@ -291,3 +291,55 @@ def test_filtered_build_sides_run_ahead_as_scheduled_pipelines() raises:
         .sort(["s"])
     )
     assert_frame(streamed, eager)
+
+
+def test_in_memory_build_sides_run_ahead_as_scheduled_pipelines() raises:
+    """Build sides that are tables already in memory are scheduled too:
+    each finishes into its hash index as a sibling join-build pipeline,
+    since every join's build side was chosen before scheduling. The sums
+    are what joining the tables eagerly gives."""
+    var frame = source()
+    var dims_a = (
+        frame.lazy()
+        .filter((col("k") % lit(Int64(2))) == lit(Int64(0)))
+        .select(["k"])
+        .unique()
+        .with_columns([lit(Int64(1)).alias("even")])
+        .collect()
+    )
+    var dims_b = (
+        frame.lazy()
+        .filter(col("k") < lit(Int64(400)))
+        .select(["k"])
+        .unique()
+        .with_columns([lit(Int64(2)).alias("small")])
+        .collect()
+    )
+    var probe = frame.lazy().filter(col("v") > lit(Int64(-400)))
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var streamed = (
+        probe.join(dims_a.lazy(), ["k"])
+        .join(dims_b.lazy(), ["k"])
+        .group_by("s")
+        .agg([col("v").sum().alias("v"), col("small").sum().alias("n")])
+        .sort("s")
+        .collect(optimize=False)
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "stream.scheduled_inputs" in paths, "the builds were not scheduled"
+    )
+    var eager = (
+        probe.collect()
+        .join(dims_a, on=["k"])
+        .join(dims_b, on=["k"])
+        .group_by(["s"])
+        .agg([col("v").sum().alias("v"), col("small").sum().alias("n")])
+        .sort(["s"])
+    )
+    assert_frame(streamed, eager)

@@ -37,13 +37,8 @@ from dataframe.io.parquet import (
     parquet_row_group_statistics,
     read_parquet,
 )
-from dataframe.kernels.join_keys import (
-    prefer_left_build,
-)
 from dataframe.join_type import (
     JOIN_CROSS,
-    JOIN_INNER,
-    JOIN_LEFT,
 )
 from dataframe.scheduler import (
     META_REGULAR,
@@ -166,9 +161,6 @@ def plan_execute(
         var right = self._report.value()[].find(node.right)
         var left_rows = left.value().output_rows if left else -1
         var right_rows = right.value().output_rows if right else -1
-        var build_left = (
-            node.how == JOIN_INNER or node.how == JOIN_LEFT
-        ) and prefer_left_build(left_rows, right_rows)
         plan_record(
             self,
             index,
@@ -178,7 +170,6 @@ def plan_execute(
             build_rows=right_rows,
             builds=1,
             algorithm="cross" if node.how == JOIN_CROSS else "eager_hash",
-            build_side="left" if build_left else "right",
             wall_ns=took,
         )
     else:

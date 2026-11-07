@@ -480,8 +480,10 @@ def _stream_join(node: PlanNode) -> Bool:
     side is built in full first, and the left side's rows probe it. The
     stream itself, and the inputs computed ahead of it
     (`plan_schedule_inputs`), walk the same joins, so every build side
-    the stream will run is known before it starts."""
-    if node.kind != JOIN:
+    the stream will run is known before it starts. A semi or anti join
+    built on its left (`build_left`) is no step: the stream has no
+    RIGHT_SEMI probe, so it runs whole as the stream's source."""
+    if node.kind != JOIN or node.build_left:
         return False
     return (
         node.how
