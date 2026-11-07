@@ -490,7 +490,9 @@ def test_metal_shared_predicate_compiler_truth_and_input_binding() raises:
     assert_equal(len(program.slots), 0)
     for mask in range(8):
         var expected = (Bool(mask & 1) and Bool(mask & 2)) or Bool(mask & 4)
-        assert_equal(Bool(program.truth[0] & (UInt32(1) << UInt32(mask))), expected)
+        assert_equal(
+            Bool(program.truth[0] & (UInt32(1) << UInt32(mask))), expected
+        )
     var names = List[String](["v"])
     assert_true(bind_predicate_inputs(program, names))
     assert_equal(names, List[String](["v", "p", "q", "r"]))
