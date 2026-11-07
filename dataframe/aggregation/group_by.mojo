@@ -10,8 +10,8 @@ from dataframe.aggregation.hash_table import (
     aggregate_layout,
     ReducerSpec,
     key_supported,
-    reduction_supported,
-    states_supported,
+    table_reduction,
+    table_states_supported,
 )
 from dataframe.aggregation.table_sink import (
     TableSinkInputs,
@@ -514,7 +514,7 @@ struct GroupBy(Copyable):
             return False
         for expression in expressions:
             for node in expression._nodes:
-                if is_reduction(node.op) and not reduction_supported(node.op):
+                if is_reduction(node.op) and not table_reduction(node.op):
                     return False
         for key in self._keys:
             if not key_supported(key):
@@ -574,7 +574,7 @@ struct GroupBy(Copyable):
         )
         var specs = table_specs(template)
         var empty = table_inputs(self._frame.clear(), empty_keys, expressions)
-        if not states_supported(specs, empty):
+        if not table_states_supported(specs, empty):
             return None
         trace_path("group_by.aggregate_table")
         if not _plain_inputs(expressions, self._frame):
