@@ -1,6 +1,7 @@
-"""An inner join whose executed right side costs more to hash, in rows times
-columns, than its left can is run with the sides swapped: the left is hashed
-and the right streams through it. A join promises no row order, so the swap applies whatever
+"""An inner join whose right side costs more to hash than its left, by
+DuckDB's build size (estimated rows times the row width of its columns'
+types) before the stream starts, is run with the sides swapped: the left is
+hashed and the right streams through it. A join promises no row order, so the swap applies whatever
 consumes the join, an ordered group-by included. The swap must not change
 the result, the join's column names (the left key's own name), its key type,
 or which rows join; it is declined where a shared non-key name would be
@@ -164,11 +165,10 @@ def test_larger_built_right_side_is_swapped_with_the_same_groups_either_optimiza
 
 
 def test_a_built_side_of_more_rows_but_fewer_cells_is_not_swapped() raises:
-    """Rows times columns decides, as the planner's build side and
-    DuckDB's build/probe side optimizer count it: 640 two-column facts
-    (about 620 kept) build cheaper than 500 three-column dimension rows,
-    so the join keeps its sides (TPC-DS q12 restarted its pipeline to
-    flip such a join)."""
+    """The hash table's bytes decide, as DuckDB's build/probe side
+    optimizer counts them: 640 two-column facts (about 620 kept) build
+    cheaper than 500 three-column dimension rows, a string among them, so
+    the join keeps its sides."""
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     comptime ROWS = 640
@@ -328,10 +328,10 @@ def test_ordered_group_bys_and_distinct_counts_swap_and_renamed_columns_keep_the
 
 
 def test_a_known_small_left_of_a_semi_join_hashes_the_left() raises:
-    # A semi or anti join whose built right side is large decides from
-    # both real sizes, a left that is already a table included: a few
-    # left rows are hashed and the right rows scanned against them, not
-    # the 600K right rows hashed for three probes.
+    # A semi or anti join whose right side is estimated large builds on
+    # its left (RIGHT_SEMI / RIGHT_ANTI): a few left rows are hashed and
+    # the right rows scanned against them, not the 600K right rows hashed
+    # for three probes.
     var keys = List[Int64]()
     for row in range(600_000):
         keys.append(Int64(row % 1000))
@@ -367,10 +367,10 @@ def test_a_known_small_left_of_a_semi_join_hashes_the_left() raises:
 
 
 def test_a_large_left_of_a_semi_join_against_a_large_right_streams() raises:
-    # A left more than a quarter of a large right (524,288 rows, the
-    # size at which the join reads both sides) keeps streaming through
-    # the right's index. Two tables used to restart the stream from the
-    # same two tables, deciding again until the stack overflowed.
+    # A large left against a larger right: the join builds on the left
+    # once, decided before the stream starts. Two tables used to restart
+    # the stream from the same two tables, deciding again until the
+    # stack overflowed.
     var right_keys = List[Int64]()
     for row in range(524_288):
         right_keys.append(Int64(2 * row))
