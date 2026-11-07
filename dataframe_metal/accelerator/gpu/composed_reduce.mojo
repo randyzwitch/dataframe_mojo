@@ -18,6 +18,8 @@ from .compound_predicate import predicate_matches
 from .value_ops import checked_float_value
 from .expression_value import expression_value
 from ...expression_format import TREE_OP
+from ...moment_format import MOMENT_PARTIAL_WORDS, MOMENT_FLAG_SHIFT
+from .moment_squares import SquareBins, IntegerMoments
 
 comptime HEADER_WORDS = 16
 comptime FIELD_WORDS = 8
@@ -239,6 +241,7 @@ def _composed_scan[
     trees: Bool = False,
     cases: Bool = False,
     simple_cases: Bool = False,
+    moments: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -270,6 +273,7 @@ def _composed_scan[
     faults: Pointer[UInt32, MutUntrackedOrigin],
     extrema: Pointer[Int64, MutUntrackedOrigin],
 ):
+    comptime assert not moments or with_extrema
     comptime assert 1 <= arity and arity <= 4
     comptime assert float_fields >= 0 and int32_fields >= 0
     comptime assert float_fields + int32_fields <= arity
@@ -348,6 +352,9 @@ def _composed_scan[
     var fc = SIMD[DType.float32, 4](0)
     var nc = SIMD[DType.uint32, 4](0)
     var exact = ExactFloatState[wide, max(1, float_fields)]()
+    var squares = SquareBins[max(1, float_fields), wide]()
+    var integer_moments = IntegerMoments[max(1, arity - float_fields)]()
+    var moment_flags = sum_flags >> UInt32(MOMENT_FLAG_SHIFT)
     var ext_lo = SIMD[DType.int64, 4](Int64.MAX)
     var ext_hi = SIMD[DType.int64, 4](Int64.MIN)
     var ext_count = SIMD[DType.uint32, 4](0)
@@ -566,6 +573,11 @@ def _composed_scan[
                         # Extrema-only arithmetic also needs gradual-underflow
                         # adjudication; its SUM bit is deliberately absent.
                         fault |= UInt32(result[1]) << 1
+                        comptime if moments:
+                            if moment_flags & (UInt32(1) << UInt32(field)):
+                                squares.add[field](
+                                    bitcast[DType.uint32](result[0])
+                                )
                         if sum_flags & (UInt32(1) << UInt32(field)):
                             comptime if precise:
                                 exact.add[field](result[0])
@@ -629,6 +641,9 @@ def _composed_scan[
                             )
                         fault |= UInt32(result[1])
                         var value = result[0] if not result[1] else Int64(0)
+                        comptime if moments:
+                            if moment_flags & (UInt32(1) << UInt32(field)):
+                                integer_moments.add[field - float_fields](value)
                         comptime if with_extrema:
                             if extent_flags & (UInt32(1) << UInt32(field)):
                                 ext_lo[field] = min(ext_lo[field], value)
@@ -686,6 +701,44 @@ def _composed_scan[
                         | (UInt32(((flags_out >> 10) & 1023) != 0) << 1)
                         | (UInt32((flags_out >> 20) != 0) << 2)
                     )
+        comptime if moments:
+            # The normal mixed scan owns five words per partial value. The
+            # moment tail shares that existing buffer, adding no Metal binding.
+            var total_values = Int(meta[unsafe_offset=3] & UInt64(0xFFFF_FFFF))
+            var tail = high.unsafe_offset(
+                5 * total_values + output * MOMENT_PARTIAL_WORDS
+            )
+            if thread_idx.x == 0:
+                comptime for word in range(MOMENT_PARTIAL_WORDS):
+                    tail[unsafe_offset=word] = 0
+            if moment_flags & (UInt32(1) << UInt32(field)):
+                comptime if field < float_fields:
+                    comptime for bin in range(
+                        SquareBins[max(1, float_fields), wide].BIN_COUNT
+                    ):
+                        var square = block.sum[
+                            block_size=BLOCK_SIZE, broadcast=False
+                        ](
+                            squares.words[
+                                field
+                                * SquareBins[max(1, float_fields), wide].STRIDE
+                                + bin
+                            ]
+                        )
+                        if thread_idx.x == 0:
+                            tail[
+                                unsafe_offset=bin
+                                + SquareBins[
+                                    max(1, float_fields), wide
+                                ].FIRST_BIN
+                            ] = square
+                    var largest = block.max[
+                        block_size=BLOCK_SIZE, broadcast=False
+                    ](squares.largest[field])
+                    if thread_idx.x == 0:
+                        tail[unsafe_offset=18] = Int64(largest)
+                else:
+                    integer_moments.finish[field - float_fields](0, tail)
     var bad = block.max[block_size=BLOCK_SIZE, broadcast=False](fault)
     if thread_idx.x == 0:
         faults[unsafe_offset=geometry[2]] = bad
@@ -788,6 +841,7 @@ def mixed_partials[
     trees: Bool = False,
     cases: Bool = False,
     simple_cases: Bool = False,
+    moments: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -837,6 +891,7 @@ def mixed_partials[
         trees,
         cases,
         simple_cases,
+        moments,
     ](
         v0,
         v1,

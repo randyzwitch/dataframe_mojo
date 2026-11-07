@@ -144,18 +144,25 @@ struct MetalRuntime(AcceleratorBackend):
         from .composition_plan import plan_composition
         from .predicate_plan import plan_predicates
         from .group_plan import plan_grouped
+        from .moment_plan import plan_moments, moment_execution_region
 
         var optimize = settings.optimize
         var offered = query.copy()
         if supports(query):
-            var normalized = normalize_region(query)
-            if (
-                plan_composition(normalized.value())
-                or plan_predicates(normalized.value())
-                or plan_grouped(normalized.value())
-            ):
-                offered = normalized.take()
+            var moments = plan_moments(query)
+            if moments:
+                offered = moment_execution_region(moments.value())
                 optimize = False
+            else:
+                var normalized = normalize_region(query)
+                if normalized:
+                    if (
+                        plan_composition(normalized.value())
+                        or plan_predicates(normalized.value())
+                        or plan_grouped(normalized.value())
+                    ):
+                        offered = normalized.take()
+                        optimize = False
         var plan = offered._with_handoff()
         if profiling:
             return plan.profile(

@@ -14,8 +14,8 @@ print(plan.explain(accelerator=MetalRuntime()))  # HANDOFF metal: ...
 ```
 
 **Supported:** fused global and bounded grouped numeric reductions over
-Int32, Int64 and Float32 inputs. SUM, COUNT, MEAN, MIN and MAX can share one
-scan, with checked arithmetic and optional numeric Boolean predicates.
+Int32, Int64 and Float32 inputs. SUM, COUNT, MEAN, MIN, MAX, VAR and STD
+can share one scan, with checked arithmetic and optional numeric Boolean predicates.
 
 | Area | Accepted regions |
 | --- | --- |
@@ -554,3 +554,25 @@ Typed programs have separate `typed_reductions:v1:` identities. Existing
 homogeneous arithmetic and proven simple CASE kernels keep their specialized
 routes; typed stacks use the general value path. Automatic placement requires
 matching measurements for the current build, types and physical layout.
+
+### Variance and standard deviation
+
+`var(ddof)` and `std(ddof)` can share native, expression, predicate and grouped
+scans with the existing aggregates. Outputs are Float64; inputs remain native
+Int32, Int64 or Float32. The GPU accumulates exact first and second moments,
+and the host subtracts them exactly before Float64 finishing. Ordinary values
+use narrow bins, with wider retries for extreme Float32 inputs.
+
+Public results preserve CPU statistical behavior within the floating-point
+tolerance `abs(metal-cpu) <= 1e-10*(1+abs(cpu))`. Int64 values first round to
+Float64; Int32 and Float32 values convert exactly. Sensitive centering at
+large offsets uses explicit CPU adjudication, preserving the behavior shared
+with DuckDB and Polars rather than returning a materially different exact
+answer. The internal mathematical finisher remains independently tested.
+Empty inputs and insufficient counts return typed nulls. Negative
+`ddof` stays on CPU; non-finite values and checked expression faults retain
+CPU adjudication. Float64 input columns remain on CPU.
+
+The [numerical contract and error-bound derivation](design/metal-moments.md)
+separate direct GPU accuracy from CPU adjudication. Moment queries use their
+own build- and layout-matched calibration keys; unmeasured shapes remain on CPU.
