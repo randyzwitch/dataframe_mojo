@@ -1287,6 +1287,11 @@ struct AggregateSink(Movable):
     var distinct: _DistinctSinks
     var distinct_slots: List[Int]
     var only: Int
+    # Whether this sink's rows of each partition are in first-row order,
+    # as a worker taking morsels in order makes them; a sink of distinct
+    # groups (`count_group_rows`) makes them in the distinct table's
+    # order instead.
+    var in_order: Bool
 
     def __init__(
         out self,
@@ -1340,6 +1345,7 @@ struct AggregateSink(Movable):
         self.distinct = _DistinctSinks()
         self.distinct_slots = List[Int]()
         self.only = -1
+        self.in_order = True
         if distinct:
             self.distinct_slots = layout.distinct.copy()
             for d in range(len(layout.distinct)):
@@ -1847,6 +1853,7 @@ struct AggregateSink(Movable):
         the group's. DuckDB scans the distinct table a vector at a time and
         sinks it into the main table (`HashAggregateDistinctFinalizeTask`).
         """
+        self.in_order = False
         var keys = len(widths) - 1
         var width = len(self.addressed)
         var word_ptrs = List[Int](capacity=width)
@@ -1865,9 +1872,10 @@ struct AggregateSink(Movable):
         for g in range(groups.count()):
             var address = groups.at(g)
             var row = _words_at(address)
-            add_at[unsafe_offset=count] = UInt64(
-                1
-            ) if nulls_count or row[unsafe_offset=1] & value_null == 0 else 0
+            add_at[unsafe_offset=count] = (
+                UInt64(1) if nulls_count
+                or row[unsafe_offset=1] & value_null == 0 else 0
+            )
             first_at[unsafe_offset=count] = Int(row[unsafe_offset=2])
             var hash = UInt64(0)
             var w = 0
@@ -2230,7 +2238,7 @@ struct _FinishJob(Job):
                         var first = Int(words[unsafe_offset=r * stride + 2])
                         in_order = in_order and first > last
                         last = first
-            if in_order and self.bits < self.order_bits:
+            if in_order and self.bits < self.order_bits and not self.rows_only:
                 # Into the output order as they are copied (see below).
                 _by_partition(spans, sizes, self.order_bits, final)
                 ordered = True
@@ -2250,6 +2258,16 @@ struct _FinishJob(Job):
             var table = entries.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
             var mask = 0
             var run = 0
+            # Rows merged in first-row order only where that order comes
+            # out: not for a distinct table's groups (`rows_only`), which
+            # are only counted, nor when some sink's rows are out of it,
+            # whose groups are sorted below. Those merge sink by sink, as
+            # DuckDB's finalize does.
+            var sequential = self.rows_only
+            for j in range(sinks):
+                sequential = sequential or not jobs[j].in_order
+            if sequential:
+                in_order = False
             var block = List[Int](length=sinks, fill=0)
             var row_in = List[Int](length=sinks, fill=0)
             # Each worker's next row's first row, Int.MAX when it has none.
@@ -2263,6 +2281,22 @@ struct _FinishJob(Job):
                             table[unsafe_offset=e] = 0
                     mask = capacity - 1
                     run += 1
+                if sequential:
+                    for j in range(sinks):
+                        ref parts = jobs[j].parts
+                        for b in range(len(parts.blocks[p])):
+                            var at = parts.blocks[p][b]
+                            for _ in range(parts.rows_in(p, b)):
+                                _ = _merge_row(
+                                    at,
+                                    table,
+                                    mask,
+                                    final,
+                                    addressed,
+                                    self.slots,
+                                )
+                                at += 8 * stride
+                    continue
                 for j in range(sinks):
                     block[j] = 0
                     row_in[j] = 0
@@ -2310,7 +2344,12 @@ struct _FinishJob(Job):
                         parts, p, block[best], row_in[best]
                     )
             _ = entries^
-        if not in_order:
+        # A distinct table's (keys, value) groups (`rows_only`) are only
+        # counted into the main table, whose finish orders its own groups,
+        # so they skip the output order.
+        if self.rows_only:
+            pass
+        elif not in_order:
             # A worker's rows were not in first-row order: sort the groups.
             trace_path("aggregate_table.sorted_groups")
             # Each as one 128-bit key: partition and first row above, the
