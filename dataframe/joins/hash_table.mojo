@@ -20,22 +20,28 @@ TupleDataLayout lays out a TupleDataCollection:
   dictionaries over the build frame's columns through it.
 
 The pointer table is an array of 8-byte `ht_entry_t`: the hash's upper 16
-bits (the salt) over the row's 48-bit address. It holds at least twice as
-many entries as rows, and at least 16,384 (`PointerTableCapacity`). A row is
-inserted by linear probing from its hash's low bits to an empty entry or to
-the entry of a row with the same salt and keys, whose chain it joins:
+bits (the salt) over the row's 48-bit address. It is built as Polars 2.0's
+streaming equi-join builds its tables (polars-stream
+`nodes/joins/equi_join.rs`): the build rows are split by hash into one
+partition per build thread (`HashPartitioner::new(num_pipelines, 0)`,
+equi_join.rs:607-610), and each partition gets its own region of the
+pointer table, which one thread fills with no shared inserts
+(`finalize_unordered`, equi_join.rs:876-1000). A region holds at least
+twice as many entries as its rows (`PointerTableCapacity` per partition),
+and the regions together at least 16,384. A row is inserted by linear
+probing, within its region, from its hash's low bits to an empty entry or
+to the entry of a row with the same salt and keys, whose chain it joins:
 every chain holds rows with equal keys, so a probe compares keys once per
-chain. Inserting is single-threaded below 1,048,576 rows and lock-free
-above (compare-and-swap on the entry), as DuckDB's Finalize. Single-
-threaded inserts go in descending row order, so each chain lists its rows
-in ascending order.
+chain. Each region's rows go in descending row order, so each chain lists
+its rows in ascending order.
 
 A probe (`ScanStructure`) hashes a chunk of up to 2,048 rows, finds each
-row's chain by linear probing (salts compared once the table is larger than
-8,192 entries, `USE_SALT_THRESHOLD`), compares the keys of the candidates
-(`RowMatcher`), and emits at most 2,048 matches per call to `next`, walking
-each probe row's chain before the next row's, so the matches come out in
-probe order. Rows with a null key match nothing.
+row's partition, then its chain by linear probing in that partition's
+region (salts compared once the table is larger than 8,192 entries,
+`USE_SALT_THRESHOLD`), compares the keys of the candidates (`RowMatcher`),
+and emits at most 2,048 matches per call to `next`, walking each probe
+row's chain before the next row's, so the matches come out in probe order.
+Rows with a null key match nothing.
 
 Right and full joins flag the build rows they matched (`found`, one byte
 per build row; DuckDB keeps the flag in the row), and `scan_full_outer`
@@ -44,7 +50,6 @@ semi or anti join built on its left input runs as DuckDB's RIGHT_SEMI or
 RIGHT_ANTI: the probe only flags build rows, and the scan emits the flagged
 (semi) or unflagged (anti) ones.
 """
-from std.atomic import Atomic
 from std.collections import Optional
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
@@ -84,9 +89,9 @@ comptime USE_SALT_THRESHOLD = 8192
 # JoinHashTable::DEFAULT_LOAD_FACTOR and MINIMUM_CAPACITY.
 comptime DEFAULT_LOAD_FACTOR = 2.0
 comptime MINIMUM_CAPACITY = 16384
-# physical_hash_join.cpp PARALLEL_CONSTRUCT_THRESHOLD: smaller tables are
-# finalized on one thread.
-comptime PARALLEL_CONSTRUCT_THRESHOLD = 1048576
+# HashPartitioner::new(num_partitions, 0)'s multiplier (polars-utils
+# `hashing.rs:82-95`): seed 0 folded through its three constants, made odd.
+comptime PARTITION_SEED = UInt64(0xA88F4BCFCCEF9ADF)
 # PerfectHashJoinExecutor::CanDoPerfectHashJoin MAX_BUILD_SIZE: the widest
 # key range a perfect hash join addresses directly.
 comptime PERFECT_MAX_BUILD_SIZE = 1048576
@@ -410,6 +415,14 @@ def _same_keys(
     return True
 
 
+@always_inline
+def partition_of(hash: UInt64, parts: Int) -> Int:
+    """HashPartitioner::hash_to_partition (polars-utils `hashing.rs:102`):
+    the high word of `(hash * seed) * parts`."""
+    var shuffled = UInt128(hash * PARTITION_SEED)
+    return Int((shuffled * UInt128(parts)) >> 64)
+
+
 struct _TableData(Movable):
     """What a table owns: its rows, its pointer table, the flags of the build
     rows a probe matched, and the build keys whose string bytes rows point
@@ -420,6 +433,10 @@ struct _TableData(Movable):
     var found: List[UInt8]
     var keys: List[Series]
     var slots: List[Int32]
+    # Each partition's region of `entries`: its first entry and its
+    # bitmask (its entry count less one).
+    var bases: List[UInt64]
+    var masks: List[UInt64]
 
     def __init__(out self, var keys: List[Series]):
         self.rows = List[UInt8]()
@@ -427,10 +444,14 @@ struct _TableData(Movable):
         self.found = List[UInt8]()
         self.keys = keys^
         self.slots = List[Int32]()
+        self.bases = List[UInt64]()
+        self.masks = List[UInt64]()
 
 
 struct _ScatterJob(Job):
-    """Lay out rows [start, end) of the build: header, key fields, hash."""
+    """Lay out rows [start, end) of the build: header, key fields, hash; and
+    list the rows with valid keys by partition, in ascending order (Polars'
+    `partition_and_sink` with `gen_idxs_per_partition`, equi_join.rs:700)."""
 
     var keys: List[Series]
     var layout: KeyLayout
@@ -438,6 +459,8 @@ struct _ScatterJob(Job):
     var start: Int
     var end: Int
     var invalid: Int
+    var parts: Int
+    var by_partition: List[List[Int32]]
 
     def __init__(
         out self,
@@ -446,6 +469,7 @@ struct _ScatterJob(Job):
         rows: Int,
         start: Int,
         end: Int,
+        parts: Int,
     ):
         self.keys = keys.copy()
         self.layout = layout.copy()
@@ -453,11 +477,19 @@ struct _ScatterJob(Job):
         self.start = start
         self.end = end
         self.invalid = 0
+        self.parts = parts
+        self.by_partition = List[List[Int32]](capacity=parts)
+        for _ in range(parts):
+            self.by_partition.append(List[Int32]())
 
     def run(mut self) raises:
         var width = self.layout.width
         var hashes = List[UInt64](unsafe_uninit_length=STANDARD_VECTOR_SIZE)
         var hashed = hashes.unsafe_ptr()
+        if self.parts > 1:
+            var expected = (self.end - self.start) // self.parts + 1
+            for p in range(self.parts):
+                self.by_partition[p].reserve(expected + expected // 8)
         var low = self.start
         while low < self.end:
             var count = min(STANDARD_VECTOR_SIZE, self.end - low)
@@ -487,127 +519,113 @@ struct _ScatterJob(Job):
                 )
             for i in range(count):
                 var row = first + i * width
-                _store64(row + _NEXT, hashed[unsafe_offset=i])
+                var hash = hashed[unsafe_offset=i]
+                _store64(row + _NEXT, hash)
                 if _load8(row + self.layout.valid_offset) == 0:
                     self.invalid += 1
+                elif self.parts > 1:
+                    self.by_partition[partition_of(hash, self.parts)].append(
+                        Int32(low + i)
+                    )
             low += count
 
 
 struct _InsertJob(Job):
-    """Insert rows [start, end) into the pointer table (DuckDB's
-    InsertHashesLoop); `parallel` inserts with compare-and-swap."""
+    """Fill one partition's region of the pointer table on one thread
+    (DuckDB's InsertHashesLoop without atomics, as each Polars partition's
+    table is built by one task): zero it, then insert its rows in
+    descending order. `lists` holds (address, length) of the partition's
+    ascending row lists, one per scatter job in row order; with none, the
+    region is the whole table and its rows are build rows [0, count)."""
 
     var layout: KeyLayout
     var rows: Int
+    var count: Int
     var entries: Int
+    var base: Int
     var bitmask: UInt64
-    var start: Int
-    var end: Int
-    var parallel: Bool
+    var lists: List[Tuple[Int, Int]]
     var chained: Bool
+    var kinds_at: Int
+    var offsets_at: Int
 
     def __init__(
         out self,
         layout: KeyLayout,
         rows: Int,
+        count: Int,
         entries: Int,
+        base: Int,
         bitmask: UInt64,
-        start: Int,
-        end: Int,
-        parallel: Bool,
+        var lists: List[Tuple[Int, Int]],
     ):
         self.layout = layout.copy()
         self.rows = rows
+        self.count = count
         self.entries = entries
+        self.base = base
         self.bitmask = bitmask
-        self.start = start
-        self.end = end
-        self.parallel = parallel
+        self.lists = lists^
         self.chained = False
+        self.kinds_at = 0
+        self.offsets_at = 0
 
     def run(mut self) raises:
-        var width = self.layout.width
-        var valid_offset = self.layout.valid_offset
-        var kinds = Int(self.layout.kinds.unsafe_ptr())
-        var offsets = Int(self.layout.offsets.unsafe_ptr())
-        var fields = len(self.layout.kinds)
-        var key_bytes = self.layout.key_bytes
-        var text = self.layout.text
-        var table = Pointer[UInt64, MutAnyOrigin](
-            unsafe_from_address=self.entries
+        self.kinds_at = Int(self.layout.kinds.unsafe_ptr())
+        self.offsets_at = Int(self.layout.offsets.unsafe_ptr())
+        var region = self.entries + 8 * self.base
+        _ = external_call["memset", Int](
+            region, Int32(0), 8 * (Int(self.bitmask) + 1)
         )
-        # Descending on one thread, so every chain lists its rows in
-        # ascending order.
-        var r = self.end - 1
-        while r >= self.start:
-            var row = self.rows + r * width
-            r -= 1
-            if _load8(row + valid_offset) == 0:
-                continue
-            var hash = _load64(row + _NEXT)
-            var offset = Int(hash & self.bitmask)
-            var salt = hash | POINTER_MASK
-            var desired = (hash & SALT_MASK) | UInt64(row)
-            while True:
-                if not self.parallel:
-                    var entry = table[unsafe_offset=offset]
-                    if entry == 0:
-                        _store64(row + _NEXT, 0)
-                        table[unsafe_offset=offset] = desired
-                        break
-                    if (entry | POINTER_MASK) == salt:
-                        var other = Int(entry & POINTER_MASK)
-                        if _same_keys(
-                            kinds,
-                            offsets,
-                            fields,
-                            key_bytes,
-                            text,
-                            other + _KEYS,
-                            row + _KEYS,
-                        ):
-                            _store64(row + _NEXT, UInt64(other))
-                            table[unsafe_offset=offset] = desired
-                            self.chained = True
-                            break
-                    offset = Int((UInt64(offset) + 1) & self.bitmask)
-                    continue
-                ref atom = Pointer[Atomic[Int64], MutAnyOrigin](
-                    unsafe_from_address=self.entries + 8 * offset
-                )[]
-                var entry = bitcast[DType.uint64](atom.load())
-                if entry == 0:
-                    # Expect an empty entry: on a lost race, the row that
-                    # took it is compared as an occupied entry.
-                    _store64(row + _NEXT, 0)
-                    var expected = Int64(0)
-                    if atom.compare_exchange(
-                        expected, bitcast[DType.int64](desired)
-                    ):
-                        break
-                    entry = bitcast[DType.uint64](expected)
-                if (entry | POINTER_MASK) == salt and _same_keys(
-                    kinds,
-                    offsets,
-                    fields,
-                    key_bytes,
-                    text,
-                    Int(entry & POINTER_MASK) + _KEYS,
+        var table = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=region)
+        if len(self.lists) == 0:
+            var r = self.count - 1
+            while r >= 0:
+                self._insert(table, r)
+                r -= 1
+            return
+        var l = len(self.lists) - 1
+        while l >= 0:
+            var listed = Pointer[Int32, MutAnyOrigin](
+                unsafe_from_address=self.lists[l][0]
+            )
+            var r = self.lists[l][1] - 1
+            while r >= 0:
+                self._insert(table, Int(listed[unsafe_offset=r]))
+                r -= 1
+            l -= 1
+
+    @always_inline
+    def _insert(mut self, table: Pointer[UInt64, MutAnyOrigin], r: Int):
+        var row = self.rows + r * self.layout.width
+        if _load8(row + self.layout.valid_offset) == 0:
+            return
+        var hash = _load64(row + _NEXT)
+        var offset = Int(hash & self.bitmask)
+        var salt = hash | POINTER_MASK
+        var desired = (hash & SALT_MASK) | UInt64(row)
+        while True:
+            var entry = table[unsafe_offset=offset]
+            if entry == 0:
+                _store64(row + _NEXT, 0)
+                table[unsafe_offset=offset] = desired
+                return
+            if (entry | POINTER_MASK) == salt:
+                var other = Int(entry & POINTER_MASK)
+                if _same_keys(
+                    self.kinds_at,
+                    self.offsets_at,
+                    len(self.layout.kinds),
+                    self.layout.key_bytes,
+                    self.layout.text,
+                    other + _KEYS,
                     row + _KEYS,
                 ):
-                    # Same keys: push onto the chain's head until it holds.
-                    var current = entry
-                    while True:
-                        _store64(row + _NEXT, current & POINTER_MASK)
-                        var expected = bitcast[DType.int64](current)
-                        if atom.compare_exchange(
-                            expected, bitcast[DType.int64](desired)
-                        ):
-                            break
-                        current = bitcast[DType.uint64](expected)
+                    _store64(row + _NEXT, UInt64(other))
+                    table[unsafe_offset=offset] = desired
                     self.chained = True
-                    break
-                offset = Int((UInt64(offset) + 1) & self.bitmask)
+                    return
+            offset = Int((UInt64(offset) + 1) & self.bitmask)
 
 
 @always_inline
@@ -708,40 +726,11 @@ def _perfect_heads(
                 return
 
 
-comptime _MINIMUM_ENTRIES_PER_TASK = 131072
-
-
-struct _ZeroJob(Job):
-    """Clear entries [start, end) of a pointer table."""
-
-    var entries: Int
-    var start: Int
-    var end: Int
-
-    def __init__(out self, entries: Int, start: Int, end: Int):
-        self.entries = entries
-        self.start = start
-        self.end = end
-
-    def run(mut self) raises:
-        _ = external_call["memset", Int](
-            self.entries + 8 * self.start, Int32(0), 8 * (self.end - self.start)
-        )
-
-
 def _next_power_of_two(value: Int) -> Int:
     var power = 1
     while power < value:
         power <<= 1
     return power
-
-
-def pointer_table_capacity(count: Int) -> Int:
-    """JoinHashTable::PointerTableCapacity."""
-    return max(
-        _next_power_of_two(Int(Float64(count) * DEFAULT_LOAD_FACTOR)),
-        MINIMUM_CAPACITY,
-    )
 
 
 struct JoinHashTable(Copyable, Movable):
@@ -760,8 +749,9 @@ struct JoinHashTable(Copyable, Movable):
     # Build rows, and those whose keys are all valid (in the table).
     var count: Int
     var inserted: Int
+    # Entries over every partition's region, and the partition count.
     var capacity: Int
-    var bitmask: UInt64
+    var parts: Int
     var chains_longer_than_one: Bool
     # Whether a build key is null (a mark join's unknown results).
     var has_null: Bool
@@ -790,15 +780,25 @@ struct JoinHashTable(Copyable, Movable):
         )
         self.data[].found = List[UInt8](length=max(self.count, 1), fill=0)
         var rows = Int(self.data[].rows.unsafe_ptr())
-        # Sink: every row laid out and hashed, on the crew.
+        # Sink: every row laid out and hashed on the crew, each worker
+        # listing its rows by partition: one partition per worker, as
+        # Polars' build (`HashPartitioner::new(num_pipelines, 0)` and
+        # `BuildState::new(num_pipelines, num_pipelines, ..)`,
+        # equi_join.rs:607-610).
         var workers = worker_count(self.count)
+        self.parts = workers
         var bounds = partitions(self.count, workers, STANDARD_VECTOR_SIZE)
         var scatter = List[_ScatterJob](capacity=workers)
         for w in range(workers):
             if bounds[w] < bounds[w + 1]:
                 scatter.append(
                     _ScatterJob(
-                        unchunked, self.layout, rows, bounds[w], bounds[w + 1]
+                        unchunked,
+                        self.layout,
+                        rows,
+                        bounds[w],
+                        bounds[w + 1],
+                        self.parts,
                     )
                 )
         run_jobs(scatter)
@@ -813,7 +813,6 @@ struct JoinHashTable(Copyable, Movable):
         self.perfect_span = 0
         self.chains_longer_than_one = False
         self.capacity = 0
-        self.bitmask = 0
         if perfect and len(unchunked) == 1 and self.inserted > 0:
             # PerfectHashJoinExecutor::BuildPerfectHashTable, else (a
             # repeated key, a wide range) the hash table.
@@ -828,58 +827,53 @@ struct JoinHashTable(Copyable, Movable):
                 for r in range(self.count):
                     _store64(rows + r * self.layout.width + _NEXT, 0)
                 return
-        # Finalize: the pointer table, then every row inserted.
-        self.capacity = pointer_table_capacity(self.inserted)
-        self.bitmask = UInt64(self.capacity - 1)
-        # InitializePointerTable: zeroed by tasks of at least 131,072
-        # entries (HashJoinTableInitEvent's MINIMUM_ENTRIES_PER_TASK), four
-        # a thread, or on this thread when the finalize is single-threaded.
+        # Finalize: each partition's region, sized by PointerTableCapacity
+        # for its rows (the regions together at least MINIMUM_CAPACITY),
+        # zeroed and filled by one job per partition.
+        var floor = _next_power_of_two(
+            (MINIMUM_CAPACITY + self.parts - 1) // self.parts
+        )
+        var lists = List[List[Tuple[Int, Int]]](capacity=self.parts)
+        for p in range(self.parts):
+            var listed = List[Tuple[Int, Int]]()
+            var rows_in = self.inserted
+            if self.parts > 1:
+                rows_in = 0
+                for w in range(len(scatter)):
+                    ref part = scatter[w].by_partition[p]
+                    listed.append((Int(part.unsafe_ptr()), len(part)))
+                    rows_in += len(part)
+            var size = max(
+                _next_power_of_two(Int(Float64(rows_in) * DEFAULT_LOAD_FACTOR)),
+                floor,
+            )
+            self.data[].bases.append(UInt64(self.capacity))
+            self.data[].masks.append(UInt64(size - 1))
+            self.capacity += size
+            lists.append(listed^)
         self.data[].entries = huge_uninit[UInt64](self.capacity)
         var entries = Int(self.data[].entries.unsafe_ptr())
-        var single = self.count < PARALLEL_CONSTRUCT_THRESHOLD or workers == 1
-        var per_task = max(
-            self.capacity // max(workers, 1) // 4, _MINIMUM_ENTRIES_PER_TASK
-        )
-        var zeroing = List[_ZeroJob]()
-        var at = 0
-        while at < self.capacity:
-            var stop = min(self.capacity, at + per_task)
-            if single:
-                stop = self.capacity
-            zeroing.append(_ZeroJob(entries, at, stop))
-            at = stop
-        if len(zeroing) == 1:
-            zeroing[0].run()
-        else:
-            run_jobs(zeroing)
-        var parallel = (
-            self.count >= PARALLEL_CONSTRUCT_THRESHOLD and workers > 1
-        )
-        var inserts = List[_InsertJob](capacity=workers)
-        if parallel:
-            for w in range(workers):
-                if bounds[w] < bounds[w + 1]:
-                    inserts.append(
-                        _InsertJob(
-                            self.layout,
-                            rows,
-                            entries,
-                            self.bitmask,
-                            bounds[w],
-                            bounds[w + 1],
-                            True,
-                        )
-                    )
-            run_jobs(inserts)
-        else:
-            var job = _InsertJob(
-                self.layout, rows, entries, self.bitmask, 0, self.count, False
+        var inserts = List[_InsertJob](capacity=self.parts)
+        for p in range(self.parts):
+            inserts.append(
+                _InsertJob(
+                    self.layout,
+                    rows,
+                    self.count,
+                    entries,
+                    Int(self.data[].bases[p]),
+                    self.data[].masks[p],
+                    lists[p].copy(),
+                )
             )
-            job.run()
-            inserts.append(job^)
-        for w in range(len(inserts)):
+        if len(inserts) == 1:
+            inserts[0].run()
+        else:
+            run_jobs(inserts)
+        _ = scatter^
+        for p in range(len(inserts)):
             self.chains_longer_than_one = (
-                self.chains_longer_than_one or inserts[w].chained
+                self.chains_longer_than_one or inserts[p].chained
             )
 
     def keys(self) -> List[Series]:
@@ -948,6 +942,9 @@ struct ScanStructure(Movable):
     var records: List[UInt8]
     var heads: List[UInt64]
     var offsets: List[UInt64]
+    # Each row's partition region: its first entry and bitmask.
+    var region: List[UInt64]
+    var masks: List[UInt64]
     var todo: List[Int32]
     var compare: List[Int32]
     var no_match: List[Int32]
@@ -974,6 +971,8 @@ struct ScanStructure(Movable):
         )
         self.heads = List[UInt64](length=n, fill=0)
         self.offsets = List[UInt64](unsafe_uninit_length=n)
+        self.region = List[UInt64](unsafe_uninit_length=n)
+        self.masks = List[UInt64](unsafe_uninit_length=n)
         self.todo = List[Int32](unsafe_uninit_length=n)
         self.compare = List[Int32](unsafe_uninit_length=n)
         self.no_match = List[Int32](unsafe_uninit_length=n)
@@ -1057,7 +1056,9 @@ struct ScanStructure(Movable):
         var table = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=self.table.entries_address()
         )
-        var bitmask = self.table.bitmask
+        var parts = self.table.parts
+        var bases = self.table.data[].bases.unsafe_ptr()
+        var masks = self.table.data[].masks.unsafe_ptr()
         var salted = self.table.use_salt()
         var hashes = self.hashes.unsafe_ptr()
         var offsets = self.offsets.unsafe_ptr()
@@ -1072,9 +1073,19 @@ struct ScanStructure(Movable):
         var key_bytes = layout.key_bytes
         var text = layout.text
         var records = Int(self.records.unsafe_ptr())
+        var region = self.region.unsafe_ptr()
+        var bitmasks = self.masks.unsafe_ptr()
+        # Each row's partition (Polars' partition_and_probe,
+        # equi_join.rs:1036), then its place in that partition's region.
         for t in range(pending):
             var i = Int(todo[unsafe_offset=t])
-            offsets[unsafe_offset=i] = hashes[unsafe_offset=i] & bitmask
+            var hash = hashes[unsafe_offset=i]
+            var p = partition_of(hash, parts) if parts > 1 else 0
+            var base = bases[unsafe_offset=p]
+            var mask = masks[unsafe_offset=p]
+            region[unsafe_offset=i] = base
+            bitmasks[unsafe_offset=i] = mask
+            offsets[unsafe_offset=i] = base + (hash & mask)
         while pending > 0:
             # ProbeForPointers: walk to an empty entry or a salt match.
             var candidates = 0
@@ -1083,6 +1094,8 @@ struct ScanStructure(Movable):
                 var hash = hashes[unsafe_offset=i]
                 var salt = hash | POINTER_MASK
                 var offset = offsets[unsafe_offset=i]
+                var base = region[unsafe_offset=i]
+                var mask = bitmasks[unsafe_offset=i]
                 while True:
                     var entry = table[unsafe_offset=Int(offset)]
                     if entry == 0:
@@ -1092,7 +1105,7 @@ struct ScanStructure(Movable):
                         compare[unsafe_offset=candidates] = Int32(i)
                         candidates += 1
                         break
-                    offset = (offset + 1) & bitmask
+                    offset = base + ((offset - base + 1) & mask)
                 offsets[unsafe_offset=i] = offset
             # RowMatcher: compare the candidates' keys; a mismatch goes on
             # probing from the next entry.
@@ -1123,9 +1136,11 @@ struct ScanStructure(Movable):
                         misses += 1
             for m in range(misses):
                 var i = Int(no_match[unsafe_offset=m])
-                offsets[unsafe_offset=i] = (
-                    offsets[unsafe_offset=i] + 1
-                ) & bitmask
+                var base = region[unsafe_offset=i]
+                offsets[unsafe_offset=i] = base + (
+                    (offsets[unsafe_offset=i] - base + 1)
+                    & bitmasks[unsafe_offset=i]
+                )
                 todo[unsafe_offset=m] = Int32(i)
             pending = misses
 

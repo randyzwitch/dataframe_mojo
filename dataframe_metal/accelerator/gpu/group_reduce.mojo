@@ -25,7 +25,7 @@ from .group_state import (
 
 @always_inline
 def group_value[
-    floating: Bool
+    floating: Bool, cases: Bool = False, simple_cases: Bool = False
 ](
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
     field: Int,
@@ -48,11 +48,13 @@ def group_value[
     b5: Bytes,
     b6: Bytes,
     b7: Bytes,
+    predicate: Bytes = Bytes(unsafe_from_address=0),
+    predicate_bits: Bytes = Bytes(unsafe_from_address=0),
 ) -> Tuple[UInt64, Bool, UInt32]:
     var descriptor = metadata.unsafe_offset(16 + field * 8)
     var op = UInt32(descriptor[unsafe_offset=0])
     if op == UInt32(TREE_OP):
-        return expression_value[floating](
+        return expression_value[floating, cases, simple_cases](
             metadata.unsafe_offset(Int(descriptor[unsafe_offset=6])),
             Int(descriptor[unsafe_offset=7]),
             0,
@@ -75,6 +77,8 @@ def group_value[
             b5,
             b6,
             b7,
+            predicate,
+            predicate_bits,
         )
     var li = Int(descriptor[unsafe_offset=1]) - 1
     var ri = Int(descriptor[unsafe_offset=2]) - 1
@@ -135,7 +139,7 @@ def group_value[
 
 @always_inline
 def update_int64_ticket[
-    minimum: Bool
+    minimum: Bool, cases: Bool = False, simple_cases: Bool = False
 ](
     ticket: Pointer[UInt32, MutUntrackedOrigin],
     candidate: Int64,
@@ -158,11 +162,13 @@ def update_int64_ticket[
     b5: Bytes,
     b6: Bytes,
     b7: Bytes,
+    predicate: Bytes = Bytes(unsafe_from_address=0),
+    predicate_bits: Bytes = Bytes(unsafe_from_address=0),
 ):
     var expected = Atomic[UInt32].load(ticket)
     while True:
         if expected != UInt32.MAX:
-            var previous = group_value[False](
+            var previous = group_value[False, cases, simple_cases](
                 metadata,
                 field,
                 Int(expected),
@@ -184,6 +190,8 @@ def update_int64_ticket[
                 b5,
                 b6,
                 b7,
+                predicate,
+                predicate_bits,
             )
             var old = bitcast[DType.int64](previous[0])
             if candidate >= old if minimum else candidate <= old:
@@ -194,8 +202,150 @@ def update_int64_ticket[
             return
 
 
+@always_inline
+def _update_group_field[
+    arity: Int,
+    floating: Bool,
+    narrow: Bool,
+    cases: Bool,
+    simple_cases: Bool,
+](
+    metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
+    slot: UInt32,
+    blocks: UInt32,
+    flags: UInt32,
+    field: Int,
+    row: Int,
+    v0: Bytes,
+    v1: Bytes,
+    v2: Bytes,
+    v3: Bytes,
+    v4: Bytes,
+    v5: Bytes,
+    v6: Bytes,
+    v7: Bytes,
+    b0: Bytes,
+    b1: Bytes,
+    b2: Bytes,
+    b3: Bytes,
+    b4: Bytes,
+    b5: Bytes,
+    b6: Bytes,
+    b7: Bytes,
+    predicate: Bytes,
+    predicate_bits: Bytes,
+    states: Pointer[UInt32, MutUntrackedOrigin],
+    control: Pointer[UInt32, MutUntrackedOrigin],
+) -> Bool:
+    var sum_requested = Bool(flags & (UInt32(1) << UInt32(field)))
+    var extrema_requested = Bool(
+        (flags >> 4 | flags >> 8) & (UInt32(1) << UInt32(field))
+    )
+    var value = group_value[floating, cases, simple_cases](
+        metadata,
+        field,
+        row,
+        UInt32(0 if narrow else 1),
+        sum_requested or extrema_requested,
+        v0,
+        v1,
+        v2,
+        v3,
+        v4,
+        v5,
+        v6,
+        v7,
+        b0,
+        b1,
+        b2,
+        b3,
+        b4,
+        b5,
+        b6,
+        b7,
+        predicate,
+        predicate_bits,
+    )
+    if value[2]:
+        atomic_or(control.unsafe_offset(1), value[2])
+        return True
+    if value[1]:
+        var state = states.unsafe_offset(
+            ((Int(slot) * Int(blocks) + Int(block_idx.x)) * arity + field)
+            * GROUP_STATE_WORDS
+        )
+        _ = Atomic[UInt32].fetch_add(
+            state.unsafe_offset(GROUP_COUNT), UInt32(1)
+        )
+        if sum_requested:
+            comptime if floating:
+                add_float_sum(state, UInt32(value[0]))
+            else:
+                add_integer_sum(state, bitcast[DType.int64](value[0]))
+        if extrema_requested:
+            comptime if narrow:
+                add_ordered_extrema(state, UInt32(value[0]), floating)
+            else:
+                var candidate = bitcast[DType.int64](value[0])
+                update_int64_ticket[True, cases, simple_cases](
+                    state.unsafe_offset(GROUP_MIN),
+                    candidate,
+                    metadata,
+                    field,
+                    row,
+                    v0,
+                    v1,
+                    v2,
+                    v3,
+                    v4,
+                    v5,
+                    v6,
+                    v7,
+                    b0,
+                    b1,
+                    b2,
+                    b3,
+                    b4,
+                    b5,
+                    b6,
+                    b7,
+                    predicate,
+                    predicate_bits,
+                )
+                update_int64_ticket[False, cases, simple_cases](
+                    state.unsafe_offset(GROUP_MAX),
+                    candidate,
+                    metadata,
+                    field,
+                    row,
+                    v0,
+                    v1,
+                    v2,
+                    v3,
+                    v4,
+                    v5,
+                    v6,
+                    v7,
+                    b0,
+                    b1,
+                    b2,
+                    b3,
+                    b4,
+                    b5,
+                    b6,
+                    b7,
+                    predicate,
+                    predicate_bits,
+                )
+    return False
+
+
 def grouped_partials[
-    arity: Int, float_fields: Int, int32_fields: Int
+    arity: Int,
+    float_fields: Int,
+    int32_fields: Int,
+    cases: Bool = False,
+    simple_cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -269,68 +419,33 @@ def grouped_partials[
             if slot == NO_GROUP:
                 return
             record_group(slot, row, blocks, counts, first)
-            comptime for field in range(arity):
-                comptime floating = field < float_fields
-                comptime narrow = field < float_fields + int32_fields
-                var sum_requested = Bool(flags & (UInt32(1) << UInt32(field)))
-                var extrema_requested = Bool(
-                    (flags >> 4 | flags >> 8) & (UInt32(1) << UInt32(field))
-                )
-                var value = group_value[floating](
-                    metadata,
-                    field,
-                    row,
-                    UInt32(0 if narrow else 1),
-                    sum_requested or extrema_requested,
-                    v0,
-                    v1,
-                    v2,
-                    v3,
-                    v4,
-                    v5,
-                    v6,
-                    v7,
-                    b0,
-                    b1,
-                    b2,
-                    b3,
-                    b4,
-                    b5,
-                    b6,
-                    b7,
-                )
-                if value[2]:
-                    atomic_or(control.unsafe_offset(1), value[2])
-                    return
-                if value[1]:
-                    var state = states.unsafe_offset(
-                        (
-                            (Int(slot) * Int(blocks) + Int(block_idx.x)) * arity
-                            + field
-                        )
-                        * GROUP_STATE_WORDS
-                    )
-                    _ = Atomic[UInt32].fetch_add(
-                        state.unsafe_offset(GROUP_COUNT), UInt32(1)
-                    )
-                    if sum_requested:
-                        comptime if floating:
-                            add_float_sum(state, UInt32(value[0]))
-                        else:
-                            add_integer_sum(
-                                state, bitcast[DType.int64](value[0])
-                            )
-                    if extrema_requested:
-                        comptime if narrow:
-                            add_ordered_extrema(
-                                state, UInt32(value[0]), floating
-                            )
-                        else:
-                            var candidate = bitcast[DType.int64](value[0])
-                            update_int64_ticket[True](
-                                state.unsafe_offset(GROUP_MIN),
-                                candidate,
+            comptime if cases:
+                # Keep one expression evaluator per native dtype. Unrolling four
+                # conditional fields duplicates the checked program and both
+                # Int64 ticket loops, overwhelming Metal's machine-code compiler.
+                # Metadata bounds prevent the compiler from unrolling these loops.
+                comptime for kind in range(3):
+                    comptime if (kind == 0 and float_fields > 0) or (
+                        kind == 1 and int32_fields > 0
+                    ) or (kind == 2 and arity > float_fields + int32_fields):
+                        comptime FLOATING = kind == 0
+                        comptime NARROW = kind < 2
+                        var begin = 0
+                        var end = Int(metadata[unsafe_offset=7])
+                        comptime if kind == 1:
+                            begin = end
+                            end += Int(metadata[unsafe_offset=8])
+                        elif kind == 2:
+                            begin = end + Int(metadata[unsafe_offset=8])
+                            end = Int(metadata[unsafe_offset=6])
+                        for field in range(begin, min(end, arity)):
+                            if _update_group_field[
+                                arity, FLOATING, NARROW, cases, simple_cases
+                            ](
                                 metadata,
+                                slot,
+                                blocks,
+                                flags,
                                 field,
                                 row,
                                 v0,
@@ -349,37 +464,60 @@ def grouped_partials[
                                 b5,
                                 b6,
                                 b7,
-                            )
-                            update_int64_ticket[False](
-                                state.unsafe_offset(GROUP_MAX),
-                                candidate,
-                                metadata,
-                                field,
-                                row,
-                                v0,
-                                v1,
-                                v2,
-                                v3,
-                                v4,
-                                v5,
-                                v6,
-                                v7,
-                                b0,
-                                b1,
-                                b2,
-                                b3,
-                                b4,
-                                b5,
-                                b6,
-                                b7,
-                            )
+                                predicate,
+                                predicate_bits,
+                                states,
+                                control,
+                            ):
+                                return
+            else:
+                comptime for field in range(arity):
+                    if _update_group_field[
+                        arity,
+                        field < float_fields,
+                        field < float_fields + int32_fields,
+                        cases,
+                        simple_cases,
+                    ](
+                        metadata,
+                        slot,
+                        blocks,
+                        flags,
+                        field,
+                        row,
+                        v0,
+                        v1,
+                        v2,
+                        v3,
+                        v4,
+                        v5,
+                        v6,
+                        v7,
+                        b0,
+                        b1,
+                        b2,
+                        b3,
+                        b4,
+                        b5,
+                        b6,
+                        b7,
+                        predicate,
+                        predicate_bits,
+                        states,
+                        control,
+                    ):
+                        return
         row += stride
     if thread_idx.x == 0:
         _ = Atomic[UInt32].fetch_add(control.unsafe_offset(2), UInt32(1))
 
 
 def resolve_int64_extrema[
-    arity: Int, float_fields: Int, int32_fields: Int
+    arity: Int,
+    float_fields: Int,
+    int32_fields: Int,
+    cases: Bool = False,
+    simple_cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -397,6 +535,8 @@ def resolve_int64_extrema[
     b5: Bytes,
     b6: Bytes,
     b7: Bytes,
+    predicate: Bytes,
+    predicate_bits: Bytes,
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
     states: Pointer[UInt32, UntrackedOrigin[mut=False]],
     resolved: Pointer[Int64, MutUntrackedOrigin],
@@ -412,7 +552,7 @@ def resolve_int64_extrema[
                     unsafe_offset=index * GROUP_STATE_WORDS + GROUP_MIN + side
                 ]
                 if ticket != UInt32.MAX:
-                    var value = group_value[False](
+                    var value = group_value[False, cases, simple_cases](
                         metadata,
                         field,
                         Int(ticket),
@@ -434,6 +574,8 @@ def resolve_int64_extrema[
                         b5,
                         b6,
                         b7,
+                        predicate,
+                        predicate_bits,
                     )
                     resolved[unsafe_offset=index * 2 + side] = bitcast[
                         DType.int64
