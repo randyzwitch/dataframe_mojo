@@ -5,10 +5,11 @@ stages. Versioned bindings preserve overwrites and their dependencies. Every
 definition must feed an output; filters must precede definitions.
 """
 from dataframe import Expr, LazyFrame
-from dataframe.expr import COL, SUM, COUNT, MEAN, MIN, MAX, Node
+from dataframe.expr import COL, SUM, COUNT, MEAN, MIN, MAX, WHEN, Node
 from dataframe.lazy import SCAN_FRAME, FILTER, WITH_COLUMNS, SELECT, AGG
 from .expression_plan import compile_expression
-from .expression_format import MAX_EXPRESSION_NODES
+from .expression_format import MAX_CASE_SOURCE_NODES
+from .conditional_plan import compile_conditional
 
 
 def _expand(
@@ -37,6 +38,8 @@ def _expand(
                     expanded.left += offset
                 if expanded.right >= 0:
                     expanded.right += offset
+                if expanded.extra >= 0:
+                    expanded.extra += offset
                 nodes.append(expanded^)
         else:
             if node.left >= 0:
@@ -47,8 +50,12 @@ def _expand(
                 if node.right >= i:
                     return None
                 node.right = remap[node.right]
+            if node.extra >= 0:
+                if node.extra >= i:
+                    return None
+                node.extra = remap[node.extra]
             nodes.append(node^)
-        if len(nodes) > MAX_EXPRESSION_NODES + 1:
+        if len(nodes) > MAX_CASE_SOURCE_NODES + 1:
             return None
         remap.append(len(nodes) - 1)
     return Expr(nodes^, expression._name.copy())
@@ -102,7 +109,16 @@ def normalize_region(region: LazyFrame) raises -> Optional[LazyFrame]:
             var expanded = _expand(
                 expression, names, versions, definitions, dependencies
             )
-            if not expanded or not compile_expression(expanded.value(), frame):
+            if not expanded:
+                return None
+            # A prior WITH_COLUMNS definition ran for every row. Inlining it
+            # into a CASE branch could hide a checked error in untaken rows.
+            for node in expression._nodes:
+                if node.op == WHEN and dependencies:
+                    return None
+            if not compile_expression(
+                expanded.value(), frame
+            ) and not compile_conditional(expanded.value(), frame):
                 return None
             added.append(expanded.take())
             stage_edges.append(dependencies^)
@@ -131,11 +147,17 @@ def normalize_region(region: LazyFrame) raises -> Optional[LazyFrame]:
         var op = expression._nodes[len(expression._nodes) - 1].op
         if op != SUM and op != COUNT and op != MEAN and op != MIN and op != MAX:
             return None
+        var output_dependencies = List[Int]()
         var expanded = _expand(
-            expression, names, versions, definitions, pending
+            expression, names, versions, definitions, output_dependencies
         )
         if not expanded:
             return None
+        for node in expression._nodes:
+            if node.op == WHEN and output_dependencies:
+                return None
+        for dependency in output_dependencies:
+            pending.append(dependency)
         outputs.append(expanded.take())
     while pending:
         var version = pending.pop()

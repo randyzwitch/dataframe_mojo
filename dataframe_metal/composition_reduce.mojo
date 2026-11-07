@@ -10,11 +10,19 @@ from .composition_plan import (
     single_float_composition,
     has_extrema,
     has_trees,
+    has_conditions,
+    simple_conditional_trees,
 )
 from .exact_float import finish_float_bins
 from .expression_format import EXPRESSION_NODE_WORDS
+from .value_program_metadata import (
+    value_program_words,
+    pack_value_program,
+    predicate_words as predicate_program_words,
+    write_predicate,
+)
 from .extrema_reduce import extrema_column
-from .predicate_plan import PredicateProgram
+from .predicate_program import PredicateProgram
 from .accelerator.gpu.compound_predicate import (
     PREDICATE_HEADER_WORDS,
     PREDICATE_FIELD_WORDS,
@@ -66,6 +74,8 @@ def _scan[
     native_mixed: Bool = False,
     compound: Bool = False,
     trees: Bool = False,
+    cases: Bool = False,
+    simple_cases: Bool = False,
 ](
     bundle: Composition,
     frame: DataFrame,
@@ -207,14 +217,11 @@ def _scan[
         var base_words = prefix + len(segments) * META_WORDS
         var predicate_words = 0
         comptime if compound:
-            predicate_words = (
-                PREDICATE_HEADER_WORDS
-                + len(program.value().clauses) * PREDICATE_FIELD_WORDS
-            )
+            predicate_words = predicate_program_words(program.value())
         var tree_words = 0
         comptime if trees:
             for value in bundle.fields:
-                tree_words += len(value.tree) * EXPRESSION_NODE_WORDS
+                tree_words += value_program_words(value.tree, value.conditions)
         var tail_words = predicate_words + tree_words
         var words = List[UInt64](
             length=base_words + len(segments) * tail_words, fill=0
@@ -252,6 +259,7 @@ def _scan[
                 predicate_input + 1 if predicate_input
                 < len(bundle.inputs) else 0
             )
+            words[at + 14] |= UInt64(nf) << 16
             var tree_at = base_words + index * tail_words + predicate_words
             for field in range(nf):
                 ref value = bundle.fields[field]
@@ -281,16 +289,12 @@ def _scan[
                     if value.tree:
                         words[base + 6] = UInt64(tree_at)
                         words[base + 7] = UInt64(len(value.tree))
-                        for node in value.tree:
-                            words[tree_at] = UInt64(node.op)
-                            if node.op == COL:
-                                ref input = segment[node.input]
-                                words[tree_at + 1] = UInt64(node.input)
-                                words[tree_at + 2] = UInt64(
-                                    input.bit_offset
-                                ) | (UInt64(input.nullable) << 32)
-                            words[tree_at + 3] = node.literal
-                            tree_at += EXPRESSION_NODE_WORDS
+                        var packed = pack_value_program(
+                            value.tree, value.conditions, segment
+                        )
+                        for word in packed:
+                            words[tree_at] = word
+                            tree_at += 1
             comptime if mixed:
                 # One packed tail avoids extra Metal buffer arguments.
                 words[at + 3] = UInt64(size)
@@ -305,44 +309,7 @@ def _scan[
                 words[at + 3] = UInt64(size if mixed else 0) | (
                     UInt64(program_at) << 32
                 )
-                words[program_at] = UInt64(len(compiled.clauses))
-                for i in range(8):
-                    words[program_at + 1 + i] = UInt64(compiled.truth[i])
-                for i in range(len(compiled.clauses)):
-                    ref leaf = compiled.clauses[i]
-                    ref clause = leaf.bounds
-                    var slot = compiled.slots[i]
-                    ref input = segment[slot]
-                    var base = (
-                        program_at
-                        + PREDICATE_HEADER_WORDS
-                        + i * PREDICATE_FIELD_WORDS
-                    )
-                    words[base] = UInt64(slot)
-                    words[base + 1] = (
-                        UInt64(input.bit_offset)
-                        | (UInt64(input.nullable) << 32)
-                        | (UInt64(input.tag) << 33)
-                    )
-                    words[base + 2] = bitcast[DType.uint64](clause.low)
-                    words[base + 3] = bitcast[DType.uint64](clause.high)
-                    words[base + 4] = UInt64(
-                        bitcast[DType.uint32](clause.low_float)
-                    ) | (UInt64(bitcast[DType.uint32](clause.high_float)) << 32)
-                    if leaf.kind == 2:
-                        ref right = segment[leaf.other_input]
-                        words[base + 2] = UInt64(leaf.other_input)
-                        words[base + 3] = (
-                            UInt64(right.bit_offset)
-                            | (UInt64(right.nullable) << 32)
-                            | (UInt64(right.tag) << 33)
-                        )
-                    words[base + 5] = (
-                        UInt64(clause.inclusive)
-                        | (UInt64(leaf.kind) << 2)
-                        | (UInt64(leaf.inverted) << 4)
-                        | (UInt64(leaf.comparison) << 5)
-                    )
+                write_predicate(words, program_at, compiled, segment)
             output_offset += partials
         var metadata = ctx.enqueue_create_buffer[DType.uint64](len(words))
         try:
@@ -379,6 +346,8 @@ def _scan[
                     batched=True,
                     compound=compound,
                     trees=trees,
+                    cases=cases,
+                    simple_cases=simple_cases,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=True
                 ] if fast and not compound else composed_partials[
@@ -390,6 +359,8 @@ def _scan[
                     batched=True,
                     compound=compound,
                     trees=trees,
+                    cases=cases,
+                    simple_cases=simple_cases,
                 ]
                 comptime kernel_separate = native_float_mixed_partials[
                     precise, wide, batched=False
@@ -402,6 +373,8 @@ def _scan[
                     batched=False,
                     compound=compound,
                     trees=trees,
+                    cases=cases,
+                    simple_cases=simple_cases,
                 ] if mixed else float_composed_partials[
                     wide, arity, float_fields, native_predicate, batched=False
                 ] if fast and not compound else composed_partials[
@@ -413,6 +386,8 @@ def _scan[
                     batched=False,
                     compound=compound,
                     trees=trees,
+                    cases=cases,
+                    simple_cases=simple_cases,
                 ]
                 if batched:
                     ctx.enqueue_function[kernel_batched](
@@ -767,6 +742,50 @@ def _mixed_dispatch[
                         and floats == n
                         and int32s == narrow
                     ):
+                        # CASE values are tree programs. Native/binary bundles
+                        # cannot use these variants; omit their instantiations.
+                        comptime if trees:
+                            if simple_conditional_trees(bundle):
+                                return _scan[
+                                    precise,
+                                    wide,
+                                    arity,
+                                    n,
+                                    False,
+                                    narrow,
+                                    mixed=mixed,
+                                    compound=compound,
+                                    trees=trees,
+                                    cases=True,
+                                    simple_cases=True,
+                                ](
+                                    bundle,
+                                    frame,
+                                    scope,
+                                    zero_copy,
+                                    timings,
+                                    program,
+                                )
+                            if has_conditions(bundle):
+                                return _scan[
+                                    precise,
+                                    wide,
+                                    arity,
+                                    n,
+                                    False,
+                                    narrow,
+                                    mixed=mixed,
+                                    compound=compound,
+                                    trees=trees,
+                                    cases=True,
+                                ](
+                                    bundle,
+                                    frame,
+                                    scope,
+                                    zero_copy,
+                                    timings,
+                                    program,
+                                )
                         return _scan[
                             precise,
                             wide,
