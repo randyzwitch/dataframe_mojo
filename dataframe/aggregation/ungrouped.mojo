@@ -8,6 +8,13 @@ expression (the `ExpressionExecutor` over DuckDB's payload chunk) and
 folded into its state a vector at a time through the unified vector format
 (`simple_update`), with no frame or column built in between. The workers'
 rows are combined at the end (`Combine`) and finalized once (`Finalize`).
+
+A distinct count (`n_unique`) is DuckDB's `DistinctAggregateData`: each
+worker sinks every chunk's input vector, as a group key, into its own
+aggregate table of the input's distinct values (one radix table per
+distinct aggregate, `SinkDistinct`); at the end every worker's table of an
+aggregate is merged into its distinct values (`FinalizeDistinct`), whose
+number is the count. `distinct_count` is the same over a column.
 """
 from std.math import isnan
 from std.sys import size_of
@@ -29,14 +36,23 @@ from dataframe.aggregation.function import (
     _K_NARROW_SUM,
     _K_NULLS,
     _K_INT_SUM,
+    _K_DISTINCT,
+    ReducerSpec,
     _ValueArena,
     _update_states,
     combine as combine_states,
     reduction_supported,
     states_supported,
 )
-from dataframe.aggregation.hash_table import AggregateLayout, aggregate_layout
-from dataframe.aggregation.table_sink import input_vector
+from dataframe.aggregation.hash_table import (
+    AggregateLayout,
+    AggregateSink,
+    KeyVector,
+    aggregate_finish,
+    aggregate_layout,
+)
+from dataframe.aggregation.table_sink import _sink_jobs, input_vector
+from dataframe.parallel import configured_workers
 from dataframe.aggregation.expressions import _stream_reductions
 from dataframe.aggregation.reducer import Reducer
 from dataframe.aggregation.selected_rows import _canonical_int
@@ -55,7 +71,6 @@ from dataframe.expr import (
     MAX,
     MEAN,
     MIN,
-    N_UNIQUE,
     SUM,
     WHEN,
     is_reduction,
@@ -152,9 +167,9 @@ def ungrouped_layout(
     empty: DataFrame, expressions: List[Expr]
 ) raises -> Optional[UngroupedLayout]:
     """The ungrouped aggregate over a sink whose input is typed as `empty`
-    (no rows), or None when some reduction has no inline state: a distinct
-    count (its distinct table needs group keys), or a positional or
-    holistic reduction the table does not hold."""
+    (no rows), or None when some reduction has no inline state: a
+    positional or holistic reduction the table does not hold. A distinct
+    count's state is the count its distinct table finishes with."""
     if len(expressions) == 0 or not _stream_reductions(expressions, True):
         return None
     var inputs = List[Optional[Expr]]()
@@ -164,7 +179,7 @@ def ungrouped_layout(
         for node in expression._nodes:
             if not is_reduction(node.op):
                 continue
-            if not reduction_supported(node.op) or node.op == N_UNIQUE:
+            if not reduction_supported(node.op):
                 return None
             ops.append(node.op)
             if node.left < 0:
@@ -341,6 +356,13 @@ struct UngroupedSink(Sink):
     # Rows sunk, and the next row's number (from the morsel's, `begin`).
     var count: Int
     var sequence: Int
+    # Per distinct count, this worker's table of its input's distinct
+    # values (DuckDB's `radix_tables` of `DistinctAggregateData`), in
+    # `AggregateLayout.distinct` order; the global state holds every
+    # worker's after it, worker by worker (`combine`). Per state, its
+    # distinct count's index there, or -1.
+    var distinct: List[AggregateSink]
+    var distinct_of: List[Int]
 
     def __init__(out self, shared: UngroupedLayout):
         self.slots = shared.layout.slots.copy()
@@ -366,6 +388,14 @@ struct UngroupedSink(Sink):
         self.held_handles = List[Int]()
         self.count = 0
         self.sequence = 0
+        self.distinct = List[AggregateSink]()
+        self.distinct_of = List[Int](length=len(self.slots), fill=-1)
+        var workers = configured_workers()
+        for d in range(len(shared.layout.distinct)):
+            self.distinct_of[shared.layout.distinct[d]] = d
+            self.distinct.append(
+                AggregateSink(shared.layout.distinct_layout(d), workers)
+            )
 
     def counts_only(self) -> Bool:
         """Whether every state is a row count, which reads no column."""
@@ -409,6 +439,18 @@ struct UngroupedSink(Sink):
                 _words(state + 8 * offset)[] += UInt64(n)
                 continue
             var format = self._format(s, chunk, arena)
+            if kind == _K_DISTINCT:
+                # The input's vector, as a group key, into the distinct
+                # table (`SinkDistinct`); its strings are held with this
+                # sink's (`_format`).
+                self.distinct[self.distinct_of[s]].sink_vectors(
+                    [KeyVector.of(format)],
+                    List[UnifiedVectorFormat](),
+                    List[Series](),
+                    self.sequence,
+                    n,
+                )
+                continue
             if self.filter_columns[s] >= 0 or self.filters[s]:
                 self._filtered(s, chunk, arena, format, state + 8 * offset)
                 continue
@@ -432,7 +474,9 @@ struct UngroupedSink(Sink):
             v = input_vector(chunk, c, arena, physical, dtype)
         else:
             v = input_vector(self.output, i, arena, physical, dtype)
-        if i < len(self.slots) and self.slots[i].holds_strings():
+        if i < len(self.slots) and (
+            self.slots[i].holds_strings() or self.slots[i].kind == _K_DISTINCT
+        ):
             var known = False
             for h in self.held_handles:
                 known = known or h == v.source
@@ -599,11 +643,97 @@ struct UngroupedSink(Sink):
 
     def combine(var self, mut combined: List[UngroupedSink]) raises:
         """These states into the global ones (DuckDB's `Combine`): the
-        first worker's states are the global states."""
+        first worker's states are the global states, which take this
+        worker's distinct tables too."""
         if len(combined) == 0:
             combined.append(self^)
             return
         self.combine_into(combined[0])
+        while len(self.distinct) > 0:
+            combined[0].distinct.append(self.distinct.pop(0))
+
+    def finalize_distinct(mut self, layout: AggregateLayout) raises:
+        """DuckDB's `FinalizeDistinct` for the global state: each distinct
+        count's tables (every worker's) merged into the input's distinct
+        values, whose number (less a null's, when nulls are ignored) is
+        written into the count's state."""
+        var count = len(layout.distinct)
+        var state = self.groups.at(0) + 8 * self.groups.states_at
+        for d in range(count):
+            # Every worker's tables are in worker order, `count - d` of
+            # them each: this count's is each worker's first.
+            var tables = List[AggregateSink]()
+            var rest = List[AggregateSink]()
+            var i = 0
+            while len(self.distinct) > 0:
+                if i % (count - d) == 0:
+                    tables.append(self.distinct.pop(0))
+                else:
+                    rest.append(self.distinct.pop(0))
+                i += 1
+            swap(self.distinct, rest)
+            for column in self.held:
+                tables[0].held.append(column.copy())
+            var slot = layout.distinct[d]
+            var values = distinct_values(
+                tables,
+                layout.distinct_layout(d),
+                layout.templates[slot].integer != 0,
+            )
+            _words(state + 8 * self.slots[slot].offset)[] = UInt64(values)
+            _ = tables^
+
+
+def distinct_values(
+    mut tables: List[AggregateSink],
+    layout: AggregateLayout,
+    ignore_nulls: Bool,
+) raises -> Int:
+    """The distinct values every worker's distinct table (`layout`, the
+    value its one key) holds together: their groups merged, a null value
+    left out when `ignore_nulls`."""
+    var groups = aggregate_finish(
+        tables, layout, rows_only=True, ordered=False
+    )
+    var values = 0
+    for p in range(len(groups.rows)):
+        ref part = groups.rows[p]
+        values += part.count()
+        if ignore_nulls:
+            for g in range(part.count()):
+                if part.null(g) != 0:
+                    values -= 1
+    return values
+
+
+# Rows a worker takes at a time: DuckDB's DEFAULT_ROW_GROUP_SIZE, the unit
+# its table scans hand to threads.
+comptime _MORSEL_ROWS = 122_880
+
+
+def distinct_count(values: Series, ignore_nulls: Bool) raises -> Int:
+    """The distinct values of a column (`n_unique` over no groups): every
+    row sunk, a morsel per worker at a time, into the worker's aggregate
+    table of the values (the ungrouped aggregate's distinct table), whose
+    groups are then merged (`distinct_values`). Every NaN is one value and
+    -0.0 equals 0.0, as the table's key words make them; a null is one
+    value unless `ignore_nulls`. The column's type must be one the table
+    groups by (`key_supported`)."""
+    var keys: List[Series] = [values.copy()]
+    var layout = aggregate_layout(keys, List[Series](), List[ReducerSpec]())
+    var ranges = List[Int]()
+    var start = 0
+    for part in values.chunks():
+        var at = 0
+        var length = len(part)
+        while at < length:
+            ranges.append(start + at)
+            ranges.append(min(_MORSEL_ROWS, length - at))
+            at += _MORSEL_ROWS
+        start += length
+    var workers = max(1, min(configured_workers(), len(ranges) // 2))
+    var tables = _sink_jobs(keys, List[Series](), layout, ranges, workers)
+    return distinct_values(tables, layout, ignore_nulls)
 
 
 def ungrouped_finish(
@@ -617,6 +747,7 @@ def ungrouped_finish(
     if len(combined) == 0:
         return shared.template().finish()
     sinks = combined^
+    sinks[0].finalize_distinct(shared.layout)
     if sinks[0].count == 0:
         # No row survived: the reductions of an empty frame.
         return shared.template().finish()

@@ -123,8 +123,6 @@ from dataframe.aggregation.group_by import (
     GroupBy,
     GroupingSets,
     _EncodeJob,
-    _PERFECT_WINDOW,
-    _PerfectAggJob,
     _encode_parallel,
     _reduce_column,
 )

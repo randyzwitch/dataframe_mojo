@@ -550,8 +550,12 @@ def aggregate_table(
     threads. Returns per finish partition its groups' keys, first rows and
     states (unfinished), partitions in hash order; each partition's groups
     in first-row order when `ordered`, otherwise in no particular order.
-    Every reduction's state must fit inline (`states_supported`)."""
+    Every reduction's state must fit inline (`states_supported`). Keys
+    whose statistics qualify make it a perfect hash table
+    (`AggregateLayout.use_perfect_hash`), whose groups come out in slot
+    order unless `ordered`."""
     var layout = aggregate_layout(keys, inputs, templates)
+    layout.use_perfect_hash(keys)
     var sinks = _sink_jobs(keys, inputs, layout, ranges, workers)
     return aggregate_finish(sinks, layout, ordered=ordered)
 

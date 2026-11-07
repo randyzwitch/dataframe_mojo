@@ -157,6 +157,7 @@ from dataframe.kernels.binary import (
     arctan2_series,
 )
 from dataframe.aggregation.reducer import Reducer, _sum_bools, _variance_blocks
+from dataframe.aggregation.ungrouped import distinct_count
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
@@ -2861,6 +2862,40 @@ def _on_dictionary[
     return result^
 
 
+def _distinct_in_table(bound: BoundExpr, node: Node, grouped: Bool) -> Bool:
+    """Whether `n_unique` over no groups counts its input in an aggregate
+    table of its values (`distinct_count`, the ungrouped aggregate's
+    distinct table): every input the table groups by, which leaves out
+    nested ones."""
+    if node.op != N_UNIQUE or grouped:
+        return False
+    return not bound.dtypes[node.left].is_nested()
+
+
+def _n_unique_table[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    prepared: List[Series],
+    states: List[Series],
+    node: Node,
+    height: Int,
+    batch_size: Int,
+) raises -> Series:
+    """`n_unique` over no groups by `distinct_count`; a column input is
+    read as it is stored (a categorical by its labels' canonical codes)."""
+    var values: Series
+    if bound.expr._nodes[node.left].op == COL:
+        values = columns[bound.sources[node.left]].copy()
+    else:
+        values = _full[width](
+            bound, prepared, states, node.left, height, batch_size, False
+        )
+    var count = distinct_count(values, node.integer != 0)
+    return Series("", Column[Int64]([Int64(count)]))
+
+
 def _distinct_by_partition(bound: BoundExpr, node: Node, height: Int) -> Bool:
     """Whether `n_unique` counts its input by hash partition (#336) rather
     than with the reducer's per-group sets: every value but a nested or a
@@ -4180,9 +4215,10 @@ def evaluate[
         var column = columns[bound.sources[0]].copy()
         column._name = bound.expr._name
         return column^
-    # n_unique of a categorical counts its codes.
+    # n_unique of a categorical counts its codes in each group.
     if (
-        count == 2
+        grouped
+        and count == 2
         and bound.expr._nodes[root].op == N_UNIQUE
         and bound.expr._nodes[root].left == 0
         and bound.expr._nodes[0].op == COL
@@ -4288,6 +4324,16 @@ def evaluate[
             if row_mode:
                 state = state.take(groups)
             states[node_index] = state^
+        elif _distinct_in_table(bound, node, grouped):
+            states[node_index] = _n_unique_table[width](
+                bound,
+                columns,
+                prepared_columns,
+                states,
+                node,
+                height,
+                batch_size,
+            )
         elif is_reduction(node.op) and _distinct_by_partition(
             bound, node, height
         ):

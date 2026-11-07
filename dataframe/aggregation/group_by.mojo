@@ -1,7 +1,4 @@
 """Eager grouping requests, strategy dispatch, and worker jobs."""
-from dataframe.aggregation.reducer import (
-    Reducer,
-)
 from dataframe.aggregation.hash_table import (
     AggregateLayout,
     AggregateSink,
@@ -29,10 +26,8 @@ from dataframe.aggregation.keys import (
     _pack_struct_keys,
 )
 from dataframe.aggregation.state import (
-    _ReductionPlan,
     _StreamReduction,
     _merge_ascending_runs,
-    _reduction_batch,
     table_frame,
     table_inputs,
     table_specs,
@@ -52,15 +47,11 @@ from dataframe.storage.column import (
     Column,
 )
 from dataframe.execution import (
-    _ColumnStats,
-    _new_reducer,
     evaluate,
-    reduce_rows,
 )
 from dataframe.expr import (
     COL,
     Expr,
-    N_UNIQUE,
     SELECTOR,
     group_sequence_rows,
     col,
@@ -100,16 +91,9 @@ from dataframe.kernels.partition import (
     Partitioner,
     encode_bucket,
     low_cardinality,
-    small_key_product,
-)
-from dataframe.aggregation.dense import (
-    PerfectLayout,
-    perfect_layout,
-    perfect_slots,
 )
 from dataframe.series import (
     Series,
-    sort_indices,
 )
 from dataframe.storage.string import (
     StringColumn,
@@ -120,10 +104,6 @@ from dataframe.trace import (
 from std.collections import (
     Dict,
     Optional,
-)
-from std.memory import (
-    ArcPointer,
-    Pointer,
 )
 
 
@@ -187,92 +167,6 @@ def _encode_parallel(keys: List[Series], workers: Int) raises -> RowKeys:
     for r in merged.representatives:
         representatives.append(rows[r])
     return RowKeys(ids^, representatives^)
-
-
-# Rows a perfect hash aggregate gives slots at a time. Their slots (8
-# bytes each) take 128 KB, within a core's L2, so every reduction reads
-# them back from cache, as DuckDB updates each aggregate from one vector's
-# group addresses before it takes the next vector.
-comptime _PERFECT_WINDOW = 16384
-
-
-struct _PerfectAggJob(Job):
-    """Reduce rows [start, end) into the slots of a perfect hash table
-    (`perfect_aggregate.mojo`): each window of rows gets its slots, then
-    every reduction folds the window in one vector at a time. `firsts` keeps
-    each slot's first row, -1 while it is empty."""
-
-    var frame: DataFrame
-    var keys: List[Series]
-    var layout: PerfectLayout
-    var plan: _ReductionPlan
-    var start: Int
-    var end: Int
-    var states: List[Reducer]
-    var firsts: List[Int]
-
-    def __init__(
-        out self,
-        frame: DataFrame,
-        keys: List[Series],
-        layout: PerfectLayout,
-        plan: _ReductionPlan,
-        start: Int,
-        end: Int,
-    ):
-        self.frame = frame.copy()
-        self.keys = keys.copy()
-        self.layout = layout.copy()
-        self.plan = plan.copy()
-        self.start = start
-        self.end = end
-        self.states = List[Reducer](capacity=len(plan.bounds))
-        for r in range(len(plan.bounds)):
-            ref bound = plan.bounds[r]
-            self.states.append(
-                _new_reducer(
-                    bound, bound.expr._nodes[plan.nodes[r]], layout.slots()
-                )
-            )
-        self.firsts = List[Int](length=layout.slots(), fill=-1)
-
-    def run(mut self) raises:
-        var slots = List[Int](length=_PERFECT_WINDOW, fill=0)
-        # Only the columns the reductions read are cut to each window.
-        var read = List[Int]()
-        for bound in self.plan.bounds:
-            for source in bound.sources:
-                if source >= 0 and source not in read:
-                    read.append(source)
-        var columns = self.frame._columns.copy()
-        var first = self.firsts.unsafe_ptr()
-        var at = self.start
-        while at < self.end:
-            var length = min(_PERFECT_WINDOW, self.end - at)
-            perfect_slots(self.keys, self.layout, at, length, slots)
-            var slot = slots.unsafe_ptr()
-            for i in range(length):
-                ref seen = first[unsafe_offset=slot[unsafe_offset=i]]
-                if seen < 0:
-                    seen = at + i
-            for c in read:
-                columns[c] = self.frame._columns[c].slice(at, length)
-            for r in range(len(self.states)):
-                ref bound = self.plan.bounds[r]
-                reduce_rows[8](
-                    self.states[r],
-                    bound,
-                    columns,
-                    List[Series](),
-                    bound.expr._nodes[self.plan.nodes[r]],
-                    0,
-                    length,
-                    _reduction_batch(True),
-                    True,
-                    slots,
-                    ArcPointer(List[_ColumnStats]()),
-                )
-            at += length
 
 
 def _plain_inputs(expressions: List[Expr], frame: DataFrame) -> Bool:
@@ -488,19 +382,13 @@ struct GroupBy(Copyable):
         # 3.5 ms while seven threads idled.
         var height = self._frame.height()
         var workers = group_by_workers(height)
-        if _stream_reductions(expressions) and not self._counts_distinct(
-            expressions
-        ):
-            var perfect = self._agg_perfect(expressions, key_names, workers)
-            if perfect:
-                return perfect.take()
-        # Keys of a small dense domain went to the perfect hash above, as
-        # DuckDB's do; any other grouping goes through the aggregate table
-        # whatever its number of groups, whose per-thread tables adapt to
-        # however many there are. Neither DuckDB nor Polars picks a route
-        # by an estimate of the groups. An expression the table has no
-        # state for is evaluated over the groups, as Polars evaluates an
-        # expression over its group tuples.
+        # Every grouping goes through the aggregate table whatever its
+        # number of groups, whose per-thread tables adapt to however many
+        # there are; keys whose statistics bound them to a few values make
+        # it a perfect hash table, as DuckDB's planner does. Neither DuckDB
+        # nor Polars picks a route by an estimate of the groups. An
+        # expression the table has no state for is evaluated over the
+        # groups, as Polars evaluates an expression over its group tuples.
         if self._table_supported(expressions):
             var table = self._agg_table(expressions, workers, batch_size)
             if table:
@@ -641,6 +529,7 @@ struct GroupBy(Copyable):
         for key in keys:
             empty_keys.append(key.slice(0, 0))
         var layout = aggregate_layout(empty_keys, empty, specs)
+        layout.use_perfect_hash(keys)
         var ranges = List[Int]()
         var height = frame.height()
         var morsel = _MORSEL_ROWS
@@ -680,113 +569,6 @@ struct GroupBy(Copyable):
             sinks, layout, ordered=self._maintain_order
         )
         return table_frame(template, result^, self._maintain_order)
-
-    def _counts_distinct(self, expressions: List[Expr]) -> Bool:
-        """Whether some expression counts distinct values: the aggregate
-        table counts them in its distinct tables (`AggregateSink.distinct`),
-        which the per-worker and per-range states do not have."""
-        for expression in expressions:
-            for node in expression._nodes:
-                if node.op == N_UNIQUE:
-                    return True
-        return False
-
-    def _agg_perfect(
-        self,
-        expressions: List[Expr],
-        key_names: Dict[String, Bool],
-        workers: Int,
-    ) raises -> Optional[DataFrame]:
-        """Integer keys spanning few enough values (`perfect_layout`) give each
-        row its group's slot directly, with no table to probe and no group
-        ids to number or store; each worker reduces its range into its own
-        slots, the workers' slots merge in row order, and the occupied
-        slots come out in first-occurrence order. None when the keys do
-        not qualify."""
-        var height = self._frame.height()
-        if height == 0:
-            return None
-        var layout = perfect_layout(self._keys)
-        if not layout:
-            return None
-        trace_path("group_by.perfect_hash")
-        var plan = _ReductionPlan(self._frame, expressions, key_names)
-        var bounds = partitions(height, workers, 64)
-        var jobs = List[_PerfectAggJob](capacity=workers)
-        for w in range(workers):
-            if bounds[w] < bounds[w + 1]:
-                jobs.append(
-                    _PerfectAggJob(
-                        self._frame,
-                        self._keys,
-                        layout.value(),
-                        plan,
-                        bounds[w],
-                        bounds[w + 1],
-                    )
-                )
-        try:
-            run_jobs(jobs)
-        except:
-            # Windows here span several feed batches, so the first error
-            # raised need not be the one the batch order raises first.
-            # A failing aggregation is left to the other routes, which
-            # feed batch by batch and raise the error in that order.
-            return None
-        # DuckDB's `Combine`: every worker's slots fold into the first's,
-        # in row order, so first and last keep a single pass's answer.
-        var merged = jobs.pop(0)
-        for w in range(len(jobs)):
-            ref job = jobs[w]
-            for r in range(len(merged.states)):
-                merged.states[r].merge(job.states[r])
-            for s in range(len(merged.firsts)):
-                if merged.firsts[s] < 0:
-                    merged.firsts[s] = job.firsts[s]
-        # DuckDB's `Scan` takes the occupied slots in slot order; these keep
-        # the first-occurrence order of the other routes.
-        var occupied = List[Int]()
-        var rows = List[Int]()
-        for s in range(len(merged.firsts)):
-            if merged.firsts[s] >= 0:
-                occupied.append(s)
-                rows.append(merged.firsts[s])
-        var order = sort_indices([rows.copy()])
-        var picked = List[Int](capacity=len(order))
-        var firsts = List[Int](capacity=len(order))
-        for o in order:
-            picked.append(occupied[o])
-            firsts.append(rows[o])
-        var count = len(picked)
-        var states = List[Reducer](capacity=len(merged.states))
-        for r in range(len(merged.states)):
-            ref source = merged.states[r]
-            var state = Reducer(
-                source.op,
-                source.input,
-                count,
-                source.min_count,
-                source.integer,
-                source.floating,
-                source.text,
-                source.logical,
-            )
-            state.merge(source, sources=picked)
-            states.append(state^)
-        var keys = List[Series](capacity=len(self._keys))
-        for key in self._keys:
-            keys.append(key.take(firsts))
-        var reduction = _StreamReduction(
-            keys=DataFrame(keys^, height=count),
-            states=states^,
-            names=plan.names,
-            dtypes=plan.dtypes,
-            outputs=plan.outputs,
-            grouped=True,
-            firsts=firsts^,
-            rows=height,
-        )
-        return reduction.finish()
 
     def _agg_groups(
         self, bound: List[BoundExpr], batch_size: Int
