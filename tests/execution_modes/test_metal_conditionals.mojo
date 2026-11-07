@@ -792,3 +792,85 @@ def test_metal_conditional_field_loop_keeps_offsets_nulls_and_native_fields() ra
                                 ) if kind == 2 else UInt64(value)
                                 assert_equal(result[0][field], expected)
             _ = (data^, bitmap^, predicate_bitmap^, words^)
+
+
+def test_metal_simple_case_dispatch_proves_register_layout_without_narrowing_support() raises:
+    from dataframe_metal.composition_plan import (
+        plan_composition,
+        simple_case_layout,
+        simple_conditional_trees,
+    )
+    from dataframe_metal.accelerator.gpu.expression_value import _case_shape
+    from std.memory import Pointer
+
+    var frame = DataFrame(
+        [
+            Series("p", Column[Int32]([Int32(1), 0])),
+            Series("v", Column[Int64]([Int64(3), 4])),
+            Series("w", Column[Int64]([Int64(2), 1])),
+        ]
+    )
+    var values = List[Expr](
+        [
+            when(col("p") > 0).then(col("v")).otherwise(col("w")),
+            when(col("p") > 0).then(col("v") + 1).otherwise(col("w")),
+            when(col("p") > 0).then(col("v")).otherwise(col("w") * 2),
+            when(col("p") > 0).then(col("v") + 1).otherwise(col("w") * 2),
+            when(col("p") > 0).then(col("v") + 1).end(),
+        ]
+    )
+    for i in range(len(values)):
+        var selected = plan_composition(
+            frame.lazy().select(values[i].sum()), include_native=True
+        )
+        assert_true(Bool(selected))
+        ref plan = selected.value()
+        assert_true(simple_conditional_trees(plan))
+        var shape = simple_case_layout(plan.fields[0].tree)
+        assert_equal(shape, i if i < 4 else 1)
+        var packed = List[UInt64](length=64, fill=0)
+        for j in range(len(plan.fields[0].tree)):
+            ref node = plan.fields[0].tree[j]
+            packed[j * 4] = UInt64(node.op)
+            packed[j * 4 + 1] = UInt64(node.input)
+            packed[j * 4 + 3] = node.literal
+        var pointer = Pointer[UInt64, UntrackedOrigin[mut=False]](
+            unsafe_from_address=Int(packed.unsafe_ptr())
+        )
+        assert_equal(_case_shape(pointer, len(plan.fields[0].tree)), shape)
+        _ = packed^
+    var complex = List[Expr](
+        [
+            when(col("p") > 0)
+            .then((col("v") + col("w")) * col("v"))
+            .otherwise(0),
+            when(col("p") > 0)
+            .then(col("v"))
+            .when(col("p") < 0)
+            .then(col("w"))
+            .end(),
+            values[0].copy() + col("v"),
+        ]
+    )
+    for expression in complex:
+        var selected = plan_composition(
+            frame.lazy().select(expression.sum()), include_native=True
+        )
+        assert_true(Bool(selected))
+        assert_false(simple_conditional_trees(selected.value()))
+    var mixed = plan_composition(
+        frame.lazy().select_exprs(
+            [
+                values[0].sum(),
+                ((col("v") + col("w")) * col("v")).sum().alias("tree"),
+            ]
+        ),
+        include_native=True,
+    )
+    assert_true(Bool(mixed))
+    assert_false(simple_conditional_trees(mixed.value()))
+    var native = plan_composition(
+        frame.lazy().select(col("v").sum()), include_native=True
+    )
+    assert_true(Bool(native))
+    assert_false(simple_conditional_trees(native.value()))

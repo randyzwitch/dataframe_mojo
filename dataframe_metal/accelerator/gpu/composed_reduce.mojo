@@ -152,7 +152,7 @@ def int_value(
 
 @always_inline
 def conditional_tree_fields[
-    floating: Bool, conditional_only: Bool
+    floating: Bool, simple_cases: Bool
 ](
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
     descriptors: Pointer[UInt64, UntrackedOrigin[mut=False]],
@@ -194,7 +194,7 @@ def conditional_tree_fields[
         var at = HEADER_WORDS + field * FIELD_WORDS
         if UInt32(descriptors[unsafe_offset=at]) != UInt32(TREE_OP):
             continue
-        var value = expression_value[floating, True, conditional_only](
+        var value = expression_value[floating, True, simple_cases](
             metadata.unsafe_offset(Int(descriptors[unsafe_offset=at + 6])),
             Int(descriptors[unsafe_offset=at + 7]),
             row_base,
@@ -238,7 +238,7 @@ def _composed_scan[
     compound: Bool = False,
     trees: Bool = False,
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -418,7 +418,7 @@ def _composed_scan[
                     )
                     comptime if END > FIRST:
                         var evaluated = conditional_tree_fields[
-                            kind == 0, conditional_only
+                            kind == 0, simple_cases
                         ](
                             metadata,
                             meta,
@@ -464,7 +464,7 @@ def _composed_scan[
                         valid = Bool(case_valid[field])
                     else:
                         var computed = expression_value[
-                            field < float_fields, cases, conditional_only
+                            field < float_fields, cases, simple_cases
                         ](
                             metadata.unsafe_offset(
                                 Int(
@@ -701,7 +701,7 @@ def composed_partials[
     compound: Bool = False,
     trees: Bool = False,
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -743,7 +743,7 @@ def composed_partials[
         compound,
         trees,
         cases,
-        conditional_only,
+        simple_cases,
     ](
         v0,
         v1,
@@ -787,7 +787,7 @@ def mixed_partials[
     compound: Bool = False,
     trees: Bool = False,
     cases: Bool = False,
-    conditional_only: Bool = False,
+    simple_cases: Bool = False,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -836,7 +836,7 @@ def mixed_partials[
         compound,
         trees,
         cases,
-        conditional_only,
+        simple_cases,
     ](
         v0,
         v1,
