@@ -530,6 +530,28 @@ def test_metal_cast_faults_and_non_strict_nulls_keep_cpu_outcomes() raises:
             execute_timed(relaxed)[0].item(0, "count").int64(), Int64(1)
         )
         same_outcome(relaxed)
+        var value = col(name).cast(DataType.INT32, strict=False)
+        var grouped = (
+            frame.lazy()
+            .group_by("p")
+            .agg(
+                [
+                    value.sum().alias("sum"),
+                    value.count().alias("count"),
+                    value.mean().alias("mean"),
+                    value.min().alias("min"),
+                    value.max().alias("max"),
+                ]
+            )
+        )
+        var groups = execute_timed(grouped)[0].copy()
+        assert_equal(groups.height(), 2)
+        assert_equal(groups.item(0, "count").int64(), Int64(0))
+        assert_equal(groups.item(0, "sum").int32(), Int32(0))
+        for output in ["mean", "min", "max"]:
+            assert_true(groups.item(0, output).is_null())
+        assert_equal(groups.item(1, "count").int64(), Int64(1))
+        same_outcome(grouped)
         var safe = (
             frame.lazy()
             .filter(col("p") > 0)
