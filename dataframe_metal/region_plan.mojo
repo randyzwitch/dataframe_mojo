@@ -8,7 +8,7 @@ from dataframe import Expr, LazyFrame
 from dataframe.expr import COL, SUM, COUNT, MEAN, MIN, MAX, WHEN, Node
 from dataframe.lazy import SCAN_FRAME, FILTER, WITH_COLUMNS, SELECT, AGG
 from .expression_plan import compile_expression
-from .expression_format import MAX_CASE_INSTRUCTIONS
+from .expression_format import MAX_CASE_SOURCE_NODES
 from .conditional_plan import compile_conditional
 
 
@@ -55,7 +55,7 @@ def _expand(
                     return None
                 node.extra = remap[node.extra]
             nodes.append(node^)
-        if len(nodes) > MAX_CASE_INSTRUCTIONS + 1:
+        if len(nodes) > MAX_CASE_SOURCE_NODES + 1:
             return None
         remap.append(len(nodes) - 1)
     return Expr(nodes^, expression._name.copy())

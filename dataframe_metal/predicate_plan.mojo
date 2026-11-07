@@ -9,6 +9,7 @@ from .predicate_program import (
     RANGE_CLAUSE,
     NULL_CLAUSE,
     COLUMN_CLAUSE,
+    MEMBERSHIP_CLAUSE,
     PredicateClause,
     PredicateProgram,
     _emit,
@@ -88,10 +89,12 @@ def plan_predicates(
 
 def predicate_key(plan: PredicateComposition) -> String:
     var advanced = False
+    var members = False
     for clause in plan.program.clauses:
         advanced = advanced or clause.kind != RANGE_CLAUSE or clause.inverted
+        members = members or clause.kind == MEMBERSHIP_CLAUSE
     var key = String(
-        "predicate_reductions:v2:" if advanced else "predicate_reductions:v1:"
+        "predicate_reductions:v3:" if members else "predicate_reductions:v2:" if advanced else "predicate_reductions:v1:"
     ) + composition_key(plan.bundle)
     for i in range(len(plan.program.clauses)):
         ref leaf = plan.program.clauses[i]
@@ -123,6 +126,11 @@ def predicate_key(plan: PredicateComposition) -> String:
             + ":"
             + String(clause.inclusive)
         )
+    for leaf in plan.program.clauses:
+        if leaf.kind == MEMBERSHIP_CLAUSE:
+            key += ":members"
+            for member in leaf.members:
+                key += "," + String(member)
     for bits in plan.program.truth:
         key += ":truth=" + String(bits)
     return key

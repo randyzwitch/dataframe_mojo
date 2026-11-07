@@ -12,7 +12,12 @@ from .accelerator.gpu.compound_predicate import (
 
 
 def predicate_words(program: PredicateProgram) -> Int:
-    return PREDICATE_HEADER_WORDS + len(program.clauses) * PREDICATE_FIELD_WORDS
+    var size = (
+        PREDICATE_HEADER_WORDS + len(program.clauses) * PREDICATE_FIELD_WORDS
+    )
+    for leaf in program.clauses:
+        size += len(leaf.members)
+    return size
 
 
 def value_program_words(
@@ -33,6 +38,11 @@ def write_predicate(
     words[at] = UInt64(len(program.clauses))
     for i in range(8):
         words[at + 1 + i] = UInt64(program.truth[i])
+    var tail = (
+        at
+        + PREDICATE_HEADER_WORDS
+        + len(program.clauses) * PREDICATE_FIELD_WORDS
+    )
     for i in range(len(program.clauses)):
         ref leaf = program.clauses[i]
         ref clause = leaf.bounds
@@ -63,6 +73,12 @@ def write_predicate(
             | (UInt64(leaf.inverted) << 4)
             | (UInt64(leaf.comparison) << 5)
         )
+        if leaf.kind == 3:
+            words[base + 2] = UInt64(tail - at)
+            words[base + 3] = UInt64(len(leaf.members))
+            for member in leaf.members:
+                words[tail] = member
+                tail += 1
 
 
 def pack_value_program(
