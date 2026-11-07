@@ -118,6 +118,16 @@ range from 0.999267578125 to 1.0; standard-deviation errors range from
 not timing measurements. Apple CPU confirmation and retesting after a CPU
 fix remain required. The Metal work does not modify the CPU implementation.
 
+DuckDB 2.0.0's built-in `var_pop` also returns 32,768 for the two-value
+example, matching the CPU result. This is a shared numerical limitation,
+not a CPU-only discrepancy against that oracle. DuckDB returns 16,384 after
+subtracting the common `2**60` offset before aggregation. Independently,
+forming `(n*sum(x*x)-sum(x)**2)/(n*n)` with DuckDB HUGEINT arithmetic gives
+exactly 16,384, agreeing with a Python Fraction calculation. DuckDB
+compatibility and mathematical accuracy therefore need separate checks for
+these stress cases; built-in floating aggregates alone are insufficient as
+the numerical oracle.
+
 Run the CPU regression from a source checkout (it currently exits nonzero):
 
 ```sh
