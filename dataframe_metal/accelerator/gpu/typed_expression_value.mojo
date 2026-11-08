@@ -1,9 +1,17 @@
-"""Bounded typed stack for checked casts and explicit mixed-source arithmetic."""
+"""Shared bounded stack for typed, conditional and legacy value programs."""
 from std.memory import Pointer, bitcast
 from dataframe.expr import COL, LIT_INT, CAST, ADD, SUB, MUL
-from ...expression_format import EXPRESSION_NODE_WORDS, VALUE_TYPE_SHIFT
+from ...expression_format import (
+    EXPRESSION_NODE_WORDS,
+    VALUE_TYPE_SHIFT,
+    TYPED_HEADER,
+    CASE_HEADER,
+    CASE_TEST,
+    CASE_JUMP,
+    CASE_NULL,
+)
 from .multi_reduce import Bytes, read_integer
-from .compound_predicate import _pointer
+from .compound_predicate import _pointer, predicate_matches
 from .filter_sum import _valid
 from .arithmetic_sum import integer_binary
 from .value_ops import checked_float_value
@@ -16,7 +24,7 @@ from .native_numeric import (
 )
 
 
-@always_inline
+@no_inline
 def typed_expression_value(
     program: Pointer[UInt64, UntrackedOrigin[mut=False]],
     count: Int,
@@ -39,20 +47,66 @@ def typed_expression_value(
     b5: Bytes,
     b6: Bytes,
     b7: Bytes,
+    fallback_tag: UInt32 = 0,
+    predicate: Bytes = Bytes(unsafe_from_address=0),
+    predicate_bits: Bytes = Bytes(unsafe_from_address=0),
 ) -> Tuple[UInt64, Bool, UInt32]:
     var values = SIMD[DType.uint64, 8](0)
     var validity = SIMD[DType.uint32, 8](0)
     var top = 0
     var fault = UInt32(0)
-    var need_float = want_value or Bool(program[unsafe_offset=3] & 1)
-    for node in range(1, count):
+    var typed = program[unsafe_offset=0] == UInt64(TYPED_HEADER)
+    var need_float = want_value or (
+        typed and Bool(program[unsafe_offset=3] & 1)
+    )
+    var node = 1 if typed else 0
+    while node < count:
         var at = node * EXPRESSION_NODE_WORDS
         var op = UInt32(program[unsafe_offset=at])
+        if op == UInt32(CASE_HEADER) or op == UInt32(TYPED_HEADER):
+            if op == UInt32(TYPED_HEADER):
+                need_float = need_float or Bool(
+                    program[unsafe_offset=at + 3] & 1
+                )
+            node += 1
+            continue
+        if op == UInt32(CASE_TEST):
+            var selected = predicate_matches(
+                program.unsafe_offset(Int(program[unsafe_offset=at + 1])),
+                row_base,
+                row,
+                v0,
+                v1,
+                v2,
+                v3,
+                v4,
+                v5,
+                v6,
+                v7,
+                predicate,
+                b0,
+                b1,
+                b2,
+                b3,
+                b4,
+                b5,
+                b6,
+                b7,
+                predicate_bits,
+            )
+            node = node + 1 if selected else Int(program[unsafe_offset=at + 3])
+            continue
+        if op == UInt32(CASE_JUMP):
+            node = Int(program[unsafe_offset=at + 3])
+            continue
         var meta = program[unsafe_offset=at + 2]
-        var tag = UInt32((meta >> VALUE_TYPE_SHIFT) & 3) - 1
+        var code = UInt32((meta >> VALUE_TYPE_SHIFT) & 3)
+        var tag = code - 1 if code else fallback_tag
         var bits = UInt64(0)
         var present = True
-        if op == UInt32(COL):
+        if op == UInt32(CASE_NULL):
+            present = False
+        elif op == UInt32(COL):
             var slot = Int(program[unsafe_offset=at + 1])
             if (meta >> 32) & 1:
                 present = _valid(
@@ -147,4 +201,5 @@ def typed_expression_value(
         values[top] = bits
         validity[top] = UInt32(present)
         top += 1
+        node += 1
     return (values[0], Bool(validity[0]), fault)
