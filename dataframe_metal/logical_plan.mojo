@@ -56,6 +56,15 @@ def plan_logical(region: LazyFrame) raises -> Optional[LogicalPlan]:
     ref root = region._plan._nodes[count - 1]
     if root.kind != SELECT and root.kind != AGG:
         return None
+    # Reject unsupported graph shapes before binding outputs against the
+    # original scan schema. A WITH_COLUMNS alias belongs to normalization in
+    # the other matchers; binding it here would abort their capability checks.
+    for index in range(1, count):
+        ref node = region._plan._nodes[index]
+        if node.left != index - 1 or (
+            index < count - 1 and node.kind != FILTER
+        ):
+            return None
     ref frame = region._plan._frames[region._plan._nodes[0].source_slot()]
     var wanted = False
     for expression in root.exprs:
@@ -82,12 +91,6 @@ def plan_logical(region: LazyFrame) raises -> Optional[LogicalPlan]:
                 )
     if not wanted:
         return None
-    for index in range(1, count):
-        ref node = region._plan._nodes[index]
-        if node.left != index - 1 or (
-            index < count - 1 and node.kind != FILTER
-        ):
-            return None
     var seed = String()
     for name in frame.columns():
         var dtype = frame.column(name).dtype()

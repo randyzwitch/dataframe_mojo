@@ -141,6 +141,24 @@ def test_metal_logical_plans_native_predicates_mixed_values_and_grouped_keys() r
     )
     assert_true(not Bool(plan_logical(frame.lazy().select(col("n").count()))))
     assert_true(Bool(plan_logical(frame.lazy().select(col("b").count()))))
+    # A numeric COUNT of an alias must reach the existing moment matcher.
+    # The logical matcher cannot bind WITH_COLUMNS outputs to the scan schema.
+    from dataframe_metal.moment_plan import plan_moments
+
+    var derived = frame.lazy().with_columns(
+        [(col("n").cast(DataType.INT64) * col("k")).alias("derived")]
+    )
+    for grouped in [False, True]:
+        var outputs: List[Expr] = [
+            col("derived").var(0).alias("variance"),
+            col("derived").std(0).alias("deviation"),
+            col("derived").count().alias("count"),
+        ]
+        var query = derived.group_by("k").agg(
+            outputs
+        ) if grouped else derived.select_exprs(outputs)
+        assert_true(not Bool(plan_logical(query)))
+        assert_true(Bool(plan_moments(query)))
 
 
 # requires: metal
