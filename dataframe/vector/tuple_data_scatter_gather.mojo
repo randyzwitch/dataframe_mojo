@@ -818,9 +818,7 @@ def gather_rows_series(
             SelectionVector(),
             arena,
         )
-        return _typed(
-            arena.columns[chunk.data[0].source].renamed(name^), dtype
-        )
+        return _typed(arena.columns[chunk.data[0].source].renamed(name^), dtype)
     var bits = List[UInt8](length=(count + 7) // 8 + 1, fill=255)
     var bits_at = Int(bits.unsafe_ptr())
     var valid_of = bits_at if top.can_have_null else 0
@@ -846,8 +844,9 @@ def gather_rows_series(
                 continue
             var entry = at + 16 * i
             var length = Int(
-                Pointer[StringT, MutAnyOrigin](unsafe_from_address=entry)[
-                ].length
+                Pointer[StringT, MutAnyOrigin](
+                    unsafe_from_address=entry
+                )[].length
             )
             builder.append(
                 StringSlice[ImmutAnyOrigin](

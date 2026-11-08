@@ -1690,7 +1690,9 @@ struct ScanStructure(Movable):
                 while p != 0:
                     found[unsafe_offset=Int(_load32(Int(p) + index_offset))] = 1
                     if dict_emission:
-                        p = aux[unsafe_offset=Int(_load64(Int(p) + next_offset))]
+                        p = aux[
+                            unsafe_offset=Int(_load64(Int(p) + next_offset))
+                        ]
                     else:
                         p = _load64(Int(p) + next_offset)
             self.finished = True
@@ -1704,11 +1706,9 @@ struct ScanStructure(Movable):
                 if h != 0 or outer_rows:
                     out_probe[unsafe_offset=out] = Int32(i)
                     var slot = Int(h) - 1
-                    out_build[unsafe_offset=out] = (
-                        -1 if h == 0 else (
-                            Int32(slot) if dictionary else Int32(
-                                slots[unsafe_offset=slot]
-                            )
+                    out_build[unsafe_offset=out] = -1 if h == 0 else (
+                        Int32(slot) if dictionary else Int32(
+                            slots[unsafe_offset=slot]
                         )
                     )
                     if h != 0:
@@ -1733,9 +1733,9 @@ struct ScanStructure(Movable):
                 if self.cursor == 0:
                     if outer:
                         out_probe[unsafe_offset=out] = Int32(i)
-                        out_build[unsafe_offset=out] = (
-                            Int32(self.table.inserted) if dict_emission else -1
-                        )
+                        out_build[unsafe_offset=out] = Int32(
+                            self.table.inserted
+                        ) if dict_emission else -1
                         out_row[unsafe_offset=out] = null_row
                         out += 1
                     self.row += 1
