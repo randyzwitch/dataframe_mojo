@@ -6,11 +6,10 @@ directly above it, and the projection or aggregation the executor offered.
 runs an accepted region and returns its columns. A declined region runs
 on the CPU in the same query.
 
-Accepted today: native numeric sums, counts and means over filters comparing
-one numeric column with untyped numeric literals (`>`, `>=`, `<`, `<=`,
-`==`, joined by `&`). The input columns are independently Int32, Int64 or
-Float32. Native chunks are read in place (`wrap_native`): Apple silicon
-shares memory, so nothing is copied. Float64 input stays on the CPU.
+Accepted today: native numeric and Boolean/count reductions over bounded
+predicate and value programs, globally or with native integer grouping keys.
+Int32, Int64, Float32 and Bool predicate inputs retain their physical widths.
+Native chunks are mapped in place on Apple silicon; Float64 input stays on CPU.
 """
 from max.gpu.host import DeviceBuffer
 from std.time import perf_counter_ns

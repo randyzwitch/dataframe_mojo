@@ -69,6 +69,7 @@ def test_metal_logical_plans_native_predicates_mixed_values_and_grouped_keys() r
             Series("b", Column[Bool]([True, False, True], [True, False, True])),
             Series("n", Column[Int32]([1, 2, 3], [True, True, False])),
             Series("k", Column[Int64]([1, 2, 1])),
+            Series("f", Column[Float32]([0.5, 1, 1.5], [True, False, True])),
         ]
     )
     for predicate in [
@@ -81,6 +82,7 @@ def test_metal_logical_plans_native_predicates_mixed_values_and_grouped_keys() r
         for grouped in [False, True]:
             var outputs = _logical_outputs(predicate)
             outputs.append(col("n").sum().alias("s"))
+            outputs.append(col("f").mean().alias("avg"))
             var query = (
                 frame.lazy()
                 .group_by("k", maintain_order=True)
@@ -133,6 +135,13 @@ def test_metal_logical_public_nullable_chunked_mixed_global_and_grouped() raises
                 ),
             ),
             Series("k", Column[Int64]([1, 1, 2, 2, 3, 3])),
+            Series(
+                "f",
+                Column[Float32](
+                    [0.5, 1, 1.5, 2, 2.5, 3],
+                    [True, True, False, True, True, False],
+                ),
+            ),
         ]
     )
     var chunked = List[Series]()
@@ -157,6 +166,7 @@ def test_metal_logical_public_nullable_chunked_mixed_global_and_grouped() raises
                 ) if empty else frame.lazy()
                 var outputs = _logical_outputs(value)
                 outputs.append(col("n").sum().alias("s"))
+                outputs.append(col("f").mean().alias("avg"))
                 var query = selected.group_by("k", maintain_order=True).agg(
                     outputs
                 ) if grouped else selected.select_exprs(outputs)
