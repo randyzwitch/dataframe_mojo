@@ -130,3 +130,121 @@ def test_metal_ordered_native_plans_global_filtered_and_tuple_grouped() raises:
     assert_false(
         Bool(plan_ordered(frame.lazy().select((col("n") + 1).first())))
     )
+
+
+# requires: metal
+def test_metal_ordered_public_native_values_ties_nulls_and_filtered_positions() raises:
+    from tests.support.metal_outcomes import require_metal
+    from dataframe_metal.ordered_reduce import execute_ordered
+    from dataframe_metal.handoff import execute_timed
+
+    _ = require_metal()
+    var first_nan = bitcast[DType.float32](UInt32(0x7FC12345))
+    var second_nan = bitcast[DType.float32](UInt32(0xFFC54321))
+    var negative_zero = bitcast[DType.float32](UInt32(0x80000000))
+    var tiny = bitcast[DType.float32](UInt32(1))
+    var frame = DataFrame(
+        [
+            Series(
+                "n",
+                Column[Int32](
+                    [9, 4, 4, -2, -2, 1, 8, 3],
+                    [False, True, True, True, True, True, False, True],
+                ),
+            ),
+            Series(
+                "w",
+                Column[Int64](
+                    [
+                        Int64(1 << 60) + 9,
+                        Int64(1 << 60) + 4,
+                        Int64(1 << 60) + 4,
+                        Int64(1 << 60) - 2,
+                        Int64(1 << 60) - 2,
+                        Int64(1 << 60) + 1,
+                        Int64(1 << 60) + 8,
+                        Int64(1 << 60) + 3,
+                    ],
+                    [False, True, True, True, True, True, False, True],
+                ),
+            ),
+            Series(
+                "f",
+                Column[Float32](
+                    [
+                        first_nan,
+                        negative_zero,
+                        0,
+                        tiny,
+                        -tiny,
+                        second_nan,
+                        first_nan,
+                        7,
+                    ],
+                    [True, True, True, True, True, True, True, False],
+                ),
+            ),
+            Series(
+                "b",
+                Column[Bool](
+                    [True, False, True, False, True, False, True, True],
+                    [False, True, True, True, False, True, True, False],
+                ),
+            ),
+            Series("p", Column[Int32]([0, 1, 0, 1, 1, 0, 1, 1])),
+            Series(
+                "k",
+                Column[Int32](
+                    [2, 1, 2, 1, 2, 1, 3, 3],
+                    [True, True, True, True, True, True, False, False],
+                ),
+            ),
+            Series(
+                "j",
+                Column[Int64](
+                    [
+                        Int64(1 << 60),
+                        Int64(1 << 60) + 1,
+                        Int64(1 << 60),
+                        Int64(1 << 60) + 1,
+                        Int64(1 << 60),
+                        Int64(1 << 60) + 1,
+                        Int64(1 << 60) + 2,
+                        Int64(1 << 60) + 2,
+                    ]
+                ),
+            ),
+        ]
+    )
+    var chunked = List[Series]()
+    for name in frame.columns():
+        var value = frame.column(name)
+        chunked.append(
+            Series._from_chunks(
+                [value.slice(0, 1), value.slice(1, 4), value.slice(5, 3)]
+            )
+        )
+    frame = DataFrame(chunked^)
+    for name in ["n", "w", "f", "b"]:
+        var value = col(name)
+        var outputs: List[Expr] = [
+            value.first().alias("first"),
+            value.last().alias("last"),
+            value.first(ignore_nulls=True).alias("nonnull_first"),
+            value.last(ignore_nulls=True).alias("nonnull_last"),
+            value.arg_min().alias("minimum"),
+            value.arg_max().alias("maximum"),
+            value.drop_nulls().arg_min().alias("nonnull_minimum"),
+            value.drop_nulls().arg_max().alias("nonnull_maximum"),
+        ]
+        for grouped in [False, True]:
+            for filtered in [False, True]:
+                var selected = frame.lazy().filter(
+                    col("p") > 0
+                ) if filtered else frame.lazy()
+                var query = selected.group_by(
+                    ["k", "j"], maintain_order=True
+                ).agg(outputs) if grouped else selected.select_exprs(outputs)
+                var cpu = query.collect(engine="cpu")
+                assert_true(execute_ordered(query)[0].equals(cpu))
+                assert_true(execute_timed(query)[0].equals(cpu))

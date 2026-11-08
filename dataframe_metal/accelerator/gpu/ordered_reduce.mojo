@@ -7,7 +7,7 @@ input offsets.
 """
 from std.atomic import Atomic
 from std.memory import Pointer
-from max.gpu import global_idx, block_idx
+from max.gpu import global_idx, block_idx, thread_idx
 from ...group_layout import GroupLayout
 from .multi_reduce import Bytes
 from .compound_predicate import _pointer, predicate_matches
@@ -201,6 +201,9 @@ def ordered_partials(
                             )
         row += Int(metadata[unsafe_offset=1])
 
+    if thread_idx.x == 0:
+        _ = Atomic[UInt32].fetch_add(scratch.unsafe_offset(2), UInt32(1))
+
 
 def merge_ordered(
     v0: Bytes,
@@ -233,6 +236,8 @@ def merge_ordered(
     scratch: Pointer[UInt32, MutUntrackedOrigin],
 ):
     var layout = ordered_layout(metadata)
+    if thread_idx.x == 0:
+        _ = Atomic[UInt32].fetch_add(scratch.unsafe_offset(3), UInt32(1))
     var index = global_idx.x
     if index >= layout.capacity * layout.fields:
         return
@@ -422,3 +427,8 @@ def ordered_ranks(
                             state.unsafe_offset(5), UInt32(1)
                         )
         row += Int(metadata[unsafe_offset=1])
+
+    if thread_idx.x == 0:
+        _ = Atomic[UInt32].fetch_add(
+            scratch.unsafe_offset(layout.rows_offset()), UInt32(1)
+        )
