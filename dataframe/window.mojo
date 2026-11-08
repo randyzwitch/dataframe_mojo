@@ -29,6 +29,12 @@ from .expr import (
     SHIFT,
     SHIFT_IGNORE_NULLS,
     RANK,
+    SUM,
+    MEAN,
+    MIN,
+    MAX,
+    STD,
+    VAR,
     ROLLING_SUM,
     ROLLING_STD,
     ROLLING_VAR,
@@ -53,17 +59,9 @@ from dataframe.storage.nested import StructColumn
 from dataframe.text.parse import parse_float64
 from dataframe.aggregation.reducer import quantile_of, _checked_product
 from .decimal import check_limit, pow10, precision_limit
-from dataframe.aggregation.scalar_states import WideInt
+from dataframe.aggregation.function import ReducerSpec
 from .series import Series, FixedElements
-from .window_segment_tree import (
-    FrameState,
-    SegmentTree,
-    evaluate_frames,
-    INT_SUM,
-    FLOAT_SUM,
-    RANK_MIN,
-    RANK_MAX,
-)
+from .window_segment_tree import frame_states_supported, window_segment_tree
 from .window_sort import rank_rows
 from std.collections import Optional
 from std.math import isnan, floor, sqrt, isfinite
@@ -395,15 +393,15 @@ def _window_ranges(
         return _interpolate(input, _range_lists(starts), node.text)
     if op == CUT or op == QCUT:
         return _bins(input, _range_lists(starts), node)
-    if op == ROLLING_STD or op == ROLLING_VAR:
-        return _rolling_moments(input, valid, _range_lists(starts), node)
     if (
-        op == ROLLING_SUM
+        op == ROLLING_STD
+        or op == ROLLING_VAR
+        or op == ROLLING_SUM
         or op == ROLLING_MEAN
         or op == ROLLING_MIN
         or op == ROLLING_MAX
     ):
-        return _rolling_frames(input, valid, starts, node)
+        return _rolling_frames(input, starts, node)
     # The remaining operations gather a source row per output row.
     var source = List[Int](length=n, fill=-1)
     var ranks = List[Int]()
@@ -978,207 +976,168 @@ def _bins(input: Series, groups: List[List[Int]], node: Node) raises -> Series:
     return Series("", StructColumn([breaks^, labels^]))
 
 
-def _rolling_frames(
-    input: Series, valid: List[Bool], starts: List[Int], node: Node
+def _reduction_of(op: Int) -> Int:
+    """The reduction a rolling window applies to each frame."""
+    if op == ROLLING_SUM or op == ROLLING_SUM_BY:
+        return SUM
+    if op == ROLLING_MEAN or op == ROLLING_MEAN_BY:
+        return MEAN
+    if op == ROLLING_MIN or op == ROLLING_MIN_BY:
+        return MIN
+    if op == ROLLING_MAX or op == ROLLING_MAX_BY:
+        return MAX
+    if op == ROLLING_VAR or op == ROLLING_VAR_BY:
+        return VAR
+    return STD
+
+
+def _frames(
+    node: Node,
+    input: Series,
+    begins: List[Int],
+    ends: List[Int],
+    starts: List[Int],
+    needed: Int,
 ) raises -> Series:
-    """rolling_sum, rolling_mean, rolling_min and rolling_max: each row's
-    frame is the window_size rows ending at it within its partition (ROWS
-    BETWEEN window_size - 1 PRECEDING AND CURRENT ROW), combined from a
-    segment tree over the partitions (DuckDB's WindowSegmentTree). Fewer
-    than min_samples valid values (default window_size) give null."""
+    """Each row's frame [begins, ends) of `input`, inside the partitions
+    at `starts` (DuckDB's WindowAggregateExecutor): the states the
+    aggregate table uses, combined over the frame by the segment tree.
+    Fewer than `needed` valid values give null, and a frame without any
+    gives null unless it is an empty sum. A minimum or maximum over a frame
+    holding a NaN is NaN, as Polars' rolling_min and rolling_max."""
+    var reduction = _reduction_of(node.op)
+    var moments = reduction == STD or reduction == VAR
+    var feed = _origin_shifted(input, starts) if moments else input.copy()
+    var spec = ReducerSpec(
+        reduction,
+        feed.dtype().physical(),
+        node.min_count if moments else 0,
+        Int64(node.min_count) if moments else 0,
+        0,
+        "",
+        feed.dtype(),
+        None,
+    )
+    if not frame_states_supported(spec, feed):
+        return _ranked_frames(spec, input, begins, ends, starts, needed)
+    var frames = window_segment_tree(spec, feed, begins, ends, starts, needed)
+    var n = len(begins)
+    var empty_ok = node.op == ROLLING_SUM_BY
+    var source = List[Int](unsafe_uninit_length=n)
+    var nulls = False
+    for j in range(n):
+        var count = Int(frames.counts[j])
+        var ok = (
+            count >= needed
+            and (count > 0 or empty_ok)
+            and (not moments or count > node.min_count)
+        )
+        source[j] = j if ok else -1
+        nulls = nulls or not ok
+    var values = frames.values.copy()
+    if len(frames.nan) > 0:
+        values = _with_nan(values, frames.nan)
+    return values.take_or_null(source) if nulls else values^
+
+
+def _origin_shifted(input: Series, starts: List[Int]) raises -> Series:
+    """`input` as Float64 with each partition's median finite value
+    subtracted, which leaves a variance unchanged: residuals are then not
+    lost to a large common offset (Welford's rounding is relative to the
+    values it adds). The median, so one huge outlier does not become the
+    origin."""
+    var floats = input.cast(DataType.FLOAT64)
+    ref column = floats._data[Column[Float64]]
+    var out = List[Float64](unsafe_uninit_length=len(column))
+    var ok = List[Bool](unsafe_uninit_length=len(column))
+    for p in range(len(starts) - 1):
+        var finite = List[Float64]()
+        for j in range(starts[p], starts[p + 1]):
+            if column._valid(j) and isfinite(column._get(j)):
+                finite.append(column._get(j))
+        var origin = Float64(0)
+        if len(finite) > 0:
+            sort(finite)
+            origin = finite[len(finite) // 2]
+        for j in range(starts[p], starts[p + 1]):
+            ok[j] = column._valid(j)
+            out[j] = column._get(j) - origin if ok[j] else Float64(0)
+    return Series("", Column[Float64](out^, ok))
+
+
+def _with_nan(values: Series, nan: List[Bool]) raises -> Series:
+    """`values` (a float column) with NaN at the rows of `nan`, valid
+    there."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if D.is_floating_point():
+            if values._data.isa[Column[Scalar[D]]]():
+                ref column = values._data[Column[Scalar[D]]]
+                var out = List[Scalar[D]](unsafe_uninit_length=len(column))
+                var ok = List[Bool](unsafe_uninit_length=len(column))
+                for i in range(len(column)):
+                    out[i] = column._get(i)
+                    ok[i] = column._valid(i)
+                    if nan[i]:
+                        out[i] = Scalar[D](FloatLiteral.nan)
+                        ok[i] = True
+                return Series("", Column[Scalar[D]](out^, ok))
+    return values.copy()
+
+
+def _ranked_frames(
+    spec: ReducerSpec,
+    input: Series,
+    begins: List[Int],
+    ends: List[Int],
+    starts: List[Int],
+    needed: Int,
+) raises -> Series:
+    """A minimum or maximum of values no aggregate state holds
+    (categoricals): the extreme of their dense sort ranks, then the row
+    with that rank."""
+    var ranks = input._sort_ranks(False, True)
+    var n = len(ranks)
+    var rank_column = List[Int64](capacity=n)
+    var valid = validity(input)
+    var row_of = List[Int](length=n + 1, fill=-1)
+    for i in range(n):
+        rank_column.append(Int64(ranks[i]))
+        if valid[i] and row_of[ranks[i]] < 0:
+            row_of[ranks[i]] = i
+    var as_ranks = Series("", Column[Int64](rank_column^, valid))
+    var rank_spec = ReducerSpec(
+        spec.op, DataType.INT64, 0, 0, 0, "", DataType.INT64, None
+    )
+    var frames = window_segment_tree(
+        rank_spec, as_ranks, begins, ends, starts, needed
+    )
+    ref best = frames.values._data[Column[Int64]]
+    var source = List[Int](length=n, fill=-1)
+    for j in range(n):
+        var count = Int(frames.counts[j])
+        if count >= needed and count > 0:
+            source[j] = row_of[Int(best._get(j))]
+    return input.take_or_null(source)
+
+
+def _rolling_frames(
+    input: Series, starts: List[Int], node: Node
+) raises -> Series:
+    """Fixed-size rolling aggregates: each row's frame is the window_size
+    rows ending at it within its partition (ROWS BETWEEN window_size - 1
+    PRECEDING AND CURRENT ROW). Fewer than min_samples valid values
+    (default window_size) give null."""
     var n = len(input)
     var window = Int(node.integer)
-    var needed = window if node.floating < 0 else Int(node.floating)
     var begins = List[Int](unsafe_uninit_length=n)
     var ends = List[Int](unsafe_uninit_length=n)
     for p in range(len(starts) - 1):
         for j in range(starts[p], starts[p + 1]):
             begins[j] = max(starts[p], j - window + 1)
             ends[j] = j + 1
-    var flags = Int(valid.unsafe_ptr())
-    var out_valid = List[Bool](length=n, fill=False)
-    if node.op == ROLLING_MIN or node.op == ROLLING_MAX:
-        var ranks = input._sort_ranks(False, True)
-        var nan = List[Bool]()
-        if input.dtype().is_float():
-            nan = _nan_rows(input, valid)
-        var nans = Int(nan.unsafe_ptr()) if len(nan) > 0 else 0
-        var rank_ptr = Int(ranks.unsafe_ptr())
-        var source = List[Int](length=n, fill=-1)
-        var states: List[FrameState]
-        if node.op == ROLLING_MIN:
-            var tree = SegmentTree[RANK_MIN](n, flags, 0, 0, rank_ptr, nans)
-            states = evaluate_frames(tree, begins, ends)
-        else:
-            var tree = SegmentTree[RANK_MAX](n, flags, 0, 0, rank_ptr, nans)
-            states = evaluate_frames(tree, begins, ends)
-        for j in range(n):
-            ref state = states[j]
-            if state.count >= needed and state.count > 0:
-                # A NaN in the window is the result, as in Polars.
-                source[j] = state.nan if state.nan >= 0 else state.row
-        _ = ranks^
-        _ = nan^
-        return input.take_or_null(source)
-    if node.op == ROLLING_SUM and input._data.isa[Column[Int64]]():
-        var contiguous = input.rechunk()
-        ref column = contiguous._data[Column[Int64]]
-        var tree = SegmentTree[INT_SUM](n, flags, Int(column._ptr()), 0, 0, 0)
-        var states = evaluate_frames(tree, begins, ends)
-        var out = List[Int64](length=n, fill=0)
-        for j in range(n):
-            ref state = states[j]
-            if state.count < needed or state.count == 0:
-                continue
-            if state.wide > Int128(Int64.MAX) or state.wide < Int128(Int64.MIN):
-                raise Error("Int64 rolling_sum overflow")
-            out_valid[j] = True
-            out[j] = state.wide.cast[DType.int64]()
-        _ = contiguous^
-        return Series("", Column[Int64](out^, out_valid))
-    var floats = List[Float64](unsafe_uninit_length=n)
-    for j in range(n):
-        floats[j] = _numeric(input, j) if valid[j] else Float64(0)
-    var tree = SegmentTree[FLOAT_SUM](
-        n, flags, 0, Int(floats.unsafe_ptr()), 0, 0
-    )
-    var states = evaluate_frames(tree, begins, ends)
-    var out = List[Float64](length=n, fill=0)
-    for j in range(n):
-        ref state = states[j]
-        if state.count < needed or state.count == 0:
-            continue
-        out_valid[j] = True
-        out[j] = (
-            state.real / Float64(state.count) if node.op
-            == ROLLING_MEAN else state.real
-        )
-    _ = floats^
-    return Series("", Column[Float64](out^, out_valid))
-
-
-def _rolling_moments(
-    input: Series, valid: List[Bool], groups: List[List[Int]], node: Node
-) raises -> Series:
-    var lower = List[Int](length=len(input), fill=0)
-    var upper = List[Int](length=len(input), fill=0)
-    var window = Int(node.integer)
-    for rows in groups:
-        for j in range(len(rows)):
-            lower[rows[j]] = max(0, j - window + 1)
-            upper[rows[j]] = j + 1
-    return _moments_bounds(
-        input,
-        valid,
-        groups,
-        lower,
-        upper,
-        window if node.floating < 0 else Int(node.floating),
-        node.min_count,
-        node.op == ROLLING_STD,
-    )
-
-
-def _moments_bounds(
-    input: Series,
-    valid: List[Bool],
-    groups: List[List[Int]],
-    lower: List[Int],
-    upper: List[Int],
-    needed: Int,
-    ddof: Int,
-    standard: Bool,
-) raises -> Series:
-    # Sliding Welford updates with removal. Translate by the first finite
-    # value so large common offsets do not spoil small variances. Each value
-    # ordinarily advances once for monotone bounds. Rebase and rebuild after
-    # a large variance decrease on eviction to recover finite outlier
-    # cancellation; nonfinite values are counted separately.
-    var output = List[Float64](length=len(input), fill=0)
-    var mask = List[Bool](length=len(input), fill=False)
-    for rows in groups:
-        var origin = Float64(0)
-        for row in rows:
-            if valid[row] and isfinite(_numeric(input, row)):
-                origin = _numeric(input, row)
-                break
-        var lo = 0
-        var hi = 0
-        var count = 0
-        var bad = 0
-        var mean = Float64(0)
-        var m2 = Float64(0)
-        for row in rows:
-            var start = lower[row]
-            var stop = upper[row]
-            var rebuild = start < lo or stop < hi or start >= hi
-            if rebuild:
-                lo = start
-                hi = start
-                count = 0
-                bad = 0
-                mean = 0
-                m2 = 0
-            while lo < start:
-                var at = rows[lo]
-                lo += 1
-                if not valid[at]:
-                    continue
-                var x = _numeric(input, at)
-                if not isfinite(x):
-                    bad -= 1
-                    continue
-                x -= origin
-                var previous_m2 = m2
-                count -= 1
-                if count == 0:
-                    mean = 0
-                    m2 = 0
-                else:
-                    var delta = x - mean
-                    mean -= delta / Float64(count)
-                    m2 -= delta * (x - mean)
-                    m2 = max(m2, 0)
-                rebuild |= (
-                    count == 0
-                    or not isfinite(previous_m2)
-                    or m2 < previous_m2 * 0.5
-                )
-            if rebuild:
-                lo = start
-                hi = start
-                count = 0
-                bad = 0
-                mean = 0
-                m2 = 0
-                for position in range(start, stop):
-                    var at = rows[position]
-                    if valid[at] and isfinite(_numeric(input, at)):
-                        origin = _numeric(input, at)
-                        break
-            while hi < stop:
-                var at = rows[hi]
-                hi += 1
-                if not valid[at]:
-                    continue
-                var x = _numeric(input, at)
-                if not isfinite(x):
-                    bad += 1
-                    continue
-                x -= origin
-                count += 1
-                var delta = x - mean
-                mean += delta / Float64(count)
-                m2 += delta * (x - mean)
-            var total = count + bad
-            if total >= needed and total > ddof:
-                mask[row] = True
-                if bad:
-                    output[row] = Float64("nan")
-                else:
-                    var variance = max(m2, 0) / Float64(count - ddof)
-                    output[row] = sqrt(variance) if standard else variance
-    return Series("", Column[Float64](output^, mask))
+    var needed = window if node.floating < 0 else Int(node.floating)
+    return _frames(node, input, begins, ends, starts, needed)
 
 
 def rolling_by_op(
@@ -1189,22 +1148,18 @@ def rolling_by_op(
     if input.is_chunked() or index.is_chunked():
         return rolling_by_op(node, input.rechunk(), index.rechunk(), ids)
     if input.dtype().is_decimal():
-        if node.op == ROLLING_SUM_BY:
-            return _rolling_decimal_sum_by(node, input, index, ids)
-        if node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY:
+        if node.op != ROLLING_SUM_BY and (
+            node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY
+        ):
             return rolling_by_op(node, _as_float(input), index, ids)
-    if node.op == ROLLING_SUM_BY and input.dtype() == DataType.UINT64:
-        var groups = partitions(len(input), ids)
-        var bounds = rolling_bounds(
-            index, groups, node.text, negate_period(node.text), node.text2
-        )
-        return _rolling_u64_sum(
-            input, groups, bounds[0], bounds[1], Int(node.floating)
-        )
     var numeric = node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY
     if numeric and node.op != ROLLING_SUM_BY and _is_narrow(input.dtype()):
         return rolling_by_op(node, input.cast(DataType.FLOAT64), index, ids)
-    if numeric and _is_narrow(input.dtype()):
+    if (
+        numeric
+        and input.dtype() != DataType.UINT64
+        and _is_narrow(input.dtype())
+    ):
         var result = rolling_by_op(node, _widen(input), index, ids)
         return (
             _narrow_sum(result, input.dtype().sum_type()) if node.op
@@ -1214,149 +1169,25 @@ def rolling_by_op(
     var bounds = rolling_bounds(
         index, groups, node.text, negate_period(node.text), node.text2
     )
-    var valid = validity(input)
-    var needed = Int(node.floating)
-    if node.op == ROLLING_STD_BY or node.op == ROLLING_VAR_BY:
-        return _moments_bounds(
-            input,
-            valid,
-            groups,
-            bounds[0],
-            bounds[1],
-            needed,
-            node.min_count,
-            node.op == ROLLING_STD_BY,
-        )
-    var is_int = node.op == ROLLING_SUM_BY and input.dtype() == DataType.INT64
-    var ints = List[Int64](length=len(input) if is_int else 0, fill=0)
-    var floats = List[Float64](
-        length=len(input) if numeric and not is_int else 0, fill=0
+    # The partitions laid out one after another, frames at their positions
+    # there, and the results put back in row order.
+    var n = len(input)
+    var order = List[Int](capacity=n)
+    var starts = List[Int](capacity=len(groups) + 1)
+    var begins = List[Int](capacity=n)
+    var ends = List[Int](capacity=n)
+    for rows in groups:
+        var base = len(order)
+        starts.append(base)
+        for row in rows:
+            order.append(row)
+            begins.append(base + bounds[0][row])
+            ends.append(base + bounds[1][row])
+    starts.append(len(order))
+    var result = _frames(
+        node, input.take(order), begins, ends, starts, Int(node.floating)
     )
-    var mask = List[Bool](length=len(input), fill=False)
-    var source = List[Int](length=len(input), fill=-1)
-    var ranks = List[Int]()
-    if not numeric:
-        ranks = input._sort_ranks(False, True)
-    for rows in groups:
-        for row in rows:
-            var count = 0
-            var total = Float64(0)
-            var wide = WideInt(0)
-            var best = -1
-            var nan_row = -1
-            var begin = bounds[0][row]
-            var end = bounds[1][row]
-            for k in range(begin, end):
-                var at = rows[k]
-                if not valid[at]:
-                    continue
-                count += 1
-                if not numeric:
-                    if input.dtype().is_float():
-                        var x = input.get(at)._float
-                        if x != x:
-                            nan_row = at
-                    if best < 0 or (
-                        ranks[at]
-                        > ranks[best] if node.op
-                        == ROLLING_MAX_BY else ranks[at]
-                        < ranks[best]
-                    ):
-                        best = at
-                elif is_int:
-                    wide += (
-                        input._data[Column[Int64]]._get(at).cast[DType.int128]()
-                    )
-                else:
-                    total += _numeric(input, at)
-            if count < needed or (count == 0 and node.op != ROLLING_SUM_BY):
-                continue
-            mask[row] = True
-            if not numeric:
-                source[row] = nan_row if nan_row >= 0 else best
-            elif is_int:
-                if wide > WideInt(Int64.MAX) or wide < WideInt(Int64.MIN):
-                    raise Error("Int64 rolling_sum_by overflow")
-                ints[row] = wide.cast[DType.int64]()
-            else:
-                floats[row] = (
-                    total / Float64(count) if node.op
-                    == ROLLING_MEAN_BY else total
-                )
-    if not numeric:
-        return input.take_or_null(source)
-    if is_int:
-        return Series("", Column[Int64](ints^, mask))
-    return Series("", Column[Float64](floats^, mask))
-
-
-def _rolling_decimal_sum_by(
-    node: Node, input: Series, index: Series, ids: List[Int]
-) raises -> Series:
-    from dataframe.time.windows import rolling_bounds, negate_period
-
-    var groups = partitions(len(input), ids)
-    var bounds = rolling_bounds(
-        index, groups, node.text, negate_period(node.text), node.text2
-    )
-    var wide = input._decimal128()
-    ref column = wide._data[Column[Int128]]
-    var target = input.dtype().sum_type()
-    var limit = precision_limit(target.precision())
-    var output = List[Int128](length=len(input), fill=0)
-    var valid = List[Bool](length=len(input), fill=False)
-    for rows in groups:
-        for row in rows:
-            var begin = bounds[0][row]
-            var stop = bounds[1][row]
-            var count = 0
-            for position in range(begin, stop):
-                count += Int(column._valid(rows[position]))
-            if count < Int(node.floating):
-                continue
-            var total = Int128(0)
-            for position in range(begin, stop):
-                var at = rows[position]
-                if not column._valid(at):
-                    continue
-                var value = check_limit(column._get(at), limit, target)
-                # Check before addition so even precision-38 prefixes cannot
-                # wrap Int128 and hide a precision error behind cancellation.
-                if (value > 0 and total >= limit - value) or (
-                    value < 0 and total <= -limit - value
-                ):
-                    raise Error(
-                        "value exceeds decimal precision "
-                        + String(target.precision())
-                    )
-                total += value
-            output[row] = total
-            valid[row] = True
-    return Series("", Column[Int128](output^, valid)).with_dtype(target)
-
-
-def _rolling_u64_sum(
-    input: Series,
-    groups: List[List[Int]],
-    lower: List[Int],
-    upper: List[Int],
-    needed: Int,
-) raises -> Series:
-    ref column = input._data[Column[UInt64]]
-    var values = List[UInt64](length=len(input), fill=0)
-    var valid = List[Bool](length=len(input), fill=False)
-    for rows in groups:
-        for row in rows:
-            var total = Int128(0)
-            var count = 0
-            for k in range(lower[row], upper[row]):
-                var at = rows[k]
-                if column._valid(at):
-                    total += Int128(column._get(at))
-                    count += 1
-            if count >= needed:
-                if total > Int128(UInt64.MAX):
-                    raise Error("UInt64 rolling_sum_by overflow")
-                valid[row] = True
-                values[row] = UInt64(total)
-    return Series("", Column[UInt64](values^, valid))
+    var inverse = List[Int](unsafe_uninit_length=n)
+    for k in range(n):
+        inverse[order[k]] = k
+    return result.take(inverse)
