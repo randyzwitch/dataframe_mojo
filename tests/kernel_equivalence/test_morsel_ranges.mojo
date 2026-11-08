@@ -1,7 +1,6 @@
 """A pipeline's morsels cover its source's rows once, in order, never
-across a chunk boundary. A source of one chunk about a batch long is cut
-into a piece a worker of at least a batch's share per worker (and one
-vector); a smaller one stays whole."""
+across a chunk boundary. Their count is Polars' ideal morsel count
+rounded up to a multiple of the workers."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_true
 
@@ -23,20 +22,18 @@ def check_cover(ranges: List[Int], n: Int) raises:
     assert_equal(at, n)
 
 
-def test_one_chunk_sources_split_by_their_batch_share() raises:
-    # A batch of 65,536 rows on 8 workers: a 65,536-row source is cut in
-    # eight. A 20,000-row one holds two shares of 8,192 rows, and two
-    # pieces are then cut to a multiple of the workers, as sources of
-    # several chunks are. Under one share (8,000 rows) it stays whole.
-    for n in [65_536, 20_000, 8_000, 5, 0]:
-        var ranges = _morsel_ranges(rows(n), 65_536, 8)
+def test_counts_round_to_a_multiple_of_the_workers() raises:
+    # Polars' in-memory source: ideal count of 100,000-row morsels, rounded
+    # up to a multiple of the workers; 1M rows on 8 workers is 16 morsels.
+    for n in [1_000_000, 100_000, 20_000, 5, 0]:
+        var ranges = _morsel_ranges(rows(n), 8)
         check_cover(ranges, n)
         var pieces = len(ranges) // 2
-        if n == 65_536:
-            assert_equal(pieces, 8)
-        elif n == 20_000:
+        if n == 1_000_000:
+            assert_equal(pieces, 16)
+        elif n == 100_000 or n == 20_000:
             assert_equal(pieces, 8)
         elif n > 0:
             assert_equal(pieces, 1)
-    # One worker: one piece.
-    assert_equal(len(_morsel_ranges(rows(65_536), 65_536, 1)) // 2, 1)
+    # One worker: only the ideal count.
+    assert_equal(len(_morsel_ranges(rows(250_000), 1)) // 2, 2)

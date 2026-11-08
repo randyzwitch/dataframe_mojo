@@ -145,7 +145,7 @@ from dataframe.kernels.gather import (
 )
 from dataframe.storage.allocation import huge_list
 from dataframe.kernels.mask_filter import filter_columns
-from .parallel import Job, run_jobs, worker_count
+from .parallel import Job, morsel_ranges, run_jobs, worker_count
 from .series import Series
 from dataframe.kernels.segment_statistics import (
     ensure_statistics,
@@ -2422,99 +2422,15 @@ def _merged_mask(
     return BoolColumn(values=values^, bits=List[UInt8](), length=height)
 
 
-# DuckDB's STANDARD_VECTOR_SIZE: the fewest rows a morsel is cut to.
-comptime _VECTOR_ROWS = 2048
-
-
-def _morsel_ranges(
-    frame: DataFrame, morsel_rows: Int, workers: Int
-) -> List[Int]:
-    """(offset, length) pairs covering the frame: each chunk of columns
-    chunked at the same rows is cut into even pieces of about
-    `morsel_rows`, and a frame without such chunks likewise. When that
-    gives fewer than four morsels a worker, the pieces are cut finer so
-    their count is a multiple of `workers` and the last round of morsels
-    is as full as the first: ten even pieces of 600K rows on eight
-    workers left two workers a whole second round (PDS-H q12 at scale
-    0.1, 1.8 to 2.1 ms). Many morsels are left as they are: each costs
-    its steps' setup (ClickBench q29's ninety sums, 36 morsels of 312K
-    rows against 144 of 69K, 4 to 6 ms)."""
+def _morsel_ranges(frame: DataFrame, workers: Int) -> List[Int]:
+    """(offset, length) pairs covering the frame, each aligned chunk of its
+    columns cut in pieces of `morsel_size` (Polars' in-memory source)."""
     var ends = List[Int]()
     if can_filter_aligned_chunks(frame._columns):
         ends = frame._columns[0]._chunked.value()[].ends.copy()
     else:
         ends.append(frame.height())
-    var lanes = max(1, workers)
-    var lengths = List[Int]()
-    var starts = List[Int]()
-    var pieces = List[Int]()
-    var total = 0
-    var start = 0
-    for end in ends:
-        var length = end - start
-        if length > 0:
-            starts.append(start)
-            lengths.append(length)
-            # Pieces of about `morsel_rows`: a chunk a little longer than
-            # the target stays one morsel rather than two short ones, each
-            # paying the steps' setup (TPC-DS q9's fifteen conditional
-            # sums over 123K-row groups cut at 90K: 145 to 174 ms on one
-            # thread).
-            pieces.append(
-                max(1, (2 * length + morsel_rows) // (2 * morsel_rows))
-            )
-            total += pieces[len(pieces) - 1]
-        start = end
-    if total == 1 and lanes > 1:
-        # One piece left every worker but one idle: a source of about a
-        # batch (a 65K-row common table read twice in TPC-DS q47) is cut
-        # into pieces of a batch's share per worker, as a source of a few
-        # batches is below, and never under one vector of `_VECTOR_ROWS`
-        # (DuckDB's smallest unit of parallel work). A smaller source
-        # stays whole: every morsel pays its steps' setup.
-        var share = max(_VECTOR_ROWS, morsel_rows // lanes)
-        var most = min(lanes, lengths[0] // share)
-        if most > 1:
-            pieces[0] = most
-            total = most
-    if total > 1 and total < 4 * lanes and total % lanes != 0:
-        # Cut every chunk finer by the same factor, then give the longest
-        # chunks one more piece each until the count is a multiple.
-        var wanted = total + lanes - total % lanes
-        var scaled = 0
-        for c in range(len(pieces)):
-            pieces[c] = min(lengths[c], pieces[c] * wanted // total)
-            scaled += pieces[c]
-        while scaled < wanted:
-            var longest = -1
-            for c in range(len(pieces)):
-                if pieces[c] < lengths[c] and (
-                    longest < 0
-                    or lengths[c] // pieces[c]
-                    > lengths[longest] // pieces[longest]
-                ):
-                    longest = c
-            if longest < 0:
-                break
-            pieces[longest] += 1
-            scaled += 1
-    # Boundaries inside a chunk fall on multiples of 64 rows, so a
-    # morsel's validity bitmaps start on a byte: kernels that AND or
-    # window bitmaps take their slow path from a bit offset (TPC-DS q9's
-    # masked sums, 145 to 174 ms on one thread at 87,381-row morsels).
-    var ranges = List[Int]()
-    for c in range(len(pieces)):
-        for p in range(pieces[c]):
-            var low = starts[c] + lengths[c] * p // pieces[c]
-            var high = starts[c] + lengths[c] * (p + 1) // pieces[c]
-            if p > 0:
-                low = starts[c] + (low - starts[c]) // 64 * 64
-            if p + 1 < pieces[c]:
-                high = starts[c] + (high - starts[c]) // 64 * 64
-            if high > low:
-                ranges.append(low)
-                ranges.append(high - low)
-    return ranges^
+    return morsel_ranges(ends, max(1, workers))
 
 
 def _emit_unmatched(
@@ -2553,7 +2469,7 @@ def _emit_unmatched(
         ref build = joins[][steps[j].join]
         var ranges = List[Int]()
         if build.height() > 0:
-            ranges = _morsel_ranges(build, max(1, batch_size), len(jobs))
+            ranges = _morsel_ranges(build, len(jobs))
         if len(ranges) == 0 and j != last:
             continue
         # The probe side's columns at this step: an empty source through
@@ -2604,7 +2520,6 @@ def run_pipeline(
     keys: List[String],
     ordered: Bool,
     workers: Int,
-    morsel_rows: Int,
     batch_size: Int,
     mut counts: List[Int],
     mut set_frames: List[DataFrame],
@@ -2648,7 +2563,6 @@ def run_pipeline(
         keys,
         ordered,
         workers,
-        morsel_rows,
         batch_size,
         counts,
         set_frames,
@@ -2681,7 +2595,6 @@ def run_pipeline(
             List[String](),
             False,
             workers,
-            batch_size,
             batch_size,
             inner,
             none,
@@ -2892,7 +2805,6 @@ def _run_pipeline(
     keys: List[String],
     ordered: Bool,
     workers: Int,
-    morsel_rows: Int,
     batch_size: Int,
     mut counts: List[Int],
     mut set_frames: List[DataFrame],
@@ -3000,7 +2912,7 @@ def _run_pipeline(
     # NextParallelScan hands out the reorderer's next row group.
     var ranges = ArcPointer(
         top_ranges.value().copy() if top_ranges else _morsel_ranges(
-            frame, max(1, morsel_rows), max(1, workers)
+            frame, workers
         )
     )
     # Grouping sets: which come from another set's group rows. Largest

@@ -52,7 +52,7 @@ from dataframe.aggregation.hash_table import (
     aggregate_layout,
 )
 from dataframe.aggregation.table_sink import _sink_jobs, input_vector
-from dataframe.parallel import configured_workers
+from dataframe.parallel import configured_workers, morsel_ranges
 from dataframe.aggregation.expressions import _stream_reductions
 from dataframe.aggregation.reducer import Reducer
 from dataframe.aggregation.selected_rows import _canonical_int
@@ -709,9 +709,14 @@ def distinct_values(
     return values
 
 
-# Rows a worker takes at a time: DuckDB's DEFAULT_ROW_GROUP_SIZE, the unit
-# its table scans hand to threads.
-comptime _MORSEL_ROWS = 122_880
+def _chunk_morsels(values: Series) -> List[Int]:
+    """(offset, length) pairs for a column's morsels (`morsel_ranges`)."""
+    var ends = List[Int]()
+    var end = 0
+    for part in values.chunks():
+        end += len(part)
+        ends.append(end)
+    return morsel_ranges(ends, configured_workers())
 
 
 def distinct_count(values: Series, ignore_nulls: Bool) raises -> Int:
@@ -724,16 +729,7 @@ def distinct_count(values: Series, ignore_nulls: Bool) raises -> Int:
     groups by (`key_supported`)."""
     var keys: List[Series] = [values.copy()]
     var layout = aggregate_layout(keys, List[Series](), List[ReducerSpec]())
-    var ranges = List[Int]()
-    var start = 0
-    for part in values.chunks():
-        var at = 0
-        var length = len(part)
-        while at < length:
-            ranges.append(start + at)
-            ranges.append(min(_MORSEL_ROWS, length - at))
-            at += _MORSEL_ROWS
-        start += length
+    var ranges = _chunk_morsels(values)
     var workers = max(1, min(configured_workers(), len(ranges) // 2))
     var tables = _sink_jobs(keys, List[Series](), layout, ranges, workers)
     return distinct_values(tables, layout, ignore_nulls)
@@ -756,16 +752,7 @@ def distinct_counts(
         ids.append(Int64(g))
     var keys: List[Series] = [Series("", Column[Int64](ids^)), values.copy()]
     var layout = aggregate_layout(keys, List[Series](), List[ReducerSpec]())
-    var ranges = List[Int]()
-    var start = 0
-    for part in values.chunks():
-        var at = 0
-        var length = len(part)
-        while at < length:
-            ranges.append(start + at)
-            ranges.append(min(_MORSEL_ROWS, length - at))
-            at += _MORSEL_ROWS
-        start += length
+    var ranges = _chunk_morsels(values)
     var workers = max(1, min(configured_workers(), len(ranges) // 2))
     var tables = _sink_jobs(keys, List[Series](), layout, ranges, workers)
     var pairs = aggregate_finish(tables, layout, rows_only=True, ordered=False)
