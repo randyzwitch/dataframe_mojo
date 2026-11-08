@@ -175,6 +175,7 @@ from dataframe.vector.data_chunk import (
     flat_over,
     to_series,
 )
+from dataframe.vector.tuple_data_scatter_gather import gather_rows_series
 from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
@@ -1214,6 +1215,12 @@ struct _ChunkRunner(Movable):
     var held: Int
     # Per join step, the arena handles of its build's columns.
     var builds: List[List[Int]]
+    # Per join step, the arena handles of the build frame's columns (a
+    # string or nested output column is a dictionary over them, read by
+    # row number: DuckDB's gather copies a string_t, no string bytes,
+    # and a row's string columns cannot be read into a column here without
+    # copying its bytes).
+    var frame_builds: List[List[Int]]
     # Whether this worker's arena holds the builds' columns yet.
     var bound: Bool
     var source: DataChunk
@@ -1275,6 +1282,7 @@ struct _ChunkRunner(Movable):
         self.compiled = List[Optional[_VectorStep]](length=n, fill=None)
         self.arena = ColumnArena()
         self.builds = List[List[Int]]()
+        self.frame_builds = List[List[Int]]()
         self.bound = False
         self.held = 0
         self.source = DataChunk()
@@ -1301,12 +1309,26 @@ struct _ChunkRunner(Movable):
         if not self.bound:
             self.bound = True
             self.builds = List[List[Int]](capacity=len(self.steps[]))
+            self.frame_builds = List[List[Int]](capacity=len(self.steps[]))
             for step in self.steps[]:
                 var handles = List[Int]()
+                var frame_handles = List[Int]()
                 if step.kind == STEP_JOIN:
+                    if (
+                        self.indexes[][step.join]
+                        and self.indexes[][step.join].value().use_dictionary
+                    ):
+                        # The table's dictionary columns (perfect or
+                        # dictionary emission), one per output column.
+                        ref dictionary = (
+                            self.indexes[][step.join].value().data[].dictionary
+                        )
+                        for c in range(len(dictionary)):
+                            handles.append(self.arena.add(dictionary[c]))
                     for column in self.joins[][step.join]._columns:
-                        handles.append(self.arena.add(column))
+                        frame_handles.append(self.arena.add(column))
                 self.builds.append(handles^)
+                self.frame_builds.append(frame_handles^)
             self.held = self.arena.mark()
         self.arena.truncate(self.held)
 
@@ -1616,19 +1638,22 @@ struct _ChunkRunner(Movable):
         for k in range(len(keys)):
             if keys[k].is_chunked():
                 keys[k] = keys[k].rechunk()
-        var scan = ScanStructure(self.indexes[][step.join].value(), step.how)
+        ref table = self.indexes[][step.join].value()
+        var scan = ScanStructure(table, step.how)
         var how = step.how
         var semi_or_anti = how == JOIN_SEMI or how == JOIN_ANTI
         var right_semi = how == JOIN_RIGHT_SEMI or how == JOIN_RIGHT_ANTI
         var pairs = not semi_or_anti and not right_semi
-        var inner = how == JOIN_INNER
         var probe_rows = List[Int](capacity=columns.height)
-        var build_rows = List[UInt32]()
-        var outer_rows = List[Int]()
-        if inner:
-            build_rows.reserve(columns.height)
-        elif pairs:
-            outer_rows.reserve(columns.height)
+        # Per output row, the build row's pointer and its dictionary
+        # index (the slot of a perfect join, a row number with dictionary
+        # emission).
+        var pointers = List[UInt64]()
+        var dictionary_rows = List[UInt32]()
+        if pairs:
+            pointers.reserve(columns.height)
+            if table.use_dictionary:
+                dictionary_rows.reserve(columns.height)
         for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
             var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
             scan.probe(keys, low, count)
@@ -1637,15 +1662,18 @@ struct _ChunkRunner(Movable):
                 if n == 0:
                     break
                 var rows = scan.probe_rows.unsafe_ptr()
-                var builds = scan.build_rows.unsafe_ptr()
                 for k in range(n):
                     probe_rows.append(low + Int(rows[unsafe_offset=k]))
-                if inner:
+                if pairs:
+                    var at = scan.row_pointers.unsafe_ptr()
                     for k in range(n):
-                        build_rows.append(UInt32(builds[unsafe_offset=k]))
-                elif pairs:
-                    for k in range(n):
-                        outer_rows.append(Int(builds[unsafe_offset=k]))
+                        pointers.append(at[unsafe_offset=k])
+                    if table.use_dictionary:
+                        var builds = scan.build_rows.unsafe_ptr()
+                        for k in range(n):
+                            dictionary_rows.append(
+                                UInt32(builds[unsafe_offset=k])
+                            )
         if right_semi:
             # A probe only flags build rows; `_emit_unmatched` emits them.
             return _Columns.of_frame(self.arena, output)
@@ -1665,34 +1693,73 @@ struct _ChunkRunner(Movable):
             result = columns.copy()
         else:
             result = columns.through(probe_rows)
-        result.height = len(build_rows) if inner else len(outer_rows)
+        result.height = len(pointers)
         var right_keys = List[Int]()
         for key in step.right_keys:
             right_keys.append(right._index(key))
-        if inner:
-            # The build side's output columns, in the join's output order.
-            var list = len(result.row_lists)
-            result.row_lists.append(build_rows^)
-            for i in range(right.width()):
-                if step.coalesce and i in right_keys:
-                    continue
-                result.handles.append(self.builds[s][i])
+        # The build side's output columns, in the join's output order:
+        # from the rows (GatherRHS), the table's dictionaries (a perfect
+        # join or dictionary emission), or, for a column a plan replaced
+        # after the build, the build frame by each row's number.
+        var list = -1
+        var frame_list = -1
+        var frame_rows = Optional[List[Int]]()
+        var has_unmatched = how == JOIN_LEFT or how == JOIN_FULL
+        for i in range(right.width()):
+            if step.coalesce and i in right_keys:
+                continue
+            ref column = right._columns[i]
+            var name = column.name()
+            var t = -1
+            for c in range(len(table.output_names)):
+                if table.output_names[c] == name:
+                    t = c
+            if t >= 0 and name in table.frame_only:
+                t = -1
+            if t < 0 and not has_unmatched:
+                # Read by row number through the build frame (no bytes
+                # copied, a string_t gather's cost; a column a plan
+                # replaced after the build).
+                if frame_list < 0:
+                    frame_list = len(result.row_lists)
+                    var numbers = List[UInt32](capacity=len(pointers))
+                    for r in range(len(pointers)):
+                        numbers.append(
+                            UInt32(table.build_side_row(pointers[r]))
+                        )
+                    result.row_lists.append(numbers^)
+                result.handles.append(self.frame_builds[s][i])
+                result.starts.append(0)
+                result.lists.append(frame_list)
+            elif t < 0:
+                if not frame_rows:
+                    var rows = List[Int](capacity=len(pointers))
+                    for r in range(len(pointers)):
+                        rows.append(table.build_side_row(pointers[r]))
+                    frame_rows = rows^
+                var gathered = take_parallel(
+                    [column.copy()], frame_rows.value().copy(), 1, or_null=True
+                )
+                result.handles.append(self.arena.add(gathered[0]))
+                result.starts.append(0)
+                result.lists.append(-1)
+            elif table.use_dictionary:
+                if list < 0:
+                    list = len(result.row_lists)
+                    result.row_lists.append(dictionary_rows.copy())
+                result.handles.append(self.builds[s][t])
                 result.starts.append(0)
                 result.lists.append(list)
-        else:
-            var sources = List[Series]()
-            for i in range(right.width()):
-                if step.coalesce and i in right_keys:
-                    continue
-                sources.append(right._columns[i].copy())
-            var gathered = take_parallel(
-                sources^,
-                outer_rows^,
-                1,
-                or_null=how == JOIN_LEFT or how == JOIN_FULL,
-            )
-            for g in range(len(gathered)):
-                result.handles.append(self.arena.add(gathered[g]))
+            else:
+                var gathered = gather_rows_series(
+                    table.row_layout,
+                    Int(pointers.unsafe_ptr()),
+                    len(pointers),
+                    table.output_columns[t],
+                    name,
+                    table.output_types[t],
+                )
+                result.handles.append(self.arena.add(gathered))
                 result.starts.append(0)
                 result.lists.append(-1)
         if result.width() != output.width():

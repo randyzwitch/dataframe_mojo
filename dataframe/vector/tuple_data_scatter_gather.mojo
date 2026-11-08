@@ -34,7 +34,12 @@ from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.storage.string import StringBuilder
-from dataframe.vector.data_chunk import ColumnArena, DataChunk, flat_over
+from dataframe.vector.data_chunk import (
+    ColumnArena,
+    DataChunk,
+    _typed,
+    flat_over,
+)
 from dataframe.vector.tuple_data_layout import (
     TupleDataLayout,
     constant_size,
@@ -783,6 +788,144 @@ def gather_column(
     var series = _node_series(nodes, root, target_count, "")
     var handle = arena.add(series)
     result.data[out_column] = flat_over(arena, handle, 0)
+
+
+def gather_rows_series(
+    layout: TupleDataLayout,
+    rows: Int,
+    count: Int,
+    column_id: Int,
+    var name: String,
+    dtype: DataType,
+) raises -> Series:
+    """The `count` rows of column `column_id` at the row pointers at `rows`,
+    a new at-rest column typed `dtype` of `count` rows (GatherRHS for an
+    operator reading columns rather than vectors; no 2,048 limit, the row
+    pointers are the only limit)."""
+    ref top = layout.nodes[][0]
+    var physical = top.physicals[column_id]
+    if physical == PHYSICAL_LIST or physical == PHYSICAL_STRUCT:
+        var chunk = DataChunk(1)
+        var arena = ColumnArena()
+        gather_column(
+            layout,
+            rows,
+            SelectionVector(),
+            count,
+            column_id,
+            chunk,
+            0,
+            SelectionVector(),
+            arena,
+        )
+        return _typed(
+            arena.columns[chunk.data[0].source].renamed(name^), dtype
+        )
+    var bits = List[UInt8](length=(count + 7) // 8 + 1, fill=255)
+    var bits_at = Int(bits.unsafe_ptr())
+    var valid_of = bits_at if top.can_have_null else 0
+    if physical == PHYSICAL_VARCHAR:
+        var buffer = List[UInt8](unsafe_uninit_length=16 * max(count, 1))
+        _gather_fixed_dispatch(
+            physical,
+            rows,
+            SelectionVector(),
+            count,
+            top.offsets[column_id],
+            column_id,
+            top.can_have_null,
+            Int(buffer.unsafe_ptr()),
+            valid_of,
+            SelectionVector(),
+        )
+        var builder = StringBuilder(count)
+        var at = Int(buffer.unsafe_ptr())
+        for i in range(count):
+            if not _bit_valid(bits_at, i):
+                builder.append_null()
+                continue
+            var entry = at + 16 * i
+            var length = Int(
+                Pointer[StringT, MutAnyOrigin](unsafe_from_address=entry)[
+                ].length
+            )
+            builder.append(
+                StringSlice[ImmutAnyOrigin](
+                    unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
+                        unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                            unsafe_from_address=string_data(entry)
+                        ),
+                        length=length,
+                    )
+                )
+            )
+        _ = buffer^
+        _ = bits^
+        return _typed(Series(name^, builder^.finish()), dtype)
+    if physical == PHYSICAL_BOOL:
+        var buffer = List[UInt8](unsafe_uninit_length=max(count, 1))
+        _gather_fixed_dispatch(
+            physical,
+            rows,
+            SelectionVector(),
+            count,
+            top.offsets[column_id],
+            column_id,
+            top.can_have_null,
+            Int(buffer.unsafe_ptr()),
+            valid_of,
+            SelectionVector(),
+        )
+        var values = List[Bool](capacity=count)
+        for i in range(count):
+            values.append(buffer[i] != 0)
+        var valid = List[Bool](capacity=count)
+        var any_null = False
+        for i in range(count):
+            var ok = _bit_valid(bits_at, i)
+            any_null = any_null or not ok
+            valid.append(ok)
+        if any_null:
+            return _typed(Series(name^, BoolColumn(values, valid)), dtype)
+        return _typed(Series(name^, BoolColumn(values)), dtype)
+    comptime for k in range(len(_FIXED)):
+        comptime D = _FIXED[k]
+        if physical == physical_of[D]():
+            var values = List[Scalar[D]](unsafe_uninit_length=count)
+            _gather_fixed_dispatch(
+                physical,
+                rows,
+                SelectionVector(),
+                count,
+                top.offsets[column_id],
+                column_id,
+                top.can_have_null,
+                Int(values.unsafe_ptr()),
+                valid_of,
+                SelectionVector(),
+            )
+            if top.can_have_null:
+                var any_null = False
+                var at = bits.unsafe_ptr()
+                for b in range(count // 8):
+                    if at[unsafe_offset=b] != 255:
+                        any_null = True
+                        break
+                if not any_null:
+                    for i in range(count & ~7, count):
+                        if not _bit_valid(bits_at, i):
+                            any_null = True
+                            break
+                if any_null:
+                    return _typed(
+                        Series(
+                            name^,
+                            Column[Scalar[D]](values=values^, bits=bits^),
+                        ),
+                        dtype,
+                    )
+            return _typed(Series(name^, Column[Scalar[D]](values^)), dtype)
+    raise Error("tuple data: no gather for this column type")
 
 
 def _gather_fixed_dispatch(

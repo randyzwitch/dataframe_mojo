@@ -6,7 +6,14 @@ from dataframe.joins.hash_table import (
     JoinHashTable,
     keys_only_join,
 )
-from dataframe.join_type import JOIN_INNER
+from dataframe.dtype import DataType
+from dataframe.join_type import (
+    JOIN_ANTI,
+    JOIN_INNER,
+    JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI,
+    JOIN_SEMI,
+)
 from dataframe.scheduler import (
     SchedulablePipeline,
 )
@@ -27,16 +34,19 @@ from std.memory import (
 
 
 def finish_build(
-    mut built: DataFrame, keys: List[String], how: Int
+    mut built: DataFrame,
+    keys: List[String],
+    how: Int,
+    coalesce: Bool = True,
+    probe_estimate: Int = -1,
 ) raises -> Optional[JoinHashTable]:
     """A join's build side, finished as its build pipeline's last stage:
-    every column in one chunk, then the hash index over `keys` (none
-    when `keys` is empty, or when a key cannot be hashed this way), as
-    DuckDB finalizes a hash join's table at the end of its build
-    pipeline. A probe gathers the build's payload through
-    `take_parallel`, which rechunks a chunked column every time it is
-    called, once per morsel or batch (PDS-H q2's 159K-row build with five
-    string columns: 3.8 ms a probe)."""
+    every column in one chunk, then the hash table over `keys` with the
+    build's other columns as its rows' payload (none when `keys` is
+    empty, or when a key cannot be hashed this way), as DuckDB finalizes
+    a hash join's table at the end of its build pipeline. Semi and anti
+    joins read no build column, so their rows have no payload.
+    `probe_estimate` is the probe side's estimated rows."""
     for column in built._columns:
         if column.is_chunked():
             built = built.rechunk()
@@ -51,8 +61,41 @@ def finish_build(
         sources.append(key.copy())
     if not supported:
         return None
+    var emits = how != JOIN_SEMI and how != JOIN_ANTI
+    var payload = List[Series]()
+    var output_columns = List[Int]()
+    var output_names = List[String]()
+    var output_types = List[DataType]()
+    for i in range(built.width()):
+        ref column = built._columns[i]
+        var key_at = -1
+        for k in range(len(keys)):
+            if keys[k] == column.name():
+                key_at = k
+        if key_at < 0:
+            if emits:
+                payload.append(column.copy())
+                output_columns.append(len(keys) + len(payload) - 1)
+                output_names.append(column.name())
+                output_types.append(column.dtype())
+            continue
+        # A key column: read from its own field where the join outputs it.
+        if not emits:
+            continue
+        if coalesce and how != JOIN_RIGHT_SEMI and how != JOIN_RIGHT_ANTI:
+            continue
+        output_columns.append(key_at)
+        output_names.append(column.name())
+        output_types.append(column.dtype())
     return JoinHashTable(
-        sources, perfect=how == JOIN_INNER, keys_only=keys_only_join(how)
+        sources,
+        payload=Optional(payload^),
+        output_columns=output_columns,
+        output_names=output_names,
+        output_types=output_types,
+        perfect=how == JOIN_INNER,
+        keys_only=keys_only_join(how),
+        probe_estimate=probe_estimate,
     )
 
 
@@ -73,6 +116,8 @@ struct _SubplanPipeline(SchedulablePipeline):
     # hash join's build side.
     var keys: List[String]
     var how: Int
+    var coalesce: Bool
+    var probe_estimate: Int
     var built: Optional[JoinHashTable]
 
     def __init__(
@@ -83,6 +128,8 @@ struct _SubplanPipeline(SchedulablePipeline):
         batch_size: Int,
         keys: List[String] = List[String](),
         how: Int = JOIN_INNER,
+        coalesce: Bool = True,
+        probe_estimate: Int = -1,
     ) raises:
         self.plan = plan^
         # Its own memo: nested prefetches on other threads never share one.
@@ -96,6 +143,8 @@ struct _SubplanPipeline(SchedulablePipeline):
         self.result = DataFrame(List[Series]())
         self.keys = keys.copy()
         self.how = how
+        self.coalesce = coalesce
+        self.probe_estimate = probe_estimate
         self.built = None
 
     def initialize(mut self) raises:
@@ -114,4 +163,10 @@ struct _SubplanPipeline(SchedulablePipeline):
 
     def finalize(mut self) raises:
         if len(self.keys) > 0:
-            self.built = finish_build(self.result, self.keys, self.how)
+            self.built = finish_build(
+                self.result,
+                self.keys,
+                self.how,
+                self.coalesce,
+                self.probe_estimate,
+            )

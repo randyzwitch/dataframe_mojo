@@ -74,6 +74,7 @@ from dataframe.io.parquet import (
     _pruned_row_groups,
     parquet_row_group_statistics,
 )
+from dataframe.planning.statistics import PlanStatistics, plan_cardinality
 from dataframe.joins.hash_table import JoinHashTable
 from dataframe.join_type import (
     JOIN_ANTI,
@@ -626,7 +627,14 @@ def _stream_probe(
                 prepared = ready.value().index.copy()
                 algorithm = "hash_index"
                 keys = List[String]()
-            var finished = finish_build(built, keys, node.how)
+            var stats = PlanStatistics()
+            var finished = finish_build(
+                built,
+                keys,
+                node.how,
+                node.coalesce,
+                plan_cardinality(self, stats, node.left),
+            )
             if finished:
                 prepared = finished^
                 algorithm = "hash_index"
