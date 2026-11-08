@@ -17,6 +17,17 @@ comptime JOIN_RIGHT_ANTI = 8
 comptime JOIN_MARK = 9
 
 
+def join_emits_build_rows(how: Int) -> Bool:
+    """Whether a probe flags the build rows it matches for a scan after
+    the probe (DuckDB's `PropagatesBuildSide`; ScanFullOuter)."""
+    return (
+        how == JOIN_RIGHT
+        or how == JOIN_FULL
+        or how == JOIN_RIGHT_SEMI
+        or how == JOIN_RIGHT_ANTI
+    )
+
+
 def join_code(how: String) -> Int:
     """The code for a join type name, or -1 when the name is unknown."""
     if how == "inner":

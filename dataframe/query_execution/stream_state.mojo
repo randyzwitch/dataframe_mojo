@@ -39,6 +39,7 @@ from dataframe.pipeline import (
     STEP_SELECT,
     STEP_WITH_COLUMNS,
     Step,
+    _steps_over_frame,
 )
 from dataframe.planning.model import (
     DROP,
@@ -453,14 +454,25 @@ def _apply_operation(
 ) raises:
     """Apply one row-local operation or join to a batch."""
     if node.kind == JOIN and indexes[][node.join_build_slot()]:
-        frame = frame._join_impl(
-            joins[][node.join_build_slot()],
-            left_on=node.names,
-            right_on=node.right_keys,
-            how=node.how,
-            suffix=node.join_suffix(),
-            coalesce=node.coalesce,
-            prepared=indexes[][node.join_build_slot()],
+        # A batch probes the join's shared table as a pipeline's morsel does.
+        var counts = List[Int]()
+        frame = _steps_over_frame(
+            frame,
+            [
+                Step(
+                    STEP_JOIN,
+                    List[Expr](),
+                    node.names.copy(),
+                    node.join_build_slot(),
+                    node.right_keys.copy(),
+                    node.how,
+                    node.join_suffix(),
+                    node.coalesce,
+                )
+            ],
+            joins,
+            indexes,
+            counts,
         )
     elif node.kind == JOIN and node.how == JOIN_CROSS:
         frame = frame.join(

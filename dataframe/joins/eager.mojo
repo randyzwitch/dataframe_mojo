@@ -58,13 +58,20 @@ def join_frames(
     how: Int = JOIN_INNER,
     suffix: String = "_right",
     coalesce: Bool = True,
-    prepared: Optional[JoinHashTable] = None,
     keep_order: Bool = True,
-    workers: Int = 0,
 ) raises -> DataFrame:
-    """Execute a validated join. `prepared` is a hash table already built
-    over `right`'s keys, which `self` probes (a pipeline worker's morsel;
-    `workers` > 0 keeps the probe on this thread)."""
+    """Execute a validated join. A RIGHT_SEMI or RIGHT_ANTI join (a semi or
+    anti join a plan flipped) is that join of `right` by `self`."""
+    if how == JOIN_RIGHT_SEMI or how == JOIN_RIGHT_ANTI:
+        return right._join_impl(
+            self,
+            left_on=right_on,
+            right_on=left_on,
+            how=JOIN_SEMI if how == JOIN_RIGHT_SEMI else JOIN_ANTI,
+            suffix=suffix,
+            coalesce=coalesce,
+            keep_order=keep_order,
+        )
     # A categorical key joins on codes, which compare only on a shared
     # dictionary (#106): both key columns move onto the union of theirs
     # (a String key is encoded into it), leaving the left codes as they
@@ -198,51 +205,6 @@ def join_frames(
             right_names.append(name)
     var left_rows = List[Int]()
     var right_rows = List[Int]()
-    if prepared:
-        # A pipeline worker's morsel probing the shared table of the build
-        # (`right`): right and full joins flag the build rows they match
-        # in the table, and the pipeline emits the unmatched ones after
-        # every morsel (`scan_full_outer`), so a right join emits only its
-        # matched pairs here.
-        var probe_keys = List[Series](capacity=len(left_keys))
-        for k in left_keys:
-            probe_keys.append(self._columns[k].copy())
-        var pairs = probe_pairs(
-            prepared.value(),
-            probe_keys,
-            how,
-            1 if workers > 0 else 0,
-            scan=False,
-        )
-        if how == JOIN_SEMI or how == JOIN_ANTI:
-            if len(pairs[0]) == self.height():
-                return self.copy()
-            return self._filter_rows(pairs[0].copy())
-        var output_height = len(pairs[0])
-        var lanes = workers if workers > 0 else worker_count(output_height)
-        var columns = self._columns.copy()
-        var identity = output_height == self.height()
-        if identity:
-            for i in range(output_height):
-                if pairs[0][i] != i:
-                    identity = False
-                    break
-        swap(left_rows, pairs[0])
-        swap(right_rows, pairs[1])
-        if not identity:
-            columns = take_parallel(columns, left_rows^, lanes, or_null=False)
-        var right_sources = List[Series]()
-        for c in right_output:
-            right_sources.append(right._columns[c].copy())
-        var gathered = take_parallel(
-            right_sources,
-            right_rows^,
-            lanes,
-            or_null=how == JOIN_LEFT or how == JOIN_FULL,
-        )
-        for k in range(len(right_output)):
-            columns.append(gathered[k].renamed(right_names[k]))
-        return DataFrame(columns^, height=output_height)
     if self.height() == 0 and (how == JOIN_FULL or how == JOIN_RIGHT):
         # No probe rows: every build row comes out once, in order, beside
         # null probe columns, with nothing hashed or gathered (a

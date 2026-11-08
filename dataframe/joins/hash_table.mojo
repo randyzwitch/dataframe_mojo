@@ -1665,15 +1665,14 @@ def probe_pairs(
     keys: List[Series],
     how: Int,
     workers: Int,
-    scan: Bool = True,
 ) raises -> Tuple[List[Int], List[Int]]:
     """Every row `keys` (the probe side's key columns) joins against
     `table` with physical join type `how`: the probe rows and the build
     rows (-1 for none), in probe order, on `workers` threads (0: by the
-    row count). A semi, anti or mark join gives probe rows only. With
-    `scan`, a right or full join then appends the build rows no probe
-    matched (probe row -1), and a right-semi or right-anti join gives its
-    build rows only (`scan_full_outer`)."""
+    row count). A semi, anti or mark join gives probe rows only. A right
+    or full join then appends the build rows no probe matched (probe row
+    -1), and a right-semi or right-anti join gives its build rows only
+    (`scan_full_outer`)."""
     var unchunked = List[Series](capacity=len(keys))
     for key in keys:
         unchunked.append(key.rechunk() if key.is_chunked() else key.copy())
@@ -1727,8 +1726,6 @@ def probe_pairs(
             at += len(job.probe)
         run_jobs(copies)
     _ = jobs^
-    if not scan:
-        return (probe^, build^)
     if how == JOIN_RIGHT or how == JOIN_FULL:
         var position = 0
         while table.scan_full_outer(position, 0, build) > 0:

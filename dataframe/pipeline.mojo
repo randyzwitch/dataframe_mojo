@@ -136,7 +136,17 @@ from dataframe.joins.join_filter import (
     supports_join_filters,
 )
 from dataframe.table_filter import TableFilterSet
-from .join_type import JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_RIGHT, JOIN_SEMI
+from .join_type import (
+    JOIN_ANTI,
+    JOIN_FULL,
+    JOIN_INNER,
+    JOIN_LEFT,
+    JOIN_RIGHT,
+    JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI,
+    JOIN_SEMI,
+    join_emits_build_rows,
+)
 from dataframe.kernels.row_encode import encodable
 from dataframe.kernels.gather import (
     can_filter_aligned_chunks,
@@ -261,6 +271,12 @@ def _key_statistics(
                         break
             names = made^
             sources = made_sources^
+        elif step.kind == STEP_JOIN and (
+            step.how == JOIN_RIGHT_SEMI or step.how == JOIN_RIGHT_ANTI
+        ):
+            # The build side is the output: no probe column stays.
+            names = List[String]()
+            sources = List[String]()
         elif step.kind == STEP_DROP or (
             step.kind == STEP_JOIN
             and (step.how == JOIN_RIGHT or step.how == JOIN_FULL)
@@ -1542,32 +1558,28 @@ struct _ChunkRunner(Movable):
     def _join(
         mut self, columns: _Columns, s: Int, marks: Int
     ) raises -> _Columns:
-        """A join step over a morsel's collected columns. An inner, semi or
-        anti join probes its table (`ScanStructure`) with the key columns
-        only and keeps every other column a dictionary over where it is:
-        the probe side through the matched probe rows, the build side
-        through the matched build rows (no payload is gathered, as
-        DuckDB's probe slices the probe chunk and emits build columns as
-        dictionary vectors, `EmitDictVectors`). Any other join probes the
-        morsel's frame; a right or full join flags the build rows it
-        matched in the table (`marks` is their address), for the rows no
-        morsel matched to come out after the probe."""
+        """A join step over a morsel's collected columns: it probes the
+        step's table (`ScanStructure`) with the key columns only and keeps
+        the probe side a dictionary over where it is (the probe slices its
+        chunk, DuckDB's ScanStructure). An inner join leaves the build
+        side a dictionary over the build's columns (`EmitDictVectors`); a
+        left, full or right join gathers it (`GatherRHS`), and flags the
+        build rows it matched for `_emit_unmatched`, as a right-semi or
+        right-anti join does without emitting anything. A step with no
+        table (nested keys) or whose keys need dictionaries unified joins
+        the morsel's frame eagerly."""
         ref step = self.steps[s]
         ref input = self.schemas[][s]
         ref output = self.schemas[][s + 1]
         ref right = self.joins[][step.join]
-        var dictionary = (
-            step.how == JOIN_INNER
-            or step.how == JOIN_SEMI
-            or step.how == JOIN_ANTI
-        ) and Bool(self.indexes[][step.join])
-        if dictionary:
+        var direct = Bool(self.indexes[][step.join])
+        if direct:
             for i in range(len(step.names)):
                 var lt = input.column(step.names[i]).dtype()
                 var rt = right.column(step.right_keys[i]).dtype()
-                if lt != rt or lt.is_categorical() or lt.is_nested():
-                    dictionary = False
-        if not dictionary:
+                if lt != rt or lt.is_nested():
+                    direct = False
+        if not direct:
             var frame = columns.whole(self.arena, input)
             var joined = frame._join_impl(
                 right,
@@ -1576,8 +1588,6 @@ struct _ChunkRunner(Movable):
                 how=step.how,
                 suffix=step.suffix,
                 coalesce=step.coalesce,
-                prepared=self.indexes[][step.join],
-                workers=1,
             )
             return _Columns.of_frame(self.arena, joined)
         trace_path("pipeline.join_dictionary")
@@ -1586,11 +1596,18 @@ struct _ChunkRunner(Movable):
             if keys[k].is_chunked():
                 keys[k] = keys[k].rechunk()
         var scan = ScanStructure(self.indexes[][step.join].value(), step.how)
+        var how = step.how
+        var semi_or_anti = how == JOIN_SEMI or how == JOIN_ANTI
+        var right_semi = how == JOIN_RIGHT_SEMI or how == JOIN_RIGHT_ANTI
+        var pairs = not semi_or_anti and not right_semi
+        var inner = how == JOIN_INNER
         var probe_rows = List[Int](capacity=columns.height)
         var build_rows = List[UInt32]()
-        var inner = step.how == JOIN_INNER
+        var outer_rows = List[Int]()
         if inner:
             build_rows.reserve(columns.height)
+        elif pairs:
+            outer_rows.reserve(columns.height)
         for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
             var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
             scan.probe(keys, low, count)
@@ -1605,7 +1622,13 @@ struct _ChunkRunner(Movable):
                 if inner:
                     for k in range(n):
                         build_rows.append(UInt32(builds[unsafe_offset=k]))
-        if not inner:
+                elif pairs:
+                    for k in range(n):
+                        outer_rows.append(Int(builds[unsafe_offset=k]))
+        if right_semi:
+            # A probe only flags build rows; `_emit_unmatched` emits them.
+            return _Columns.of_frame(self.arena, output)
+        if semi_or_anti:
             if len(probe_rows) == columns.height:
                 return columns.copy()
             return columns.through(probe_rows)
@@ -1621,19 +1644,36 @@ struct _ChunkRunner(Movable):
             result = columns.copy()
         else:
             result = columns.through(probe_rows)
-        result.height = len(build_rows)
-        # The build side's output columns, in the join's output order.
-        var list = len(result.row_lists)
-        result.row_lists.append(build_rows^)
+        result.height = len(build_rows) if inner else len(outer_rows)
         var right_keys = List[Int]()
         for key in step.right_keys:
             right_keys.append(right._index(key))
-        for i in range(right.width()):
-            if step.coalesce and i in right_keys:
-                continue
-            result.handles.append(self.builds[s][i])
-            result.starts.append(0)
-            result.lists.append(list)
+        if inner:
+            # The build side's output columns, in the join's output order.
+            var list = len(result.row_lists)
+            result.row_lists.append(build_rows^)
+            for i in range(right.width()):
+                if step.coalesce and i in right_keys:
+                    continue
+                result.handles.append(self.builds[s][i])
+                result.starts.append(0)
+                result.lists.append(list)
+        else:
+            var sources = List[Series]()
+            for i in range(right.width()):
+                if step.coalesce and i in right_keys:
+                    continue
+                sources.append(right._columns[i].copy())
+            var gathered = take_parallel(
+                sources^,
+                outer_rows^,
+                1,
+                or_null=how == JOIN_LEFT or how == JOIN_FULL,
+            )
+            for g in range(len(gathered)):
+                result.handles.append(self.arena.add(gathered[g]))
+                result.starts.append(0)
+                result.lists.append(-1)
         if result.width() != output.width():
             raise Error("pipeline join: output columns differ from its schema")
         return result^
@@ -1897,7 +1937,7 @@ struct _PipelineJob(Job):
         for step in steps:
             if (
                 step.kind == STEP_JOIN
-                and (step.how == JOIN_RIGHT or step.how == JOIN_FULL)
+                and join_emits_build_rows(step.how)
                 and indexes[][step.join]
             ):
                 self.marks.append(indexes[][step.join].value().found_address())
@@ -2177,19 +2217,25 @@ struct _PipelineJob(Job):
         thread of DuckDB's `PhysicalHashJoin::GetData` scans its share of
         the hash table's rows for unmatched ones."""
         ref marks = self.unmatched_marks[]
+        ref step = self.steps[self.unmatched_step]
+        # A right-semi join emits the flagged rows, the others the rest.
+        var want = UInt8(1) if step.how == JOIN_RIGHT_SEMI else UInt8(0)
         var rows = List[Int]()
         var stop = offset + length
         var r = offset
         while r < stop:
-            # Eight build rows a word while every worker matched them all.
+            # Eight build rows a word while every worker's flags agree
+            # none of them is wanted.
             if r + 8 <= stop:
-                var all = UInt64(0x0101010101010101)
+                var skip = UInt64(0x0101010101010101) if want == 0 else UInt64(
+                    0
+                )
                 var merged = UInt64(0)
                 for m in marks:
                     merged |= Pointer[UInt64, MutAnyOrigin](
                         unsafe_from_address=m + r
                     )[]
-                if merged == all:
+                if merged == skip:
                     r += 8
                     continue
             var seen = UInt8(0)
@@ -2197,13 +2243,14 @@ struct _PipelineJob(Job):
                 seen |= Pointer[UInt8, MutAnyOrigin](unsafe_from_address=m)[
                     unsafe_offset=r
                 ]
-            if seen == 0:
+            if seen == want:
                 rows.append(r)
             r += 1
         if len(rows) == 0:
             return self.unmatched_probe[].clear()
         trace_path("pipeline.join_unmatched")
-        ref step = self.steps[self.unmatched_step]
+        if step.how == JOIN_RIGHT_SEMI or step.how == JOIN_RIGHT_ANTI:
+            return self.frame[]._filter_rows(rows^)
         return self.unmatched_probe[]._join_impl(
             self.frame[]._filter_rows(rows^),
             left_on=step.names,
@@ -2538,16 +2585,14 @@ def _emit_unmatched(
     var next_morsel = len(jobs[0].ranges[]) // 2
     var last = -1
     for j in range(len(steps)):
-        if steps[j].kind == STEP_JOIN and (
-            steps[j].how == JOIN_RIGHT or steps[j].how == JOIN_FULL
-        ):
+        if steps[j].kind == STEP_JOIN and (join_emits_build_rows(steps[j].how)):
             last = j
     if last < 0:
         return
     var source = jobs[0].frame[].clear()
     for j in range(last + 1):
-        if steps[j].kind != STEP_JOIN or not (
-            steps[j].how == JOIN_RIGHT or steps[j].how == JOIN_FULL
+        if steps[j].kind != STEP_JOIN or not join_emits_build_rows(
+            steps[j].how
         ):
             continue
         ref build = joins[][steps[j].join]
@@ -3121,7 +3166,7 @@ def _run_pipeline(
     for step in steps:
         if (
             step.kind == STEP_JOIN
-            and (step.how == JOIN_RIGHT or step.how == JOIN_FULL)
+            and join_emits_build_rows(step.how)
             and indexes[][step.join]
         ):
             indexes[][step.join].value().reset_found()
@@ -3246,9 +3291,7 @@ def _run_pipeline(
     # An outer join's unmatched build rows run after every morsel of the
     # source (`_emit_unmatched`), and the workers finish after them.
     for step in steps:
-        if step.kind == STEP_JOIN and (
-            step.how == JOIN_RIGHT or step.how == JOIN_FULL
-        ):
+        if step.kind == STEP_JOIN and join_emits_build_rows(step.how):
             for w in range(len(jobs)):
                 jobs[w].finishes = False
     try:

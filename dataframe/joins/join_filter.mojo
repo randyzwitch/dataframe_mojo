@@ -29,7 +29,12 @@ takes its filters (`PushedJoinFilter`).
 from std.memory import ArcPointer, Pointer
 
 from dataframe.dtype import DataType
-from dataframe.join_type import JOIN_INNER, JOIN_RIGHT, JOIN_SEMI
+from dataframe.join_type import (
+    JOIN_INNER,
+    JOIN_RIGHT,
+    JOIN_RIGHT_SEMI,
+    JOIN_SEMI,
+)
 from dataframe.kernels.runtime_filter import KeyBloom, build_bloom
 from dataframe.parallel import Job, partitions, run_jobs, worker_count
 from dataframe.series import Series
@@ -316,7 +321,12 @@ def finalize_filters(
 def supports_join_filters(how: Int) -> Bool:
     """JoinFilterPushdownUtil::JoinTypeIsSupported among the pipeline's
     join steps: a probe row that matches nothing makes no output row."""
-    return how == JOIN_INNER or how == JOIN_SEMI or how == JOIN_RIGHT
+    return (
+        how == JOIN_INNER
+        or how == JOIN_SEMI
+        or how == JOIN_RIGHT
+        or how == JOIN_RIGHT_SEMI
+    )
 
 
 def keep_rows(
