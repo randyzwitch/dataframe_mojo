@@ -20,6 +20,7 @@ can share one scan, with checked arithmetic and optional numeric Boolean predica
 | Area | Accepted regions |
 | --- | --- |
 | Values | Native columns, binary arithmetic, bounded trees of `+`, `-`, `*` |
+| Ordered reductions | Native FIRST/LAST and ARG_MIN/ARG_MAX, globally or within bounded integer-key groups |
 | Conditional values | Numeric `when/then/otherwise` chains feeding reductions |
 | Filters | Literal ranges, same-dtype column comparisons, null tests, AND/OR/NOT |
 | Grouping | Up to four native Int32/Int64 keys, at most 65,536 groups including null tuples |
@@ -649,3 +650,26 @@ CPU adjudication. Float64 input columns remain on CPU.
 The [numerical contract and error-bound derivation](design/metal-moments.md)
 separate direct GPU accuracy from CPU adjudication. Moment queries use their
 own build- and layout-matched calibration keys; unmeasured shapes remain on CPU.
+
+### Native ordered reductions
+
+`first`, `last`, `arg_min` and `arg_max` accept native Int32, Int64,
+Float32 and Bool columns, globally or with the existing integer tuple keys
+and fused filters. FIRST/LAST preserve the source dtype and payload;
+`ignore_nulls=True` skips null values. ARG_MIN/MAX ignore null values,
+return nullable UInt32 positions and select the first tie. Numbers precede
+NaNs for extrema; an all-NaN input selects the first NaN. Signed zeros tie.
+
+Positions refer to the selected rows within each group, after filtering.
+An explicit `drop_nulls().arg_min()` or `drop_nulls().arg_max()` also removes
+null positions. Empty global FIRST/LAST and ARG_MIN/MAX results are null.
+FIRST/LAST return the chosen value without numeric conversion, preserving
+Float32 NaN payloads, signed zeros and subnormals, and full-width Int64 values.
+
+One scan shares up to four distinct `(column, drop_nulls)` states across the
+ordered outputs. Inputs can have nullable, sliced or chunked native storage;
+Bool values remain bit-packed. Grouping uses up to four Int32/Int64 keys and
+at most 65,536 groups. Expressions other than a native column with optional
+DROP_NULLS, and projections mixing these with other aggregate families, use
+CPU execution. Automatic placement requires matching measurements for
+`ordered_reductions:v1:` keys.
