@@ -7,27 +7,7 @@ from .reduction_inputs import _place_chunks
 from .typed_storage import NativeColumnAny, coalesced_native_chunks
 
 
-@fieldwise_init
-struct NumericView(Copyable, Movable):
-    var values: DeviceBuffer[DType.uint8]
-    var bits: DeviceBuffer[DType.uint8]
-    var bit_offset: Int
-    var rows: Int
-    var tag: Int
-    var nullable: Bool
-
-    def view(self, start: Int, length: Int) raises -> Self:
-        var width = 8 if self.tag == 1 else 1 if self.tag == 3 else 4
-        return Self(
-            self.values.create_sub_buffer[DType.uint8](
-                start * width, length * width
-            ),
-            self.bits.copy(),
-            self.bit_offset + start if self.nullable else 0,
-            length,
-            self.tag,
-            self.nullable,
-        )
+from .numeric_view import NumericView
 
 
 def _place[
@@ -81,8 +61,10 @@ def numeric_views(
 ) raises -> List[NumericView]:
     var dtype = frame.column(name).dtype()
     if dtype == DataType.BOOL:
-        return _place[DType.bool](
-            frame, name, scope, zero_copy, empty, 3, owners, coalesce
+        from .packed_bool_input import place_packed_bool
+
+        return place_packed_bool(
+            frame.column(name), scope, zero_copy, owners, coalesce
         )
     if dtype == DataType.INT32:
         return _place[DType.int32](
@@ -99,9 +81,13 @@ def numeric_views(
 
 def single_native_span(series: Series) raises -> Bool:
     """Whether all logical chunks can share one native value/bitmap mapping."""
-    comptime for i in range(4):
+    if series.dtype() == DataType.BOOL:
+        from .packed_bool_input import coalesced_bool_chunks
+
+        return len(coalesced_bool_chunks(series)) == 1
+    comptime for i in range(3):
         comptime D = DType.int32 if i == 0 else (
-            DType.int64 if i == 1 else DType.float32 if i == 2 else DType.bool
+            DType.int64 if i == 1 else DType.float32
         )
         if series.dtype() == DataType.of(D):
             var groups = coalesced_native_chunks[D](series)

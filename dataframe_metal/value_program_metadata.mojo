@@ -57,6 +57,7 @@ def write_predicate(
             UInt64(input.bit_offset)
             | (UInt64(input.nullable) << 32)
             | (UInt64(input.tag) << 33)
+            | (UInt64(input.value_bit_offset) << 35)
         )
         words[base + 2] = bitcast[DType.uint64](clause.low)
         words[base + 3] = bitcast[DType.uint64](clause.high)

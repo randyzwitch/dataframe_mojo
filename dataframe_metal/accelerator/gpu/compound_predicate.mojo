@@ -124,12 +124,12 @@ def predicate_matches(
             PREDICATE_HEADER_WORDS + i * PREDICATE_FIELD_WORDS
         )
         var slot = Int(clause[unsafe_offset=0])
-        var tag = UInt32(clause[unsafe_offset=1] >> 33)
+        var tag = UInt32(clause[unsafe_offset=1] >> 33) & 3
         var nullable = (clause[unsafe_offset=1] >> 32) & 1
         var offset = UInt32(clause[unsafe_offset=1]) + UInt32(row_base)
         var values = _pointer(
             slot, v0, v1, v2, v3, v4, v5, v6, v7, predicate
-        ).unsafe_offset(row_base * (8 if tag == 1 else 1 if tag == 3 else 4))
+        ).unsafe_offset(0 if tag == 3 else row_base * (8 if tag == 1 else 4))
         var bits = _pointer(
             slot, b0, b1, b2, b3, b4, b5, b6, b7, predicate_bits
         )
@@ -143,7 +143,16 @@ def predicate_matches(
         var kept = False
         if kind == 1:
             if flags >> 5 == UInt32(COL):
-                matched = valid and Bool(values[unsafe_offset=row])
+                var value_bit = (
+                    Int((clause[unsafe_offset=1] >> 35) & 7) + row_base + row
+                )
+                matched = valid and Bool(
+                    (
+                        values[unsafe_offset=value_bit // 8]
+                        >> UInt8(value_bit % 8)
+                    )
+                    & 1
+                )
             elif flags >> 5 == UInt32(EQ_MISSING):
                 if valid:
                     matched = (

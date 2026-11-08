@@ -1,4 +1,4 @@
-"""Native byte-width Bool predicate ABI, bitmap offsets and SQL composition."""
+"""Native packed Bool predicate ABI, bitmap offsets and SQL composition."""
 from std.memory import Pointer
 from std.testing import assert_equal
 from max.gpu import global_idx
@@ -57,12 +57,13 @@ def main() raises:
     _ = require_metal()
     var rows = 4096
     var capacity = rows + 128
-    var booleans = List[UInt8]()
+    var booleans = List[UInt8](length=(capacity + 15) // 8, fill=0)
     var numbers = List[Int32]()
     var bool_bits = List[UInt8](length=(capacity + 15) // 8, fill=0)
     var int_bits = List[UInt8](length=(capacity + 15) // 8, fill=0)
     for i in range(capacity):
-        booleans.append(UInt8(i % 5 < 2))
+        if i % 5 < 2:
+            booleans[(i + 5) // 8] |= UInt8(1 << ((i + 5) % 8))
         numbers.append(Int32(i % 7 - 3))
         if i % 11 != 0:
             bool_bits[(i + 3) // 8] |= UInt8(1 << ((i + 3) % 8))
@@ -78,7 +79,12 @@ def main() raises:
         var inverted = case == 1 or case == 3 or case == 7
         var comparison = COL if case != 2 and case != 3 else 0
         program[at + 9] = 0
-        program[at + 10] = UInt64(3) | (UInt64(1) << 32) | (UInt64(3) << 33)
+        program[at + 10] = (
+            UInt64(3)
+            | (UInt64(1) << 32)
+            | (UInt64(3) << 33)
+            | (UInt64(5) << 35)
+        )
         program[at + 14] = UInt64(
             3 | (1 << 2) | (Int(inverted) << 4) | (comparison << 5)
         )
@@ -91,7 +97,7 @@ def main() raises:
     var scope = Scope()
     var ctx = scope.context()
     var metadata = ctx.enqueue_create_buffer[DType.uint64](len(program))
-    var boolean = ctx.enqueue_create_buffer[DType.uint8](capacity)
+    var boolean = ctx.enqueue_create_buffer[DType.uint8](len(booleans))
     var integer = ctx.enqueue_create_buffer[DType.int32](capacity)
     var bbits = ctx.enqueue_create_buffer[DType.uint8](len(bool_bits))
     var nbits = ctx.enqueue_create_buffer[DType.uint8](len(int_bits))
