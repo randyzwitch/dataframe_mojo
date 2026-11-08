@@ -91,7 +91,12 @@ def predicate_key(plan: PredicateComposition) -> String:
     var advanced = False
     var members = False
     for clause in plan.program.clauses:
-        advanced = advanced or clause.kind != RANGE_CLAUSE or clause.inverted
+        advanced = (
+            advanced
+            or clause.kind != RANGE_CLAUSE
+            or clause.inverted
+            or clause.comparison != 0
+        )
         members = members or clause.kind == MEMBERSHIP_CLAUSE
     var key = String(
         "predicate_reductions:v3:" if members else "predicate_reductions:v2:" if advanced else "predicate_reductions:v1:"

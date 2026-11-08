@@ -148,6 +148,18 @@ def test_metal_missing_predicate_matches_columns_literals_and_negation() raises:
             "predicate " + String(checked),
         )
         checked += 1
+    from dataframe_metal.predicate_plan import plan_predicates, predicate_key
+
+    var ordinary = plan_predicates(
+        frame.lazy().filter(col("a") == 0).select(col("b").sum()),
+        allow_simple=True,
+    )
+    var total = plan_predicates(
+        frame.lazy().filter(col("a").eq_missing(0)).select(col("b").sum()),
+        allow_simple=True,
+    )
+    assert_true(Bool(ordinary) and Bool(total))
+    assert_true(predicate_key(ordinary.value()) != predicate_key(total.value()))
     assert_false(Bool(compile_predicate(col("a").eq_missing(col("f")), frame)))
     assert_false(
         Bool(
@@ -215,7 +227,7 @@ def test_metal_null_fills_public_count_validity_and_shared_aggregates() raises:
         .then(col("f").fill_nan(null(DataType.FLOAT32)))
         .otherwise(col("g").fill_null(1)),
     ]
-    var expected_counts = List[Int64]([3, 4, 6, 4])
+    var expected_counts: List[Int64] = [3, 4, 6, 4]
     for i in range(len(counted)):
         var query = frame.lazy().select(counted[i].count().alias("n"))
         var cpu = query.collect(engine="cpu")
@@ -226,7 +238,7 @@ def test_metal_null_fills_public_count_validity_and_shared_aggregates() raises:
         col("a").fill_null(col("b")),
         col("f").fill_nan(null(DataType.FLOAT32)).fill_null(2),
     ]:
-        var outputs = [
+        var outputs: List[Expr] = [
             value.sum().alias("s"),
             value.count().alias("n"),
             value.mean().alias("avg"),
@@ -307,13 +319,13 @@ def test_metal_missing_comparisons_public_total_nan_null_and_boolean_composition
         col("f").eq_missing(col("g")) | col("f").is_null(),
     ]
     # Hand-enumerated totals independently guard CPU/Metal agreement.
-    var expected_sums = List[Int64]([16, 20, 20, 7, 29, 3, 33, 15, 21, 24])
-    var expected_counts = List[Int64]([4, 4, 4, 2, 6, 2, 6, 2, 6, 5])
+    var expected_sums: List[Int64] = [16, 20, 20, 7, 29, 3, 33, 15, 21, 24]
+    var expected_counts: List[Int64] = [4, 4, 4, 2, 6, 2, 6, 2, 6, 5]
     for index in range(len(predicates)):
-        var predicate = predicates[index]
+        var predicate = predicates[index].copy()
         for grouped in [False, True]:
             var filtered = frame.lazy().filter(predicate)
-            var outputs = [
+            var outputs: List[Expr] = [
                 col("v").sum().alias("s"),
                 col("v").count().alias("n"),
             ]

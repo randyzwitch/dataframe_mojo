@@ -270,8 +270,8 @@ def _emit(
         expression, node.left, frame, clauses, code, inverted
     ) or not _emit(expression, node.right, frame, clauses, code, inverted):
         return False
-    # Push NOT to leaves. Each inverted comparison still rejects nulls;
-    # complementing an is-true mask would incorrectly admit UNKNOWN.
+    # Push NOT to leaves. Ordinary comparisons retain UNKNOWN; total missing
+    # comparisons remain valid, including their null cases.
     code.append(-1 if (node.op == AND) != inverted else -2)
     return True
 
