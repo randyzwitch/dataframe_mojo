@@ -39,10 +39,10 @@ def _numeric_bits_probe(
     result: Pointer[UInt64, MutUntrackedOrigin],
     present: Pointer[UInt32, MutUntrackedOrigin],
     faults: Pointer[UInt32, MutUntrackedOrigin],
-    rows: Int,
+    rows: UInt32,
 ):
     var row = global_idx.x
-    if row >= rows:
+    if row >= Int(rows):
         return
     var op = Int(operations[unsafe_offset=row])
     var tag = tags[unsafe_offset=row]
@@ -154,7 +154,7 @@ def test_metal_numeric_device_bits_match_independently_checked_host_primitives()
         output,
         present,
         flags,
-        n,
+        UInt32(n),
         grid_dim=(n + 255) // 256,
         block_dim=256,
     )
