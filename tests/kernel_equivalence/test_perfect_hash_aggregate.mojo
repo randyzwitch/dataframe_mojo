@@ -1,10 +1,11 @@
-"""Perfect hash group-by (integer keys over a small span) against the same
-grouping by string copies of the keys, which takes the hashed routes."""
+"""Perfect hash group-by (integer keys whose statistics bound them to a
+small span, DuckDB's perfect hash aggregate) against the same grouping by
+string copies of the keys, which takes the hashed table."""
 # contract-group: kernel.reduce
 from std.testing import assert_equal, assert_false, assert_true
 from dataframe import AnyValue, Column, DataFrame, DataType, Expr, Series, col
 from dataframe.categorical import encode
-from dataframe.aggregation.dense import perfect_layout
+from dataframe.aggregation.perfect_hash import perfect_hash
 
 
 def _frame(n: Int, span: Int, chunked: Bool) raises -> DataFrame:
@@ -59,7 +60,8 @@ def _aggregates() -> List[Expr]:
         col("v").first().alias("first"),
         col("f").last().alias("last"),
         col("f").std().alias("std"),
-        col("v").n_unique().alias("distinct"),
+        col("v").median().alias("median"),
+        col("f").implode().alias("list"),
     ]
 
 
@@ -125,13 +127,13 @@ def test_perfect_hash_layout_follows_key_span() raises:
     # 100 values and a null need 7 bits; two such keys need 14, more than
     # DuckDB's 12-bit perfect_ht_threshold.
     var narrow = _frame(500, 100, False)
-    var one = perfect_layout([narrow.column("b")])
-    assert_true(Bool(one))
-    assert_equal(one.value().bits, 7)
-    assert_false(Bool(perfect_layout([narrow.column("b"), narrow.column("b")])))
+    var one = perfect_hash([narrow.column("b")])
+    assert_true(one.used())
+    assert_equal(one.total_bits, 7)
+    assert_false(perfect_hash([narrow.column("b"), narrow.column("b")]).used())
     # A key spanning more than 2^12 values falls back, and still groups.
     var wide = _frame(20_000, 10_000, False)
-    assert_false(Bool(perfect_layout([wide.column("b")])))
+    assert_false(perfect_hash([wide.column("b")]).used())
     var grouped = wide.group_by("b", maintain_order=True).agg(
         [col("v").sum().alias("sum")]
     )
@@ -142,8 +144,8 @@ def test_perfect_hash_layout_follows_key_span() raises:
     for row in range(expected.height()):
         _assert_close(grouped.item(row, "sum"), expected.item(row, "sum"))
     # A float or string key never qualifies.
-    assert_false(Bool(perfect_layout([narrow.column("f")])))
-    assert_false(Bool(perfect_layout([narrow.column("sa")])))
+    assert_false(perfect_hash([narrow.column("f")]).used())
+    assert_false(perfect_hash([narrow.column("sa")]).used())
 
 
 def test_categorical_keys_group_by_their_codes() raises:
@@ -157,9 +159,9 @@ def test_categorical_keys_group_by_their_codes() raises:
         columns.append(encode(frame.column("sb")).renamed("cb"))
         var coded = DataFrame(columns^)
         if n > 0:
-            assert_true(Bool(perfect_layout([coded.column("ca")])))
+            assert_true(perfect_hash([coded.column("ca")]).used())
             assert_true(
-                Bool(perfect_layout([coded.column("ca"), coded.column("cb")]))
+                perfect_hash([coded.column("ca"), coded.column("cb")]).used()
             )
         var key_sets: List[List[String]] = [["a"], ["b"], ["a", "b"]]
         for keys in key_sets:
@@ -191,3 +193,136 @@ def test_categorical_keys_group_by_their_codes() raises:
                     _assert_close(
                         actual.item(row, name), expected.item(row, name)
                     )
+
+
+def test_perfect_hash_groups_come_out_in_slot_order() raises:
+    # Without maintain_order the groups come out as DuckDB's perfect hash
+    # aggregate scans them: by slot, the null key first, then ascending
+    # values. A distinct count keeps the hashed table, whose groups agree.
+    var frame = _frame(3000, 40, True)
+    var grouped = frame.group_by("b").agg(
+        [col("v").sum().alias("sum"), col("v").n_unique().alias("distinct")]
+    )
+    var plain = frame.group_by("b").agg([col("v").sum().alias("sum")])
+    assert_equal(plain.height(), grouped.height())
+    assert_true(plain.item(0, "b").is_null())
+    for row in range(2, plain.height()):
+        assert_true(
+            plain.item(row - 1, "b").numeric[DType.int32]()
+            < plain.item(row, "b").numeric[DType.int32]()
+        )
+    var sorted = grouped.sort("b", nulls_last=False)
+    for row in range(plain.height()):
+        _assert_close(sorted.item(row, "sum"), plain.item(row, "sum"))
+    # Lazily, the pipeline's table takes the source column's statistics.
+    var lazy = (
+        frame.lazy()
+        .filter(col("v") > -30)
+        .group_by("b")
+        .agg([col("v").sum().alias("sum")])
+        .collect()
+    )
+    var eager = (
+        frame.filter(col("v") > -30)
+        .group_by("sb", maintain_order=True)
+        .agg([col("v").sum().alias("sum")])
+    )
+    assert_equal(lazy.height(), eager.height())
+    var by_key = lazy.sort("b", nulls_last=False)
+    var expected = eager.with_column(
+        eager.column("sb").cast(DataType.INT32).renamed("b")
+    ).sort("b", nulls_last=False)
+    for row in range(by_key.height()):
+        _assert_close(by_key.item(row, "sum"), expected.item(row, "sum"))
+
+
+def test_ungrouped_n_unique_counts_in_a_table() raises:
+    # n_unique over no groups counts the values' groups in an aggregate
+    # table (the ungrouped aggregate's distinct table), eagerly and in the
+    # pipeline's ungrouped sink, nulls once unless ignored.
+    for n in [0, 1, 65, 140_000]:
+        var frame = _frame(n, 40, n > 2)
+        for name in ["a", "b", "v", "f", "sa"]:
+            var expected = frame.group_by(name).agg(
+                [col(name).len().alias("n")]
+            )
+            var with_null = expected.height()
+            var nulls = expected.filter(col(name).is_null()).height()
+            var eager = frame.select_exprs(
+                [
+                    col(name).n_unique().alias("u"),
+                    col(name).n_unique(ignore_nulls=True).alias("i"),
+                ]
+            )
+            assert_equal(
+                Int(eager.item(0, "u").numeric[DType.int64]()), with_null
+            )
+            assert_equal(
+                Int(eager.item(0, "i").numeric[DType.int64]()),
+                with_null - nulls,
+            )
+            # The filter keeps every row, so the pipeline's ungrouped sink
+            # (not the in-memory route) counts them.
+            var lazy = (
+                frame.lazy()
+                .filter(col("f").is_null() | (col("f") > -1000.0))
+                .select_exprs(
+                    [
+                        col(name).n_unique().alias("u"),
+                        col("v").sum().alias("s"),
+                    ]
+                )
+                .collect()
+            )
+            assert_equal(
+                Int(lazy.item(0, "u").numeric[DType.int64]()), with_null
+            )
+
+
+def test_perfect_hash_keys_without_nulls() raises:
+    # Flat key vectors with every row valid take the location pass eight
+    # rows at a time; narrow, unsigned and negative keys all qualify.
+    var n = 5000
+    var small = List[Int16]()
+    var wide = List[UInt64]()
+    var v = List[Int64]()
+    for row in range(n):
+        small.append(Int16(row % 37 - 5))
+        wide.append(UInt64(1) << 63 | UInt64(row % 11))
+        v.append(Int64(row % 13))
+    var frame = DataFrame(
+        [
+            Series("s", Column[Int16](small^)),
+            Series("w", Column[UInt64](wide^)),
+            Series("v", Column[Int64](v^)),
+        ]
+    )
+    frame = frame.with_column(
+        frame.column("s").cast(DataType.STRING).renamed("ss")
+    )
+    frame = frame.with_column(
+        frame.column("w").cast(DataType.STRING).renamed("sw")
+    )
+    assert_true(perfect_hash([frame.column("s"), frame.column("w")]).used())
+    var actual = frame.group_by(["s", "w"], maintain_order=True).agg(
+        [col("v").sum().alias("sum"), col("v").len().alias("len")]
+    )
+    var expected = frame.group_by(["ss", "sw"], maintain_order=True).agg(
+        [col("v").sum().alias("sum"), col("v").len().alias("len")]
+    )
+    assert_equal(actual.height(), expected.height())
+    for row in range(actual.height()):
+        _assert_close(
+            DataFrame([actual.column("s").cast(DataType.STRING)]).item(
+                row, "s"
+            ),
+            expected.item(row, "ss"),
+        )
+        _assert_close(
+            DataFrame([actual.column("w").cast(DataType.STRING)]).item(
+                row, "w"
+            ),
+            expected.item(row, "sw"),
+        )
+        _assert_close(actual.item(row, "sum"), expected.item(row, "sum"))
+        _assert_close(actual.item(row, "len"), expected.item(row, "len"))

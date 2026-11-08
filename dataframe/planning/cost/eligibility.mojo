@@ -113,10 +113,6 @@ def pipeline_eligibility(
         return PipelineEligibility(False, "ordered_slice_requires_batches")
     if not _pipeline_steps(operations, indexes):
         return PipelineEligibility(False, "operation_requires_batches")
-    if distinct and key_count == 0:
-        # Grouped distinct counts have the aggregate table's distinct
-        # tables; a global one has no grouped sink to count in.
-        return PipelineEligibility(False, "distinct_without_probe_join")
     if not (join_count == 0 or key_count == 0 or not ordered):
         return PipelineEligibility(False, "ordered_grouped_join")
     if not (key_count > 0 or not _order_sensitive(expressions)):

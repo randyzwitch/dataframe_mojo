@@ -108,6 +108,13 @@ def projections() raises -> List[Expr]:
         (col("price") * col("price")).alias("r"),
         (col("price") + lit("0.5").cast(DataType.decimal(3, 1))).alias("t"),
         col("price").cast(DataType.FLOAT64).alias("u"),
+        # Booleans cast to 1 / 0 in lanes, a null staying null.
+        (col("a") > col("b").cast(DataType.INT64))
+        .cast(DataType.INT64)
+        .alias("bi"),
+        (col("a").is_not_null() & (col("f") < lit(0.0)))
+        .cast(DataType.FLOAT64)
+        .alias("bf"),
         (col("a") > col("b").cast(DataType.INT64)).alias("v"),
         col("s").str().len_bytes().alias("w"),
         col("s").alias("x"),

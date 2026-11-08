@@ -100,6 +100,12 @@ from dataframe.aggregation.function import (
     table_reduction,
     table_states_supported,
 )
+from dataframe.aggregation.perfect_hash import (
+    PerfectHash,
+    group_locations,
+    key_word,
+    perfect_hash,
+)
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
@@ -576,6 +582,24 @@ struct AggregateLayout(Copyable, Movable):
     var distinct_keys: List[List[Series]]
     var distinct_addressed: List[List[Bool]]
     var distinct_radix: List[ArcPointer[_SinkBits]]
+    # The perfect hash table's shape when the table is one (none by
+    # default): every worker's table then holds a row for every key
+    # combination, found from the keys' bits (`perfect_hash.mojo`).
+    var perfect: PerfectHash
+
+    def use_perfect_hash(mut self, keys: List[Series]) raises:
+        """Make this a perfect hash table when DuckDB's planner would
+        (`CanUsePerfectHashAggregate`) for the grouping keys `keys`, the
+        layout's own key columns carrying their statistics: never with a
+        distinct count, which perfect hash aggregates do not take."""
+        if len(self.distinct) > 0 or len(keys) != len(self.key_templates):
+            return
+        for key in self.key_templates:
+            if _width(key) != 1:
+                return
+        self.perfect = perfect_hash(keys)
+        if self.perfect.used():
+            trace_path("aggregate_table.perfect_hash")
 
     def distinct_layout(self, d: Int) -> AggregateLayout:
         """Distinct count d's table: its keys and no states."""
@@ -590,6 +614,7 @@ struct AggregateLayout(Copyable, Movable):
             List[List[Series]](),
             List[List[Bool]](),
             List[ArcPointer[_SinkBits]](),
+            PerfectHash.none(),
         )
 
 
@@ -687,6 +712,7 @@ def aggregate_layout(
         distinct_keys^,
         distinct_addressed^,
         distinct_radix^,
+        PerfectHash.none(),
     )
 
 
@@ -1307,6 +1333,13 @@ struct AggregateSink(Movable):
     var by_address: List[Int]
     var owned: List[Reducer]
     var buffered: List[_OrderedBuffer]
+    # A perfect hash table (`AggregateLayout.perfect`): its shape, and a
+    # row of `parts.stride` words for every group slot (DuckDB's `data`),
+    # all empty until a row finds it; word 1 of a slot's row is then its
+    # `group_is_set` flag and word 2 its first row. None for a hashed
+    # table.
+    var perfect: PerfectHash
+    var perfect_rows: List[UInt64]
 
     def __init__(
         out self,
@@ -1369,6 +1402,12 @@ struct AggregateSink(Movable):
                 self.by_address.append(s)
             self.owned.append(layout.templates[s].make(0))
             self.buffered.append(_OrderedBuffer())
+        self.perfect = layout.perfect.copy()
+        self.perfect_rows = List[UInt64]()
+        if self.perfect.used():
+            self.perfect_rows = List[UInt64](
+                length=self.perfect.total_groups() * self.parts.stride, fill=0
+            )
         if distinct:
             self.distinct_slots = layout.distinct.copy()
             for d in range(len(layout.distinct)):
@@ -1503,6 +1542,10 @@ struct AggregateSink(Movable):
             return
         for column in hold:
             self.held.append(column.copy())
+        if self.perfect.used():
+            self._perfect_groups(keys, first, count)
+            self._update_groups(inputs, first, count, columns)
+            return
         var constant = count > 1
         var zero = zero_selection().data
         for c in range(len(keys)):
@@ -1513,7 +1556,18 @@ struct AggregateSink(Movable):
             self._dictionary_groups(keys[0], first, count)
         else:
             self._find_or_create(keys, first, count)
-        # The chunk's states, by the address of each row's group.
+        self._update_groups(inputs, first, count, columns)
+        self._sink_distinct(keys, inputs, hold, first, count)
+
+    def _update_groups(
+        mut self,
+        inputs: List[UnifiedVectorFormat],
+        first: Int,
+        count: Int,
+        columns: List[Series],
+    ) raises:
+        """The chunk's states, by the address of each row's group in
+        `groups` (`UpdateStates`)."""
         _update_states(
             self.slots,
             inputs,
@@ -1532,7 +1586,54 @@ struct AggregateSink(Movable):
         if len(self.by_address) > 0 and self.only < 0:
             self._update_by_address(columns, first, count)
         self.sunk += count
-        self._sink_distinct(keys, inputs, hold, first, count)
+
+    def _perfect_groups(
+        mut self, keys: List[KeyVector], first: Int, count: Int
+    ) raises:
+        """`PerfectAggregateHashTable::AddChunk`'s group addresses: each
+        row's slot from its keys' bits (`ComputeGroupLocation`), checked
+        against the table's size (statistics that do not hold for the
+        data raise, as DuckDB's do), the slot marked set (with the row, its
+        first) and its row's address into `groups`."""
+        # The locations are computed into the address vector itself, each
+        # then replaced by its row's address (DuckDB's `addresses`).
+        var groups = self.groups.unsafe_ptr()
+        var slots = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=Int(groups)
+        )
+        for k in range(count):
+            slots[unsafe_offset=k] = 0
+        var shift = self.perfect.total_bits
+        for c in range(len(keys)):
+            shift -= self.perfect.bits[c]
+            group_locations(
+                keys[c].format,
+                keys[c].map,
+                keys[c].map_length,
+                self.perfect.minima[c],
+                shift,
+                count,
+                slots,
+            )
+        var total = UInt64(self.perfect.total_groups())
+        var base = Int(self.perfect_rows.unsafe_ptr())
+        var bytes = 8 * self.parts.stride
+        for k in range(count):
+            var slot = slots[unsafe_offset=k]
+            if slot >= total:
+                raise Error(
+                    "Perfect hash aggregate: aggregate group "
+                    + String(slot)
+                    + " exceeded total groups "
+                    + String(total)
+                    + ", so the key statistics do not hold for the data"
+                )
+            var at = base + Int(slot) * bytes
+            var row = _words_at(at)
+            if row[unsafe_offset=1] == 0:
+                row[unsafe_offset=1] = 1
+                row[unsafe_offset=2] = UInt64(first + k)
+            groups[unsafe_offset=k] = at
 
     def _update_by_address(
         mut self, columns: List[Series], first: Int, count: Int
@@ -2499,76 +2600,100 @@ struct _FinishJob(Job):
         ref held = Pointer[_HeldBuffers, MutAnyOrigin](
             unsafe_from_address=self.held
         )[]
-        if self.filter and final.count() > 0:
-            # The reductions the filter reads, finished over every group,
-            # then only the kept groups' rows, in order, for the scan.
-            ref filter = self.filter.value()
-            var results = List[Reducer](capacity=len(filter.slots))
-            for s in filter.slots:
-                var one = _Finalizer(
-                    self.slots[s], self.templates[s], final.count(), held
-                )
-                for lo in range(0, final.count(), _BATCH):
-                    one.scan(final, lo, min(final.count(), lo + _BATCH), held)
-                results.append(one^.reducer())
-            var kept = filter.keep(filter.context, results)
-            if len(kept) < final.count():
-                var into = _Groups(
-                    final.width(),
-                    final.addressed.copy(),
-                    final.stride - final.states_at,
-                    len(kept),
-                )
-                for g in kept:
-                    _ = into.copy_row(final.at(g))
-                swap(final, into)
-                _ = into^
-        # The groups are scanned out a vector of rows at a time (DuckDB's
-        # `Scan`: each chunk of rows gathered into every output column, its
-        # states finalized), so each group's row is read from memory once,
-        # not once per reduction and key.
-        var count = final.count()
-        var outputs = List[_Finalizer](capacity=len(self.templates))
-        for s in range(len(self.templates)):
-            if self.slots[s].kind == _K_TOP_ROWS:
-                var w0 = final.states_at + self.slots[s].offset
-                var words = final.rows.unsafe_ptr()
-                for g in range(count):
-                    var w = g * final.stride + w0
-                    for p in range(Int(words[unsafe_offset=w])):
-                        self.top_rows.append(
-                            Int(words[unsafe_offset=w + 2 + 2 * p])
-                        )
-            outputs.append(
-                _Finalizer(self.slots[s], self.templates[s], count, held)
+        _scan_groups(
+            final,
+            self.slots,
+            self.templates,
+            self.key_templates,
+            held,
+            self.filter,
+            self.states,
+            self.keys,
+            self.firsts,
+            self.top_rows,
+        )
+
+
+def _scan_groups(
+    mut final: _Groups,
+    slots: List[AggregateFunction],
+    templates: List[ReducerSpec],
+    key_templates: List[Series],
+    held: _HeldBuffers,
+    filter: Optional[GroupFilter],
+    mut states: List[Reducer],
+    mut keys: List[Series],
+    mut firsts_out: List[Int],
+    mut top_rows: List[Int],
+) raises:
+    """A finish job's groups (`final`) read out: with `filter`, only the
+    groups it keeps; then every reduction's state finalized and every key
+    column read, a vector of groups at a time, into `states`, `keys`,
+    `firsts_out` (each group's first row) and `top_rows`."""
+    if filter and final.count() > 0:
+        # The reductions the filter reads, finished over every group,
+        # then only the kept groups' rows, in order, for the scan.
+        ref chosen = filter.value()
+        var results = List[Reducer](capacity=len(chosen.slots))
+        for s in chosen.slots:
+            var one = _Finalizer(slots[s], templates[s], final.count(), held)
+            for lo in range(0, final.count(), _BATCH):
+                one.scan(final, lo, min(final.count(), lo + _BATCH), held)
+            results.append(one^.reducer())
+        var kept = chosen.keep(chosen.context, results)
+        if len(kept) < final.count():
+            var into = _Groups(
+                final.width(),
+                final.addressed.copy(),
+                final.stride - final.states_at,
+                len(kept),
             )
-        var key_columns = List[_KeyColumn](capacity=len(self.key_templates))
-        var w = 0
-        for c in range(len(self.key_templates)):
-            key_columns.append(
-                _KeyColumn(
-                    self.key_templates[c],
-                    w,
-                    UInt64(1) << UInt64(c),
-                    count,
-                    held,
-                )
+            for g in kept:
+                _ = into.copy_row(final.at(g))
+            swap(final, into)
+            _ = into^
+    # The groups are scanned out a vector of rows at a time (DuckDB's
+    # `Scan`: each chunk of rows gathered into every output column, its
+    # states finalized), so each group's row is read from memory once,
+    # not once per reduction and key.
+    var count = final.count()
+    var outputs = List[_Finalizer](capacity=len(templates))
+    for s in range(len(templates)):
+        if slots[s].kind == _K_TOP_ROWS:
+            var w0 = final.states_at + slots[s].offset
+            var words = final.rows.unsafe_ptr()
+            for g in range(count):
+                var w = g * final.stride + w0
+                for p in range(Int(words[unsafe_offset=w])):
+                    top_rows.append(Int(words[unsafe_offset=w + 2 + 2 * p]))
+        outputs.append(_Finalizer(slots[s], templates[s], count, held))
+    var key_columns = List[_KeyColumn](capacity=len(key_templates))
+    var w = 0
+    for c in range(len(key_templates)):
+        key_columns.append(
+            _KeyColumn(
+                key_templates[c],
+                w,
+                UInt64(1) << UInt64(c),
+                count,
+                held,
             )
-            w += _width(self.key_templates[c])
-        self.firsts = List[Int](unsafe_uninit_length=count)
-        var firsts = self.firsts.unsafe_ptr()
-        for lo in range(0, count, _BATCH):
-            var hi = min(count, lo + _BATCH)
-            for s in range(len(outputs)):
-                outputs[s].scan(final, lo, hi, held)
-            for c in range(len(key_columns)):
-                key_columns[c].scan(final, lo, hi, held)
-            for g in range(lo, hi):
-                firsts[unsafe_offset=g] = final.first(g)
-        while len(outputs) > 0:
-            self.states.append(outputs.pop(0).reducer())
-        while len(key_columns) > 0:
-            self.keys.append(key_columns.pop(0).column())
+        )
+        w += _width(key_templates[c])
+    firsts_out = List[Int](unsafe_uninit_length=count)
+    var firsts = firsts_out.unsafe_ptr()
+    for lo in range(0, count, _BATCH):
+        var hi = min(count, lo + _BATCH)
+        for s in range(len(outputs)):
+            outputs[s].scan(final, lo, hi, held)
+        for c in range(len(key_columns)):
+            key_columns[c].scan(final, lo, hi, held)
+        for g in range(lo, hi):
+            firsts[unsafe_offset=g] = final.first(g)
+    while len(outputs) > 0:
+        states.append(outputs.pop(0).reducer())
+    while len(key_columns) > 0:
+        keys.append(key_columns.pop(0).column())
 
 
 struct _CombineJob(Job):
@@ -2683,6 +2808,193 @@ def _finalize_distinct(
         _ = tables^
 
 
+struct _PerfectScanJob(Job):
+    """A range of a perfect hash table's group slots, [lo, hi): every
+    worker's rows of those slots combined into the first worker's
+    (`PerfectAggregateHashTable::Combine`), then the occupied slots read out
+    in slot order, each key rebuilt from the slot's bits (`Scan`)."""
+
+    var sinks: Int
+    var held: Int
+    var lo: Int
+    var hi: Int
+    var templates: List[ReducerSpec]
+    var slots: List[AggregateFunction]
+    var key_templates: List[Series]
+    var perfect: PerfectHash
+    var filter: Optional[GroupFilter]
+    var merged: Int
+    var states: List[Reducer]
+    var firsts: List[Int]
+    var keys: List[Series]
+    var top_rows: List[Int]
+
+    def __init__(
+        out self,
+        sinks: Int,
+        held: Int,
+        lo: Int,
+        hi: Int,
+        layout: AggregateLayout,
+        filter: Optional[GroupFilter],
+    ):
+        self.sinks = sinks
+        self.held = held
+        self.lo = lo
+        self.hi = hi
+        self.templates = layout.templates.copy()
+        self.slots = layout.slots.copy()
+        self.key_templates = layout.key_templates.copy()
+        self.perfect = layout.perfect.copy()
+        self.filter = filter.copy()
+        self.merged = 0
+        self.states = List[Reducer]()
+        self.firsts = List[Int]()
+        self.keys = List[Series]()
+        self.top_rows = List[Int]()
+
+    def run(mut self) raises:
+        ref jobs = Pointer[List[AggregateSink], MutAnyOrigin](
+            unsafe_from_address=self.sinks
+        )[]
+        var stride = jobs[0].parts.stride
+        var states_bytes = 8 * jobs[0].parts.states_at
+        var bytes = 8 * stride
+        var base = Int(jobs[0].perfect_rows.unsafe_ptr())
+        var count = 0
+        for slot in range(self.lo, self.hi):
+            var into = base + slot * bytes
+            var mine = _words_at(into)
+            for j in range(1, len(jobs)):
+                var other = (
+                    Int(jobs[j].perfect_rows.unsafe_ptr()) + slot * bytes
+                )
+                var theirs = _words_at(other)
+                if theirs[unsafe_offset=1] == 0:
+                    continue
+                if mine[unsafe_offset=1] == 0:
+                    _ = external_call["memcpy", Int](into, other, bytes)
+                    continue
+                combine(self.slots, into + states_bytes, other + states_bytes)
+                if theirs[unsafe_offset=2] < mine[unsafe_offset=2]:
+                    mine[unsafe_offset=2] = theirs[unsafe_offset=2]
+            count += Int(mine[unsafe_offset=1] != 0)
+        var final = _Groups(
+            len(jobs[0].addressed),
+            jobs[0].addressed.copy(),
+            stride - jobs[0].parts.states_at,
+            count,
+        )
+        var key_count = len(self.key_templates)
+        for slot in range(self.lo, self.hi):
+            var into = base + slot * bytes
+            if _words_at(into)[unsafe_offset=1] == 0:
+                continue
+            var row = _words_at(final.at(final.copy_row(into)))
+            # The row's null bits and key words, from the slot's bits.
+            var nulls = UInt64(0)
+            for c in range(key_count):
+                var key = key_word(self.perfect, c, slot)
+                if not key[0]:
+                    nulls |= UInt64(1) << UInt64(c)
+                row[unsafe_offset=_HEAD + c] = key[1]
+            row[] = 0
+            row[unsafe_offset=1] = nulls
+        self.merged = count
+        ref held = Pointer[_HeldBuffers, MutAnyOrigin](
+            unsafe_from_address=self.held
+        )[]
+        _scan_groups(
+            final,
+            self.slots,
+            self.templates,
+            self.key_templates,
+            held,
+            self.filter,
+            self.states,
+            self.keys,
+            self.firsts,
+            self.top_rows,
+        )
+
+
+def _perfect_finish(
+    mut sinks: List[AggregateSink],
+    layout: AggregateLayout,
+    filter: Optional[GroupFilter],
+) raises -> AggregateResult:
+    """The perfect hash table's finish (`PhysicalPerfectHashAggregate`'s
+    `Combine` and source): the group slots cut into ranges holding about an
+    equal share of what finishing reads (each occupied slot's rows and the
+    values of its quantile states, as `aggregate_finish` cuts partitions),
+    and each range combined and read out on its own thread, one chunk of
+    the result each, in slot order."""
+    var result = AggregateResult()
+    for j in range(len(sinks)):
+        sinks[j].prepare_ordered()
+    var columns = List[List[Series]](capacity=len(sinks))
+    for j in range(len(sinks)):
+        columns.append(sinks[j].held.copy())
+    var held = _HeldBuffers(columns)
+    _ = columns^
+    var stride = sinks[0].parts.stride
+    var counted = List[Int]()
+    for slot in layout.slots:
+        if slot.kind == _K_VALUES:
+            counted.append(sinks[0].parts.states_at + slot.offset + 2)
+    var groups = layout.perfect.total_groups()
+    var weight = List[Int](length=groups, fill=0)
+    var total = 0
+    for j in range(len(sinks)):
+        var rows = sinks[j].perfect_rows.unsafe_ptr()
+        for g in range(groups):
+            var row = g * stride
+            if rows[unsafe_offset=row + 1] == 0:
+                continue
+            var bytes = 8 * stride
+            for w in counted:
+                bytes += 8 * Int(rows[unsafe_offset=row + w])
+            weight[g] += bytes
+            total += bytes
+    var per_job = max(
+        _PARTITION_BYTES, -(-total // max(1, configured_workers()))
+    )
+    var jobs = List[_PerfectScanJob]()
+    var lo = 0
+    var job = 0
+    for g in range(groups):
+        job += weight[g]
+        if job >= per_job or g == groups - 1:
+            if job > 0:
+                jobs.append(
+                    _PerfectScanJob(
+                        Int(Pointer(to=sinks)),
+                        Int(Pointer(to=held)),
+                        lo,
+                        g + 1,
+                        layout,
+                        filter,
+                    )
+                )
+            lo = g + 1
+            job = 0
+    run_jobs(jobs)
+    _ = held^
+    for p in range(len(jobs)):
+        var firsts = List[Int]()
+        var states = List[Reducer]()
+        var keys_out = List[Series]()
+        result.top_rows.extend(Span(jobs[p].top_rows))
+        result.merged += jobs[p].merged
+        swap(firsts, jobs[p].firsts)
+        swap(states, jobs[p].states)
+        swap(keys_out, jobs[p].keys)
+        result.firsts.append(firsts^)
+        result.states.append(states^)
+        result.keys.append(keys_out^)
+    return result^
+
+
 def aggregate_finish(
     mut sinks: List[AggregateSink],
     layout: AggregateLayout,
@@ -2703,6 +3015,8 @@ def aggregate_finish(
     var result = AggregateResult()
     if len(sinks) == 0:
         return result^
+    if layout.perfect.used():
+        return _perfect_finish(sinks, layout, filter)
     if len(layout.distinct) > 0:
         _finalize_distinct(sinks, layout)
     for j in range(len(sinks)):
