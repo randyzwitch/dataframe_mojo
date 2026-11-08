@@ -357,7 +357,7 @@ def scatter(
     """TupleDataCollection::Scatter: the appended rows' values into the
     rows at `state.row_locations`, their heap data at the heap pointers."""
     var rows = _ints(state.rows())
-    ref top = layout.nodes[0]
+    ref top = layout.nodes[][0]
     if top.can_have_null:
         # Every value valid until a null clears its bit.
         var width = validity_bytes(top.column_count())
@@ -389,8 +389,8 @@ def _scatter(
 ):
     """The scatter function of column `col` of layout `node`, from format
     `f`, into the rows at `rows`."""
-    var physical = layout.nodes[node].physicals[col]
-    var offset = layout.nodes[node].offsets[col]
+    var physical = layout.nodes[][node].physicals[col]
+    var offset = layout.nodes[][node].offsets[col]
     var source = state.vector_data[f].unified
     if physical == PHYSICAL_VARCHAR:
         _scatter_strings(
@@ -533,13 +533,13 @@ def _scatter_struct(
                 _bytes(targets[unsafe_offset=i])[unsafe_offset=entry] &= ~(
                     UInt8(1) << bit
                 )
-    var offset = layout.nodes[node].offsets[col]
+    var offset = layout.nodes[][node].offsets[col]
     var struct_rows = List[Int](unsafe_uninit_length=max(append_count, 1))
     var struct_at = struct_rows.unsafe_ptr()
     for i in range(append_count):
         struct_at[unsafe_offset=i] = targets[unsafe_offset=i] + offset
-    var child_node = layout.nodes[node].struct_layouts[col]
-    var width = validity_bytes(layout.nodes[child_node].column_count())
+    var child_node = layout.nodes[][node].struct_layouts[col]
+    var width = validity_bytes(layout.nodes[][child_node].column_count())
     for i in range(append_count):
         _fill_ones(struct_at[unsafe_offset=i], width)
     ref children = state.vector_data[f].children
@@ -574,7 +574,7 @@ def _scatter_list(
     var heap_at = _ints(state.heaps())
     var entry = col >> 3
     var bit = UInt8(col & 7)
-    var offset = layout.nodes[node].offsets[col]
+    var offset = layout.nodes[][node].offsets[col]
     for i in range(append_count):
         var row = targets[unsafe_offset=i]
         var at = source.sel.get_index(append_sel.get_index(i))
@@ -741,7 +741,7 @@ def gather_column(
     """TupleDataCollection::Gather of one column: the rows `scan_sel`
     picks from the row pointers at `rows` into vector `out_column` of
     `result`, at the positions `target_sel` gives."""
-    ref top = layout.nodes[0]
+    ref top = layout.nodes[][0]
     var physical = top.physicals[column_id]
     if physical != PHYSICAL_LIST and physical != PHYSICAL_STRUCT:
         var vector = result.writable(out_column, physical)
@@ -1006,7 +1006,7 @@ def _gather(
 ) raises:
     """The gather function of column `col` of layout `node` into level
     `target`."""
-    ref layout_node = layout.nodes[node]
+    ref layout_node = layout.nodes[][node]
     var physical = layout_node.physicals[col]
     var offset = layout_node.offsets[col]
     var can_have_null = layout_node.can_have_null
@@ -1062,7 +1062,7 @@ def _gather_struct(
 ) raises:
     """TupleDataStructGather: the struct's validity, then its fields from
     the nested rows."""
-    ref layout_node = layout.nodes[node]
+    ref layout_node = layout.nodes[][node]
     var offset = layout_node.offsets[col]
     var can_have_null = layout_node.can_have_null
     var sources = _ints(rows)
@@ -1116,7 +1116,7 @@ def _gather_list(
 ) raises:
     """TupleDataListGather: list entries from the lengths in the heap, then
     the child from the heap data after them."""
-    ref layout_node = layout.nodes[node]
+    ref layout_node = layout.nodes[][node]
     var offset = layout_node.offsets[col]
     var can_have_null = layout_node.can_have_null
     var sources = _ints(rows)
