@@ -7,10 +7,12 @@ from .multi_reduce import Bytes
 
 @always_inline
 def ordered_bits(values: Bytes, tag: UInt32, row: Int) -> UInt64:
-    if tag == 1:
+    var kind = tag & 3
+    if kind == 1:
         return values.unsafe_bitcast[UInt64]()[unsafe_offset=row]
-    if tag == 3:
-        return UInt64(values[unsafe_offset=row] != 0)
+    if kind == 3:
+        var bit = row + Int((tag >> 2) & 7)
+        return UInt64((values[unsafe_offset=bit // 8] >> UInt8(bit % 8)) & 1)
     return UInt64(values.unsafe_bitcast[UInt32]()[unsafe_offset=row])
 
 
@@ -24,7 +26,8 @@ def ordered_better(
     minimum: Bool,
 ) -> Bool:
     """NaNs lose to numbers; numeric ties, all NaNs and signed zero use first row."""
-    if tag == 2:
+    var kind = tag & 3
+    if kind == 2:
         var a = UInt32(candidate)
         var b = UInt32(previous)
         var am = a & 0x7FFF_FFFF
@@ -48,10 +51,10 @@ def ordered_better(
         )
     var a = bitcast[DType.int64](candidate)
     var b = bitcast[DType.int64](previous)
-    if tag == 0:
+    if kind == 0:
         a = Int64(bitcast[DType.int32](UInt32(candidate)))
         b = Int64(bitcast[DType.int32](UInt32(previous)))
-    elif tag == 3:
+    elif kind == 3:
         a = Int64(candidate != 0)
         b = Int64(previous != 0)
     return (

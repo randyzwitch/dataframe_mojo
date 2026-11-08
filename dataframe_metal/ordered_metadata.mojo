@@ -72,6 +72,7 @@ def ordered_metadata(
             UInt64(input.bit_offset)
             | (UInt64(input.nullable) << 32)
             | (UInt64(input.tag) << 33)
+            | (UInt64(input.value_bit_offset) << 35)
         )
         words[at + 2] = UInt64(value.drop_nulls) | (
             UInt64(value.operations) << 8
