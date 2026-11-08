@@ -30,7 +30,12 @@ struct NumericView(Copyable, Movable):
         self.value_bit_offset = value_bit_offset
 
     def view(self, start: Int, length: Int) raises -> Self:
-        if start < 0 or length < 0 or start > self.rows or length > self.rows - start:
+        if (
+            start < 0
+            or length < 0
+            or start > self.rows
+            or length > self.rows - start
+        ):
             raise Error("Metal native input window is out of bounds")
         if self.tag == 3:
             var first = self.value_bit_offset + start

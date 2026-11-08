@@ -22,9 +22,9 @@ def _logical_probe(
         return
     var mask = UInt32(0)
     var numbers = integers.unsafe_bitcast[UInt8]()
-    for case in range(8):
+    for scenario in range(8):
         var selected = predicate_matches(
-            program.unsafe_offset(case * 21),
+            program.unsafe_offset(scenario * 21),
             Int(base),
             row,
             boolean,
@@ -46,7 +46,7 @@ def _logical_probe(
             boolean_bits,
             boolean_bits,
         )
-        mask |= UInt32(selected) << UInt32(case)
+        mask |= UInt32(selected) << UInt32(scenario)
     output[unsafe_offset=row] = mask
 
 
@@ -70,14 +70,14 @@ def main() raises:
         if i % 13 != 0:
             int_bits[(i + 7) // 8] |= UInt8(1 << ((i + 7) % 8))
     var program = List[UInt64](length=8 * 21, fill=0)
-    for case in range(8):
-        var at = case * 21
-        program[at] = 1 if case < 4 else 2
+    for scenario in range(8):
+        var at = scenario * 21
+        program[at] = 1 if scenario < 4 else 2
         # Cases: b, ~b, is_null(b), is_not_null(b), b&n, b|n,
         # b|~n, ~(b&n). Each leaf carries its own SQL validity.
-        program[at + 1] = 2 if case < 4 else 8 if case == 4 else 14
-        var inverted = case == 1 or case == 3 or case == 7
-        var comparison = COL if case != 2 and case != 3 else 0
+        program[at + 1] = 2 if scenario < 4 else 8 if scenario == 4 else 14
+        var inverted = scenario == 1 or scenario == 3 or scenario == 7
+        var comparison = COL if scenario != 2 and scenario != 3 else 0
         program[at + 9] = 0
         program[at + 10] = (
             UInt64(3)
@@ -88,12 +88,14 @@ def main() raises:
         program[at + 14] = UInt64(
             3 | (1 << 2) | (Int(inverted) << 4) | (comparison << 5)
         )
-        if case >= 4:
+        if scenario >= 4:
             program[at + 15] = 1
             program[at + 16] = UInt64(7) | (UInt64(1) << 32)
             program[at + 17] = 1
             program[at + 18] = UInt64(Int32.MAX)
-            program[at + 20] = UInt64(3 | (Int(case == 6 or case == 7) << 4))
+            program[at + 20] = UInt64(
+                3 | (Int(scenario == 6 or scenario == 7) << 4)
+            )
     var scope = Scope()
     var ctx = scope.context()
     var metadata = ctx.enqueue_create_buffer[DType.uint64](len(program))
@@ -142,7 +144,7 @@ def main() raises:
                 (bv and b) or (nv and not n),
                 (bv and not b) or (nv and not n),
             ]
-            for case in range(8):
-                expected |= UInt32(answers[case]) << UInt32(case)
+            for scenario in range(8):
+                expected |= UInt32(answers[scenario]) << UInt32(scenario)
             assert_equal(actual[row], expected)
     print("PASS 131072 actual Metal Bool predicate/offset/composition checks")

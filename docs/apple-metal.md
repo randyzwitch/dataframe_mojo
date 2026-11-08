@@ -444,6 +444,9 @@ one-binary kernels retain their specialized routes.
 ### Boolean and count reductions
 
 Native Bool columns and supported numeric predicates can feed `any` and `all`.
+Boolean values stay in the CPU column's packed bitmap; value-bit and validity-bit
+offsets are independent. Shared slices map in place, and the explicit-copy path
+concatenates packed bitmaps without expanding values to bytes.
 Both the default ignore-null behavior and `ignore_nulls=False` Kleene behavior
 use shared true-count, valid-count and row-count state in the GPU scan. Empty
 ANY is false and empty ALL is true. With Kleene semantics, an unknown remains

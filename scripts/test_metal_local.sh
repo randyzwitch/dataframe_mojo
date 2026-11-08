@@ -51,6 +51,11 @@ pixi run --locked mojo build -O3 -I . scripts/check_metal_logical_device.mojo \
   -o build/contract-tests/metal-logical-device
 build/contract-tests/metal-logical-device
 
+echo "== Packed Boolean storage device conformance"
+pixi run --locked mojo build -O3 -I . scripts/check_metal_bool_storage.mojo \
+  -o build/contract-tests/metal-bool-storage
+build/contract-tests/metal-bool-storage
+
 echo "== Parquet reader (the file-source contracts read Parquet)"
 pixi run --locked -e native build-dfparquet
 
