@@ -197,3 +197,164 @@ def test_metal_distinct_cpu_oracle_keeps_wide_integers_nan_zero_and_null_classes
     )
     assert_equal(counts.item(0, "all").int64(), Int64(8))
     assert_equal(counts.item(0, "nonnull").int64(), Int64(7))
+
+
+def test_metal_distinct_placement_keys_separate_low_and_uncertain_cardinality() raises:
+    from dataframe_metal.distinct_properties import cardinality_key
+    from dataframe_metal.distinct_plan import distinct_key
+
+    var low = List[Int32](length=8192, fill=7)
+    var high = List[Int32]()
+    for i in range(8192):
+        high.append(Int32(i))
+    var a = DataFrame([Series("n", Column[Int32](low^))])
+    var b = DataFrame([Series("n", Column[Int32](high^))])
+    var ap = plan_distinct(a.lazy().select(col("n").n_unique()))
+    var bp = plan_distinct(b.lazy().select(col("n").n_unique()))
+    assert_true(Bool(ap) and Bool(bp))
+    assert_equal(distinct_key(ap.value()), distinct_key(bp.value()))
+    assert_true(":distinct_cardinality=1" in cardinality_key(ap.value(), a))
+    assert_true(
+        ":distinct_cardinality=uncertain" in cardinality_key(bp.value(), b)
+    )
+
+
+# requires: metal
+def test_metal_distinct_public_native_null_nan_zero_and_tuple_groups() raises:
+    from tests.support.metal_outcomes import require_metal
+    from dataframe_metal.distinct_reduce import execute_distinct
+    from dataframe_metal.handoff import execute_timed
+
+    var runtime = require_metal()
+    var base = Int64(1 << 60)
+    var nan = bitcast[DType.float32](UInt32(0x7FC12345))
+    var other_nan = bitcast[DType.float32](UInt32(0xFFC54321))
+    var zero = bitcast[DType.float32](UInt32(0x80000000))
+    var tiny = bitcast[DType.float32](UInt32(1))
+    var frame = DataFrame(
+        [
+            Series(
+                "n",
+                Column[Int32](
+                    [9, 4, 4, -2, -2, 1, 8, 3],
+                    [False, True, True, True, True, True, False, True],
+                ),
+            ),
+            Series(
+                "w",
+                Column[Int64](
+                    [
+                        base + 9,
+                        base + 4,
+                        base + 4,
+                        base - 2,
+                        base - 2,
+                        base + 1,
+                        base + 8,
+                        base + 3,
+                    ],
+                    [False, True, True, True, True, True, False, True],
+                ),
+            ),
+            Series(
+                "f",
+                Column[Float32](
+                    [nan, zero, 0, tiny, -tiny, other_nan, nan, 7],
+                    [True, True, True, True, True, True, True, False],
+                ),
+            ),
+            Series(
+                "b",
+                Column[Bool](
+                    [True, False, True, False, True, False, True, True],
+                    [False, True, True, True, False, True, True, False],
+                ),
+            ),
+            Series("p", Column[Int32]([0, 1, 0, 1, 1, 0, 1, 1])),
+            Series(
+                "k",
+                Column[Int32](
+                    [2, 1, 2, 1, 2, 1, 3, 3],
+                    [True, True, True, True, True, True, False, False],
+                ),
+            ),
+            Series(
+                "j",
+                Column[Int64](
+                    [
+                        base,
+                        base + 1,
+                        base,
+                        base + 1,
+                        base,
+                        base + 1,
+                        base + 2,
+                        base + 2,
+                    ]
+                ),
+            ),
+        ]
+    )
+    var chunked = List[Series]()
+    for name in frame.columns():
+        var source = frame.column(name)
+        chunked.append(
+            Series._from_chunks(
+                [source.slice(0, 1), source.slice(1, 4), source.slice(5, 3)]
+            )
+        )
+    frame = DataFrame(chunked^)
+    var outputs = List[Expr]()
+    for name in ["n", "w", "f", "b"]:
+        outputs.extend(
+            [
+                col(name).n_unique().alias(name + "all"),
+                col(name).n_unique(ignore_nulls=True).alias(name + "nonnull"),
+                col(name).drop_nulls().n_unique().alias(name + "dropped"),
+            ]
+        )
+    for empty in [False, True]:
+        var data = frame.slice(0, 0) if empty else frame.copy()
+        for grouped in [False, True]:
+            for filtered in [False, True]:
+                var selected = data.lazy().filter(
+                    col("p") > 0
+                ) if filtered else data.lazy()
+                var query = selected.group_by(
+                    ["k", "j"], maintain_order=True
+                ).agg(outputs) if grouped else selected.select_exprs(outputs)
+                var cpu = query.collect(engine="cpu")
+                assert_true(execute_distinct(query)[0].equals(cpu))
+                assert_true(execute_timed(query)[0].equals(cpu))
+                assert_true(query.collect(accelerator=runtime).equals(cpu))
+
+
+# requires: metal
+def test_metal_distinct_public_growth_and_resource_limit_fallback_are_exact() raises:
+    from tests.support.metal_outcomes import require_metal
+    from dataframe_metal.distinct_reduce import execute_distinct
+    from dataframe_metal.accelerator.faults import is_data_fault
+
+    var runtime = require_metal()
+    for rows in [20000, 1048577]:
+        var values = List[Int32](capacity=rows)
+        for row in range(rows):
+            values.append(Int32(row))
+        var frame = DataFrame([Series("n", Column[Int32](values^))])
+        var query = frame.lazy().select(col("n").n_unique().alias("count"))
+        if rows == 20000:
+            assert_equal(
+                execute_distinct(query)[0].item(0, "count").int64(), Int64(rows)
+            )
+        else:
+            var failed = False
+            try:
+                _ = execute_distinct(query)
+            except error:
+                assert_true(is_data_fault(error))
+                failed = True
+            assert_true(failed)
+        assert_equal(
+            query.collect(accelerator=runtime).item(0, "count").int64(),
+            Int64(rows),
+        )

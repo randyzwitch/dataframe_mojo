@@ -1,4 +1,5 @@
 """Schema-only exact N_UNIQUE matching over native values and tuple keys."""
+from std.memory import bitcast
 from dataframe import DataType, LazyFrame
 from dataframe.binding import bind
 from dataframe.expr import COL, N_UNIQUE, DROP_NULLS
@@ -135,3 +136,58 @@ def plan_distinct(region: LazyFrame) raises -> Optional[DistinctPlan]:
     if not bind_predicate_inputs(predicate, inputs):
         return None
     return DistinctPlan(fields^, outputs^, inputs^, predicate^, keys^)
+
+
+def distinct_key(plan: DistinctPlan) -> String:
+    var result = String("distinct_reductions:v1:limit1048576:probes512:")
+    for field in plan.fields:
+        var slot = -1
+        for i in range(len(plan.inputs)):
+            if plan.inputs[i] == field.column:
+                slot = i
+        result += ":input" + String(slot) + ":" + field.dtype.name()
+    if plan.keys:
+        for dtype in plan.keys.value().dtypes:
+            result += ":key:" + dtype.name()
+    for output in plan.outputs:
+        result += (
+            ":out"
+            + String(output.field)
+            + ":"
+            + String(Int(output.ignore_nulls))
+        )
+    ref program = plan.predicate
+    for i in range(len(program.clauses)):
+        ref leaf = program.clauses[i]
+        ref bounds = leaf.bounds
+        result += (
+            ":p"
+            + String(program.slots[i])
+            + ":"
+            + String(leaf.kind)
+            + ":"
+            + String(leaf.comparison)
+            + ":"
+            + String(Int(leaf.inverted))
+            + ":"
+            + String(leaf.other_input)
+        )
+        result += (
+            ":"
+            + bounds.filter_dtype.name()
+            + ":"
+            + String(bounds.low)
+            + ":"
+            + String(bounds.high)
+            + ":"
+            + String(bitcast[DType.uint32](bounds.low_float))
+            + ":"
+            + String(bitcast[DType.uint32](bounds.high_float))
+            + ":"
+            + String(bounds.inclusive)
+        )
+        for member in leaf.members:
+            result += ":m" + String(member)
+    for word in program.truth:
+        result += ":t" + String(word)
+    return result^
