@@ -411,6 +411,13 @@ def test_an_aggregate_over_joins_is_estimated_from_its_keys_counts() raises:
         equal._estimate(len(equal._plan._nodes) - 1),
         (40_000 + amounts - 1) // amounts,
     )
+    # With a table's segment statistics, a filter they prove keeps no row
+    # is an empty relation (`StatisticsPropagator`).
+    var stored = t[0].collect()._with_statistics()._with_storage_statistics()
+    var none = stored.lazy().filter(col("f_amount") > lit(Int64(1000)))
+    assert_equal(none._estimate(len(none._plan._nodes) - 1), 0)
+    var some = stored.lazy().filter(col("f_amount") > lit(Int64(10)))
+    assert_equal(some._estimate(len(some._plan._nodes) - 1), 40_000 // 5)
 
 
 def test_union_all_estimates_sum_known_inputs_and_preserve_unknowns() raises:

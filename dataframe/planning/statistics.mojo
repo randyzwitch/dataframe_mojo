@@ -9,7 +9,8 @@ count with its source (`DistinctCount`): a table's HyperLogLog count
 came from (`CARDINALITY`). Nothing is sampled or run:
 
 - A table scan has its table's rows. The filters right above it are its
-  table filters (`ExtractGetStats`): an equality with a constant on a
+  table filters (`ExtractGetStats`): one the column's statistics prove
+  keeps no row makes the scan empty (`StatisticsPropagator`), an equality with a constant on a
   column of known distinct count keeps the rows over that count, a
   conjunction the fewest any part keeps, a filter the column's statistics
   prove always true nothing; when no part narrows the estimate it keeps
@@ -73,7 +74,9 @@ from dataframe.planning.model import (
 from dataframe.planning.properties import _references, _stream_rows
 from dataframe.storage.statistics import (
     COMPARE_EQUAL,
+    FILTER_ALWAYS_FALSE,
     FILTER_ALWAYS_TRUE,
+    FILTER_FALSE_OR_NULL,
     NUMERIC_STATS,
 )
 from dataframe.table_filter import (
@@ -228,11 +231,19 @@ def _filter_chain_rows(
             var column = table.column(filter.column)
             var bounds = series_statistics(column)
             if bounds and len(filter.nodes) > 0:
-                # A filter the statistics prove keeps every row is no
-                # filter (`FILTER_ALWAYS_TRUE`).
-                if check_statistics(filter, bounds.value()) == (
-                    FILTER_ALWAYS_TRUE
+                var proven = check_statistics(filter, bounds.value())
+                # A filter the statistics prove keeps no row makes the
+                # scan an empty result (StatisticsPropagator's
+                # `PropagateTableFilter`: FILTER_ALWAYS_FALSE or
+                # FILTER_FALSE_OR_NULL, `ReplaceWithEmptyResult`).
+                if (
+                    proven == FILTER_ALWAYS_FALSE
+                    or proven == FILTER_FALSE_OR_NULL
                 ):
+                    return 0
+                # One they prove keeps every row is no filter
+                # (`FILTER_ALWAYS_TRUE`).
+                if proven == FILTER_ALWAYS_TRUE:
                     narrowing -= 1
                     continue
             var count = plan_distinct(self, stats, scan, filter.column)
