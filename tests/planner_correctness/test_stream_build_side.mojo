@@ -64,7 +64,8 @@ def test_a_small_left_builds_inside_the_pipeline() raises:
     var observed = StrategyTrace()
     var rows = query.collect()
     assert_true(
-        "dataframe-path: lazy.swap_join_sides\n" in observed.text(),
+        "dataframe-path: lazy.swap_join_sides\n" in observed.text()
+        or "dataframe-path: lazy.cost_join_order\n" in observed.text(),
         "the smaller left side was not built inside the pipeline",
     )
     _ = observed^

@@ -57,6 +57,7 @@ from dataframe.planning.model import (
     FILTER,
     GROUPING_SETS,
     JOIN,
+    PlanNode,
     REVERSE,
     ROW_INDEX,
     SCAN_FRAME,
@@ -202,7 +203,7 @@ def _filter_chain_rows(
     while cursor != scan:
         for expr in self._nodes[cursor].exprs:
             for part in conjuncts(expr):
-                parts.append(part^)
+                parts.append(part.copy())
         cursor = self._nodes[cursor].left
     var columns = table.columns()
     var single = List[Expr]()

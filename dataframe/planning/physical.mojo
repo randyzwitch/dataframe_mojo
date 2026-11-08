@@ -672,6 +672,27 @@ def plan_cost_order_joins(
             continue
         var tree = chosen.take()
         var swaps = plan_tree_swaps(self, tree, relations, columns, edges, ops)
+        # The written tree, each join's left and right relation sets: a
+        # chosen tree that is the same joins of the same sides changes
+        # nothing, and the graph stays as written.
+        var written = List[Tuple[Int, Int]]()
+        for g in joins:
+            written.append(
+                (
+                    ((1 << g.right_from) - 1) & ~((1 << g.left_from) - 1),
+                    ((1 << g.end) - 1) & ~((1 << g.right_from) - 1),
+                )
+            )
+        var same = True
+        for e in range(n, len(tree.mask)):
+            var lm = tree.mask[tree.right[e] if swaps[e] else tree.left[e]]
+            var rm = tree.mask[tree.left[e] if swaps[e] else tree.right[e]]
+            var found = False
+            for w in written:
+                found = found or (w[0] == lm and w[1] == rm)
+            same = same and found
+        if same:
+            continue
         # Build the chosen tree. `node_of` is each tree entry's plan
         # node; `renamed` maps each key a join dropped to the key it
         # matched.
@@ -759,9 +780,9 @@ def plan_cost_order_joins(
                 right_keys=right_keys,
                 suffix="_right",
             )
-            # Its build side is the tree's (`plan_tree_swaps`), which
-            # knows the estimates of the joins under it.
-            join.sides_fixed = True
+            # Its sides are the tree's (`plan_tree_swaps`) until the build
+            # side optimizer decides them at stream start, as DuckDB runs
+            # `BuildProbeSideOptimizer` after the join order.
             added.append(join^)
             var current = _place_graph_filters(
                 self,
