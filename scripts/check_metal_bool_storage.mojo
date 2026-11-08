@@ -96,7 +96,7 @@ def main() raises:
                 == 0 else shared.copy() if layout
                 == 1 else independent.copy()
             )
-            var frame = DataFrame([source])
+            var frame = DataFrame([source^])
             for zero_copy in [False, True]:
                 for coalesce in [False, True]:
                     var owners = List[NativeColumnAny]()
