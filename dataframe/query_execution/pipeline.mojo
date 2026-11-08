@@ -1438,12 +1438,15 @@ def plan_stream_execute(
             job.keep_frame = undecided
             job.projection = projection.copy()
             jobs.append(job^)
-        if len(jobs) == 0:
+        if len(jobs) == 0 and not (undecided and len(held) > 0):
             break
-        if not pool_ready:
-            pool = Pool(min(len(jobs), workers))
-            pool_ready = True
-        pool.run(jobs, claim=True)
+        # A round can find the input ended with batches still held: it
+        # runs no jobs but still judges them below.
+        if len(jobs) > 0:
+            if not pool_ready:
+                pool = Pool(min(len(jobs), workers))
+                pool_ready = True
+            pool.run(jobs, claim=True)
         if counting:
             for i in range(len(jobs)):
                 ref counts = jobs[i].counts
