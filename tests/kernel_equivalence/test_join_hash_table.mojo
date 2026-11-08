@@ -1,7 +1,6 @@
 """DuckDB's join hash table (`dataframe/joins/hash_table.mojo`): a build on
-several workers, one hash partition each (Polars' partitioned build), keeps
-every duplicate and null of the build and lists each key's rows in
-ascending order; an eager
+several sink workers into radix-partitioned rows keeps every duplicate and
+null of the build and lists each key's rows in ascending order; an eager
 join builds on the side of the smaller hash table and, when its rows are
 read in order, returns them in the unflipped join's order."""
 # contract-group: table.join
@@ -28,7 +27,7 @@ def test_partitioned_build_keeps_every_duplicate_null_and_row() raises:
         valid.append(row % 97 != 2)
     var build = Series("k", Column[Int64](values^, valid))
     var table = JoinHashTable([build.copy()])
-    assert_equal(table.parts, 4)
+    assert_equal(table.radix_bits, 4)
     assert_true(table.chains_longer_than_one)
     assert_true(table.has_null)
     var probes: List[Int64] = [
@@ -69,9 +68,9 @@ def test_partitioned_build_keeps_every_duplicate_null_and_row() raises:
 
 
 def test_partitioned_key_set_finds_exactly_the_build_keys() raises:
-    # The keys-only table of semi, anti and mark joins (Polars' grouper per
-    # partition): duplicates kept once, null keys left out, large enough
-    # that its lookups prefetch.
+    # The table of semi, anti and mark joins (DuckDB's
+    # insert_duplicate_keys false): duplicates kept once, null keys left
+    # out, large enough that its lookups prefetch.
     var setting = JoinWorkers(4)
     var domain = 300_000
     var n = 500_001
@@ -82,8 +81,6 @@ def test_partitioned_key_set_finds_exactly_the_build_keys() raises:
         valid.append(row % 89 != 5)
     var build = Series("k", Column[Int64](values^, valid))
     var table = JoinHashTable([build.copy()], keys_only=True)
-    assert_equal(table.parts, 4)
-    assert_true(table.keys_only)
     assert_true(table.has_null)
     var probes = List[Int64]()
     var probe_valid = List[Bool]()
