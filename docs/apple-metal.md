@@ -584,6 +584,9 @@ unary and clipping operations retain signed zeros, subnormals and NaN rules.
 Programs retain the existing bounded typed-value format. Operation tags,
 parameters and native per-node types distinguish calibration keys; unmeasured
 shapes stay on CPU, and adjudicated executions cannot train GPU timings.
+Grouped physical keys also distinguish the requested `maintain_order` policy:
+CPU grouping may reorder its output when first-occurrence order is not
+requested, and its cost must not be reused for an ordered workload.
 
 ### Variance and standard deviation
 

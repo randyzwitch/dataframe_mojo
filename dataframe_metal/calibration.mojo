@@ -63,6 +63,10 @@ def shape_key(region: LazyFrame, operator: String) raises -> String:
     # Literal bounds and arithmetic constants influence selectivity, overflow
     # and exact-bin retries. Do not borrow costs from a different query shape.
     for node in region._plan._nodes:
+        if node.kind == AGG:
+            # CPU grouping may skip first-occurrence ordering when it is not
+            # requested. Its measured cost is a different physical workload.
+            key += ":group_order=" + String(Int(node.maintain_order))
         for expression in node.exprs:
             for value in expression._nodes:
                 if value.op == LIT_INT:

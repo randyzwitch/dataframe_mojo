@@ -158,6 +158,34 @@ def test_metal_numeric_planner_composes_native_types_and_separates_costs() raise
     assert_false(Bool(compile_typed_expression(col("f").sqrt(), frame)))
 
 
+def test_metal_group_calibration_separates_requested_output_order() raises:
+    from dataframe_metal.calibration import shape_key
+    from dataframe_metal.group_plan import plan_grouped, grouped_key
+
+    var frame = DataFrame(
+        [
+            Series("key", Column[Int32]([2, 1, 2])),
+            Series("x", Column[Int64]([-3, 4, 5])),
+        ]
+    )
+    var unordered = frame.lazy().group_by("key").agg(col("x").abs().sum())
+    var ordered = (
+        frame.lazy()
+        .group_by("key", maintain_order=True)
+        .agg(col("x").abs().sum())
+    )
+    var plain = plan_grouped(unordered)
+    var stable = plan_grouped(ordered)
+    assert_true(Bool(plain))
+    assert_true(Bool(stable))
+    assert_equal(grouped_key(plain.value()), grouped_key(stable.value()))
+    var plain_key = shape_key(unordered, grouped_key(plain.value()))
+    var stable_key = shape_key(ordered, grouped_key(stable.value()))
+    assert_true(":group_order=0" in plain_key)
+    assert_true(":group_order=1" in stable_key)
+    assert_false(plain_key == stable_key)
+
+
 # requires: metal
 def test_metal_numeric_public_nullable_chunks_groups_and_shared_states() raises:
     from tests.support.metal_outcomes import require_metal
@@ -223,7 +251,9 @@ def test_metal_numeric_public_nullable_chunks_groups_and_shared_states() raises:
         var direct = execute_timed(query)
         assert_true(direct[0].equals(expected))
         assert_true(query.collect(accelerator=runtime).equals(expected))
-        var grouped = frame.lazy().group_by("key").agg(outputs)
+        var grouped = (
+            frame.lazy().group_by("key", maintain_order=True).agg(outputs)
+        )
         var grouped_expected = grouped.collect(engine="cpu")
         assert_true(execute_timed(grouped)[0].equals(grouped_expected))
         assert_true(
