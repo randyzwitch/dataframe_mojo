@@ -125,6 +125,12 @@ struct PlanNode(Copyable, Deinitable, Movable):
     # once. Without this a swap made on a low estimate could flip back
     # once the other side's real height is known, and again after that.
     var sides_fixed: Bool
+    # A semi or anti JOIN the build side optimizer flipped: DuckDB's
+    # RIGHT_SEMI or RIGHT_ANTI, which hashes the left input and scans
+    # the right through it. A stream has no such step, so the join runs
+    # whole as the stream's source (`_stream_join`), where the eager
+    # join builds on its left.
+    var build_left: Bool
 
     def has_dataset(self) -> Bool:
         return Bool(self.dataset)
@@ -479,6 +485,7 @@ def _plan_node(
         json_schema.copy(),
         dataset.copy(),
         dataset_projected,
+        False,
         False,
     )
 

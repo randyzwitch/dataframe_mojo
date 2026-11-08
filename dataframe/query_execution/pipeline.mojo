@@ -76,9 +76,6 @@ from dataframe.io.parquet import (
     parquet_row_group_statistics,
 )
 from dataframe.joins.hash_table import JoinHashTable
-from dataframe.kernels.join_keys import (
-    prefer_left_build,
-)
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -127,14 +124,11 @@ from dataframe.planning.inputs import (
 from dataframe.planning.graph import (
     plan_is_filtering,
     plan_columns_of,
-    plan_estimated_rows,
     plan_filters_rows,
     plan_grouped_on,
-    plan_height_bound,
     plan_input_name,
     plan_keeps_column,
     plan_key_source,
-    plan_known_height,
 )
 from dataframe.planning.model import (
     AGG,
@@ -159,10 +153,7 @@ from dataframe.planning.cost.aggregation import (
     plan_row_number_shape,
 )
 from dataframe.planning.physical import (
-    plan_direct_key,
-    plan_joins_below,
-    plan_swap_join_sides,
-    plan_swap_left_join_sides,
+    plan_build_probe_sides,
 )
 from dataframe.planning.properties import (
     _distinct_inputs,
@@ -200,7 +191,6 @@ from dataframe.query_execution.materialize import (
 )
 from dataframe.query_execution.operators import (
     _set_rows,
-    plan_join_frames,
 )
 from dataframe.query_execution.reporting import (
     plan_record,
@@ -437,6 +427,14 @@ def plan_stream_execute(
         return _stream_after_materialization(
             through.value(), index, batch_size, sink
         )
+    # Every join's build side is chosen before anything runs or is
+    # scheduled, from estimates (DuckDB's `BuildProbeSideOptimizer`):
+    # the stream then builds each join's right input as it stands.
+    var sided = plan_build_probe_sides(self, cursor, batch_size)
+    if sided:
+        return _stream_after_materialization(
+            sided.take(), index, batch_size, sink
+        )
     if self._prefetched and not self._report:
         plan_schedule_inputs(self, cursor, batch_size)
     # A computed source (a union, an aggregate, a sort) is run in full
@@ -490,94 +488,6 @@ def plan_stream_execute(
             operation_nodes.append(cursor)
         elif _stream_join(node):
             var prepared = Optional[JoinHashTable]()
-            # A left input that can only be small next to a large known
-            # right may be the side to hash: decline streaming, so the
-            # plan runs eagerly and `DataFrame.join` builds on the smaller
-            # side, as Polars' `det_hash_prone_order` and DuckDB's
-            # build/probe optimizer do (#377). Streaming would build on
-            # the right: PDS-H q17 hashed 6M lineitem rows to match the
-            # few hundred parts its filter keeps.
-            var bound = plan_height_bound(self, node.left)
-            var right_rows = plan_known_height(self, node.right)
-            # A left input made by another join has no bound; how many
-            # rows it holds is known only once it has run.
-            var unbounded = bound < 0 and plan_joins_below(self, node.left)
-            if (
-                (node.how == JOIN_INNER or node.how == JOIN_LEFT)
-                and plan_known_height(self, node.left) < 0
-                and right_rows >= 524288
-                and (unbounded or (bound >= 0 and 4 * bound <= right_rows))
-            ):
-                # A join promises no row order: build on the
-                # small left and stream the large right through it in
-                # the pipeline, as DuckDB's build side optimizer does
-                # whatever side a join was written on, rather than run
-                # the join outside the pipeline (TPC-DS q43 probed its
-                # 366 dates with 2.9M sales rows eagerly).
-                if (
-                    node.how == JOIN_INNER
-                    and not node.sides_fixed
-                    and plan_direct_key(self, node.left, node.names)
-                ):
-                    var large = self._execute(
-                        node.right, False, True, batch_size
-                    )
-                    var swapped = plan_swap_join_sides(
-                        self, cursor, large, batch_size
-                    )
-                    if swapped:
-                        var plan = swapped.take()
-                        for k in range(len(operations)):
-                            if operations[k].kind != JOIN:
-                                continue
-                            plan._frames.append(
-                                joins[operations[k].join_build_slot()].copy()
-                            )
-                            plan._schemas.append(Optional[CsvSchema]())
-                            plan._nodes.append(
-                                _frame_scan_node(slot=len(plan._frames) - 1)
-                            )
-                            plan._nodes[operation_nodes[k]].right = (
-                                len(plan._nodes) - 1
-                            )
-                        return _stream_after_materialization(
-                            plan, index, batch_size, sink
-                        )
-                # The bound only says the left side may be small; the
-                # eager join then decides with the real heights (a
-                # filter often keeps far fewer rows than it scans).
-                if len(joins) == 0:
-                    return None
-                # Joins above this one stream faster than they run
-                # eagerly (PDS-H q8 and q9 were 1.5 times slower eager),
-                # so only this join leaves the stream: it becomes the
-                # stream's source, executed as a plan of its own, where
-                # the rule above runs it eagerly. PDS-H q8 hashed 6M
-                # lineitem rows to match the 1,300 parts its filter
-                # keeps. Leaving the stream costs the joins above their
-                # prepared probe of this one's output, so it takes a
-                # wider margin: PDS-H q16 (200K parts at most, 800K
-                # partsupp rows) was 10% slower leaving it. A left input
-                # made by other joins has no bound and leaves too: PDS-H
-                # q5 hashed 6M lineitem rows for about 45K orders, and
-                # q18, q11, q7 and q2 gained 15-44%. Where that input is
-                # large, streaming was faster: q9's partsupp and orders
-                # joins (about 320K rows on the left) are 14% slower.
-                if unbounded or 8 * bound <= right_rows:
-                    break
-            if (
-                plan_known_height(self, node.left) <= batch_size
-                and (node.how == JOIN_INNER or node.how == JOIN_LEFT)
-                and prefer_left_build(
-                    plan_known_height(self, node.left),
-                    plan_known_height(self, node.right),
-                )
-            ):
-                # This left input already fits one stream batch, so
-                # physical reversal does not increase the materialized
-                # join output over the existing batch bound. Keep larger
-                # left inputs on the bounded streaming executor.
-                break
             var operation = node.copy()
             operation.set_join_build_slot(len(joins))
             var algorithm = String(
@@ -590,165 +500,6 @@ def plan_stream_execute(
                 var held = self._prefetched_indexes.value()
                 if node.right in held[]:
                     ready = held[].pop(node.right)
-            if (
-                node.how == JOIN_INNER
-                and not node.sides_fixed
-                and bound >= 0
-                and built.height() * max(built.width(), 1)
-                > bound * max(len(plan_columns_of(self, node.left)), 1)
-            ):
-                # The built right side costs more to hash than the left
-                # can, in rows times columns as the planner's build side
-                # and DuckDB's build/probe side optimizer count it, and
-                # is no progression (above): hash the left instead and
-                # stream the right through it. Rows alone flipped TPC-DS
-                # q12's planned build of 6,693 three-column rows for
-                # 5,323 six-column items, restarting the pipeline.
-                # A join promises no row order, and the stream
-                # keeps every worker busy over the larger side, where
-                # probing from a small left ran its few morsels on one
-                # or two workers.
-                var swapped = plan_swap_join_sides(
-                    self, cursor, built, batch_size
-                )
-                if swapped:
-                    # Joins above keep the right sides they built.
-                    var plan = swapped.take()
-                    for k in range(len(operations)):
-                        if operations[k].kind != JOIN:
-                            continue
-                        plan._frames.append(
-                            joins[operations[k].join_build_slot()].copy()
-                        )
-                        plan._schemas.append(Optional[CsvSchema]())
-                        plan._nodes.append(
-                            _frame_scan_node(slot=len(plan._frames) - 1)
-                        )
-                        plan._nodes[operation_nodes[k]].right = (
-                            len(plan._nodes) - 1
-                        )
-                    return _stream_after_materialization(
-                        plan, index, batch_size, sink
-                    )
-            if (
-                (node.how == JOIN_INNER or node.how == JOIN_LEFT)
-                and node.coalesce
-                and not node.sides_fixed
-            ):
-                # DuckDB's build side (`BuildProbeSideOptimizer`): the
-                # side of fewer rows times columns builds. The right
-                # side has run; when the left one, estimated, is the
-                # smaller, the join runs here on both, building on the
-                # left and restoring its row order (`DataFrame.join`),
-                # and the stream goes on from its result, rather than
-                # hash every built row to probe a few: PDS-H q2 hashed
-                # and rechunked 159K wide supplier rows for its 747
-                # parts. The left's bound is read first, so a left that
-                # cannot be smaller is never sampled.
-                var right_cost = built.height() * max(built.width(), 1)
-                var columns = len(plan_columns_of(self, node.left))
-                var most = plan_height_bound(self, node.left)
-                if most < 0 or most * columns < right_cost:
-                    var rows = plan_estimated_rows(self, node.left)
-                    if rows >= 0 and rows * columns < right_cost:
-                        # The join builds on the smaller left inside the
-                        # pipeline (a join promises no row order): the
-                        # right streams through the left's index, a left
-                        # join's unmatched left rows coming out last, as
-                        # DuckDB flips a join's sides. The join's output
-                        # is then never materialized outside the
-                        # pipeline. The eager join below is left for a
-                        # swap that declines (a shared name).
-                        var swapped = plan_swap_left_join_sides(
-                            self, cursor, built, batch_size
-                        ) if node.how == JOIN_LEFT else plan_swap_join_sides(
-                            self, cursor, built, batch_size
-                        )
-                        if swapped:
-                            var plan = swapped.take()
-                            for k in range(len(operations)):
-                                if operations[k].kind != JOIN:
-                                    continue
-                                plan._frames.append(
-                                    joins[
-                                        operations[k].join_build_slot()
-                                    ].copy()
-                                )
-                                plan._schemas.append(Optional[CsvSchema]())
-                                plan._nodes.append(
-                                    _frame_scan_node(slot=len(plan._frames) - 1)
-                                )
-                                plan._nodes[operation_nodes[k]].right = (
-                                    len(plan._nodes) - 1
-                                )
-                            return _stream_after_materialization(
-                                plan, index, batch_size, sink
-                            )
-                        trace_path("stream.smaller_left_build")
-                        var left_frame = self._execute(
-                            node.left, False, True, batch_size
-                        )
-                        var joined = plan_join_frames(
-                            self, cursor, left_frame^, built^, False
-                        )
-                        var plan = self.copy()
-                        plan._frames.append(joined^)
-                        plan._schemas.append(Optional[CsvSchema]())
-                        plan._nodes[cursor] = _frame_scan_node(
-                            slot=len(plan._frames) - 1
-                        )
-                        return _stream_after_materialization(
-                            plan, index, batch_size, sink
-                        )
-            if (node.how == JOIN_SEMI or node.how == JOIN_ANTI) and (
-                built.height() >= 524288
-            ):
-                # A semi or anti join whose built right side turned out
-                # large decides from both real sizes, as DuckDB does: a
-                # left at most a quarter of the right is joined eagerly,
-                # hashing the left (PDS-H q4: about 57K orders against
-                # 3.8M late lineitem rows); otherwise the stream goes on
-                # probing the right's index. A left whose height is
-                # known (a table, or a side run before) is only read.
-                # One that must run is run here, and both results
-                # replace their nodes in a copy of the plan, so neither
-                # side runs twice; that copy's left then has a known
-                # height, so the stream it restarts goes on from here
-                # rather than deciding again.
-                var left_rows = plan_known_height(self, node.left)
-                if left_rows < 0 or 4 * left_rows <= built.height():
-                    var left_frame = self._execute(
-                        node.left, False, True, batch_size
-                    )
-                    var plan = self.copy()
-                    if 4 * left_frame.height() <= built.height():
-                        var joined = left_frame.join(
-                            built,
-                            left_on=node.names,
-                            right_on=node.right_keys,
-                            how="semi" if node.how == JOIN_SEMI else "anti",
-                        )
-                        plan._frames.append(joined^)
-                        plan._schemas.append(Optional[CsvSchema]())
-                        plan._nodes[cursor] = _frame_scan_node(
-                            slot=len(plan._frames) - 1
-                        )
-                    else:
-                        plan._frames.append(left_frame^)
-                        plan._schemas.append(Optional[CsvSchema]())
-                        plan._nodes.append(
-                            _frame_scan_node(slot=len(plan._frames) - 1)
-                        )
-                        plan._nodes[cursor].left = len(plan._nodes) - 1
-                        plan._frames.append(built^)
-                        plan._schemas.append(Optional[CsvSchema]())
-                        plan._nodes.append(
-                            _frame_scan_node(slot=len(plan._frames) - 1)
-                        )
-                        plan._nodes[cursor].right = len(plan._nodes) - 1
-                    return _stream_after_materialization(
-                        plan, index, batch_size, sink
-                    )
             # The build finished: one chunk per column, and its keys'
             # hash index, unless a prefetch made the same one already.
             var keys = List[String]()

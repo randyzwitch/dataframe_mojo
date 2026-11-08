@@ -153,12 +153,14 @@ def test_drop_after_selected_join_preserves_complete_public_results() raises:
         for optimize in [False, True]:
             for streaming in [False, True]:
                 for batch in [1, 3, 64]:
+                    # A join promises no row order (its build side is
+                    # chosen from estimates), so rows are compared by x.
                     var result = query.collect(
                         optimize=optimize,
                         streaming=streaming,
                         batch_size=batch,
                         engine="cpu",
-                    )
+                    ).sort(["x"])
                     var expected = List[Int]()
                     for row in range(9):
                         if row % 2 == 0 and (how == "left" or row % 3 != 2):

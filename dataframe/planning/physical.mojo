@@ -9,13 +9,6 @@ from dataframe.planning.cost.aggregation import (
     plan_row_number_shape,
 )
 
-from dataframe.storage.column import (
-    Column,
-)
-
-from dataframe.dtype import (
-    DataType,
-)
 from dataframe.expr import (
     COL,
     Expr,
@@ -36,8 +29,8 @@ from dataframe.frame import (
 from dataframe.io.csv import (
     CsvSchema,
 )
-from dataframe.kernels.join_keys import (
-    _PERFECT_SPAN,
+from dataframe.joins.eager import (
+    build_row_width,
 )
 from dataframe.join_order import (
     FilterEdge,
@@ -87,6 +80,7 @@ from dataframe.planning.graph import (
     plan_has_join,
     plan_has_kind,
     plan_height_bound,
+    plan_is_filtering,
     plan_known_height,
     plan_largest_scan,
     plan_live_parents,
@@ -103,11 +97,15 @@ from dataframe.planning.inputs import (
 )
 from dataframe.planning.model import (
     AGG,
+    CONCAT,
+    DROP,
     FILTER,
     JOIN,
     PlanNode,
     SCAN_FRAME,
     SELECT,
+    SORT,
+    WITH_COLUMNS,
 )
 from dataframe.planning.properties import (
     _bound_filter,
@@ -115,12 +113,18 @@ from dataframe.planning.properties import (
     _comparison_edge,
     _is_scan,
     _references,
+    _stream_join,
+    _stream_rows,
+)
+from dataframe.aggregation.expressions import (
+    _row_local,
 )
 
 
 from dataframe.trace import (
     trace_path,
 )
+from std.math import exp
 from std.collections import (
     Dict,
     Optional,
@@ -141,75 +145,261 @@ def plan_joins_below(self: QueryContext, index: Int) -> Bool:
     return False
 
 
-def plan_direct_key(
-    self: QueryContext, index: Int, names: List[String]
+# DuckDB 2.0's BuildProbeSideOptimizer (build_probe_side_optimizer.hpp):
+# a build side whose other side is a join costs 15% more when it is no
+# join itself, since the join's rows are already in flight.
+comptime _PREFER_RIGHT_DEEP_PENALTY = 0.15
+# JoinFilterBuildSideHeuristics (build_probe_side_optimizer.cpp): a
+# build side that filters earns its runtime filter's bonus only against
+# a probe scan of at least a million rows, 64 times its own rows; a
+# semi join's filtering left builds for a right scan three times both
+# sides.
+comptime _MIN_FILTER_TARGET_CARDINALITY = 1000000
+comptime _MAX_BUILD_TO_TARGET_RATIO = 64
+comptime _SEMI_JOIN_FILTER_TARGET_RATIO = 3
+# RelationStatisticsHelper::DEFAULT_SELECTIVITY: the rows a filter keeps
+# when nothing measures it.
+comptime _DEFAULT_SELECTIVITY = 0.2
+
+
+def plan_side_estimate(self: QueryContext, index: Int) raises -> Int:
+    """Rows node `index` yields, estimated from statistics before it runs,
+    as the build side optimizer reads a child's estimated cardinality
+    (`RelationStatisticsHelper`), with nothing sampled or run: a table's
+    rows; through projections, windows, sorts (a top-N at most its
+    limit) and row-local filters, where a filter keeps DuckDB's default
+    fifth of its rows (`DEFAULT_SELECTIVITY`); a union's inputs' rows
+    together; an aggregate's groups from its keys' distinct counts
+    (`plan_aggregate_estimate`'s formula); a semi or anti join its left
+    input's rows, a left join the larger input's, and an inner join
+    DuckDB's estimate of joining two relations (`CardinalityEstimator`):
+    their rows multiplied, divided by the key pairs' largest total
+    domain, a key's distinct count where its table keeps statistics,
+    else the fewest rows of a table holding the key. -1 when an input
+    has no estimate."""
+    ref node = self._nodes[index]
+    if node.kind == SCAN_FRAME:
+        return self._frames[node.source_slot()].height()
+    if (
+        node.kind == DROP
+        or node.kind == WITH_COLUMNS
+        or (node.kind == SELECT and _stream_rows(node))
+    ):
+        # Projections and windows keep their input's rows.
+        return plan_side_estimate(self, node.left)
+    if node.kind == SORT:
+        var rows = plan_side_estimate(self, node.left)
+        if rows < 0 or node.sort_limit() < 0:
+            return rows
+        return min(rows, node.sort_limit())
+    if node.kind == FILTER and _row_local(node.exprs):
+        var rows = plan_side_estimate(self, node.left)
+        if rows < 0:
+            return -1
+        return Int(Float64(rows) * _DEFAULT_SELECTIVITY)
+    if node.kind == CONCAT:
+        var first = plan_side_estimate(self, node.left)
+        var second = plan_side_estimate(self, node.right)
+        if first < 0 or second < 0:
+            return -1
+        return first + second
+    if node.kind == AGG:
+        var rows = plan_side_estimate(self, node.left)
+        if rows < 0:
+            return -1
+        if len(node.names) == 0:
+            return 1
+        var product = 1.0
+        for key in node.names:
+            var count = plan_spine_distinct(self, node.left, key)
+            if count < 0:
+                return -1
+            product *= Float64(max(count, 1))
+        product *= 0.95 ** Float64(len(node.names) - 1)
+        var multiplier = 1.0 - exp(-Float64(rows) / product)
+        var groups = (
+            Float64(rows) if multiplier == 0.0 else product * multiplier
+        )
+        var result = Int(min(groups, Float64(rows)))
+        return max(result, 1) if rows > 0 else 0
+    if node.kind != JOIN or len(node.names) == 0:
+        return -1
+    var left = plan_side_estimate(self, node.left)
+    if left < 0:
+        return -1
+    if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
+        return left
+    var right = plan_side_estimate(self, node.right)
+    if right < 0:
+        return -1
+    if node.how != JOIN_INNER:
+        return max(left, right)
+    if left == 0 or right == 0:
+        return 0
+    var domain = 1.0
+    for i in range(len(node.names)):
+        var count = max(
+            plan_spine_distinct(self, node.left, node.names[i]),
+            plan_spine_distinct(self, node.right, node.right_keys[i]),
+        )
+        if count <= 0:
+            for side in range(2):
+                var found = plan_provider_scan(
+                    self,
+                    node.left if side == 0 else node.right,
+                    node.names[i] if side == 0 else node.right_keys[i],
+                )
+                if found[0] < 0:
+                    continue
+                var rows = self._frames[
+                    self._nodes[found[0]].source_slot()
+                ].height()
+                if count <= 0 or rows < count:
+                    count = rows
+        domain = max(domain, Float64(count))
+    return max(Int(Float64(left) * Float64(right) / domain), 1)
+
+
+def _filter_target_rows(
+    self: QueryContext, side: Int, keys: List[String]
+) raises -> Int:
+    """The most rows of a table scan under `side` that a runtime filter on
+    `keys` would reach (`MaxDynamicFilterTargetCardinality`): the scans
+    supplying the keys (`GetPushdownFilterTargets`), whatever filters
+    later reduce."""
+    var most = 0
+    for key in keys:
+        var found = plan_provider_scan(self, side, key)
+        if found[0] < 0:
+            continue
+        most = max(
+            most, self._frames[self._nodes[found[0]].source_slot()].height()
+        )
+    return most
+
+
+def _filter_build_bonus(
+    self: QueryContext,
+    probe: Int,
+    probe_keys: List[String],
+    build: Int,
+    build_rows: Int,
+) raises -> Float64:
+    """How much cheaper building on `build` is for the runtime filter it
+    publishes into the probe side's scans (`DynamicFilterBuildBonus`):
+    the target scan's rows over the build's, when the build filters its
+    tables and the scan is large next to it; else 1."""
+    if not plan_is_filtering(self, build):
+        return 1.0
+    var target = _filter_target_rows(self, probe, probe_keys)
+    if target < _MIN_FILTER_TARGET_CARDINALITY:
+        return 1.0
+    if build_rows > 0 and build_rows > target // _MAX_BUILD_TO_TARGET_RATIO:
+        return 1.0
+    return Float64(target) / Float64(max(build_rows, 1))
+
+
+def _child_joins(self: QueryContext, index: Int) -> Int:
+    """The joins in the subplan at `index` (`ChildHasJoins`): both inputs
+    of a join, the first input of anything else."""
+    if index < 0:
+        return 0
+    ref node = self._nodes[index]
+    if node.kind == JOIN:
+        return (
+            1 + _child_joins(self, node.left) + _child_joins(self, node.right)
+        )
+    return _child_joins(self, node.left)
+
+
+def _builds_on_left(
+    self: QueryContext, at: Int, batch_size: Int
 ) raises -> Bool:
-    """Whether the one join key `names` of node `index` comes from an
-    in-memory table whose whole key column is unique, never null and
-    spans at most `_PERFECT_SPAN` values: any rows of it then index
-    directly (`_perfect_slots`), so a stream probing them pays one load
-    a row. Told from the table, before anything runs."""
-    if len(names) != 1:
-        return False
-    var found = plan_provider_scan(self, index, names[0])
-    if found[0] < 0:
-        return False
-    var key = self._frames[self._nodes[found[0]].source_slot()].column(found[1])
-    if key.dtype().physical() != DataType.INT64 or key.null_count() > 0:
-        return False
-    # More rows than the span allows cannot all differ: no pass needed.
-    if len(key) > _PERFECT_SPAN:
-        return False
-    var flat = key.rechunk() if key.is_chunked() else key.copy()
-    ref column = flat._data[Column[Int64]]
-    var n = len(column)
-    if n == 0:
-        return False
-    var least = Int64.MAX
-    var most = Int64.MIN
-    for i in range(n):
-        least = min(least, column._get(i))
-        most = max(most, column._get(i))
-    # Unsigned, as `_perfect_slots` takes it: a span over 2**63 overflows
-    # a signed difference.
-    var span = UInt64(most) - UInt64(least)
-    if span >= UInt64(_PERFECT_SPAN):
-        return False
-    var seen = List[Bool](length=Int(span) + 1, fill=False)
-    for i in range(n):
-        var at = Int(UInt64(column._get(i)) - UInt64(least))
-        if seen[at]:
-            return False
-        seen[at] = True
-    return True
-
-
-def plan_swap_join_sides(
-    self: QueryContext, at: Int, built: DataFrame, batch_size: Int
-) raises -> Optional[QueryContext]:
-    """A copy of the plan in which the inner join at `at` takes its
-    executed right side, `built`, as its left and its left side, run
-    now, as its right, under a selection that restores the join's
-    columns: their order, names and key types. None, with nothing run,
-    when a name the sides share other than as a key would be renamed
-    by the join."""
+    """Whether the join at `at` should build on its left input
+    (`TryFlipJoinChildren`): each side's hash table bytes
+    (`GetBuildSize` over its schema and estimated rows), the right's
+    divided by its runtime filter bonus where the join type publishes
+    one, the left's where the flipped type does (an anti join's RIGHT_ANTI
+    does not), and the right's 15% dearer when it holds no join and the
+    left does; the left builds when the right costs more, or for a semi
+    join whose filtering left would filter a right scan three times both
+    sides' rows. False when a side has no estimate."""
     ref node = self._nodes[at]
-    if not node.coalesce or node.how != JOIN_INNER:
-        return None
-    var left_names = plan_columns_of(self, node.left)
-    var right_names = built.columns()
+    if (
+        node.sides_fixed
+        or len(node.names) == 0
+        or node.how not in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI]
+    ):
+        return False
+    var lhs = plan_side_estimate(self, node.left)
+    var rhs = plan_side_estimate(self, node.right)
+    if lhs < 0 or rhs < 0:
+        return False
+    var left_width = build_row_width(
+        self._execute(node.left, True, False, batch_size)
+    )
+    var right_width = build_row_width(
+        self._execute(node.right, True, False, batch_size)
+    )
+    var left_cost = max(Float64(left_width) * Float64(lhs), 8.0)
+    var right_cost = max(Float64(right_width) * Float64(rhs), 8.0)
+    var swap = False
+    # JoinFilterPushdownUtil::JoinTypeIsSupported: inner and semi joins
+    # filter their probe (a left join keeps every probe row, an anti
+    # join's filter would need inverting); flipped, an inner, right and
+    # right semi join do.
+    if node.how == JOIN_INNER or node.how == JOIN_SEMI:
+        right_cost /= _filter_build_bonus(
+            self, node.left, node.names, node.right, rhs
+        )
+    if node.how != JOIN_ANTI:
+        left_cost /= _filter_build_bonus(
+            self, node.right, node.right_keys, node.left, lhs
+        )
+    if node.how == JOIN_SEMI and plan_is_filtering(self, node.left):
+        var target = _filter_target_rows(self, node.right, node.right_keys)
+        if (
+            target >= _MIN_FILTER_TARGET_CARDINALITY
+            and target // _SEMI_JOIN_FILTER_TARGET_RATIO > lhs
+            and target // _SEMI_JOIN_FILTER_TARGET_RATIO > rhs
+        ):
+            swap = True
+    if (
+        _child_joins(self, node.right) == 0
+        and _child_joins(self, node.left) > 0
+    ):
+        right_cost *= 1.0 + _PREFER_RIGHT_DEEP_PENALTY
+    if right_cost > left_cost:
+        swap = True
+    return swap
+
+
+def _flip_inner_join(
+    mut plan: QueryContext, at: Int, batch_size: Int
+) raises -> Bool:
+    """Flip the inner join at `at` (`FlipChildren`): its right input
+    probes and its left builds, under a selection that restores the
+    join's columns, their order, names and key types. False, with
+    nothing changed, when a name the sides share other than as a key
+    would be renamed by the join, or a right key repeats."""
+    var node = plan._nodes[at].copy()
+    if not node.coalesce:
+        return False
     for i in range(len(node.right_keys)):
         for j in range(i):
             if node.right_keys[i] == node.right_keys[j]:
-                return None
+                return False
+    var left = plan._execute(node.left, True, False, batch_size)
+    var right = plan._execute(node.right, True, False, batch_size)
+    var left_names = left.columns()
+    var right_names = right.columns()
     for name in right_names:
         if name in left_names and not (
             name in node.right_keys and name in node.names
         ):
-            return None
-    var left_frame = self._execute(node.left, False, True, batch_size)
+            return False
     var exprs = List[Expr]()
-    for name in left_frame.columns():
+    for name in left_names:
         var k = -1
         for i in range(len(node.names)):
             if node.names[i] == name:
@@ -218,89 +408,69 @@ def plan_swap_join_sides(
             exprs.append(col(name))
             continue
         var key = col(node.right_keys[k])
-        var dtype = left_frame.column(name).dtype()
-        if built.column(node.right_keys[k]).dtype() != dtype:
+        var dtype = left.column(name).dtype()
+        if right.column(node.right_keys[k]).dtype() != dtype:
             key = key.cast(dtype)
         exprs.append(key.alias(name))
     for name in right_names:
         if name not in node.right_keys:
             exprs.append(col(name))
-    var plan = self.copy()
-    plan._frames.append(built.copy())
-    plan._schemas.append(Optional[CsvSchema]())
-    plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
-    var probe = len(plan._nodes) - 1
-    plan._frames.append(left_frame^)
-    plan._schemas.append(Optional[CsvSchema]())
-    plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
-    var build = len(plan._nodes) - 1
     var join = node.copy()
-    join.left = probe
-    join.right = build
+    join.left = node.right
+    join.right = node.left
     join.names = node.right_keys.copy()
     join.right_keys = node.names.copy()
     join.sides_fixed = True
     plan._nodes.append(join^)
     plan._nodes[at] = _select_node(left=len(plan._nodes) - 1, exprs=exprs)
     trace_path("lazy.swap_join_sides")
-    return Optional(plan^)
+    return True
 
 
-def plan_swap_left_join_sides(
-    self: QueryContext, at: Int, built: DataFrame, batch_size: Int
-) raises -> Optional[QueryContext]:
-    """A copy of the plan in which the left join at `at` becomes a
-    right join of its executed right side, `built`, as the probe and
-    its left side, run now, as the build, under a selection that
-    restores the join's columns: the left's, then the right's other
-    than its keys. The probe streams through the pipeline against the
-    build's index, and the build rows no probe row matched come out
-    last (`_emit_unmatched`), as in Polars' `emit_unmatched_build` and
-    DuckDB's right-outer scan of a swapped join. None, with nothing
-    run, when the sides share a column name, a key repeats, or the
-    left's key types differ from the right's or need the general join
+def _flip_left_join(
+    mut plan: QueryContext, at: Int, batch_size: Int
+) raises -> Bool:
+    """Flip the left join at `at` into a right join (`FlipChildren` with
+    `InverseJoinType`): its right input probes and its left builds, the
+    build rows no probe row matched coming out last (`_emit_unmatched`,
+    DuckDB's right-outer scan), under a selection that restores the
+    join's columns: the left's, then the right's other than its keys.
+    False, with nothing changed, when the sides share a column name, a
+    key repeats, or the key types differ or need the general join
     (categorical, nested)."""
-    ref node = self._nodes[at]
-    if not node.coalesce or node.how != JOIN_LEFT:
-        return None
-    var left_names = plan_columns_of(self, node.left)
-    var right_names = built.columns()
+    var node = plan._nodes[at].copy()
+    if not node.coalesce:
+        return False
     for i in range(len(node.right_keys)):
         for j in range(i):
             if node.right_keys[i] == node.right_keys[j]:
-                return None
+                return False
+    var left = plan._execute(node.left, True, False, batch_size)
+    var right = plan._execute(node.right, True, False, batch_size)
+    var left_names = left.columns()
+    var right_names = right.columns()
     for name in right_names:
         if name in left_names:
-            return None
-    var left_frame = self._execute(node.left, False, True, batch_size)
+            return False
     for i in range(len(node.names)):
-        var ltype = left_frame.column(node.names[i]).dtype()
-        var rtype = built.column(node.right_keys[i]).dtype()
+        var ltype = left.column(node.names[i]).dtype()
+        var rtype = right.column(node.right_keys[i]).dtype()
         if (
             ltype != rtype
             or ltype.is_categorical()
             or ltype.is_nested()
             or ltype.is_struct()
         ):
-            return None
+            return False
     var exprs = List[Expr]()
-    for name in left_frame.columns():
+    for name in left_names:
         exprs.append(col(name))
     for name in right_names:
         if name not in node.right_keys:
             exprs.append(col(name))
-    var plan = self.copy()
-    plan._frames.append(built.copy())
-    plan._schemas.append(Optional[CsvSchema]())
-    plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
-    var probe = len(plan._nodes) - 1
-    plan._frames.append(left_frame^)
-    plan._schemas.append(Optional[CsvSchema]())
-    plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
-    var build = len(plan._nodes) - 1
     var join = node.copy()
-    join.left = probe
-    join.right = build
+    join.left = node.right
+    join.right = node.left
     join.names = node.right_keys.copy()
     join.right_keys = node.names.copy()
     join.how = JOIN_RIGHT
@@ -310,6 +480,57 @@ def plan_swap_left_join_sides(
     plan._nodes.append(join^)
     plan._nodes[at] = _select_node(left=len(plan._nodes) - 1, exprs=exprs)
     trace_path("lazy.swap_left_join_sides")
+    return True
+
+
+def plan_build_probe_sides(
+    self: QueryContext, top: Int, batch_size: Int
+) raises -> Optional[QueryContext]:
+    """Choose the build side of every join the stream below `top` runs,
+    before anything runs or is scheduled: DuckDB 2.0's
+    `BuildProbeSideOptimizer` on the joins' estimated inputs
+    (`_builds_on_left`). A join that should build on its left is
+    flipped: an inner join probes its right input against its left, a
+    left join becomes a right join, and a semi or anti join DuckDB's
+    RIGHT_SEMI or RIGHT_ANTI (`build_left`). A copy of the plan with the
+    flips made, or None when every join keeps its sides. A flipped join
+    is decided (`sides_fixed`), so the stream the copy starts keeps it."""
+    var spine = List[Int]()
+    var cursor = top
+    while cursor >= 0:
+        ref step = self._nodes[cursor]
+        if _stream_rows(step):
+            cursor = step.left
+        elif _stream_join(step):
+            spine.append(cursor)
+            cursor = step.left
+        else:
+            break
+    # Children first, as the optimizer visits them; a flip leaves every
+    # other join's inputs, their estimates and schemas as they were.
+    var flips = List[Int]()
+    for k in range(len(spine) - 1, -1, -1):
+        if _builds_on_left(self, spine[k], batch_size):
+            flips.append(spine[k])
+    if len(flips) == 0:
+        return None
+    var plan = self.copy()
+    var changed = False
+    for at in flips:
+        var how = plan._nodes[at].how
+        if how == JOIN_INNER:
+            if _flip_inner_join(plan, at, batch_size):
+                changed = True
+        elif how == JOIN_LEFT:
+            if _flip_left_join(plan, at, batch_size):
+                changed = True
+        else:
+            plan._nodes[at].build_left = True
+            plan._nodes[at].sides_fixed = True
+            trace_path("lazy.build_left_semi_join")
+            changed = True
+    if not changed:
+        return None
     return Optional(plan^)
 
 
@@ -851,6 +1072,9 @@ def plan_cost_order_joins(
                 right_keys=right_keys,
                 suffix="_right",
             )
+            # Its build side is the tree's (`plan_tree_swaps`), which
+            # knows the estimates of the joins under it.
+            join.sides_fixed = True
             added.append(join^)
             var current = _place_graph_filters(
                 self,
