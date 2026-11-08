@@ -2,9 +2,6 @@
 from dataframe.planning.node_builders import (
     _frame_scan_node,
 )
-from dataframe.aggregation.expressions import (
-    _stream_reductions,
-)
 from dataframe.io.csv import (
     CsvSchema,
 )
@@ -27,24 +24,25 @@ from dataframe.planning.context import (
 )
 from dataframe.planning.graph import (
     plan_aggregated,
+    plan_class_refs,
     plan_compact_scan_slots,
     plan_cover,
     plan_ends_in_breaker,
+    plan_filtered_scan,
     plan_height_bound,
+    plan_materialized,
     plan_reorder,
     plan_spine_rows,
-    plan_spine_source,
     plan_subplan,
     plan_subplan_classes,
 )
 from dataframe.planning.inputs import (
     _SubplanPipeline,
 )
-from dataframe.planning.model import (
-    AGG,
-    JOIN,
-    SCAN_FRAME,
-    SELECT,
+from dataframe.planning.statistics import (
+    PlanStatistics,
+    plan_cardinality,
+    plan_distinct,
 )
 from dataframe.planning.properties import (
     _pinned,
@@ -65,52 +63,28 @@ from std.collections import (
 def plan_share_subplans(
     mut self: QueryContext, streaming: Bool, batch_size: Int
 ) raises:
-    """Execute a subplan used in two places once. Two nodes whose
-    subtrees read the same (`_signature`)
-    would compute the same frame twice: PDS-H q21 filters lineitem
-    for late shipments both as a join input and under a grouped
-    n_unique, TPC-DS q39 joins and groups inventory once per month
-    compared. The largest such subtree is collected on its own, and
-    every node holding it becomes a scan of the result; the next
-    largest that holds no copy of it is collected at the same time
-    (`plan_collect_shared`).
-
-    A subtree holding an aggregation or a unique is shared: its result
-    is small next to its input, and holding it whole costs little. A
-    subtree is also shared when every copy is read whole
-    (`_read_whole`): as a join's build side, materialized in any case
-    (TPC-DS q83 builds one date subquery three times), or as the
-    direct input of an aggregation when it holds joins (q27's rollup
-    aggregates one five-way join three ways). The shared result is
-    materialized once and scanned by each consumer.
-    Other joins and filters are not shared, since their output can
-    be as large as their input and a consumer's filter above one
-    copy would have narrowed it (TPC-DS q39's two branches agree only
-    on the 11.7M-row joins below their date filters, and holding
-    those doubled the query; copies with different consumer filters
-    therefore remain separate)."""
+    """Execute once a subplan the query computes in several places, under
+    the conditions DuckDB 2.0 keeps one materialized (`plan_materialized`,
+    `_selective_multi_table_plan`). Our plans hold no CTE nodes: a lazy
+    frame used twice is copied into each reader, so a CTE written twice
+    and a subplan repeated are the same thing here, and the two passes
+    that decide them in DuckDB (`CTEInlining`, `CommonSubplanOptimizer`)
+    are one test. A subtree that passes is collected on its own and every
+    node holding it becomes a scan of the result; largest first, then the
+    next largest holding no copy of it (`plan_collect_shared`). A filter
+    or a projection over one table does not pass: DuckDB has that filter
+    in the scan, one operator, which is never worth materializing, and
+    each reader then scans with the table's own statistics."""
     var computed = plan_subplan_classes(self)
     ref classes = computed[0]
     ref sizes = computed[1]
-    ref reducing = computed[2]
-    # Which nodes hold a join, and each node's parent.
-    var joining = List[Bool]()
-    var parents = List[Int](length=len(self._nodes), fill=-1)
-    for i in range(len(self._nodes)):
-        ref node = self._nodes[i]
-        var joins = node.kind == JOIN
-        if node.left >= 0:
-            joins = joins or joining[node.left]
-            parents[node.left] = i
-        if node.right >= 0:
-            joins = joins or joining[node.right]
-            parents[node.right] = i
-        joining.append(joins)
     # Nodes under a shared subtree are replaced with it.
     var covered = List[Bool](length=len(self._nodes), fill=False)
     var shared = False
     var done = False
     while not done:
+        # Nodes change between rounds, so each has its own memo.
+        var stats = PlanStatistics()
         # This round's shared subtrees, largest first, and the copies each
         # replaces. None holds another's copy, so they run at once.
         var picks = List[Int]()
@@ -121,21 +95,19 @@ def plan_share_subplans(
             var best = -1
             for i in range(len(self._nodes)):
                 # A reader's pinned filter stays outside what is shared
-                # (`_filter_shared_subplans`): two readers with one filter
+                # (`plan_filter_shared_subplans`): two readers with one filter
                 # in common would otherwise share it, each pair with its
                 # own copy of the subplan below.
                 if covered[i] or _pinned(self._nodes[i]):
                     continue
-                if not reducing[i] and not plan_read_whole(
-                    self, i, classes, parents, joining, covered
-                ):
-                    continue
                 if best >= 0 and sizes[i] <= sizes[best]:
                     continue
-                for j in range(len(self._nodes)):
-                    if j != i and not covered[j] and classes[j] == classes[i]:
-                        best = i
-                        break
+                var refs = plan_class_refs(classes, covered, i)
+                if refs >= 2 and (
+                    plan_materialized(self, i, refs)
+                    or _selective_multi_table_plan(self, stats, i)
+                ):
+                    best = i
             if best < 0:
                 done = True
                 break
@@ -160,18 +132,16 @@ def plan_share_subplans(
         for best in picks:
             trace_path("lazy.shared_subplan")
             origins.append(plan_spine_rows(self, best))
-        var tables = List[Optional[DataFrame]]()
-        var names = List[Dict[String, String]]()
+        var counts = List[Dict[String, Int]]()
         var frames = plan_collect_shared(
-            self, picks, origins, streaming, batch_size, tables, names
+            self, picks, origins, streaming, batch_size, counts
         )
         for k in range(len(picks)):
             self._frames.append(frames[k].copy())
             self._schemas.append(Optional[CsvSchema]())
             var slot = len(self._frames) - 1
-            if tables[k]:
-                self._origin_tables[slot] = tables[k].value().copy()
-                self._origin_names[slot] = names[k].copy()
+            if len(counts[k]) > 0:
+                self._materialized_distinct[slot] = counts[k].copy()
             var origin = origins[k]
             if origin > 0:
                 self._origin_rows[slot] = origin
@@ -181,6 +151,42 @@ def plan_share_subplans(
     if shared:
         plan_reorder(self)
         plan_compact_scan_slots(self)
+
+
+def _relation_stats(
+    self: QueryContext, mut stats: PlanStatistics, index: Int
+) raises -> Tuple[Int, Int]:
+    """DuckDB's `GetSubplanStats`: how many base tables the subtree at
+    `index` reads and the largest one's estimated rows. A table's filters
+    belong to its scan there, so a scan under row-local steps counts as
+    one table with the rows those steps keep."""
+    ref node = self._nodes[index]
+    if node.left < 0 or plan_filtered_scan(self, index):
+        return (1, max(plan_cardinality(self, stats, index), 0))
+    var left = _relation_stats(self, stats, node.left)
+    if node.right < 0:
+        return left
+    var right = _relation_stats(self, stats, node.right)
+    return (left[0] + right[0], max(left[1], right[1]))
+
+
+def _selective_multi_table_plan(
+    self: QueryContext, mut stats: PlanStatistics, index: Int
+) raises -> Bool:
+    """DuckDB's `IsSelectiveMultiTablePlan`, with its constants: a subplan
+    over two or more tables is worth materializing when its estimate is
+    at most 2,048 rows or under half its largest table."""
+    comptime CARDINALITY_THRESHOLD = 2048
+    comptime CARDINALITY_RATIO = 2
+    var rows = plan_cardinality(self, stats, index)
+    if rows < 0:
+        return False
+    var relations = _relation_stats(self, stats, index)
+    if relations[0] < 2:
+        return False
+    if rows <= CARDINALITY_THRESHOLD:
+        return True
+    return rows < relations[1] // CARDINALITY_RATIO
 
 
 def _holds(self: QueryContext, index: Int, marked: List[Bool]) -> Bool:
@@ -208,8 +214,7 @@ struct _SharedPipeline(SchedulablePipeline):
     var streaming: Bool
     var batch_size: Int
     var result: DataFrame
-    var origin_table: Optional[DataFrame]
-    var origin_names: Dict[String, String]
+    var distinct_counts: Dict[String, Int]
 
     def __init__(
         out self,
@@ -225,8 +230,7 @@ struct _SharedPipeline(SchedulablePipeline):
         self.streaming = streaming
         self.batch_size = batch_size
         self.result = DataFrame(List[Series]())
-        self.origin_table = None
-        self.origin_names = Dict[String, String]()
+        self.distinct_counts = Dict[String, Int]()
 
     def initialize(mut self) raises:
         pass
@@ -243,47 +247,19 @@ struct _SharedPipeline(SchedulablePipeline):
         pass
 
     def finalize(mut self) raises:
-        var frame = self.result.copy()
-        # A result holding every row of its table reads its columns'
-        # distinct counts from that table: they are the same columns, as
-        # DuckDB carries a column's count through a projection into a
-        # materialized CTE's statistics. TPC-DS q76's three channels share
-        # one projection of date_dim, whose date keys then had no count,
-        # and the join order took the 1,990 dates the sales hold for the
-        # domain, putting the item join first on a date join estimated 37
-        # times too large. A filtered result reads none: DuckDB keeps the
-        # table's counts there too, but a filtered dimension's full key
-        # count is the date-containment estimate of #1083 (a month of
-        # dates joined to sales estimated 37 times too small, TPC-DS q60),
-        # whose low estimates the run-time swaps then undo.
-        if (
-            not self.aggregated
-            and self.origin > 0
-            and frame.height() == self.origin
-        ):
-            var top = len(self.plan._nodes) - 1
-            var origin_slot = -1
-            for name in frame.columns():
-                var source = plan_spine_source(self.plan, top, name)
-                if not source:
-                    continue
-                var found = source.value()
-                if not self.plan._frames[found[0]]._statistics:
-                    continue
-                if origin_slot >= 0 and found[0] != origin_slot:
-                    continue
-                origin_slot = found[0]
-                self.origin_names[name] = found[1]
-            if origin_slot >= 0:
-                self.origin_table = self.plan._frames[origin_slot].copy()
-        # An aggregate's result keeps distinct counts of its own
-        # columns for the join order, as DuckDB keeps a materialized
-        # CTE's statistics (`AddMaterializedCTEStats`) and gives an
-        # aggregate's columns distinct counts (`ExtractAggregationStats`).
+        # A materialized result keeps the distinct counts its plan estimated
+        # for it, as DuckDB gives a CTE reference its definition's relation
+        # statistics (`AddMaterializedCTEStats`). An aggregate's result
+        # has its own columns counted (`ExtractAggregationStats`).
         if self.aggregated:
-            self.result = frame^._with_statistics()
-        else:
-            self.result = frame^
+            self.result = self.result^._with_statistics()
+            return
+        var stats = PlanStatistics()
+        var top = len(self.plan._nodes) - 1
+        for name in self.result.columns():
+            var count = plan_distinct(self.plan, stats, top, name)
+            if count.known():
+                self.distinct_counts[name] = count.count
 
 
 def plan_collect_shared(
@@ -292,8 +268,7 @@ def plan_collect_shared(
     origins: List[Int],
     streaming: Bool,
     batch_size: Int,
-    mut origin_tables: List[Optional[DataFrame]],
-    mut origin_names: List[Dict[String, String]],
+    mut distinct_counts: List[Dict[String, Int]],
 ) raises -> List[DataFrame]:
     """Each shared subtree in `picks`, collected on its own. The subtrees
     are independent, so outside an execution report they are scheduled
@@ -322,46 +297,8 @@ def plan_collect_shared(
     var frames = List[DataFrame](capacity=len(jobs))
     for k in range(len(jobs)):
         frames.append(jobs[k].result.copy())
-        origin_tables.append(jobs[k].origin_table.copy())
-        origin_names.append(jobs[k].origin_names.copy())
+        distinct_counts.append(jobs[k].distinct_counts.copy())
     return frames^
-
-
-def plan_read_whole(
-    self: QueryContext,
-    index: Int,
-    classes: List[Int],
-    parents: List[Int],
-    joining: List[Bool],
-    covered: List[Bool],
-) -> Bool:
-    """Whether every uncovered copy of the subtree at `index` is read
-    whole: as a join's build side, which the executor materializes in
-    any case, or, when the subtree holds a join, as the direct input of
-    a grouped aggregation or a selection of reductions. One result then
-    serves every copy. A chain of row steps over a scan under aggregations reads
-    its input once either way and is not worth holding."""
-    if self._nodes[index].kind == SCAN_FRAME:
-        return False
-    var copies = 0
-    for j in range(len(self._nodes)):
-        if covered[j] or classes[j] != classes[index]:
-            continue
-        var parent = parents[j]
-        if parent < 0:
-            return False
-        ref consumer = self._nodes[parent]
-        if consumer.kind == JOIN and consumer.right == j:
-            copies += 1
-        elif consumer.left != j or not joining[index]:
-            return False
-        elif consumer.kind == AGG or (
-            consumer.kind == SELECT and _stream_reductions(consumer.exprs)
-        ):
-            copies += 1
-        else:
-            return False
-    return copies >= 2
 
 
 def plan_schedule_inputs(self: QueryContext, top: Int, batch_size: Int) raises:

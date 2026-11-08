@@ -449,12 +449,10 @@ def _scan_distinct(
         return DistinctCount.unknown()
     var rows = table.height()
     var count = table._distinct_count(name)
-    if count < 0 and slot in self._origin_tables:
-        # A shared subplan's result reads its table's counts, as DuckDB
-        # carries a column's base-table count into a materialized CTE.
-        ref names = self._origin_names[slot]
-        if name in names:
-            count = self._origin_tables[slot]._distinct_count(names[name])
+    if count < 0 and slot in self._materialized_distinct:
+        # A shared subplan's result has the counts its plan estimated,
+        # as DuckDB keeps a materialized CTE's relation statistics.
+        count = self._materialized_distinct[slot].get(name, -1)
     if count > 0:
         return DistinctCount(count, COUNT_HLL)
     if rows > 0:

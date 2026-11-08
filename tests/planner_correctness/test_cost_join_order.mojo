@@ -28,7 +28,7 @@ from dataframe.join_order import (
     build_conflicts,
     order_joins,
 )
-from dataframe.planning.model import SCAN_FRAME
+from dataframe.planning.model import SCAN_FRAME, SELECT
 from tests.support.coverage_compare import (
     assert_frame,
     assert_frame_unordered,
@@ -634,14 +634,11 @@ def test_semi_anti_and_left_joins_are_ordered_with_the_inner_joins() raises:
     assert_frame(rows, written)
 
 
-def test_a_shared_subplan_reads_distinct_counts_from_its_table() raises:
-    # Two channels share one projection of a date table, run once
-    # (`_share_subplans`). Its result reads the date key's distinct count
-    # from the table, as DuckDB carries a column's base-table count into a
-    # materialized CTE's statistics. Without it the key had no count, and
-    # the join order took the few dates the sales hold for the domain:
-    # TPC-DS q76 estimated its date joins 37 times too large and joined
-    # its items first.
+def test_one_table_slices_are_not_shared() raises:
+    # Two channels read one projection of a date table. DuckDB holds a
+    # projection or filter over one table as a scan, never worth
+    # materializing, so the copies stay table scans and their columns keep
+    # the table's distinct counts.
     var day = List[Int64]()
     var year = List[Int64]()
     for d in range(7000):
@@ -667,24 +664,16 @@ def test_a_shared_subplan_reads_distinct_counts_from_its_table() raises:
         )
     var query = channels[0].concat(channels[1])
     var plan = query._optimized()
+    var nodes = len(plan._plan._nodes)
     plan._share_subplans(True, 65536)
-    var read = 0
+    assert_equal(len(plan._plan._nodes), nodes)
     for i in range(len(plan._plan._nodes)):
         ref node = plan._plan._nodes[i]
-        if (
-            node.kind != SCAN_FRAME
-            or node.source_slot() not in plan._plan._origin_tables
-        ):
+        if node.kind != SELECT:
             continue
         assert_equal(
             plan._distinct(i, "day").count, dates._distinct_count("d_sk")
         )
-        assert_equal(
-            plan._distinct(i, "d_year").count,
-            dates._distinct_count("d_year"),
-        )
-        read += 1
-    assert_true(read >= 1, "the projection was not shared")
     # The shared result joins as the written query does.
     assert_frame_unordered(
         query.collect(),

@@ -273,7 +273,6 @@ from dataframe.query_execution.executor import (
     plan_execute_node,
 )
 from dataframe.query_execution.materialize import (
-    plan_read_whole,
     plan_share_subplans,
 )
 from dataframe.query_execution.operators import (
@@ -2173,23 +2172,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             self._plan, streaming=streaming, batch_size=batch_size
         )
 
-    def _read_whole(
-        self,
-        index: Int,
-        classes: List[Int],
-        parents: List[Int],
-        joining: List[Bool],
-        covered: List[Bool],
-    ) -> Bool:
-        return plan_read_whole(
-            self._plan,
-            index=index,
-            classes=classes,
-            parents=parents,
-            joining=joining,
-            covered=covered,
-        )
-
     def _cover(self, index: Int, mut covered: List[Bool]):
         plan_cover(self._plan, index, covered)
 
@@ -2227,7 +2209,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _subplan_classes(
         self,
-    ) -> Tuple[List[Int], List[Int], List[Bool]]:
+    ) -> Tuple[List[Int], List[Int]]:
         return plan_subplan_classes(self._plan)
 
     def _filter_shared_subplans(mut self):
