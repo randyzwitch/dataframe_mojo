@@ -139,7 +139,9 @@ def ordered_partials(
             if slot != NO_GROUP:
                 if metadata[unsafe_offset=11]:
                     _ = Atomic[UInt32].min(
-                        scratch.unsafe_offset(layout.first_offset() + Int(slot)),
+                        scratch.unsafe_offset(
+                            layout.first_offset() + Int(slot)
+                        ),
                         UInt32(row),
                     )
                 for field in range(layout.fields):

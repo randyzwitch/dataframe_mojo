@@ -251,7 +251,9 @@ def test_metal_ordered_public_native_values_ties_nulls_and_filtered_positions() 
                     ) if filtered else window.lazy()
                     var query = selected.group_by(
                         ["k", "j"], maintain_order=True
-                    ).agg(outputs) if grouped else selected.select_exprs(outputs)
+                    ).agg(outputs) if grouped else selected.select_exprs(
+                        outputs
+                    )
                     var cpu = query.collect(engine="cpu")
                     assert_true(execute_ordered(query)[0].equals(cpu))
                     assert_true(execute_timed(query)[0].equals(cpu))
