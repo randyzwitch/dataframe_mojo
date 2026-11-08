@@ -14,7 +14,7 @@ from dataframe.aggregation.table_sink import (
     TableSinkInputs,
     TableSinkLayout,
     aggregate_table,
-    sink_columns,
+    sink_frame,
 )
 from dataframe.aggregation.expressions import (
     count_rows_by,
@@ -188,12 +188,13 @@ def _plain_inputs(expressions: List[Expr], frame: DataFrame) -> Bool:
 
 
 struct _BatchSinkJob(Job):
-    """One worker's morsels into its aggregate table sink, each morsel's
-    reduction inputs evaluated `batch` rows at a time."""
+    """One worker's morsels into its aggregate table sink, a data chunk of
+    at most `batch` rows at a time, each chunk's reduction inputs computed
+    by their compiled vector expressions (DuckDB's sink running its
+    `ExpressionExecutor` over each chunk, as the pipeline's table sink
+    does)."""
 
-    var frame: DataFrame
-    var keys: List[Series]
-    var expressions: List[Expr]
+    var columns: List[Series]
     var layout: AggregateLayout
     var shared: TableSinkLayout
     var ranges: List[Int]
@@ -204,22 +205,17 @@ struct _BatchSinkJob(Job):
 
     def __init__(
         out self,
-        frame: DataFrame,
-        keys: List[Series],
-        expressions: List[Expr],
+        columns: List[Series],
         layout: AggregateLayout,
-        empty_keys: List[Series],
-        empty: List[Series],
+        shared: TableSinkLayout,
         ranges: List[Int],
         cursor: _Cursor,
         workers: Int,
         batch: Int,
     ):
-        self.frame = frame.copy()
-        self.keys = keys.copy()
-        self.expressions = expressions.copy()
+        self.columns = columns.copy()
         self.layout = layout.copy()
-        self.shared = TableSinkLayout(layout, empty_keys, empty)
+        self.shared = shared.copy()
         self.ranges = ranges.copy()
         self.cursor = cursor.copy()
         self.workers = workers
@@ -236,16 +232,11 @@ struct _BatchSinkJob(Job):
                 break
             var offset = self.ranges[2 * m]
             var length = self.ranges[2 * m + 1]
-            for lo in range(0, length, self.batch):
-                var start = offset + lo
-                var n = min(self.batch, length - lo)
-                var keys = List[Series](capacity=len(self.keys))
-                for key in self.keys:
-                    keys.append(key.slice(start, n))
-                var inputs = table_inputs(
-                    self.frame.slice(start, n), keys, self.expressions
-                )
-                sink_columns(sink, reader, keys, inputs, start)
+            var columns = List[Series](capacity=len(self.columns))
+            for column in self.columns:
+                columns.append(column.slice(offset, length))
+            sink_frame(sink, reader, columns, offset, self.batch)
+        reader.release()
         self.sinks.append(sink^)
 
 
@@ -522,14 +513,35 @@ struct GroupBy(Copyable):
         """The aggregate table over morsels whose reduction inputs are
         evaluated `batch_size` rows at a time on the workers."""
         var frame = self._frame.rechunk()
+        # The sink's input: the key columns (named apart from the frame's),
+        # then the frame's columns, which the input expressions read.
+        var columns = List[Series](capacity=len(self._keys) + frame.width())
+        var key_names = List[String](capacity=len(self._keys))
         var keys = List[Series](capacity=len(self._keys))
-        for key in self._keys:
-            keys.append(key.rechunk() if key.is_chunked() else key.copy())
+        for k in range(len(self._keys)):
+            var key = (
+                self._keys[k]
+                .rechunk() if self._keys[k]
+                .is_chunked() else self._keys[k]
+                .copy()
+            )
+            var name = "__agg_key_" + String(k)
+            key_names.append(name)
+            columns.append(key.renamed(name))
+            keys.append(key^)
+        for column in frame._columns:
+            columns.append(column.copy())
         var empty_keys = List[Series](capacity=len(keys))
         for key in keys:
             empty_keys.append(key.slice(0, 0))
         var layout = aggregate_layout(empty_keys, empty, specs)
         layout.use_perfect_hash(keys)
+        var schema = List[Series](capacity=len(columns))
+        for column in columns:
+            schema.append(column.slice(0, 0))
+        var shared = TableSinkLayout(
+            layout, DataFrame(schema^), key_names, expressions, empty
+        )
         var ranges = List[Int]()
         var height = frame.height()
         var morsel = _MORSEL_ROWS
@@ -543,12 +555,9 @@ struct GroupBy(Copyable):
         for _ in range(max(1, workers)):
             jobs.append(
                 _BatchSinkJob(
-                    frame,
-                    keys,
-                    expressions,
+                    columns,
                     layout,
-                    empty_keys,
-                    empty,
+                    shared,
                     ranges,
                     cursor,
                     workers,

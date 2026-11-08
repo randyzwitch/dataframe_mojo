@@ -220,6 +220,10 @@ def _computed_supported(bound: BoundExpr, index: Int) raises -> Bool:
         var source = bound.dtypes[node.left]
         if node.dtypes[0].value() != dtype:
             return False
+        if _lane(source) == _LANE_BOOL:
+            # A Boolean casts to 1 or 0 (DuckDB's BOOL -> BIGINT / DOUBLE
+            # casts), which never fails.
+            return dtype == DataType.INT64 or dtype == DataType.FLOAT64
         if not _numeric_lane(_lane(source)) or source.is_temporal():
             return False
         if dtype.is_decimal():
@@ -2091,6 +2095,10 @@ struct VectorExpression(Copyable, Movable):
                     var x = self.lane_floats[left].unsafe_ptr()
                     for k in range(count):
                         out[unsafe_offset=k] = x[unsafe_offset=k]
+                elif source_lane == _LANE_BOOL:
+                    var x = self.lane_bools[left].unsafe_ptr()
+                    for k in range(count):
+                        out[unsafe_offset=k] = Float64(x[unsafe_offset=k] & 1)
                 elif source_lane == _LANE_INT:
                     var x = self.lane_ints[left].unsafe_ptr()
                     for k in range(count):
@@ -2112,6 +2120,11 @@ struct VectorExpression(Copyable, Movable):
                         )
                 return
             var out = self.lane_ints[index].unsafe_ptr()
+            if source_lane == _LANE_BOOL:
+                var b = self.lane_bools[left].unsafe_ptr()
+                for k in range(count):
+                    out[unsafe_offset=k] = Int64(b[unsafe_offset=k] & 1)
+                return
             var x = self.lane_ints[left].unsafe_ptr()
             for k in range(count):
                 out[unsafe_offset=k] = x[unsafe_offset=k]

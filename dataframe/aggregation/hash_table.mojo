@@ -1595,7 +1595,12 @@ struct AggregateSink(Movable):
         against the table's size (statistics that do not hold for the
         data raise, as DuckDB's do), the slot marked set (with the row, its
         first) and its row's address into `groups`."""
-        var slots = self.hashes.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+        # The locations are computed into the address vector itself, each
+        # then replaced by its row's address (DuckDB's `addresses`).
+        var groups = self.groups.unsafe_ptr()
+        var slots = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=Int(groups)
+        )
         for k in range(count):
             slots[unsafe_offset=k] = 0
         var shift = self.perfect.total_bits
@@ -1608,12 +1613,11 @@ struct AggregateSink(Movable):
                 self.perfect.minima[c],
                 shift,
                 count,
-                Pointer[UInt64, MutAnyOrigin](unsafe_from_address=Int(slots)),
+                slots,
             )
         var total = UInt64(self.perfect.total_groups())
         var base = Int(self.perfect_rows.unsafe_ptr())
         var bytes = 8 * self.parts.stride
-        var groups = self.groups.unsafe_ptr()
         for k in range(count):
             var slot = slots[unsafe_offset=k]
             if slot >= total:

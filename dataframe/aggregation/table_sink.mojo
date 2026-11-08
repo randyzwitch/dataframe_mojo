@@ -436,18 +436,40 @@ def sink_columns(
     `table` a data chunk at a time, as a table scan's chunks of flat
     vectors over them reach the pipeline's sink (`reader` from a
     `TableSinkLayout` over such columns)."""
-    var arena = ColumnArena()
-    var handles = List[Int](capacity=len(keys) + len(inputs))
+    var columns = List[Series](capacity=len(keys) + len(inputs))
     for key in keys:
-        handles.append(arena.add(key))
+        columns.append(key.copy())
     for i in range(len(inputs)):
         # A row count's chunk column is never read.
-        handles.append(arena.add(inputs[i]) if reader.reads[i] else handles[0])
+        columns.append(inputs[i].copy() if reader.reads[i] else keys[0].copy())
+    sink_frame(table, reader, columns, first, STANDARD_VECTOR_SIZE)
+
+
+def sink_frame(
+    mut table: AggregateSink,
+    mut reader: TableSinkInputs,
+    columns: List[Series],
+    first: Int,
+    rows: Int,
+) raises:
+    """A morsel's `columns` (each unchunked or one chunk, of equal length;
+    `first` the source row of their first) into `table` a data chunk of at
+    most `rows` rows at a time, as a table scan's chunks of flat vectors
+    over them reach the pipeline's sink: `reader` (from a
+    `TableSinkLayout` over such columns) reads each chunk's group chunk and
+    evaluates its aggregate input chunk, compiled input expressions
+    included (DuckDB's sink executing its `ExpressionExecutor` on each
+    chunk)."""
+    var arena = ColumnArena()
+    var handles = List[Int](capacity=len(columns))
+    for column in columns:
+        handles.append(arena.add(column))
     reader.begin()
     var chunk = DataChunk(len(handles))
-    var length = len(keys[0])
-    for lo in range(0, length, STANDARD_VECTOR_SIZE):
-        var n = min(STANDARD_VECTOR_SIZE, length - lo)
+    var length = len(columns[0])
+    var step = max(1, min(rows, STANDARD_VECTOR_SIZE))
+    for lo in range(0, length, step):
+        var n = min(step, length - lo)
         chunk.reset()
         from_frame_window(chunk, arena, handles, lo, n)
         var hold = List[Series]()

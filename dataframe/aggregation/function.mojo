@@ -1015,102 +1015,160 @@ def _update_slot[
     discard: Int,
 ):
     """Update group state words with a batch's values of `D`, rows
-    [start, start + count) of a vector (DuckDB's `UnaryScatterLoop`,
-    through the vector's selection when `selected`). `base` is the byte
-    offset in each group row, and `rows` holds the group-row addresses."""
-    var values = format.values[D]()
-    var sel = format.sel
-    var validity = format.validity
+    [start, start + count) of a vector (DuckDB's `UnaryScatter`, through
+    the vector's selection when `selected`). `base` is the byte offset in
+    each group row, and `rows` holds the group-row addresses. As DuckDB's
+    scatter is a template per aggregate operation and input type, each
+    state kind has its own loop, and a vector without nulls takes one that
+    reads no validity (`UnaryScatterLoop`'s quick path)."""
     var nulls = _format_nulls(format, start, count)
     var kind = slot.kind
     if kind == _K_VALUES:
-        for k in range(count):
-            var i: Int
-            comptime if selected:
-                i = sel.get_index_unsafe(start + k)
-            else:
-                i = start + k
-            if nulls and not validity.row_is_valid_unsafe(i):
-                continue
-            # Rows a filter dropped keep no value.
-            if rows[unsafe_offset=k] == discard:
-                continue
-            _values_push(
-                _words_at(rows[unsafe_offset=k] + base),
-                Float64(values[unsafe_offset=i]),
-                arena,
-            )
-        return
+        _scatter_kind[D, selected, _K_VALUES](
+            format, start, count, rows, base, arena, discard, nulls
+        )
+    elif kind == _K_INT_SUM:
+        _scatter_kind[D, selected, _K_INT_SUM](
+            format, start, count, rows, base, arena, discard, nulls
+        )
+    elif kind == _K_NARROW_SUM:
+        _scatter_kind[D, selected, _K_NARROW_SUM](
+            format, start, count, rows, base, arena, discard, nulls
+        )
+    elif kind == _K_FLOAT_SUM:
+        _scatter_kind[D, selected, _K_FLOAT_SUM](
+            format, start, count, rows, base, arena, discard, nulls
+        )
+    elif kind == _K_MOMENTS:
+        _scatter_kind[D, selected, _K_MOMENTS](
+            format, start, count, rows, base, arena, discard, nulls
+        )
+    elif kind == _K_MAX:
+        _scatter_kind[D, selected, _K_MAX](
+            format, start, count, rows, base, arena, discard, nulls
+        )
+    else:
+        _scatter_kind[D, selected, _K_MIN](
+            format, start, count, rows, base, arena, discard, nulls
+        )
+
+
+@always_inline
+def _scatter_kind[
+    D: DType, selected: Bool, kind: Int
+](
+    format: UnifiedVectorFormat,
+    start: Int,
+    count: Int,
+    rows: Pointer[Int, _],
+    base: Int,
+    arena: Pointer[_ValueArena, MutAnyOrigin],
+    discard: Int,
+    nulls: Bool,
+):
+    if nulls:
+        _scatter[D, selected, kind, True](
+            format, start, count, rows, base, arena, discard
+        )
+    else:
+        _scatter[D, selected, kind, False](
+            format, start, count, rows, base, arena, discard
+        )
+
+
+def _scatter[
+    D: DType, selected: Bool, kind: Int, nulls: Bool
+](
+    format: UnifiedVectorFormat,
+    start: Int,
+    count: Int,
+    rows: Pointer[Int, _],
+    base: Int,
+    arena: Pointer[_ValueArena, MutAnyOrigin],
+    discard: Int,
+):
+    """One state kind's scatter loop (`UnaryScatterLoop` for one
+    operation): each row's value into the state at its group row's
+    address, a null skipped only when the vector may hold one (`nulls`)."""
+    var values = format.values[D]()
+    var sel = format.sel
+    var validity = format.validity
     for k in range(count):
         var i: Int
         comptime if selected:
             i = sel.get_index_unsafe(start + k)
         else:
             i = start + k
-        if nulls and not validity.row_is_valid_unsafe(i):
-            continue
-        var at = _words_at(rows[unsafe_offset=k] + base)
-        var w = 0
+        comptime if nulls:
+            if not validity.row_is_valid_unsafe(i):
+                continue
         var value = values[unsafe_offset=i]
-        if kind == _K_INT_SUM:
-            var total = (UInt128(at[unsafe_offset=w + 1]) << 64) | UInt128(
-                at[unsafe_offset=w]
+        var at = _words_at(rows[unsafe_offset=k] + base)
+        comptime if kind == _K_VALUES:
+            # Rows a filter dropped keep no value.
+            if rows[unsafe_offset=k] != discard:
+                _values_push(at, Float64(value), arena)
+        elif kind == _K_INT_SUM:
+            var total = (UInt128(at[unsafe_offset=1]) << 64) | UInt128(
+                at[unsafe_offset=0]
             )
             total += bitcast[DType.uint128](value.cast[DType.int128]())
-            at[unsafe_offset=w] = UInt64(total)
-            at[unsafe_offset=w + 1] = UInt64(total >> 64)
-            at[unsafe_offset=w + 2] += 1
+            at[unsafe_offset=0] = UInt64(total)
+            at[unsafe_offset=1] = UInt64(total >> 64)
+            at[unsafe_offset=2] += 1
         elif kind == _K_NARROW_SUM:
-            at[unsafe_offset=w] += bitcast[DType.uint64](
+            at[unsafe_offset=0] += bitcast[DType.uint64](
                 value.cast[DType.int64]()
             )
-            at[unsafe_offset=w + 1] += 1
+            at[unsafe_offset=1] += 1
         elif kind == _K_FLOAT_SUM:
-            at[unsafe_offset=w] = bitcast[DType.uint64](
-                bitcast[DType.float64](at[unsafe_offset=w]) + Float64(value)
+            at[unsafe_offset=0] = bitcast[DType.uint64](
+                bitcast[DType.float64](at[unsafe_offset=0]) + Float64(value)
             )
-            at[unsafe_offset=w + 1] += 1
+            at[unsafe_offset=1] += 1
         elif kind == _K_MOMENTS:
             # Every integer as its value (an ordering key would shift a
             # UInt64 by 2^63 and lose its spread).
             var x = value.cast[DType.float64]()
-            var n = at[unsafe_offset=w] + 1
-            var mean = bitcast[DType.float64](at[unsafe_offset=w + 1])
+            var n = at[unsafe_offset=0] + 1
+            var mean = bitcast[DType.float64](at[unsafe_offset=1])
             var delta = x - mean
             mean += delta / Float64(n)
-            var m2 = bitcast[DType.float64](at[unsafe_offset=w + 2]) + delta * (
+            var m2 = bitcast[DType.float64](at[unsafe_offset=2]) + delta * (
                 x - mean
             )
-            at[unsafe_offset=w] = n
-            at[unsafe_offset=w + 1] = bitcast[DType.uint64](mean)
-            at[unsafe_offset=w + 2] = bitcast[DType.uint64](m2)
+            at[unsafe_offset=0] = n
+            at[unsafe_offset=1] = bitcast[DType.uint64](mean)
+            at[unsafe_offset=2] = bitcast[DType.uint64](m2)
         else:
-            var is_max = kind == _K_MAX
-            var seen = at[unsafe_offset=w + 1] & 1 != 0
+            comptime is_max = kind == _K_MAX
+            var seen = at[unsafe_offset=1] & 1 != 0
             comptime if D.is_floating_point():
                 var x = Float64(value)
                 if isnan(x):
-                    at[unsafe_offset=w + 1] |= 2
+                    at[unsafe_offset=1] |= 2
                     continue
-                var best = bitcast[DType.float64](at[unsafe_offset=w])
-                if (
-                    not seen
-                    or (is_max and x > best)
-                    or (not is_max and x < best)
-                ):
-                    at[unsafe_offset=w] = bitcast[DType.uint64](x)
-                    at[unsafe_offset=w + 1] |= 1
+                var best = bitcast[DType.float64](at[unsafe_offset=0])
+                var better: Bool
+                comptime if is_max:
+                    better = x > best
+                else:
+                    better = x < best
+                if not seen or better:
+                    at[unsafe_offset=0] = bitcast[DType.uint64](x)
+                    at[unsafe_offset=1] |= 1
             else:
                 # Ties keep the earlier value, as `_extreme` does.
                 var x = _canonical_int[D](value)
-                var best = bitcast[DType.int64](at[unsafe_offset=w])
-                if (
-                    not seen
-                    or (is_max and x > best)
-                    or (not is_max and x < best)
-                ):
-                    at[unsafe_offset=w] = bitcast[DType.uint64](x)
-                    at[unsafe_offset=w + 1] |= 1
+                var best = bitcast[DType.int64](at[unsafe_offset=0])
+                var better: Bool
+                comptime if is_max:
+                    better = x > best
+                else:
+                    better = x < best
+                if not seen or better:
+                    at[unsafe_offset=0] = bitcast[DType.uint64](x)
+                    at[unsafe_offset=1] |= 1
 
 
 def _decimal_part(column: Series) -> Bool:
@@ -2837,6 +2895,8 @@ struct _KeyColumn(Movable):
     var values: _ValueColumn
     var w: Int
     var bit: UInt64
+    # The key's source field metadata, which its groups' column keeps.
+    var metadata: Optional[ArcPointer[List[UInt8]]]
 
     def __init__(
         out self,
@@ -2851,6 +2911,7 @@ struct _KeyColumn(Movable):
         )
         self.w = w
         self.bit = bit
+        self.metadata = template._field_metadata
 
     def scan(mut self, groups: _Groups, lo: Int, hi: Int, held: _HeldBuffers):
         """Groups [lo, hi)'s keys from their rows."""
@@ -2864,5 +2925,8 @@ struct _KeyColumn(Movable):
         self.values.write(at, stride, _HEAD + self.w, lo, hi, held)
 
     def column(deinit self) raises -> Series:
-        """The finished key column."""
-        return self.values^.column()
+        """The finished key column, with its source's field metadata."""
+        var metadata = self.metadata
+        var column = self.values^.column()
+        column._field_metadata = metadata
+        return column^
