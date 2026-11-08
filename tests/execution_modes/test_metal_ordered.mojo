@@ -143,7 +143,7 @@ def test_metal_ordered_public_native_values_ties_nulls_and_filtered_positions() 
     from dataframe_metal.ordered_reduce import execute_ordered
     from dataframe_metal.handoff import execute_timed
 
-    _ = require_metal()
+    var runtime = require_metal()
     var first_nan = bitcast[DType.float32](UInt32(0x7FC12345))
     var second_nan = bitcast[DType.float32](UInt32(0xFFC54321))
     var negative_zero = bitcast[DType.float32](UInt32(0x80000000))
@@ -253,6 +253,7 @@ def test_metal_ordered_public_native_values_ties_nulls_and_filtered_positions() 
                 var cpu = query.collect(engine="cpu")
                 assert_true(execute_ordered(query)[0].equals(cpu))
                 assert_true(execute_timed(query)[0].equals(cpu))
+                assert_true(query.collect(accelerator=runtime).equals(cpu))
 
 
 def test_metal_ordered_payload_gather_uses_native_float32_accessor() raises:
