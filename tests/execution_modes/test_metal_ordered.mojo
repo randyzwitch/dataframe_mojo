@@ -253,3 +253,22 @@ def test_metal_ordered_public_native_values_ties_nulls_and_filtered_positions() 
                 var cpu = query.collect(engine="cpu")
                 assert_true(execute_ordered(query)[0].equals(cpu))
                 assert_true(execute_timed(query)[0].equals(cpu))
+
+
+def test_metal_ordered_payload_gather_uses_native_float32_accessor() raises:
+    from dataframe_metal.ordered_finish import OrderedColumn
+
+    var nan = bitcast[DType.float32](UInt32(0x7FC12345))
+    var zero = bitcast[DType.float32](UInt32(0x80000000))
+    var frame = DataFrame(
+        [
+            Series(
+                "f",
+                Column[Float32]([nan, zero, 0.5, 1], [True, True, True, False]),
+            )
+        ]
+    )
+    var output = OrderedColumn("f", DataType.FLOAT32)
+    for row in range(4):
+        output.append(frame, "f", UInt32(row))
+    assert_true(output^.finish().equals(frame.column("f")))

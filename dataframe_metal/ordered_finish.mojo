@@ -54,7 +54,7 @@ struct OrderedColumn(Movable):
         elif self.dtype == DataType.FLOAT32:
             self.floating.append(
                 Float32(
-                    frame.item(Int(row), column).float64()
+                    frame.item(Int(row), column).float32()
                 ) if present else Float32(0)
             )
         else:
