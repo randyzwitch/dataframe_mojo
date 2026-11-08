@@ -2,6 +2,9 @@
 # contract-group: execution.backends
 from std.memory import Pointer, bitcast
 from max.gpu import global_idx
+
+# Load the host kernel-launch overloads in this module's import scope.
+from max.gpu.host import DeviceContext, DeviceBuffer
 from std.testing import assert_equal, assert_true, assert_false
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, when
 from dataframe.expr import (
@@ -328,9 +331,7 @@ def test_metal_numeric_public_nullable_chunks_groups_and_shared_states() raises:
     for name in frame.columns():
         var source = frame.column(name)
         chunked.append(
-            Series._from_chunks(
-                name, source.dtype(), [source.slice(0, 2), source.slice(2, 4)]
-            )
+            Series._from_chunks([source.slice(0, 2), source.slice(2, 4)])
         )
     frame = DataFrame(chunked^)
     var values = List[Expr](
