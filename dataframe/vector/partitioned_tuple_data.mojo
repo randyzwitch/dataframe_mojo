@@ -213,9 +213,7 @@ struct RadixPartitionedTupleData(Movable):
         other._count = 0
         other._data_size = 0
 
-    def get_sizes_and_counts(
-        self, mut sizes: List[Int], mut counts: List[Int]
-    ):
+    def get_sizes_and_counts(self, mut sizes: List[Int], mut counts: List[Int]):
         """GetSizesAndCounts: each partition's bytes and rows, added."""
         for p in range(len(self.partitions)):
             sizes[p] += self.partitions[p].size_in_bytes()
