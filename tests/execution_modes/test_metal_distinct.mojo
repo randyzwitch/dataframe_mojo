@@ -313,20 +313,25 @@ def test_metal_distinct_public_native_null_nan_zero_and_tuple_groups() raises:
                 col(name).drop_nulls().n_unique().alias(name + "dropped"),
             ]
         )
-    for empty in [False, True]:
-        var data = frame.slice(0, 0) if empty else frame.copy()
-        for grouped in [False, True]:
-            for filtered in [False, True]:
-                var selected = data.lazy().filter(
-                    col("p") > 0
-                ) if filtered else data.lazy()
-                var query = selected.group_by(
-                    ["k", "j"], maintain_order=True
-                ).agg(outputs) if grouped else selected.select_exprs(outputs)
-                var cpu = query.collect(engine="cpu")
-                assert_true(execute_distinct(query)[0].equals(cpu))
-                assert_true(execute_timed(query)[0].equals(cpu))
-                assert_true(query.collect(accelerator=runtime).equals(cpu))
+    for start in [0, 1, 5]:
+        for empty in [False, True]:
+            var data = frame.slice(0, 0) if empty else frame.slice(
+                start, frame.height() - start
+            )
+            for grouped in [False, True]:
+                for filtered in [False, True]:
+                    var selected = data.lazy().filter(
+                        col("p") > 0
+                    ) if filtered else data.lazy()
+                    var query = selected.group_by(
+                        ["k", "j"], maintain_order=True
+                    ).agg(outputs) if grouped else selected.select_exprs(
+                        outputs
+                    )
+                    var cpu = query.collect(engine="cpu")
+                    assert_true(execute_distinct(query)[0].equals(cpu))
+                    assert_true(execute_timed(query)[0].equals(cpu))
+                    assert_true(query.collect(accelerator=runtime).equals(cpu))
 
 
 # requires: metal
