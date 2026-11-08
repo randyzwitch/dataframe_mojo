@@ -488,8 +488,12 @@ struct _TableData(Movable):
     var entries: List[UInt64]
     var found: List[UInt8]
     var keys: List[Series]
-    # A perfect hash join's slots: the row of each key (0 for none).
-    var slots: List[UInt64]
+    # A perfect hash join's table (PerfectHashJoinExecutor's
+    # `perfect_hash_table` and `bitmap_build_idx`): per key slot its build
+    # row (the payload stand-in, unset where the slot's bit is clear) and
+    # one bit per slot, set when a build row has the slot's key.
+    var slots: List[UInt32]
+    var slot_bits: List[UInt8]
     # Each partition's region of `entries` (one region unless the table
     # is built per partition): its first entry and its bitmask.
     var bases: List[UInt64]
@@ -502,7 +506,8 @@ struct _TableData(Movable):
         self.entries = List[UInt64]()
         self.found = List[UInt8]()
         self.keys = keys^
-        self.slots = List[UInt64]()
+        self.slots = List[UInt32]()
+        self.slot_bits = List[UInt8]()
         self.bases = List[UInt64]()
         self.masks = List[UInt64]()
 
@@ -744,20 +749,32 @@ def _word[D: DType](value: Scalar[D]) -> UInt64:
 
 
 def _perfect_slots(
-    key: Series, inserted: Int, rows: TupleDataCollection, key_offset: Int
-) raises -> Optional[Tuple[UInt64, Int, List[UInt64]]]:
-    """PerfectHashJoinExecutor::CanDoPerfectHashJoin and its build: an
-    integer key whose valid values span at most PERFECT_MAX_BUILD_SIZE, with
-    no more of them than slots, each value once. Gives the least value's
-    word, the span and each slot's row (0 for none); None otherwise.
+    key: Series,
+    inserted: Int,
+    rows: TupleDataCollection,
+    key_offset: Int,
+    index_offset: Int,
+    mut slots: List[UInt32],
+    mut bits: List[UInt8],
+) raises -> Optional[Tuple[UInt64, Int]]:
+    """PerfectHashJoinExecutor::CanDoPerfectHashJoin and its build
+    (BuildPerfectHashTable, FullScanHashTable): an integer key whose valid
+    values span at most PERFECT_MAX_BUILD_SIZE, with no more of them than
+    slots, each value once. Fills `slots` with each slot's build row and
+    `bits` with which slots hold one, and gives the least value's word and
+    the span; None otherwise.
+
+    As DuckDB's, the slots are not initialized: only the bitmap is
+    cleared, one bit a slot (`bitmap_build_idx.SetAllInvalid`), and a
+    slot's build row is read only when its bit is set.
 
     DuckDB bails when `Count() > build_range`, its comment says for
     duplicates, but build_range is max - min, one less than its slots: a
     key that fills its range (a dimension's dense surrogate key) would take
     the hash table for no duplicate. Here the count is checked against the
     slots, so only duplicates bail."""
-    var bits = _validity(key)
-    var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bits[0])
+    var valid = _validity(key)
+    var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid[0])
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         comptime if not D.is_floating_point():
@@ -767,7 +784,7 @@ def _perfect_slots(
                 var least = Scalar[D].MAX
                 var most = Scalar[D].MIN
                 for i in range(n):
-                    if bits[0] != 0 and not _validity_at(bitmap, bits[1] + i):
+                    if valid[0] != 0 and not _validity_at(bitmap, valid[1] + i):
                         continue
                     var value = values[unsafe_offset=i]
                     least = min(least, value)
@@ -780,9 +797,14 @@ def _perfect_slots(
                     return None
                 if UInt64(inserted) > span + 1:
                     return None
-                # BuildPerfectHashTable: each row into its key's slot.
-                var slots = List[UInt64](length=Int(span) + 1, fill=0)
+                var size = Int(span) + 1
+                slots = List[UInt32](unsafe_uninit_length=size)
+                bits = List[UInt8](unsafe_uninit_length=(size + 7) // 8)
+                _ = external_call["memset", Int](
+                    Int(bits.unsafe_ptr()), Int32(0), (size + 7) // 8
+                )
                 var table = slots.unsafe_ptr()
+                var set = bits.unsafe_ptr()
                 var state = TupleDataChunkState()
                 for s in range(len(rows.segments)):
                     ref segment = rows.segments[s]
@@ -796,10 +818,15 @@ def _perfect_slots(
                             var slot = Int(
                                 _word[D](_load_as[D](row + key_offset)) - base
                             )
-                            if table[unsafe_offset=slot] != 0:
+                            var byte = set[unsafe_offset=slot >> 3]
+                            var bit = UInt8(1) << UInt8(slot & 7)
+                            if byte & bit != 0:
                                 return None
-                            table[unsafe_offset=slot] = UInt64(row)
-                return (base, Int(span), slots^)
+                            set[unsafe_offset=slot >> 3] = byte | bit
+                            table[unsafe_offset=slot] = _load32(
+                                row + index_offset
+                            )
+                return (base, Int(span))
     return None
 
 
@@ -810,13 +837,15 @@ def _perfect_heads(
     base: UInt64,
     span: Int,
     slots: Int,
+    slot_bits: Int,
     heads: Int,
 ):
-    """Each probe row's build row, as the address of its row (0 for none),
-    looked up by `key - base` (PerfectHashJoinExecutor's probe)."""
-    var bits = _validity(key)
-    var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bits[0])
-    var table = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=slots)
+    """Each probe row's build row plus one (0 for none), looked up by `key -
+    base` (PerfectHashJoinExecutor::ProbePerfectHashTable)."""
+    var valid = _validity(key)
+    var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid[0])
+    var table = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=slots)
+    var set = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=slot_bits)
     var out = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=heads)
     var limit = UInt64(span)
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -828,11 +857,15 @@ def _perfect_heads(
                     var at = _word[D](values[unsafe_offset=start + i]) - base
                     if at > limit:
                         continue
-                    if bits[0] != 0 and not _validity_at(
-                        bitmap, bits[1] + start + i
+                    if valid[0] != 0 and not _validity_at(
+                        bitmap, valid[1] + start + i
                     ):
                         continue
-                    out[unsafe_offset=i] = table[unsafe_offset=Int(at)]
+                    var slot = Int(at)
+                    if (set[unsafe_offset=slot >> 3] >> UInt8(slot & 7)) & 1:
+                        out[unsafe_offset=i] = (
+                            UInt64(table[unsafe_offset=slot]) + 1
+                        )
                 return
 
 
@@ -934,7 +967,14 @@ struct JoinHashTable(Copyable, Movable):
         if self.count > Int(Int32.MAX):
             raise Error("A join build exceeds 2^31 - 1 rows")
         self.data = ArcPointer(_TableData(unchunked.copy(), row_layout))
-        self.data[].found = List[UInt8](length=max(self.count, 1), fill=0)
+        # The match flags only a join that emits build rows reads (DuckDB's
+        # PropagatesBuildSide): never an inner join (`perfect`) nor a
+        # semi, anti or mark join (`keys_only`).
+        var flags = 1 if perfect or keys_only else max(self.count, 1)
+        self.data[].found = List[UInt8](unsafe_uninit_length=flags)
+        _ = external_call["memset", Int](
+            Int(self.data[].found.unsafe_ptr()), Int32(0), flags
+        )
         # Sink: each thread its share of the rows, in chunks, into its own
         # partitioned rows.
         var workers = worker_count(self.count)
@@ -995,17 +1035,23 @@ struct JoinHashTable(Copyable, Movable):
             # PerfectHashJoinExecutor::BuildPerfectHashTable, else (a
             # repeated key, a wide range) the hash table.
             var slots = _perfect_slots(
-                unchunked[0], self.inserted, rows, self.layout.key_offset
+                unchunked[0],
+                self.inserted,
+                rows,
+                self.layout.key_offset,
+                self.layout.index_offset,
+                self.data[].slots,
+                self.data[].slot_bits,
             )
             if slots:
                 trace_path("join.perfect_hash")
                 self.perfect = True
                 self.perfect_base = slots.value()[0]
                 self.perfect_span = slots.value()[1]
-                self.data[].slots = slots.value()[2].copy()
-                # Each row ends its chain: a probe emits it alone.
-                _end_chains(rows, self.layout.pointer_offset)
                 return
+            # A repeated key: the hash table instead.
+            self.data[].slots = List[UInt32]()
+            self.data[].slot_bits = List[UInt8]()
         var collection = Int(Pointer(to=self.data[].collection))
         # Each partition its own region of the table; the regions together
         # at least MINIMUM_CAPACITY.
@@ -1046,7 +1092,7 @@ struct JoinHashTable(Copyable, Movable):
         # As many tasks as the build had sink threads, each filling a run
         # of partitions' regions; one runs here.
         var tasks = List[_FinalizeJob](capacity=sink_threads)
-        for t in range(sink_threads):
+        for _ in range(sink_threads):
             tasks.append(_FinalizeJob())
         for p in range(self.parts):
             tasks[p * sink_threads // self.parts].regions.append(
@@ -1103,18 +1149,6 @@ struct JoinHashTable(Copyable, Movable):
                 appended += 1
             position += 1
         return appended
-
-
-def _end_chains(rows: TupleDataCollection, pointer_offset: Int):
-    """Every row's next pointer cleared: each row is a chain of its own."""
-    var state = TupleDataChunkState()
-    for s in range(len(rows.segments)):
-        ref segment = rows.segments[s]
-        for c in range(segment.chunk_count()):
-            var count = segment.initialize_chunk_state(state, c, False)
-            var at = state.row_locations.unsafe_ptr()
-            for i in range(count):
-                _store64(at[unsafe_offset=i] + pointer_offset, 0)
 
 
 struct ScanStructure(Movable):
@@ -1203,7 +1237,8 @@ struct ScanStructure(Movable):
         for i in range(count):
             heads[unsafe_offset=i] = 0
         if self.table.perfect:
-            # ProbePerfectHashTable: the key's slot holds its build row.
+            # ProbePerfectHashTable: the key's slot holds its build row,
+            # emitted by `next` with no chain to walk.
             _perfect_heads(
                 keys[0],
                 start,
@@ -1211,6 +1246,7 @@ struct ScanStructure(Movable):
                 self.table.perfect_base,
                 self.table.perfect_span,
                 Int(self.table.data[].slots.unsafe_ptr()),
+                Int(self.table.data[].slot_bits.unsafe_ptr()),
                 Int(heads),
             )
             return
@@ -1472,6 +1508,18 @@ struct ScanStructure(Movable):
                     p = _load64(Int(p) + next_offset)
             self.finished = True
             return 0
+        if self.table.perfect:
+            # A perfect hash probe: each key at most one build row,
+            # `heads` holding it plus one.
+            var outer_rows = self.how == JOIN_LEFT or self.how == JOIN_FULL
+            for i in range(self.count):
+                var h = heads[unsafe_offset=i]
+                if h != 0 or outer_rows:
+                    out_probe[unsafe_offset=out] = Int32(i)
+                    out_build[unsafe_offset=out] = Int32(h) - 1
+                    out += 1
+            self.finished = True
+            return out
         # NextInnerJoin / NextLeftJoin, one probe row's chain at a time.
         var outer = self.how == JOIN_LEFT or self.how == JOIN_FULL
         var flag = self.propagate

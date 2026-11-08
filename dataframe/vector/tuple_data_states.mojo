@@ -72,9 +72,13 @@ struct TupleDataChunkState(Copyable, Movable):
     def __init__(out self):
         self.vector_data = List[TupleDataVectorFormat]()
         self.column_ids = List[Int]()
-        self.row_locations = List[Int](length=STANDARD_VECTOR_SIZE, fill=0)
-        self.heap_locations = List[Int](length=STANDARD_VECTOR_SIZE, fill=0)
-        self.heap_sizes = List[Int](length=STANDARD_VECTOR_SIZE, fill=0)
+        self.row_locations = List[Int](
+            unsafe_uninit_length=STANDARD_VECTOR_SIZE
+        )
+        self.heap_locations = List[Int](
+            unsafe_uninit_length=STANDARD_VECTOR_SIZE
+        )
+        self.heap_sizes = List[Int](unsafe_uninit_length=STANDARD_VECTOR_SIZE)
         self.chunk_parts = List[Int]()
         self.chunk_part_chunks = List[Int]()
 

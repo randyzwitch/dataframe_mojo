@@ -17,9 +17,10 @@ are plain allocations that live as long as the collection and never
 move, so a part's heap pointer is fixed when it is built.
 
 Each segment owns its allocator. DuckDB shares one allocator among the
-segments of a collection, but a collection has one segment until it
-combines another's, which keeps its own allocator, so ownership is the
-same.
+segments of a collection, but a collection has at most one segment of its
+own (made by its first build) until it combines another's, which keeps
+its own allocator, so ownership is the same. Blocks are made when rows
+first land, so an empty partition allocates nothing.
 """
 from dataframe.vector.tuple_data_layout import (
     TUPLE_DATA_BLOCK_SIZE,
