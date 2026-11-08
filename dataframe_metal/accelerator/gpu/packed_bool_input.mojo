@@ -122,7 +122,7 @@ def _uploaded_bool(
             )
         else:
             var valid = List[UInt8](length=(len(column) + 7) // 8, fill=255)
-            _append_native_bits(validity, rows, valid.span(), 0, len(column))
+            _append_native_bits(validity, rows, Span(valid), 0, len(column))
         rows = checked_add(rows, len(column))
     var ctx = scope.context()
     var data = ctx.enqueue_create_buffer[DType.uint8](count)
