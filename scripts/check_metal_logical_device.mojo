@@ -72,10 +72,10 @@ def main() raises:
     var program = List[UInt64](length=8 * 21, fill=0)
     for scenario in range(8):
         var at = scenario * 21
-        program[at] = 1 if scenario < 4 else 2
+        program[at] = UInt64(1 if scenario < 4 else 2)
         # Cases: b, ~b, is_null(b), is_not_null(b), b&n, b|n,
         # b|~n, ~(b&n). Each leaf carries its own SQL validity.
-        program[at + 1] = 2 if scenario < 4 else 8 if scenario == 4 else 14
+        program[at + 1] = UInt64(2 if scenario < 4 else 8 if scenario == 4 else 14)
         var inverted = scenario == 1 or scenario == 3 or scenario == 7
         var comparison = COL if scenario != 2 and scenario != 3 else 0
         program[at + 9] = 0
