@@ -5,7 +5,8 @@ from .group_hash import _key_hash
 
 @always_inline
 def distinct_canonical(raw: UInt64, tag: UInt32) -> UInt64:
-    if tag == 2:
+    var kind = tag & 3
+    if kind == 2:
         var bits = UInt32(raw)
         var magnitude = bits & 0x7FFF_FFFF
         if magnitude == 0:
@@ -13,9 +14,9 @@ def distinct_canonical(raw: UInt64, tag: UInt32) -> UInt64:
         if magnitude > 0x7F80_0000:
             return UInt64(0x7FC0_0000)
         return UInt64(bits)
-    if tag == 0:
+    if kind == 0:
         return UInt64(UInt32(raw))
-    if tag == 3:
+    if kind == 3:
         return UInt64(raw != 0)
     return raw
 

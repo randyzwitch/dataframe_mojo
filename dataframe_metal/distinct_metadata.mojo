@@ -78,6 +78,7 @@ def distinct_metadata(
             UInt64(input.bit_offset)
             | (UInt64(input.nullable) << 32)
             | (UInt64(input.tag) << 33)
+            | (UInt64(input.value_bit_offset) << 35)
         )
     write_predicate(words, start, plan.predicate, inputs)
     return words^
