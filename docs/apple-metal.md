@@ -20,12 +20,13 @@ can share one scan, with checked arithmetic and optional numeric Boolean predica
 | Area | Accepted regions |
 | --- | --- |
 | Values | Native columns, binary arithmetic, bounded trees of `+`, `-`, `*` |
+| Exact distinct counts | Native N_UNIQUE globally or within bounded integer-key groups |
 | Ordered reductions | Native FIRST/LAST and ARG_MIN/ARG_MAX, globally or within bounded integer-key groups |
 | Conditional values | Numeric `when/then/otherwise` chains feeding reductions |
 | Filters | Literal ranges, same-dtype column comparisons, null tests, AND/OR/NOT |
 | Grouping | Up to four native Int32/Int64 keys, at most 65,536 groups including null tuples |
 | Input layout | Native nullable columns, slices and chunked inputs |
-| CPU execution | Other input types, joins, sorting, windows, distinct and unsupported expressions |
+| CPU execution | Other input types, joins, sorting, windows, row deduplication and unsupported expressions |
 
 Supported regions still require matching measurements before automatic
 placement selects Metal. The existing filtered-SUM fast path compares a
@@ -673,3 +674,30 @@ at most 65,536 groups. Expressions other than a native column with optional
 DROP_NULLS, and projections mixing these with other aggregate families, use
 CPU execution. Automatic placement requires matching measurements for
 `ordered_reductions:v1:` keys.
+
+### Exact distinct counts
+
+`n_unique()` accepts native Int32, Int64, Float32 and Bool columns, globally
+or with the existing integer tuple keys and fused filters. Results are
+non-null Int64 counts. The default counts null as one distinct value;
+`ignore_nulls=True` and `drop_nulls().n_unique()` exclude it. All Float32 NaNs
+share one class and both signed zeros share one class. Int64 keys retain
+all their bits. An empty global input returns zero.
+
+Up to four source columns share one scan; different null modes on the same
+column share the exact hash state. The GPU stores original-row tickets and
+compares native values and tuple keys on collisions. It does not convert
+input payloads, construct a per-row group-ID array or estimate the result.
+The host finishes only result rows.
+
+GPU resources are bounded to 65,536 groups and 1,048,576 distinct
+`(group, value)` pairs per source column. A table can grow once on GPU;
+excess cardinality or the bounded probe limit triggers the existing checked
+CPU fallback. Four maximum-capacity states use less than 40 MB of scratch.
+Unsupported types, derived values and projections mixed with other aggregate
+families use CPU execution.
+
+Placement keys include the null modes and sampled cardinality. A mostly
+unique sample cannot establish that the bounded table will fit, so automatic
+placement retains CPU for `distinct_cardinality=uncertain` shapes. Other
+shapes require matching measured costs for `distinct_reductions:v1:` keys.
