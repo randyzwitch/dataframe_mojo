@@ -12,6 +12,18 @@ from dataframe.expr import (
     ADD,
     SUB,
     MUL,
+    DIV,
+    FLOORDIV,
+    MOD,
+    CLIP_LOW,
+    CLIP_HIGH,
+    NEG,
+    ABS,
+    SIGN,
+    FLOOR,
+    CEIL,
+    TRUNCATE,
+    ROUND,
     WHEN,
     LIT_INT,
     LIT_FLOAT,
@@ -125,7 +137,33 @@ def _emit_value(
         ):
             return False
         nodes[jump_at].literal = UInt64(len(nodes))
-    elif node.op == ADD or node.op == SUB or node.op == MUL:
+    elif node.op in [NEG, ABS, SIGN, FLOOR, CEIL, TRUNCATE, ROUND]:
+        if (
+            node.right >= 0
+            or node.extra >= 0
+            or (
+                node.op == ROUND
+                and dtype == DataType.FLOAT32
+                and node.integer != 0
+            )
+            or not _emit_value(
+                expression,
+                typed,
+                types,
+                frame,
+                node.left,
+                dtype,
+                depth,
+                visited,
+                nodes,
+                conditions,
+            )
+        ):
+            return False
+        nodes.append(
+            ValueNode(node.op, "", -1, bitcast[DType.uint64](node.integer))
+        )
+    elif node.op in [ADD, SUB, MUL, DIV, FLOORDIV, MOD, CLIP_LOW, CLIP_HIGH]:
         if (
             node.left < 0
             or node.left >= at

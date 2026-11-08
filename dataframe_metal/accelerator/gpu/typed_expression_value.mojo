@@ -1,6 +1,6 @@
 """Bounded typed stack for checked casts and explicit mixed-source arithmetic."""
 from std.memory import Pointer, bitcast
-from dataframe.expr import COL, LIT_INT, CAST
+from dataframe.expr import COL, LIT_INT, CAST, ADD, SUB, MUL
 from ...expression_format import EXPRESSION_NODE_WORDS, VALUE_TYPE_SHIFT
 from .multi_reduce import Bytes, read_integer
 from .compound_predicate import _pointer
@@ -8,6 +8,12 @@ from .filter_sum import _valid
 from .arithmetic_sum import integer_binary
 from .value_ops import checked_float_value
 from .native_cast import native_cast_bits
+from .native_numeric import (
+    numeric_unary,
+    float32_unary_bits,
+    integer_unary_bits,
+    native_numeric_binary,
+)
 
 
 @always_inline
@@ -82,6 +88,19 @@ def typed_expression_value(
                     if descriptor & 1:
                         fault |= 1
                     present = False
+        elif numeric_unary(Int(op)):
+            top -= 1
+            present = Bool(validity[top])
+            if present:
+                if tag == 2:
+                    if need_float:
+                        bits = UInt64(
+                            float32_unary_bits(UInt32(values[top]), Int(op))
+                        )
+                else:
+                    var result = integer_unary_bits(values[top], tag, Int(op))
+                    bits = result[0]
+                    fault |= UInt32(result[1])
         else:
             top -= 1
             var right = values[top]
@@ -89,7 +108,19 @@ def typed_expression_value(
             top -= 1
             present = Bool(validity[top]) and right_valid
             if present:
-                if tag == 2:
+                if (
+                    op != UInt32(ADD)
+                    and op != UInt32(SUB)
+                    and op != UInt32(MUL)
+                ):
+                    if tag != 2 or need_float:
+                        var result = native_numeric_binary(
+                            values[top], right, tag, Int(op)
+                        )
+                        bits = result[0]
+                        present = result[1]
+                        fault |= result[2]
+                elif tag == 2:
                     if need_float:
                         var result = checked_float_value(
                             bitcast[DType.float32](UInt32(values[top])),

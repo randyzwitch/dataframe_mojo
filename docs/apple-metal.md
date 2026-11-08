@@ -76,7 +76,9 @@ scan without an intermediate result column. Operand nulls discard that row;
 integer intermediate overflow is detected even if a final sum would cancel.
 Overflow and non-finite Float32 partials use CPU adjudication. These shapes
 have separate `arithmetic_sum:` calibration keys. Deeper arithmetic uses the
-bounded tree path below; division and mixed-dtype arithmetic remain on CPU.
+bounded tree path below. Explicit casts can reconcile native operand types;
+integer true division and Float64 results remain on CPU. The general value
+program also supports native numeric operations described below.
 Arithmetic expressions can also appear inside SUM, COUNT and MEAN in the
 same projection as column aggregates, for example:
 
@@ -554,6 +556,34 @@ Typed programs have separate `typed_reductions:v1:` identities. Existing
 homogeneous arithmetic and proven simple CASE kernels keep their specialized
 routes; typed stacks use the general value path. Automatic placement requires
 matching measurements for the current build, types and physical layout.
+
+### Native numeric value programs
+
+Fused aggregate values can use unary negation, absolute value, sign, floor,
+ceiling, truncation and zero-decimal half-away rounding, plus lower/upper
+clipping. These compose with the existing native casts, arithmetic and CASE
+branches, and retain the same global/grouped reduction and predicate support.
+Float32 rounding with a nonzero decimal count remains on CPU because its
+decimal scaling uses Float64 arithmetic. Integer rounding retains the CPU's
+identity behavior.
+
+Int32 and Int64 floor division and remainder preserve the divisor's sign in
+the remainder. A zero divisor makes that row null. The minimum signed value
+divided by -1 retains the CPU's overflow outcome; modulo -1 is zero. Unary
+negation and absolute value also preserve minimum-integer overflow checks,
+including inside COUNT-only values. Untaken CASE branches remain lazy.
+
+Float32 true/floor division uses integer significands and round-to-nearest-even
+to reproduce native Float32 division, including subnormal operands/results,
+without device Float64. Float32 remainder follows the CPU's rounded quotient,
+fused recomposition and sign adjustment, rather than substituting a different
+mathematical remainder. Non-finite operands, zero Float32 divisors and
+underflow-sensitive remainder windows use explicit CPU adjudication. Bit-based
+unary and clipping operations retain signed zeros, subnormals and NaN rules.
+
+Programs retain the existing bounded typed-value format. Operation tags,
+parameters and native per-node types distinguish calibration keys; unmeasured
+shapes stay on CPU, and adjudicated executions cannot train GPU timings.
 
 ### Variance and standard deviation
 
