@@ -692,6 +692,60 @@ def test_a_shared_subplan_reads_distinct_counts_from_its_table() raises:
     )
 
 
+def test_a_shared_filtered_subplan_reads_distinct_counts_from_its_table() raises:
+    # A year of a date table, shared by two channels (TPC-DS q78's three
+    # sales CTEs each joining one year of date_dim). The filtered result
+    # still reads its key's count from the table, as DuckDB's scan keeps
+    # a filtered column's base count (`ExtractGetStats`): without it the
+    # date join's domain was the dates the sales hold, estimating it 40
+    # times too large.
+    var day = List[Int64]()
+    var year = List[Int64]()
+    for d in range(7000):
+        day.append(Int64(d))
+        year.append(Int64(d // 365))
+    var dates = DataFrame(
+        [ints("d_sk", day), ints("d_year", year)]
+    )._with_statistics()
+    var shared = (
+        dates.lazy()
+        .filter(col("d_year") == lit(Int64(3)))
+        .select_exprs([col("d_sk").alias("day")])
+    )
+    var channels = List[LazyFrame]()
+    for c in range(2):
+        var sold = List[Int64]()
+        var amount = List[Int64]()
+        for row in range(5000):
+            sold.append(Int64((row * 31 + c) % 2000))
+            amount.append(Int64(row % 11))
+        channels.append(
+            DataFrame([ints("f_day", sold), ints("f_amount", amount)])
+            .lazy()
+            .join(shared, left_on=["f_day"], right_on=["day"])
+        )
+    var query = channels[0].concat(channels[1])
+    var plan = query._optimized()
+    plan._share_subplans(True, 65536)
+    var read = 0
+    for i in range(len(plan._plan._nodes)):
+        ref node = plan._plan._nodes[i]
+        if (
+            node.kind != SCAN_FRAME
+            or node.source_slot() not in plan._plan._origin_tables
+        ):
+            continue
+        assert_equal(
+            plan._distinct(i, "day").count, dates._distinct_count("d_sk")
+        )
+        read += 1
+    assert_true(read >= 1, "the filtered projection was not shared")
+    assert_frame_unordered(
+        query.collect(),
+        query.collect(optimize=False, engine="cpu"),
+    )
+
+
 def test_a_filtered_relation_streaming_into_a_build_is_not_run_ahead() raises:
     # PDS-H q3's shape: filtered customers, orders and lines. Planning
     # estimates every relation from statistics and runs none of them
