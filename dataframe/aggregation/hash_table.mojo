@@ -1729,6 +1729,8 @@ struct AggregateSink(Movable):
             self.clustered,
             self.parts.states_at,
             count,
+            first,
+            Int(self.scratch.unsafe_ptr()),
         )
         if not self.skip_addresses:
             _update_states(

@@ -43,6 +43,7 @@ from dataframe.aggregation.function import (
     _K_WIDE_MAX,
     _K_WIDE_MIN,
     _format_nulls,
+    _value_words,
     _words_at,
 )
 from dataframe.aggregation.selected_rows import _canonical_int
@@ -108,11 +109,14 @@ def cluster_update(op: Int, kind: Int) -> Bool:
 def cluster_kernel(op: Int, kind: Int) -> Bool:
     """Whether `update_clustered` folds runs into the state: the cluster
     updates of counts, integer and float sums, and numeric min and max.
-    Decimal sums (whose overflow is checked as each value is added),
-    128-bit min and max, first and last keep their scatter, through the
-    rows' addresses, as DuckDB's aggregates with no cluster update do."""
+    first and last (DuckDB's early exit: a run's first or last row).
+    Decimal sums (whose overflow is checked as each value is added) and
+    128-bit min and max keep their scatter, through the rows' addresses,
+    as DuckDB's aggregates with no cluster update do."""
     return cluster_update(op, kind) and (
         kind == _K_LEN
+        or kind == _K_FIRST
+        or kind == _K_LAST
         or kind == _K_COUNT
         or kind == _K_INT_SUM
         or kind == _K_NARROW_SUM
@@ -192,6 +196,9 @@ struct ClusteredAggrState(Movable):
     var gids: List[UInt64]
     var counts: List[Int]
     var rows: List[Int]
+    # A first or last row per run: its vector index, and its position.
+    var picks: List[UInt32]
+    var positions: List[Int]
     var n_runs: Int
     var tuples_in_large: Int
     var skipped: Int
@@ -205,6 +212,8 @@ struct ClusteredAggrState(Movable):
         self.gids = List[UInt64]()
         self.counts = List[Int]()
         self.rows = List[Int]()
+        self.picks = List[UInt32]()
+        self.positions = List[Int]()
         self.n_runs = 0
         self.tuples_in_large = 0
         self.skipped = 0
@@ -223,6 +232,8 @@ struct ClusteredAggrState(Movable):
         self.gids = List[UInt64](length=_BATCH, fill=0)
         self.counts = List[Int](length=_BATCH, fill=0)
         self.rows = List[Int](length=_BATCH, fill=0)
+        self.picks = List[UInt32](length=_BATCH, fill=0)
+        self.positions = List[Int](length=_BATCH, fill=0)
         self.skipped = 0
         self.backoff = 1
         self.ready = True
@@ -458,16 +469,19 @@ def update_clustered(
     slots: List[AggregateFunction],
     kernels: List[Bool],
     inputs: List[UnifiedVectorFormat],
-    runs: ClusteredAggrState,
+    mut runs: ClusteredAggrState,
     states_at: Int,
     count: Int,
+    first: Int,
+    scratch: Int,
 ) raises:
     """`RowOperations::UpdateStatesClustered` for the reductions with a
     run kernel (`kernels`): each run of the chunk's `count` rows folded
     into its group's state (at `runs.rows[r]`, states from word
     `states_at`) once, from a local copy of the state (DuckDB's
     `ClusteredStateCopy`, so values add in row order as the scatter adds
-    them)."""
+    them). `first` is the source row of the chunk's first, and `scratch`
+    the value states' three vectors of words."""
     for s in range(len(slots)):
         if not kernels[s]:
             continue
@@ -484,6 +498,9 @@ def update_clustered(
                 )
             continue
         var format = inputs[s]
+        if kind == _K_FIRST or kind == _K_LAST:
+            _clustered_first_last(slot, format, runs, base, first, scratch)
+            continue
         var nulls = _format_nulls(format, 0, count)
         if kind == _K_COUNT:
             _clustered_counts(format, runs, base, nulls)
@@ -523,6 +540,64 @@ def _row[
     comptime if selected:
         i = sel.get_index_unsafe(i)
     return i
+
+
+def _clustered_first_last(
+    slot: AggregateFunction,
+    format: UnifiedVectorFormat,
+    mut runs: ClusteredAggrState,
+    base: Int,
+    first: Int,
+    scratch: Int,
+) raises:
+    """first and last's cluster update (`ClusteredOp`'s early exit): only
+    a run's first (last) row can be its group's first (last) of the chunk,
+    so each run's state takes that row, null or not, as the scatter would
+    (a set first state is kept; a last state is replaced). A group's runs
+    come in row order."""
+    var last = slot.kind == _K_LAST
+    var n = runs.n_runs
+    var picks = runs.picks.unsafe_ptr()
+    var positions = runs.positions.unsafe_ptr()
+    var starts = runs.starts.unsafe_ptr()
+    var counts = runs.counts.unsafe_ptr()
+    var arena = runs.arena.unsafe_ptr()
+    var sel = format.sel
+    for r in range(n):
+        var at = starts[unsafe_offset=r]
+        if last:
+            at += counts[unsafe_offset=r] - 1
+        var p = Int(arena[unsafe_offset=at])
+        positions[unsafe_offset=r] = p
+        picks[unsafe_offset=r] = UInt32(sel.get_index(p))
+    # The picked rows, through a selection over the vector's data.
+    var picked = UnifiedVectorFormat(
+        SelectionVector(Int(picks)),
+        format.data,
+        format.validity,
+        format.physical,
+    )
+    var first_words = _words_at(scratch)
+    var second_words = _words_at(scratch + 8 * _BATCH)
+    var nulls = _words_at(scratch + 16 * _BATCH)
+    for r in range(n):
+        nulls[unsafe_offset=r] = 0
+    _value_words(
+        picked, 0, n, scratch, scratch + 8 * _BATCH, scratch + 16 * _BATCH
+    )
+    var width = slot.width
+    var rows = runs.rows.unsafe_ptr()
+    for r in range(n):
+        var state = _words_at(rows[unsafe_offset=r] + base)
+        if not last and state[unsafe_offset=width + 1] != 0:
+            continue
+        state[] = first_words[unsafe_offset=r]
+        if width == 2:
+            state[unsafe_offset=1] = second_words[unsafe_offset=r]
+        state[unsafe_offset=width] = UInt64(first + positions[unsafe_offset=r])
+        state[unsafe_offset=width + 1] = UInt64(1) if nulls[
+            unsafe_offset=r
+        ] != 0 else UInt64(3)
 
 
 def _clustered_counts(
