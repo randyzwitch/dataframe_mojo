@@ -4,9 +4,9 @@ Each thread's `TopNSink` encodes its chunks' key columns a vector at a
 time and adds the rows that can enter to its `TopNHeap`, copying those
 rows into its payload (`heap_data`, AddLargeHeap). Once the payload holds
 more than ReduceThreshold rows it is cut down to the live entries
-(`Reduce`). The threads share a `TopNBoundary`. The finish sorts the heap
-(`Finalize`) and gathers the payload in order; the caller combines the
-threads' results.
+(`Reduce`). The threads share a `TopNBoundary`. `combine` merges each
+thread's heap and payload into one global heap (`TopNHeap::Combine`); the
+finish sorts that heap (`Finalize`) and gathers the payload in order.
 """
 from dataframe.frame import DataFrame
 from dataframe.dtype import DataType
@@ -151,9 +151,44 @@ struct TopNSink(Sink):
         pass
 
     def combine(var self, mut combined: List[TopNSink]) raises:
-        """This thread's heap into the global state, every thread's heap:
-        the finish sorts each and combines their rows."""
-        combined.append(self^)
+        """Combine (physical_top_n.cpp:532): this thread's heap into the
+        global heap, which the first thread's becomes."""
+        if len(combined) == 0:
+            combined.append(self^)
+            return
+        combined[0]._absorb(self^)
+
+    def _absorb(mut self, var other: TopNSink) raises:
+        if self.layout.variable:
+            self._combine[1, True](other^)
+        elif self.layout.words == 1:
+            self._combine[1, False](other^)
+        elif self.layout.words == 2:
+            self._combine[2, False](other^)
+        else:
+            self._combine[3, False](other^)
+
+    def _combine[W: Int, VAR: Bool](mut self, var other: TopNSink) raises:
+        """TopNHeap::Combine: the other heap sorted (`Finalize`), its
+        entries best first until one cannot enter, each entry's payload row
+        appended to this payload, then Reduce."""
+        comptime K = SortKeys[W, VAR]
+        other.heap.finalize[W, VAR]()
+        var k = other.heap.keys[W, VAR]()
+        var rows = List[Int]()
+        for i in range(other.heap.size):
+            var rec = k.get(i)
+            if not self.heap.entry_should_be_added[W, VAR](rec):
+                break
+            rows.append(Int(rec[K.R - 1]))
+            rec[K.R - 1] = UInt64(self.payload_rows + len(rows) - 1)
+            self.heap.add[W, VAR](rec)
+        if len(rows) == 0:
+            return
+        self._append(other._payload().take(rows)._columns)
+        self.payload_rows += len(rows)
+        if self.payload_rows >= self.heap.reduce_threshold():
+            self._reduce[W, VAR]()
 
     def sink(mut self, frame: DataFrame) raises:
         """Sink: the chunk's rows that enter, a vector at a time."""
