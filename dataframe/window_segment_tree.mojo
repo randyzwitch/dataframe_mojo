@@ -189,19 +189,27 @@ struct _TreePart(Movable):
         """Entries [begin, end) of level `l_idx` into `state`."""
         if begin >= end:
             return
+        var statep = self.statep.unsafe_ptr()
         if l_idx == 0:
-            for row in range(begin, end):
-                self.statep[self.flush_count] = state
-                self.sel[self.flush_count] = UInt32(row)
-                self.flush_count += 1
+            var sel = self.sel.unsafe_ptr()
+            var row = begin
+            while row < end:
+                var at = self.flush_count
+                var take = min(end - row, STANDARD_VECTOR_SIZE - at)
+                for k in range(take):
+                    statep[unsafe_offset=at + k] = state
+                    sel[unsafe_offset=at + k] = UInt32(row + k)
+                row += take
+                self.flush_count = at + take
                 if self.flush_count >= STANDARD_VECTOR_SIZE:
                     self.flush_states(False)
             return
+        var statel = self.statel.unsafe_ptr()
         var entry = tree.state_at(begin + tree.levels_flat_start[l_idx - 1])
         var step = 8 * tree.stride
         for i in range(end - begin):
-            self.statep[self.flush_count] = state
-            self.statel[self.flush_count] = entry + i * step
+            statep[unsafe_offset=self.flush_count] = state
+            statel[unsafe_offset=self.flush_count] = entry + i * step
             self.flush_count += 1
             if self.flush_count >= STANDARD_VECTOR_SIZE:
                 self.flush_states(True)
