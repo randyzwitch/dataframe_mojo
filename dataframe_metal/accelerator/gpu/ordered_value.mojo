@@ -10,7 +10,7 @@ def ordered_bits(values: Bytes, tag: UInt32, row: Int) -> UInt64:
     if tag == 1:
         return values.unsafe_bitcast[UInt64]()[unsafe_offset=row]
     if tag == 3:
-        return UInt64(values[unsafe_offset=row])
+        return UInt64(values[unsafe_offset=row] != 0)
     return UInt64(values.unsafe_bitcast[UInt32]()[unsafe_offset=row])
 
 
@@ -51,6 +51,9 @@ def ordered_better(
     if tag == 0:
         a = Int64(bitcast[DType.int32](UInt32(candidate)))
         b = Int64(bitcast[DType.int32](UInt32(previous)))
+    elif tag == 3:
+        a = Int64(candidate != 0)
+        b = Int64(previous != 0)
     return (
         candidate_row
         < previous_row if a

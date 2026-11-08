@@ -87,6 +87,11 @@ def test_metal_ordered_integer_tickets_keep_full_width_and_empty_sentinels() rai
                 ),
                 a <= b,
             )
+    for a in [UInt64(0), UInt64(1), UInt64(255)]:
+        for b in [UInt64(0), UInt64(1), UInt64(255)]:
+            assert_equal(
+                ordered_better(a, 1, b, 2, 3, True), not Bool(a) or Bool(b)
+            )
     for op in [FIRST, LAST, ARG_MIN, ARG_MAX]:
         assert_equal(ordered_ticket_row(ordered_empty(op), op), UInt32.MAX)
         for row in [UInt32(0), UInt32(127), UInt32(Int32.MAX - 1)]:
