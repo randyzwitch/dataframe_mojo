@@ -88,6 +88,14 @@ def test_metal_conditional_program_rejects_unsupported_branch_types_and_math() r
     assert_false(
         Bool(
             compile_conditional(
+                when(col("p") > 0).then(col("v").sqrt()).otherwise(col("v")),
+                frame,
+            )
+        )
+    )
+    assert_true(
+        Bool(
+            compile_conditional(
                 when(col("p") > 0).then(col("v") / 2).otherwise(col("v")), frame
             )
         )
