@@ -29,8 +29,8 @@ The pointer table is an array of 8-byte `ht_entry_t`: the hash's upper 16
 bits (the salt) over the row's 48-bit address. Finalize differs from
 DuckDB's, which inserts on one thread below 1,048,576 rows
 (PARALLEL_CONSTRUCT_THRESHOLD) and with compare-and-swap above: each radix
-partition gets its own region of the table, which one task zeroes and
-fills with no shared inserts, as Polars 2.0's streaming join builds a
+partition gets its own region of the table, zeroed and filled with no
+shared inserts by one of as many tasks as the build had sink threads, as Polars 2.0's streaming join builds a
 table per partition (`finalize_unordered`, polars-stream
 equi_join.rs:876-1000); a probe row looks in its partition's region.
 Measured on the operator harness, DuckDB's finalize was 1.36x slower on
@@ -599,7 +599,23 @@ struct _SinkJob(Job):
         _ = kept^
 
 
-struct _InsertJob(Job):
+struct _FinalizeJob(Job):
+    """One finalize thread's partitions, filled one after another."""
+
+    var regions: List[_InsertJob]
+    var chained: Bool
+
+    def __init__(out self):
+        self.regions = List[_InsertJob]()
+        self.chained = False
+
+    def run(mut self) raises:
+        for r in range(len(self.regions)):
+            self.regions[r].run()
+            self.chained = self.chained or self.regions[r].chained
+
+
+struct _InsertJob(Copyable, Job):
     """A HashJoinFinalizeTask for one partition's region of the pointer
     table (at `base`, with `bitmask`): zero it, then insert the rows of
     the partition's chunks (DuckDB's InsertHashesLoop), last row first, so
@@ -941,6 +957,7 @@ struct JoinHashTable(Copyable, Movable):
         for w in range(len(sinks)):
             invalid += sinks[w].invalid
             sink.combine(sinks[w].rows)
+        var sink_threads = max(len(sinks), 1)
         _ = sinks^
         self.has_null = invalid > 0
         self.build_filtered = False
@@ -1020,10 +1037,22 @@ struct JoinHashTable(Copyable, Movable):
                     not keys_only,
                 )
             )
-        run_jobs(inserts)
-        for p in range(len(inserts)):
+        # As many tasks as the build had sink threads, each filling a run
+        # of partitions' regions; one runs here.
+        var tasks = List[_FinalizeJob](capacity=sink_threads)
+        for t in range(sink_threads):
+            tasks.append(_FinalizeJob())
+        for p in range(self.parts):
+            tasks[p * sink_threads // self.parts].regions.append(
+                inserts[p].copy()
+            )
+        if len(tasks) == 1:
+            tasks[0].run()
+        else:
+            run_jobs(tasks)
+        for t in range(len(tasks)):
             self.chains_longer_than_one = (
-                self.chains_longer_than_one or inserts[p].chained
+                self.chains_longer_than_one or tasks[t].chained
             )
 
     def keys(self) -> List[Series]:
