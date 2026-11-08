@@ -28,7 +28,6 @@ from dataframe.storage.column import (
 from dataframe.dtype import (
     DataType,
 )
-from dataframe.execution import direct_reductions
 from dataframe.expr import (
     COL,
     Expr,
@@ -1090,22 +1089,6 @@ def plan_stream_execute(
             top = top - skip + order.value().remaining_offset
             skip = order.value().remaining_offset
             top_ranges = order.value().ranges.copy()
-    var rows_per_batch = batch_size
-    if (
-        len(operations) == 0
-        and len(expressions) > 0
-        and len(keys) == 0
-        and input.height() > 0
-        and direct_reductions(expressions, input._columns)
-    ):
-        # Ungrouped reductions straight off an in-memory input that
-        # each run as one scan of their column: four batches a worker
-        # and no more, since each batch binds and sets up every
-        # expression (ClickBench q29: ninety sums, 153 batches of 64K
-        # rows cost 15 ms of that; 32 batches cost 4). A reduction
-        # that materializes per-batch values keeps `batch_size`, which
-        # fits them in cache (TPC-DS q9, 34 ms against 25 at 90K rows).
-        rows_per_batch = max(batch_size, input.height() // (4 * workers))
     # Row-local steps over an in-memory frame into a materialize or an
     # ungrouped reduce sink run as a thread-owned pipeline (#538): each
     # worker takes morsels from a shared cursor and runs every step on
@@ -1228,7 +1211,6 @@ def plan_stream_execute(
             keys,
             ordered,
             workers,
-            rows_per_batch,
             batch_size,
             piped_counts,
             set_frames,
@@ -1378,22 +1360,7 @@ def plan_stream_execute(
                     piped_counts[base + 2 * k + 1],
                 )
         return piped_result^
-    # An in-memory input hands each round four batches a worker, which
-    # the pool claims as workers free up, so uneven batches balance.
-    # Batches decoded from a file are held until their round ends, so
-    # those keep one a worker, as does a top-k (ClickBench q26 lost its
-    # bound for a first round four times as long).
     var per_round = workers
-    if (
-        len(csv) == 0
-        and len(dataset) == 0
-        and len(parquet) == 0
-        and len(ipc) == 0
-        and len(ndjson) == 0
-        and top < 0
-    ):
-        # Not for a top-k, whose bound tightens between rounds.
-        per_round = 4 * workers
     # Batches held while undecided, to reduce in the next round once
     # the stream decides not to collect.
     var replay = List[DataFrame]()
@@ -1451,7 +1418,7 @@ def plan_stream_execute(
                 if emitted and offset >= input.height():
                     ended = True
                     break
-                frame = input.slice(offset, rows_per_batch)
+                frame = input.slice(offset, batch_size)
                 offset += frame.height()
                 emitted = True
             var job = _StreamJob(
@@ -1471,12 +1438,15 @@ def plan_stream_execute(
             job.keep_frame = undecided
             job.projection = projection.copy()
             jobs.append(job^)
-        if len(jobs) == 0:
+        if len(jobs) == 0 and not (undecided and len(held) > 0):
             break
-        if not pool_ready:
-            pool = Pool(min(len(jobs), workers))
-            pool_ready = True
-        pool.run(jobs, claim=True)
+        # A round can find the input ended with batches still held: it
+        # runs no jobs but still judges them below.
+        if len(jobs) > 0:
+            if not pool_ready:
+                pool = Pool(min(len(jobs), workers))
+                pool_ready = True
+            pool.run(jobs, claim=True)
         if counting:
             for i in range(len(jobs)):
                 ref counts = jobs[i].counts
