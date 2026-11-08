@@ -299,33 +299,32 @@ def join_frames(
             physical = JOIN_RIGHT_ANTI
     elif how == JOIN_RIGHT:
         physical = JOIN_LEFT
+    var probe_keys = List[Series](capacity=len(left_keys))
+    var build_keys = List[Series](capacity=len(left_keys))
+    for k in range(len(left_keys)):
+        if probe_left:
+            probe_keys.append(self._columns[left_keys[k]].copy())
+            build_keys.append(right._columns[right_keys[k]].copy())
+        else:
+            probe_keys.append(right._columns[right_keys[k]].copy())
+            build_keys.append(self._columns[left_keys[k]].copy())
+    trace_path("join.hash_table")
+    var table = JoinHashTable(
+        build_keys,
+        perfect=physical == JOIN_INNER,
+        keys_only=keys_only_join(physical),
+    )
     var pairs = Tuple[List[Int], List[Int]](List[Int](), List[Int]())
-    var build_rows = right.height() if probe_left else self.height()
-    if build_rows == 0 and (
+    if table.count == 0 and (
         physical == JOIN_INNER
         or physical == JOIN_SEMI
         or physical == JOIN_RIGHT_SEMI
     ):
         # An empty build matches no probe row (DuckDB's
         # `EmptyResultIfRHSIsEmpty`: the hash join's sink finalizes as
-        # NO_OUTPUT_POSSIBLE), so nothing is hashed or probed.
+        # NO_OUTPUT_POSSIBLE), so nothing is probed.
         trace_path("join.empty_build")
     else:
-        var probe_keys = List[Series](capacity=len(left_keys))
-        var build_keys = List[Series](capacity=len(left_keys))
-        for k in range(len(left_keys)):
-            if probe_left:
-                probe_keys.append(self._columns[left_keys[k]].copy())
-                build_keys.append(right._columns[right_keys[k]].copy())
-            else:
-                probe_keys.append(right._columns[right_keys[k]].copy())
-                build_keys.append(self._columns[left_keys[k]].copy())
-        trace_path("join.hash_table")
-        var table = JoinHashTable(
-            build_keys,
-            perfect=physical == JOIN_INNER,
-            keys_only=keys_only_join(physical),
-        )
         pairs = probe_pairs(table, probe_keys, physical, 0)
     if how == JOIN_SEMI or how == JOIN_ANTI:
         var kept = List[Int]()
