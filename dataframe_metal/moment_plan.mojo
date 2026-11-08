@@ -144,7 +144,7 @@ def moment_execution_region(plan: MomentPlan) -> LazyFrame:
 
 
 def moment_key(plan: MomentPlan) -> String:
-    var key = String("moments:v2:cpu:")
+    var key = String("moments:v3:cpu:")
     if plan.grouped:
         key += grouped_key(plan.grouped.value())
     else:

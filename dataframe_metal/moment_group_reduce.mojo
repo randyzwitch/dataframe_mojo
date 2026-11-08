@@ -12,6 +12,7 @@ from dataframe.expr import VAR, STD, SUM, MEAN
 from .moment_plan import MomentPlan, plan_moments, moment_output_sources
 from .moment_reduce import moment_masks
 from .moment_finish import finish_variance
+from .moment_inputs import coalesced_moment_frame
 from .moment_compatibility import (
     require_cpu_moment_compatibility,
     require_cpu_moment_precision,
@@ -205,6 +206,13 @@ def execute_grouped_moments_math(
     comptime if not METAL_TARGET:
         raise Error("Metal grouped moments require an Apple compilation target")
     else:
+        var input_ns = 0
+        if zero_copy and len(plan.selected.bundle.fields) == 4:
+            var input_started = Int(perf_counter_ns())
+            frame = coalesced_moment_frame(
+                frame, len(plan.selected.bundle.fields)
+            )
+            input_ns = Int(perf_counter_ns()) - input_started
         var scope = Scope(service=shared_service())
         var started = Int(perf_counter_ns())
         _ = scope.context()
@@ -218,6 +226,7 @@ def execute_grouped_moments_math(
             timings,
             moment_mask=masks[0],
         )
+        timings.upload_ns += input_ns
         started = Int(perf_counter_ns())
         var answer = finish_grouped_moments_math(
             plan, frame, partials, cpu_compatible=True

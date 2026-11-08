@@ -664,7 +664,7 @@ def test_metal_moment_planner_shares_values_but_preserves_each_ddof() raises:
         .op,
         VAR,
     )
-    assert_true(moment_key(plan).startswith("moments:v2:cpu:"))
+    assert_true(moment_key(plan).startswith("moments:v3:cpu:"))
     assert_true(not Bool(plan_moments(frame.lazy().select(value.var(-1)))))
     var changed = plan_moments(frame.lazy().select(value.var(1)))
     var original = plan_moments(frame.lazy().select(value.var(0)))
@@ -1426,7 +1426,7 @@ def test_metal_moment_provider_layout_key_keeps_derived_ddof() raises:
         else:
             derived = derived.select(col("derived").var(1).alias("variance"))
             direct = direct.select(value.var(1).alias("renamed"))
-        assert_true(region_key(derived).startswith("moments:v2:cpu:"))
+        assert_true(region_key(derived).startswith("moments:v3:cpu:"))
         assert_equal(layout_key(derived), layout_key(direct))
     assert_true(
         layout_key(frame.lazy().select(value.var(0)))
@@ -1775,7 +1775,7 @@ def test_metal_moments_public_derived_casts_membership_and_tuple_groups() raises
             )
             var expected = DataFrame(columns^)
             assert_true(supports(query))
-            assert_true(layout_key(query).startswith("moments:v2:cpu:"))
+            assert_true(layout_key(query).startswith("moments:v3:cpu:"))
             _assert_moment_answer(execute_timed(query)[0], expected)
             _assert_public_moment(query, expected)
 
@@ -1981,3 +1981,69 @@ def test_metal_moments_public_precision_boundary_keeps_cpu_results() raises:
                     assert_true(
                         abs(actual - expected) <= 1e-10 * (1 + abs(expected))
                     )
+
+
+def test_metal_moment_shared_spans_keep_native_values_and_bitmap_offsets() raises:
+    from std.memory import Pointer
+    from dataframe import Column, DataFrame, Series
+    from dataframe_metal.moment_inputs import coalesced_moment_frame
+
+    var values = List[Float32]()
+    var integers = List[Int64]()
+    var valid = List[Bool]()
+    for row in range(10):
+        values.append(Float32(row) + Float32(0.25))
+        integers.append(Int64(row - 3))
+        valid.append(row % 3 != 0)
+    var base = DataFrame(
+        [
+            Series("x", Column[Float32](values^, valid)),
+            Series("i", Column[Int64](integers^, valid)),
+        ]
+    ).slice(1, 8)
+    var columns = List[Series]()
+    for name in base.columns():
+        var source = base.column(name)
+        columns.append(
+            Series._from_chunks(
+                [source.slice(0, 3), source.slice(3, 2), source.slice(5, 3)]
+            )
+        )
+    var fragmented = DataFrame(columns^)
+    var joined = coalesced_moment_frame(fragmented, 4)
+    assert_equal(joined.height(), fragmented.height())
+    assert_equal(joined.columns(), fragmented.columns())
+    for name in fragmented.columns():
+        assert_true(fragmented.column(name).is_chunked())
+        assert_true(not joined.column(name).is_chunked())
+        assert_true(joined.column(name).equals(fragmented.column(name)))
+    var before = base.column("x").numeric[DType.float32]()
+    var after = joined.column("x").numeric[DType.float32]()
+    assert_equal(Int(after.unsafe_values()), Int(before.unsafe_values()))
+    assert_equal(
+        Int(Pointer(to=after._bits[])), Int(Pointer(to=before._bits[]))
+    )
+    assert_equal(after.validity_offset(), before.validity_offset())
+    assert_true(coalesced_moment_frame(fragmented, 1).column("x").is_chunked())
+
+    var source = base.column("x")
+    var gaps = DataFrame(
+        [Series._from_chunks([source.slice(0, 3), source.slice(4, 4)])]
+    )
+    var retained = coalesced_moment_frame(gaps, 4)
+    assert_true(retained.column("x").is_chunked())
+    assert_true(retained.column("x").equals(gaps.column("x")))
+
+    var independent = DataFrame(
+        [
+            Series._from_chunks(
+                [
+                    Series("x", Column[Float32]([Float32(1), Float32(2)])),
+                    Series("x", Column[Float32]([Float32(3), Float32(4)])),
+                ]
+            )
+        ]
+    )
+    retained = coalesced_moment_frame(independent, 4)
+    assert_true(retained.column("x").is_chunked())
+    assert_true(retained.column("x").equals(independent.column("x")))

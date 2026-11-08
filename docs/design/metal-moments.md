@@ -118,7 +118,14 @@ compiler logs, strict Float64 IR and hashes under
 `build/metal-moment-accuracy/`. GPU and public-execution contracts separately
 validate accumulation, retries and provider routing.
 
-Moment calibration keys include `moments:v2:cpu:`, logical operations and
+Four-value moment execution joins adjacent shared native chunks into one
+input span before dispatch. Values and validity bitmaps retain their original
+owners and offsets; no payload is copied. Independent allocations and gaps
+retain their existing path. This selects the existing contiguous kernels
+for shared spans rather than the fragmented variants. The calibration
+revision changes with this input mapping so earlier timings are not reused.
+
+Moment calibration keys include `moments:v3:cpu:`, logical operations and
 each output's `ddof`, as well as expression, predicate, grouping and physical
 input properties. Layout matching uses normalized native inputs while the
 logical plan retains VAR/STD. Unmeasured shapes remain on CPU. Calibration
