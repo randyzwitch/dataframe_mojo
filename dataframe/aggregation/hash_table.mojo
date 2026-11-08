@@ -1195,6 +1195,20 @@ struct _DictionaryKeys(Movable):
             hashes[unsafe_offset=k] = _mix(hash_key)
 
 
+@always_inline
+def _perfect_bound(slot: UInt64, total: UInt64) raises:
+    """A perfect hash table's slot within its `total` groups, or the error
+    DuckDB raises when the key statistics do not hold for the data."""
+    if slot >= total:
+        raise Error(
+            "Perfect hash aggregate: aggregate group "
+            + String(slot)
+            + " exceeded total groups "
+            + String(total)
+            + ", so the key statistics do not hold for the data"
+        )
+
+
 struct _DictionaryGroups(Movable):
     """DuckDB's `AggregateDictionaryState`: for the dictionary whose
     entries a sole coded key's codes index (`identity`, its address, as
@@ -1676,6 +1690,7 @@ struct AggregateSink(Movable):
             return False
         if self.perfect.total_groups() >= MAX_GID_COUNT:
             return False
+        self._perfect_check(count)
         if not self.clustered.try_build(Int(self.groups.unsafe_ptr()), count):
             return False
         var base = Int(self.perfect_rows.unsafe_ptr())
@@ -1767,9 +1782,9 @@ struct AggregateSink(Movable):
         mut self, keys: List[KeyVector], first: Int, count: Int
     ) raises:
         """`PerfectAggregateHashTable::AddChunk`'s group ids: each row's
-        slot from its keys' bits (`ComputeGroupLocation`) into `groups`,
-        checked against the table's size (statistics that do not hold for
-        the data raise, as DuckDB's do)."""
+        slot from its keys' bits (`ComputeGroupLocation`) into `groups`.
+        Each path checks them against the table's size (statistics that do
+        not hold for the data raise, as DuckDB's do)."""
         # The locations are computed into the address vector itself, each
         # then replaced by its row's address (DuckDB's `addresses`).
         var groups = self.groups.unsafe_ptr()
@@ -1790,34 +1805,33 @@ struct AggregateSink(Movable):
                 count,
                 slots,
             )
-        var total = UInt64(self.perfect.total_groups())
+
+    def _perfect_check(self, count: Int) raises:
+        """The clustered path's check of the rows' slots (in `groups`)
+        against the table's size, before any is clustered: a group id keeps
+        only its low bits there."""
+        var slots = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=Int(self.groups.unsafe_ptr())
+        )
         var most = UInt64(0)
         for k in range(count):
             most = max(most, slots[unsafe_offset=k])
-        if most >= total:
-            for k in range(count):
-                var slot = slots[unsafe_offset=k]
-                if slot >= total:
-                    raise Error(
-                        "Perfect hash aggregate: aggregate group "
-                        + String(slot)
-                        + " exceeded total groups "
-                        + String(total)
-                        + ", so the key statistics do not hold for the data"
-                    )
+        _perfect_bound(most, UInt64(self.perfect.total_groups()))
 
-    def _perfect_addresses(mut self, first: Int, count: Int):
+    def _perfect_addresses(mut self, first: Int, count: Int) raises:
         """The non-clustered path's group addresses: each row's slot (in
-        `groups`) marked set (with the row, its first) and replaced by its
-        row's address."""
+        `groups`) checked against the table's size, marked set (with the
+        row, its first) and replaced by its row's address."""
         var groups = self.groups.unsafe_ptr()
         var slots = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=Int(groups)
         )
+        var total = UInt64(self.perfect.total_groups())
         var base = Int(self.perfect_rows.unsafe_ptr())
         var bytes = 8 * self.parts.stride
         for k in range(count):
             var slot = slots[unsafe_offset=k]
+            _perfect_bound(slot, total)
             var at = base + Int(slot) * bytes
             var row = _words_at(at)
             if row[unsafe_offset=1] == 0:
