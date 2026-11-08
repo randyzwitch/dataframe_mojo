@@ -739,6 +739,47 @@ def distinct_count(values: Series, ignore_nulls: Bool) raises -> Int:
     return distinct_values(tables, layout, ignore_nulls)
 
 
+def distinct_counts(
+    values: Series, groups: List[Int], group_count: Int, ignore_nulls: Bool
+) raises -> List[Int64]:
+    """The distinct values of a column in each of `group_count` groups
+    (`n_unique` by group; row r is in group `groups[r]`), as DuckDB's
+    radix distinct tables count them: every row's (group, value) sunk, a
+    morsel per worker at a time, into the worker's aggregate table of those
+    pairs, whose merged groups are then counted into their group. Values
+    compare as `distinct_count`'s do; a null is one value unless
+    `ignore_nulls`."""
+    if len(groups) != len(values):
+        raise Error("distinct counts: one group per row")
+    var ids = List[Int64](capacity=len(groups))
+    for g in groups:
+        ids.append(Int64(g))
+    var keys: List[Series] = [Series("", Column[Int64](ids^)), values.copy()]
+    var layout = aggregate_layout(keys, List[Series](), List[ReducerSpec]())
+    var ranges = List[Int]()
+    var start = 0
+    for part in values.chunks():
+        var at = 0
+        var length = len(part)
+        while at < length:
+            ranges.append(start + at)
+            ranges.append(min(_MORSEL_ROWS, length - at))
+            at += _MORSEL_ROWS
+        start += length
+    var workers = max(1, min(configured_workers(), len(ranges) // 2))
+    var tables = _sink_jobs(keys, List[Series](), layout, ranges, workers)
+    var pairs = aggregate_finish(tables, layout, rows_only=True, ordered=False)
+    var counts = List[Int64](length=group_count, fill=0)
+    for p in range(len(pairs.rows)):
+        ref part = pairs.rows[p]
+        for g in range(part.count()):
+            # Key 1, the value, is null.
+            if ignore_nulls and (part.null(g) >> 1) & 1 != 0:
+                continue
+            counts[Int(part.word(g, 0))] += 1
+    return counts^
+
+
 def ungrouped_finish(
     shared: UngroupedLayout, mut sinks: List[UngroupedSink]
 ) raises -> DataFrame:

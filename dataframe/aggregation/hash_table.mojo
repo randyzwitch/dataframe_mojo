@@ -100,6 +100,14 @@ from dataframe.aggregation.function import (
     table_reduction,
     table_states_supported,
 )
+from dataframe.aggregation.clustered import (
+    ClusteredAggrState,
+    GID_HIGH_MASK,
+    MAX_GID_COUNT,
+    cluster_kernel,
+    cluster_update,
+    update_clustered,
+)
 from dataframe.aggregation.perfect_hash import (
     PerfectHash,
     group_locations,
@@ -1206,12 +1214,19 @@ struct _DictionaryGroups(Movable):
     var row_entries: List[Int]
     var entries: List[Int]
     var rows: List[Int]
+    # Whether every group row found so far shares its high address bits
+    # (`address_high_bits_uniform`), so the clustered update can take the
+    # rows' addresses as group ids; the bits, UInt64.MAX before any.
+    var high_bits: UInt64
+    var uniform: Bool
 
     def __init__(out self):
         self.identity = 0
         self.found = List[Bool]()
         self.addresses = List[Int]()
         self.resolved = 0
+        self.high_bits = UInt64.MAX
+        self.uniform = True
         self.row_entries = List[Int](length=_BATCH, fill=0)
         self.entries = List[Int](length=_BATCH, fill=0)
         self.rows = List[Int](length=_BATCH, fill=0)
@@ -1229,6 +1244,18 @@ struct _DictionaryGroups(Movable):
         if len(self.addresses) < size + 1:
             self.addresses = List[Int](length=size + 1, fill=0)
         self.resolved = 0
+        self.high_bits = UInt64.MAX
+        self.uniform = True
+
+    @always_inline
+    def saw(mut self, address: Int):
+        """A group row found for an entry: whether its high address bits
+        keep the found rows uniform."""
+        var high = UInt64(address) & GID_HIGH_MASK
+        if self.high_bits == UInt64.MAX:
+            self.high_bits = high
+        elif high != self.high_bits:
+            self.uniform = False
 
 
 struct _DistinctSinks(Movable):
@@ -1340,6 +1367,16 @@ struct AggregateSink(Movable):
     # table.
     var perfect: PerfectHash
     var perfect_rows: List[UInt64]
+    # DuckDB's `ClusteredAggrState`, made only when more than one reduction
+    # has a cluster update (`n_clustered > 1`); per reduction whether
+    # `update_clustered` folds its runs; whether every reduction's does
+    # (DuckDB's `all_clustered`: the rows' addresses are then not needed);
+    # and the probe's entry offset of each row (`ht_offsets`), the hashed
+    # table's group ids.
+    var clustered: ClusteredAggrState
+    var kernels: List[Bool]
+    var skip_addresses: Bool
+    var offsets: List[UInt64]
 
     def __init__(
         out self,
@@ -1404,6 +1441,24 @@ struct AggregateSink(Movable):
             self.buffered.append(_OrderedBuffer())
         self.perfect = layout.perfect.copy()
         self.perfect_rows = List[UInt64]()
+        self.clustered = ClusteredAggrState()
+        self.kernels = List[Bool](capacity=len(layout.slots))
+        self.offsets = List[UInt64]()
+        var n_clustered = 0
+        var n_kernels = 0
+        for s in range(len(layout.slots)):
+            var op = layout.templates[s].op
+            var kind = layout.slots[s].kind
+            n_clustered += Int(cluster_update(op, kind))
+            var kernel = cluster_kernel(op, kind)
+            n_kernels += Int(kernel)
+            self.kernels.append(kernel)
+        self.skip_addresses = len(layout.slots) > 0 and n_kernels == len(
+            layout.slots
+        )
+        if n_clustered > 1:
+            self.clustered.initialize()
+            self.offsets = List[UInt64](length=_BATCH, fill=0)
         if self.perfect.used():
             self.perfect_rows = List[UInt64](
                 length=self.perfect.total_groups() * self.parts.stride, fill=0
@@ -1544,20 +1599,141 @@ struct AggregateSink(Movable):
             self.held.append(column.copy())
         if self.perfect.used():
             self._perfect_groups(keys, first, count)
-            self._update_groups(inputs, first, count, columns)
+            if not self._perfect_clustered(inputs, first, count, columns):
+                self._perfect_addresses(first, count)
+                self._update_groups(inputs, first, count, columns)
             return
         var constant = count > 1
         var zero = zero_selection().data
         for c in range(len(keys)):
             constant = constant and keys[c].format.sel.data == zero
+        # The rows' group ids for the clustered update: the probe's entry
+        # offsets, or (for the compressed paths, as DuckDB's
+        # `UpdateAggregatesClustered` with `ht_offsets_valid` false) the
+        # group rows' addresses, when their high bits are uniform.
+        var gids = Int(self.groups.unsafe_ptr())
         if constant:
             self._constant_groups(keys, first, count)
         elif len(keys) == 1 and keys[0].codes != 0:
             self._dictionary_groups(keys[0], first, count)
+            if not self.dictionary_groups.uniform:
+                gids = 0
         else:
             self._find_or_create(keys, first, count)
-        self._update_groups(inputs, first, count, columns)
+            gids = Int(self.offsets.unsafe_ptr())
+            if self.capacity >= MAX_GID_COUNT:
+                gids = 0
+        if not self._hashed_clustered(gids, inputs, first, count, columns):
+            self._update_groups(inputs, first, count, columns)
         self._sink_distinct(keys, inputs, hold, first, count)
+
+    def _clustered_ready(self) -> Bool:
+        """Whether the clustered update may run on this sink's next chunk:
+        its state was made, and the sink is no table of distinct groups
+        counting into one reduction (`only`)."""
+        return self.clustered.ready and self.only < 0
+
+    def _hashed_clustered(
+        mut self,
+        gids: Int,
+        inputs: List[UnifiedVectorFormat],
+        first: Int,
+        count: Int,
+        columns: List[Series],
+    ) raises -> Bool:
+        """`GroupedAggregateHashTable::UpdateAggregatesClustered`: the
+        chunk's rows clustered by the group ids at `gids` (0 for none) and
+        its states updated run by run; False, with nothing updated, when
+        lookups are skipped or the chunk does not cluster. A run's state
+        row is its first row's group."""
+        if gids == 0 or self.skip or not self._clustered_ready():
+            return False
+        if not self.clustered.try_build(gids, count):
+            return False
+        var groups = self.groups.unsafe_ptr()
+        var rows = self.clustered.rows.unsafe_ptr()
+        for r in range(self.clustered.n_runs):
+            rows[unsafe_offset=r] = groups[
+                unsafe_offset=self.clustered.first_position(r)
+            ]
+        self._update_runs(inputs, first, count, columns)
+        return True
+
+    def _perfect_clustered(
+        mut self,
+        inputs: List[UnifiedVectorFormat],
+        first: Int,
+        count: Int,
+        columns: List[Series],
+    ) raises -> Bool:
+        """`PerfectAggregateHashTable::AddChunkClustered`: the chunk's rows
+        clustered by their slots (in `groups`), each run's slot marked set
+        (with its first row) and its row found once (`InitializeStates`),
+        the rows' addresses made only when some reduction still scatters,
+        then the states updated run by run. False, with nothing updated,
+        when the chunk does not cluster."""
+        if not self._clustered_ready():
+            return False
+        if self.perfect.total_groups() >= MAX_GID_COUNT:
+            return False
+        if not self.clustered.try_build(Int(self.groups.unsafe_ptr()), count):
+            return False
+        var base = Int(self.perfect_rows.unsafe_ptr())
+        var bytes = 8 * self.parts.stride
+        var gids = self.clustered.gids.unsafe_ptr()
+        var rows = self.clustered.rows.unsafe_ptr()
+        for r in range(self.clustered.n_runs):
+            var at = base + Int(gids[unsafe_offset=r]) * bytes
+            var row = _words_at(at)
+            if row[unsafe_offset=1] == 0:
+                # A group's earliest rows are in its first run.
+                row[unsafe_offset=1] = 1
+                row[unsafe_offset=2] = UInt64(
+                    first + self.clustered.first_position(r)
+                )
+            rows[unsafe_offset=r] = at
+        if not self.skip_addresses:
+            self._perfect_addresses(first, count)
+        self._update_runs(inputs, first, count, columns)
+        return True
+
+    def _update_runs(
+        mut self,
+        inputs: List[UnifiedVectorFormat],
+        first: Int,
+        count: Int,
+        columns: List[Series],
+    ) raises:
+        """`RowOperations::UpdateStatesClustered`: the reductions with a run
+        kernel fold the chunk's runs; the others scatter through the rows'
+        addresses in `groups`."""
+        update_clustered(
+            self.slots,
+            self.kernels,
+            inputs,
+            self.clustered,
+            self.parts.states_at,
+            count,
+        )
+        if not self.skip_addresses:
+            _update_states(
+                self.slots,
+                inputs,
+                0,
+                count,
+                self.groups.unsafe_ptr(),
+                self.parts.states_at,
+                first,
+                Pointer[_ValueArena, MutAnyOrigin](
+                    unsafe_from_address=Int(Pointer(to=self.values))
+                ),
+                Int(self.discard.unsafe_ptr()),
+                Int(self.scratch.unsafe_ptr()),
+                skip=self.kernels,
+            )
+            if len(self.by_address) > 0:
+                self._update_by_address(columns, first, count)
+        self.sunk += count
 
     def _update_groups(
         mut self,
@@ -1590,11 +1766,10 @@ struct AggregateSink(Movable):
     def _perfect_groups(
         mut self, keys: List[KeyVector], first: Int, count: Int
     ) raises:
-        """`PerfectAggregateHashTable::AddChunk`'s group addresses: each
-        row's slot from its keys' bits (`ComputeGroupLocation`), checked
-        against the table's size (statistics that do not hold for the
-        data raise, as DuckDB's do), the slot marked set (with the row, its
-        first) and its row's address into `groups`."""
+        """`PerfectAggregateHashTable::AddChunk`'s group ids: each row's
+        slot from its keys' bits (`ComputeGroupLocation`) into `groups`,
+        checked against the table's size (statistics that do not hold for
+        the data raise, as DuckDB's do)."""
         # The locations are computed into the address vector itself, each
         # then replaced by its row's address (DuckDB's `addresses`).
         var groups = self.groups.unsafe_ptr()
@@ -1616,18 +1791,33 @@ struct AggregateSink(Movable):
                 slots,
             )
         var total = UInt64(self.perfect.total_groups())
+        var most = UInt64(0)
+        for k in range(count):
+            most = max(most, slots[unsafe_offset=k])
+        if most >= total:
+            for k in range(count):
+                var slot = slots[unsafe_offset=k]
+                if slot >= total:
+                    raise Error(
+                        "Perfect hash aggregate: aggregate group "
+                        + String(slot)
+                        + " exceeded total groups "
+                        + String(total)
+                        + ", so the key statistics do not hold for the data"
+                    )
+
+    def _perfect_addresses(mut self, first: Int, count: Int):
+        """The non-clustered path's group addresses: each row's slot (in
+        `groups`) marked set (with the row, its first) and replaced by its
+        row's address."""
+        var groups = self.groups.unsafe_ptr()
+        var slots = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=Int(groups)
+        )
         var base = Int(self.perfect_rows.unsafe_ptr())
         var bytes = 8 * self.parts.stride
         for k in range(count):
             var slot = slots[unsafe_offset=k]
-            if slot >= total:
-                raise Error(
-                    "Perfect hash aggregate: aggregate group "
-                    + String(slot)
-                    + " exceeded total groups "
-                    + String(total)
-                    + ", so the key statistics do not hold for the data"
-                )
             var at = base + Int(slot) * bytes
             var row = _words_at(at)
             if row[unsafe_offset=1] == 0:
@@ -1760,6 +1950,7 @@ struct AggregateSink(Movable):
             word_ptrs,
             Int(self.groups.unsafe_ptr()),
             0,
+            Int(self.offsets.unsafe_ptr()) if self.clustered.ready else 0,
         )
 
     def _constant_groups(
@@ -1839,6 +2030,7 @@ struct AggregateSink(Movable):
                 addresses[unsafe_offset=entries[unsafe_offset=i]] = group_at[
                     unsafe_offset=i
                 ]
+                self.dictionary_groups.saw(group_at[unsafe_offset=i])
         # The adaptive counters see every row (`AddInput`).
         self.cycle += count - unique
         for k in range(count):
@@ -1857,11 +2049,16 @@ struct AggregateSink(Movable):
         word_ptrs: List[Int],
         groups: Int,
         rows: Int,
+        offsets: Int = 0,
     ) raises:
         """A batch's `count` rows (source rows from `row`, or with `listed`
         each one's at `rows`) into the table: each row's group address
-        into `groups`."""
+        into `groups` and, when `offsets` is not 0, the entry it probed to
+        there (DuckDB's `ht_offsets`) while lookups are not skipped."""
         var hash_ptr = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes)
+        var offset_at = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=offsets
+        )
         var null_ptr = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls)
         var group_at = Pointer[Int, MutAnyOrigin](unsafe_from_address=groups)
         var row_at = Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)
@@ -1912,6 +2109,8 @@ struct AggregateSink(Movable):
                     self.live += 1
                     self.made += 1
                     group_at[unsafe_offset=k] = at
+                    if offsets != 0:
+                        offset_at[unsafe_offset=k] = UInt64(slot)
                     break
                 if (entry & ~_ID_MASK) == salt:
                     var at = Int(entry & _ID_MASK)
@@ -1919,6 +2118,8 @@ struct AggregateSink(Movable):
                         at, self.addressed, word_ptrs, k, null
                     ):
                         group_at[unsafe_offset=k] = at
+                        if offsets != 0:
+                            offset_at[unsafe_offset=k] = UInt64(slot)
                         break
                 slot = (slot + _stride(hash)) & mask
 

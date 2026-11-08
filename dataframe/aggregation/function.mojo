@@ -1318,6 +1318,7 @@ def _update_states(
     discard: Int,
     scratch: Int,
     only: Int = -1,
+    skip: List[Bool] = List[Bool](),
 ) raises:
     """Every reduction's `update` for a batch (DuckDB's
     `RowOperations::UpdateStates`, each aggregate's scatter over its
@@ -1327,7 +1328,8 @@ def _update_states(
     source row of the vectors' first, rows numbered on from it; `scratch`
     three vectors of words for value states. With `only`, each row adds
     one to that reduction's state alone (a distinct table's groups into
-    their distinct counts)."""
+    their distinct counts). Reductions marked in `skip` (the clustered
+    update's, `update_clustered`) are left alone."""
     if only >= 0:
         var base = 8 * (states_at + slots[only].offset)
         for k in range(count):
@@ -1338,6 +1340,8 @@ def _update_states(
         var base = 8 * (states_at + slot.offset)
         if slot.kind == _K_DISTINCT or slot.by_address():
             # States by address are the sink's (`AggregateSink`).
+            continue
+        if len(skip) > 0 and skip[s]:
             continue
         if slot.kind == _K_LEN:
             for k in range(count):

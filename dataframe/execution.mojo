@@ -132,7 +132,6 @@ from .categorical import (
     gather,
 )
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
-from dataframe.kernels.distinct import distinct_counts
 from .window import window_op, interpolate_by_op, rolling_by_op
 from dataframe.kernels.fusion import fused
 from dataframe.kernels.temporal import dt_op, temporal_binary
@@ -157,7 +156,7 @@ from dataframe.kernels.binary import (
     arctan2_series,
 )
 from dataframe.aggregation.reducer import Reducer, _sum_bools, _variance_blocks
-from dataframe.aggregation.ungrouped import distinct_count
+from dataframe.aggregation.ungrouped import distinct_count, distinct_counts
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
@@ -2862,12 +2861,12 @@ def _on_dictionary[
     return result^
 
 
-def _distinct_in_table(bound: BoundExpr, node: Node, grouped: Bool) -> Bool:
-    """Whether `n_unique` over no groups counts its input in an aggregate
-    table of its values (`distinct_count`, the ungrouped aggregate's
-    distinct table): every input the table groups by, which leaves out
+def _distinct_in_table(bound: BoundExpr, node: Node) -> Bool:
+    """Whether `n_unique` counts its input in an aggregate table
+    (`distinct_count` over no groups, `distinct_counts` by group: DuckDB's
+    distinct tables): every input the table groups by, which leaves out
     nested ones."""
-    if node.op != N_UNIQUE or grouped:
+    if node.op != N_UNIQUE:
         return False
     return not bound.dtypes[node.left].is_nested()
 
@@ -2882,9 +2881,13 @@ def _n_unique_table[
     node: Node,
     height: Int,
     batch_size: Int,
+    grouped: Bool,
+    groups: List[Int],
+    group_count: Int,
 ) raises -> Series:
-    """`n_unique` over no groups by `distinct_count`; a column input is
-    read as it is stored (a categorical by its labels' canonical codes)."""
+    """`n_unique` overall (`distinct_count`) or by group
+    (`distinct_counts`); a column input is read as it is stored (a
+    categorical by its labels' canonical codes)."""
     var values: Series
     if bound.expr._nodes[node.left].op == COL:
         values = columns[bound.sources[node.left]].copy()
@@ -2892,51 +2895,15 @@ def _n_unique_table[
         values = _full[width](
             bound, prepared, states, node.left, height, batch_size, False
         )
+    if grouped:
+        return Series(
+            "",
+            Column[Int64](
+                distinct_counts(values, groups, group_count, node.integer != 0)
+            ),
+        )
     var count = distinct_count(values, node.integer != 0)
     return Series("", Column[Int64]([Int64(count)]))
-
-
-def _distinct_by_partition(bound: BoundExpr, node: Node, height: Int) -> Bool:
-    """Whether `n_unique` counts its input by hash partition (#336) rather
-    than with the reducer's per-group sets: every value but a nested or a
-    decimal one, over enough rows to pay for the partitions' setup.
-    Partitions are counted on every worker, however skewed the groups, and
-    beat the sets even on a handful of distinct values (see
-    dataframe/distinct.mojo); below 65,536 rows, as in each small bucket of
-    a many-group aggregation, the sets' lower fixed cost wins."""
-    if node.op != N_UNIQUE or height < (1 << 16):
-        return False
-    var dtype = bound.dtypes[node.left]
-    return not (dtype.is_nested() or dtype.is_decimal())
-
-
-def _n_unique_partitioned[
-    width: Int
-](
-    bound: BoundExpr,
-    columns: List[Series],
-    states: List[Series],
-    node: Node,
-    height: Int,
-    batch_size: Int,
-    grouped: Bool,
-    groups: List[Int],
-    group_count: Int,
-) raises -> Series:
-    """Distinct values of the input, overall or per group; the node's
-    integer flag excludes nulls, every NaN is one value and -0.0 equals 0.0.
-    """
-    var values: Series
-    if bound.expr._nodes[node.left].op == COL:
-        values = columns[bound.sources[node.left]].copy()
-    else:
-        values = _full[width](
-            bound, columns, states, node.left, height, batch_size, False
-        )
-    var counts = distinct_counts(
-        values, groups, group_count, grouped, node.integer != 0
-    )
-    return Series("", Column[Int64](counts.take()))
 
 
 def _reduce[
@@ -4215,26 +4182,6 @@ def evaluate[
         var column = columns[bound.sources[0]].copy()
         column._name = bound.expr._name
         return column^
-    # n_unique of a categorical counts its codes in each group.
-    if (
-        grouped
-        and count == 2
-        and bound.expr._nodes[root].op == N_UNIQUE
-        and bound.expr._nodes[root].left == 0
-        and bound.expr._nodes[0].op == COL
-        and bound.sources[0] >= 0
-        and columns[bound.sources[0]].dtype().is_categorical()
-    ):
-        var codes = columns[bound.sources[0]].with_dtype(DataType.UINT32)
-        var counts = distinct_counts(
-            codes,
-            groups,
-            group_count,
-            grouped,
-            bound.expr._nodes[root].integer != 0,
-        )
-        var result = Series(bound.expr._name, Column[Int64](counts.take()))
-        return result^
     if not grouped:
         var source = _dictionary_source(bound, columns, height)
         if source >= 0:
@@ -4324,21 +4271,10 @@ def evaluate[
             if row_mode:
                 state = state.take(groups)
             states[node_index] = state^
-        elif _distinct_in_table(bound, node, grouped):
-            states[node_index] = _n_unique_table[width](
+        elif _distinct_in_table(bound, node):
+            var state = _n_unique_table[width](
                 bound,
                 columns,
-                prepared_columns,
-                states,
-                node,
-                height,
-                batch_size,
-            )
-        elif is_reduction(node.op) and _distinct_by_partition(
-            bound, node, height
-        ):
-            var state = _n_unique_partitioned[width](
-                bound,
                 prepared_columns,
                 states,
                 node,

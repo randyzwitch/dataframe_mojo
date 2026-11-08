@@ -1,7 +1,7 @@
-"""Partitioned distinct counts have scalar witnesses."""
+"""Distinct counts in the aggregate table have scalar witnesses."""
 # contract-group: kernel.order_keys
 from std.math import isnan
-from std.testing import assert_equal, assert_true, assert_false
+from std.testing import assert_equal, assert_true
 from dataframe import (
     Column,
     DataFrame,
@@ -13,7 +13,7 @@ from dataframe import (
 )
 from dataframe.binding import bind, BoundExpr
 from tests.support.coverage_compare import assert_float
-from dataframe.kernels.distinct import distinct_counts
+from dataframe.aggregation.ungrouped import distinct_count, distinct_counts
 from dataframe.storage.string_view import StringViewBuilder
 from tests.support.lifecycle_jobs import WorkerSetting
 
@@ -28,12 +28,9 @@ def _assert_counts(
         grouped_seen[labels[row]] |= bit
         global_seen |= bit
     for grouped in [False, True]:
-        var result = distinct_counts(values, labels, group_count, grouped)
-        assert_true(
-            Bool(result),
-            "partitioned distinct route must accept primitive storage",
-        )
-        var actual = result.value().copy()
+        var actual = distinct_counts(
+            values, labels, group_count, False
+        ) if grouped else [Int64(distinct_count(values, False))]
         assert_equal(len(actual), group_count if grouped else 1)
         for group in range(len(actual)):
             var bits = grouped_seen[group] if grouped else global_seen
@@ -96,7 +93,7 @@ def test_shared_group_value_partitions_preserve_integer_bits_float_classes_and_n
         _ = setting^
 
 
-def test_partitioned_distinct_compares_native_view_string_bytes_across_pieces_and_declines_decimals() raises:
+def test_table_distinct_compares_native_view_string_bytes_across_pieces_and_counts_decimals() raises:
     comptime ROWS = 131073
     var builder = StringViewBuilder()
     var labels = List[Int]()
@@ -128,7 +125,7 @@ def test_partitioned_distinct_compares_native_view_string_bytes_across_pieces_an
     var decimal = Series("v", Column[Int128]([Int128(1)])).with_dtype(
         DataType.decimal(5, 2)
     )
-    assert_false(Bool(distinct_counts(decimal, [0], 1, True)))
+    assert_equal(distinct_counts(decimal, [0], 1, False)[0], 1)
 
 
 struct HashStats(Copyable, Movable):
