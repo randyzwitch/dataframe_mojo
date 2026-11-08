@@ -72,6 +72,20 @@ def test_metal_logical_plans_native_predicates_mixed_values_and_grouped_keys() r
             Series("f", Column[Float32]([0.5, 1, 1.5], [True, False, True])),
         ]
     )
+    from dataframe_metal.calibration import shape_key
+
+    var present = DataFrame([Series("b", Column[Bool]([True, False, True]))])
+    var nullable_key = shape_key(
+        frame.lazy().select(col("b").any()), "bool-layout"
+    )
+    var present_key = shape_key(
+        present.lazy().select(col("b").any()), "bool-layout"
+    )
+    assert_true(nullable_key != present_key)
+    assert_equal(
+        present_key,
+        shape_key(present.lazy().select(col("b").any()), "bool-layout"),
+    )
     from dataframe_metal.predicate_program import _emit, PredicateClause
     from dataframe_metal.expression_format import BOOL_COLUMN_COMPARISON
 
