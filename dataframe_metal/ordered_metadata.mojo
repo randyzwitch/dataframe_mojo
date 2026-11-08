@@ -38,7 +38,7 @@ def ordered_metadata(
     words[1] = UInt64(layout.blocks * 256)
     words[2] = UInt64(layout.fields)
     words[3] = UInt64(layout.capacity)
-    words[4] = UInt64(65536)
+    words[4] = UInt64(min(65536, layout.capacity // 2))
     words[5] = UInt64(start)
     words[6] = UInt64(layout.blocks)
     words[7] = UInt64(layout.global_state)
