@@ -76,6 +76,18 @@ def main() raises:
     var expected = List[UInt64]()
     var validity = List[UInt32]()
     var faults = List[UInt32]()
+    var zero_divisors: List[UInt32] = [
+        1,
+        0x80000001,
+        0x007FFFFF,
+        0x00800000,
+        0x3F800000,
+        0xBF800000,
+        0x40000000,
+        0xC0000000,
+        0x7F7FFFFF,
+        0xFF7FFFFF,
+    ]
     var state = UInt64(41378391)
     for op in [
         NEG,
@@ -129,6 +141,16 @@ def main() raises:
                 expected.append(answer[0])
                 validity.append(UInt32(answer[1]))
                 faults.append(answer[2])
+    # Keep all random cases and add independently expected zero remainders.
+    for zero in [UInt32(0), UInt32(0x80000000)]:
+        for divisor in zero_divisors:
+            left.append(UInt64(zero))
+            right.append(UInt64(divisor))
+            ops.append(Int32(MOD))
+            tags.append(UInt32(2))
+            expected.append(UInt64(0))
+            validity.append(UInt32(1))
+            faults.append(UInt32(0))
     var n = len(left)
     var scope = Scope()
     var ctx = scope.context()
@@ -167,4 +189,4 @@ def main() raises:
     assert_equal(actual, expected)
     assert_equal(actual_validity, validity)
     assert_equal(actual_faults, faults)
-    print("PASS 17408 actual Metal native numeric bit/validity/fault cases")
+    print("PASS 17428 actual Metal native numeric bit/validity/fault cases")

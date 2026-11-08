@@ -89,6 +89,29 @@ def test_metal_native_float_numeric_bits_keep_ieee_and_cpu_remainder() raises:
         float32_clip_bits(0x7FC12345, 0, CLIP_HIGH), UInt32(0x7FC12345)
     )
     assert_equal(float32_clip_bits(1, 0, CLIP_HIGH), UInt32(0))
+    var zero_divisors: List[UInt32] = [
+        1,
+        0x80000001,
+        0x007FFFFF,
+        0x00800000,
+        0x3F800000,
+        0xBF800000,
+        0x40000000,
+        0xC0000000,
+        0x7F7FFFFF,
+        0xFF7FFFFF,
+    ]
+    for zero in [UInt32(0), UInt32(0x80000000)]:
+        for divisor in zero_divisors:
+            var actual = native_numeric_binary(
+                UInt64(zero), UInt64(divisor), 2, MOD
+            )
+            var expected = bitcast[DType.uint32](
+                bitcast[DType.float32](zero) % bitcast[DType.float32](divisor)
+            )
+            assert_equal(actual[0], UInt64(expected))
+            assert_true(actual[1])
+            assert_equal(actual[2], UInt32(0))
     var state = UInt64(9325421)
     for i in range(8192):
         state = state * 6364136223846793005 + 1442695040888963407

@@ -226,6 +226,10 @@ def native_numeric_binary(
         return (UInt64(divided[0]), True, UInt32(0))
     if op == FLOORDIV:
         return (UInt64(float32_unary_bits(divided[0], FLOOR)), True, UInt32(0))
+    # Zero modulo a finite nonzero divisor is positive zero on CPU. No
+    # arithmetic or gradual-underflow handling is needed, even for tiny divisors.
+    if left & 0x7FFF_FFFF == 0:
+        return (UInt64(0), True, UInt32(0))
     # The CPU SIMD remainder truncates the rounded quotient, uses a fused
     # multiply-subtract, then adds the divisor for opposite-sign operands.
     # It is not an exact mathematical remainder. Reproduce that recurrence.
