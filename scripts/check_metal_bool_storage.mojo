@@ -4,7 +4,7 @@ from std.testing import assert_equal
 from max.gpu import global_idx
 from dataframe import DataFrame, Series
 from dataframe.storage.boolean import BoolColumn
-from dataframe.expr import COL
+from dataframe_metal.expression_format import BOOL_COLUMN_COMPARISON
 from dataframe_metal.accelerator.gpu.query_scope import Scope
 from dataframe_metal.accelerator.gpu.typed_storage import NativeColumnAny
 from dataframe_metal.accelerator.gpu.erased_input import (
@@ -124,7 +124,9 @@ def main() raises:
                                 | (UInt64(3) << 33)
                                 | (UInt64(view.value_bit_offset) << 35)
                             )
-                            program[14] = UInt64(3 | (1 << 2) | (COL << 5))
+                            program[14] = UInt64(
+                                3 | (1 << 2) | (BOOL_COLUMN_COMPARISON << 5)
+                            )
                             var metadata = ctx.enqueue_create_buffer[
                                 DType.uint64
                             ](15)

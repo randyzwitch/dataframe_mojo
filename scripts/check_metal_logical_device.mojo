@@ -3,7 +3,7 @@ from std.memory import Pointer
 from std.testing import assert_equal
 from max.gpu import global_idx
 from max.gpu.host import DeviceContext, DeviceBuffer
-from dataframe.expr import COL
+from dataframe_metal.expression_format import BOOL_COLUMN_COMPARISON
 from dataframe_metal.accelerator.gpu.compound_predicate import predicate_matches
 
 
@@ -75,9 +75,13 @@ def main() raises:
         program[at] = UInt64(1 if scenario < 4 else 2)
         # Cases: b, ~b, is_null(b), is_not_null(b), b&n, b|n,
         # b|~n, ~(b&n). Each leaf carries its own SQL validity.
-        program[at + 1] = UInt64(2 if scenario < 4 else 8 if scenario == 4 else 14)
+        program[at + 1] = UInt64(
+            2 if scenario < 4 else 8 if scenario == 4 else 14
+        )
         var inverted = scenario == 1 or scenario == 3 or scenario == 7
-        var comparison = COL if scenario != 2 and scenario != 3 else 0
+        var comparison = (
+            BOOL_COLUMN_COMPARISON if scenario != 2 and scenario != 3 else 0
+        )
         program[at + 9] = 0
         program[at + 10] = (
             UInt64(3)

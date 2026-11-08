@@ -3,7 +3,8 @@ from std.memory import Pointer, bitcast
 from .multi_reduce import Bytes, read_integer
 from .filter_sum import _valid
 from .float_predicate import float_in_range, _ordered
-from dataframe.expr import EQ, GT, GE, LT, LE, EQ_MISSING, COL
+from dataframe.expr import EQ, GT, GE, LT, LE, EQ_MISSING
+from ...expression_format import BOOL_COLUMN_COMPARISON
 from .null_value import equal_missing_float32, equal_missing_integer
 
 comptime PREDICATE_HEADER_WORDS = 9
@@ -142,7 +143,7 @@ def predicate_matches(
         var matched = False
         var kept = False
         if kind == 1:
-            if flags >> 5 == UInt32(COL):
+            if flags >> 5 == UInt32(BOOL_COLUMN_COMPARISON):
                 var value_bit = (
                     Int((clause[unsafe_offset=1] >> 35) & 7) + row_base + row
                 )
@@ -162,7 +163,7 @@ def predicate_matches(
             else:
                 matched = not valid
             kept = not matched if inverted else matched
-            if flags >> 5 == UInt32(COL):
+            if flags >> 5 == UInt32(BOOL_COLUMN_COMPARISON):
                 kept = valid and kept
         elif kind == 2:
             var right_slot = Int(clause[unsafe_offset=2])

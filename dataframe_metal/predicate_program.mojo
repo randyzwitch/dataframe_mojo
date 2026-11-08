@@ -26,6 +26,7 @@ from dataframe.expr import (
     LIT_FLOAT,
     UNTYPED,
 )
+from .expression_format import BOOL_COLUMN_COMPARISON
 from .filter_plan import FilterSum, _predicate, supported_dtype
 from .membership_plan import compile_membership
 
@@ -198,7 +199,7 @@ def _emit(
                 FilterSum(root.text.copy(), root.text.copy(), DataType.BOOL),
                 NULL_CLAUSE,
                 inverted,
-                comparison=COL,
+                comparison=BOOL_COLUMN_COMPARISON,
             )
     if leaf:
         pass

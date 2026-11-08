@@ -72,9 +72,25 @@ def test_metal_logical_plans_native_predicates_mixed_values_and_grouped_keys() r
             Series("f", Column[Float32]([0.5, 1, 1.5], [True, False, True])),
         ]
     )
+    from dataframe_metal.predicate_program import _emit, PredicateClause
+    from dataframe_metal.expression_format import BOOL_COLUMN_COMPARISON
+
+    for null_test in [False, True]:
+        var expression = col("b").is_null() if null_test else col("b")
+        var clauses = List[PredicateClause]()
+        var code = List[Int]()
+        assert_true(
+            _emit(expression, len(expression._nodes) - 1, frame, clauses, code)
+        )
+        assert_equal(
+            clauses[0].comparison, 0 if null_test else BOOL_COLUMN_COMPARISON
+        )
     for predicate in [
         col("b"),
         ~col("b"),
+        col("b").is_null(),
+        col("b").is_not_null(),
+        col("n").is_null(),
         col("b") | (col("n") > 1),
         col("n") > 1,
         col("n").eq_missing(1),

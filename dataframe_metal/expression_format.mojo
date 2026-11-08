@@ -25,3 +25,7 @@ comptime MAX_CASE_SOURCE_NODES = 262144
 # A separate program header preserves the legacy homogeneous evaluators.
 comptime TYPED_HEADER = 0xFFFF_FFFA
 comptime VALUE_TYPE_SHIFT = 40
+
+# Unary predicate leaves reserve zero for null tests. COL itself is zero, so
+# native Bool values need a distinct ABI tag rather than their Expr opcode.
+comptime BOOL_COLUMN_COMPARISON = 0x7FFF
