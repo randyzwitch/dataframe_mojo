@@ -1689,7 +1689,10 @@ struct ScanStructure(Movable):
                     continue
                 while p != 0:
                     found[unsafe_offset=Int(_load32(Int(p) + index_offset))] = 1
-                    p = _load64(Int(p) + next_offset)
+                    if dict_emission:
+                        p = aux[unsafe_offset=Int(_load64(Int(p) + next_offset))]
+                    else:
+                        p = _load64(Int(p) + next_offset)
             self.finished = True
             return 0
         if self.table.perfect:
