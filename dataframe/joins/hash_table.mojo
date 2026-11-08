@@ -610,8 +610,9 @@ struct _FinalizeJob(Job):
         self.chained = False
 
     def run(mut self) raises:
+        var state = TupleDataChunkState()
         for r in range(len(self.regions)):
-            self.regions[r].run()
+            self.regions[r].fill(state)
             self.chained = self.chained or self.regions[r].chained
 
 
@@ -657,6 +658,12 @@ struct _InsertJob(Copyable, Job):
         self.widths_at = 0
 
     def run(mut self) raises:
+        var state = TupleDataChunkState()
+        self.fill(state)
+
+    def fill(mut self, mut state: TupleDataChunkState):
+        """Zero the region and insert the rows, reading their pointers
+        through `state`."""
         self.kinds_at = Int(self.layout.kinds.unsafe_ptr())
         self.offsets_at = Int(self.layout.offsets.unsafe_ptr())
         self.widths_at = Int(self.layout.widths.unsafe_ptr())
@@ -667,7 +674,6 @@ struct _InsertJob(Copyable, Job):
         ref rows = Pointer[TupleDataCollection, MutAnyOrigin](
             unsafe_from_address=self.collection
         )[]
-        var state = TupleDataChunkState()
         var r = len(self.chunks) - 1
         while r >= 0:
             var segment = self.chunks[r][0]
