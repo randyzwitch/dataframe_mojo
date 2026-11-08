@@ -1,6 +1,6 @@
 """Bounded checked postfix evaluation inside a reduction scan."""
 from std.memory import Pointer, bitcast
-from dataframe.expr import COL, LIT_INT, ADD, SUB, MUL
+from dataframe.expr import COL, LIT_INT, ADD, SUB, MUL, FILL_NULL, FILL_NAN
 from ...expression_format import (
     EXPRESSION_NODE_WORDS,
     CASE_HEADER,
@@ -15,6 +15,7 @@ from .arithmetic_sum import integer_binary
 from .value_ops import checked_float_value
 from ...expression_format import TYPED_HEADER
 from .typed_expression_value import typed_expression_value
+from .null_value import fill_value_bits
 from .native_numeric import (
     numeric_unary,
     float32_unary_bits,
@@ -52,6 +53,10 @@ def _stack_value[
     predicate: Bytes = Bytes(unsafe_from_address=0),
     predicate_bits: Bytes = Bytes(unsafe_from_address=0),
 ) -> Tuple[UInt64, Bool, UInt32]:
+    var need_float = want_value
+    comptime if cases:
+        if program[unsafe_offset=0] == UInt64(CASE_HEADER):
+            need_float = need_float or Bool(program[unsafe_offset=3] & 1)
     var values = SIMD[DType.uint64, 8](0)
     var valid = SIMD[DType.uint32, 8](0)
     var top = 0
@@ -108,7 +113,7 @@ def _stack_value[
             if meta >> 32:
                 var bitmap = _pointer(slot, b0, b1, b2, b3, b4, b5, b6, b7, b7)
                 present = _valid(bitmap, UInt32(meta) + UInt32(row_base), row)
-            if present and (not floating or want_value):
+            if present and (not floating or need_float):
                 var data = _pointer(slot, v0, v1, v2, v3, v4, v5, v6, v7, v7)
                 comptime if floating:
                     bits = UInt64(
@@ -127,7 +132,7 @@ def _stack_value[
             present = Bool(valid[top])
             if present:
                 comptime if floating:
-                    if want_value:
+                    if need_float:
                         bits = UInt64(
                             float32_unary_bits(UInt32(values[top]), Int(op))
                         )
@@ -141,14 +146,24 @@ def _stack_value[
             var right_valid = valid[top]
             top -= 1
             present = Bool(valid[top] & right_valid)
-            if present:
+            if op == UInt32(FILL_NULL) or op == UInt32(FILL_NAN):
+                var result = fill_value_bits(
+                    values[top],
+                    Bool(valid[top]),
+                    right,
+                    Bool(right_valid),
+                    Int(op),
+                )
+                bits = result[0]
+                present = result[1]
+            elif present:
                 if (
                     cases
                     and op != UInt32(ADD)
                     and op != UInt32(SUB)
                     and op != UInt32(MUL)
                 ):
-                    if not floating or want_value:
+                    if not floating or need_float:
                         var result = native_numeric_binary(
                             values[top],
                             right,
@@ -159,7 +174,7 @@ def _stack_value[
                         present = result[1]
                         fault |= result[2]
                 elif floating:
-                    if want_value:
+                    if need_float:
                         var result = checked_float_value(
                             bitcast[DType.float32](UInt32(values[top])),
                             bitcast[DType.float32](UInt32(right)),

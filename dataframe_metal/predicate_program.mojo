@@ -20,6 +20,11 @@ from dataframe.expr import (
     GE,
     LT,
     LE,
+    EQ_MISSING,
+    NE_MISSING,
+    LIT_NULL,
+    LIT_FLOAT,
+    UNTYPED,
 )
 from .filter_plan import FilterSum, _predicate, supported_dtype
 from .membership_plan import compile_membership
@@ -111,6 +116,50 @@ def _same(a: PredicateClause, b: PredicateClause) -> Bool:
     )
 
 
+def _missing_literal(
+    expression: Expr, at: Int, frame: DataFrame, inverted: Bool
+) raises -> Optional[PredicateClause]:
+    ref root = expression._nodes[at]
+    var column = root.left
+    var literal = root.right
+    if column < 0 or literal < 0:
+        return None
+    if expression._nodes[column].op != COL:
+        column = root.right
+        literal = root.left
+    ref input = expression._nodes[column]
+    ref value = expression._nodes[literal]
+    if input.op != COL or input.text not in frame.columns():
+        return None
+    var dtype = frame.column(input.text).dtype()
+    if not supported_dtype(dtype):
+        return None
+    var plan = FilterSum(input.text.copy(), input.text.copy(), dtype)
+    if value.op == LIT_NULL:
+        if len(value.dtypes) != 1 or not value.dtypes[0]:
+            return None
+        if (
+            value.dtypes[0].value() != DataType.NULL
+            and value.dtypes[0].value() != dtype
+        ):
+            return None
+        return PredicateClause(plan^, NULL_CLAUSE, inverted)
+    if value.op == LIT_FLOAT and value.floating != value.floating:
+        if dtype != DataType.FLOAT32:
+            return None
+        if value.text != UNTYPED and (
+            len(value.dtypes) != 1
+            or not value.dtypes[0]
+            or value.dtypes[0].value() != DataType.FLOAT32
+        ):
+            return None
+        # A total NaN-equality leaf: NaN matches NaN, and null is false.
+        return PredicateClause(
+            plan^, NULL_CLAUSE, inverted, comparison=EQ_MISSING
+        )
+    return None
+
+
 def _emit(
     expression: Expr,
     at: Int,
@@ -122,14 +171,28 @@ def _emit(
     ref root = expression._nodes[at]
     if root.op == NOT:
         return _emit(expression, root.left, frame, clauses, code, not inverted)
-    var unequal = root.op == NE
+    var missing = root.op == EQ_MISSING or root.op == NE_MISSING
+    var unequal = root.op == NE or root.op == NE_MISSING
     var equal = expression.copy()
-    if unequal:
+    if unequal or missing:
         equal._nodes[at].op = EQ
+    if (
+        missing
+        and root.left >= 0
+        and root.right >= 0
+        and expression._nodes[root.left].op != COL
+        and expression._nodes[root.right].op == COL
+    ):
+        equal._nodes[at].left = root.right
+        equal._nodes[at].right = root.left
     var membership = compile_membership(expression, at, frame)
-    var bounds = _range(equal if unequal else expression, at, frame)
-    var leaf = Optional[PredicateClause]()
-    if membership:
+    var bounds = _range(equal if unequal or missing else expression, at, frame)
+    var leaf = _missing_literal(
+        expression, at, frame, inverted != unequal
+    ) if missing else Optional[PredicateClause]()
+    if leaf:
+        pass
+    elif membership:
         var matched = membership.take()
         leaf = PredicateClause(
             FilterSum(
@@ -140,7 +203,11 @@ def _emit(
             members=matched.keys.copy(),
         )
     elif bounds:
-        leaf = PredicateClause(bounds.take(), inverted=inverted != unequal)
+        leaf = PredicateClause(
+            bounds.take(),
+            inverted=inverted != unequal,
+            comparison=EQ_MISSING if missing else 0,
+        )
     else:
         ref node = expression._nodes[at]
         if node.op == IS_NULL or node.op == IS_NOT_NULL:
@@ -162,6 +229,7 @@ def _emit(
         or root.op == LE
         or root.op == EQ
         or root.op == NE
+        or missing
     ):
         ref left = expression._nodes[root.left]
         ref right = expression._nodes[root.right]
@@ -181,7 +249,7 @@ def _emit(
                     COLUMN_CLAUSE,
                     inverted != unequal,
                     right.text.copy(),
-                    EQ if unequal else root.op,
+                    EQ_MISSING if missing else EQ if unequal else root.op,
                 )
     if leaf:
         var slot = -1

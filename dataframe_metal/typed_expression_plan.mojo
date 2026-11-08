@@ -6,6 +6,7 @@ from dataframe.expr import (
     COL,
     LIT_INT,
     LIT_FLOAT,
+    LIT_NULL,
     CAST,
     ADD,
     SUB,
@@ -22,12 +23,15 @@ from dataframe.expr import (
     ROUND,
     CLIP_LOW,
     CLIP_HIGH,
+    FILL_NULL,
+    FILL_NAN,
 )
 from .expression_plan import ValueNode, ExpressionTree
 from .expression_format import (
     TYPED_HEADER,
     MAX_EXPRESSION_NODES,
     MAX_EXPRESSION_STACK,
+    CASE_NULL,
 )
 
 
@@ -66,6 +70,8 @@ def compile_typed_expression(
             ROUND,
             CLIP_LOW,
             CLIP_HIGH,
+            FILL_NULL,
+            FILL_NAN,
         ]
     if not has_native_program:
         return None
@@ -81,6 +87,10 @@ def compile_typed_expression(
         ref original = expression._nodes[i]
         ref node = bound.expr._nodes[i]
         var tag = numeric_tag(bound.dtypes[i])
+        if node.op == LIT_NULL:
+            # Invalid payloads have no observed width; the consuming typed
+            # operation owns the value dtype after binding.
+            tag = 0
         if tag < 0 or node.extra >= 0:
             return None
         if node.op == COL:
@@ -93,6 +103,10 @@ def compile_typed_expression(
             if not seed:
                 seed = node.text.copy()
             nodes.append(ValueNode(COL, node.text.copy(), -1, 0, tag))
+        elif node.op == LIT_NULL:
+            if node.left >= 0 or node.right >= 0:
+                return None
+            nodes.append(ValueNode(CASE_NULL, "", -1, 0, tag))
         elif node.op == LIT_INT or node.op == LIT_FLOAT:
             if node.left >= 0 or node.right >= 0:
                 return None
@@ -145,6 +159,8 @@ def compile_typed_expression(
             MOD,
             CLIP_LOW,
             CLIP_HIGH,
+            FILL_NULL,
+            FILL_NAN,
         ]:
             if len(stack) < 2:
                 return None
@@ -152,6 +168,12 @@ def compile_typed_expression(
             var left = stack.pop()
             if original.left != left or original.right != right:
                 return None
+            if node.op == FILL_NAN:
+                if tag != 2:
+                    return None
+                # COUNT observes replacement validity, so NaN detection must
+                # read Float32 payloads even without numeric output work.
+                nodes[0].literal = 1
             nodes.append(ValueNode(node.op, "", -1, 0, tag))
         else:
             return None

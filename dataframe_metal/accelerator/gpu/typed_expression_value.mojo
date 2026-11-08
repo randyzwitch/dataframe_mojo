@@ -1,6 +1,15 @@
 """Shared bounded stack for typed, conditional and legacy value programs."""
 from std.memory import Pointer, bitcast
-from dataframe.expr import COL, LIT_INT, CAST, ADD, SUB, MUL
+from dataframe.expr import (
+    COL,
+    LIT_INT,
+    CAST,
+    ADD,
+    SUB,
+    MUL,
+    FILL_NULL,
+    FILL_NAN,
+)
 from ...expression_format import (
     EXPRESSION_NODE_WORDS,
     VALUE_TYPE_SHIFT,
@@ -22,6 +31,7 @@ from .native_numeric import (
     integer_unary_bits,
     native_numeric_binary,
 )
+from .null_value import fill_value_bits
 
 
 @no_inline
@@ -161,7 +171,17 @@ def typed_expression_value(
             var right_valid = Bool(validity[top])
             top -= 1
             present = Bool(validity[top]) and right_valid
-            if present:
+            if op == UInt32(FILL_NULL) or op == UInt32(FILL_NAN):
+                var result = fill_value_bits(
+                    values[top],
+                    Bool(validity[top]),
+                    right,
+                    right_valid,
+                    Int(op),
+                )
+                bits = result[0]
+                present = result[1]
+            elif present:
                 if (
                     op != UInt32(ADD)
                     and op != UInt32(SUB)
