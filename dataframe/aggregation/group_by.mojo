@@ -204,6 +204,8 @@ struct _BatchSinkJob(Job):
     var workers: Int
     var batch: Int
     var sinks: List[AggregateSink]
+    var failed_morsel: Int
+    var failure: String
 
     def __init__(
         out self,
@@ -223,6 +225,8 @@ struct _BatchSinkJob(Job):
         self.workers = workers
         self.batch = max(1, batch)
         self.sinks = List[AggregateSink]()
+        self.failed_morsel = -1
+        self.failure = String()
 
     def run(mut self) raises:
         var sink = AggregateSink(self.layout, self.workers)
@@ -237,7 +241,14 @@ struct _BatchSinkJob(Job):
             var columns = List[Series](capacity=len(self.columns))
             for column in self.columns:
                 columns.append(column.slice(offset, length))
-            sink_frame(sink, reader, columns, offset, self.batch)
+            try:
+                sink_frame(sink, reader, columns, offset, self.batch)
+            except e:
+                # Kept for the caller to raise the earliest morsel's error;
+                # morsels are claimed in order, so every earlier one runs.
+                self.failed_morsel = m
+                self.failure = String(e)
+                break
         reader.release()
         self.sinks.append(sink^)
 
@@ -529,8 +540,13 @@ struct GroupBy(Copyable):
         var shared = TableSinkLayout(
             layout, DataFrame(schema^), key_names, expressions, empty
         )
+        # Morsels end on whole input batches: an input error anywhere in a
+        # batch precedes that batch's state updates, whichever worker has it.
         var ends: List[Int] = [frame.height()]
-        var ranges = morsel_ranges(ends, workers)
+        var batch = max(1, batch_size)
+        var ranges = morsel_ranges(
+            ends, workers, batch if batch % 64 == 0 else 64 * batch
+        )
         var cursor = _Cursor.new()
         var jobs = List[_BatchSinkJob](capacity=workers)
         for _ in range(max(1, workers)):
@@ -551,6 +567,15 @@ struct GroupBy(Copyable):
             cursor.free()
             raise e^
         cursor.free()
+        # The error of the earliest morsel, as a serial scan would meet it.
+        var failed = -1
+        for j in range(len(jobs)):
+            if jobs[j].failed_morsel >= 0 and (
+                failed < 0 or jobs[j].failed_morsel < jobs[failed].failed_morsel
+            ):
+                failed = j
+        if failed >= 0:
+            raise Error(jobs[failed].failure)
         var sinks = List[AggregateSink](capacity=len(jobs))
         for j in range(len(jobs)):
             while len(jobs[j].sinks) > 0:

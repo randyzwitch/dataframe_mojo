@@ -1319,26 +1319,27 @@ def _run_jobs[
 comptime IDEAL_MORSEL_ROWS = 100_000
 
 
-def morsel_size(height: Int, workers: Int) -> Int:
+def morsel_size(height: Int, workers: Int, align: Int = 64) -> Int:
     """Rows in each morsel of an in-memory source of `height` rows, as
     Polars' `InMemorySourceNode` sizes them: the ideal morsel count, rounded
     up to a multiple of the workers so the last round of morsels is as full
     as the first, then the rows divided among them. The workers claim the
     morsels from a shared cursor, so uneven work still balances. Rounded up
-    to 64 rows, so a morsel's validity bitmaps start on a byte."""
+    to a multiple of `align`: 64 rows by default, so a morsel's validity
+    bitmaps start on a byte."""
     var lanes = max(1, workers)
     var ideal = max(1, height // IDEAL_MORSEL_ROWS)
     var count = ideal + (lanes - ideal % lanes) % lanes
     var size = max(1, (height + count - 1) // count)
-    return (size + 63) // 64 * 64
+    return (size + align - 1) // align * align
 
 
-def morsel_ranges(ends: List[Int], workers: Int) -> List[Int]:
+def morsel_ranges(ends: List[Int], workers: Int, align: Int = 64) -> List[Int]:
     """(offset, length) pairs covering the rows of chunks ending at `ends`,
     in `morsel_size` pieces of the whole height. A morsel never crosses a
     chunk boundary, so its columns stay one contiguous buffer each."""
     var height = ends[len(ends) - 1] if len(ends) > 0 else 0
-    var size = morsel_size(height, workers)
+    var size = morsel_size(height, workers, align)
     var ranges = List[Int]()
     var start = 0
     for end in ends:
