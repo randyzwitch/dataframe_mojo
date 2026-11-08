@@ -1,4 +1,5 @@
 """CPU group/OVER feed and occurrence order, independent of GPU lowering."""
+# contract-group: reduce.grouped
 from std.testing import assert_raises, assert_true, assert_equal
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from dataframe.decimal import pow10

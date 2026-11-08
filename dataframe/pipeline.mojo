@@ -229,6 +229,66 @@ def _reads(exprs: List[Expr]) -> Optional[List[String]]:
     return Optional(names^)
 
 
+def _key_statistics(
+    frame: DataFrame, steps: List[Step], keys: List[String]
+) -> List[Series]:
+    """The source column whose statistics hold for each grouping key after
+    the steps (a key that is a source column, carried unchanged through
+    filters, joins and bare column projections, as DuckDB's statistics
+    propagate through them); empty when some key has none (a computed key,
+    or one a right or full join coalesces with its build side's)."""
+    var names = frame.columns()
+    var sources = frame.columns()
+    for step in steps:
+        if step.kind == STEP_SELECT or step.kind == STEP_WITH_COLUMNS:
+            var made = List[String]()
+            var made_sources = List[String]()
+            if step.kind == STEP_WITH_COLUMNS:
+                made = names.copy()
+                made_sources = sources.copy()
+            for expr in step.exprs:
+                for i in range(len(made)):
+                    if made[i] == expr._name:
+                        _ = made.pop(i)
+                        _ = made_sources.pop(i)
+                        break
+                if len(expr._nodes) != 1 or expr._nodes[0].op != COL:
+                    continue
+                for i in range(len(names)):
+                    if names[i] == expr._nodes[0].text:
+                        made.append(expr._name)
+                        made_sources.append(sources[i])
+                        break
+            names = made^
+            sources = made_sources^
+        elif step.kind == STEP_DROP or (
+            step.kind == STEP_JOIN
+            and (step.how == JOIN_RIGHT or step.how == JOIN_FULL)
+        ):
+            var kept = List[String]()
+            var kept_sources = List[String]()
+            for i in range(len(names)):
+                if names[i] not in step.names:
+                    kept.append(names[i])
+                    kept_sources.append(sources[i])
+            names = kept^
+            sources = kept_sources^
+    var found = List[Series](capacity=len(keys))
+    for key in keys:
+        var at = -1
+        for i in range(len(names)):
+            if names[i] == key:
+                at = i
+                break
+        if at < 0:
+            return List[Series]()
+        try:
+            found.append(frame.column(sources[at]))
+        except:
+            return List[Series]()
+    return found^
+
+
 comptime _AGGREGATE_INPUT = "__aggregate_input_"
 
 
@@ -2917,13 +2977,18 @@ def _run_pipeline(
             for name in keys:
                 empty_keys.append(empty.column(name))
             var reduction = _StreamReduction(empty, expressions, keys)
-            layout.append(
-                aggregate_layout(
-                    empty_keys,
-                    table_inputs(empty, empty_keys, expressions),
-                    table_specs(reduction),
-                )
+            var made = aggregate_layout(
+                empty_keys,
+                table_inputs(empty, empty_keys, expressions),
+                table_specs(reduction),
             )
+            # Keys whose source statistics bound them to a few values: a
+            # perfect hash aggregate (DuckDB's planner, from the group
+            # statistics the propagator carries to the aggregate).
+            var stats = _key_statistics(frame, steps, keys)
+            if len(stats) == len(keys):
+                made.use_perfect_hash(stats)
+            layout.append(made^)
             template.append(reduction^)
     if len(layout) > 0:
         trace_path("pipeline.group_table")

@@ -96,7 +96,9 @@ def test_free_range_restarts_per_group_and_order_and_includes_null_rows() raises
             ]
         ),
     )
-    var grouped = frame.group_by("g").agg(row_len().alias("n"))
+    var grouped = frame.group_by("g", maintain_order=True).agg(
+        row_len().alias("n")
+    )
     assert_frame(
         grouped,
         DataFrame(
@@ -108,12 +110,14 @@ def test_free_range_restarts_per_group_and_order_and_includes_null_rows() raises
     )
     assert_frame(
         frame.lazy()
-        .group_by("g")
+        .group_by("g", maintain_order=True)
         .agg(row_len().alias("n"))
         .collect(engine="cpu"),
         grouped,
     )
-    var lists = frame.group_by("g").agg(int_range(row_len()).alias("indices"))
+    var lists = frame.group_by("g", maintain_order=True).agg(
+        int_range(row_len()).alias("indices")
+    )
     assert_frame(
         lists,
         DataFrame(

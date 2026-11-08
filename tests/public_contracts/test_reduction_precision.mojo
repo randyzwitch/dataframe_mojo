@@ -114,12 +114,6 @@ def test_decimal_means_allow_exact_totals_beyond_input_precision() raises:
                 assert_true(empty.item().is_null())
 
 
-# expected-failure: Independent quadratic Int128 equality counts five distinct
-# expected-failure: values including null. Decimal128 scaled values beyond
-# expected-failure: Int64, duplicate and signs; eager-global ordinary error is
-# expected-failure: first reached witness.
-# expected-diagnostic: n_unique of a decimal value beyond 64 bits is not
-# expected-diagnostic: supported
 def test_decimal_distinct_counts_compare_full_int128_values() raises:
     # n_unique accepts any logical type; a Decimal128 value is not limited
     # to Int64. Independent equality over scaled integers counts null once.
