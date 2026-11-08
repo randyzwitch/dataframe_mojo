@@ -6,7 +6,18 @@ from std.memory import Pointer
 from std.testing import assert_equal
 from max.gpu import global_idx
 from max.gpu.host import DeviceContext, DeviceBuffer
-from dataframe.expr import LIT_INT, ADD, MUL, NEG, FLOORDIV, DIV, CLIP_LOW, CAST
+from dataframe.expr import (
+    COL,
+    LIT_INT,
+    ADD,
+    MUL,
+    NEG,
+    FLOORDIV,
+    DIV,
+    CLIP_LOW,
+    FILL_NAN,
+    CAST,
+)
 from dataframe_metal.expression_format import (
     TYPED_HEADER,
     CASE_HEADER,
@@ -27,11 +38,11 @@ def probe(
     output: Pointer[UInt64, MutUntrackedOrigin],
 ):
     var index = global_idx.x
-    if index >= 4096:
+    if index >= 4608:
         return
-    var scenario = index % 16
+    var scenario = index % 18
     var at = scenario * 64
-    var empty = programs.unsafe_bitcast[UInt8]()
+    var empty = programs.unsafe_offset(18 * 64).unsafe_bitcast[UInt8]()
     var answer = typed_expression_value(
         programs.unsafe_offset(at + 4),
         Int(programs[unsafe_offset=at]),
@@ -64,7 +75,7 @@ def probe(
 
 
 def main() raises:
-    var words = List[UInt64](length=16 * 64, fill=0)
+    var words = List[UInt64](length=18 * 64 + 1, fill=0)
     var expected = List[UInt64]()
     var validity = List[UInt64]()
     var faults = List[UInt64]()
@@ -335,20 +346,41 @@ def main() raises:
     expected.append(0)
     validity.append(1)
     faults.append(1)
+    # COUNT must load the NaN payload when either program header requests it.
+    words[18 * 64] = 0x7FC12345
+    for scenario in range(16, 18):
+        var at = scenario * 64
+        words[at] = 4
+        words[at + 1] = 2
+        words[at + 2] = 0
+        words[at + 4] = UInt64(TYPED_HEADER if scenario == 16 else CASE_HEADER)
+        words[at + 7] = 1
+        words[at + 8] = UInt64(COL)
+        words[at + 10] = (
+            UInt64(3) << VALUE_TYPE_SHIFT
+        ) if scenario == 16 else UInt64(0)
+        words[at + 12] = UInt64(CASE_NULL)
+        words[at + 16] = UInt64(FILL_NAN)
+        words[at + 18] = (
+            UInt64(3) << VALUE_TYPE_SHIFT
+        ) if scenario == 16 else UInt64(0)
+        expected.append(0)
+        validity.append(0)
+        faults.append(0)
     var scope = Scope()
     var ctx = scope.context()
     var programs = ctx.enqueue_create_buffer[DType.uint64](len(words))
-    var result = ctx.enqueue_create_buffer[DType.uint64](4096 * 3)
+    var result = ctx.enqueue_create_buffer[DType.uint64](4608 * 3)
     ctx.enqueue_copy(programs, words.unsafe_ptr())
-    ctx.enqueue_function[probe](programs, result, grid_dim=16, block_dim=256)
-    var actual = List[UInt64](length=4096 * 3, fill=0)
+    ctx.enqueue_function[probe](programs, result, grid_dim=18, block_dim=256)
+    var actual = List[UInt64](length=4608 * 3, fill=0)
     ctx.enqueue_copy(actual.unsafe_ptr(), result)
     scope.synchronize()
-    for i in range(4096):
-        assert_equal(actual[i * 3], expected[i % 16])
-        assert_equal(actual[i * 3 + 1], validity[i % 16])
-        assert_equal(actual[i * 3 + 2], faults[i % 16])
+    for i in range(4608):
+        assert_equal(actual[i * 3], expected[i % 18])
+        assert_equal(actual[i * 3 + 1], validity[i % 18])
+        assert_equal(actual[i * 3 + 2], faults[i % 18])
     scope.mark_success()
     print(
-        "PASS 4096 shared interpreter validity, fault and lazy CASE checks on Metal"
+        "PASS 4608 shared interpreter validity, fault and lazy CASE checks on Metal"
     )

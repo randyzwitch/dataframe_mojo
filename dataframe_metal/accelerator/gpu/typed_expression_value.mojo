@@ -65,19 +65,18 @@ def typed_expression_value(
     var validity = SIMD[DType.uint32, 8](0)
     var top = 0
     var fault = UInt32(0)
-    var typed = program[unsafe_offset=0] == UInt64(TYPED_HEADER)
+    var header = program[unsafe_offset=0]
+    var typed = header == UInt64(TYPED_HEADER)
     var need_float = want_value or (
-        typed and Bool(program[unsafe_offset=3] & 1)
+        (typed or header == UInt64(CASE_HEADER))
+        and Bool(program[unsafe_offset=3] & 1)
     )
     var node = 1 if typed else 0
     while node < count:
         var at = node * EXPRESSION_NODE_WORDS
         var op = UInt32(program[unsafe_offset=at])
         if op == UInt32(CASE_HEADER) or op == UInt32(TYPED_HEADER):
-            if op == UInt32(TYPED_HEADER):
-                need_float = need_float or Bool(
-                    program[unsafe_offset=at + 3] & 1
-                )
+            need_float = need_float or Bool(program[unsafe_offset=at + 3] & 1)
             node += 1
             continue
         if op == UInt32(CASE_TEST):
