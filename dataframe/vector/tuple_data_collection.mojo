@@ -70,8 +70,9 @@ struct TupleDataCollection(Movable):
                 + String(TUPLE_DATA_BLOCK_SIZE)
             )
         self.layout = layout.copy()
+        # No segment until the first rows are built (DuckDB makes it in
+        # InitializeAppend), so an empty partition costs no allocator.
         self.segments = List[TupleDataSegment]()
-        self.segments.append(TupleDataSegment(self.layout))
         self._count = 0
         self._data_size = 0
 
@@ -203,6 +204,8 @@ struct TupleDataCollection(Movable):
     ):
         """Build: room for the rows in the last segment, their pointers in
         `state`."""
+        if len(self.segments) == 0:
+            self.segments.append(TupleDataSegment(self.layout))
         ref segment = self.segments[len(self.segments) - 1]
         var before = segment.size_in_bytes()
         segment.build(state, append_offset, append_count)
@@ -233,11 +236,11 @@ struct TupleDataCollection(Movable):
         other.reset()
 
     def reset(mut self):
-        """Reset: no rows, a fresh segment."""
+        """Reset: no rows and no segment; the next build makes one (DuckDB
+        keeps no segment once Combine moved them all out)."""
         self._count = 0
         self._data_size = 0
         self.segments = List[TupleDataSegment]()
-        self.segments.append(TupleDataSegment(self.layout))
 
     # -- Scan and gather ---------------------------------------------------
 

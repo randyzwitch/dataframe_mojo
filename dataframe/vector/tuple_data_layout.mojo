@@ -17,6 +17,8 @@ contains its own kind fails as an imported Mojo module, so the layouts of
 one row live in one flat list: node 0 is the row, and a struct column
 names its node by index (`struct_layouts`).
 """
+from std.memory import ArcPointer
+
 from dataframe.dtype import DataType
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
@@ -129,7 +131,10 @@ struct TupleDataLayoutNode(Copyable, Movable):
 struct TupleDataLayout(Copyable, Movable):
     """The layout of a row and of every struct nested in it."""
 
-    var nodes: List[TupleDataLayoutNode]
+    # Shared by every copy, as DuckDB shares one `shared_ptr<TupleDataLayout>`
+    # among a collection, its partitions and their allocators: a copy is a
+    # reference count, not a copy of every node's lists.
+    var nodes: ArcPointer[List[TupleDataLayoutNode]]
 
     def __init__(
         out self,
@@ -140,18 +145,22 @@ struct TupleDataLayout(Copyable, Movable):
         """TupleDataLayout::Initialize(types, aggregates, validity_type):
         `aggregate_sizes` are the payload sizes of the aggregate states
         that follow the columns (each a multiple of 8)."""
-        self.nodes = List[TupleDataLayoutNode]()
-        _ = self._initialize(types, can_have_null, True, aggregate_sizes)
+        var nodes = List[TupleDataLayoutNode]()
+        _ = TupleDataLayout._initialize(
+            nodes, types, can_have_null, True, aggregate_sizes
+        )
+        self.nodes = ArcPointer(nodes^)
 
+    @staticmethod
     def _initialize(
-        mut self,
+        mut nodes: List[TupleDataLayoutNode],
         types: List[DataType],
         can_have_null: Bool,
         top_level: Bool,
         aggregate_sizes: List[Int],
     ) raises -> Int:
-        var index = len(self.nodes)
-        self.nodes.append(TupleDataLayoutNode())
+        var index = len(nodes)
+        nodes.append(TupleDataLayoutNode())
         var node = TupleDataLayoutNode()
         node.types = types.copy()
         node.can_have_null = can_have_null
@@ -167,10 +176,10 @@ struct TupleDataLayout(Copyable, Movable):
             node.physicals.append(physical)
             var child = -1
             if physical == PHYSICAL_STRUCT:
-                child = self._initialize(
-                    types[c].field_dtypes(), True, False, List[Int]()
+                child = TupleDataLayout._initialize(
+                    nodes, types[c].field_dtypes(), True, False, List[Int]()
                 )
-                if not self.nodes[child].all_constant:
+                if not nodes[child].all_constant:
                     node.all_constant = False
                     node.variable_columns.append(c)
             elif not constant_size(physical):
@@ -190,7 +199,7 @@ struct TupleDataLayout(Copyable, Movable):
             if constant_size(physical) or physical == PHYSICAL_VARCHAR:
                 node.row_width += physical_size(physical)
             elif physical == PHYSICAL_STRUCT:
-                node.row_width += self.nodes[node.struct_layouts[c]].row_width
+                node.row_width += nodes[node.struct_layouts[c]].row_width
             else:
                 # A list is a pointer to its data in the heap.
                 node.row_width += 8
@@ -207,41 +216,41 @@ struct TupleDataLayout(Copyable, Movable):
         if align:
             node.row_width = _align(node.row_width)
 
-        self.nodes[index] = node^
+        nodes[index] = node^
         return index
 
     def column_count(self) -> Int:
-        return len(self.nodes[0].types)
+        return len(self.nodes[][0].types)
 
     def types(self) -> List[DataType]:
-        return self.nodes[0].types.copy()
+        return self.nodes[][0].types.copy()
 
     def row_width(self) -> Int:
-        return self.nodes[0].row_width
+        return self.nodes[][0].row_width
 
     def data_offset(self) -> Int:
-        return self.nodes[0].flag_width
+        return self.nodes[][0].flag_width
 
     def data_width(self) -> Int:
-        return self.nodes[0].data_width
+        return self.nodes[][0].data_width
 
     def aggr_offset(self) -> Int:
-        return self.nodes[0].flag_width + self.nodes[0].data_width
+        return self.nodes[][0].flag_width + self.nodes[][0].data_width
 
     def offsets(self) -> List[Int]:
-        return self.nodes[0].offsets.copy()
+        return self.nodes[][0].offsets.copy()
 
     def all_constant(self) -> Bool:
-        return self.nodes[0].all_constant
+        return self.nodes[][0].all_constant
 
     def heap_size_offset(self) -> Int:
-        return self.nodes[0].heap_size_offset
+        return self.nodes[][0].heap_size_offset
 
     def can_have_null(self) -> Bool:
-        return self.nodes[0].can_have_null
+        return self.nodes[][0].can_have_null
 
     def has_nested_types(self) -> Bool:
-        for p in self.nodes[0].physicals:
+        for p in self.nodes[][0].physicals:
             if p == PHYSICAL_LIST or p == PHYSICAL_STRUCT:
                 return True
         return False
