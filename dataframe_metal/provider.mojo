@@ -19,8 +19,6 @@ from dataframe.lazy import LazyFrame
 from .metal import MetalRuntime, default_runtime, metal_installed
 from . import handoff
 from .accelerator.faults import is_data_fault
-from .calibration import shape_key
-from .region_plan import normalize_region
 from .accelerator.gpu.identity import runtime_build_id
 from dataframe.json.value import json_quote
 from std.os import getenv
@@ -101,8 +99,7 @@ def pipeline_supports(pipeline: LazyFrame, device: Int) -> Bool:
     if device != 0:
         return False
     try:
-        var normalized = normalize_region(pipeline)
-        return Bool(normalized) and handoff_supports(normalized.value())
+        return handoff_supports(pipeline)
     except:
         return False
 
@@ -122,13 +119,9 @@ def pipeline_costs(
     if frame_rows != features.input_rows:
         return (Float64(-1), Float64(-1))
     try:
-        var normalized = normalize_region(pipeline)
-        if not normalized:
-            return (Float64(-1), Float64(-1))
-        # Same validated profile snapshot and physical input for both engines.
-        var costs = handoff.estimate_costs(
-            normalized.value(), features.input_rows
-        )
+        # The handoff matcher preserves logical moment operations while
+        # normalizing their physical inputs for the same validated profile.
+        var costs = handoff.estimate_costs(pipeline, features.input_rows)
         return (costs[1], costs[2])
     except:
         return (Float64(-1), Float64(-1))
@@ -161,9 +154,7 @@ def _trace_placement(pipeline: LazyFrame, engine: String) raises:
     var path = getenv("DATAFRAME_METAL_PLACEMENT_TRACE")
     if not path:
         return
-    var normalized = normalize_region(pipeline)
-    var selected = normalized.take()
-    var key = shape_key(selected, handoff.region_key(selected))
+    var key = handoff.layout_key(pipeline)
     var rows = pipeline._plan._frames[
         pipeline._plan._nodes[0].source_slot()
     ].height()
