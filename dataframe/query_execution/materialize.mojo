@@ -244,14 +244,23 @@ struct _SharedPipeline(SchedulablePipeline):
 
     def finalize(mut self) raises:
         var frame = self.result.copy()
-        # A result read from one table reads its columns' distinct counts
-        # from that table, filtered or not: DuckDB carries a column's
-        # count through a table's filters and projections into a
-        # materialized CTE's statistics (`ExtractGetStats` keeps the
-        # base counts, `AddMaterializedCTEStats`). Without them a shared
-        # date_dim slice's keys have no count, and a join to sales takes
-        # the dates the sales hold for its domain (TPC-DS q76, q78).
-        if not self.aggregated and self.origin > 0:
+        # A result holding every row of its table reads its columns'
+        # distinct counts from that table: they are the same columns, as
+        # DuckDB carries a column's count through a projection into a
+        # materialized CTE's statistics. TPC-DS q76's three channels share
+        # one projection of date_dim, whose date keys then had no count,
+        # and the join order took the 1,990 dates the sales hold for the
+        # domain, putting the item join first on a date join estimated 37
+        # times too large. A filtered result reads none: DuckDB keeps the
+        # table's counts there too, but a filtered dimension's full key
+        # count is the date-containment estimate of #1083 (a month of
+        # dates joined to sales estimated 37 times too small, TPC-DS q60),
+        # whose low estimates the run-time swaps then undo.
+        if (
+            not self.aggregated
+            and self.origin > 0
+            and frame.height() == self.origin
+        ):
             var top = len(self.plan._nodes) - 1
             var origin_slot = -1
             for name in frame.columns():
