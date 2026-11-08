@@ -2272,7 +2272,10 @@ struct VectorExpression(Copyable, Movable):
     def _raise_if_kept(self, index: Int, count: Int) raises:
         """A decimal result past its precision: the column kernels' error.
         Every computed row is a kept row, so it is raised."""
-        raise Error("value exceeds decimal precision")
+        raise Error(
+            "value exceeds decimal precision "
+            + String(self.bound.dtypes[index].precision())
+        )
 
     # --- results ----------------------------------------------------------
 
