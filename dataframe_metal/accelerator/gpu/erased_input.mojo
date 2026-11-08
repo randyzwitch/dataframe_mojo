@@ -8,6 +8,7 @@ from .typed_storage import NativeColumnAny, coalesced_native_chunks
 
 
 from .numeric_view import NumericView
+from .packed_bool_input import place_packed_bool, coalesced_bool_chunks
 
 
 def _place[
@@ -61,8 +62,6 @@ def numeric_views(
 ) raises -> List[NumericView]:
     var dtype = frame.column(name).dtype()
     if dtype == DataType.BOOL:
-        from .packed_bool_input import place_packed_bool
-
         return place_packed_bool(
             frame.column(name), scope, zero_copy, owners, coalesce
         )
@@ -82,8 +81,6 @@ def numeric_views(
 def single_native_span(series: Series) raises -> Bool:
     """Whether all logical chunks can share one native value/bitmap mapping."""
     if series.dtype() == DataType.BOOL:
-        from .packed_bool_input import coalesced_bool_chunks
-
         return len(coalesced_bool_chunks(series)) == 1
     comptime for i in range(3):
         comptime D = DType.int32 if i == 0 else (
