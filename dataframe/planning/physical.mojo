@@ -111,6 +111,8 @@ comptime _PREFER_RIGHT_DEEP_PENALTY = 0.15
 comptime _MIN_FILTER_TARGET_CARDINALITY = 1000000
 comptime _MAX_BUILD_TO_TARGET_RATIO = 64
 comptime _SEMI_JOIN_FILTER_TARGET_RATIO = 3
+
+
 def plan_side_estimate(
     self: QueryContext, mut stats: PlanStatistics, index: Int
 ) raises -> Int:
@@ -432,7 +434,7 @@ def plan_cost_order_joins(
 
     Only where nothing above reads the rows' order
     (`_order_free_above`) and every column name is unique across the
-    relations, so no join renames one. True when a graph changed."""
+    relations but a key pair of one name, so no join renames one. True when a graph changed."""
     var parents = plan_live_parents(self, root)
     var changed = False
     var count = len(self._nodes)
@@ -464,17 +466,51 @@ def plan_cost_order_joins(
                 hidden[g.right_from] = True
             elif how == JOIN_LEFT:
                 nullable[g.right_from] = True
+        # Which relation holds each column. A name several relations share
+        # is one column only as inner join key pairs of that name joining
+        # them all (coalesced into one, as DuckDB's bindings equate them);
+        # `twins` holds its other relations, checked below.
         var provider = Dict[String, Int]()
-        var unique = True
+        var twins = Dict[String, List[Int]]()
         var columns = List[List[String]]()
         for r in range(n):
             var names = plan_columns_of(self, relations[r])
             if not hidden[r]:
                 for c in names:
-                    if c in provider:
-                        unique = False
-                    provider[c] = r
+                    if c not in provider:
+                        provider[c] = r
+                    elif c in twins:
+                        twins[c].append(r)
+                    else:
+                        twins[c] = [r]
             columns.append(names^)
+        # Each join's left and right relation sets.
+        var join_masks = List[Tuple[Int, Int]]()
+        for g in joins:
+            join_masks.append(
+                (
+                    ((1 << g.right_from) - 1) & ~((1 << g.left_from) - 1),
+                    ((1 << g.end) - 1) & ~((1 << g.right_from) - 1),
+                )
+            )
+        # Every relation of a shared name joins another of it on that name.
+        var unique = True
+        for c in twins.keys():
+            var holders = 1 << provider[c]
+            for r in twins[c]:
+                holders |= 1 << r
+            var linked = 0
+            for j in range(len(joins)):
+                ref join = self._nodes[joins[j].node]
+                if join.how != JOIN_INNER:
+                    continue
+                for i in range(len(join.names)):
+                    if join.names[i] == c and join.right_keys[i] == c:
+                        var l = join_masks[j][0] & holders
+                        var r = join_masks[j][1] & holders
+                        if l != 0 and r != 0:
+                            linked |= l | r
+            unique = unique and linked == holders
         if not unique:
             continue
         # Each join as an operator (`JoinOrderOperator`): its inputs'
@@ -484,16 +520,14 @@ def plan_cost_order_joins(
         for j in range(len(joins)):
             ref g = joins[j]
             ref join = self._nodes[g.node]
-            var left_mask = ((1 << g.right_from) - 1) & ~(
-                (1 << g.left_from) - 1
-            )
-            var right_mask = ((1 << g.end) - 1) & ~((1 << g.right_from) - 1)
+            var left_mask = join_masks[j][0]
+            var right_mask = join_masks[j][1]
             var syntactic = 0
             for i in range(len(join.names)):
-                var a = provider.get(join.names[i], -1)
+                var a = _holder(provider, twins, join.names[i], left_mask)
                 var b = g.right_from
                 if join.how == JOIN_INNER:
-                    b = provider.get(join.right_keys[i], -1)
+                    b = _holder(provider, twins, join.right_keys[i], right_mask)
                 if (
                     a < 0
                     or b < 0
@@ -539,8 +573,8 @@ def plan_cost_order_joins(
             for i in range(len(join.names)):
                 var left_key = join.names[i]
                 var right_key = join.right_keys[i]
-                var a = provider[left_key]
-                var b = provider[right_key]
+                var a = _holder(provider, twins, left_key, join_masks[j][0])
+                var b = _holder(provider, twins, right_key, join_masks[j][1])
                 var found = False
                 for k in range(len(edges)):
                     if edges[k].owner != owner:
@@ -570,6 +604,9 @@ def plan_cost_order_joins(
                     known = False
                 else:
                     mask |= 1 << r
+                if name in twins:
+                    for t in twins[name]:
+                        mask |= 1 << t
             # One reading a left join's right columns runs after that
             # join (`PinFilterAfterLeftJoin`).
             for op in ops:
@@ -820,6 +857,25 @@ def plan_cost_order_joins(
         trace_path("lazy.cost_join_order")
         changed = True
     return changed
+
+
+def _holder(
+    provider: Dict[String, Int],
+    twins: Dict[String, List[Int]],
+    name: String,
+    mask: Int,
+) raises -> Int:
+    """The first relation in `mask` holding column `name` (`provider`,
+    then a shared name's `twins`); its first holder when none is in
+    `mask`, -1 when none holds it."""
+    var r = provider.get(name, -1)
+    if r >= 0 and mask & (1 << r) != 0:
+        return r
+    if name in twins:
+        for t in twins[name]:
+            if mask & (1 << t) != 0:
+                return t
+    return r
 
 
 def _place_graph_filters(

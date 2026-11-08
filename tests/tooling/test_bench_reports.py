@@ -214,7 +214,7 @@ class BenchmarkReports(unittest.TestCase):
     def test_instrumentation_includes_nested_and_other_operator_names(self):
         paths = bench.instrumented_paths()
         self.assertIn("group_by.aggregate_table", paths)
-        self.assertIn("lazy.join_order", paths)
+        self.assertIn("lazy.cost_join_order", paths)
         self.assertIn("filter.float_rows", paths)
 
     def test_nested_library_changes_invalidate_runner_binaries(self):

@@ -145,8 +145,8 @@ def estimate_distinct_cardinality(
     product *= 0.95 ** Float64(len(counts) - 1)
     var multiplier = 1.0 - exp(-Float64(input_cardinality) / product)
     var estimate = (
-        Float64(input_cardinality) if multiplier == 0.0 else product
-        * multiplier
+        Float64(input_cardinality) if multiplier
+        == 0.0 else product * multiplier
     )
     var result = Int(min(estimate, Float64(input_cardinality)))
     return max(result, 1) if input_cardinality > 0 else 0
@@ -294,7 +294,11 @@ def _cardinality(
     if kind == SORT or kind == SLICE or kind == TAIL:
         # A limit keeps at most its count (`LOGICAL_LIMIT`).
         var rows = plan_cardinality(self, stats, node.left)
-        var limit = node.offset if kind == TAIL else node.length
+        var limit = node.sort_limit()
+        if kind == TAIL:
+            limit = node.tail_count()
+        elif kind == SLICE:
+            limit = node.slice_length()
         if rows < 0 or limit < 0:
             return rows
         return min(rows, limit)
@@ -386,10 +390,10 @@ def _group_keys(self: QueryContext, node: PlanNode) raises -> List[String]:
     var best = List[String]()
     if keys == 0:
         return best^
-    for s in range(len(node.flags) // keys):
+    for s in range(len(node.grouping_membership()) // keys):
         var members = List[String]()
         for k in range(keys):
-            if node.flags[s * keys + k]:
+            if node.grouping_membership()[s * keys + k]:
                 members.append(node.names[k])
         if len(members) > len(best):
             best = members^
@@ -530,9 +534,11 @@ def _distinct(
         return DistinctCount.unknown()
     if _has_column(self, node.right, name):
         return plan_distinct(self, stats, node.right, name)
-    var suffix = node.join_suffix() if len(node.names2) > 0 else String("")
+    var suffix = node.join_suffix()
     if suffix.byte_length() > 0 and name.endswith(suffix):
-        var base = String(name[byte = 0 : name.byte_length() - suffix.byte_length()])
+        var base = String(
+            name[byte = 0 : name.byte_length() - suffix.byte_length()]
+        )
         return plan_distinct(self, stats, node.right, base)
     return DistinctCount.unknown()
 

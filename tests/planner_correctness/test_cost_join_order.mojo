@@ -832,3 +832,33 @@ def test_a_filter_rejecting_nulls_makes_a_left_join_inner() raises:
     var written = keeping.collect(optimize=False, engine="cpu")
     assert_true(written.height() > rows.height())
     assert_frame_unordered(kept, written)
+
+
+def test_an_empty_build_ends_its_stream_with_the_rows_above_it() raises:
+    # The products' filter keeps nothing. Planning runs nothing ahead; the
+    # stream builds the products, finds them empty, and probes no fact
+    # row (DuckDB's `EmptyResultIfRHSIsEmpty`). A count above the inner
+    # join still yields its one row.
+    var t = tables()
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var query = t[0].join(
+        t[1].filter(col("p_category") == lit(Int64(99))),
+        left_on=["f_product"],
+        right_on=["p_id"],
+    )
+    var counted = query.select_exprs([col("f_amount").count().alias("rows")])
+    var observed = StrategyTrace()
+    var rows = query.collect()
+    var count = counted.collect()
+    assert_true(
+        "dataframe-path: stream.empty_build\n" in observed.text(),
+        "the empty build did not end its stream",
+    )
+    _ = observed^
+    _ = trace^
+    assert_equal(rows.height(), 0)
+    assert_equal(
+        len(rows.columns()),
+        len(query.collect(optimize=False, engine="cpu").columns()),
+    )
+    assert_frame(count, counted.collect(optimize=False, engine="cpu"))
