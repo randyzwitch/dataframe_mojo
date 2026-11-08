@@ -230,30 +230,32 @@ def test_metal_ordered_public_native_values_ties_nulls_and_filtered_positions() 
             )
         )
     frame = DataFrame(chunked^)
-    for name in ["n", "w", "f", "b"]:
-        var value = col(name)
-        var outputs: List[Expr] = [
-            value.first().alias("first"),
-            value.last().alias("last"),
-            value.first(ignore_nulls=True).alias("nonnull_first"),
-            value.last(ignore_nulls=True).alias("nonnull_last"),
-            value.arg_min().alias("minimum"),
-            value.arg_max().alias("maximum"),
-            value.drop_nulls().arg_min().alias("nonnull_minimum"),
-            value.drop_nulls().arg_max().alias("nonnull_maximum"),
-        ]
-        for grouped in [False, True]:
-            for filtered in [False, True]:
-                var selected = frame.lazy().filter(
-                    col("p") > 0
-                ) if filtered else frame.lazy()
-                var query = selected.group_by(
-                    ["k", "j"], maintain_order=True
-                ).agg(outputs) if grouped else selected.select_exprs(outputs)
-                var cpu = query.collect(engine="cpu")
-                assert_true(execute_ordered(query)[0].equals(cpu))
-                assert_true(execute_timed(query)[0].equals(cpu))
-                assert_true(query.collect(accelerator=runtime).equals(cpu))
+    for start in [0, 1, 5]:
+        var window = frame.slice(start, frame.height() - start)
+        for name in ["n", "w", "f", "b"]:
+            var value = col(name)
+            var outputs: List[Expr] = [
+                value.first().alias("first"),
+                value.last().alias("last"),
+                value.first(ignore_nulls=True).alias("nonnull_first"),
+                value.last(ignore_nulls=True).alias("nonnull_last"),
+                value.arg_min().alias("minimum"),
+                value.arg_max().alias("maximum"),
+                value.drop_nulls().arg_min().alias("nonnull_minimum"),
+                value.drop_nulls().arg_max().alias("nonnull_maximum"),
+            ]
+            for grouped in [False, True]:
+                for filtered in [False, True]:
+                    var selected = window.lazy().filter(
+                        col("p") > 0
+                    ) if filtered else window.lazy()
+                    var query = selected.group_by(
+                        ["k", "j"], maintain_order=True
+                    ).agg(outputs) if grouped else selected.select_exprs(outputs)
+                    var cpu = query.collect(engine="cpu")
+                    assert_true(execute_ordered(query)[0].equals(cpu))
+                    assert_true(execute_timed(query)[0].equals(cpu))
+                    assert_true(query.collect(accelerator=runtime).equals(cpu))
 
 
 def test_metal_ordered_payload_gather_uses_native_float32_accessor() raises:
