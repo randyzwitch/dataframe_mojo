@@ -146,7 +146,9 @@ def test_metal_numeric_device_bits_match_independently_checked_host_primitives()
     ctx.enqueue_copy(b, right.unsafe_ptr())
     ctx.enqueue_copy(operations, ops.unsafe_ptr())
     ctx.enqueue_copy(types, tags.unsafe_ptr())
-    ctx.enqueue_function[_numeric_bits_probe](
+    var kernel = ctx.compile_function[_numeric_bits_probe]()
+    ctx.enqueue_function(
+        kernel,
         a,
         b,
         operations,
