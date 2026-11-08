@@ -352,30 +352,72 @@ def test_joins_over_tables_with_statistics_match_the_written_order() raises:
     assert_frame(query.collect(), eager)
 
 
-def test_joins_the_order_cannot_reorder_are_estimated_not_run() raises:
-    # DuckDB's estimate for an input the join order cannot reorder: a
-    # left, right or full join yields its larger input's rows, a semi or
-    # anti join its left input's.
+def test_join_estimates_follow_duckdbs_relation_statistics() raises:
+    # DuckDB's estimate of a join (`RelationStatisticsHelper`): a left,
+    # right or full join yields its larger input's rows, a semi or anti
+    # join its left input's, and an inner join both inputs' rows over the
+    # keys' total domain, here the products' rows (no table statistics:
+    # each key counts its relation's rows, and the smaller one bounds).
     var t = tables()
     var left = t[0].join(
         t[1], left_on=["f_product"], right_on=["p_id"], how="left"
     )
-    assert_equal(left._relation_estimate(len(left._plan._nodes) - 1), 40_000)
+    assert_equal(left._estimate(len(left._plan._nodes) - 1), 40_000)
     var full = t[1].join(
         t[0], left_on=["p_id"], right_on=["f_product"], how="full"
     )
-    assert_equal(full._relation_estimate(len(full._plan._nodes) - 1), 40_000)
+    assert_equal(full._estimate(len(full._plan._nodes) - 1), 40_000)
     var semi = t[1].join(
         t[0], left_on=["p_id"], right_on=["f_product"], how="semi"
     )
-    assert_equal(semi._relation_estimate(len(semi._plan._nodes) - 1), 2000)
+    assert_equal(semi._estimate(len(semi._plan._nodes) - 1), 2000)
     var anti = t[3].join(
         t[0], left_on=["s_id"], right_on=["f_store"], how="anti"
     )
-    assert_equal(anti._relation_estimate(len(anti._plan._nodes) - 1), 4000)
-    # An inner join is part of the graph itself: no estimate here.
+    assert_equal(anti._estimate(len(anti._plan._nodes) - 1), 4000)
     var inner = t[0].join(t[1], left_on=["f_product"], right_on=["p_id"])
-    assert_equal(inner._relation_estimate(len(inner._plan._nodes) - 1), -1)
+    assert_equal(inner._estimate(len(inner._plan._nodes) - 1), 40_000)
+
+
+def test_an_aggregate_over_joins_is_estimated_from_its_keys_counts() raises:
+    # An aggregate over joined tables with statistics: its keys keep their
+    # tables' HyperLogLog counts through the joins, and its groups are
+    # `EstimateDistinctCardinality` of them over the joined rows.
+    var t = tables()
+    var fact = t[0].collect()._with_statistics()
+    var products = t[1].collect()._with_statistics()
+    var query = (
+        fact.lazy()
+        .join(products.lazy(), left_on=["f_product"], right_on=["p_id"])
+        .group_by(["p_category"])
+        .agg([col("f_amount").sum().alias("total")])
+    )
+    var top = len(query._plan._nodes) - 1
+    var categories = products._distinct_count("p_category")
+    assert_true(categories > 0)
+    var count = query._distinct(top, "p_category")
+    assert_equal(count.count, categories)
+    var groups = query._estimate(top)
+    assert_true(groups > 0 and groups <= categories, String(groups))
+    # A filter keeps a fifth of the rows when nothing measures it.
+    var filtered = fact.lazy().filter(col("f_amount") < lit(Int64(10)))
+    assert_equal(
+        filtered._estimate(len(filtered._plan._nodes) - 1), 40_000 // 5
+    )
+    # An equality keeps the rows over the column's distinct count.
+    var equal = fact.lazy().filter(col("f_amount") == lit(Int64(10)))
+    var amounts = fact._distinct_count("f_amount")
+    assert_equal(
+        equal._estimate(len(equal._plan._nodes) - 1),
+        (40_000 + amounts - 1) // amounts,
+    )
+    # With a table's segment statistics, a filter they prove keeps no row
+    # is an empty relation (`StatisticsPropagator`).
+    var stored = t[0].collect()._with_statistics()._with_storage_statistics()
+    var none = stored.lazy().filter(col("f_amount") > lit(Int64(1000)))
+    assert_equal(none._estimate(len(none._plan._nodes) - 1), 0)
+    var some = stored.lazy().filter(col("f_amount") > lit(Int64(10)))
+    assert_equal(some._estimate(len(some._plan._nodes) - 1), 40_000 // 5)
 
 
 def test_union_all_estimates_sum_known_inputs_and_preserve_unknowns() raises:
@@ -388,11 +430,11 @@ def test_union_all_estimates_sum_known_inputs_and_preserve_unknowns() raises:
         left.concat(empty),
     ]:
         assert_equal(
-            query._relation_estimate(len(query._plan._nodes) - 1),
+            query._estimate(len(query._plan._nodes) - 1),
             query.collect(optimize=False, engine="cpu").height(),
         )
     var unknown = left.concat(left.select(col("k").sum()))
-    assert_equal(unknown._relation_estimate(len(unknown._plan._nodes) - 1), -1)
+    assert_equal(unknown._estimate(len(unknown._plan._nodes) - 1), -1)
 
 
 def test_a_join_graph_over_a_left_join_orders_without_running_it() raises:
@@ -457,19 +499,20 @@ def test_join_key_distinct_counts_follow_renames_to_their_table_column() raises:
     )
     var top = len(renamed._plan._nodes) - 1
     assert_equal(
-        renamed._spine_distinct(top, "pk"), table._distinct_count("p_id")
+        renamed._distinct(top, "pk").count, table._distinct_count("p_id")
     )
     assert_equal(
-        renamed._spine_distinct(top, "p_category"),
+        renamed._distinct(top, "p_category").count,
         table._distinct_count("p_category"),
     )
-    # A computed column has no table column's count.
+    # A computed column counts its relation's rows (DuckDB's
+    # `DistinctCountSource::CARDINALITY`).
     var computed = table.lazy().with_columns(
         [(col("p_id") + lit(Int64(1))).alias("pk")]
     )
-    assert_equal(
-        computed._spine_distinct(len(computed._plan._nodes) - 1, "pk"), -1
-    )
+    var made = computed._distinct(len(computed._plan._nodes) - 1, "pk")
+    assert_equal(made.count, table.height())
+    assert_true(not made.reliable())
 
 
 def test_a_semi_join_runs_before_inner_joins_its_keys_do_not_read() raises:
@@ -634,10 +677,11 @@ def test_a_shared_subplan_reads_distinct_counts_from_its_table() raises:
         ):
             continue
         assert_equal(
-            plan._spine_distinct(i, "day"), dates._distinct_count("d_sk")
+            plan._distinct(i, "day").count, dates._distinct_count("d_sk")
         )
         assert_equal(
-            plan._spine_distinct(i, "d_year"), dates._distinct_count("d_year")
+            plan._distinct(i, "d_year").count,
+            dates._distinct_count("d_year"),
         )
         read += 1
     assert_true(read >= 1, "the projection was not shared")
@@ -649,12 +693,9 @@ def test_a_shared_subplan_reads_distinct_counts_from_its_table() raises:
 
 
 def test_a_filtered_relation_streaming_into_a_build_is_not_run_ahead() raises:
-    # PDS-H q3's shape: filtered customers, orders and lines. The tree
-    # builds on the customers, streams the orders through them inside
-    # the build for the lines, and streams the lines. Only the customers
-    # are built whole, so only they run ahead for their count; the
-    # orders' filter runs in the stream, where running it ahead held
-    # every filtered order.
+    # PDS-H q3's shape: filtered customers, orders and lines. Planning
+    # estimates every relation from statistics and runs none of them
+    # ahead: each filter runs once, in the pipeline the plan puts it in.
     var customer = List[Int64]()
     var segment = List[Int64]()
     for c in range(2000):
@@ -712,25 +753,27 @@ def test_a_filtered_relation_streaming_into_a_build_is_not_run_ahead() raises:
     for r in range(report.height()):
         if report.item(r, "operator").string().startswith("FILTER"):
             filters += 1
-    # The orders' and the lines' filters ran in their streams.
-    assert_equal(filters, 2)
+    assert_equal(filters, 3)
     assert_frame_unordered(
         query.collect(), query.collect(optimize=False, engine="cpu")
     )
 
 
 def test_a_graph_with_an_empty_relation_is_its_empty_result() raises:
-    # The categories' filter keeps nothing. They run ahead for their
-    # count, and an inner join with an empty input is empty, as DuckDB
-    # pulls an empty result up (`EmptyResultPullup`): nothing else of
-    # the graph runs, and the result keeps the graph's columns.
+    # The categories table has no rows, which its statistics say, and an
+    # inner join with an empty input is empty, as DuckDB pulls an empty
+    # result up (`EmptyResultPullup`): nothing else of the graph runs,
+    # and the result keeps the graph's columns.
     var t = tables()
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var none = List[Int64]()
     var query = (
         t[0]
         .join(t[1], left_on=["f_product"], right_on=["p_id"])
         .join(
-            t[2].filter(col("c_group") == lit(Int64(99))),
+            DataFrame([ints("c_id", none), ints("c_group", none)])
+            .lazy()
+            .filter(col("c_group") == lit(Int64(99))),
             left_on=["p_category"],
             right_on=["c_id"],
         )
@@ -796,3 +839,33 @@ def test_a_filter_rejecting_nulls_makes_a_left_join_inner() raises:
     var written = keeping.collect(optimize=False, engine="cpu")
     assert_true(written.height() > rows.height())
     assert_frame_unordered(kept, written)
+
+
+def test_an_empty_build_ends_its_stream_with_the_rows_above_it() raises:
+    # The products' filter keeps nothing. Planning runs nothing ahead; the
+    # stream builds the products, finds them empty, and probes no fact
+    # row (DuckDB's `EmptyResultIfRHSIsEmpty`). A count above the inner
+    # join still yields its one row.
+    var t = tables()
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var query = t[0].join(
+        t[1].filter(col("p_category") == lit(Int64(99))),
+        left_on=["f_product"],
+        right_on=["p_id"],
+    )
+    var counted = query.select_exprs([col("f_amount").count().alias("rows")])
+    var observed = StrategyTrace()
+    var rows = query.collect()
+    var count = counted.collect()
+    assert_true(
+        "dataframe-path: stream.empty_build\n" in observed.text(),
+        "the empty build did not end its stream",
+    )
+    _ = observed^
+    _ = trace^
+    assert_equal(rows.height(), 0)
+    assert_equal(
+        len(rows.columns()),
+        len(query.collect(optimize=False, engine="cpu").columns()),
+    )
+    assert_frame(count, counted.collect(optimize=False, engine="cpu"))

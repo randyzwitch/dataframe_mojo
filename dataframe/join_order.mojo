@@ -4,10 +4,11 @@ Relations form vertices in a graph; join keys and column comparisons form
 edges. Each relation starts with its row count after local filters. To
 estimate a connected set, divide the product of its relation row counts by
 the product of edge domains on a spanning tree, choosing edges in descending
-domain order. Columns equated by joins or filters share an equivalence set.
-Without distinct-count statistics, an equivalence set's domain is the
-smallest row count among its relations. With statistics, use the largest
-distinct-count estimate among its columns. A cross-relation equality filter
+domain order. Columns equated by joins or filters share an equivalence set,
+whose domain is DuckDB 2.0's `DomainEstimate`: the largest reliable
+distinct count among its columns (HyperLogLog or exact), else the largest
+count from integer bounds, else the smallest fallback count (a column's
+relation's rows). A cross-relation equality filter
 is an edge that divides by its domain; another comparison divides by the
 domain raised to 2/3. Additional edges after connecting the set each
 contribute another domain factor. A plan's cost is the sum of estimated
@@ -290,6 +291,8 @@ struct JoinGraph(Movable):
         filters: List[FilterEdge] = List[FilterEdge](),
         ops: List[JoinOperator] = List[JoinOperator](),
         uncounted: Int = 0,
+        bounded: Dict[String, Float64] = Dict[String, Float64](),
+        fallback: Dict[String, Float64] = Dict[String, Float64](),
     ) raises:
         self.counted = List[Bool]()
         self.ops = ops.copy()
@@ -342,12 +345,15 @@ struct JoinGraph(Movable):
             var ry = find(parent, y)
             if rx != ry:
                 parent[rx] = ry
-        # A set's total domain (`UpdateTotalDomains`): the largest distinct
-        # count among its columns where a table keeps statistics
-        # (`distinct`, by "relation/column"), else the fewest table rows
-        # (`domains`) of any relation holding one of its columns.
+        # A set's total domain (`UpdateTotalDomains`, `DomainEstimate`):
+        # the largest reliable distinct count among its columns (a
+        # HyperLogLog or exact count, `distinct`, by "relation/column"),
+        # else the largest count from integer bounds (`bounded`), else the
+        # fewest fallback rows: a column's own (`fallback`), or its
+        # relation's (`domains`).
         var domain = Dict[Int, Float64]()
         var counted = Dict[Int, Float64]()
+        var spans = Dict[Int, Float64]()
         for pair in compared:
             for side in range(2):
                 var rel = pair[0] if side == 0 else pair[2]
@@ -358,9 +364,17 @@ struct JoinGraph(Movable):
                     var d = max(distinct[key], 1.0)
                     if root not in counted or d > counted[root]:
                         counted[root] = d
-                var r = max(domains[rel], 1.0)
+                    continue
+                if key in bounded:
+                    var d = max(bounded[key], 1.0)
+                    if root not in spans or d > spans[root]:
+                        spans[root] = d
+                    continue
+                var r = max(fallback.get(key, domains[rel]), 1.0)
                 if root not in domain or r < domain[root]:
                     domain[root] = r
+        for root in spans.keys():
+            domain[root] = spans[root]
         for root in counted.keys():
             domain[root] = counted[root]
         # An edge of several key pairs merges its relations once, at the
@@ -570,13 +584,23 @@ def order_joins(
     filters: List[FilterEdge] = List[FilterEdge](),
     ops: List[JoinOperator] = List[JoinOperator](),
     uncounted: Int = 0,
+    bounded: Dict[String, Float64] = Dict[String, Float64](),
+    fallback: Dict[String, Float64] = Dict[String, Float64](),
 ) raises -> Optional[JoinTree]:
     """The cheapest join tree over these relations (`rows` after their own
     filters, `domains` their tables' rows before them) and operators
     (`build_conflicts` applied), or None when the edges leave them
     disconnected (a cross product, which is not reordered)."""
     var graph = JoinGraph(
-        rows, domains, edges, distinct, filters, ops, uncounted
+        rows,
+        domains,
+        edges,
+        distinct,
+        filters,
+        ops,
+        uncounted,
+        bounded,
+        fallback,
     )
     var n = len(rows)
     var full = (1 << n) - 1

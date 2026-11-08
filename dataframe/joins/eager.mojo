@@ -314,7 +314,18 @@ def join_frames(
         perfect=physical == JOIN_INNER,
         keys_only=keys_only_join(physical),
     )
-    var pairs = probe_pairs(table, probe_keys, physical, 0)
+    var pairs = Tuple[List[Int], List[Int]](List[Int](), List[Int]())
+    if table.count == 0 and (
+        physical == JOIN_INNER
+        or physical == JOIN_SEMI
+        or physical == JOIN_RIGHT_SEMI
+    ):
+        # An empty build matches no probe row (DuckDB's
+        # `EmptyResultIfRHSIsEmpty`: the hash join's sink finalizes as
+        # NO_OUTPUT_POSSIBLE), so nothing is probed.
+        trace_path("join.empty_build")
+    else:
+        pairs = probe_pairs(table, probe_keys, physical, 0)
     if how == JOIN_SEMI or how == JOIN_ANTI:
         var kept = List[Int]()
         if probe_left:

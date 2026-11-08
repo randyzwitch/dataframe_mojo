@@ -45,6 +45,27 @@ comptime RAW_STORAGE = [
 comptime _COPY_NONE = 0
 comptime _COPY_RAW = 1
 comptime _COPY_VALUES = 2
+# The fixed widths a selected copy moves as one typed value.
+comptime _COPY_WIDTHS = [
+    DType.uint8,
+    DType.uint16,
+    DType.uint32,
+    DType.uint64,
+    DType.uint128,
+]
+comptime _COPY_SIZES = [1, 2, 4, 8, 16]
+
+
+@always_inline
+def _copy_selected[
+    D: DType
+](address: Int, format: UnifiedVectorFormat, count: Int):
+    """`count` values of type `D` read through `format`'s selection,
+    written in order from `address`."""
+    var src = Pointer[Scalar[D], MutAnyOrigin](unsafe_from_address=format.data)
+    var dst = Pointer[Scalar[D], MutAnyOrigin](unsafe_from_address=address)
+    for i in range(count):
+        dst[unsafe_offset=i] = src[unsafe_offset=format.sel.get_index_unsafe(i)]
 
 
 def append_raw(
@@ -75,13 +96,28 @@ def append_raw(
             Span[UInt8, MutAnyOrigin](unsafe_ptr=data, length=size * count)
         )
     else:
-        for i in range(count):
-            var at = size * format.sel.get_index_unsafe(i)
-            bytes.extend(
-                Span[UInt8, MutAnyOrigin](
-                    unsafe_ptr=data.unsafe_offset(at), length=size
+        # Each selected value written in place at its width, as
+        # `TemplatedColumnDataCopy` does, not a list append per row.
+        bytes.resize(start + size * count, 0)
+        var dest = Int(bytes.unsafe_ptr()) + start
+        var copied = False
+        comptime for k in range(len(_COPY_WIDTHS)):
+            comptime D = _COPY_WIDTHS[k]
+            comptime W = _COPY_SIZES[k]
+            if size == W:
+                _copy_selected[D](dest, format, count)
+                copied = True
+        if not copied:
+            for i in range(count):
+                unsafe_memcpy(
+                    dest=Pointer[UInt8, MutAnyOrigin](
+                        unsafe_from_address=dest + size * i
+                    ),
+                    src=data.unsafe_offset(
+                        size * format.sel.get_index_unsafe(i)
+                    ),
+                    count=size,
                 )
-            )
     if format.validity.all_valid() and len(bits) == 0:
         return
     # ColumnDataCopyValidity.

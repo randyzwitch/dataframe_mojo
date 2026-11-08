@@ -419,6 +419,8 @@ def plan_stream_execute(
     # The plan node of each operation, for the execution report.
     var operation_nodes = List[Int]()
     var joins = List[DataFrame]()
+    # The plan node of each join built so far.
+    var join_nodes = List[Int]()
     var indexes = List[Optional[JoinHashTable]]()
     # Join filters through an aggregate the stream starts from: the
     # builds above it run first, and the plan with their results runs.
@@ -494,6 +496,37 @@ def plan_stream_execute(
                 "cross" if node.how == JOIN_CROSS else "eager_hash"
             )
             var built = self._execute(node.right, False, True, batch_size)
+            if built.height() == 0 and (
+                node.how == JOIN_INNER
+                or node.how == JOIN_SEMI
+                or node.how == JOIN_RIGHT
+            ):
+                # No output is possible below this join (DuckDB's
+                # `EmptyResultIfRHSIsEmpty`: its sink finalizes as
+                # NO_OUTPUT_POSSIBLE and the probe pipeline never runs):
+                # the join's result is empty, and nothing under it runs.
+                # The steps above it run on no rows, so an aggregate
+                # without keys still yields its one row; the builds
+                # already made are kept.
+                var plan = self.copy()
+                for k in range(len(joins)):
+                    plan._frames.append(joins[k].copy())
+                    plan._schemas.append(Optional[CsvSchema]())
+                    plan._nodes.append(
+                        _frame_scan_node(slot=len(plan._frames) - 1)
+                    )
+                    plan._nodes[join_nodes[k]].right = len(plan._nodes) - 1
+                plan._frames.append(
+                    self._execute(cursor, True, False, batch_size)
+                )
+                plan._schemas.append(Optional[CsvSchema]())
+                plan._nodes[cursor] = _frame_scan_node(
+                    slot=len(plan._frames) - 1
+                )
+                trace_path("stream.empty_build")
+                return _stream_after_materialization(
+                    plan, index, batch_size, sink
+                )
             # The index a prefetch made with this build, if any.
             var ready = Optional[_ReadyIndex]()
             if self._prefetched_indexes:
@@ -523,6 +556,7 @@ def plan_stream_execute(
                 hash_index.build_filtered = plan_is_filtering(self, node.right)
                 prepared = hash_index^
             joins.append(built^)
+            join_nodes.append(cursor)
             plan_record(
                 self,
                 cursor,

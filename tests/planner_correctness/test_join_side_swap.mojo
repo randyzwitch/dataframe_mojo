@@ -143,7 +143,13 @@ def assert_by_name_and_group(actual: DataFrame) raises:
 
 
 def swapped(paths: String) -> Bool:
-    return "dataframe-path: lazy.swap_join_sides\n" in paths
+    # The smaller side builds when the join order puts it on the build
+    # side (DuckDB's plan enumerator) or the build side optimizer flips
+    # the join at stream start.
+    return (
+        "dataframe-path: lazy.swap_join_sides\n" in paths
+        or "dataframe-path: lazy.cost_join_order\n" in paths
+    )
 
 
 def test_larger_built_right_side_is_swapped_with_the_same_groups_either_optimization() raises:

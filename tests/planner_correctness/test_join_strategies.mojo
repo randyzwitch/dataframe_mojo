@@ -51,9 +51,9 @@ def _check_groups(actual: DataFrame, first: Bool) raises:
         assert_equal(result.item(key, "n").int64(), Int64(len(members)))
 
 
-def test_join_rerooting_restores_coalesced_key_names_under_any_reduction() raises:
-    # A join promises no row order, so the chain re-roots under a
-    # position-reading reduction or an ordered group-by too.
+def test_join_order_restores_coalesced_key_names_under_any_reduction() raises:
+    # A join promises no row order, so the join order may change its sides
+    # under a position-reading reduction or an ordered group-by too.
     var inputs = _inputs()
     for first in [False, True]:
         for ordered in [False, True]:
@@ -73,8 +73,8 @@ def test_join_rerooting_restores_coalesced_key_names_under_any_reduction() raise
             )
             for streaming in [False, True]:
                 var planned = query._optimized()
+                planned._order_joins(streaming, 7)
                 var root = len(planned._plan._nodes) - 1
-                assert_true(planned._probe_largest_inputs(root, streaming, 7))
                 var actual = planned._execute(root, False, streaming, 7)
                 assert_equal(actual.columns(), ["a", "answer", "n"])
                 _check_groups(actual, first)
@@ -90,7 +90,7 @@ def test_join_rerooting_restores_coalesced_key_names_under_any_reduction() raise
                     )
 
 
-def test_join_rerooting_keeps_payload_sources_in_place() raises:
+def test_join_order_keeps_payload_columns() raises:
     var inputs = _inputs()
     var query = (
         inputs[0]
@@ -102,12 +102,6 @@ def test_join_rerooting_keeps_payload_sources_in_place() raises:
                 col("value").sum().alias("answer"),
                 col("value").count().alias("n"),
             ]
-        )
-    )
-    var planned = query._optimized()
-    assert_true(
-        not planned._probe_largest_inputs(
-            len(planned._plan._nodes) - 1, True, 7
         )
     )
     var actual = query.collect(engine="cpu")
