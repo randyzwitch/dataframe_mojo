@@ -441,6 +441,23 @@ filters precede them; grouping keys cannot be replaced by this transformation.
 These programs use `expression_reductions:v1:` keys. Existing native and
 one-binary kernels retain their specialized routes.
 
+### Boolean and count reductions
+
+Native Bool columns and supported numeric predicates can feed `any` and `all`.
+Both the default ignore-null behavior and `ignore_nulls=False` Kleene behavior
+use shared true-count, valid-count and row-count state in the GPU scan. Empty
+ANY is false and empty ALL is true. With Kleene semantics, an unknown remains
+null unless a true ANY or false ALL decides the result.
+
+Global `len`, `null_count` on native values, and Bool `count` use the same
+state. They can share a projection with supported numeric aggregates and
+bounded integer-key grouping. Existing grouped LEN retains its original route.
+The existing limits of four distinct aggregate values and nine native input
+bindings apply after lowering; shared Boolean state consumes one value and
+row counts consume one more. The host only finishes result rows, with no input
+payload conversion or Boolean mask materialization. New logical programs use
+`logical_reductions:v1:` keys and require their own measured placement costs.
+
 ### Null-aware values and total comparisons
 
 Native Int32, Int64 and Float32 aggregate expressions support `fill_null`.

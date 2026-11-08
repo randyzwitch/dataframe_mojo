@@ -3,7 +3,7 @@ from std.memory import Pointer, bitcast
 from .multi_reduce import Bytes, read_integer
 from .filter_sum import _valid
 from .float_predicate import float_in_range, _ordered
-from dataframe.expr import EQ, GT, GE, LT, LE, EQ_MISSING
+from dataframe.expr import EQ, GT, GE, LT, LE, EQ_MISSING, COL
 from .null_value import equal_missing_float32, equal_missing_integer
 
 comptime PREDICATE_HEADER_WORDS = 9
@@ -129,7 +129,7 @@ def predicate_matches(
         var offset = UInt32(clause[unsafe_offset=1]) + UInt32(row_base)
         var values = _pointer(
             slot, v0, v1, v2, v3, v4, v5, v6, v7, predicate
-        ).unsafe_offset(row_base * (8 if tag == 1 else 4))
+        ).unsafe_offset(row_base * (8 if tag == 1 else 1 if tag == 3 else 4))
         var bits = _pointer(
             slot, b0, b1, b2, b3, b4, b5, b6, b7, predicate_bits
         )
@@ -142,7 +142,9 @@ def predicate_matches(
         var matched = False
         var kept = False
         if kind == 1:
-            if flags >> 5 == UInt32(EQ_MISSING):
+            if flags >> 5 == UInt32(COL):
+                matched = valid and Bool(values[unsafe_offset=row])
+            elif flags >> 5 == UInt32(EQ_MISSING):
                 if valid:
                     matched = (
                         values.unsafe_bitcast[UInt32]()[unsafe_offset=row]
@@ -151,6 +153,8 @@ def predicate_matches(
             else:
                 matched = not valid
             kept = not matched if inverted else matched
+            if flags >> 5 == UInt32(COL):
+                kept = valid and kept
         elif kind == 2:
             var right_slot = Int(clause[unsafe_offset=2])
             var right_meta = clause[unsafe_offset=3]

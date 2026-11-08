@@ -190,6 +190,16 @@ def _emit(
     var leaf = _missing_literal(
         expression, at, frame, inverted != unequal
     ) if missing else Optional[PredicateClause]()
+    if not leaf and root.op == COL and root.text in frame.columns():
+        if frame.column(root.text).dtype() == DataType.BOOL:
+            # Reuse the unary-leaf ABI, distinguishing a nullable Bool value
+            # from an is-null/total-NaN test by its comparison opcode.
+            leaf = PredicateClause(
+                FilterSum(root.text.copy(), root.text.copy(), DataType.BOOL),
+                NULL_CLAUSE,
+                inverted,
+                comparison=COL,
+            )
     if leaf:
         pass
     elif membership:
@@ -215,7 +225,7 @@ def _emit(
             if input.op != COL or input.text not in frame.columns():
                 return False
             var dtype = frame.column(input.text).dtype()
-            if not supported_dtype(dtype):
+            if not supported_dtype(dtype) and dtype != DataType.BOOL:
                 return False
             leaf = PredicateClause(
                 FilterSum(input.text.copy(), input.text.copy(), dtype),

@@ -23,6 +23,7 @@ from .calibration import shape_key, measured_costs
 from dataframe.series import Series
 from .filter_plan import FilterSum, plan_region
 from .region_plan import normalize_region
+from .logical_plan import plan_logical, logical_key, finish_logical
 from .cross_sum import reduce_cross
 from .multi_plan import plan_bundle, bundle_key
 from .multi_reduce import execute_bundle
@@ -67,6 +68,9 @@ def supports(region: LazyFrame) -> Bool:
     comptime if not METAL_TARGET:
         return False
     try:
+        var logical = plan_logical(region)
+        if logical:
+            return supports(logical.value().region)
         if plan_moments(region):
             return True
         var normalized = normalize_region(region)
@@ -104,6 +108,13 @@ def operator_key(plan: FilterSum) -> String:
 
 def region_key(region: LazyFrame) raises -> String:
     """Schema-only operator identity shared by placement and capture."""
+    var logical = plan_logical(region)
+    if logical:
+        var underlying = region_key(logical.value().region)
+        return (
+            logical_key(logical.value())
+            + underlying if underlying else String()
+        )
     var moments = plan_moments(region)
     if moments:
         var key = moment_key(moments.value())
@@ -535,6 +546,14 @@ def execute_timed(
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
+        var logical = plan_logical(region)
+        if logical:
+            var result = execute_timed(logical.value().region, zero_copy)
+            var started = Int(perf_counter_ns())
+            var finished = finish_logical(logical.value(), result[0])
+            var timings = result[1].copy()
+            timings.finish_ns += Int(perf_counter_ns()) - started
+            return (finished^, timings^)
         var moments = plan_moments(region)
         if moments:
             if moments.value().grouped:

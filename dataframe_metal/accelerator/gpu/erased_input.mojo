@@ -17,7 +17,7 @@ struct NumericView(Copyable, Movable):
     var nullable: Bool
 
     def view(self, start: Int, length: Int) raises -> Self:
-        var width = 8 if self.tag == 1 else 4
+        var width = 8 if self.tag == 1 else 1 if self.tag == 3 else 4
         return Self(
             self.values.create_sub_buffer[DType.uint8](
                 start * width, length * width
@@ -80,6 +80,10 @@ def numeric_views(
     coalesce: Bool = False,
 ) raises -> List[NumericView]:
     var dtype = frame.column(name).dtype()
+    if dtype == DataType.BOOL:
+        return _place[DType.bool](
+            frame, name, scope, zero_copy, empty, 3, owners, coalesce
+        )
     if dtype == DataType.INT32:
         return _place[DType.int32](
             frame, name, scope, zero_copy, empty, 0, owners, coalesce
@@ -95,9 +99,9 @@ def numeric_views(
 
 def single_native_span(series: Series) raises -> Bool:
     """Whether all logical chunks can share one native value/bitmap mapping."""
-    comptime for i in range(3):
+    comptime for i in range(4):
         comptime D = DType.int32 if i == 0 else (
-            DType.int64 if i == 1 else DType.float32
+            DType.int64 if i == 1 else DType.float32 if i == 2 else DType.bool
         )
         if series.dtype() == DataType.of(D):
             var groups = coalesced_native_chunks[D](series)

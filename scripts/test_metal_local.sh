@@ -46,6 +46,11 @@ pixi run --locked mojo build -O3 -I . scripts/check_metal_null_device.mojo \
   -o build/contract-tests/metal-null-device
 build/contract-tests/metal-null-device
 
+echo "== Boolean predicate device conformance"
+pixi run --locked mojo build -O3 -I . scripts/check_metal_logical_device.mojo \
+  -o build/contract-tests/metal-logical-device
+build/contract-tests/metal-logical-device
+
 echo "== Parquet reader (the file-source contracts read Parquet)"
 pixi run --locked -e native build-dfparquet
 

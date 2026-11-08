@@ -228,6 +228,16 @@ def plan_composition(
                 dtype = tree.dtype
                 tree_nodes = tree.nodes.copy()
             var matched = plan_region(offered.select(col(seed).sum()))
+            if (
+                not matched
+                and n == 2
+                and frame.column(seed).dtype() == DataType.BOOL
+            ):
+                # Bool columns only supply CASE conditions here. Numeric
+                # constants form the value; no Bool payload is read as Int64.
+                var condition_seed = FilterSum(seed.copy(), seed.copy(), dtype)
+                condition_seed.filter_dtype = DataType.BOOL
+                matched = condition_seed^
             if not matched:
                 return None
             var p = matched.take()
