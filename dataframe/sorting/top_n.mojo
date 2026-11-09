@@ -232,16 +232,22 @@ struct TopNHeap(Movable):
         return self.heap_size > 0 and self.size >= self.heap_size
 
     @always_inline
-    def should_add[W: Int, VAR: Bool](self, rec: Rec) -> Bool:
-        """EntryShouldBeAdded, after the boundary check."""
+    def entry_should_be_added[W: Int, VAR: Bool](self, rec: Rec) -> Bool:
+        """EntryShouldBeAdded: room in the heap, or better than its worst."""
         comptime K = SortKeys[W, VAR]
         if self.heap_size == 0:
-            return False
-        if self.view.version != 0 and not K.less(rec, self.view.rec):
             return False
         if self.size < self.heap_size:
             return True
         return K.less(rec, self.keys[W, VAR]().get(0))
+
+    @always_inline
+    def should_add[W: Int, VAR: Bool](self, rec: Rec) -> Bool:
+        """A sinking row: CheckBoundaryValues, then EntryShouldBeAdded."""
+        comptime K = SortKeys[W, VAR]
+        if self.view.version != 0 and not K.less(rec, self.view.rec):
+            return False
+        return self.entry_should_be_added[W, VAR](rec)
 
     def _sift_up[W: Int, VAR: Bool](self, i_in: Int):
         comptime K = SortKeys[W, VAR]
@@ -319,11 +325,13 @@ struct TopNHeap(Movable):
 
     def combine[W: Int, VAR: Bool](mut self, other: TopNHeap):
         """Combine: another thread's finalized heap, best first, until an
-        entry can no longer enter."""
+        entry can no longer enter. Only EntryShouldBeAdded decides: the
+        boundary is a full heap's worst key, and that key's own rows are
+        in the result."""
         var k = other.keys[W, VAR]()
         for i in range(other.size):
             var rec = k.get(i)
-            if not self.should_add[W, VAR](rec):
+            if not self.entry_should_be_added[W, VAR](rec):
                 break
             self.add[W, VAR](rec)
         self.compact_keys[W, VAR]()

@@ -49,11 +49,13 @@ from dataframe.planning.context import (
     QueryContext,
 )
 from dataframe.planning.graph import (
+    plan_class_refs,
     plan_columns_of,
     plan_cover,
     plan_forget_schema,
     plan_forget_schemas_above,
     plan_parents,
+    plan_materialized,
     plan_projection_visits,
     plan_remember_schemas,
     plan_reorder,
@@ -343,18 +345,18 @@ def plan_unique_as_aggregate(mut self: QueryContext) raises:
 
 
 def plan_filter_shared_subplans(mut self: QueryContext):
-    """A subplan written in several places that `_share_subplans` will
-    compute once (it aggregates), read by each copy only through
-    row-local filters, needs only the rows some reader keeps: the OR
-    of the readers' filters goes above every copy and moves into it,
-    while each reader's own filters are pinned where they are, so the
-    copies stay alike and are still computed once. TPC-DS
-    q4, q11 and q74 read one yearly total per channel and year from a
-    table of every channel and year."""
-    # Copies need two aggregations alike in their kind, keys,
-    # aggregate count and subtree size at least; most plans have none,
-    # and subplan classes are not worth finding for them (ClickBench
-    # q29's ninety sums, TPC-DS q41's two small distincts).
+    """DuckDB 2.0's `CTEFilterPusher`. A subplan written in several places
+    that `plan_share_subplans` will compute once (`plan_materialized`),
+    read by every copy only through row-local filters, needs only the rows
+    some reader keeps: the OR of the readers' filters goes above every
+    copy and moves into it. Each reader's own filters stay, pinned, so
+    the copies stay alike and are still computed once. TPC-DS q4, q11
+    and q74 read one yearly total per channel and year from a table of
+    every channel and year."""
+    # Copies need two aggregates or joins alike in their keys, expression
+    # count and subtree size at least; most plans have none, and
+    # subplan classes are not worth finding for them (ClickBench q29's
+    # ninety sums, TPC-DS q41's two small distincts).
     var subtree = List[Int](capacity=len(self._nodes))
     var shapes = Dict[String, Int]()
     var alike = False
@@ -366,7 +368,7 @@ def plan_filter_shared_subplans(mut self: QueryContext):
         if node.right >= 0:
             size += subtree[node.right]
         subtree.append(size)
-        if node.kind != AGG and node.kind != UNIQUE:
+        if node.kind != AGG and node.kind != UNIQUE and node.kind != JOIN:
             continue
         var shape = (
             String(node.kind)
@@ -386,25 +388,21 @@ def plan_filter_shared_subplans(mut self: QueryContext):
     var computed = plan_subplan_classes(self)
     ref classes = computed[0]
     ref sizes = computed[1]
-    ref reducing = computed[2]
     var parents = plan_parents(self)
     var covered = List[Bool](length=len(self._nodes), fill=False)
     var count = len(self._nodes)
     while True:
-        # The largest aggregating subtree written twice or more, under
+        # The largest materialized subtree written twice or more, under
         # its readers' filters (two readers may share one).
         var best = -1
         for i in range(count):
-            if covered[i] or not reducing[i]:
-                continue
-            if self._nodes[i].kind == FILTER:
+            if covered[i] or self._nodes[i].kind == FILTER:
                 continue
             if best >= 0 and sizes[i] <= sizes[best]:
                 continue
-            for j in range(count):
-                if j != i and not covered[j] and classes[j] == classes[i]:
-                    best = i
-                    break
+            var refs = plan_class_refs(classes, covered, i)
+            if refs >= 2 and plan_materialized(self, i, refs):
+                best = i
         if best < 0:
             break
         var copies = List[Int]()

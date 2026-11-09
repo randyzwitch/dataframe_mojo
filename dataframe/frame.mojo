@@ -136,7 +136,6 @@ from dataframe.aggregation.state import (
     _equality_words,
     _finish_parts,
     _merge_ascending_runs,
-    _reduction_batch,
     _table_input,
     _word_hash,
     table_frame,

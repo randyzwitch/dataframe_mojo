@@ -87,11 +87,9 @@ from dataframe.planning.properties import (
     _is_time_window,
     _join_schema,
     _joined,
-    _key_group_bound,
     _key_pairs,
     _key_read,
     _keys_repeat,
-    _late_key_build,
     _merge_copy_needs,
     _mix,
     _mix_expr,
@@ -107,7 +105,6 @@ from dataframe.planning.properties import (
     _produced_at,
     _reads_input,
     _references,
-    _row_merge_reductions,
     _row_order_step,
     _row_steps_only,
     _same_expr,
@@ -118,7 +115,6 @@ from dataframe.planning.properties import (
     _stream_rows,
     _through_projection,
     _time_window_reads,
-    _unique_key_column,
 )
 from dataframe.planning.scans import (
     _csv_scan_node,

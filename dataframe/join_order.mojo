@@ -35,6 +35,9 @@ comptime EXACT_RELATIONS = 12
 # DuckDB's DEFAULT_SEMI_ANTI_SELECTIVITY: a semi or anti join keeps one
 # left row in five.
 comptime SEMI_ANTI_SELECTIVITY = 5.0
+# DuckDB's CompositeJoinPairStats: a row-count cap on a composite key is
+# plausible only within this ratio of an observed single-column domain.
+comptime MAX_CARDINALITY_TO_DISTINCT_RATIO = 8.0
 # Operator kinds (`JoinOperator.kind`).
 comptime OPERATOR_INNER = 0
 comptime OPERATOR_LEFT = 1
@@ -273,6 +276,9 @@ struct JoinGraph(Movable):
     # Whether each edge's (then filter's) total domain is a distinct count
     # (DuckDB's `has_distinct_count_hll`) rather than table rows.
     var counted: List[Bool]
+    # Edges joining two relations on two or more equivalence classes
+    # (`RelationPairEqualitySummary::HasDirectCompositeEquality`).
+    var composite: List[Bool]
     var ops: List[JoinOperator]
     # The right relations of semi and anti joins, then of left joins.
     var semi_rights: Int
@@ -295,6 +301,7 @@ struct JoinGraph(Movable):
         fallback: Dict[String, Float64] = Dict[String, Float64](),
     ) raises:
         self.counted = List[Bool]()
+        self.composite = List[Bool]()
         self.ops = ops.copy()
         self.uncounted = uncounted
         self.semi_rights = 0
@@ -384,13 +391,17 @@ struct JoinGraph(Movable):
         for e in self.edges:
             var best = 1.0
             var from_count = False
+            var classes = List[Int]()
             for i in range(len(e.a_keys)):
                 var root = find(parent, ids[String(e.a) + "/" + e.a_keys[i]])
+                if root not in classes:
+                    classes.append(root)
                 if domain[root] > best:
                     best = domain[root]
                     from_count = root in counted
             self.tdom.append(best)
             self.counted.append(from_count)
+            self.composite.append(len(classes) >= 2)
         for f in self.filters:
             var root = find(parent, ids[String(f.a) + "/" + f.a_column])
             self.tdom.append(domain[root])
@@ -459,7 +470,9 @@ struct JoinGraph(Movable):
             var cb = component[b]
             if ca == cb:
                 continue
-            if k < joins or self.filters[k - joins].equal:
+            if k < joins and self.composite[k]:
+                denominator *= self._composite_cap(k)
+            elif k < joins or self.filters[k - joins].equal:
                 denominator *= self.tdom[k]
             else:
                 denominator *= self.tdom[k] ** (2.0 / 3.0)
@@ -471,6 +484,22 @@ struct JoinGraph(Movable):
         var result = max(numerator / denominator, 1.0)
         self.inner_estimates[mask] = result
         return result
+
+    def _composite_cap(self, k: Int) -> Float64:
+        """The factor a composite join of two relations divides by:
+        DuckDB's FK/PK floor (`GetJoinPairCap`, `ApplyJoinPairCap`), the
+        smaller relation's rows, within `MAX_CARDINALITY_TO_DISTINCT_RATIO`
+        of the first single-column domain; else that domain."""
+        var cap = min(self.rows[self.edges[k].a], self.rows[self.edges[k].b])
+        var first = self.tdom[k]
+        if (
+            cap > 0.0
+            and first > 0.0
+            and first <= cap
+            and cap <= first * MAX_CARDINALITY_TO_DISTINCT_RATIO
+        ):
+            return cap
+        return first
 
     def connects(self, a: Int, b: Int) -> Bool:
         """Whether a free edge (no operator's) joins relation set `a` to
