@@ -553,16 +553,10 @@ def table_parts(
     return parts^
 
 
-def _reduction_batch(grouped: Bool) -> Int:
-    """Rows a reduction evaluates at a time: 16K ungrouped, 4K grouped.
-    The evaluator's fixed cost per batch (a column slice and a validity
-    window per node) is paid a few times per stream batch instead of 64.
-    TPC-DS q9's fifteen conditional sums took 90 ms at 1,024 rows and 25
-    ms at 16K. A grouped reduction also touches its group states per
-    batch, and ClickBench q27 (string lengths by CounterID) was 12% slower
-    at 16K and level at 4K, where q59 keeps most of its gain (178 ms at
-    1,024, 150 at 4K, 137 at 8K)."""
-    return 4096 if grouped else 16384
+def _reduction_batch() -> Int:
+    """Rows a reduction evaluates at a time: DuckDB's vector,
+    STANDARD_VECTOR_SIZE (2,048)."""
+    return 2048
 
 
 struct _ReductionPlan(Copyable, Movable):
@@ -707,7 +701,7 @@ struct _StreamReduction(Movable):
                 plan.bounds[r].expr._nodes[plan.nodes[r]],
                 0,
                 frame.height(),
-                _reduction_batch(self.grouped),
+                _reduction_batch(),
                 self.grouped,
                 shared,
                 count,

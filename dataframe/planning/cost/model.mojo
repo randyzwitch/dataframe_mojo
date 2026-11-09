@@ -1,5 +1,4 @@
 """Explicit streaming-reduction strategies and their observed decision facts."""
-from dataframe.expr import Expr
 from std.io import RawFileDescriptor
 from std.os import getenv
 
@@ -18,7 +17,7 @@ struct PipelineEligibility(Copyable):
 
 
 struct AggregationDecision(Copyable, Movable):
-    """One strategy, a reason, and the facts/key plan that selected it.
+    """One strategy, a reason, and the facts that selected it.
 
     Pipeline/table/insertion/eager flags are derived from one route, so
     contradictory sink combinations cannot survive selection.
@@ -27,21 +26,11 @@ struct AggregationDecision(Copyable, Movable):
     var route: Int
     var reason: String
     var eligibility_reason: String
-    var code_late_keys: Bool
-    var row_holder: Int
-    var row_names: List[String]
-    var row_unique: Bool
-    var row_merge: List[Expr]
 
     def __init__(out self, route: Int, reason: String):
         self.route = route
         self.reason = reason.copy()
         self.eligibility_reason = reason.copy()
-        self.code_late_keys = False
-        self.row_holder = -1
-        self.row_names = List[String]()
-        self.row_unique = False
-        self.row_merge = List[Expr]()
 
     def uses_pipeline(self) -> Bool:
         return self.route == MORSEL_PIPELINE or self.route == TABLE_PIPELINE

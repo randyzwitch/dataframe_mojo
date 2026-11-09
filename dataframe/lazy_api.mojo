@@ -252,9 +252,6 @@ from dataframe.planning.statistics import (
     plan_cardinality,
     plan_distinct,
 )
-from dataframe.planning.cost.aggregation import (
-    plan_row_number_shape,
-)
 from dataframe.planning.properties import (
     _bare_column,
     _is_scan,
@@ -273,7 +270,6 @@ from dataframe.query_execution.executor import (
     plan_execute_node,
 )
 from dataframe.query_execution.materialize import (
-    plan_read_whole,
     plan_share_subplans,
 )
 from dataframe.query_execution.operators import (
@@ -2054,25 +2050,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _joins_below(self, index: Int) -> Bool:
         return plan_joins_below(self._plan, index=index)
 
-    def _row_number_shape(
-        self,
-        source: Int,
-        keys: List[String],
-        carried: List[String],
-        holder: Int,
-        joins: List[DataFrame],
-        operations: List[PlanNode],
-    ) raises -> Tuple[Float64, Float64]:
-        return plan_row_number_shape(
-            self._plan,
-            source=source,
-            keys=keys,
-            carried=carried,
-            holder=holder,
-            joins=joins,
-            operations=operations,
-        )
-
     def _height_bound(self, index: Int) -> Int:
         return plan_height_bound(self._plan, index=index)
 
@@ -2173,23 +2150,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             self._plan, streaming=streaming, batch_size=batch_size
         )
 
-    def _read_whole(
-        self,
-        index: Int,
-        classes: List[Int],
-        parents: List[Int],
-        joining: List[Bool],
-        covered: List[Bool],
-    ) -> Bool:
-        return plan_read_whole(
-            self._plan,
-            index=index,
-            classes=classes,
-            parents=parents,
-            joining=joining,
-            covered=covered,
-        )
-
     def _cover(self, index: Int, mut covered: List[Bool]):
         plan_cover(self._plan, index, covered)
 
@@ -2227,7 +2187,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _subplan_classes(
         self,
-    ) -> Tuple[List[Int], List[Int], List[Bool]]:
+    ) -> Tuple[List[Int], List[Int]]:
         return plan_subplan_classes(self._plan)
 
     def _filter_shared_subplans(mut self):

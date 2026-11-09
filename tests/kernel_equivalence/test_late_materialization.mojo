@@ -129,3 +129,23 @@ def test_computed_key_and_passthrough_columns() raises:
         .head(10)
     )
     assert_true(whole.equals(whole_expected), "all columns required")
+
+
+def test_top_n_keeps_the_limit_when_ties_cross_workers() raises:
+    # Every row ties on the best key across workers: the shared boundary
+    # is that key, and the combine must still keep `limit` rows.
+    var frame = _table().with_columns([(col("id") % 3).alias("few")])
+    for limit in [100, 5000]:
+        var got = (
+            frame.lazy()
+            .sort(["few"], descending=[False], nulls_last=[True])
+            .head(limit)
+            .collect()
+        )
+        var expected = frame.sort(
+            ["few"], descending=[False], nulls_last=[True]
+        ).head(limit)
+        assert_true(got.height() == limit, "row count")
+        assert_true(
+            got.select(["few"]).equals(expected.select(["few"])), "key column"
+        )

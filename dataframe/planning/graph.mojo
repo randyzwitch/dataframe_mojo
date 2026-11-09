@@ -8,7 +8,9 @@ from dataframe.dtype import (
 from dataframe.expr import (
     COL,
     Expr,
+    OVER,
     SELECTOR,
+    is_window,
 )
 from dataframe.frame import (
     DataFrame,
@@ -684,9 +686,8 @@ def plan_merge_inputs(mut self: QueryContext, other: QueryContext) -> List[Int]:
 
 def plan_subplan_classes(
     self: QueryContext,
-) -> Tuple[List[Int], List[Int], List[Bool]]:
-    """Each node's class, its subtree's node count, and whether the
-    subtree holds an aggregation or a unique. Two nodes share a class
+) -> Tuple[List[Int], List[Int]]:
+    """Each node's class and its subtree's node count. Two nodes share a class
     exactly when their subtrees compute the same thing: hash a node
     with its inputs'
     classes, and compared only with the earlier nodes of its hash,
@@ -698,7 +699,6 @@ def plan_subplan_classes(
     var canonical = plan_canonical_frames(self)
     var classes = List[Int](capacity=len(self._nodes))
     var sizes = List[Int](capacity=len(self._nodes))
-    var reducing = List[Bool](capacity=len(self._nodes))
     # The first node of each class, by hash.
     var firsts = Dict[UInt64, List[Int]]()
     for i in range(len(self._nodes)):
@@ -720,20 +720,12 @@ def plan_subplan_classes(
         classes.append(found)
         ref node = self._nodes[i]
         var size = 1
-        var reduces = (
-            node.kind == AGG
-            or node.kind == UNIQUE
-            or node.kind == GROUPING_SETS
-        )
         if node.left >= 0:
             size += sizes[node.left]
-            reduces = reduces or reducing[node.left]
         if node.right >= 0:
             size += sizes[node.right]
-            reduces = reduces or reducing[node.right]
         sizes.append(size)
-        reducing.append(reduces)
-    return (classes^, sizes^, reducing^)
+    return (classes^, sizes^)
 
 
 def plan_filtered_table(self: QueryContext, index: Int) -> Bool:
@@ -1183,6 +1175,94 @@ def plan_spine_frame(self: QueryContext, index: Int) -> Optional[DataFrame]:
     return None
 
 
+def _holds_window(exprs: List[Expr]) -> Bool:
+    """Whether any of `exprs` computes a window function."""
+    for expr in exprs:
+        for node in expr._nodes:
+            if node.op == OVER or is_window(node.op):
+                return True
+    return False
+
+
+def plan_ends_in_aggregate(self: QueryContext, index: Int) -> Bool:
+    """DuckDB's `CTEInlining::EndsInAggregateOrDistinct`: an aggregate,
+    distinct or window down a chain of single-input steps. A union counts
+    when all its inputs do: DuckDB keeps a written union of aggregates
+    materialized as a CTE, reaching the end of `TryInlining` without
+    inlining it, and we have no CTE node to tell it from a repeated one."""
+    ref node = self._nodes[index]
+    if (
+        node.kind == AGG
+        or node.kind == UNIQUE
+        or node.kind == GROUPING_SETS
+        or (
+            (node.kind == SELECT or node.kind == WITH_COLUMNS)
+            and _holds_window(node.exprs)
+        )
+    ):
+        return True
+    if node.kind == CONCAT:
+        return plan_ends_in_aggregate(
+            self, node.left
+        ) and plan_ends_in_aggregate(self, node.right)
+    if node.left < 0 or node.right >= 0:
+        return False
+    return plan_ends_in_aggregate(self, node.left)
+
+
+def plan_base_tables(self: QueryContext, index: Int) -> Int:
+    """The scans under `index` (DuckDB's `CountBaseTableReferences`)."""
+    ref node = self._nodes[index]
+    if node.left < 0:
+        return 1
+    var tables = plan_base_tables(self, node.left)
+    if node.right >= 0:
+        tables += plan_base_tables(self, node.right)
+    return tables
+
+
+def plan_materialized(self: QueryContext, index: Int, refs: Int) -> Bool:
+    """Whether DuckDB 2.0's `CTEInlining::TryInlining` keeps a CTE with the
+    subtree at `index` as its definition and `refs` references
+    materialized by its query shape alone: one ending in an aggregate,
+    distinct or window, or one over more than two tables that more than
+    ten table reads would repeat if inlined."""
+    if plan_ends_in_aggregate(self, index):
+        return True
+    var tables = plan_base_tables(self, index)
+    return tables > 2 and tables * refs > 10
+
+
+def plan_class_refs(classes: List[Int], covered: List[Bool], index: Int) -> Int:
+    """How many uncovered nodes share the class of `index`."""
+    var refs = 0
+    for j in range(len(classes)):
+        if not covered[j] and classes[j] == classes[index]:
+            refs += 1
+    return refs
+
+
+def plan_filtered_scan(self: QueryContext, index: Int) -> Bool:
+    """Whether node `index` is one table under row-local filters and
+    projections only: what DuckDB's scan holds as one operator."""
+    var cursor = index
+    while cursor >= 0:
+        ref node = self._nodes[cursor]
+        if node.left < 0:
+            return True
+        if not (
+            (node.kind == FILTER and _row_local(node.exprs))
+            or node.kind == DROP
+            or (
+                (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                and _stream_rows(node)
+            )
+        ):
+            return False
+        cursor = node.left
+    return False
+
+
 def plan_aggregated(self: QueryContext, index: Int) -> Bool:
     """Whether node `index` is an aggregation, under steps that keep,
     drop or rename its rows' columns (a filter, a projection)."""
@@ -1249,19 +1329,14 @@ def plan_compact_scan_slots(mut self: QueryContext):
     for entry in self._origin_rows.items():
         if slots[entry.key] >= 0:
             origins[slots[entry.key]] = entry.value
-    var tables = Dict[Int, DataFrame]()
-    var names = Dict[Int, Dict[String, String]]()
-    for entry in self._origin_tables.items():
+    var counts = Dict[Int, Dict[String, Int]]()
+    for entry in self._materialized_distinct.items():
         if slots[entry.key] >= 0:
-            tables[slots[entry.key]] = entry.value.copy()
-    for entry in self._origin_names.items():
-        if slots[entry.key] >= 0:
-            names[slots[entry.key]] = entry.value.copy()
+            counts[slots[entry.key]] = entry.value.copy()
     self._frames = FrameSlots(frames^)
     self._schemas = schemas^
     self._origin_rows = origins^
-    self._origin_tables = tables^
-    self._origin_names = names^
+    self._materialized_distinct = counts^
 
 
 def plan_remember_schemas(mut self: QueryContext) -> Bool:
@@ -1374,12 +1449,9 @@ def plan_subplan(self: QueryContext, root: Int) -> QueryContext:
     for entry in self._origin_rows.items():
         if slots[entry.key] >= 0:
             sub._origin_rows[slots[entry.key]] = entry.value
-    for entry in self._origin_tables.items():
+    for entry in self._materialized_distinct.items():
         if slots[entry.key] >= 0:
-            sub._origin_tables[slots[entry.key]] = entry.value.copy()
-    for entry in self._origin_names.items():
-        if slots[entry.key] >= 0:
-            sub._origin_names[slots[entry.key]] = entry.value.copy()
+            sub._materialized_distinct[slots[entry.key]] = entry.value.copy()
     return sub^
 
 

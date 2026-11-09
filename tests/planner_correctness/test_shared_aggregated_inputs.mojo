@@ -181,17 +181,9 @@ def assert_rollup(actual: DataFrame, with_filters: Bool) raises:
         assert_equal(integer(actual.item(r, "rows")), expected[key][1])
 
 
-def test_a_join_every_aggregation_reads_whole_runs_once() raises:
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    var observed = StrategyTrace()
+def test_a_join_read_by_every_aggregation_keeps_its_answer() raises:
     assert_rollup(rollup(False).collect(), False)
-    assert_true(
-        "dataframe-path: lazy.shared_subplan\n" in observed.text(),
-        "the repeated join was not shared",
-    )
-    _ = observed^
     assert_rollup(rollup(False).collect(optimize=False), False)
-    _ = trace^
 
 
 def test_copies_under_their_own_filters_stay_apart() raises:
