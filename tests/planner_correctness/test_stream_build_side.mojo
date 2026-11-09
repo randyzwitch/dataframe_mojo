@@ -81,6 +81,36 @@ def test_a_small_left_builds_inside_the_pipeline() raises:
     assert_frame_unordered(rows, eager)
 
 
+def test_a_small_left_semi_or_anti_join_streams_its_right_side() raises:
+    # A semi or anti join with a small left side hashes the left, as
+    # DuckDB's RIGHT_SEMI / RIGHT_ANTI, and the stock rows stream through
+    # it: the output is still the left's rows the written join keeps.
+    var t = frames()
+    for how in [String("semi"), String("anti")]:
+        var left = t[0].filter(col("p_size") == lit(Int64(3)))
+        var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+        var observed = StrategyTrace()
+        var rows = left.join(
+            t[1].filter(col("s_site") == lit(Int64(2))),
+            left_on=["p_key"],
+            right_on=["s_part"],
+            how=how,
+        ).collect()
+        assert_true(
+            "dataframe-path: lazy.swap_semi_join_sides\n" in observed.text(),
+            "the small left side was not built",
+        )
+        _ = observed^
+        _ = trace^
+        var eager = left.collect().join(
+            t[1].filter(col("s_site") == lit(Int64(2))).collect(),
+            left_on=["p_key"],
+            right_on=["s_part"],
+            how=how,
+        )
+        assert_frame_unordered(rows, eager)
+
+
 def test_a_left_that_cannot_be_smaller_builds_on_the_right() raises:
     var t = frames()
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")

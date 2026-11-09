@@ -74,7 +74,6 @@ from .parallel import (
 )
 from dataframe.kernels.partition import (
     encode_partitioned,
-    low_cardinality,
 )
 from .join_type import (
     JOIN_CROSS,
@@ -1889,16 +1888,11 @@ struct DataFrame(Copyable, Sized, Writable):
         how: Int = JOIN_INNER,
         suffix: String = "_right",
         coalesce: Bool = True,
-        prepared: Optional[JoinHashTable] = None,
         keep_order: Bool = True,
-        workers: Int = 0,
     ) raises -> Self:
         """`keep_order=False` lets an inner join emit its pairs in whatever
         order its probe produced them, for a caller whose consumers ignore
-        row order (a lazy plan feeding an aggregation). A right join
-        probing a `prepared` table emits only its matched pairs and flags
-        the build rows it matched in the table: the caller emits the rest
-        (`JoinHashTable.scan_full_outer`)."""
+        row order (a lazy plan feeding an aggregation)."""
         if how == JOIN_CROSS:
             raise Error(
                 "A cross join takes no keys; use join(right, how='cross')"
@@ -1915,9 +1909,7 @@ struct DataFrame(Copyable, Sized, Writable):
             how=how,
             suffix=suffix,
             coalesce=coalesce,
-            prepared=prepared,
             keep_order=keep_order,
-            workers=workers,
         )
 
     def join(
@@ -2549,7 +2541,7 @@ struct DataFrame(Copyable, Sized, Writable):
         so ids are in no particular order."""
         var keys = self._subset_keys(subset)
         var workers = worker_count(self._height)
-        if workers > 1 and not low_cardinality(keys):
+        if workers > 1:
             # The bucket scatter is stable, so a bucket's first row for a key
             # is the key's first row in the frame.
             return encode_partitioned(keys, workers, nulls_equal=True)

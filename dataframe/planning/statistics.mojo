@@ -46,6 +46,8 @@ from dataframe.join_type import (
     JOIN_CROSS,
     JOIN_INNER,
     JOIN_MARK,
+    JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI,
     JOIN_SEMI,
 )
 from dataframe.kernels.segment_statistics import series_statistics
@@ -345,6 +347,9 @@ def _cardinality(
         return -1
     if node.how == JOIN_MARK:
         return left
+    if node.how == JOIN_RIGHT_SEMI or node.how == JOIN_RIGHT_ANTI:
+        # The build side is the output (the left input probes).
+        return plan_cardinality(self, stats, node.right)
     if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
         # `CalculateSemiAntiJoinDenom`: a fifth of the left rows.
         return (
@@ -545,6 +550,8 @@ def _distinct(
     if kind != JOIN:
         return DistinctCount.unknown()
     # A join's column keeps its side's count (`ProjectChildStats`).
+    if node.how == JOIN_RIGHT_SEMI or node.how == JOIN_RIGHT_ANTI:
+        return plan_distinct(self, stats, node.right, name)
     if _has_column(self, node.left, name):
         return plan_distinct(self, stats, node.left, name)
     if node.how == JOIN_SEMI or node.how == JOIN_ANTI:

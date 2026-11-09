@@ -88,6 +88,8 @@ from dataframe.join_order import (
     FilterEdge,
 )
 from dataframe.join_type import (
+    JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI,
     JOIN_ANTI,
     JOIN_CROSS,
     JOIN_FULL,
@@ -312,6 +314,8 @@ def _join_schema(
     for other join types, keys of differing, nested or categorical types,
     and output names that still collide, which the caller then runs to
     raise or handle as it does."""
+    if node.how == JOIN_RIGHT_SEMI or node.how == JOIN_RIGHT_ANTI:
+        return None
     var how = join_type(node.text)
     if not (
         how == JOIN_INNER
@@ -476,10 +480,11 @@ def _stream_join(node: PlanNode) -> Bool:
     side is built in full first, and the left side's rows probe it. The
     stream itself, and the inputs computed ahead of it
     (`plan_schedule_inputs`), walk the same joins, so every build side
-    the stream will run is known before it starts. A semi or anti join
-    built on its left (`build_left`) is no step: the stream has no
-    RIGHT_SEMI probe, so it runs whole as the stream's source."""
-    if node.kind != JOIN or node.build_left:
+    the stream will run is known before it starts. A RIGHT_SEMI or
+    RIGHT_ANTI step (a semi or anti join flipped by the build side
+    optimizer) probes the same way and emits the build rows it flagged
+    after the probe (`_emit_unmatched`)."""
+    if node.kind != JOIN:
         return False
     return (
         node.how
@@ -489,6 +494,8 @@ def _stream_join(node: PlanNode) -> Bool:
             JOIN_SEMI,
             JOIN_ANTI,
             JOIN_CROSS,
+            JOIN_RIGHT_SEMI,
+            JOIN_RIGHT_ANTI,
         ]
         or (node.how == JOIN_RIGHT and not node.coalesce)
         or node.how == JOIN_FULL

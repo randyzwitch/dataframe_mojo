@@ -206,7 +206,7 @@ def plan_join_frames(
         right_on=node.join_right_keys(),
         # Parsed here, as `DataFrame.join` would: an unknown type
         # raises.
-        how=join_type(node.text),
+        how=node.how if node.how > JOIN_CROSS else join_type(node.text),
         suffix=node.join_suffix(),
         coalesce=node.coalesce,
         keep_order=not free,

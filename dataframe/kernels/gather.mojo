@@ -570,10 +570,6 @@ def _take_sorted_chunked_partitioned(
     return result^
 
 
-# Checked on Threadripper 3970X and M1 at 4/8/16 workers. Four chunks
-# sometimes win on M1 but lose on Threadripper; keep the conservative
-# 16-chunk guard. See docs/design/worker-calibration.md for widths and selectivity.
-comptime SORTED_GATHER_MIN_CHUNKS = 16
 # Cap jobs by both configured workers and physical/performance cores.
 # M1 8-worker / 2-column / 1M-row gather: two parts 2.07 ms, four 2.46 ms.
 comptime _SORTED_GATHER_MAX_PARTS = 4
@@ -616,10 +612,7 @@ def take_sorted_chunked(
         ):
             var chunked = True
             for column in columns:
-                if (
-                    not column.is_chunked()
-                    or column.n_chunks() < SORTED_GATHER_MIN_CHUNKS
-                ):
+                if not column.is_chunked():
                     chunked = False
                     break
             if chunked:
