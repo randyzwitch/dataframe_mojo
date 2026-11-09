@@ -354,9 +354,11 @@ def _scan[
                 ) if tag == 2 else bitcast[DType.uint64](value.integer)
                 comptime if trees:
                     if value.tree:
-                        if value.tree[0].op == TYPED_HEADER and value.tree[
-                            0
-                        ].literal & UInt64(TYPED_CHAIN):
+                        if (
+                            value.dtype != DataType.FLOAT32
+                            and value.tree[0].op == TYPED_HEADER
+                            and value.tree[0].literal & UInt64(TYPED_CHAIN)
+                        ):
                             words[at + 14] |= UInt64(1) << UInt64(
                                 SCALAR_FIELD_SHIFT + field
                             )

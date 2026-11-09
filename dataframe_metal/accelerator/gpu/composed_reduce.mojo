@@ -478,46 +478,54 @@ def _composed_scan[
             comptime if trees:
                 if kept and ops[field] == UInt32(TREE_OP):
                     comptime if cases:
-                        if scalar_fields & (UInt32(1) << UInt32(field)):
-                            comptime at = HEADER_WORDS + field * FIELD_WORDS
-                            var computed = chain_expression_value(
-                                metadata.unsafe_offset(
-                                    Int(meta[unsafe_offset=at + 6])
-                                ),
-                                Int(meta[unsafe_offset=at + 7]),
-                                row_base,
-                                row,
-                                Bool(sum_flags & (UInt32(1) << UInt32(field)))
-                                or (
-                                    with_extrema
-                                    and Bool(
-                                        extent_flags
-                                        & (UInt32(1) << UInt32(field))
-                                    )
-                                ),
-                                v0,
-                                v1,
-                                v2,
-                                v3,
-                                v4,
-                                v5,
-                                v6,
-                                v7,
-                                b0,
-                                b1,
-                                b2,
-                                b3,
-                                b4,
-                                b5,
-                                b6,
-                                b7,
-                            )
-                            tree_bits = computed[0]
-                            valid = computed[1]
-                            fault |= computed[2]
-                        else:
+                        comptime if field < float_fields:
+                            # Shared Float32 field evaluation keeps exact-bin
+                            # scans compact; direct inlining regressed timings.
                             tree_bits = case_values[field]
                             valid = Bool(case_valid[field])
+                        else:
+                            if scalar_fields & (UInt32(1) << UInt32(field)):
+                                comptime at = HEADER_WORDS + field * FIELD_WORDS
+                                var computed = chain_expression_value(
+                                    metadata.unsafe_offset(
+                                        Int(meta[unsafe_offset=at + 6])
+                                    ),
+                                    Int(meta[unsafe_offset=at + 7]),
+                                    row_base,
+                                    row,
+                                    Bool(
+                                        sum_flags & (UInt32(1) << UInt32(field))
+                                    )
+                                    or (
+                                        with_extrema
+                                        and Bool(
+                                            extent_flags
+                                            & (UInt32(1) << UInt32(field))
+                                        )
+                                    ),
+                                    v0,
+                                    v1,
+                                    v2,
+                                    v3,
+                                    v4,
+                                    v5,
+                                    v6,
+                                    v7,
+                                    b0,
+                                    b1,
+                                    b2,
+                                    b3,
+                                    b4,
+                                    b5,
+                                    b6,
+                                    b7,
+                                )
+                                tree_bits = computed[0]
+                                valid = computed[1]
+                                fault |= computed[2]
+                            else:
+                                tree_bits = case_values[field]
+                                valid = Bool(case_valid[field])
                     else:
                         var computed = expression_value[
                             field < float_fields, cases, simple_cases

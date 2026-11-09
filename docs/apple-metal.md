@@ -76,7 +76,9 @@ reused for the specialized kernels.
 Typed numeric and null-aware expression chains use scalar accumulator schedules
 inside the existing reduction kernels. The planner records each operation's
 arity; chains of up to three operations use fixed scalar steps, and longer
-chains use a scalar loop. This avoids indexed interpreter stacks while retaining
+chains use a scalar loop. Integer chains feed statically assigned reduction fields directly; Float32
+chains keep the shared field evaluator alongside their exact aggregate state.
+This avoids indexed interpreter stacks while retaining
 native rounding, null validity and eager checked intermediates. Nested right
 subtrees and conditional expressions retain the general interpreter. These
 kernels use the `typed_reductions:v2:scalar_chain` calibration revision.
