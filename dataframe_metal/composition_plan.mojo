@@ -357,7 +357,7 @@ def composition_key(plan: Composition) -> String:
     # Names do not affect costs; canonical source slots describe reuse.
     var key = (
         String(
-            "typed_reductions:v1:" if has_typed_values(
+            "typed_reductions:v2:scalar_chain:" if has_typed_values(
                 plan
             ) else "conditional_reductions:v1:" if has_conditions(
                 plan

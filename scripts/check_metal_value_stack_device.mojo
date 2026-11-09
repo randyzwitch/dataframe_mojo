@@ -31,9 +31,12 @@ from dataframe_metal.accelerator.gpu.typed_expression_value import (
     typed_expression_value,
 )
 from dataframe_metal.accelerator.gpu.query_scope import Scope
+from dataframe_metal.accelerator.gpu.expression_value import expression_value
 
 
-def probe(
+def probe[
+    fast: Bool
+](
     programs: Pointer[UInt64, UntrackedOrigin[mut=False]],
     output: Pointer[UInt64, MutUntrackedOrigin],
 ):
@@ -43,32 +46,61 @@ def probe(
     var scenario = index % 18
     var at = scenario * 64
     var empty = programs.unsafe_offset(18 * 64).unsafe_bitcast[UInt8]()
-    var answer = typed_expression_value(
-        programs.unsafe_offset(at + 4),
-        Int(programs[unsafe_offset=at]),
-        0,
-        0,
-        Bool(programs[unsafe_offset=at + 2]),
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        empty,
-        UInt32(programs[unsafe_offset=at + 1]),
-        empty,
-        empty,
-    )
+    var answer: Tuple[UInt64, Bool, UInt32]
+    comptime if fast:
+        answer = expression_value[False, True](
+            programs.unsafe_offset(at + 4),
+            Int(programs[unsafe_offset=at]),
+            0,
+            0,
+            UInt32(programs[unsafe_offset=at + 1]),
+            Bool(programs[unsafe_offset=at + 2]),
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+        )
+    else:
+        answer = typed_expression_value(
+            programs.unsafe_offset(at + 4),
+            Int(programs[unsafe_offset=at]),
+            0,
+            0,
+            Bool(programs[unsafe_offset=at + 2]),
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            UInt32(programs[unsafe_offset=at + 1]),
+            empty,
+            empty,
+        )
     output[unsafe_offset=index * 3] = answer[0]
     output[unsafe_offset=index * 3 + 1] = UInt64(answer[1])
     output[unsafe_offset=index * 3 + 2] = UInt64(answer[2])
@@ -367,20 +399,36 @@ def main() raises:
         expected.append(0)
         validity.append(0)
         faults.append(0)
+    for scenario in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 16]:
+        var base = scenario * 64
+        var at = 2
+        var steps = 0
+        var unary_mask = UInt64(0)
+        while at < Int(words[base]):
+            if words[base + 4 + at * 4] in [UInt64(NEG), UInt64(CAST)]:
+                unary_mask |= UInt64(1) << UInt64(steps)
+                at += 1
+            else:
+                at += 2
+            steps += 1
+        words[base + 7] |= 2 | (UInt64(steps) << 8) | (unary_mask << 16)
     var scope = Scope()
     var ctx = scope.context()
     var programs = ctx.enqueue_create_buffer[DType.uint64](len(words))
     var result = ctx.enqueue_create_buffer[DType.uint64](4608 * 3)
     ctx.enqueue_copy(programs, words.unsafe_ptr())
-    ctx.enqueue_function[probe](programs, result, grid_dim=18, block_dim=256)
     var actual = List[UInt64](length=4608 * 3, fill=0)
-    ctx.enqueue_copy(actual.unsafe_ptr(), result)
-    scope.synchronize()
-    for i in range(4608):
-        assert_equal(actual[i * 3], expected[i % 18])
-        assert_equal(actual[i * 3 + 1], validity[i % 18])
-        assert_equal(actual[i * 3 + 2], faults[i % 18])
+    comptime for fast in range(2):
+        ctx.enqueue_function[probe[Bool(fast)]](
+            programs, result, grid_dim=18, block_dim=256
+        )
+        ctx.enqueue_copy(actual.unsafe_ptr(), result)
+        scope.synchronize()
+        for i in range(4608):
+            assert_equal(actual[i * 3], expected[i % 18])
+            assert_equal(actual[i * 3 + 1], validity[i % 18])
+            assert_equal(actual[i * 3 + 2], faults[i % 18])
     scope.mark_success()
     print(
-        "PASS 4608 shared interpreter validity, fault and lazy CASE checks on Metal"
+        "PASS 9216 reference/optimized validity, fault and lazy CASE checks on Metal"
     )

@@ -13,7 +13,8 @@ from .compound_predicate import _pointer, predicate_matches
 from .filter_sum import _valid
 from .arithmetic_sum import integer_binary
 from .value_ops import checked_float_value
-from ...expression_format import TYPED_HEADER
+from ...expression_format import TYPED_HEADER, TYPED_CHAIN
+from .chain_expression_value import chain_expression_value
 from .typed_expression_value import typed_expression_value
 from .null_value import fill_value_bits
 from .native_numeric import (
@@ -741,6 +742,32 @@ def expression_value[
     predicate_bits: Bytes = Bytes(unsafe_from_address=0),
 ) -> Tuple[UInt64, Bool, UInt32]:
     comptime if cases and not simple_cases:
+        if program[unsafe_offset=0] == UInt64(TYPED_HEADER) and program[
+            unsafe_offset=3
+        ] & UInt64(TYPED_CHAIN):
+            return chain_expression_value(
+                program,
+                count,
+                row_base,
+                row,
+                want_value,
+                v0,
+                v1,
+                v2,
+                v3,
+                v4,
+                v5,
+                v6,
+                v7,
+                b0,
+                b1,
+                b2,
+                b3,
+                b4,
+                b5,
+                b6,
+                b7,
+            )
         return typed_expression_value(
             program,
             count,

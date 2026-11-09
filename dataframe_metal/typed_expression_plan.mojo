@@ -29,6 +29,7 @@ from dataframe.expr import (
 from .expression_plan import ValueNode, ExpressionTree
 from .expression_format import (
     TYPED_HEADER,
+    TYPED_CHAIN,
     MAX_EXPRESSION_NODES,
     MAX_EXPRESSION_STACK,
     CASE_NULL,
@@ -182,4 +183,40 @@ def compile_typed_expression(
             return None
     if len(stack) != 1 or stack[0] != last or not seed:
         return None
+    nodes[0].literal |= scalar_chain_schedule(nodes)
     return ExpressionTree(bound.dtypes[last], nodes^, seed^)
+
+
+def scalar_chain_schedule(nodes: List[ValueNode]) -> UInt64:
+    """A left-to-right accumulator, preserving every eager checked operation."""
+    if len(nodes) < 2 or nodes[0].op != TYPED_HEADER:
+        return UInt64(0)
+    if nodes[1].op not in [COL, LIT_INT, CASE_NULL]:
+        return UInt64(0)
+    var at = 2
+    var steps = 0
+    var unary = UInt64(0)
+    while at < len(nodes):
+        var op = nodes[at].op
+        if op in [CAST, NEG, ABS, SIGN, FLOOR, CEIL, TRUNCATE, ROUND]:
+            unary |= UInt64(1) << UInt64(steps)
+            at += 1
+        elif op in [COL, LIT_INT, CASE_NULL]:
+            if at + 1 >= len(nodes) or nodes[at + 1].op not in [
+                ADD,
+                SUB,
+                MUL,
+                DIV,
+                FLOORDIV,
+                MOD,
+                CLIP_LOW,
+                CLIP_HIGH,
+                FILL_NULL,
+                FILL_NAN,
+            ]:
+                return UInt64(0)
+            at += 2
+        else:
+            return UInt64(0)
+        steps += 1
+    return UInt64(TYPED_CHAIN) | (UInt64(steps) << 8) | (unary << 16)
