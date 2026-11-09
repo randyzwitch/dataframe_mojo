@@ -1163,6 +1163,10 @@ def _gather_fixed_loop[
                 (_bytes(row)[unsafe_offset=entry] >> bit) & 1 == 0
             ):
                 set_invalid(bits, target_idx)
+                # A null's row value is NullValue (the type's minimum),
+                # which a reader that checks decimal precision on every
+                # value it widens would reject.
+                out[unsafe_offset=target_idx] = 0
 
 
 struct _GatherNode(Copyable, Movable):
