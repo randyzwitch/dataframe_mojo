@@ -1,6 +1,15 @@
 """Shared bounded stack for typed, conditional and legacy value programs."""
 from std.memory import Pointer, bitcast
-from dataframe.expr import COL, LIT_INT, CAST, ADD, SUB, MUL
+from dataframe.expr import (
+    COL,
+    LIT_INT,
+    CAST,
+    ADD,
+    SUB,
+    MUL,
+    FILL_NULL,
+    FILL_NAN,
+)
 from ...expression_format import (
     EXPRESSION_NODE_WORDS,
     VALUE_TYPE_SHIFT,
@@ -22,6 +31,7 @@ from .native_numeric import (
     integer_unary_bits,
     native_numeric_binary,
 )
+from .null_value import fill_value_bits
 
 
 @no_inline
@@ -55,19 +65,18 @@ def typed_expression_value(
     var validity = SIMD[DType.uint32, 8](0)
     var top = 0
     var fault = UInt32(0)
-    var typed = program[unsafe_offset=0] == UInt64(TYPED_HEADER)
+    var header = program[unsafe_offset=0]
+    var typed = header == UInt64(TYPED_HEADER)
     var need_float = want_value or (
-        typed and Bool(program[unsafe_offset=3] & 1)
+        (typed or header == UInt64(CASE_HEADER))
+        and Bool(program[unsafe_offset=3] & 1)
     )
     var node = 1 if typed else 0
     while node < count:
         var at = node * EXPRESSION_NODE_WORDS
         var op = UInt32(program[unsafe_offset=at])
         if op == UInt32(CASE_HEADER) or op == UInt32(TYPED_HEADER):
-            if op == UInt32(TYPED_HEADER):
-                need_float = need_float or Bool(
-                    program[unsafe_offset=at + 3] & 1
-                )
+            need_float = need_float or Bool(program[unsafe_offset=at + 3] & 1)
             node += 1
             continue
         if op == UInt32(CASE_TEST):
@@ -161,7 +170,17 @@ def typed_expression_value(
             var right_valid = Bool(validity[top])
             top -= 1
             present = Bool(validity[top]) and right_valid
-            if present:
+            if op == UInt32(FILL_NULL) or op == UInt32(FILL_NAN):
+                var result = fill_value_bits(
+                    values[top],
+                    Bool(validity[top]),
+                    right,
+                    right_valid,
+                    Int(op),
+                )
+                bits = result[0]
+                present = result[1]
+            elif present:
                 if (
                     op != UInt32(ADD)
                     and op != UInt32(SUB)

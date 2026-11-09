@@ -28,6 +28,8 @@ from dataframe.expr import (
     LIT_INT,
     LIT_FLOAT,
     LIT_NULL,
+    FILL_NULL,
+    FILL_NAN,
 )
 from .expression_plan import ValueNode, _integer_fits_float32
 from .predicate_program import PredicateProgram, compile_predicate
@@ -163,7 +165,18 @@ def _emit_value(
         nodes.append(
             ValueNode(node.op, "", -1, bitcast[DType.uint64](node.integer))
         )
-    elif node.op in [ADD, SUB, MUL, DIV, FLOORDIV, MOD, CLIP_LOW, CLIP_HIGH]:
+    elif node.op in [
+        ADD,
+        SUB,
+        MUL,
+        DIV,
+        FLOORDIV,
+        MOD,
+        CLIP_LOW,
+        CLIP_HIGH,
+        FILL_NULL,
+        FILL_NAN,
+    ]:
         if (
             node.left < 0
             or node.left >= at
@@ -195,6 +208,10 @@ def _emit_value(
             )
         ):
             return False
+        if node.op == FILL_NAN:
+            if dtype != DataType.FLOAT32:
+                return False
+            nodes[0].literal = 1
         nodes.append(ValueNode(node.op, "", -1, 0))
     elif node.op == COL:
         if (

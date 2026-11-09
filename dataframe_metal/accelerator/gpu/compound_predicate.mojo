@@ -3,7 +3,8 @@ from std.memory import Pointer, bitcast
 from .multi_reduce import Bytes, read_integer
 from .filter_sum import _valid
 from .float_predicate import float_in_range, _ordered
-from dataframe.expr import EQ, GT, GE, LT, LE
+from dataframe.expr import EQ, GT, GE, LT, LE, EQ_MISSING
+from .null_value import equal_missing_float32, equal_missing_integer
 
 comptime PREDICATE_HEADER_WORDS = 9
 comptime PREDICATE_FIELD_WORDS = 6
@@ -141,7 +142,14 @@ def predicate_matches(
         var matched = False
         var kept = False
         if kind == 1:
-            matched = not valid
+            if flags >> 5 == UInt32(EQ_MISSING):
+                if valid:
+                    matched = (
+                        values.unsafe_bitcast[UInt32]()[unsafe_offset=row]
+                        & 0x7FFF_FFFF
+                    ) > 0x7F80_0000
+            else:
+                matched = not valid
             kept = not matched if inverted else matched
         elif kind == 2:
             var right_slot = Int(clause[unsafe_offset=2])
@@ -153,12 +161,35 @@ def predicate_matches(
             var right_bits = _pointer(
                 right_slot, b0, b1, b2, b3, b4, b5, b6, b7, predicate_bits
             )
+            var left_valid = valid
+            var right_valid = True
             if (right_meta >> 32) & 1:
-                valid = valid & _valid(
+                right_valid = _valid(
                     right_bits, UInt32(right_meta) + UInt32(row_base), row
                 )
+            valid = left_valid and right_valid
             var comparison = flags >> 5
-            if tag == 2:
+            if comparison == UInt32(EQ_MISSING):
+                if not valid:
+                    matched = left_valid == right_valid
+                elif tag == 2:
+                    matched = equal_missing_float32(
+                        values.unsafe_bitcast[UInt32]()[unsafe_offset=row],
+                        True,
+                        right_values.unsafe_bitcast[UInt32]()[
+                            unsafe_offset=row
+                        ],
+                        True,
+                    )
+                else:
+                    matched = equal_missing_integer(
+                        read_integer(values, tag, row),
+                        True,
+                        read_integer(right_values, right_tag, row),
+                        True,
+                    )
+                valid = True
+            elif tag == 2:
                 matched = _compare_float_bits(
                     values.unsafe_bitcast[UInt32]()[unsafe_offset=row],
                     right_values.unsafe_bitcast[UInt32]()[unsafe_offset=row],
@@ -201,6 +232,9 @@ def predicate_matches(
             matched = (
                 value >= bitcast[DType.int64](clause[unsafe_offset=2])
             ) & (value <= bitcast[DType.int64](clause[unsafe_offset=3]))
+        if kind == 0 and flags >> 5 == UInt32(EQ_MISSING):
+            matched = valid and matched
+            valid = True
         if kind != 1:
             kept = valid & (not matched if inverted else matched)
         mask |= UInt32(kept) << UInt32(i)

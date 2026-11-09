@@ -441,6 +441,23 @@ filters precede them; grouping keys cannot be replaced by this transformation.
 These programs use `expression_reductions:v1:` keys. Existing native and
 one-binary kernels retain their specialized routes.
 
+### Null-aware values and total comparisons
+
+Native Int32, Int64 and Float32 aggregate expressions support `fill_null`.
+Float32 expressions also support `fill_nan`, including a null replacement.
+The replacement retains normal binding rules. `fill_nan` leaves input nulls
+unchanged; a valid NaN becomes the replacement, whose validity determines the
+result. COUNT-only projections still inspect NaN payloads when this can change
+validity. Both operands evaluate eagerly, including checked integer arithmetic;
+CASE continues to evaluate only its selected branch.
+
+`eq_missing` and `ne_missing` support same-dtype native columns and exactly
+representable literals, including typed nulls and Float32 NaNs. These predicates
+always produce a valid Boolean: two nulls compare equal, one null compares
+unequal, all NaN payloads compare equal, and signed zeros compare equal.
+Their complements therefore include null rows when appropriate. They compose
+with existing filter Boolean programs and CASE conditions.
+
 ### Conditional aggregate values
 
 SUM, COUNT, MEAN, MIN and MAX can share a conditional value, for example
