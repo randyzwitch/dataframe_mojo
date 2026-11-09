@@ -222,6 +222,25 @@ def test_metal_logical_public_nullable_chunked_mixed_global_and_grouped() raises
                 assert_true(execute_timed(query)[0].equals(cpu))
                 assert_true(query.collect(accelerator=runtime).equals(cpu))
 
+    # Repeated Boolean aggregates must keep the filter in the same GPU
+    # region, rather than materializing CSE columns on the CPU first.
+    var outputs = _logical_outputs(col("b") | (col("n") > 0))
+    outputs.append(col("n").sum().alias("s"))
+    var filtered = frame.lazy().filter(col("n") > 2).select_exprs(outputs)
+    var observed = filtered.profile(accelerator=runtime)
+    assert_true(observed[0].equals(filtered.collect(engine="cpu")))
+    ref report = observed[1]
+    var handed = False
+    for row in range(report.height()):
+        if report.item(row, "executor").string() == "accel":
+            assert_equal(report.item(row, "algorithm").string(), "handoff")
+            assert_equal(
+                report.item(row, "input_rows").int64(), Int64(frame.height())
+            )
+            assert_equal(report.item(row, "executions").int64(), Int64(1))
+            handed = True
+    assert_true(handed)
+
 
 # requires: metal
 def test_metal_logical_length_and_null_count_preserve_checked_value_work() raises:
