@@ -104,7 +104,10 @@ from dataframe.vector.tuple_data_layout import (
     TupleDataLayout,
     physical_of_dtype,
 )
-from dataframe.vector.tuple_data_scatter_gather import gather_rows_series
+from dataframe.vector.tuple_data_scatter_gather import (
+    gather_rows_series,
+    gather_rows_slots,
+)
 from dataframe.vector.tuple_data_states import TupleDataChunkState
 from dataframe.vector.types import (
     PHYSICAL_UINT32,
@@ -788,15 +791,17 @@ def _perfect_slots(
     mut slots: List[UInt32],
     mut bits: List[UInt8],
     mut slot_rows: List[UInt64],
-    null_row: Int,
+    mut filled_rows: List[UInt64],
+    mut filled_slots: List[UInt32],
 ) raises -> Optional[Tuple[UInt64, Int]]:
     """PerfectHashJoinExecutor::CanDoPerfectHashJoin and its build
     (BuildPerfectHashTable, FullScanHashTable): an integer key whose valid
     values span at most PERFECT_MAX_BUILD_SIZE, with no more of them than
     slots, each value once. Fills `slots` with each slot's build row and
-    `bits` with which slots hold one, `slot_rows` (every slot, `null_row`
-    where the slot is empty) with each slot's row, and gives the least
-    value's word and the span; None otherwise.
+    `bits` with which slots hold one, `slot_rows` with each filled slot's
+    row, `filled_rows` and `filled_slots` with the rows and their slots
+    (FullScanHashTable's `tuples_addresses` and `sel_build`), and gives
+    the least value's word and the span; None otherwise.
 
     As DuckDB's, the slots are not initialized: only the bitmap is
     cleared, one bit a slot (`bitmap_build_idx.SetAllInvalid`), and a
@@ -841,8 +846,8 @@ def _perfect_slots(
                 var set = bits.unsafe_ptr()
                 slot_rows = List[UInt64](unsafe_uninit_length=size)
                 var pointers = slot_rows.unsafe_ptr()
-                for i in range(size):
-                    pointers[unsafe_offset=i] = UInt64(null_row)
+                filled_rows = List[UInt64](capacity=inserted)
+                filled_slots = List[UInt32](capacity=inserted)
                 var state = TupleDataChunkState()
                 for s in range(len(rows.segments)):
                     ref segment = rows.segments[s]
@@ -865,6 +870,8 @@ def _perfect_slots(
                                 row + index_offset
                             )
                             pointers[unsafe_offset=slot] = UInt64(row)
+                            filled_rows.append(UInt64(row))
+                            filled_slots.append(UInt32(slot))
                 return (base, Int(span))
     return None
 
@@ -1115,7 +1122,8 @@ struct JoinHashTable(Copyable, Movable):
         if perfect and not keys_only and len(unchunked) == 1:
             # PerfectHashJoinExecutor::BuildPerfectHashTable, else (a
             # repeated key, a wide range) the hash table.
-            var null_row = self.null_row_address()
+            var filled_rows = List[UInt64]()
+            var filled_slots = List[UInt32]()
             var slots = _perfect_slots(
                 unchunked[0],
                 self.inserted,
@@ -1125,17 +1133,21 @@ struct JoinHashTable(Copyable, Movable):
                 self.data[].slots,
                 self.data[].slot_bits,
                 self.data[].slot_rows,
-                null_row,
+                filled_rows,
+                filled_slots,
             )
             if slots:
                 trace_path("join.perfect_hash")
                 self.perfect = True
                 self.perfect_base = slots.value()[0]
                 self.perfect_span = slots.value()[1]
-                # FullScanHashTable: the payload scattered by key, every
-                # output column a dictionary over the slots.
+                # FullScanHashTable: only the rows in the table gathered,
+                # each to its key's slot; every output column a dictionary
+                # over the slots.
                 if len(self.output_columns) > 0:
-                    self._gather_dictionary(self.data[].slot_rows.copy())
+                    self._gather_slots(
+                        filled_rows, filled_slots, Int(self.perfect_span) + 1
+                    )
                 return
             # A repeated key: the hash table instead.
             self.data[].slots = List[UInt32]()
@@ -1226,6 +1238,33 @@ struct JoinHashTable(Copyable, Movable):
                     self.row_layout,
                     Int(rows.unsafe_ptr()),
                     len(rows),
+                    self.output_columns[c],
+                    self.output_names[c],
+                    self.output_types[c],
+                )
+            )
+        self.data[].dictionary = out^
+        self.use_dictionary = True
+
+    def _gather_slots(
+        mut self,
+        rows: List[UInt64],
+        slots: List[UInt32],
+        size: Int,
+    ) raises:
+        """Every output column as a column of `size` slots, the row at
+        `rows[i]` at slot `slots[i]`, the other slots unwritten
+        (FullScanHashTable; the probe reads only slots whose bit is
+        set)."""
+        var out = List[Series](capacity=len(self.output_columns))
+        for c in range(len(self.output_columns)):
+            out.append(
+                gather_rows_slots(
+                    self.row_layout,
+                    Int(rows.unsafe_ptr()),
+                    len(rows),
+                    Int(slots.unsafe_ptr()),
+                    size,
                     self.output_columns[c],
                     self.output_names[c],
                     self.output_types[c],

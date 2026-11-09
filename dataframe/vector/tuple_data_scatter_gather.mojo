@@ -884,6 +884,9 @@ def gather_rows_series(
             var ok = _bit_valid(bits_at, i)
             any_null = any_null or not ok
             valid.append(ok)
+        # `bits` is read only through its address: without this it dies
+        # before the gather and `buffer` reuses its memory.
+        _ = bits^
         if any_null:
             return _typed(Series(name^, BoolColumn(values, valid)), dtype)
         return _typed(Series(name^, BoolColumn(values)), dtype)
@@ -925,6 +928,99 @@ def gather_rows_series(
                     )
             return _typed(Series(name^, Column[Scalar[D]](values^)), dtype)
     raise Error("tuple data: no gather for this column type")
+
+
+def gather_rows_slots(
+    layout: TupleDataLayout,
+    rows: Int,
+    count: Int,
+    slots: Int,
+    size: Int,
+    column_id: Int,
+    var name: String,
+    dtype: DataType,
+) raises -> Series:
+    """Column `column_id` of the `count` rows at the pointers at `rows` as
+    a column of `size` values, the row at pointer i at slot `slots[i]`
+    (FullScanHashTable's Gather through `sel_build`). The other slots'
+    values are not written, as DuckDB's; a reader reads only filled
+    slots."""
+    ref top = layout.nodes[][0]
+    var physical = top.physicals[column_id]
+    var target_sel = SelectionVector(slots)
+    var slot_at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=slots)
+    var bits = List[UInt8](length=(size + 7) // 8 + 1, fill=255)
+    var bits_at = Int(bits.unsafe_ptr())
+    var valid_of = bits_at if top.can_have_null else 0
+    var any_null = False
+    if physical == PHYSICAL_BOOL:
+        var buffer = List[UInt8](unsafe_uninit_length=max(size, 1))
+        _gather_fixed_dispatch(
+            physical,
+            rows,
+            SelectionVector(),
+            count,
+            top.offsets[column_id],
+            column_id,
+            top.can_have_null,
+            Int(buffer.unsafe_ptr()),
+            valid_of,
+            target_sel,
+        )
+        var packed = List[UInt8](length=(size + 7) // 8, fill=0)
+        var at = buffer.unsafe_ptr()
+        var into = packed.unsafe_ptr()
+        for i in range(count):
+            var slot = Int(slot_at[unsafe_offset=i])
+            if at[unsafe_offset=slot] != 0:
+                into[unsafe_offset=slot >> 3] |= UInt8(1) << UInt8(slot & 7)
+            any_null = any_null or not _bit_valid(bits_at, slot)
+        _ = buffer^
+        if not any_null:
+            return _typed(
+                Series(
+                    name^,
+                    BoolColumn(
+                        values=packed^,
+                        bits=List[UInt8](length=(size + 7) // 8, fill=255),
+                        length=size,
+                    ),
+                ),
+                dtype,
+            )
+        return _typed(
+            Series(name^, BoolColumn(values=packed^, bits=bits^, length=size)),
+            dtype,
+        )
+    comptime for k in range(len(_FIXED)):
+        comptime D = _FIXED[k]
+        if physical == physical_of[D]():
+            var values = List[Scalar[D]](unsafe_uninit_length=max(size, 1))
+            _gather_fixed_dispatch(
+                physical,
+                rows,
+                SelectionVector(),
+                count,
+                top.offsets[column_id],
+                column_id,
+                top.can_have_null,
+                Int(values.unsafe_ptr()),
+                valid_of,
+                target_sel,
+            )
+            for i in range(count):
+                if not _bit_valid(bits_at, Int(slot_at[unsafe_offset=i])):
+                    any_null = True
+                    break
+            if any_null:
+                return _typed(
+                    Series(
+                        name^, Column[Scalar[D]](values=values^, bits=bits^)
+                    ),
+                    dtype,
+                )
+            return _typed(Series(name^, Column[Scalar[D]](values^)), dtype)
+    raise Error("tuple data: no slot gather for this column type")
 
 
 def _gather_fixed_dispatch(

@@ -23,6 +23,7 @@ from dataframe.vector.data_chunk import (
 )
 from dataframe.vector.tuple_data_collection import TupleDataCollection
 from dataframe.vector.tuple_data_layout import TupleDataLayout
+from dataframe.vector.tuple_data_scatter_gather import gather_rows_series
 from dataframe.vector.tuple_data_states import (
     TupleDataAppendState,
     TupleDataChunkState,
@@ -424,6 +425,39 @@ def test_gather_through_row_pointers() raises:
     _ = scan^
     _ = target^
     _ = state^
+    _ = rows^
+
+
+def test_boolean_payload_through_row_pointers() raises:
+    # GatherRHS for a Boolean column: `false` stays false, null stays
+    # null, with and without nulls in the column.
+    var n = 3 * STANDARD_VECTOR_SIZE
+    var plain_values = List[Bool](capacity=n)
+    for i in range(n):
+        plain_values.append(i % 3 == 0)
+    var columns = List[Series]()
+    columns.append(_bools("nulls", n))
+    columns.append(Series("plain", BoolColumn(plain_values)))
+    var rows = TupleDataCollection(TupleDataLayout(_types(columns)))
+    _append_all(rows, columns, 0, n)
+    for c in range(rows.chunk_count()):
+        var state = TupleDataChunkState()
+        var count = rows.fetch_chunk(state, c, False)
+        var picked = List[Int](capacity=count)
+        for i in range(count):
+            picked.append(c * STANDARD_VECTOR_SIZE + i)
+        for k in range(len(columns)):
+            var got = gather_rows_series(
+                rows.layout,
+                Int(state.rows()),
+                count,
+                k,
+                columns[k].name(),
+                columns[k].dtype(),
+            )
+            assert_true(got.equals(columns[k].take(picked)), columns[k].name())
+        _ = state^
+    _ = rows^
 
 
 def test_combined_collections_keep_their_rows() raises:
