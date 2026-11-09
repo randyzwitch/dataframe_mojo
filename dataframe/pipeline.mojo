@@ -3369,33 +3369,16 @@ def _run_pipeline(
                 locals.append(jobs[j].runner.materialize.pop())
         var combined = _combined(locals^)
         return materialize_finish(combined, schemas[][len(steps)].clear())
-    # A top-N's parts are its workers' heaps, each sorted (Finalize).
-    var parts = List[DataFrame]()
+    # A top-N's workers' heaps, combined into one, sorted (Finalize).
     var locals = List[TopNSink]()
     for j in range(len(jobs)):
         if len(jobs[j].topn) > 0:
             locals.append(jobs[j].topn.pop())
     var heaps = _combined(locals^)
-    for h in range(len(heaps)):
-        var part = heaps[h].finish()
-        if part.height() > 0:
-            parts.append(part^)
-    if len(parts) == 0:
+    if len(heaps) == 0 or heaps[0].heap.size == 0:
         var empty = schemas[][len(steps)].copy()
         return empty^
-    # Combine: the workers' heaps into one top-N.
-    var merged = parts[0].copy() if len(parts) == 1 else concat(parts)
-    if len(parts) > 1:
-        var names = _top_keys(top_names, top_maintain_order)
-        merged = merged.take(
-            merged._arg_sort_head(
-                names,
-                _top_flags(top_descending, top_maintain_order),
-                _top_flags(top_nulls_last, top_maintain_order),
-                top,
-                maintain_order=False,
-            )
-        )
+    var merged = heaps[0].finish()
     if top_maintain_order:
         merged = merged.drop([_ORDER_COLUMN])
     return merged^
