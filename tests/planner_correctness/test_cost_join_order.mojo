@@ -634,6 +634,26 @@ def test_semi_anti_and_left_joins_are_ordered_with_the_inner_joins() raises:
     assert_frame(rows, written)
 
 
+def test_composite_keys_cap_the_join_domain_at_the_smaller_relation() raises:
+    # DuckDB's `ApplyJoinPairCap`: a two-column join of the same two
+    # relations divides by the smaller relation's rows when that is within
+    # eight times the keys' domain, not by the domain alone.
+    var edges: List[JoinEdge] = [JoinEdge(0, 1, ["a", "b"], ["c", "d"])]
+    var distinct = Dict[String, Float64]()
+    distinct["0/a"] = 100.0
+    distinct["1/c"] = 100.0
+    distinct["0/b"] = 50.0
+    distinct["1/d"] = 50.0
+    var graph = JoinGraph([1000.0, 500.0], [1000.0, 500.0], edges, distinct)
+    # 1000 * 500 / min(1000, 500)
+    assert_equal(graph.estimate(3), 1000.0)
+    # Beyond eight times the domain the cap is implausible.
+    var far = JoinGraph(
+        [100000.0, 90000.0], [100000.0, 90000.0], edges, distinct
+    )
+    assert_equal(far.estimate(3), 100000.0 * 90000.0 / 100.0)
+
+
 def test_one_table_slices_are_not_shared() raises:
     # Two channels read one projection of a date table. DuckDB holds a
     # projection or filter over one table as a scan, never worth
