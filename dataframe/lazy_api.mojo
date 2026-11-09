@@ -252,9 +252,6 @@ from dataframe.planning.statistics import (
     plan_cardinality,
     plan_distinct,
 )
-from dataframe.planning.cost.aggregation import (
-    plan_row_number_shape,
-)
 from dataframe.planning.properties import (
     _bare_column,
     _is_scan,
@@ -2052,25 +2049,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _joins_below(self, index: Int) -> Bool:
         return plan_joins_below(self._plan, index=index)
-
-    def _row_number_shape(
-        self,
-        source: Int,
-        keys: List[String],
-        carried: List[String],
-        holder: Int,
-        joins: List[DataFrame],
-        operations: List[PlanNode],
-    ) raises -> Tuple[Float64, Float64]:
-        return plan_row_number_shape(
-            self._plan,
-            source=source,
-            keys=keys,
-            carried=carried,
-            holder=holder,
-            joins=joins,
-            operations=operations,
-        )
 
     def _height_bound(self, index: Int) -> Int:
         return plan_height_bound(self._plan, index=index)

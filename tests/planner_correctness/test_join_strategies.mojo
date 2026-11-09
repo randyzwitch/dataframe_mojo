@@ -2,7 +2,7 @@
 # contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col
-from dataframe.lazy import JOIN, SELECT, PlanNode, _late_key_build
+from dataframe.lazy import JOIN, SELECT, PlanNode
 
 
 def _inputs() raises -> Tuple[DataFrame, DataFrame]:
@@ -132,39 +132,6 @@ def test_late_materialized_join_string_keys_are_eligible_only_when_no_expression
         ]
     )
     var joined = source.lazy().join(build.lazy(), "k", how="left")
-    var operations = List[PlanNode]()
-    var join_index = -1
-    for index in range(len(joined._plan._nodes)):
-        if joined._plan._nodes[index].kind == JOIN:
-            join_index = index
-    assert_true(join_index >= 0)
-    var operation = joined._plan._nodes[join_index].copy()
-    operation.offset = 0
-    operations.append(operation^)
-    var builds: List[DataFrame] = [build.copy()]
-    var aggregates: List[Expr] = [col("value").sum().alias("total")]
-    assert_equal(
-        _late_key_build(
-            "label", source.columns(), builds, operations, aggregates
-        ),
-        0,
-    )
-    assert_equal(
-        _late_key_build(
-            "label",
-            source.columns(),
-            builds,
-            operations,
-            [col("label").first()],
-        ),
-        -1,
-    )
-    assert_equal(
-        _late_key_build(
-            "label", ["k", "label"], builds, operations, aggregates
-        ),
-        -1,
-    )
     var result = (
         joined.group_by("label", maintain_order=True)
         .agg(col("value").sum().alias("total"))

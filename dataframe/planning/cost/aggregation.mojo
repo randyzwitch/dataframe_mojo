@@ -1,24 +1,12 @@
 """Central streaming-reduction strategy selection and cost preferences."""
-from dataframe.kernels.distinct_statistics import (
-    _identity,
-    distinct_estimate,
-    statistics_known,
-    statistics_record,
-)
-from dataframe.planning.graph import (
-    plan_spine_rows,
-    plan_spine_source,
-)
 from dataframe.expr import (
     Expr,
 )
 from dataframe.frame import (
     DataFrame,
 )
-from dataframe.parallel import configured_workers
 from dataframe.join_type import (
     JOIN_FULL,
-    JOIN_INNER,
     JOIN_RIGHT,
 )
 from dataframe.planning.context import (
@@ -32,10 +20,6 @@ from dataframe.planning.cost.model import (
     PipelineEligibility,
     TABLE_PIPELINE,
 )
-from dataframe.planning.cost.sampling import (
-    _key_group_bound,
-    _unique_key_column,
-)
 from dataframe.planning.model import (
     JOIN,
     PlanNode,
@@ -44,106 +28,8 @@ from dataframe.planning.model import (
 from dataframe.planning.cost.eligibility import (
     _counts_distinct,
     _has_quantile,
-    _row_merge_reductions,
     _row_steps_only,
 )
-
-
-def _build_distinct(
-    self: QueryContext, op: PlanNode, build: DataFrame, key: String
-) raises -> Int:
-    """A join build's column's distinct count. A build holding every row
-    of the table under the join's right input keeps the count with that
-    table's statistics, through renames, as DuckDB reads a column's count
-    from its base table: it is taken from the build's rows once, then read
-    back on every run. Any other build is estimated from its column each
-    time. The table's own rows are not read here: this runs on pipeline
-    workers, and the planner's statistics read tables on one thread."""
-    if op.right >= 0 and op.right < len(self._nodes):
-        if plan_spine_rows(self, op.right) == build.height():
-            var source = plan_spine_source(self, op.right, key)
-            if source:
-                var found = source.value()
-                ref table = self._frames[found[0]]
-                if table._statistics:
-                    var column = table.column(found[1])
-                    var identity = _identity(column)
-                    var rows = len(column)
-                    var box = table._statistics.value()
-                    var known = statistics_known(box, found[1], identity, rows)
-                    if known > 0:
-                        return known
-                    var count = distinct_estimate(build.column(key))
-                    statistics_record(box, found[1], identity, rows, count)
-                    return count
-    return distinct_estimate(build.column(key))
-
-
-def plan_row_number_shape(
-    self: QueryContext,
-    source: Int,
-    keys: List[String],
-    carried: List[String],
-    holder: Int,
-    joins: List[DataFrame],
-    operations: List[PlanNode],
-) raises -> Tuple[Float64, Float64]:
-    """The rows the joins leave for the sink and the groups of the
-    first pass if it groups by the holder build's row number instead of
-    the `carried` string keys, estimated from the planner's statistics
-    as the join order estimates them; (-1, -1) when a key has none.
-
-    - Rows: the source rows times, for each inner join whose probe key
-      is a source column, the share of probe keys its build holds,
-      min(1, distinct build keys / distinct probe keys) (DuckDB's join
-      cardinality estimate); a join with no statistics for its probe key
-      leaves the rows as they are.
-    - Groups: min(rows, R * O), with R the build rows the probe reaches
-      (the build's rows, or fewer when the holder join's probe key has
-      fewer distinct values) and O the product of the other keys'
-      distinct counts."""
-    ref table = self._frames[source]
-    var rows = Float64(table.height())
-    var holder_probe = String("")
-    for op in operations:
-        if op.kind != JOIN:
-            continue
-        if op.join_build_slot() == holder:
-            holder_probe = op.names[0]
-        if op.how != JOIN_INNER or len(op.names) == 0:
-            continue
-        if op.names[0] not in table.columns():
-            continue
-        var probe = table._distinct_count(op.names[0])
-        var build = _build_distinct(
-            self, op, joins[op.join_build_slot()], op.right_keys[0]
-        )
-        if probe > 0 and build > 0:
-            rows *= min(1.0, Float64(build) / Float64(probe))
-    var reached = Float64(joins[holder].height())
-    if holder_probe in table.columns():
-        var probe = table._distinct_count(holder_probe)
-        if probe > 0:
-            reached = min(reached, Float64(probe))
-    var others = 1.0
-    for key in keys:
-        if key in carried:
-            continue
-        var count = -1
-        if key in table.columns():
-            count = table._distinct_count(key)
-        else:
-            for op in operations:
-                if op.kind != JOIN:
-                    continue
-                ref build = joins[op.join_build_slot()]
-                if key in build.columns():
-                    count = _build_distinct(self, op, build, key)
-                    break
-        if count <= 0:
-            return (-1.0, -1.0)
-        others *= Float64(count)
-    return (rows, min(rows, reached * others))
 
 
 def select_aggregation_strategy(
@@ -158,16 +44,13 @@ def select_aggregation_strategy(
     ordered: Bool,
     top: Int,
     grouping: Bool,
-    late_names: List[String],
-    late_builds: List[Int],
     eligibility: PipelineEligibility,
     inline_table_eligible: Bool,
 ) raises -> AggregationDecision:
     """Choose one route, retaining the original preference and sampling order.
 
-    Semantic pipeline/inline-state eligibility is supplied before cost
-    preferences. Key coding and row-number grouping are returned as a plan;
-    this function does not rewrite operations or execute a source.
+    Semantic pipeline/inline-state eligibility is supplied by the caller;
+    group keys are grouped as their values, as DuckDB's aggregate does.
     """
     var choice = AggregationDecision(
         MORSEL_PIPELINE if eligibility.allowed else BATCH_STREAM,
@@ -180,134 +63,6 @@ def select_aggregation_strategy(
     ):
         choice.choose(EAGER_FRAME, "inline_table_required")
         return choice^
-    var late_table_codes_pay = False
-    if choice.uses_aggregate_table() and len(late_names) > 0:
-        ref source_frame = self._frames[self._nodes[cursor].source_slot()]
-        var sample = min(source_frame.height(), 4096)
-        late_table_codes_pay = (
-            _key_group_bound(keys, source_frame, joins, sample // 4) >= 0
-        )
-    if (
-        grouping
-        and choice.uses_aggregate_table()
-        and choice.uses_pipeline()
-        and len(late_names) > 0
-    ):
-        # Grouping sets cannot group by one build's row number (each set
-        # keeps a different subset of the keys), so their coded keys are
-        # judged on their own, by cost alone: the joined rows' key reads
-        # the codes spare (one unit a key, the workers sharing them)
-        # against coding the builds' key columns on one thread (2 units a
-        # value) and reading the groups' values back (1 a key). Without
-        # codes the sink reads Parquet strings through their dictionary
-        # codes, so a few joined rows do not pay for coding (TPC-DS q86:
-        # 142K web sales; q22 joins 2.3M inventory rows to 18K items).
-        var shape = plan_row_number_shape(
-            self,
-            self._nodes[cursor].source_slot(),
-            keys,
-            late_names,
-            late_builds[0],
-            joins,
-            operations,
-        )
-        var rows = shape[0]
-        var groups = shape[1]
-        var coded = 0.0
-        for k in range(len(late_names)):
-            coded += 2.0 * Float64(joins[late_builds[k]].height())
-        var width = Float64(len(late_names))
-        var shared = Float64(max(1, configured_workers()))
-        late_table_codes_pay = rows >= 0 and rows * width / shared > (
-            coded + groups * width
-        )
-    choice.code_late_keys = (
-        len(late_names) > 0 and choice.uses_pipeline() and late_table_codes_pay
-    )
-    if len(late_names) > 0 and not choice.code_late_keys:
-        # Collecting coded keys for the finish's group-by ran slower
-        # than the eager route their strings take (TPC-DS q45 5.9 ->
-        # 13.4 ms, q24 40 -> 81), so those plans take the strings'
-        # route, as before; the aggregate table groups the strings
-        # themselves.
-        if len(operations) > 0 and not choice.uses_aggregate_table():
-            choice.choose(BATCH_STREAM, "uncoded_build_keys")
-        # Several of these keys from one build side, under the aggregate
-        # table: the sink groups by that build's row number alone
-        # (DuckDB carries a build row's payload by its address through
-        # the join and reads it once, at the output), and the finished
-        # groups, far fewer than the joined rows, read their key values
-        # from the build and merge where two build rows hold the same
-        # values.
-        if (
-            choice.uses_aggregate_table()
-            and choice.uses_pipeline()
-            and not distinct
-            and not grouping
-            and top < 0
-        ):
-            var best = -1
-            var best_count = 1
-            for h in late_builds:
-                var count = 0
-                for other in late_builds:
-                    if other == h:
-                        count += 1
-                if count > best_count:
-                    best = h
-                    best_count = count
-            var carried = List[String]()
-            for k in range(len(late_names)):
-                if best >= 0 and late_builds[k] == best:
-                    carried.append(late_names[k])
-            if best >= 0:
-                var shape = plan_row_number_shape(
-                    self,
-                    self._nodes[cursor].source_slot(),
-                    keys,
-                    carried,
-                    best,
-                    joins,
-                    operations,
-                )
-                var merge = _row_merge_reductions(expressions)
-                # The carried columns' counts from their table's
-                # statistics where the build holds the whole table.
-                var counts = List[Int]()
-                for op in operations:
-                    if op.kind == JOIN and op.join_build_slot() == best:
-                        for name in carried:
-                            counts.append(
-                                _build_distinct(self, op, joins[best], name)
-                            )
-                        break
-                var unique = _unique_key_column(joins[best], carried, counts)
-                var rows = shape[0]
-                var groups = shape[1]
-                var width = Float64(len(carried))
-                var build = Float64(joins[best].height())
-                if rows >= 0 and unique:
-                    # Unique values per build row: no two row numbers
-                    # hold equal values, so the first pass's groups are
-                    # final (any reduction) and only their key values
-                    # are read. Paid: the uniqueness check (hash and
-                    # insert one key per build row, 2 units each) and
-                    # reading the k keys of the G groups (k units).
-                    if rows * width > 2.0 * build + groups * width:
-                        choice.row_holder = best
-                        choice.row_unique = True
-                        choice.row_names = carried^
-                elif rows >= 0 and merge:
-                    # Paid: the regroup of the G groups by all K keys,
-                    # 4 units a key (read from the build, hashed and
-                    # partitioned, inserted and compared, written out)
-                    # and 4 for the group (slot, states' merge, row).
-                    var paid = groups * Float64(4 * len(keys) + 4)
-                    if rows * width > paid:
-                        choice.row_holder = best
-                        choice.row_merge = merge.take()
-                        choice.row_names = carried^
-
     # Right and full joins require their unmatched build rows to be
     # emitted by a morsel pipeline. A row-only in-memory fallback may prefer eager work.
     if not choice.uses_pipeline():
