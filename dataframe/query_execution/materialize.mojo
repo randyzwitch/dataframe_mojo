@@ -301,36 +301,44 @@ def plan_collect_shared(
     return frames^
 
 
-def plan_schedule_inputs(self: QueryContext, top: Int, batch_size: Int) raises:
-    """Run at once, ahead of the stream below `top`, the inputs it will
-    execute in full: every join's build side, a table already in memory
-    included (its build finishes into a hash index like any other), and
-    its source where that ends in a pipeline breaker. Build sides are
-    chosen before this (`plan_build_probe_sides`), so no build made here
-    is one a swap would stream instead. Each is a
-    MetaPipeline of the stream's pipeline: a build side is a JOIN_BUILD
-    child, the source a REGULAR one, as DuckDB's `MetaPipeline::Build`
-    makes them, and none depends on another, so `run_pipelines` runs
-    them at the same time (TPC-DS q78 aggregated web and catalog sales
-    to build on, then store sales to probe with, one after another on a
-    crew that the aggregates' serial phases left partly idle). Each
-    result waits in
-    `_prefetched` for the `_execute` call that would have computed it.
+struct _StreamInputs(Movable):
+    """The pipelines of a stream's computed inputs, not yet run."""
+
+    var jobs: List[_SubplanPipeline]
+    var metas: List[MetaPipeline]
+    var wanted: List[Int]
+    var keys: List[List[String]]
+    var hows: List[Int]
+
+    def __init__(out self):
+        self.jobs = List[_SubplanPipeline]()
+        self.metas = List[MetaPipeline]()
+        self.wanted = List[Int]()
+        self.keys = List[List[String]]()
+        self.hows = List[Int]()
+
+
+def plan_schedule_inputs(
+    self: QueryContext, top: Int, batch_size: Int
+) raises -> _StreamInputs:
+    """The inputs the stream below `top` will execute in full, as
+    pipelines for its schedule: every join's build side, a table already
+    in memory included (its build finishes into a hash index like any
+    other), and its source where that ends in a pipeline breaker. Build
+    sides are chosen before this (`plan_build_probe_sides`), so no build
+    made here is one a swap would stream instead. Each is a MetaPipeline
+    of the stream's pipeline: a build side is a JOIN_BUILD child, the
+    source a REGULAR one, as DuckDB's `MetaPipeline::Build` makes them.
+    The stream's probe depends on them all (`plan_stream_execute`).
 
     A build side's finish event also finishes it as a build
     (`finish_build`): its columns in one chunk and its keys' hash
     index, as DuckDB finalizes each hash join's table in its build
     pipeline's finish event. Sibling builds all execute before any
-    finishes (`BuildPipelineSchedule`). The index waits in
-    `_prefetched_indexes` for the stream, which takes it where it would
-    have made the same one."""
+    finishes (`BuildPipelineSchedule`). The results wait in `_prefetched`
+    (`_prefetched_indexes` for the index) for the probe."""
     var ahead = self._prefetched.value()
-    var wanted = List[Int]()
-    # A build side's keys, as the stream prepares its table (none for the
-    # source or a cross join).
-    var keys = List[List[String]]()
-    var hows = List[Int]()
-    var metas = List[MetaPipeline]()
+    var inputs = _StreamInputs()
     var probe = top
     while probe >= 0:
         ref step = self._nodes[probe]
@@ -338,48 +346,41 @@ def plan_schedule_inputs(self: QueryContext, top: Int, batch_size: Int) raises:
             probe = step.left
         elif _stream_join(step):
             if step.right not in ahead[]:
-                wanted.append(step.right)
+                inputs.wanted.append(step.right)
                 if step.how != JOIN_CROSS and len(step.names) > 0:
-                    keys.append(step.right_keys.copy())
+                    inputs.keys.append(step.right_keys.copy())
                 else:
-                    keys.append(List[String]())
-                hows.append(step.how)
-                metas.append(MetaPipeline(META_JOIN_BUILD))
+                    inputs.keys.append(List[String]())
+                inputs.hows.append(step.how)
+                inputs.metas.append(MetaPipeline(META_JOIN_BUILD))
             probe = step.left
         else:
             break
+    # With no build to overlap, the stream runs its source itself, where
+    # an aggregate's finish can take the steps above it (`FinishAbove`).
     if (
-        probe >= 0
+        len(inputs.wanted) > 0
+        and probe >= 0
         and probe != top
         and plan_ends_in_breaker(self, probe)
         and probe not in ahead[]
     ):
-        wanted.append(probe)
-        keys.append(List[String]())
-        hows.append(JOIN_CROSS)
-        metas.append(MetaPipeline(META_REGULAR))
-    if len(wanted) < 2:
-        return
-    trace_path("stream.scheduled_inputs")
-    var jobs = List[_SubplanPipeline](capacity=len(wanted))
-    for k in range(len(wanted)):
-        jobs.append(
+        inputs.wanted.append(probe)
+        inputs.keys.append(List[String]())
+        inputs.hows.append(JOIN_CROSS)
+        inputs.metas.append(MetaPipeline(META_REGULAR))
+    for k in range(len(inputs.wanted)):
+        inputs.jobs.append(
             _SubplanPipeline(
                 self.copy(),
-                wanted[k],
+                inputs.wanted[k],
                 True,
                 batch_size,
-                keys[k],
-                hows[k],
+                inputs.keys[k],
+                inputs.hows[k],
             )
         )
-    run_pipelines(jobs, metas)
-    for k in range(len(wanted)):
-        ahead[][wanted[k]] = jobs[k].result.copy()
-        if jobs[k].built and self._prefetched_indexes:
-            self._prefetched_indexes.value()[][wanted[k]] = _ReadyIndex(
-                keys[k], hows[k], jobs[k].built.value().copy()
-            )
+    return inputs^
 
 
 def plan_take_prefetched(
