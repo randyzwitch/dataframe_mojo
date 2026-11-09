@@ -490,7 +490,6 @@ def plan_stream_execute(
     return result^
 
 
-
 @fieldwise_init
 struct _StreamHead(Movable):
     """What a stream decided before scheduling its inputs, which its
@@ -565,7 +564,9 @@ struct _StreamProbe(Movable):
             ref job = pipelines[k].input[0]
             ahead[][self.wanted[k]] = job.result.copy()
             if job.built and plan._prefetched_indexes:
-                plan._prefetched_indexes.value()[][self.wanted[k]] = _ReadyIndex(
+                plan._prefetched_indexes.value()[][
+                    self.wanted[k]
+                ] = _ReadyIndex(
                     self.keys[k], self.hows[k], job.built.value().copy()
                 )
         self.result = _stream_probe(
