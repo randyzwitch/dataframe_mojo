@@ -370,11 +370,11 @@ def test_join_estimates_follow_duckdbs_relation_statistics() raises:
     var semi = t[1].join(
         t[0], left_on=["p_id"], right_on=["f_product"], how="semi"
     )
-    assert_equal(semi._estimate(len(semi._plan._nodes) - 1), 2000)
+    assert_equal(semi._estimate(len(semi._plan._nodes) - 1), 400)
     var anti = t[3].join(
         t[0], left_on=["s_id"], right_on=["f_store"], how="anti"
     )
-    assert_equal(anti._estimate(len(anti._plan._nodes) - 1), 4000)
+    assert_equal(anti._estimate(len(anti._plan._nodes) - 1), 800)
     var inner = t[0].join(t[1], left_on=["f_product"], right_on=["p_id"])
     assert_equal(inner._estimate(len(inner._plan._nodes) - 1), 40_000)
 

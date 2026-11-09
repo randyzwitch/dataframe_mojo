@@ -21,7 +21,8 @@ came from (`CARDINALITY`). Nothing is sampled or run:
   constant has one value, a computed column its relation's rows.
 - An aggregate's groups come from its keys' counts
   (`EstimateDistinctCardinality`), and so do a unique's rows.
-- A semi or anti join keeps its left input's rows, an outer join its
+- A semi or anti join keeps a fifth of its left input's rows
+  (`DEFAULT_SEMI_ANTI_SELECTIVITY`), a mark join all of them, an outer join its
   larger input's, a cross join both multiplied, and a union both added.
   An inner join is DuckDB's estimate of joining two relations
   (`CardinalityEstimator`): their rows multiplied, divided by the key
@@ -39,6 +40,7 @@ from std.math import exp
 
 from dataframe.expr import COL, Expr, conjuncts
 from dataframe.frame import DataFrame
+from dataframe.join_order import SEMI_ANTI_SELECTIVITY
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -341,8 +343,14 @@ def _cardinality(
     var left = plan_cardinality(self, stats, node.left)
     if left < 0:
         return -1
-    if node.how == JOIN_SEMI or node.how == JOIN_ANTI or node.how == JOIN_MARK:
+    if node.how == JOIN_MARK:
         return left
+    if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
+        # `CalculateSemiAntiJoinDenom`: a fifth of the left rows.
+        return (
+            max(Int(Float64(left) / SEMI_ANTI_SELECTIVITY), 1) if left
+            > 0 else 0
+        )
     var right = plan_cardinality(self, stats, node.right)
     if right < 0:
         return -1

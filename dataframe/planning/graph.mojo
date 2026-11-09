@@ -1228,9 +1228,7 @@ def plan_materialized(self: QueryContext, index: Int, refs: Int) -> Bool:
     return tables > 2 and tables * refs > 10
 
 
-def plan_class_refs(
-    classes: List[Int], covered: List[Bool], index: Int
-) -> Int:
+def plan_class_refs(classes: List[Int], covered: List[Bool], index: Int) -> Int:
     """How many uncovered nodes share the class of `index`."""
     var refs = 0
     for j in range(len(classes)):
