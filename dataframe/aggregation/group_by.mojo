@@ -92,7 +92,6 @@ from dataframe.parallel import (
 from dataframe.kernels.partition import (
     Partitioner,
     encode_bucket,
-    low_cardinality,
 )
 from dataframe.series import (
     Series,

@@ -74,7 +74,6 @@ from .parallel import (
 )
 from dataframe.kernels.partition import (
     encode_partitioned,
-    low_cardinality,
 )
 from .join_type import (
     JOIN_CROSS,
@@ -2542,7 +2541,7 @@ struct DataFrame(Copyable, Sized, Writable):
         so ids are in no particular order."""
         var keys = self._subset_keys(subset)
         var workers = worker_count(self._height)
-        if workers > 1 and not low_cardinality(keys):
+        if workers > 1:
             # The bucket scatter is stable, so a bucket's first row for a key
             # is the key's first row in the frame.
             return encode_partitioned(keys, workers, nulls_equal=True)

@@ -83,12 +83,13 @@ divided by column count. On M1 with eight configured workers, two columns,
 configured workers, splitting is slightly slower than the unsplit path.
 This changes a resource budget rather than hard-coding an M1 row threshold.
 
-Keep the 16-chunk guard and give its three call sites one named constant.
+The 16-chunk guard described by this sweep has since been removed; the numbers
+below are kept as the record of what it measured.
 Four chunks win in several M1 cases but lose on Threadripper: at four workers,
 250k selected rows and two columns, generic gather takes 2.37 ms versus
 2.88 ms for sorted gather; with sixteen chunks, the partitioned sorted path
 takes 1.25 ms versus generic's 2.03 ms. Width, selection and locality matter;
-there is no cross-machine evidence for removing the guard globally.
+the rule was not derived from cross-machine evidence.
 
 ### Keep the shared rows-per-worker floor
 

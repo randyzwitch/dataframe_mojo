@@ -9,7 +9,7 @@ rolling_min or rolling_max window holding a NaN is NaN.
 from dataframe.storage.boolean import BoolColumn
 from dataframe.kernels.canonical_labels import canonical_labels
 from dataframe.kernels.hashing import encode_rows
-from dataframe.kernels.partition import encode_partitioned, low_cardinality
+from dataframe.kernels.partition import encode_partitioned
 from .parallel import worker_count
 from dataframe.storage.column import Column, _copy_validity
 from .dtype import DataType, NUMERIC_DTYPES
@@ -190,9 +190,7 @@ def _distinct_flags(op: Int, input: Series, ids: List[Int]) raises -> Series:
     var workers = worker_count(len(input))
     var encoded = encode_partitioned(
         keys, workers, nulls_equal=True
-    ) if workers > 1 and not low_cardinality(keys) else encode_rows(
-        keys, nulls_equal=True
-    )
+    ) if workers > 1 else encode_rows(keys, nulls_equal=True)
     var values = List[UInt8](length=(len(input) + 7) // 8, fill=0)
     if op == IS_FIRST_DISTINCT:
         for row in encoded.representatives:
