@@ -5,7 +5,6 @@ from std.math import isnan
 from std.testing import assert_equal, assert_true
 from dataframe import BoolColumn, Column, DataFrame, DataType, Series
 from dataframe.parallel import worker_count
-from dataframe.kernels.partition import low_cardinality
 from tests.support.lifecycle_jobs import WorkerSetting
 
 
@@ -197,7 +196,6 @@ def test_parallel_subset_unique_keeps_input_order_and_exact_key_counts() raises:
         if counts[keys[row]] == 1:
             single.append(row)
     var subset: List[String] = ["a", "b"]
-    assert_true(not low_cardinality([frame.column("a"), frame.column("b")]))
     var modes: List[String] = ["first", "last", "none"]
     var wanted: List[List[Int]] = [first^, last^, single^]
     for m in range(len(modes)):

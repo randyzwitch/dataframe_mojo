@@ -53,7 +53,6 @@ from dataframe.parallel import (
 from dataframe.kernels.partition import (
     Partitioner,
     encode_partitioned,
-    low_cardinality,
 )
 from dataframe.kernels.row_encode import (
     STRING_PREFIX_BYTES,
@@ -85,7 +84,7 @@ def _encode_in_order(keys: List[Series]) raises -> RowKeys:
     """
     var n = len(keys[0])
     var workers = worker_count(n)
-    if workers <= 1 or low_cardinality(keys):
+    if workers <= 1:
         return encode_rows(keys, nulls_equal=True)
     var encoded = encode_partitioned(keys, workers, nulls_equal=True)
     var renumbered = List[Int](length=encoded.count(), fill=-1)

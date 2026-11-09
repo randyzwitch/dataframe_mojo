@@ -13,14 +13,8 @@ is one value, -0.0 equals 0.0, strings compare by bytes, and a null key is
 one ordinary value. The permutation is stable: within a bucket, rows keep
 their input order, so first-occurrence order within a bucket is preserved.
 
-Partitioning is not always worth it. Gathering the key and value columns
-into bucket order costs a full materialization of the frame, which only
-pays off when the serial encode it replaces is itself expensive -- that is,
-when distinct keys are many. `low_cardinality` answers that beforehand by
-hashing a strided sample on the calling thread and counting how much of
-hash space it touches: keys spread across most slots mean many distinct
-values. The sample is a few thousand rows, so deciding costs far less than
-the hash pass it guards, and nothing is wasted when the answer is no.
+Every parallel encode scatters first, as DuckDB's radix partitioning does;
+no sample chooses whether it pays.
 """
 from std.memory import Pointer, bitcast
 from std.sys import size_of
@@ -41,14 +35,10 @@ from dataframe.storage.string_view import StringView, _mapped
 
 comptime _NULL_KEY = UInt64(0x9E3779B97F4A7C15)
 
-# Histogram granularity. Always 256 slots regardless of the bucket count, so
-# the number of occupied slots estimates distinct keys: each slot holds a
-# 1/256 slice of hash space, so few occupied slots means few distinct keys.
+# Histogram granularity, DuckDB's largest radix partition count (2^8): the
+# scatter folds the 256 slots into its bucket count.
 comptime _SLOTS = 256
 comptime _SLOT_SHIFT = 56
-
-# Rows hashed to estimate cardinality before committing to a full pass.
-comptime _SAMPLE_ROWS = 4096
 
 
 def _mix(value: UInt64) -> UInt64:
@@ -388,65 +378,8 @@ struct Partitioned(Movable):
         return len(self.bounds) - 1
 
 
-def _prefer_whole_sample(
-    occupied: Int, taken: Int, counts: List[Int], hashes: List[UInt64]
-) -> Bool:
-    if 2 * occupied < min(taken, _SLOTS):
-        return True
-    if taken < 128:
-        return False
-    var largest = 0
-    for count in counts:
-        largest = max(largest, count)
-    if 4 * largest < taken:
-        return False
-    # A hot key alone does not imply cheap serial encoding: the remaining
-    # rows may all be unique. Count exact hashes only for skewed samples.
-    var distinct = Dict[UInt64, Bool]()
-    for hash in hashes:
-        distinct[hash] = True
-    return 3 * len(distinct) <= taken
-
-
-def low_cardinality(keys: List[Series]) raises -> Bool:
-    """Whether whole-frame encoding is cheaper than hash partitioning.
-
-    A bounded sample first counts occupied hash slots. If a key dominates,
-    exact sampled hash cardinality checks whether the remaining domain is
-    small enough to avoid the partition scatter and gather.
-    """
-    var rows = len(keys[0])
-    if rows == 0:
-        return True
-    var sample = min(rows, _SAMPLE_ROWS)
-    var stride = max(1, rows // sample)
-    var picked = List[Int](capacity=sample)
-    var i = 0
-    while i < rows and len(picked) < sample:
-        picked.append(i)
-        var taken = len(picked)
-        i = taken * stride + (taken * 7919) % stride
-    var hashes = List[UInt64](length=len(picked), fill=0)
-    for j in range(len(keys)):
-        # Gather only the bounded sample, including from source chunks.
-        # Resolve storage and dtype once per key rather than once per row.
-        var values = keys[j].take(picked)
-        _hash_column(values, 0, len(picked), Int(hashes.unsafe_ptr()), j == 0)
-    var seen = List[Bool](length=_SLOTS, fill=False)
-    var counts = List[Int](length=_SLOTS, fill=0)
-    var occupied = 0
-    for hash in hashes:
-        var slot = Int(hash >> UInt64(_SLOT_SHIFT))
-        counts[slot] += 1
-        if not seen[slot]:
-            seen[slot] = True
-            occupied += 1
-    return _prefer_whole_sample(occupied, len(picked), counts, hashes)
-
-
 struct Partitioner(Movable):
-    """One hash pass over the keys, plus the histogram that decides whether
-    scattering is worth it."""
+    """One hash pass over the keys, plus the histogram the scatter reads."""
 
     var hashes: List[UInt64]
     var histogram: List[Int]

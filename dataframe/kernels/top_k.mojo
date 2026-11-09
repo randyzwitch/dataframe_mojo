@@ -28,9 +28,9 @@ from dataframe.aggregation.hash_table import (
     key_supported,
 )
 from dataframe.aggregation.table_sink import aggregate_top_rows
-from dataframe.kernels.hashing import encode_rows, encode_rows_parallel
+from dataframe.kernels.hashing import encode_rows
 from dataframe.parallel import Job, run_jobs, worker_count
-from dataframe.kernels.partition import encode_partitioned, low_cardinality
+from dataframe.kernels.partition import encode_partitioned
 from dataframe.kernels.rank import _key, _pack
 from dataframe.series import Series
 from dataframe.trace import trace_path
@@ -320,11 +320,9 @@ def top_k_mask(
         for row in table.value():
             mask[row] = True
         return BoolColumn(mask)
-    var partitions = encode_rows(keys, nulls_equal=True) if workers <= 1 else (
-        encode_rows_parallel(keys, True, workers) if low_cardinality(
-            keys
-        ) else encode_partitioned(keys, workers, nulls_equal=True)
-    )
+    var partitions = encode_rows(
+        keys, nulls_equal=True
+    ) if workers <= 1 else encode_partitioned(keys, workers, nulls_equal=True)
     var count = partitions.count()
     comptime for t in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[t]
