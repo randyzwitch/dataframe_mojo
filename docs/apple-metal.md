@@ -462,6 +462,13 @@ use shared true-count, valid-count and row-count state in the GPU scan. Empty
 ANY is false and empty ALL is true. With Kleene semantics, an unknown remains
 null unless a true ANY or false ALL decides the result.
 
+Unfiltered global projections of plain-column logical reductions use packed-word
+counts. The GPU counts 32 value/validity bits at a time, shares true/valid counts
+across repeated outputs and Boolean negations, and reads no payload for numeric
+counts. All-valid counts use the known row count without scanning the input.
+Filtered, grouped, derived-value and mixed numeric-aggregate projections retain
+the general fused scan, including checked-expression errors.
+
 Global `len`, `null_count` on native values, and Bool `count` use the same
 state. They can share a projection with supported numeric aggregates and
 bounded integer-key grouping. Existing grouped LEN retains its original route.

@@ -43,6 +43,7 @@ from .group_properties import sample_group_tuples
 from .group_reduce import execute_grouped
 from .predicate_reduce import execute_predicates
 from .moment_plan import plan_moments, moment_key
+from .logical_reduce import plan_packed_logical, execute_packed_logical
 from .moment_reduce import execute_global_moments_math
 from .moment_group_reduce import execute_grouped_moments_math
 from .accelerator.gpu.reduction_inputs import (
@@ -585,6 +586,9 @@ def execute_timed(
             return execute_ordered(region, zero_copy)
         var logical = plan_logical(region)
         if logical:
+            var packed = plan_packed_logical(region)
+            if packed:
+                return execute_packed_logical(region, packed.value(), zero_copy)
             var result = execute_timed(logical.value().region, zero_copy)
             var started = Int(perf_counter_ns())
             var finished = finish_logical(logical.value(), result[0])
