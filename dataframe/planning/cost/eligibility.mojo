@@ -34,6 +34,8 @@ from dataframe.join_type import (
     JOIN_INNER,
     JOIN_LEFT,
     JOIN_RIGHT,
+    JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI,
     JOIN_SEMI,
 )
 from dataframe.planning.cost.model import (
@@ -81,7 +83,14 @@ def _pipeline_steps(
                 # Probed as a left join; its unmatched build rows come
                 # out as a final morsel, as a right join's do.
                 pass
-            elif node.how not in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI]:
+            elif node.how not in [
+                JOIN_INNER,
+                JOIN_LEFT,
+                JOIN_SEMI,
+                JOIN_ANTI,
+                JOIN_RIGHT_SEMI,
+                JOIN_RIGHT_ANTI,
+            ]:
                 return False
             if (
                 node.join_build_slot() >= len(indexes)

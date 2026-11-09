@@ -32,6 +32,8 @@ from dataframe.join_order import (
     order_joins,
 )
 from dataframe.join_type import (
+    JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI,
     JOIN_ANTI,
     JOIN_INNER,
     JOIN_LEFT,
@@ -346,6 +348,33 @@ def _flip_left_join(
     return True
 
 
+def _flip_semi_join(
+    mut plan: QueryContext, at: Int, batch_size: Int
+) raises -> Bool:
+    """Flip the semi or anti join at `at` into DuckDB's RIGHT_SEMI or
+    RIGHT_ANTI (`InverseJoinType`): its right input probes, its left
+    builds and is the output. False, with nothing changed, when the key
+    types differ or are nested: such a join has no shared hash table."""
+    var node = plan._nodes[at].copy()
+    var left = plan._execute(node.left, True, False, batch_size)
+    var right = plan._execute(node.right, True, False, batch_size)
+    for i in range(len(node.names)):
+        var ltype = left.column(node.names[i]).dtype()
+        var rtype = right.column(node.right_keys[i]).dtype()
+        if ltype != rtype or ltype.is_nested():
+            return False
+    var join = node.copy()
+    join.left = node.right
+    join.right = node.left
+    join.names = node.right_keys.copy()
+    join.right_keys = node.names.copy()
+    join.how = JOIN_RIGHT_SEMI if node.how == JOIN_SEMI else JOIN_RIGHT_ANTI
+    join.sides_fixed = True
+    plan._nodes[at] = join^
+    trace_path("lazy.swap_semi_join_sides")
+    return True
+
+
 def plan_build_probe_sides(
     self: QueryContext, top: Int, batch_size: Int
 ) raises -> Optional[QueryContext]:
@@ -355,8 +384,8 @@ def plan_build_probe_sides(
     (`_builds_on_left`). A join that should build on its left is
     flipped: an inner join probes its right input against its left, a
     left join becomes a right join, and a semi or anti join DuckDB's
-    RIGHT_SEMI or RIGHT_ANTI (`build_left`). A copy of the plan with the
-    flips made, or None when every join keeps its sides. A flipped join
+    RIGHT_SEMI or RIGHT_ANTI (`_flip_semi_join`). A copy of the plan with
+    the flips made, or None when every join keeps its sides. A flipped join
     is decided (`sides_fixed`), so the stream the copy starts keeps it."""
     var spine = List[Int]()
     var cursor = top
@@ -388,10 +417,7 @@ def plan_build_probe_sides(
         elif how == JOIN_LEFT:
             if _flip_left_join(plan, at, batch_size):
                 changed = True
-        else:
-            plan._nodes[at].build_left = True
-            plan._nodes[at].sides_fixed = True
-            trace_path("lazy.build_left_semi_join")
+        elif _flip_semi_join(plan, at, batch_size):
             changed = True
     if not changed:
         return None

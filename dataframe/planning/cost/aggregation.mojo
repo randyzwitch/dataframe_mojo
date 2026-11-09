@@ -8,6 +8,8 @@ from dataframe.frame import (
 from dataframe.join_type import (
     JOIN_FULL,
     JOIN_RIGHT,
+    JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI,
 )
 from dataframe.planning.context import (
     QueryContext,
@@ -68,7 +70,10 @@ def select_aggregation_strategy(
     if not choice.uses_pipeline():
         for operation in operations:
             if operation.kind == JOIN and (
-                operation.how == JOIN_RIGHT or operation.how == JOIN_FULL
+                operation.how == JOIN_RIGHT
+                or operation.how == JOIN_FULL
+                or operation.how == JOIN_RIGHT_SEMI
+                or operation.how == JOIN_RIGHT_ANTI
             ):
                 choice.choose(EAGER_FRAME, "right_join_requires_pipeline")
                 return choice^

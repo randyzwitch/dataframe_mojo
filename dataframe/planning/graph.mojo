@@ -30,6 +30,8 @@ from dataframe.join_type import (
     JOIN_CROSS,
     JOIN_INNER,
     JOIN_LEFT,
+    JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI,
     JOIN_SEMI,
 )
 from dataframe.planning.context import (
@@ -453,7 +455,10 @@ def plan_join_names(
     """An inner, left, semi or anti equi-join's output names, as
     `_join_schema` names them: the left columns, then the right ones
     not coalesced into a left key, a name the left side has taking the
-    suffix. None for other joins and where a name still collides."""
+    suffix (a RIGHT_SEMI or RIGHT_ANTI join's are its right input's).
+    None for other joins and where a name still collides."""
+    if node.how == JOIN_RIGHT_SEMI or node.how == JOIN_RIGHT_ANTI:
+        return plan_names_of(self, node.right)
     if not (
         node.how == JOIN_INNER
         or node.how == JOIN_LEFT
