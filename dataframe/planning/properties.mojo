@@ -6,15 +6,11 @@ from dataframe.planning.cost.eligibility import (
     _row_steps_only,
     _filters,
     _key_read,
-    _row_merge_reductions,
-    _late_key_build,
 )
 
 from dataframe.planning.expression_inputs import _references
 from dataframe.planning.cost.sampling import (
     _keys_repeat,
-    _key_group_bound,
-    _unique_key_column,
 )
 
 from dataframe.aggregation.hash_table import (

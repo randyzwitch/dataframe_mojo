@@ -157,13 +157,11 @@ def _facts(rows: Int, spread: Int, step: Int) raises -> DataFrame:
     )._with_statistics()
 
 
-def _row_number_trace(
+def _check_grouped_build_keys(
     dimension: DataFrame, facts: DataFrame, means: Bool = False
-) raises -> Bool:
-    """Whether the row-number keys ran, after checking that the lazy
-    grouped result is the eager join's, for an inner and a left join."""
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    var observed = StrategyTrace()
+) raises:
+    """The lazy grouped result is the eager join's, for an inner and a
+    left join, grouping by the build's key values."""
     var keys: List[String] = [
         "d_name",
         "d_region",
@@ -202,44 +200,23 @@ def _row_number_trace(
             .sort(keys)
         )
         assert_frame(rows, expected)
-    var taken = "dataframe-path: lazy.row_number_keys\n" in observed.text()
-    _ = observed^
-    _ = trace^
-    return taken
 
 
-def test_string_keys_from_one_build_group_by_its_row_number_when_groups_are_fewer_than_rows() raises:
+def test_string_keys_from_one_build_group_by_their_values() raises:
     # 6,000 dimension rows with four string columns whose values repeat, and
-    # 400K fact rows, some without a dimension row (a left join): about
-    # 18,000 groups for some 370,000 joined rows, so the sink groups by the
-    # dimension's row number and the groups of equal values merge afterwards,
-    # to the eager join's result.
-    assert_true(
-        _row_number_trace(_dimension(6000, 4000), _facts(400_000, 6500, 7)),
-        "the keys were not grouped by the build's row number",
+    # 400K fact rows, some without a dimension row (a left join).
+    _check_grouped_build_keys(_dimension(6000, 4000), _facts(400_000, 6500, 7))
+
+
+def test_build_keys_group_when_every_joined_row_is_its_own_group() raises:
+    _check_grouped_build_keys(
+        _dimension(40_000, 40_000), _facts(40_000, 40_000, 1)
     )
 
 
-def test_string_keys_stay_when_every_joined_row_is_its_own_group() raises:
-    # Each of 40K fact rows meets its own dimension row, so the groups are
-    # the rows: the regroup would repeat the work the row numbers save.
-    assert_true(
-        not _row_number_trace(
-            _dimension(40_000, 40_000), _facts(40_000, 40_000, 1)
-        ),
-        "keys grouped by row number although the groups are about the rows",
-    )
-
-
-def test_unique_build_values_group_by_the_row_number_for_any_reduction() raises:
-    # No two dimension rows hold the same values, so the groups of the row
-    # numbers are the final groups and a mean or a count (which do not merge)
-    # are taken over them directly.
-    assert_true(
-        _row_number_trace(
-            _dimension(6000, 6000), _facts(400_000, 6500, 7), means=True
-        ),
-        "unique build values were not grouped by the build's row number",
+def test_unique_build_keys_group_for_any_reduction() raises:
+    _check_grouped_build_keys(
+        _dimension(6000, 6000), _facts(400_000, 6500, 7), means=True
     )
 
 
