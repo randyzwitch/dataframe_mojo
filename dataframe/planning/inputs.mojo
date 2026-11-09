@@ -73,7 +73,15 @@ def finish_build(
             if keys[k] == column.name():
                 key_at = k
         if key_at < 0:
-            if emits:
+            # A string or nested column stays in the build frame, read by
+            # each row's number: a probe never copies its bytes (DuckDB's
+            # gather copies a string_t; a column here cannot reference
+            # the rows' heap).
+            if (
+                emits
+                and not column.dtype().is_nested()
+                and column.dtype().physical() != DataType.STRING
+            ):
                 payload.append(column.copy())
                 output_columns.append(len(keys) + len(payload) - 1)
                 output_names.append(column.name())
