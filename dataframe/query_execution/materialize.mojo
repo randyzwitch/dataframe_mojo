@@ -235,7 +235,10 @@ struct _SharedPipeline(SchedulablePipeline):
     def initialize(mut self) raises:
         pass
 
-    def execute_tasks(self) -> Int:
+    def max_execute_tasks(self) -> Int:
+        return 1
+
+    def execute_tasks(mut self) raises -> Int:
         return 1
 
     def execute(mut self, task: Int) raises:

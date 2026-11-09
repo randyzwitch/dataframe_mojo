@@ -2653,8 +2653,7 @@ def run_pipeline(
     steps feed, for the source's join filters (`_join_filters`).
     `counts` receives the rows fed, then each step's input and output
     rows, then each finish step's."""
-    var finish_counts = List[Int]()
-    var result = _run_pipeline(
+    var run = begin_pipeline(
         frame,
         steps,
         joins,
@@ -2664,8 +2663,6 @@ def run_pipeline(
         ordered,
         workers,
         batch_size,
-        counts,
-        set_frames,
         sets,
         top,
         top_names,
@@ -2678,26 +2675,40 @@ def run_pipeline(
         table,
         set_masks,
         finish_steps,
-        finish_counts,
         pushed,
     )
-    if len(finish_steps) > 0 and len(finish_counts) == 0:
+    try:
+        run.execute_all()
+    except e:
+        run.release()
+        raise e^
+    return finish_pipeline(run, counts, set_frames)
+
+
+def finish_pipeline(
+    mut run: PipelineRun,
+    mut counts: List[Int],
+    mut set_frames: List[DataFrame],
+) raises -> DataFrame:
+    """`run`'s result once its execute tasks are done; `counts` and
+    `set_frames` as in `run_pipeline`."""
+    var finish_counts = List[Int]()
+    var result = _finish_pipeline(run, counts, set_frames, finish_counts)
+    if len(run.finish_steps) > 0 and len(finish_counts) == 0:
         # The sink finished the output whole: the steps run over it as
         # a pipeline of their own, morsels on every worker.
         var inner = List[Int]()
         var none = List[DataFrame]()
-        result = _run_pipeline(
+        var second = begin_pipeline(
             result,
-            finish_steps,
-            joins,
-            indexes,
+            run.finish_steps,
+            run.joins,
+            run.indexes,
             List[Expr](),
             List[String](),
             False,
-            workers,
-            batch_size,
-            inner,
-            none,
+            run.workers,
+            run.batch_size,
             List[List[Int]](),
             -1,
             List[String](),
@@ -2710,10 +2721,15 @@ def run_pipeline(
             False,
             List[List[Int64]](),
             List[Step](),
-            finish_counts,
             List[PushedJoinFilter](),
         )
-        for k in range(len(finish_steps)):
+        try:
+            second.execute_all()
+        except e:
+            second.release()
+            raise e^
+        result = _finish_pipeline(second, inner, none, finish_counts)
+        for k in range(len(run.finish_steps)):
             finish_counts.append(inner[2 * k + 1])
             finish_counts.append(inner[2 * k + 2])
     counts.extend(Span(finish_counts))
@@ -2896,7 +2912,123 @@ def _finish_with_steps(
     return chunks_frame(frames)
 
 
-def _run_pipeline(
+struct PipelineRun(Movable):
+    """A morsel pipeline between `begin_pipeline` and `finish_pipeline`:
+    its workers' jobs (the execute tasks `Pipeline::Schedule` makes, one
+    per thread) and what its finish reads. Lives on one thread at each
+    stage but its execute, where each task has its own job."""
+
+    var jobs: List[_PipelineJob]
+    var cursor: _Cursor
+    var boundary: TopNBoundary
+    var frame: DataFrame
+    var steps: List[Step]
+    var planned: Int
+    var joins: ArcPointer[List[DataFrame]]
+    var indexes: ArcPointer[List[Optional[JoinHashTable]]]
+    var expressions: List[Expr]
+    var keys: List[String]
+    var ordered: Bool
+    var workers: Int
+    var batch_size: Int
+    var sets: List[List[Int]]
+    var top: Int
+    var top_names: List[String]
+    var top_descending: List[Bool]
+    var top_nulls_last: List[Bool]
+    var top_maintain_order: Bool
+    var layout: List[AggregateLayout]
+    var template: List[_StreamReduction]
+    var set_empty: List[DataFrame]
+    var derived_from: List[Int]
+    var schemas: ArcPointer[List[DataFrame]]
+    var reduce_layout: List[ArcPointer[_ReduceSinkLayout]]
+    var collects: Bool
+    var ungrouped: List[ArcPointer[UngroupedLayout]]
+    var finish_steps: List[Step]
+    var released: Bool
+
+    def __init__(
+        out self,
+        var jobs: List[_PipelineJob],
+        cursor: _Cursor,
+        boundary: TopNBoundary,
+        var frame: DataFrame,
+        var steps: List[Step],
+        planned: Int,
+        joins: ArcPointer[List[DataFrame]],
+        indexes: ArcPointer[List[Optional[JoinHashTable]]],
+        var expressions: List[Expr],
+        var keys: List[String],
+        ordered: Bool,
+        workers: Int,
+        batch_size: Int,
+        var sets: List[List[Int]],
+        top: Int,
+        var top_names: List[String],
+        var top_descending: List[Bool],
+        var top_nulls_last: List[Bool],
+        top_maintain_order: Bool,
+        var layout: List[AggregateLayout],
+        var template: List[_StreamReduction],
+        var set_empty: List[DataFrame],
+        var derived_from: List[Int],
+        schemas: ArcPointer[List[DataFrame]],
+        var reduce_layout: List[ArcPointer[_ReduceSinkLayout]],
+        collects: Bool,
+        var ungrouped: List[ArcPointer[UngroupedLayout]],
+        var finish_steps: List[Step],
+    ):
+        self.jobs = jobs^
+        self.cursor = cursor.copy()
+        self.boundary = boundary
+        self.frame = frame^
+        self.steps = steps^
+        self.planned = planned
+        self.joins = joins
+        self.indexes = indexes
+        self.expressions = expressions^
+        self.keys = keys^
+        self.ordered = ordered
+        self.workers = workers
+        self.batch_size = batch_size
+        self.sets = sets^
+        self.top = top
+        self.top_names = top_names^
+        self.top_descending = top_descending^
+        self.top_nulls_last = top_nulls_last^
+        self.top_maintain_order = top_maintain_order
+        self.layout = layout^
+        self.template = template^
+        self.set_empty = set_empty^
+        self.derived_from = derived_from^
+        self.schemas = schemas
+        self.reduce_layout = reduce_layout^
+        self.collects = collects
+        self.ungrouped = ungrouped^
+        self.finish_steps = finish_steps^
+        self.released = False
+
+    def tasks(self) -> Int:
+        return len(self.jobs)
+
+    def execute(mut self, task: Int) raises:
+        self.jobs[task].run()
+
+    def execute_all(mut self) raises:
+        run_jobs(self.jobs)
+
+    def release(mut self):
+        """Free the workers' shared cursor and top-N boundary; idempotent,
+        for a run that failed before its finish."""
+        if self.released:
+            return
+        self.released = True
+        self.cursor.free()
+        self.boundary.free()
+
+
+def begin_pipeline(
     frame: DataFrame,
     given_steps: List[Step],
     joins: ArcPointer[List[DataFrame]],
@@ -2906,8 +3038,6 @@ def _run_pipeline(
     ordered: Bool,
     workers: Int,
     batch_size: Int,
-    mut counts: List[Int],
-    mut set_frames: List[DataFrame],
     sets: List[List[Int]],
     top: Int,
     top_names: List[String],
@@ -2920,12 +3050,11 @@ def _run_pipeline(
     table: Bool,
     set_masks: List[List[Int64]],
     finish_steps: List[Step],
-    mut finish_counts: List[Int],
     pushed: List[PushedJoinFilter],
-) raises -> DataFrame:
-    """`run_pipeline`; `finish_counts` receives each finish step's input
-    and output rows when the aggregate table's finish ran them, and stays
-    empty otherwise."""
+) raises -> PipelineRun:
+    """`run_pipeline` up to its workers' jobs, not yet run: its execute
+    stage is the jobs, as `Pipeline::Schedule` makes one task per thread;
+    `finish_pipeline` is its finish."""
     trace_path("pipeline.run")
     # Every step's input columns and the output, typed once, and the
     # row-local steps compiled once for every worker. A late-materialized
@@ -3263,20 +3392,80 @@ def _run_pipeline(
         if step.kind == STEP_JOIN and join_emits_build_rows(step.how):
             for w in range(len(jobs)):
                 jobs[w].finishes = False
-    try:
-        run_jobs(jobs)
-        _emit_unmatched(jobs, steps, joins, indexes)
-    except e:
-        cursor.free()
-        boundary.free()
-        raise e
-    cursor.free()
-    boundary.free()
+    return PipelineRun(
+        jobs^,
+        cursor.copy(),
+        boundary,
+        frame.clear(),
+        steps^,
+        len(given_steps),
+        joins,
+        indexes,
+        expressions^,
+        keys.copy(),
+        ordered,
+        workers,
+        batch_size,
+        sets.copy(),
+        top,
+        top_names.copy(),
+        top_descending.copy(),
+        top_nulls_last.copy(),
+        top_maintain_order,
+        layout^,
+        template^,
+        set_empty^,
+        derived_from^,
+        schemas,
+        reduce_layout^,
+        collects,
+        ungrouped^,
+        finish_steps.copy(),
+    )
+
+
+def _finish_pipeline(
+    mut run: PipelineRun,
+    mut counts: List[Int],
+    mut set_frames: List[DataFrame],
+    mut finish_counts: List[Int],
+) raises -> DataFrame:
+    """The sink's result, after every execute task of `run`: the rows no
+    probe matched (`_emit_unmatched`), then the workers' sinks combined and
+    finished. `counts` and `set_frames` are `run_pipeline`'s; `finish_counts`
+    receives each finish step's input and output rows when the aggregate
+    table's finish ran them, and stays empty otherwise."""
+    ref jobs = run.jobs
+    ref steps = run.steps
+    ref joins = run.joins
+    ref indexes = run.indexes
+    ref expressions = run.expressions
+    ref keys = run.keys
+    var ordered = run.ordered
+    var batch_size = run.batch_size
+    ref sets = run.sets
+    var top = run.top
+    ref top_names = run.top_names
+    ref top_descending = run.top_descending
+    ref top_nulls_last = run.top_nulls_last
+    var top_maintain_order = run.top_maintain_order
+    ref layout = run.layout
+    ref template = run.template
+    ref set_empty = run.set_empty
+    ref derived_from = run.derived_from
+    ref schemas = run.schemas
+    ref reduce_layout = run.reduce_layout
+    var collects = run.collects
+    ref ungrouped = run.ungrouped
+    ref finish_steps = run.finish_steps
+    ref frame = run.frame
+    var planned = run.planned
+    _emit_unmatched(jobs, steps, joins, indexes)
+    run.release()
     counts = List[Int](length=3 * len(steps) + 1, fill=0)
     for j in range(len(jobs)):
         for i in range(len(counts)):
             counts[i] += jobs[j].counts[i]
-    var planned = len(given_steps)
     if len(steps) != planned:
         # The aggregate inputs' projection has no plan node: the counts
         # are the planned steps'.

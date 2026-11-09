@@ -21,11 +21,13 @@ complete event has finished (`Executor::ExecutionIsFinished`).
 
 The crew's threads and the caller take tasks from that queue until then
 (`Executor::WorkOnTasks`), so a pipeline never waits for another it does
-not depend on, and independent builds run at the same time. A thread
-with no task queued runs the jobs that running tasks post to the crew
-(`_Crew._help`): until every operator runs as a task of its pipeline, a
-task's own morsels still run through `run_jobs`. The workers themselves
-are posted so that only idle crew threads join them (`_UNHELPABLE`).
+not depend on, and independent builds run at the same time. A pipeline
+says how many tasks its execute event makes when that event schedules
+(`Pipeline::Schedule`): a stream's probe makes one per morsel worker. A
+thread with no task queued runs the jobs that running tasks post to the
+crew (`_Crew._help`): a build side's own plan still runs inside its one
+execute task. The workers themselves are posted so that only idle crew
+threads join them (`_UNHELPABLE`).
 """
 from std.atomic import Atomic
 from std.ffi import external_call
@@ -62,9 +64,16 @@ trait SchedulablePipeline(Deinitable, Movable):
         """`PipelineInitializeTask`: reset the sink."""
         ...
 
-    def execute_tasks(self) -> Int:
-        """How many tasks `Pipeline::Schedule` makes for the execute
-        event (at least one)."""
+    def max_execute_tasks(self) -> Int:
+        """The most execute tasks `execute_tasks` can make, known before
+        any event runs: the queue is sized from it."""
+        ...
+
+    def execute_tasks(mut self) raises -> Int:
+        """`Pipeline::Schedule`, called when the execute event is
+        scheduled (its dependencies complete): set up the source and
+        operators, and say how many tasks to make (at least one, at most
+        `max_execute_tasks`)."""
         ...
 
     def execute(mut self, task: Int) raises:
@@ -256,15 +265,16 @@ struct _Executor[P: SchedulablePipeline](Movable):
             self.pipeline.append(s.pipeline)
             self.parents.append(List[Int]())
             self.total_dependencies.append(len(s.dependencies))
-            var tasks = 0
-            if s.type == STAGE_EXECUTE:
-                tasks = max(1, pipelines[s.pipeline].execute_tasks())
-            elif s.type != STAGE_COMPLETE:
-                # Initialize, prepare finish and finish each make one task;
-                # complete makes none and finishes when scheduled.
-                tasks = 1
+            # The execute event learns its count when it schedules
+            # (`Pipeline::Schedule`); here it reserves its most. Initialize,
+            # prepare finish and finish each make one task; complete makes
+            # none and finishes when scheduled.
+            var tasks = 0 if s.type == STAGE_COMPLETE else 1
             self.total_tasks.append(tasks)
-            capacity += tasks
+            if s.type == STAGE_EXECUTE:
+                capacity += max(1, pipelines[s.pipeline].max_execute_tasks())
+            else:
+                capacity += tasks
         # `Event::AddDependency`: the dependency learns its parent.
         for e in range(len(stages)):
             for d in stages[e].dependencies:
@@ -302,6 +312,16 @@ struct _Executor[P: SchedulablePipeline](Movable):
         """`Event::Schedule` then `SetTasks`; an event without tasks
         finishes now (`AutoFinishWithoutTasks`)."""
         var tasks = self.total_tasks[event]
+        if self.stage[event] == STAGE_EXECUTE:
+            ref pipeline = self._pipelines()[self.pipeline[event]]
+            try:
+                tasks = max(1, pipeline.execute_tasks())
+                if tasks > max(1, pipeline.max_execute_tasks()):
+                    raise Error("more execute tasks than max_execute_tasks")
+            except e:
+                self._fail(e)
+                return
+            self.total_tasks[event] = tasks
         if tasks == 0:
             self._finish(event)
             return
@@ -363,13 +383,16 @@ struct _Executor[P: SchedulablePipeline](Movable):
             else:
                 pipeline.finalize()
         except e:
-            # `Executor::PushError`: the first error is the query's; the
-            # failed event never finishes, so every worker stops.
-            var none = Int64(0)
-            if self.failed.compare_exchange(none, Int64(1)):
-                self.error = String(e)
+            self._fail(e)
             return
         self._finish_task(event)
+
+    def _fail(mut self, e: Error):
+        """`Executor::PushError`: the first error is the query's; the
+        failed event never finishes, so every worker stops."""
+        var none = Int64(0)
+        if self.failed.compare_exchange(none, Int64(1)):
+            self.error = String(e)
 
     def work_on_tasks(mut self):
         """`Executor::WorkOnTasks` until the schedule is done. With no
@@ -424,7 +447,7 @@ def run_pipelines[
     # tasks, within the thread count.
     var width = 0
     for p in range(len(pipelines)):
-        width += max(1, pipelines[p].execute_tasks())
+        width += max(1, pipelines[p].max_execute_tasks())
     var threads = min(width, configured_workers()) if parallel else 1
     if threads <= 1:
         executor.work_on_tasks()

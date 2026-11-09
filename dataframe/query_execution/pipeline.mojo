@@ -111,7 +111,9 @@ from dataframe.pipeline import (
     _ensure_zones,
     _range_key,
     _window_bounds,
-    run_pipeline,
+    PipelineRun,
+    begin_pipeline,
+    finish_pipeline,
 )
 from dataframe.planning.context import (
     FinishAbove,
@@ -361,7 +363,14 @@ def plan_stream_execute(
         )
     )
     pipelines[count].probe[0].siblings = Int(Pointer(to=pipelines))
-    run_pipelines(pipelines, metas, parallel=not self._report)
+    try:
+        run_pipelines(pipelines, metas, parallel=not self._report)
+    except e:
+        # A failed schedule never reaches the probe's finish.
+        ref started = pipelines[count].probe[0].started
+        if len(started) > 0 and len(started[0].piped) > 0:
+            started[0].piped[0].run.release()
+        raise e^
     var result = Optional[DataFrame]()
     swap(result, pipelines[count].probe[0].result)
     return result^
@@ -402,6 +411,7 @@ struct _StreamProbe(Movable):
     # The caller's List[_StreamPipeline]; its first `len(wanted)` hold
     # the inputs, this probe after them.
     var siblings: Int
+    var started: List[_ProbeStart]
     var result: Optional[DataFrame]
 
     def __init__(
@@ -425,17 +435,20 @@ struct _StreamProbe(Movable):
         self.keys = keys^
         self.hows = hows^
         self.siblings = 0
+        self.started = List[_ProbeStart]()
         self.result = None
 
-    def run(mut self) raises:
+    def tasks(mut self) raises -> Int:
+        """`Pipeline::Schedule`, every input complete: its results in the
+        memo (written by this one thread), the probe set up, and a task
+        per morsel worker. An execution report runs them as one task (its
+        schedule is on one thread), the workers within it as jobs."""
         ref plan = Pointer[QueryContext, MutAnyOrigin](
             unsafe_from_address=self.plan
         )[]
         ref pipelines = Pointer[List[_StreamPipeline], MutAnyOrigin](
             unsafe_from_address=self.siblings
         )[]
-        # Every input has completed: the memo is written by one thread,
-        # the plan's `_execute` calls below take from it.
         var ahead = plan._prefetched.value()
         for k in range(len(self.wanted)):
             ref job = pipelines[k].input[0]
@@ -446,9 +459,36 @@ struct _StreamProbe(Movable):
                 ] = _ReadyIndex(
                     self.keys[k], self.hows[k], job.built.value().copy()
                 )
-        self.result = _stream_probe(
-            plan, self.index, self.batch_size, self.sink, self.head.pop(0)
+        self.started.append(
+            _probe_start(
+                plan, self.index, self.batch_size, self.sink, self.head.pop(0)
+            )
         )
+        if len(self.started[0].piped) == 0 or plan._report:
+            return 1
+        return self.started[0].piped[0].run.tasks()
+
+    def execute(mut self, task: Int) raises:
+        if len(self.started[0].piped) == 0:
+            return
+        if Pointer[QueryContext, MutAnyOrigin](
+            unsafe_from_address=self.plan
+        )[]._report:
+            self.started[0].piped[0].run.execute_all()
+        else:
+            self.started[0].piped[0].run.execute(task)
+
+    def finalize(mut self) raises:
+        ref started = self.started[0]
+        if len(started.piped) > 0:
+            self.result = _probe_finish(
+                Pointer[QueryContext, MutAnyOrigin](
+                    unsafe_from_address=self.plan
+                )[],
+                started.piped[0],
+            )
+        else:
+            swap(self.result, started.result)
 
 
 struct _StreamPipeline(SchedulablePipeline):
@@ -470,12 +510,15 @@ struct _StreamPipeline(SchedulablePipeline):
     def initialize(mut self) raises:
         pass
 
-    def execute_tasks(self) -> Int:
-        return 1
+    def max_execute_tasks(self) -> Int:
+        return configured_workers() if len(self.probe) > 0 else 1
+
+    def execute_tasks(mut self) raises -> Int:
+        return self.probe[0].tasks() if len(self.probe) > 0 else 1
 
     def execute(mut self, task: Int) raises:
         if len(self.probe) > 0:
-            self.probe[0].run()
+            self.probe[0].execute(task)
         else:
             self.input[0].execute(task)
 
@@ -483,18 +526,22 @@ struct _StreamPipeline(SchedulablePipeline):
         pass
 
     def finalize(mut self) raises:
-        if len(self.input) > 0:
+        if len(self.probe) > 0:
+            self.probe[0].finalize()
+        else:
             self.input[0].finalize()
 
 
-def _stream_probe(
+def _probe_start(
     self: QueryContext,
     index: Int,
     batch_size: Int,
     sink: Int,
     var head: _StreamHead,
-) raises -> Optional[DataFrame]:
-    """The stream's probe pipeline, once its inputs are done."""
+) raises -> _ProbeStart:
+    """The stream's probe pipeline set up, once its inputs are done
+    (`Pipeline::Schedule`): its morsel workers, not yet run, or its
+    result when it ran here (a batch stream, or no pipeline at all)."""
     var cursor = head.cursor
     var expressions = head.expressions.copy()
     var keys = head.keys.copy()
@@ -551,18 +598,22 @@ def _stream_probe(
             plan._finish_above = Optional(finish)
             var aggregated = plan._execute(first, False, True, batch_size)
             if finish[].applied:
-                return aggregated^
+                return _ProbeStart(aggregated^)
             plan._finish_above = None
             plan._frames.append(aggregated^)
             plan._schemas.append(Optional[CsvSchema]())
             plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
-            return _stream_after_materialization(plan, index, batch_size, sink)
+            return _ProbeStart(
+                _stream_after_materialization(plan, index, batch_size, sink)
+            )
         var computed = self._execute(first, False, True, batch_size)
         var plan = self.copy()
         plan._frames.append(computed^)
         plan._schemas.append(Optional[CsvSchema]())
         plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
-        return _stream_after_materialization(plan, index, batch_size, sink)
+        return _ProbeStart(
+            _stream_after_materialization(plan, index, batch_size, sink)
+        )
     while cursor >= 0:
         ref node = self._nodes[cursor]
         if _stream_rows(node):
@@ -604,8 +655,8 @@ def _stream_probe(
                     slot=len(plan._frames) - 1
                 )
                 trace_path("stream.empty_build")
-                return _stream_after_materialization(
-                    plan, index, batch_size, sink
+                return _ProbeStart(
+                    _stream_after_materialization(plan, index, batch_size, sink)
                 )
             # The index a prefetch made with this build, if any.
             var ready = Optional[_ReadyIndex]()
@@ -663,13 +714,13 @@ def _stream_probe(
             break
         cursor = node.left
     if cursor < 0 or cursor == index and not _is_scan(self._nodes[cursor].kind):
-        return None
+        return _ProbeStart(None)
     if cursor == index and self._nodes[cursor].kind == SCAN_FRAME:
         # The frame itself, with nothing to apply: batches would only
         # copy it into chunks that the eager step above rechunks
         # again (ClickBench q16 over 10M in-memory rows, 275 -> 181
         # ms).
-        return None
+        return _ProbeStart(None)
     if (
         len(expressions) == 0
         and top < 0
@@ -685,7 +736,7 @@ def _stream_probe(
         # together, while the eager steps share the columns they do
         # not touch (ClickBench q18 adds a minute column to 10M rows
         # before a 4.9M-group aggregation).
-        return None
+        return _ProbeStart(None)
     operations.reverse()
     operation_nodes.reverse()
     var distinct = _counts_distinct(expressions)
@@ -729,7 +780,7 @@ def _stream_probe(
     )
     if decision.is_eager():
         trace_decision(decision)
-        return None
+        return _ProbeStart(None)
     if top >= 0:
         operations.append(self._nodes[top_node].copy())
         operation_nodes.append(top_node)
@@ -781,7 +832,7 @@ def _stream_probe(
             _scan_options(source),
         )
         if not opened:
-            return None
+            return _ProbeStart(None)
         csv.append(opened.take())
     elif source.kind == SCAN_PARQUET:
         var groups = Optional[List[Int]]()
@@ -845,7 +896,7 @@ def _stream_probe(
         input = self._execute(cursor, False, True, batch_size)
     trace_decision(decision)
     if decision.is_eager():
-        return None
+        return _ProbeStart(None)
     var workers = configured_workers()
     var pool = Pool(1)
     var pool_ready = False
@@ -1063,7 +1114,7 @@ def _stream_probe(
             pushed = self._pushed_filters.value()[].filters.copy()
         for n in finish_nodes:
             finish_operations.append(self._nodes[n].copy())
-        var piped_result = run_pipeline(
+        var run = begin_pipeline(
             pipe_input,
             _steps_of(step_nodes),
             shared_joins,
@@ -1073,8 +1124,6 @@ def _stream_probe(
             ordered,
             workers,
             batch_size,
-            piped_counts,
-            set_frames,
             sets=set_indices,
             top=top,
             top_names=top_names,
@@ -1088,79 +1137,31 @@ def _stream_probe(
             finish_steps=_steps_of(finish_operations),
             pushed=pushed,
         )
-        if finish:
-            finish.value()[].applied = True
-        if grouping:
-            if len(set_frames) != len(set_indices):
-                return None
-            # The empty frame through the steps types the keys a set
-            # leaves null.
-            var dtypes = List[DataType]()
-            for name in terminal.names:
-                if name in keys:
-                    dtypes.append(piped_result.column(name).dtype())
-                else:
-                    dtypes.append(DataType.INT64)
-            var parts = List[DataFrame](capacity=len(set_frames))
-            var members = _set_members(terminal)
-            for k in range(len(set_frames)):
-                parts.append(
-                    _set_rows(
-                        terminal, set_frames[k].copy(), members[k], dtypes
-                    )
-                )
-            piped_result = concat(parts)
-        if top > 0:
-            piped_result = piped_result.slice(skip, limit)
-        if late_operations:
-            piped_result = late_fetch(
-                input, piped_result, late_operations.value()
+        return _ProbeStart(
+            _PipedProbe(
+                run^,
+                piped_counts^,
+                set_frames^,
+                finish,
+                grouping,
+                set_indices^,
+                index,
+                keys.copy(),
+                expressions.copy(),
+                top,
+                skip,
+                limit,
+                late_operations^,
+                input^,
+                counting,
+                cursor,
+                step_count,
+                operation_nodes.copy(),
+                top_node,
+                began,
+                finish_nodes^,
             )
-        if counting:
-            plan_record(self, cursor, "pipeline", 0, piped_counts[0])
-            var into_terminal = piped_counts[0]
-            for k in range(step_count):
-                plan_record(
-                    self,
-                    operation_nodes[k],
-                    "pipeline",
-                    piped_counts[2 * k + 1],
-                    piped_counts[2 * k + 2],
-                    busy_ns=piped_counts[2 * step_count + 1 + k],
-                )
-                into_terminal = piped_counts[2 * k + 2]
-            if top > 0:
-                plan_record(
-                    self,
-                    top_node,
-                    "pipeline",
-                    into_terminal,
-                    piped_result.height(),
-                )
-            var wall = Int(perf_counter_ns()) - began
-            if index != cursor and (index not in operation_nodes):
-                plan_record(
-                    self,
-                    index,
-                    "pipeline",
-                    into_terminal,
-                    piped_result.height(),
-                    wall_ns=wall,
-                )
-            else:
-                plan_record(
-                    self, index, "pipeline", 0, 0, executions=0, wall_ns=wall
-                )
-            var base = 3 * step_count + 1
-            for k in range(len(finish_nodes)):
-                plan_record(
-                    self,
-                    finish_nodes[k],
-                    "pipeline",
-                    piped_counts[base + 2 * k],
-                    piped_counts[base + 2 * k + 1],
-                )
-        return piped_result^
+        )
     var per_round = workers
     # Batches held while undecided, to reduce in the next round once
     # the stream decides not to collect.
@@ -1524,7 +1525,217 @@ def _stream_probe(
                 executions=0,
                 wall_ns=stream_wall,
             )
-    return result^
+    return _ProbeStart(result^)
+
+
+def _probe_finish(
+    self: QueryContext, mut piped: _PipedProbe
+) raises -> Optional[DataFrame]:
+    """The probe pipeline's result, its execute tasks done (`Sink::Finalize`
+    and the plan's bookkeeping after it)."""
+    var index = piped.index
+    ref terminal = self._nodes[index]
+    ref piped_counts = piped.counts
+    ref set_frames = piped.set_frames
+    ref finish = piped.finish
+    var grouping = piped.grouping
+    ref set_indices = piped.set_indices
+    ref keys = piped.keys
+    ref expressions = piped.expressions
+    var top = piped.top
+    var skip = piped.skip
+    var limit = piped.limit
+    ref late_operations = piped.late_operations
+    ref input = piped.input
+    var counting = piped.counting
+    var cursor = piped.cursor
+    var step_count = piped.step_count
+    ref operation_nodes = piped.operation_nodes
+    var top_node = piped.top_node
+    var began = piped.began
+    ref finish_nodes = piped.finish_nodes
+    var piped_result = finish_pipeline(piped.run, piped_counts, set_frames)
+    if finish:
+        finish.value()[].applied = True
+    if grouping:
+        if len(set_frames) != len(set_indices):
+            return None
+        # The empty frame through the steps types the keys a set
+        # leaves null.
+        var dtypes = List[DataType]()
+        for name in terminal.names:
+            if name in keys:
+                dtypes.append(piped_result.column(name).dtype())
+            else:
+                dtypes.append(DataType.INT64)
+        var parts = List[DataFrame](capacity=len(set_frames))
+        var members = _set_members(terminal)
+        for k in range(len(set_frames)):
+            parts.append(
+                _set_rows(terminal, set_frames[k].copy(), members[k], dtypes)
+            )
+        piped_result = concat(parts)
+    if top > 0:
+        piped_result = piped_result.slice(skip, limit)
+    if late_operations:
+        piped_result = late_fetch(input, piped_result, late_operations.value())
+    if counting:
+        plan_record(self, cursor, "pipeline", 0, piped_counts[0])
+        var into_terminal = piped_counts[0]
+        for k in range(step_count):
+            plan_record(
+                self,
+                operation_nodes[k],
+                "pipeline",
+                piped_counts[2 * k + 1],
+                piped_counts[2 * k + 2],
+                busy_ns=piped_counts[2 * step_count + 1 + k],
+            )
+            into_terminal = piped_counts[2 * k + 2]
+        if top > 0:
+            plan_record(
+                self,
+                top_node,
+                "pipeline",
+                into_terminal,
+                piped_result.height(),
+            )
+        var wall = Int(perf_counter_ns()) - began
+        if index != cursor and (index not in operation_nodes):
+            plan_record(
+                self,
+                index,
+                "pipeline",
+                into_terminal,
+                piped_result.height(),
+                wall_ns=wall,
+            )
+        else:
+            plan_record(
+                self, index, "pipeline", 0, 0, executions=0, wall_ns=wall
+            )
+        var base = 3 * step_count + 1
+        for k in range(len(finish_nodes)):
+            plan_record(
+                self,
+                finish_nodes[k],
+                "pipeline",
+                piped_counts[base + 2 * k],
+                piped_counts[base + 2 * k + 1],
+            )
+    return piped_result^
+
+
+def _stream_probe(
+    self: QueryContext,
+    index: Int,
+    batch_size: Int,
+    sink: Int,
+    var head: _StreamHead,
+) raises -> Optional[DataFrame]:
+    """The stream's probe pipeline, run on the calling thread's own
+    schedule: no input ahead of it, so its workers run as `run_jobs`."""
+    var start = _probe_start(self, index, batch_size, sink, head^)
+    if len(start.piped) == 0:
+        var result = Optional[DataFrame]()
+        swap(result, start.result)
+        return result^
+    ref piped = start.piped[0]
+    try:
+        piped.run.execute_all()
+    except e:
+        piped.run.release()
+        raise e^
+    return _probe_finish(self, piped)
+
+
+struct _PipedProbe(Movable):
+    """A probe set up as a morsel pipeline (`begin_pipeline`): what its
+    finish reads."""
+
+    var run: PipelineRun
+    var counts: List[Int]
+    var set_frames: List[DataFrame]
+    var finish: Optional[ArcPointer[FinishAbove]]
+    var grouping: Bool
+    var set_indices: List[List[Int]]
+    var index: Int
+    var keys: List[String]
+    var expressions: List[Expr]
+    var top: Int
+    var skip: Int
+    var limit: Int
+    var late_operations: Optional[List[PlanNode]]
+    var input: DataFrame
+    var counting: Bool
+    var cursor: Int
+    var step_count: Int
+    var operation_nodes: List[Int]
+    var top_node: Int
+    var began: Int
+    var finish_nodes: List[Int]
+
+    def __init__(
+        out self,
+        var run: PipelineRun,
+        var counts: List[Int],
+        var set_frames: List[DataFrame],
+        var finish: Optional[ArcPointer[FinishAbove]],
+        grouping: Bool,
+        var set_indices: List[List[Int]],
+        index: Int,
+        var keys: List[String],
+        var expressions: List[Expr],
+        top: Int,
+        skip: Int,
+        limit: Int,
+        var late_operations: Optional[List[PlanNode]],
+        var input: DataFrame,
+        counting: Bool,
+        cursor: Int,
+        step_count: Int,
+        var operation_nodes: List[Int],
+        top_node: Int,
+        began: Int,
+        var finish_nodes: List[Int],
+    ):
+        self.run = run^
+        self.counts = counts^
+        self.set_frames = set_frames^
+        self.finish = finish^
+        self.grouping = grouping
+        self.set_indices = set_indices^
+        self.index = index
+        self.keys = keys^
+        self.expressions = expressions^
+        self.top = top
+        self.skip = skip
+        self.limit = limit
+        self.late_operations = late_operations^
+        self.input = input^
+        self.counting = counting
+        self.cursor = cursor
+        self.step_count = step_count
+        self.operation_nodes = operation_nodes^
+        self.top_node = top_node
+        self.began = began
+        self.finish_nodes = finish_nodes^
+
+
+struct _ProbeStart(Movable):
+    """`_probe_start`'s answer: the result, or a probe set up to run."""
+
+    var result: Optional[DataFrame]
+    var piped: List[_PipedProbe]
+
+    def __init__(out self, var result: Optional[DataFrame]):
+        self.result = result^
+        self.piped = List[_PipedProbe]()
+
+    def __init__(out self, var piped: _PipedProbe):
+        self.result = None
+        self.piped = List[_PipedProbe]()
+        self.piped.append(piped^)
 
 
 def _row_steps_above(
