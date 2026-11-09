@@ -25,6 +25,9 @@ from .region_plan import normalize_region
 from .logical_plan import plan_logical, logical_key, finish_logical
 from .ordered_plan import plan_ordered, ordered_key
 from .ordered_reduce import execute_ordered
+from .distinct_plan import plan_distinct, distinct_key
+from .distinct_properties import cardinality_key
+from .distinct_reduce import execute_distinct
 from .cross_sum import reduce_cross
 from .multi_plan import plan_bundle, bundle_key
 from .multi_reduce import execute_bundle
@@ -69,7 +72,7 @@ def supports(region: LazyFrame) -> Bool:
     comptime if not METAL_TARGET:
         return False
     try:
-        if plan_ordered(region):
+        if Bool(plan_distinct(region)) or Bool(plan_ordered(region)):
             return True
         var logical = plan_logical(region)
         if logical:
@@ -111,6 +114,17 @@ def operator_key(plan: FilterSum) -> String:
 
 def region_key(region: LazyFrame) raises -> String:
     """Schema-only operator identity shared by placement and capture."""
+    var distinct = plan_distinct(region)
+    if distinct:
+        ref frame = region._plan._frames[region._plan._nodes[0].source_slot()]
+        var key = distinct_key(distinct.value()) + cardinality_key(
+            distinct.value(), frame
+        )
+        if distinct.value().keys:
+            key += sample_group_tuples(
+                frame, distinct.value().keys.value().names
+            ).key()
+        return key^
     var ordered = plan_ordered(region)
     if ordered:
         var key = ordered_key(ordered.value())
@@ -189,6 +203,11 @@ def estimate_costs(
         var key = layout_key(region)
         if not key:
             return (String(), Float64(-1), Float64(-1))
+        if (
+            key.startswith("distinct_reductions:v1:")
+            and ":distinct_cardinality=uncertain" in key
+        ):
+            return (key^, Float64(-1), Float64(-1))
         var costs = measured_costs(key, rows)
         return (key^, costs[0], costs[1])
     except:
@@ -560,6 +579,8 @@ def execute_timed(
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
+        if plan_distinct(region):
+            return execute_distinct(region, zero_copy)
         if plan_ordered(region):
             return execute_ordered(region, zero_copy)
         var logical = plan_logical(region)
