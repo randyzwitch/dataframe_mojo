@@ -80,7 +80,7 @@ def run_check[D: DType](nullable: Bool, direct: Bool) raises:
                     == 0 else abs(value) * 2
                 )
                 var index = block * 2 + field
-                sums[index] += result
+                sums[index] += Int128(result)
                 counts[index] += 1
                 least[index] = min(least[index], result)
                 greatest[index] = max(greatest[index], result)
