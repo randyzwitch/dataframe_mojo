@@ -355,7 +355,7 @@ def test_joins_over_tables_with_statistics_match_the_written_order() raises:
 def test_join_estimates_follow_duckdbs_relation_statistics() raises:
     # DuckDB's estimate of a join (`RelationStatisticsHelper`): a left,
     # right or full join yields its larger input's rows, a semi or anti
-    # join its left input's, and an inner join both inputs' rows over the
+    # join a fifth of its left input's, and an inner join both inputs' rows over the
     # keys' total domain, here the products' rows (no table statistics:
     # each key counts its relation's rows, and the smaller one bounds).
     var t = tables()
