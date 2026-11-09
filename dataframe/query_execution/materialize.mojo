@@ -419,8 +419,11 @@ def plan_schedule_inputs(
             probe = step.left
         else:
             break
+    # With no build to overlap, the stream runs its source itself, where
+    # an aggregate's finish can take the steps above it (`FinishAbove`).
     if (
-        probe >= 0
+        len(inputs.wanted) > 0
+        and probe >= 0
         and probe != top
         and plan_ends_in_breaker(self, probe)
         and probe not in ahead[]

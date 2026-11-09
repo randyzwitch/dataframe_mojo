@@ -4,8 +4,9 @@ pipeline_initialize_event.cpp, pipeline_event.cpp,
 pipeline_prepare_finish_event.cpp, pipeline_finish_event.cpp,
 pipeline_complete_event.cpp).
 
-A query's independent pipelines -- the build sides of a stream's joins,
-the inputs of an eager join, shared subplans -- are scheduled as DuckDB
+A query's independent pipelines -- the build sides of a stream's joins
+and the probe that depends on them, the inputs of an eager join, shared
+subplans -- are scheduled as DuckDB
 schedules its MetaPipelines (`BuildPipelineSchedule`). Each pipeline
 becomes five events: initialize, execute, prepare finish, finish and
 complete, each depending on the one before. A pipeline that depends on
@@ -83,7 +84,7 @@ struct MetaPipeline(Copyable, Movable):
     """One MetaPipeline of a schedule, holding one pipeline (its base).
 
     `parent` names the MetaPipeline whose pipeline reads this one's sink
-    (-1 for the caller's own pipeline, which runs after the schedule);
+    (-1 for one no pipeline of this schedule reads);
     JOIN_BUILD children of one parent are siblings. `dependencies` are the
     pipelines (by index) that must complete before this one executes
     (`Pipeline::GetDependencies`)."""
