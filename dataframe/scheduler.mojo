@@ -32,6 +32,7 @@ threads join them (`_UNHELPABLE`).
 from std.atomic import Atomic
 from std.ffi import external_call
 from std.memory import Pointer
+from std.time import perf_counter_ns
 
 from dataframe.parallel import (
     Job,
@@ -247,6 +248,9 @@ struct _Executor[P: SchedulablePipeline](Movable):
     var completed_pipelines: Atomic[Int64]
     var failed: Atomic[Int64]
     var error: String
+    # When the schedule began: orders it against schedules nested in its
+    # tasks for `_Crew._help`.
+    var stamp: Int
 
     def __init__(
         out self,
@@ -288,6 +292,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
         self.completed_pipelines = Atomic[Int64](0)
         self.failed = Atomic[Int64](0)
         self.error = String()
+        self.stamp = Int(perf_counter_ns())
 
     def _pipelines(self) -> ref[MutAnyOrigin] List[Self.P]:
         return Pointer[List[Self.P], MutAnyOrigin](
@@ -406,7 +411,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
             var crew = Int(_current_crew().load())
             if crew == 0 or not Pointer[_Crew, MutAnyOrigin](
                 unsafe_from_address=crew
-            )[]._help(-1):
+            )[]._help(-1, self.stamp):
                 _ = external_call["sched_yield", Int32]()
 
 
@@ -458,7 +463,7 @@ def run_pipelines[
             workers.append(_EventWorker[P](address))
         # Posted for idle crew threads only: a thread waiting inside one
         # of these tasks must not take a worker that waits for that task.
-        _run_jobs(workers, Int.MAX, helpable=False)
+        _run_jobs(workers, Int.MAX, helpable=False, schedule=executor.stamp)
     if executor.failed.load() != 0:
         raise Error(executor.error)
     if executor.completed_pipelines.load() < Int64(len(pipelines)):

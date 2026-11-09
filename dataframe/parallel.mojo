@@ -705,6 +705,8 @@ struct _Claims(Movable):
     var next: Atomic[Int64]
     # Jobs finished, for a caller that waits on crew threads (`_Crew`).
     var done: Atomic[Int64]
+    # An unhelpable posting's schedule stamp (`_Crew._help`), 0 for others.
+    var schedule: Int
 
     def __init__(out self, slots: Int, stride: Int, count: Int, entry: Int):
         self.slots = slots
@@ -713,6 +715,7 @@ struct _Claims(Movable):
         self.entry = entry
         self.next = Atomic[Int64](0)
         self.done = Atomic[Int64](0)
+        self.schedule = 0
 
     def run(mut self):
         var entry = Pointer(to=self.entry).unsafe_bitcast[_Entry]()[]
@@ -932,7 +935,7 @@ struct _Crew(Movable):
                 _ = external_call["sched_yield", Int32]()
         self._claims(p).store(0)
 
-    def _help(mut self, own: Int) -> Bool:
+    def _help(mut self, own: Int, schedule: Int = -1) -> Bool:
         """Join another posting that still wants a helper and run its
         jobs: True when it ran some. A caller whose own jobs are taken
         waits for the threads running them, and the jobs those threads
@@ -942,13 +945,22 @@ struct _Crew(Movable):
         without a budget slot (`_reserve_helpers`): the threads running
         jobs stay at the budget plus the callers. A posting it joins was
         made by a job that does not wait on its own caller, so no wait
-        cycle forms."""
+        cycle forms.
+
+        An unhelpable posting (a schedule's workers, which wait for the
+        whole schedule) is joined only by a thread between tasks of a
+        schedule stamped earlier (`schedule`, -1 for any waiting caller):
+        a schedule nested in a task of this one, or one running beside
+        it. Never an older one, which may be waiting on this one's
+        caller; holding a nested schedule's workers back from every
+        thread running the outer one left the nested schedule on its
+        caller alone (TPC-DS, 1.22x)."""
         for q in range(_POSTINGS):
             if q == own:
                 continue
             var state = self._state(q).load()
             while (state >> 32) > 0:
-                if self._claims(q).load() & _UNHELPABLE != 0:
+                if not self._may_help(self._claims(q).load(), schedule):
                     break
                 if not self._state(q).compare_exchange(
                     state, state - (Int64(1) << 32) + 1
@@ -958,7 +970,7 @@ struct _Crew(Movable):
                 # Joined, the posting stays put: read its list again, as
                 # the slot may have been reposted since the check above.
                 var claims = self._claims(q).load()
-                if claims & _UNHELPABLE != 0:
+                if not self._may_help(claims, schedule):
                     while True:
                         var now = self._state(q).load()
                         var back = now - 1
@@ -968,11 +980,28 @@ struct _Crew(Movable):
                             break
                     break
                 Pointer[_Claims, MutAnyOrigin](
-                    unsafe_from_address=Int(claims)
+                    unsafe_from_address=Int(claims & ~_UNHELPABLE)
                 )[].run()
                 _ = self._state(q).fetch_sub(1)
                 return True
         return False
+
+    @staticmethod
+    def _may_help(claims: Int64, schedule: Int) -> Bool:
+        """Whether a thread helping at `schedule` may join a posting: any
+        helpable one, or a schedule's workers stamped after `schedule`."""
+        if claims == 0:
+            return False
+        if claims & _UNHELPABLE == 0:
+            return True
+        if schedule < 0:
+            return False
+        return (
+            Pointer[_Claims, MutAnyOrigin](
+                unsafe_from_address=Int(claims & ~_UNHELPABLE)
+            )[].schedule
+            > schedule
+        )
 
 
 def _crew_spawner(address: Int) abi("C") -> Int:
@@ -1177,7 +1206,11 @@ struct Crew(Movable):
 def _run_on_crew[
     J: Job
 ](
-    mut slots: List[_Slot[J]], entry: Int, threads: Int, helpable: Bool = True
+    mut slots: List[_Slot[J]],
+    entry: Int,
+    threads: Int,
+    helpable: Bool = True,
+    schedule: Int = 0,
 ) -> Bool:
     """Run every slot with crew threads and the caller; False (nothing
     run) when no crew is running or every posting is taken. Crew threads
@@ -1196,6 +1229,7 @@ def _run_on_crew[
     var claims = _Claims(
         Int(slots.unsafe_ptr()), size_of[_Slot[J]](), len(slots), entry
     )
+    claims.schedule = schedule
     var claims_address = Int(Pointer(to=claims))
     var posted = claims_address
     if not helpable:
@@ -1225,7 +1259,9 @@ def run_jobs[J: Job](mut jobs: List[J]) raises:
 
 def _run_jobs[
     J: Job
-](mut jobs: List[J], limit: Int, helpable: Bool = True) raises:
+](
+    mut jobs: List[J], limit: Int, helpable: Bool = True, schedule: Int = 0
+) raises:
     """`run_jobs` on at most `limit` threads, the caller included. Jobs
     that wait on each other's work, as an executor's workers do, pass
     `helpable=False` (`_UNHELPABLE`)."""
@@ -1239,7 +1275,7 @@ def _run_jobs[
         var crew = Crew.start()
         if crew.address != 0:
             try:
-                _run_jobs(jobs, limit, helpable)
+                _run_jobs(jobs, limit, helpable, schedule)
             except e:
                 crew.release()
                 raise e^
@@ -1250,7 +1286,9 @@ def _run_jobs[
         slots.append(_Slot[J](jobs.pop(0)))
     var entry: _Entry = _entry[J]
     var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
-    if len(slots) > 1 and _run_on_crew(slots, entry_address, limit, helpable):
+    if len(slots) > 1 and _run_on_crew(
+        slots, entry_address, limit, helpable, schedule
+    ):
         for t in range(len(slots)):
             if slots[t].failed:
                 raise Error(slots[t].message)
