@@ -33,6 +33,17 @@ from std.memory import (
 )
 
 
+def _in_rows(dtype: DataType) -> Bool:
+    """Whether a build column's output is gathered from the rows
+    (`GatherRHS`); a Boolean, string or nested column is read from the
+    build frame by row number instead."""
+    return (
+        not dtype.is_nested()
+        and dtype.physical() != DataType.STRING
+        and dtype.physical() != DataType.BOOL
+    )
+
+
 def finish_build(
     mut built: DataFrame,
     keys: List[String],
@@ -77,11 +88,7 @@ def finish_build(
             # each row's number: a probe never copies its bytes (DuckDB's
             # gather copies a string_t; a column here cannot reference
             # the rows' heap).
-            if (
-                emits
-                and not column.dtype().is_nested()
-                and column.dtype().physical() != DataType.STRING
-            ):
+            if emits and _in_rows(column.dtype()):
                 payload.append(column.copy())
                 output_columns.append(len(keys) + len(payload) - 1)
                 output_names.append(column.name())
@@ -91,6 +98,8 @@ def finish_build(
         if not emits:
             continue
         if coalesce and how != JOIN_RIGHT_SEMI and how != JOIN_RIGHT_ANTI:
+            continue
+        if not _in_rows(column.dtype()):
             continue
         output_columns.append(key_at)
         output_names.append(column.name())
