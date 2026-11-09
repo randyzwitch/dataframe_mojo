@@ -23,6 +23,8 @@ from dataframe.series import Series
 from .filter_plan import FilterSum, plan_region
 from .region_plan import normalize_region
 from .logical_plan import plan_logical, logical_key, finish_logical
+from .ordered_plan import plan_ordered, ordered_key
+from .ordered_reduce import execute_ordered
 from .cross_sum import reduce_cross
 from .multi_plan import plan_bundle, bundle_key
 from .multi_reduce import execute_bundle
@@ -67,6 +69,8 @@ def supports(region: LazyFrame) -> Bool:
     comptime if not METAL_TARGET:
         return False
     try:
+        if plan_ordered(region):
+            return True
         var logical = plan_logical(region)
         if logical:
             return supports(logical.value().region)
@@ -107,6 +111,17 @@ def operator_key(plan: FilterSum) -> String:
 
 def region_key(region: LazyFrame) raises -> String:
     """Schema-only operator identity shared by placement and capture."""
+    var ordered = plan_ordered(region)
+    if ordered:
+        var key = ordered_key(ordered.value())
+        if ordered.value().keys:
+            ref frame = region._plan._frames[
+                region._plan._nodes[0].source_slot()
+            ]
+            key += sample_group_tuples(
+                frame, ordered.value().keys.value().names
+            ).key()
+        return key^
     var logical = plan_logical(region)
     if logical:
         var underlying = region_key(logical.value().region)
@@ -545,6 +560,8 @@ def execute_timed(
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
+        if plan_ordered(region):
+            return execute_ordered(region, zero_copy)
         var logical = plan_logical(region)
         if logical:
             var result = execute_timed(logical.value().region, zero_copy)
