@@ -1601,7 +1601,7 @@ struct _ChunkRunner(Movable):
         chunk, DuckDB's ScanStructure). An inner join leaves the build
         side a dictionary over the build's columns (`EmitDictVectors`); a
         left, full or right join gathers it (`GatherRHS`), and flags the
-        build rows it matched for `_emit_unmatched`, as a right-semi or
+        build rows it matched for `begin_round`, as a right-semi or
         right-anti join does without emitting anything. A step with no
         table (nested keys) or whose keys need dictionaries unified joins
         the morsel's frame eagerly."""
@@ -1669,7 +1669,7 @@ struct _ChunkRunner(Movable):
                                 UInt32(builds[unsafe_offset=k])
                             )
         if right_semi:
-            # A probe only flags build rows; `_emit_unmatched` emits them.
+            # A probe only flags build rows; `begin_round` emits them.
             return _Columns.of_frame(self.arena, output)
         if semi_or_anti:
             if len(probe_rows) == columns.height:
@@ -1967,7 +1967,7 @@ struct _PipelineJob(Job):
     # and derives its grouping sets): not before an outer join's
     # unmatched build rows have run.
     var finishes: Bool
-    # While an outer join's unmatched build rows run (`_emit_unmatched`):
+    # While an outer join's unmatched build rows run (`begin_round`):
     # that join's step (-1 otherwise) and the probe side's columns at the
     # step, empty. The frame is then the build, and each worker finds its
     # morsel's unmatched rows itself.
@@ -2540,70 +2540,6 @@ def _morsel_ranges(frame: DataFrame, workers: Int) -> List[Int]:
     return morsel_ranges(ends, max(1, workers))
 
 
-def _emit_unmatched(
-    mut jobs: List[_PipelineJob],
-    steps: List[Step],
-    joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[JoinHashTable]]],
-) raises:
-    """The build rows no morsel matched, for each right or full join step
-    in step order, as morsels of that step's output (the probe columns
-    null) through the steps after it and into the workers' sinks: Polars'
-    `emit_unmatched_build` (`EmitUnmatchedState`, polars-stream equi_join)
-    and the outer scan of DuckDB's `PhysicalHashJoin::GetData`, which
-    hands each thread its share of the rows. Every worker flagged the
-    rows its own morsels matched in the rows; each worker then takes
-    chunks of the table's rows, finds those no worker flagged and makes
-    their output rows (`_PipelineJob._unmatched`). The last round finishes the workers'
-    sinks."""
-    var next_morsel = len(jobs[0].ranges[]) // 2
-    var last = -1
-    for j in range(len(steps)):
-        if steps[j].kind == STEP_JOIN and (join_emits_build_rows(steps[j].how)):
-            last = j
-    if last < 0:
-        return
-    var source = jobs[0].frame[].clear()
-    for j in range(last + 1):
-        if steps[j].kind != STEP_JOIN or not join_emits_build_rows(
-            steps[j].how
-        ):
-            continue
-        ref build = joins[][steps[j].join]
-        # One morsel per chunk of the table's rows (ScanFullOuter).
-        var ranges = List[Int]()
-        for c in range(indexes[][steps[j].join].value().chunk_count()):
-            ranges.append(c)
-            ranges.append(1)
-        if len(ranges) == 0 and j != last:
-            continue
-        # The probe side's columns at this step: an empty source through
-        # the steps before it.
-        var empty = jobs[0].runner.schema(j)
-        # One more round of the workers over the build rows' morsels,
-        # each into its own sink; the last round also finishes them.
-        var cursor = _Cursor.new()
-        var shared_build = ArcPointer(build.copy())
-        var shared_ranges = ArcPointer(ranges^)
-        var shared_probe = ArcPointer(empty^)
-        for w in range(len(jobs)):
-            jobs[w].frame = shared_build
-            jobs[w].ranges = shared_ranges
-            jobs[w].cursor = cursor.address
-            jobs[w].first_step = j + 1
-            jobs[w].first_morsel = next_morsel
-            jobs[w].finishes = j == last
-            jobs[w].unmatched_step = j
-            jobs[w].unmatched_probe = shared_probe
-        next_morsel += len(shared_ranges[]) // 2
-        try:
-            run_jobs(jobs)
-        except e:
-            cursor.free()
-            raise e
-        cursor.free()
-
-
 def run_pipeline(
     frame: DataFrame,
     steps: List[Step],
@@ -2936,6 +2872,13 @@ struct PipelineRun(Movable):
     var ungrouped: List[ArcPointer[UngroupedLayout]]
     var finish_steps: List[Step]
     var released: Bool
+    # A right or full join's unmatched build rows (`begin_round`): the
+    # join steps that emit them, the next to run, the morsel number the
+    # next round's start from, and the running round's cursor.
+    var outer_steps: List[Int]
+    var next_round: Int
+    var next_morsel: Int
+    var round_cursor: Optional[_Cursor]
 
     def __init__(
         out self,
@@ -2997,6 +2940,15 @@ struct PipelineRun(Movable):
         self.ungrouped = ungrouped^
         self.finish_steps = finish_steps^
         self.released = False
+        self.outer_steps = List[Int]()
+        for j in range(len(self.steps)):
+            if self.steps[j].kind == STEP_JOIN and (
+                join_emits_build_rows(self.steps[j].how)
+            ):
+                self.outer_steps.append(j)
+        self.next_round = 0
+        self.next_morsel = len(self.jobs[0].ranges[]) // 2
+        self.round_cursor = None
 
     def tasks(self) -> Int:
         return len(self.jobs)
@@ -3007,12 +2959,63 @@ struct PipelineRun(Movable):
     def execute_all(mut self) raises:
         run_jobs(self.jobs)
 
+    def begin_round(mut self) raises -> Bool:
+        """The workers set to the next round of the rows no probe matched,
+        for the next right or full join step, as morsels of that step's
+        output (the probe columns null) through the steps after it into
+        the workers' sinks: Polars' `emit_unmatched_build` and the outer
+        scan of DuckDB's `PhysicalHashJoin::GetData`, which hands each
+        thread its share of the table's rows; a finish-group pipeline of
+        the probe's when scheduled. Every worker flagged the rows its own
+        morsels matched; each now takes chunks of the table's rows, finds
+        those no worker flagged and makes their output rows
+        (`_PipelineJob._unmatched`). The last round also finishes the
+        workers' sinks. False when no round is left."""
+        self.end_round()
+        while self.next_round < len(self.outer_steps):
+            var j = self.outer_steps[self.next_round]
+            var last = self.outer_steps[len(self.outer_steps) - 1]
+            self.next_round += 1
+            ref step = self.steps[j]
+            # One morsel per chunk of the table's rows (ScanFullOuter).
+            var ranges = List[Int]()
+            for c in range(self.indexes[][step.join].value().chunk_count()):
+                ranges.append(c)
+                ranges.append(1)
+            if len(ranges) == 0 and j != last:
+                continue
+            var cursor = _Cursor.new()
+            var shared_build = ArcPointer(self.joins[][step.join].copy())
+            var morsels = len(ranges) // 2
+            var shared_ranges = ArcPointer(ranges^)
+            var shared_probe = ArcPointer(self.jobs[0].runner.schema(j))
+            for w in range(len(self.jobs)):
+                ref job = self.jobs[w]
+                job.frame = shared_build
+                job.ranges = shared_ranges
+                job.cursor = cursor.address
+                job.first_step = j + 1
+                job.first_morsel = self.next_morsel
+                job.finishes = j == last
+                job.unmatched_step = j
+                job.unmatched_probe = shared_probe
+            self.next_morsel += morsels
+            self.round_cursor = cursor^
+            return True
+        return False
+
+    def end_round(mut self):
+        if self.round_cursor:
+            self.round_cursor.value().free()
+            self.round_cursor = None
+
     def release(mut self):
-        """Free the workers' shared cursor and top-N boundary; idempotent,
+        """Free the workers' shared cursors and top-N boundary; idempotent,
         for a run that failed before its finish."""
         if self.released:
             return
         self.released = True
+        self.end_round()
         self.cursor.free()
         self.boundary.free()
 
@@ -3042,7 +3045,7 @@ def begin_pipeline(
 ) raises -> PipelineRun:
     """`run_pipeline` up to its workers' jobs, not yet run: its execute
     stage is the jobs, as `Pipeline::Schedule` makes one task per thread;
-    `finish_pipeline` is its finish."""
+    `finish_pipeline` is its finish, after the rounds of `begin_round`."""
     trace_path("pipeline.run")
     # Every step's input columns and the output, typed once, and the
     # row-local steps compiled once for every worker. A late-materialized
@@ -3354,7 +3357,7 @@ def begin_pipeline(
         for w in range(len(jobs)):
             jobs[w].runner.scan = shared_scan
     # An outer join's unmatched build rows run after every morsel of the
-    # source (`_emit_unmatched`), and the workers finish after them.
+    # source (`begin_round`), and the workers finish after them.
     for step in steps:
         if step.kind == STEP_JOIN and join_emits_build_rows(step.how):
             for w in range(len(jobs)):
@@ -3398,7 +3401,7 @@ def _finish_pipeline(
     mut finish_counts: List[Int],
 ) raises -> DataFrame:
     """The sink's result, after every execute task of `run`: the rows no
-    probe matched (`_emit_unmatched`), then the workers' sinks combined and
+    probe matched (`begin_round`), then the workers' sinks combined and
     finished. `counts` and `set_frames` are `run_pipeline`'s; `finish_counts`
     receives each finish step's input and output rows when the aggregate
     table's finish ran them, and stays empty otherwise."""
@@ -3427,7 +3430,9 @@ def _finish_pipeline(
     ref finish_steps = run.finish_steps
     ref frame = run.frame
     var planned = run.planned
-    _emit_unmatched(jobs, steps, joins, indexes)
+    # The rounds no schedule ran (`begin_round`).
+    while run.begin_round():
+        run.execute_all()
     run.release()
     counts = List[Int](length=3 * len(steps) + 1, fill=0)
     for j in range(len(jobs)):

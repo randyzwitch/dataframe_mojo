@@ -97,21 +97,28 @@ struct MetaPipeline(Copyable, Movable):
     (-1 for one no pipeline of this schedule reads);
     JOIN_BUILD children of one parent are siblings. `dependencies` are the
     pipelines (by index) that must complete before this one executes
-    (`Pipeline::GetDependencies`)."""
+    (`Pipeline::GetDependencies`). `finish_group` names the pipeline
+    (of this MetaPipeline's group) whose execute this one's waits for
+    (-1: none), as DuckDB's right or full join scan follows its probe;
+    the group's base pipeline prepares its finish only after every
+    member executed (`MetaPipeline::AddFinishEvent`)."""
 
     var type: Int
     var parent: Int
     var dependencies: List[Int]
+    var finish_group: Int
 
     def __init__(
         out self,
         type: Int,
         parent: Int = -1,
         dependencies: List[Int] = List[Int](),
+        finish_group: Int = -1,
     ):
         self.type = type
         self.parent = parent
         self.dependencies = dependencies.copy()
+        self.finish_group = finish_group
 
 
 struct PipelineScheduleStage(Copyable, Movable):
@@ -162,6 +169,21 @@ def build_pipeline_schedule(
             stages[5 * p + STAGE_EXECUTE].dependencies.append(
                 5 * d + STAGE_COMPLETE
             )
+    # A finish group: each member executes after the one it names, and the
+    # group's base prepares its finish after every member executed.
+    for p in range(len(metas)):
+        var g = metas[p].finish_group
+        if g < 0:
+            continue
+        if g >= len(metas) or g == p:
+            raise Error("pipeline finish group out of range")
+        stages[5 * p + STAGE_EXECUTE].dependencies.append(5 * g + STAGE_EXECUTE)
+        var base = g
+        while metas[base].finish_group >= 0:
+            base = metas[base].finish_group
+        stages[5 * base + STAGE_PREPARE_FINISH].dependencies.append(
+            5 * p + STAGE_EXECUTE
+        )
     # Sibling join builds: all execute through Combine before any runs
     # PrepareFinalize, and all prepare before any runs Finalize, so the
     # memory every build needs is known when they finalize.
