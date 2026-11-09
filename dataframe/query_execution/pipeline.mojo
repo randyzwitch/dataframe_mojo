@@ -118,7 +118,14 @@ from dataframe.planning.context import (
     _ReadyIndex,
 )
 from dataframe.planning.inputs import (
+    _SubplanPipeline,
     finish_build,
+)
+from dataframe.scheduler import (
+    META_REGULAR,
+    MetaPipeline,
+    SchedulablePipeline,
+    run_pipelines,
 )
 from dataframe.planning.graph import (
     plan_is_filtering,
@@ -287,16 +294,6 @@ def plan_stream_execute(
             top_descending.append(self._nodes[cursor].sort_descending(k))
             top_nulls_last.append(self._nodes[cursor].sort_nulls_last(k))
         cursor = self._nodes[cursor].left
-    # A streamed top-N's sink, made at its first batch.
-    var topn = List[TopNSink]()
-    var top_batches = 0
-    var operations = List[PlanNode]()
-    # The plan node of each operation, for the execution report.
-    var operation_nodes = List[Int]()
-    var joins = List[DataFrame]()
-    # The plan node of each join built so far.
-    var join_nodes = List[Int]()
-    var indexes = List[Optional[JoinHashTable]]()
     # Join filters through an aggregate the stream starts from: the
     # builds above it run first, and the plan with their results runs.
     var through = plan_push_filters_through_aggregate(self, cursor, batch_size)
@@ -312,8 +309,215 @@ def plan_stream_execute(
         return _stream_after_materialization(
             sided.take(), index, batch_size, sink
         )
-    if self._prefetched and not self._report:
-        plan_schedule_inputs(self, cursor, batch_size)
+    var head = _StreamHead(
+        cursor,
+        expressions^,
+        keys^,
+        ordered,
+        skip,
+        limit,
+        grouping,
+        top,
+        top_node,
+        top_maintain_order,
+        top_names^,
+        top_descending^,
+        top_nulls_last^,
+    )
+    if not self._prefetched:
+        return _stream_probe(self, index, batch_size, sink, head^)
+    # Each computed input is a MetaPipeline under the stream's (DuckDB's
+    # `MetaPipeline::Build`); the probe is the pipeline that depends on
+    # them all (`Pipeline::AddDependency`), so builds overlap and the
+    # caller only waits. An execution report records one task at a time.
+    var inputs = plan_schedule_inputs(self, cursor, batch_size)
+    if len(inputs.wanted) == 0:
+        return _stream_probe(self, index, batch_size, sink, head^)
+    trace_path("stream.scheduled_inputs")
+    var count = len(inputs.wanted)
+    var pipelines = List[_StreamPipeline](capacity=count + 1)
+    var metas = List[MetaPipeline](capacity=count + 1)
+    var dependencies = List[Int](capacity=count)
+    for k in range(count):
+        pipelines.append(_StreamPipeline(inputs.jobs.pop(0)))
+        var meta = inputs.metas[k].copy()
+        meta.parent = count
+        metas.append(meta^)
+        dependencies.append(k)
+    metas.append(MetaPipeline(META_REGULAR, -1, dependencies))
+    pipelines.append(
+        _StreamPipeline(
+            _StreamProbe(
+                Int(Pointer(to=self)),
+                index,
+                batch_size,
+                sink,
+                head^,
+                inputs.wanted.copy(),
+                inputs.keys.copy(),
+                inputs.hows.copy(),
+            )
+        )
+    )
+    pipelines[count].probe[0].siblings = Int(Pointer(to=pipelines))
+    run_pipelines(pipelines, metas, parallel=not self._report)
+    var result = Optional[DataFrame]()
+    swap(result, pipelines[count].probe[0].result)
+    return result^
+
+
+@fieldwise_init
+struct _StreamHead(Movable):
+    """What a stream decided before scheduling its inputs, which its
+    probe pipeline starts from."""
+
+    var cursor: Int
+    var expressions: List[Expr]
+    var keys: List[String]
+    var ordered: Bool
+    var skip: Int
+    var limit: Int
+    var grouping: Bool
+    var top: Int
+    var top_node: Int
+    var top_maintain_order: Bool
+    var top_names: List[String]
+    var top_descending: List[Bool]
+    var top_nulls_last: List[Bool]
+
+
+struct _StreamProbe(Movable):
+    """A stream's probe pipeline: runs once every input it depends on
+    has completed (`Pipeline::GetDependencies`)."""
+
+    var plan: Int
+    var index: Int
+    var batch_size: Int
+    var sink: Int
+    var head: List[_StreamHead]
+    var wanted: List[Int]
+    var keys: List[List[String]]
+    var hows: List[Int]
+    # The caller's List[_StreamPipeline]; its first `len(wanted)` hold
+    # the inputs, this probe after them.
+    var siblings: Int
+    var result: Optional[DataFrame]
+
+    def __init__(
+        out self,
+        plan: Int,
+        index: Int,
+        batch_size: Int,
+        sink: Int,
+        var head: _StreamHead,
+        var wanted: List[Int],
+        var keys: List[List[String]],
+        var hows: List[Int],
+    ):
+        self.plan = plan
+        self.index = index
+        self.batch_size = batch_size
+        self.sink = sink
+        self.head = List[_StreamHead]()
+        self.head.append(head^)
+        self.wanted = wanted^
+        self.keys = keys^
+        self.hows = hows^
+        self.siblings = 0
+        self.result = None
+
+    def run(mut self) raises:
+        ref plan = Pointer[QueryContext, MutAnyOrigin](
+            unsafe_from_address=self.plan
+        )[]
+        ref pipelines = Pointer[List[_StreamPipeline], MutAnyOrigin](
+            unsafe_from_address=self.siblings
+        )[]
+        # Every input has completed: the memo is written by one thread,
+        # the plan's `_execute` calls below take from it.
+        var ahead = plan._prefetched.value()
+        for k in range(len(self.wanted)):
+            ref job = pipelines[k].input[0]
+            ahead[][self.wanted[k]] = job.result.copy()
+            if job.built and plan._prefetched_indexes:
+                plan._prefetched_indexes.value()[][
+                    self.wanted[k]
+                ] = _ReadyIndex(
+                    self.keys[k], self.hows[k], job.built.value().copy()
+                )
+        self.result = _stream_probe(
+            plan, self.index, self.batch_size, self.sink, self.head.pop(0)
+        )
+
+
+struct _StreamPipeline(SchedulablePipeline):
+    """A stream's schedule holds its inputs and its probe."""
+
+    var input: List[_SubplanPipeline]
+    var probe: List[_StreamProbe]
+
+    def __init__(out self, var input: _SubplanPipeline):
+        self.input = List[_SubplanPipeline]()
+        self.input.append(input^)
+        self.probe = List[_StreamProbe]()
+
+    def __init__(out self, var probe: _StreamProbe):
+        self.input = List[_SubplanPipeline]()
+        self.probe = List[_StreamProbe]()
+        self.probe.append(probe^)
+
+    def initialize(mut self) raises:
+        pass
+
+    def execute_tasks(self) -> Int:
+        return 1
+
+    def execute(mut self, task: Int) raises:
+        if len(self.probe) > 0:
+            self.probe[0].run()
+        else:
+            self.input[0].execute(task)
+
+    def prepare_finalize(mut self) raises:
+        pass
+
+    def finalize(mut self) raises:
+        if len(self.input) > 0:
+            self.input[0].finalize()
+
+
+def _stream_probe(
+    self: QueryContext,
+    index: Int,
+    batch_size: Int,
+    sink: Int,
+    var head: _StreamHead,
+) raises -> Optional[DataFrame]:
+    """The stream's probe pipeline, once its inputs are done."""
+    var cursor = head.cursor
+    var expressions = head.expressions.copy()
+    var keys = head.keys.copy()
+    var ordered = head.ordered
+    var skip = head.skip
+    var limit = head.limit
+    var grouping = head.grouping
+    var top = head.top
+    var top_node = head.top_node
+    var top_maintain_order = head.top_maintain_order
+    var top_names = head.top_names.copy()
+    var top_descending = head.top_descending.copy()
+    var top_nulls_last = head.top_nulls_last.copy()
+    ref terminal = self._nodes[index]
+    # A streamed top-N's sink, made at its first batch.
+    var topn = List[TopNSink]()
+    var top_batches = 0
+    var operations = List[PlanNode]()
+    # The plan node of each operation, for the execution report.
+    var operation_nodes = List[Int]()
+    var joins = List[DataFrame]()
+    # The plan node of each join built so far.
+    var join_nodes = List[Int]()
+    var indexes = List[Optional[JoinHashTable]]()
     # A computed source (a union, an aggregate, a sort) is run in full
     # whatever the stream does with it; as an in-memory table its rows
     # run through the morsel pipelines and the aggregate table on every
