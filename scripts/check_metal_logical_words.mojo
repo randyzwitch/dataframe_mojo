@@ -79,14 +79,17 @@ def main() raises:
     ctx.enqueue_copy(dv, values.unsafe_ptr())
     ctx.enqueue_copy(db, bits.unsafe_ptr())
     var kernel = ctx.compile_function[logical_word_partials]()
+    var empty = ctx.enqueue_create_buffer[DType.uint8](1)
     for index in range(len(descriptors)):
         ref d = descriptors[index]
         var v = dv.create_sub_buffer[DType.uint8](d[0] * BYTES, BYTES)
         var b = db.create_sub_buffer[DType.uint8](d[0] * BYTES, BYTES)
+        var value_buffer = v.copy() if d[4] & 1 else empty.copy()
+        var validity_buffer = b.copy() if d[4] & 2 else empty.copy()
         ctx.enqueue_function(
             kernel,
-            v,
-            b,
+            value_buffer,
+            validity_buffer,
             UInt32(d[1]),
             UInt32(d[2]),
             UInt32(d[3]),
@@ -107,4 +110,4 @@ def main() raises:
             actual[index * 4 + 1] + actual[index * 4 + 3], expected_true[index]
         )
     print("PASS packed-word GPU cases:", len(descriptors))
-    _ = (dv^, db^, output^, actual^, values^, bits^)
+    _ = (dv^, db^, output^, actual^, values^, bits^, empty^)

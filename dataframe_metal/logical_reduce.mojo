@@ -6,9 +6,13 @@ from dataframe.lazy import SCAN_FRAME, SELECT
 from .accelerator.gpu.target import METAL_TARGET
 from .accelerator.gpu.query_scope import Scope, shared_service
 from .accelerator.gpu.reduction_inputs import HandoffTimings, _check_ran
-from .accelerator.gpu.erased_input import numeric_views
+from .accelerator.gpu.erased_input import numeric_views, validity_views
 from .accelerator.gpu.numeric_view import NumericView
-from .accelerator.gpu.typed_storage import NativeColumnAny, _NativeReservation
+from .accelerator.gpu.typed_storage import (
+    NativeColumnAny,
+    _NativeReservation,
+)
+
 from .accelerator.gpu.logical_words import logical_word_partials
 from .accelerator.gpu.filter_sum import BLOCK_SIZE
 
@@ -98,19 +102,37 @@ def execute_packed_logical(
         started = Int(perf_counter_ns())
         var empty = ctx.enqueue_create_buffer[DType.uint8](1)
         var owners = List[NativeColumnAny]()
+        var sources = List[Series]()
         var inputs = List[List[NumericView]]()
         var blocks = List[List[Int]]()
         var partials = 0
         for field in range(len(plan.inputs)):
-            var views = numeric_views(
-                frame,
-                plan.inputs[field],
-                scope,
-                zero_copy,
-                empty,
-                owners,
-                coalesce=True,
-            )
+            sources.append(frame.column(plan.inputs[field]))
+            var views: List[NumericView]
+            if zero_copy and not plan.values[field]:
+                if not plan.validity[field]:
+                    views = [
+                        NumericView(
+                            empty.copy(),
+                            empty.copy(),
+                            0,
+                            frame.height(),
+                            0,
+                            False,
+                        )
+                    ]
+                else:
+                    views = validity_views(sources[field], scope, empty)
+            else:
+                views = numeric_views(
+                    frame,
+                    plan.inputs[field],
+                    scope,
+                    zero_copy,
+                    empty,
+                    owners,
+                    coalesce=True,
+                )
             var counts = List[Int]()
             for view in views:
                 var work = plan.values[field] or (
@@ -140,9 +162,16 @@ def execute_packed_logical(
                         Int(plan.values[field])
                         | (Int(view.nullable and plan.validity[field]) << 1)
                     )
+                    var values_buffer = view.values.copy() if plan.values[
+                        field
+                    ] else empty.copy()
+                    var validity_buffer = (
+                        view.bits.copy() if view.nullable
+                        and plan.validity[field] else empty.copy()
+                    )
                     ctx.enqueue_function[logical_word_partials](
-                        view.values,
-                        view.bits,
+                        values_buffer,
+                        validity_buffer,
                         UInt32(view.value_bit_offset),
                         UInt32(view.bit_offset),
                         UInt32(view.rows),
@@ -163,7 +192,15 @@ def execute_packed_logical(
                 scope.synchronize()
             except:
                 pass
-            _ = (inputs^, owners^, result^, host^, empty^, reservation^)
+            _ = (
+                inputs^,
+                owners^,
+                sources^,
+                result^,
+                host^,
+                empty^,
+                reservation^,
+            )
             raise error^
         _check_ran(host)
         scope.record_download(partials * 8)
@@ -212,5 +249,5 @@ def execute_packed_logical(
                 )
         timings.finish_ns = Int(perf_counter_ns()) - started
         scope.mark_success()
-        _ = (inputs^, owners^, result^, host^, empty^, reservation^)
+        _ = (inputs^, owners^, sources^, result^, host^, empty^, reservation^)
         return (DataFrame(columns^), timings^)
