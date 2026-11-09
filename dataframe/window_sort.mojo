@@ -501,6 +501,69 @@ struct _LocalNumberJob(Job):
             )
 
 
+struct _KeyEquality(Movable):
+    """`_rows_equal` over a partition key, the comparison hoisted: a single
+    integer key's values are compared in place (DuckDB's typed row
+    match), any other keys through `_rows_equal`."""
+
+    var keys: List[Series]
+    var data: Int
+    var width: Int
+    var bits: Int
+    var offset: Int
+
+    def __init__(out self, keys: List[Series]):
+        self.keys = keys.copy()
+        self.data = 0
+        self.width = 0
+        self.bits = 0
+        self.offset = 0
+        if len(keys) != 1:
+            return
+        comptime for t in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[t]
+            comptime if not D.is_floating_point():
+                if keys[0]._data.isa[Column[Scalar[D]]]():
+                    ref column = keys[0]._data[Column[Scalar[D]]]
+                    self.data = Int(column._ptr())
+                    self.width = size_of[Scalar[D]]()
+                    if len(column._bits[]) > 0:
+                        self.bits = Int(column._bits[].unsafe_ptr())
+                        self.offset = column._offset
+
+    @always_inline
+    def _null(self, row: Int) -> Bool:
+        var at = self.offset + row
+        var byte = Pointer[UInt8, MutAnyOrigin](
+            unsafe_from_address=self.bits + (at >> 3)
+        )[]
+        return (byte >> UInt8(at & 7)) & 1 == 0
+
+    @always_inline
+    def equal(self, a: Int, b: Int) -> Bool:
+        if self.data == 0:
+            return _rows_equal(self.keys, a, b)
+        if self.bits != 0:
+            var null_a = self._null(a)
+            if null_a != self._null(b):
+                return False
+            if null_a:
+                return True
+        if self.width == 8:
+            var values = Pointer[Int64, MutAnyOrigin](
+                unsafe_from_address=self.data
+            )
+            return values[unsafe_offset=a] == values[unsafe_offset=b]
+        return (
+            external_call["memcmp", Int32](
+                self.data + a * self.width,
+                self.data + b * self.width,
+                self.width,
+            )
+            == 0
+        )
+
+
 struct _MergeJob(Job):
     """Merge partition p of the morsels' dictionaries (the partitioned
     combine of a hash aggregate): every morsel entry whose hash falls in p
@@ -542,6 +605,7 @@ struct _MergeJob(Job):
         var slots = List[Int](length=slots_count, fill=-1)
         var first_rows = List[Int]()
         var first_hashes = List[UInt64]()
+        var equality = _KeyEquality(self.keys)
         for j in range(self.count):
             ref job = locals[unsafe_offset=j]
             for g in job.by_part[self.part]:
@@ -573,8 +637,8 @@ struct _MergeJob(Job):
                                     to = Int((UInt64(to) + 1) & mask)
                                 slots[to] = id
                         break
-                    if first_hashes[slot] == hash and _rows_equal(
-                        self.keys, first_rows[slot], row
+                    if first_hashes[slot] == hash and equality.equal(
+                        first_rows[slot], row
                     ):
                         job.codes[g] = (self.part << 40) | slot
                         break

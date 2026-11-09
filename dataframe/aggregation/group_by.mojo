@@ -83,6 +83,8 @@ from dataframe.lazy import (
 from dataframe.parallel import (
     Job,
     configured_workers,
+    morsel_ranges,
+    morsel_size,
     partitions,
     run_jobs,
     worker_count,
@@ -202,6 +204,8 @@ struct _BatchSinkJob(Job):
     var workers: Int
     var batch: Int
     var sinks: List[AggregateSink]
+    var failed_morsel: Int
+    var failure: String
 
     def __init__(
         out self,
@@ -221,6 +225,8 @@ struct _BatchSinkJob(Job):
         self.workers = workers
         self.batch = max(1, batch)
         self.sinks = List[AggregateSink]()
+        self.failed_morsel = -1
+        self.failure = String()
 
     def run(mut self) raises:
         var sink = AggregateSink(self.layout, self.workers)
@@ -235,7 +241,14 @@ struct _BatchSinkJob(Job):
             var columns = List[Series](capacity=len(self.columns))
             for column in self.columns:
                 columns.append(column.slice(offset, length))
-            sink_frame(sink, reader, columns, offset, self.batch)
+            try:
+                sink_frame(sink, reader, columns, offset, self.batch)
+            except e:
+                # Kept for the caller to raise the earliest morsel's error;
+                # morsels are claimed in order, so every earlier one runs.
+                self.failed_morsel = m
+                self.failure = String(e)
+                break
         reader.release()
         self.sinks.append(sink^)
 
@@ -366,11 +379,6 @@ struct GroupBy(Copyable):
                     "Aggregate output name collides with grouping key: "
                     + expression.expr._name
                 )
-        # Hashing and encoding a key cost 50 to 80 ns a row, not the
-        # nanosecond of the scans `worker_count`'s floor is sized for, so
-        # the routes below divide at the partition floor: 75K rows of
-        # ClickBench q40 (35K groups) encoded whole on one thread took
-        # 3.5 ms while seven threads idled.
         var height = self._frame.height()
         var workers = group_by_workers(height)
         # Every grouping goes through the aggregate table whatever its
@@ -485,17 +493,7 @@ struct GroupBy(Copyable):
                 if inputs[k].is_chunked():
                     inputs[k] = inputs[k].rechunk()
             ends.append(self._frame.height())
-        var ranges = List[Int]()
-        var start = 0
-        var morsel = _MORSEL_ROWS
-        for end in ends:
-            var at = start
-            while at < end:
-                var length = min(morsel, end - at)
-                ranges.append(at)
-                ranges.append(length)
-                at += length
-            start = end
+        var ranges = morsel_ranges(ends, workers)
         var result = aggregate_table(
             keys, inputs, specs, ranges, workers, self._maintain_order
         )
@@ -542,14 +540,13 @@ struct GroupBy(Copyable):
         var shared = TableSinkLayout(
             layout, DataFrame(schema^), key_names, expressions, empty
         )
-        var ranges = List[Int]()
-        var height = frame.height()
-        var morsel = _MORSEL_ROWS
-        var at = 0
-        while at < height:
-            ranges.append(at)
-            ranges.append(min(morsel, height - at))
-            at += morsel
+        # Morsels end on whole input batches: an input error anywhere in a
+        # batch precedes that batch's state updates, whichever worker has it.
+        var ends: List[Int] = [frame.height()]
+        var batch = max(1, batch_size)
+        var ranges = morsel_ranges(
+            ends, workers, batch if batch % 64 == 0 else 64 * batch
+        )
         var cursor = _Cursor.new()
         var jobs = List[_BatchSinkJob](capacity=workers)
         for _ in range(max(1, workers)):
@@ -570,6 +567,15 @@ struct GroupBy(Copyable):
             cursor.free()
             raise e^
         cursor.free()
+        # The error of the earliest morsel, as a serial scan would meet it.
+        var failed = -1
+        for j in range(len(jobs)):
+            if jobs[j].failed_morsel >= 0 and (
+                failed < 0 or jobs[j].failed_morsel < jobs[failed].failed_morsel
+            ):
+                failed = j
+        if failed >= 0:
+            raise Error(jobs[failed].failure)
         var sinks = List[AggregateSink](capacity=len(jobs))
         for j in range(len(jobs)):
             while len(jobs[j].sinks) > 0:
@@ -738,13 +744,10 @@ def _reduce_column(
 # The column of row numbers whose implode gives each group's rows
 # (`_agg_groups`).
 comptime _GROUP_ROWS = "__group_rows"
-# Rows a worker takes at a time: DuckDB's DEFAULT_ROW_GROUP_SIZE, the unit
-# its table scans hand to threads.
-comptime _MORSEL_ROWS = 122_880
 
 
 def group_by_workers(height: Int) -> Int:
-    """Workers the eager group-by divides `height` rows among: one per
-    morsel of `_MORSEL_ROWS`, at most the configured threads (DuckDB runs at
-    most one thread per row group)."""
-    return max(1, min(configured_workers(), -(-height // _MORSEL_ROWS)))
+    """Workers the eager group-by divides `height` rows among: at most one
+    per morsel (`morsel_size`), at most the configured threads."""
+    var workers = configured_workers()
+    return max(1, min(workers, -(-height // morsel_size(height, workers))))
