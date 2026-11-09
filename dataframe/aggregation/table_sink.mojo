@@ -45,7 +45,7 @@ from dataframe.vector.data_chunk import (
 from dataframe.parallel import Job, run_jobs
 from dataframe.vector.expression import VectorExpression
 from dataframe.vector.sink import Sink
-from std.memory import Pointer, bitcast
+from std.memory import Pointer
 from dataframe.vector.types import (
     CONSTANT_VECTOR,
     DICTIONARY_VECTOR,
@@ -668,31 +668,24 @@ struct GroupingSetsLayout(Copyable, Movable):
     """What every worker's grouping sets sink shares: the reader of the
     group columns (every key of every set) and the reductions' inputs;
     per set, its table's layout, its key columns (indices into the keys;
-    empty is the grand total) and their masks (a key packing several coded
-    keys is grouped by the fields the set keeps, the others masked to
-    zero; -1 keeps the whole value; empty: none); and per set derived
+    empty is the grand total); and per set derived
     from another's group rows rather than sunk from the chunks, its source
-    set (-1 for none), its key columns among the source's and their masks,
-    with the sets by size, largest first (a set is derived after its
+    set (-1 for none) and its key columns among the source's, with the sets by size, largest first (a set is derived after its
     source)."""
 
     var inputs: TableSinkLayout
     var layouts: List[AggregateLayout]
     var sets: List[List[Int]]
-    var set_masks: List[List[Int64]]
     var derived_from: List[Int]
     var derived_columns: List[List[Int]]
-    var derived_masks: List[List[Int64]]
     var derive_order: List[Int]
 
     def __init__(out self, *, copy: Self):
         self.inputs = copy.inputs.copy()
         self.layouts = copy.layouts.copy()
         self.sets = copy.sets.copy()
-        self.set_masks = copy.set_masks.copy()
         self.derived_from = copy.derived_from.copy()
         self.derived_columns = copy.derived_columns.copy()
-        self.derived_masks = copy.derived_masks.copy()
         self.derive_order = copy.derive_order.copy()
 
     def __init__(
@@ -700,19 +693,15 @@ struct GroupingSetsLayout(Copyable, Movable):
         var inputs: TableSinkLayout,
         layouts: List[AggregateLayout],
         sets: List[List[Int]],
-        set_masks: List[List[Int64]],
         derived_from: List[Int],
         derived_columns: List[List[Int]],
-        derived_masks: List[List[Int64]],
         derive_order: List[Int],
     ):
         self.inputs = inputs^
         self.layouts = layouts.copy()
         self.sets = sets.copy()
-        self.set_masks = set_masks.copy()
         self.derived_from = derived_from.copy()
         self.derived_columns = derived_columns.copy()
-        self.derived_masks = derived_masks.copy()
         self.derive_order = derive_order.copy()
 
 
@@ -748,8 +737,7 @@ struct GroupingSetsSink(Sink):
 
     def sink(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
         """A chunk into every set's table that is not derived, each taking
-        the key vectors it groups by: a packed key masked to the fields
-        the set keeps, the grand total a constant zero."""
+        the key vectors it groups by, the grand total a constant zero."""
         var n = chunk.count
         if n == 0:
             return
@@ -774,15 +762,7 @@ struct GroupingSetsSink(Sink):
                 )
             else:
                 for j in range(len(one)):
-                    var key = all_keys[one[j]]
-                    var mask = self.shared.set_masks[s][j] if len(
-                        self.shared.set_masks
-                    ) > 0 else Int64(-1)
-                    if mask != -1:
-                        if key.format.physical != PHYSICAL_INT64:
-                            raise Error("grouping sets: a masked key is Int64")
-                        key.mask = bitcast[DType.uint64](mask)
-                    keys.append(key)
+                    keys.append(all_keys[one[j]])
             self.tables[s].sink_vectors(
                 keys, inputs, hold, self.sequence, n, self.inputs.read
             )
@@ -804,7 +784,6 @@ struct GroupingSetsSink(Sink):
                 self.tables[from_set if from_set < t else from_set - 1],
                 self.shared.derived_columns[t],
                 layout_widths(self.shared.layouts[from_set]),
-                self.shared.derived_masks[t],
             )
             self.tables.insert(t, target^)
 

@@ -312,8 +312,12 @@ struct _StreamInputs(Movable):
     var wanted: List[Int]
     var keys: List[List[String]]
     var hows: List[Int]
+    var coalesces: List[Bool]
+    var probe_estimates: List[Int]
 
     def __init__(out self):
+        self.coalesces = List[Bool]()
+        self.probe_estimates = List[Int]()
         self.jobs = List[_SubplanPipeline]()
         self.metas = List[MetaPipeline]()
         self.wanted = List[Int]()
@@ -342,8 +346,6 @@ def plan_schedule_inputs(
     (`_prefetched_indexes` for the index) for the probe."""
     var ahead = self._prefetched.value()
     var inputs = _StreamInputs()
-    var coalesces = List[Bool]()
-    var probe_estimates = List[Int]()
     var stats = PlanStatistics()
     var probe = top
     while probe >= 0:
@@ -358,8 +360,10 @@ def plan_schedule_inputs(
                 else:
                     inputs.keys.append(List[String]())
                 inputs.hows.append(step.how)
-                coalesces.append(step.coalesce)
-                probe_estimates.append(plan_cardinality(self, stats, step.left))
+                inputs.coalesces.append(step.coalesce)
+                inputs.probe_estimates.append(
+                    plan_cardinality(self, stats, step.left)
+                )
                 inputs.metas.append(MetaPipeline(META_JOIN_BUILD))
             probe = step.left
         else:
@@ -376,8 +380,8 @@ def plan_schedule_inputs(
         inputs.wanted.append(probe)
         inputs.keys.append(List[String]())
         inputs.hows.append(JOIN_CROSS)
-        coalesces.append(True)
-        probe_estimates.append(-1)
+        inputs.coalesces.append(True)
+        inputs.probe_estimates.append(-1)
         inputs.metas.append(MetaPipeline(META_REGULAR))
     for k in range(len(inputs.wanted)):
         inputs.jobs.append(
@@ -388,8 +392,8 @@ def plan_schedule_inputs(
                 batch_size,
                 inputs.keys[k],
                 inputs.hows[k],
-                coalesces[k],
-                probe_estimates[k],
+                inputs.coalesces[k],
+                inputs.probe_estimates[k],
             )
         )
     return inputs^
