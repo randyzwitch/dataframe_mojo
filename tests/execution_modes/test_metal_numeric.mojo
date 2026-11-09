@@ -333,12 +333,18 @@ def test_metal_typed_scalar_chain_keeps_nested_right_trees_on_general_path() rai
             null(DataType.INT64).fill_null(col("w")),
         ]
     )
-    for value in chains:
+    var steps = [3, 1, 1, 3, 2, 1, 1]
+    var unary = [1, 0, 1, 3, 0, 0, 0]
+    for i in range(len(chains)):
+        var value = chains[i].copy()
         var compiled = compile_typed_expression(value, frame)
         assert_true(Bool(compiled))
         assert_true(
             Bool(compiled.value().nodes[0].literal & UInt64(TYPED_CHAIN))
         )
+        var schedule = compiled.value().nodes[0].literal
+        assert_equal(Int((schedule >> 8) & 255), steps[i])
+        assert_equal(Int(schedule >> 16), unary[i])
         var query = frame.lazy().select_exprs(
             [
                 value.sum().alias("s"),
@@ -365,3 +371,10 @@ def test_metal_typed_scalar_chain_keeps_nested_right_trees_on_general_path() rai
         assert_false(
             Bool(compiled.value().nodes[0].literal & UInt64(TYPED_CHAIN))
         )
+
+    var longer = compile_typed_expression(
+        col("n").abs().clip(0, 12).sign().cast(DataType.INT64), frame
+    )
+    assert_true(Bool(longer))
+    assert_equal(Int((longer.value().nodes[0].literal >> 8) & 255), 5)
+    assert_equal(Int(longer.value().nodes[0].literal >> 16), 25)
