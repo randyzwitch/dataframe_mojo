@@ -95,7 +95,8 @@ struct AdaptiveFilter(Copyable, Movable):
             self.runtime_sum = 0.0
         elif not self.observe and self.iteration_count == self.execute_interval:
             self.prev_mean = self.runtime_sum / Float64(self.iteration_count)
-            var random_number = self._random(1, self.right_random_border)
+            # Each adjacent pair owns 100 zero-based probability slots.
+            var random_number = self._random(0, self.right_random_border - 1)
             self.swap_idx = random_number // 100
             var likeliness = random_number - 100 * self.swap_idx
             if self.swap_likeliness[self.swap_idx] > likeliness:
