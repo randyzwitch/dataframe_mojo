@@ -14,7 +14,12 @@ from .composition_plan import (
     simple_conditional_trees,
 )
 from .exact_float import finish_float_bins
-from .expression_format import EXPRESSION_NODE_WORDS
+from .expression_format import (
+    EXPRESSION_NODE_WORDS,
+    TYPED_HEADER,
+    TYPED_CHAIN,
+    SCALAR_FIELD_SHIFT,
+)
 from .value_program_metadata import (
     value_program_words,
     pack_value_program,
@@ -349,6 +354,12 @@ def _scan[
                 ) if tag == 2 else bitcast[DType.uint64](value.integer)
                 comptime if trees:
                     if value.tree:
+                        if value.tree[0].op == TYPED_HEADER and value.tree[
+                            0
+                        ].literal & UInt64(TYPED_CHAIN):
+                            words[at + 14] |= UInt64(1) << UInt64(
+                                SCALAR_FIELD_SHIFT + field
+                            )
                         words[base + 6] = UInt64(tree_at)
                         words[base + 7] = UInt64(len(value.tree))
                         var packed = pack_value_program(

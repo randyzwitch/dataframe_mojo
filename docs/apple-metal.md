@@ -607,9 +607,9 @@ range checks still execute. Required Float32 arithmetic retains intermediate
 rounding and gradual-underflow adjudication. Row-local cast definitions can
 be inlined under the existing definition-order and checked-work rules.
 
-Typed programs have separate `typed_reductions:v1:` identities. Existing
-homogeneous arithmetic and proven simple CASE kernels keep their specialized
-routes; typed stacks use the general value path. Automatic placement requires
+Typed programs have separate `typed_reductions:v2:scalar_chain:` identities.
+Existing homogeneous arithmetic and proven simple CASE kernels keep their
+specialized routes; nested typed trees use the general value path. Automatic placement requires
 matching measurements for the current build, types and physical layout.
 
 ### Native numeric value programs

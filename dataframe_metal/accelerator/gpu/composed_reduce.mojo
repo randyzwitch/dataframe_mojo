@@ -17,7 +17,8 @@ from .exact_float_state import ExactFloatState
 from .compound_predicate import predicate_matches
 from .value_ops import checked_float_value
 from .expression_value import expression_value
-from ...expression_format import TREE_OP
+from ...expression_format import TREE_OP, SCALAR_FIELD_SHIFT
+from .chain_expression_value import chain_expression_value
 from ...moment_format import MOMENT_PARTIAL_WORDS, MOMENT_FLAG_SHIFT
 from .moment_squares import SquareBins, IntegerMoments
 
@@ -196,6 +197,10 @@ def conditional_tree_fields[
         var at = HEADER_WORDS + field * FIELD_WORDS
         if UInt32(descriptors[unsafe_offset=at]) != UInt32(TREE_OP):
             continue
+        if descriptors[unsafe_offset=14] & (
+            UInt64(1) << UInt64(SCALAR_FIELD_SHIFT + field)
+        ):
+            continue
         var value = expression_value[floating, True, simple_cases](
             metadata.unsafe_offset(Int(descriptors[unsafe_offset=at + 6])),
             Int(descriptors[unsafe_offset=at + 7]),
@@ -295,6 +300,8 @@ def _composed_scan[
     var low_float = bitcast[DType.float32](UInt32(meta[unsafe_offset=11]))
     var high_float = bitcast[DType.float32](UInt32(meta[unsafe_offset=12]))
     var sum_flags = UInt32(meta[unsafe_offset=14])
+    var scalar_fields = (sum_flags >> UInt32(SCALAR_FIELD_SHIFT)) & 15
+    var generic_fields = UInt32(0)
     var predicate_slot = UInt32(meta[unsafe_offset=15])
     var predicate_values = predicate.unsafe_offset(
         row_base * (8 if predicate_tag == 1 else 4)
@@ -334,6 +341,10 @@ def _composed_scan[
             Int(ri) - 1, b0, b1, b2, b3, b4, b5, b6, b7
         )
         ops[field] = UInt32(meta[unsafe_offset=at])
+        if ops[field] == UInt32(TREE_OP) and not (
+            scalar_fields & (UInt32(1) << UInt32(field))
+        ):
+            generic_fields |= UInt32(1) << UInt32(field)
         flags[field] = UInt32(meta[unsafe_offset=at + 3])
         loff[field] = UInt32(meta[unsafe_offset=at + 4]) + UInt32(row_base)
         roff[field] = UInt32(meta[unsafe_offset=at + 5]) + UInt32(row_base)
@@ -406,7 +417,7 @@ def _composed_scan[
         var case_values = SIMD[DType.uint64, 4](0)
         var case_valid = SIMD[DType.uint32, 4](0)
         comptime if cases:
-            if kept:
+            if kept and generic_fields:
                 # Bits 16..18 carry the field count; zero accepts older probe
                 # metadata while retaining a runtime loop bound.
                 var bound = Int((meta[unsafe_offset=14] >> 16) & 7)
@@ -467,8 +478,46 @@ def _composed_scan[
             comptime if trees:
                 if kept and ops[field] == UInt32(TREE_OP):
                     comptime if cases:
-                        tree_bits = case_values[field]
-                        valid = Bool(case_valid[field])
+                        if scalar_fields & (UInt32(1) << UInt32(field)):
+                            comptime at = HEADER_WORDS + field * FIELD_WORDS
+                            var computed = chain_expression_value(
+                                metadata.unsafe_offset(
+                                    Int(meta[unsafe_offset=at + 6])
+                                ),
+                                Int(meta[unsafe_offset=at + 7]),
+                                row_base,
+                                row,
+                                Bool(sum_flags & (UInt32(1) << UInt32(field)))
+                                or (
+                                    with_extrema
+                                    and Bool(
+                                        extent_flags
+                                        & (UInt32(1) << UInt32(field))
+                                    )
+                                ),
+                                v0,
+                                v1,
+                                v2,
+                                v3,
+                                v4,
+                                v5,
+                                v6,
+                                v7,
+                                b0,
+                                b1,
+                                b2,
+                                b3,
+                                b4,
+                                b5,
+                                b6,
+                                b7,
+                            )
+                            tree_bits = computed[0]
+                            valid = computed[1]
+                            fault |= computed[2]
+                        else:
+                            tree_bits = case_values[field]
+                            valid = Bool(case_valid[field])
                     else:
                         var computed = expression_value[
                             field < float_fields, cases, simple_cases

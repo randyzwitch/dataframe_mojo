@@ -12,6 +12,8 @@ from dataframe.expr import (
     ADD,
     MUL,
     NEG,
+    ABS,
+    FILL_NULL,
     FLOORDIV,
     DIV,
     CLIP_LOW,
@@ -41,11 +43,11 @@ def probe[
     output: Pointer[UInt64, MutUntrackedOrigin],
 ):
     var index = global_idx.x
-    if index >= 4608:
+    if index >= 5632:
         return
-    var scenario = index % 18
+    var scenario = index % 22
     var at = scenario * 64
-    var empty = programs.unsafe_offset(18 * 64).unsafe_bitcast[UInt8]()
+    var empty = programs.unsafe_offset(22 * 64).unsafe_bitcast[UInt8]()
     var answer: Tuple[UInt64, Bool, UInt32]
     comptime if fast:
         answer = expression_value[False, True](
@@ -106,8 +108,16 @@ def probe[
     output[unsafe_offset=index * 3 + 2] = UInt64(answer[2])
 
 
+def write_node(
+    mut words: List[UInt64], at: Int, op: Int, tag: Int, literal: UInt64 = 0
+):
+    words[at] = UInt64(op)
+    words[at + 2] = UInt64(tag + 1) << VALUE_TYPE_SHIFT
+    words[at + 3] = literal
+
+
 def main() raises:
-    var words = List[UInt64](length=18 * 64 + 1, fill=0)
+    var words = List[UInt64](length=22 * 64 + 1, fill=0)
     var expected = List[UInt64]()
     var validity = List[UInt64]()
     var faults = List[UInt64]()
@@ -379,7 +389,7 @@ def main() raises:
     validity.append(1)
     faults.append(1)
     # COUNT must load the NaN payload when either program header requests it.
-    words[18 * 64] = 0x7FC12345
+    words[22 * 64] = 0x7FC12345
     for scenario in range(16, 18):
         var at = scenario * 64
         words[at] = 4
@@ -399,7 +409,58 @@ def main() raises:
         expected.append(0)
         validity.append(0)
         faults.append(0)
-    for scenario in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 16]:
+    # Mixed-width unary/unary/binary chain; retain each Float32 boundary.
+    var base = 18 * 64
+    words[base] = 6
+    words[base + 2] = 1
+    words[base + 4] = UInt64(TYPED_HEADER)
+    write_node(words, base + 8, LIT_INT, 0, 7)
+    write_node(words, base + 12, NEG, 0)
+    write_node(words, base + 16, CAST, 2, 1)
+    write_node(words, base + 20, LIT_INT, 2, 0x40000000)
+    write_node(words, base + 24, DIV, 2)
+    expected.append(0xC0600000)
+    validity.append(1)
+    faults.append(0)
+    # Four operations exercise the scalar-loop path beyond the short schedule.
+    base = 19 * 64
+    words[base] = 9
+    words[base + 2] = 1
+    words[base + 4] = UInt64(TYPED_HEADER)
+    write_node(words, base + 8, LIT_INT, 0, 18446744073709551609)
+    write_node(words, base + 12, ABS, 0)
+    for step in range(3):
+        write_node(words, base + 16 + step * 8, LIT_INT, 0, 1)
+        write_node(words, base + 20 + step * 8, ADD, 0)
+    expected.append(10)
+    validity.append(1)
+    faults.append(0)
+    # A checked right subtree stays on the general path and remains eager.
+    base = 20 * 64
+    words[base] = 5
+    words[base + 2] = 1
+    words[base + 4] = UInt64(TYPED_HEADER)
+    write_node(words, base + 8, CASE_NULL, 0)
+    write_node(words, base + 12, LIT_INT, 1, 9223372036854775807)
+    write_node(words, base + 16, CAST, 0, 257)
+    write_node(words, base + 20, FILL_NULL, 0)
+    expected.append(0)
+    validity.append(0)
+    faults.append(1)
+    # COUNT observes the NaN replacement before a second fill restores validity.
+    base = 21 * 64
+    words[base] = 6
+    words[base + 4] = UInt64(TYPED_HEADER)
+    words[base + 7] = 1
+    write_node(words, base + 8, COL, 2)
+    write_node(words, base + 12, CASE_NULL, 0)
+    write_node(words, base + 16, FILL_NAN, 2)
+    write_node(words, base + 20, LIT_INT, 2, 0x40000000)
+    write_node(words, base + 24, FILL_NULL, 2)
+    expected.append(0x40000000)
+    validity.append(1)
+    faults.append(0)
+    for scenario in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 18, 19, 21]:
         var base = scenario * 64
         var at = 2
         var steps = 0
@@ -415,20 +476,20 @@ def main() raises:
     var scope = Scope()
     var ctx = scope.context()
     var programs = ctx.enqueue_create_buffer[DType.uint64](len(words))
-    var result = ctx.enqueue_create_buffer[DType.uint64](4608 * 3)
+    var result = ctx.enqueue_create_buffer[DType.uint64](5632 * 3)
     ctx.enqueue_copy(programs, words.unsafe_ptr())
-    var actual = List[UInt64](length=4608 * 3, fill=0)
+    var actual = List[UInt64](length=5632 * 3, fill=0)
     comptime for fast in range(2):
         ctx.enqueue_function[probe[Bool(fast)]](
-            programs, result, grid_dim=18, block_dim=256
+            programs, result, grid_dim=22, block_dim=256
         )
         ctx.enqueue_copy(actual.unsafe_ptr(), result)
         scope.synchronize()
-        for i in range(4608):
-            assert_equal(actual[i * 3], expected[i % 18])
-            assert_equal(actual[i * 3 + 1], validity[i % 18])
-            assert_equal(actual[i * 3 + 2], faults[i % 18])
+        for i in range(5632):
+            assert_equal(actual[i * 3], expected[i % 22])
+            assert_equal(actual[i * 3 + 1], validity[i % 22])
+            assert_equal(actual[i * 3 + 2], faults[i % 22])
     scope.mark_success()
     print(
-        "PASS 9216 reference/optimized validity, fault and lazy CASE checks on Metal"
+        "PASS 11264 reference/optimized validity, fault and lazy CASE checks on Metal"
     )
