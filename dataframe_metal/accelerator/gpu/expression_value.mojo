@@ -15,6 +15,12 @@ from .arithmetic_sum import integer_binary
 from .value_ops import checked_float_value
 from ...expression_format import TYPED_HEADER
 from .typed_expression_value import typed_expression_value
+from .native_numeric import (
+    numeric_unary,
+    float32_unary_bits,
+    integer_unary_bits,
+    native_numeric_binary,
+)
 
 
 @always_inline
@@ -116,6 +122,19 @@ def _stack_value[
                     )
         elif op == UInt32(LIT_INT):
             bits = program[unsafe_offset=at + 3]
+        elif cases and numeric_unary(Int(op)):
+            top -= 1
+            present = Bool(valid[top])
+            if present:
+                comptime if floating:
+                    if want_value:
+                        bits = UInt64(
+                            float32_unary_bits(UInt32(values[top]), Int(op))
+                        )
+                else:
+                    var result = integer_unary_bits(values[top], tag, Int(op))
+                    bits = result[0]
+                    fault |= UInt32(result[1])
         else:
             top -= 1
             var right = values[top]
@@ -123,7 +142,23 @@ def _stack_value[
             top -= 1
             present = Bool(valid[top] & right_valid)
             if present:
-                comptime if floating:
+                if (
+                    cases
+                    and op != UInt32(ADD)
+                    and op != UInt32(SUB)
+                    and op != UInt32(MUL)
+                ):
+                    if not floating or want_value:
+                        var result = native_numeric_binary(
+                            values[top],
+                            right,
+                            UInt32(2) if floating else tag,
+                            Int(op),
+                        )
+                        bits = result[0]
+                        present = result[1]
+                        fault |= result[2]
+                elif floating:
                     if want_value:
                         var result = checked_float_value(
                             bitcast[DType.float32](UInt32(values[top])),
@@ -691,30 +726,32 @@ def expression_value[
     predicate_bits: Bytes = Bytes(unsafe_from_address=0),
 ) -> Tuple[UInt64, Bool, UInt32]:
     comptime if cases and not simple_cases:
-        if program[unsafe_offset=0] == UInt64(TYPED_HEADER):
-            return typed_expression_value(
-                program,
-                count,
-                row_base,
-                row,
-                want_value,
-                v0,
-                v1,
-                v2,
-                v3,
-                v4,
-                v5,
-                v6,
-                v7,
-                b0,
-                b1,
-                b2,
-                b3,
-                b4,
-                b5,
-                b6,
-                b7,
-            )
+        return typed_expression_value(
+            program,
+            count,
+            row_base,
+            row,
+            want_value,
+            v0,
+            v1,
+            v2,
+            v3,
+            v4,
+            v5,
+            v6,
+            v7,
+            b0,
+            b1,
+            b2,
+            b3,
+            b4,
+            b5,
+            b6,
+            b7,
+            UInt32(2) if floating else tag,
+            predicate,
+            predicate_bits,
+        )
     comptime if cases:
         if program[unsafe_offset=0] == UInt64(CASE_HEADER):
             var layout = _case_shape(program, count)

@@ -2,7 +2,27 @@
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Expr
 from dataframe.binding import bind, BoundExpr
-from dataframe.expr import COL, LIT_INT, LIT_FLOAT, CAST, ADD, SUB, MUL
+from dataframe.expr import (
+    COL,
+    LIT_INT,
+    LIT_FLOAT,
+    CAST,
+    ADD,
+    SUB,
+    MUL,
+    DIV,
+    FLOORDIV,
+    MOD,
+    NEG,
+    ABS,
+    SIGN,
+    FLOOR,
+    CEIL,
+    TRUNCATE,
+    ROUND,
+    CLIP_LOW,
+    CLIP_HIGH,
+)
 from .expression_plan import ValueNode, ExpressionTree
 from .expression_format import (
     TYPED_HEADER,
@@ -30,10 +50,24 @@ def compile_typed_expression(
         or last >= MAX_EXPRESSION_NODES
     ):
         return None
-    var has_cast = False
+    var has_native_program = False
     for i in range(last + 1):
-        has_cast = has_cast or expression._nodes[i].op == CAST
-    if not has_cast:
+        has_native_program = has_native_program or expression._nodes[i].op in [
+            CAST,
+            DIV,
+            FLOORDIV,
+            MOD,
+            NEG,
+            ABS,
+            SIGN,
+            FLOOR,
+            CEIL,
+            TRUNCATE,
+            ROUND,
+            CLIP_LOW,
+            CLIP_HIGH,
+        ]
+    if not has_native_program:
         return None
     var bound: BoundExpr
     try:
@@ -90,7 +124,28 @@ def compile_typed_expression(
                     tag,
                 )
             )
-        elif node.op == ADD or node.op == SUB or node.op == MUL:
+        elif node.op in [NEG, ABS, SIGN, FLOOR, CEIL, TRUNCATE, ROUND]:
+            if not stack or node.right >= 0 or original.left != stack.pop():
+                return None
+            # Decimal scaling currently requires CPU Float64 arithmetic.
+            # Integer round retains the existing identity semantics.
+            if tag == 2 and node.op == ROUND and node.integer != 0:
+                return None
+            nodes.append(
+                ValueNode(
+                    node.op, "", -1, bitcast[DType.uint64](node.integer), tag
+                )
+            )
+        elif node.op in [
+            ADD,
+            SUB,
+            MUL,
+            DIV,
+            FLOORDIV,
+            MOD,
+            CLIP_LOW,
+            CLIP_HIGH,
+        ]:
             if len(stack) < 2:
                 return None
             var right = stack.pop()
