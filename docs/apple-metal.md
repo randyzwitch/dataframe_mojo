@@ -13,13 +13,17 @@ var placed = plan.collect()  # engine="auto": by measured cost, see below
 print(plan.explain(accelerator=MetalRuntime()))  # HANDOFF metal: ...
 ```
 
-**Supported:** fused global and bounded grouped numeric reductions over
-Int32, Int64 and Float32 inputs. SUM, COUNT, MEAN, MIN, MAX, VAR and STD
-can share one scan, with checked arithmetic and optional numeric Boolean predicates.
+**Supported:** fused global reductions and bounded integer-key grouped
+reductions. Numeric value programs read Int32, Int64 and Float32 inputs;
+Boolean, ordered and distinct reductions also read packed Bool columns.
+Accepted expressions and predicates run within the reduction scan.
 
 | Area | Accepted regions |
 | --- | --- |
-| Values | Native columns, binary arithmetic, bounded trees of `+`, `-`, `*` |
+| Numeric reductions | SUM, COUNT, MEAN, MIN, MAX, VAR and STD |
+| Values | Native numeric columns and casts, bounded arithmetic trees, unary numeric operations, zero-decimal rounding, clipping, supported division and remainder |
+| Null-aware expressions | `fill_null`, Float32 `fill_nan`, `eq_missing` and `ne_missing` |
+| Boolean and count reductions | ANY/ALL, global LEN, NULL_COUNT and Bool COUNT |
 | Exact distinct counts | Native N_UNIQUE globally or within bounded integer-key groups |
 | Ordered reductions | Native FIRST/LAST and ARG_MIN/ARG_MAX, globally or within bounded integer-key groups |
 | Conditional values | Numeric `when/then/otherwise` chains feeding reductions |
@@ -347,8 +351,7 @@ scripts/test_metal_local.sh
 ```
 
 `pixi run -e oracle report-apple` times CPU against forced Metal on the
-benchmark suites. While no query shape is supported, every case reports
-`unsupported`.
+benchmark suites. Cases outside the accepted regions report `unsupported`.
 
 ### Property-matched placement costs
 
@@ -359,6 +362,11 @@ chunks share one native span. They contain no process-specific addresses.
 Profiles apply only within their measured row range and matching build,
 hardware and thread identities. Unknown inputs and unmeasured shapes stay
 on CPU.
+
+Automatic placement checks the CPU-optimized pipeline. If optimization adds
+an intermediate that Metal cannot accept, that pipeline stays on CPU even
+when the original expression can run as a forced Metal region. Forced GPU
+execution and automatic placement are validated separately.
 
 Each side uses an affine fit to per-scale sample medians. Negative-coefficient
 boundary cases are refitted instead of clamping the intercept of an overly
