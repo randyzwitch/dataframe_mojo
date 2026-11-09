@@ -100,6 +100,10 @@ def shape_key(region: LazyFrame, operator: String) raises -> String:
                 key += _chunk_shape[DType.int64](chunk)
             elif chunk.dtype() == DataType.FLOAT32:
                 key += _chunk_shape[DType.float32](chunk)
+            elif chunk.dtype() == DataType.BOOL:
+                # Packed Bool storage always owns a validity bitmap. The
+                # native input maps it only when this window contains nulls.
+                key += String(Int(chunk.null_count() > 0))
             else:
                 raise Error("Unsupported Metal calibration layout")
             key += ","

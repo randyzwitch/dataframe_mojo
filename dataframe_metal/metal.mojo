@@ -149,6 +149,10 @@ struct MetalRuntime(AcceleratorBackend):
         var optimize = settings.optimize
         var offered = query.copy()
         if supports(query):
+            # Every accepted region is already a complete device program.
+            # This also covers logical, ordered and distinct reductions,
+            # whose repeated values CPU CSE could otherwise materialize.
+            optimize = False
             var moments = plan_moments(query)
             if moments:
                 offered = moment_execution_region(moments.value())

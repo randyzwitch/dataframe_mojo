@@ -6,11 +6,10 @@ directly above it, and the projection or aggregation the executor offered.
 runs an accepted region and returns its columns. A declined region runs
 on the CPU in the same query.
 
-Accepted today: native numeric sums, counts and means over filters comparing
-one numeric column with untyped numeric literals (`>`, `>=`, `<`, `<=`,
-`==`, joined by `&`). The input columns are independently Int32, Int64 or
-Float32. Native chunks are read in place (`wrap_native`): Apple silicon
-shares memory, so nothing is copied. Float64 input stays on the CPU.
+Accepted today: native numeric and Boolean/count reductions over bounded
+predicate and value programs, globally or with native integer grouping keys.
+Int32, Int64, Float32 and Bool predicate inputs retain their physical widths.
+Native chunks are mapped in place on Apple silicon; Float64 input stays on CPU.
 """
 from max.gpu.host import DeviceBuffer
 from std.time import perf_counter_ns
@@ -23,6 +22,7 @@ from .calibration import shape_key, measured_costs
 from dataframe.series import Series
 from .filter_plan import FilterSum, plan_region
 from .region_plan import normalize_region
+from .logical_plan import plan_logical, logical_key, finish_logical
 from .cross_sum import reduce_cross
 from .multi_plan import plan_bundle, bundle_key
 from .multi_reduce import execute_bundle
@@ -67,6 +67,9 @@ def supports(region: LazyFrame) -> Bool:
     comptime if not METAL_TARGET:
         return False
     try:
+        var logical = plan_logical(region)
+        if logical:
+            return supports(logical.value().region)
         if plan_moments(region):
             return True
         var normalized = normalize_region(region)
@@ -104,6 +107,13 @@ def operator_key(plan: FilterSum) -> String:
 
 def region_key(region: LazyFrame) raises -> String:
     """Schema-only operator identity shared by placement and capture."""
+    var logical = plan_logical(region)
+    if logical:
+        var underlying = region_key(logical.value().region)
+        return (
+            logical_key(logical.value())
+            + underlying if underlying else String()
+        )
     var moments = plan_moments(region)
     if moments:
         var key = moment_key(moments.value())
@@ -535,6 +545,14 @@ def execute_timed(
     comptime if not METAL_TARGET:
         raise Error("Metal hand-off requires an Apple Metal compilation target")
     else:
+        var logical = plan_logical(region)
+        if logical:
+            var result = execute_timed(logical.value().region, zero_copy)
+            var started = Int(perf_counter_ns())
+            var finished = finish_logical(logical.value(), result[0])
+            var timings = result[1].copy()
+            timings.finish_ns += Int(perf_counter_ns()) - started
+            return (finished^, timings^)
         var moments = plan_moments(region)
         if moments:
             if moments.value().grouped:
