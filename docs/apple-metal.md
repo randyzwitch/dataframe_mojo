@@ -595,14 +595,15 @@ samples. Sampling describes cost only; GPU hashing computes every group.
 Unmeasured shapes retain CPU placement.
 
 
-Repeated-key grouped scans can combine contributions in a per-thread cache
-before publishing hash/atomic state. A bounded key sample selects this path
-when keys repeat at the GPU grid stride; every actual row still compares its
-complete key tuple before reuse. Changing keys flush the cache. Float32 sums
-retain exact integer bins with a moving three-bin window, and Int32/Int64 sums
-retain the complete signed 96-bit state. Counts, first occurrence, null keys,
-ordered extrema and checked expression faults preserve the existing contract.
-Moment reductions retain their existing scan.
+Repeated-key grouped scans can batch row-count/first-occurrence updates and
+reuse hash slots after comparing each actual key tuple. Int64 extrema cache
+the evaluated value of an immutable winning-row ticket separately for every
+field and extremum, avoiding repeated evaluation while that ticket remains
+current. Numeric sums and value counts retain the existing exact GPU state.
+Changing keys flushes row counts; changed tickets refresh their value cache.
+Checked expressions still evaluate every selected row. Moment reductions retain
+their existing scan. A bounded stride-reuse sample chooses this path; sampling
+describes cost only and never discovers the complete groups.
 
 ### Native casts inside aggregate values
 

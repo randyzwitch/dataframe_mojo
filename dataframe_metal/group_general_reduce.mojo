@@ -181,7 +181,7 @@ def scan_general_groups[
                     and has_extrema(plan.selected.bundle) == WITH_EXTREMA
                 ) or (not moments and cached == Bool(mode)):
                     comptime kernel = cached_grouped_partials[
-                        cases, simple_cases, global_state
+                        cases, simple_cases, global_state, value_types
                     ] if not moments and mode == 1 else general_grouped_partials[
                         cases,
                         simple_cases,

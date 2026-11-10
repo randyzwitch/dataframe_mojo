@@ -16,7 +16,9 @@ from dataframe_metal.expression_format import (
     CASE_JUMP,
     VALUE_TYPE_SHIFT,
 )
-from dataframe_metal.accelerator.gpu.group_cached import cached_grouped_partials
+from dataframe_metal.accelerator.gpu.group_cached import (
+    cached_grouped_partials,
+)
 from dataframe_metal.group_layout import GroupLayout
 from dataframe_metal.exact_float import finish_float_bins
 from dataframe_metal.accelerator.gpu.query_scope import Scope
@@ -46,7 +48,9 @@ def node(
     words[at + 3] = literal
 
 
-def run_check[cached: Bool = False](nullable: Bool) raises:
+def run_check[
+    cached: Bool = False
+](nullable: Bool, wide_case: Bool = False, many: Bool = False) raises:
     var rows = 65536
     var blocks = 128
     var layout = GroupLayout(512, 3, blocks, False)
@@ -129,8 +133,11 @@ def run_check[cached: Bool = False](nullable: Bool) raises:
         var value = p - 16
         floating.append(Float32(value) * Float32(0.5))
         narrow.append(Int32(value))
-        wide.append(Int64(value * 257 + p % 8))
-        key.append(Int32(p % 8))
+        wide.append(
+            Int64(value * 257 + p % 8)
+            + (Int64(1) << 50 if wide_case else Int64(0))
+        )
+        key.append(Int32(row % 257 if many else p % 8))
         second.append(Int64(p // 8))
     var scope = Scope()
     var ctx = scope.context()
@@ -264,6 +271,12 @@ def run_check[cached: Bool = False](nullable: Bool) raises:
     )
     stage("synchronize")
     scope.synchronize()
+    comptime if cached:
+        if many:
+            assert_equal(control[1], UInt32(0x80000000))
+            scope.mark_success()
+            print("PASS original group-capacity retry request")
+            return
     assert_equal(control[0], UInt32(32))
     assert_equal(control[1], UInt32(0))
     assert_equal(control[2], UInt32(blocks))
@@ -276,7 +289,11 @@ def run_check[cached: Bool = False](nullable: Bool) raises:
         groups += 1
         var p = Int(first[slot]) % 32
         var expected_n = Int64(min(abs(p - 16), 12))
-        var expected_w = (Int64(p - 16) * 257 + Int64(p % 8)) // 3
+        var expected_w = (
+            Int64(p - 16) * 257
+            + Int64(p % 8)
+            + (Int64(1) << 50 if wide_case else Int64(0))
+        ) // 3
         var expected_f = Float64(abs(p - 16)) * Float64(0.5)
         for block in range(blocks):
             assert_equal(counts[slot * blocks + block], UInt32(16))
@@ -335,3 +352,7 @@ def main() raises:
     run_check(True)
     run_check[True](False)
     run_check[True](True)
+    run_check[True](False, wide_case=True)
+    run_check[True](False, many=True)
+    run_check(False, wide_case=True)
+    run_check[True](True, wide_case=True)

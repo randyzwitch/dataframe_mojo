@@ -1,28 +1,42 @@
-"""Repeated-key aggregation with exact thread-local contribution combining."""
-from std.memory import Pointer
+"""Batch repeated group rows and reuse immutable Int64 winning values."""
+from std.memory import Pointer, bitcast
 from std.atomic import Atomic
 from max.gpu import global_idx, block_idx, thread_idx
 from .multi_reduce import Bytes
 from .compound_predicate import predicate_matches
-from .group_tuple_hash import claim_tuple, tuple_equal
+from .group_tuple_hash import tuple_equal, claim_tuple
 from .group_hash import NO_GROUP
-from .group_state import GROUP_MIN, GROUP_MAX, atomic_or
-from .group_local_state import GroupLocalState
-from .group_reduce import group_value, update_int64_ticket
+from .group_state import (
+    GROUP_COUNT,
+    GROUP_MIN,
+    GROUP_MAX,
+    atomic_or,
+    add_integer_sum,
+)
+from .group_reduce import _update_group_field, group_value
 from ...group_layout import GroupLayout, GROUP_VALUE_WORDS
 
 
+struct TicketCache(Movable):
+    var rows: SIMD[DType.uint32, 4]
+    var values: SIMD[DType.int64, 4]
+
+    @always_inline
+    def __init__(out self):
+        self.rows = SIMD[DType.uint32, 4](UInt32.MAX)
+        self.values = SIMD[DType.int64, 4](0)
+
+
 @always_inline
-def flush_cache[
-    cases: Bool, simple_cases: Bool, global_state: Bool
+def update_ticket[
+    minimum: Bool, cases: Bool, simple_cases: Bool
 ](
-    mut cache: GroupLocalState,
-    layout: GroupLayout,
-    flags: UInt32,
+    mut cache: TicketCache,
+    ticket: Pointer[UInt32, MutUntrackedOrigin],
+    candidate: Int64,
     metadata: Pointer[UInt64, UntrackedOrigin[mut=False]],
-    counts: Pointer[UInt32, MutUntrackedOrigin],
-    first: Pointer[UInt32, MutUntrackedOrigin],
-    states: Pointer[UInt32, MutUntrackedOrigin],
+    field: Int,
+    row: Int,
     v0: Bytes,
     v1: Bytes,
     v2: Bytes,
@@ -42,85 +56,79 @@ def flush_cache[
     predicate: Bytes,
     predicate_bits: Bytes,
 ):
-    if cache.slot == NO_GROUP:
+    var expected = Atomic[UInt32].load(ticket)
+    while True:
+        if expected != UInt32.MAX:
+            var previous = Int64(0)
+            if cache.rows[field] == expected:
+                previous = cache.values[field]
+            else:
+                var value = group_value[False, cases, simple_cases](
+                    metadata,
+                    field,
+                    Int(expected),
+                    1,
+                    True,
+                    v0,
+                    v1,
+                    v2,
+                    v3,
+                    v4,
+                    v5,
+                    v6,
+                    v7,
+                    b0,
+                    b1,
+                    b2,
+                    b3,
+                    b4,
+                    b5,
+                    b6,
+                    b7,
+                    predicate,
+                    predicate_bits,
+                )
+                previous = bitcast[DType.int64](value[0])
+                cache.rows[field] = expected
+                cache.values[field] = previous
+            if candidate >= previous if minimum else candidate <= previous:
+                return
+        if Atomic[UInt32].compare_exchange[weak=True](
+            ticket, expected, UInt32(row)
+        ):
+            cache.rows[field] = UInt32(row)
+            cache.values[field] = candidate
+            return
+
+
+@always_inline
+def flush_rows[
+    global_state: Bool
+](
+    slot: UInt32,
+    rows: UInt32,
+    first_row: UInt32,
+    layout: GroupLayout,
+    scratch: Pointer[UInt32, MutUntrackedOrigin],
+):
+    if slot == NO_GROUP:
         return
-    var index = Int(cache.slot)
+    var index = Int(slot)
     comptime if not global_state:
         index = index * layout.blocks + Int(block_idx.x)
-    _ = Atomic[UInt32].fetch_add(counts.unsafe_offset(index), cache.rows)
-    _ = Atomic[UInt32].min(first.unsafe_offset(Int(cache.slot)), cache.first)
-    var integer64_begin = Int(
-        metadata[unsafe_offset=7] + metadata[unsafe_offset=8]
+    _ = Atomic[UInt32].fetch_add(
+        scratch.unsafe_offset(layout.rows_offset() + index), rows
     )
-    for field in range(layout.fields):
-        var kind = 0 if field < Int(metadata[unsafe_offset=7]) else (
-            1 if field < integer64_begin else 2
-        )
-        var want_sum = Bool(flags & (UInt32(1) << UInt32(field)))
-        var want_extrema = Bool(
-            (flags >> 4 | flags >> 8) & (UInt32(1) << UInt32(field))
-        )
-        var state = states.unsafe_offset(
-            (index * layout.fields + field) * GROUP_VALUE_WORDS
-        )
-        cache.flush_field(field, kind, want_sum, want_extrema, state)
-        if kind == 2 and want_extrema and cache.counts[field]:
-            update_int64_ticket[True, cases, simple_cases](
-                state.unsafe_offset(GROUP_MIN),
-                cache.minimum[field],
-                metadata,
-                field,
-                Int(cache.min_row[field]),
-                v0,
-                v1,
-                v2,
-                v3,
-                v4,
-                v5,
-                v6,
-                v7,
-                b0,
-                b1,
-                b2,
-                b3,
-                b4,
-                b5,
-                b6,
-                b7,
-                predicate,
-                predicate_bits,
-            )
-            update_int64_ticket[False, cases, simple_cases](
-                state.unsafe_offset(GROUP_MAX),
-                cache.maximum[field],
-                metadata,
-                field,
-                Int(cache.max_row[field]),
-                v0,
-                v1,
-                v2,
-                v3,
-                v4,
-                v5,
-                v6,
-                v7,
-                b0,
-                b1,
-                b2,
-                b3,
-                b4,
-                b5,
-                b6,
-                b7,
-                predicate,
-                predicate_bits,
-            )
+    _ = Atomic[UInt32].min(
+        scratch.unsafe_offset(layout.first_offset() + Int(slot)), first_row
+    )
 
 
 def cached_grouped_partials[
     cases: Bool = False,
     simple_cases: Bool = False,
     global_state: Bool = True,
+    value_types: Int = 7,
 ](
     v0: Bytes,
     v1: Bytes,
@@ -156,14 +164,15 @@ def cached_grouped_partials[
         Int(metadata[unsafe_offset=6]),
         Int(metadata[unsafe_offset=2]),
         global_state,
-        GROUP_VALUE_WORDS,
     )
     var table = scratch.unsafe_offset(layout.table_offset())
-    var first = scratch.unsafe_offset(layout.first_offset())
-    var counts = scratch.unsafe_offset(layout.rows_offset())
     var states = scratch.unsafe_offset(layout.states_offset())
     var flags = UInt32(metadata[unsafe_offset=9])
-    var cache = GroupLocalState()
+    var cached_slot = NO_GROUP
+    var cached_first = UInt32.MAX
+    var cached_rows = UInt32(0)
+    var min_cache = TicketCache()
+    var max_cache = TicketCache()
     var row = global_idx.x
     while row < Int(metadata[unsafe_offset=0]):
         if Atomic[UInt32].load(scratch.unsafe_offset(1)):
@@ -191,9 +200,9 @@ def cached_grouped_partials[
             b7,
             predicate_bits,
         ):
-            var same = cache.slot != NO_GROUP and tuple_equal(
+            var same = cached_slot != NO_GROUP and tuple_equal(
                 metadata,
-                Int(cache.first),
+                Int(cached_first),
                 row,
                 k0,
                 k1,
@@ -204,36 +213,11 @@ def cached_grouped_partials[
                 kb2,
                 kb3,
             )
-            var slot = cache.slot
+            var slot = cached_slot
             if not same:
-                flush_cache[cases, simple_cases, global_state](
-                    cache,
-                    layout,
-                    flags,
-                    metadata,
-                    counts,
-                    first,
-                    states,
-                    v0,
-                    v1,
-                    v2,
-                    v3,
-                    v4,
-                    v5,
-                    v6,
-                    v7,
-                    b0,
-                    b1,
-                    b2,
-                    b3,
-                    b4,
-                    b5,
-                    b6,
-                    b7,
-                    predicate,
-                    predicate_bits,
+                flush_rows[global_state](
+                    cached_slot, cached_rows, cached_first, layout, scratch
                 )
-                cache = GroupLocalState()
                 slot = claim_tuple(
                     metadata,
                     row,
@@ -250,119 +234,167 @@ def cached_grouped_partials[
                 )
                 if slot == NO_GROUP:
                     return
-                cache.slot = slot
-                cache.first = UInt32(row)
-            cache.rows += 1
-            var state_index = Int(slot)
-            comptime if not global_state:
-                state_index = state_index * layout.blocks + Int(block_idx.x)
-            for field in range(layout.fields):
-                var kind = 0 if field < Int(metadata[unsafe_offset=7]) else (
-                    1 if field
-                    < Int(
-                        metadata[unsafe_offset=7] + metadata[unsafe_offset=8]
-                    ) else 2
-                )
-                var want_sum = Bool(flags & (UInt32(1) << UInt32(field)))
-                var want_extrema = Bool(
-                    (flags >> 4 | flags >> 8) & (UInt32(1) << UInt32(field))
-                )
-                var value = (UInt64(0), False, UInt32(0))
-                if kind == 0:
-                    value = group_value[True, cases, simple_cases](
-                        metadata,
-                        field,
-                        row,
-                        2,
-                        want_sum or want_extrema,
-                        v0,
-                        v1,
-                        v2,
-                        v3,
-                        v4,
-                        v5,
-                        v6,
-                        v7,
-                        b0,
-                        b1,
-                        b2,
-                        b3,
-                        b4,
-                        b5,
-                        b6,
-                        b7,
-                        predicate,
-                        predicate_bits,
-                    )
-                else:
-                    value = group_value[False, cases, simple_cases](
-                        metadata,
-                        field,
-                        row,
-                        UInt32(0 if kind == 1 else 1),
-                        want_sum or want_extrema,
-                        v0,
-                        v1,
-                        v2,
-                        v3,
-                        v4,
-                        v5,
-                        v6,
-                        v7,
-                        b0,
-                        b1,
-                        b2,
-                        b3,
-                        b4,
-                        b5,
-                        b6,
-                        b7,
-                        predicate,
-                        predicate_bits,
-                    )
-                if value[2]:
-                    atomic_or(scratch.unsafe_offset(1), value[2])
-                    return
-                if value[1]:
-                    cache.add(
-                        field,
-                        kind,
-                        value[0],
-                        UInt32(row),
-                        want_sum,
-                        want_extrema,
-                        states.unsafe_offset(
-                            (state_index * layout.fields + field)
-                            * GROUP_VALUE_WORDS
-                        ),
-                    )
+                cached_slot = slot
+                cached_first = UInt32(row)
+                cached_rows = 0
+            cached_rows += 1
+            comptime for kind in range(3):
+                comptime if value_types & (1 << kind):
+                    var begin = 0
+                    var end = Int(metadata[unsafe_offset=7])
+                    comptime if kind == 1:
+                        begin = end
+                        end += Int(metadata[unsafe_offset=8])
+                    elif kind == 2:
+                        begin = end + Int(metadata[unsafe_offset=8])
+                        end = layout.fields
+                    for field in range(begin, end):
+                        comptime if kind < 2:
+                            if _update_group_field[
+                                kind == 0,
+                                True,
+                                cases,
+                                simple_cases,
+                                global_state,
+                            ](
+                                metadata,
+                                slot,
+                                UInt32(layout.blocks),
+                                flags,
+                                field,
+                                row,
+                                v0,
+                                v1,
+                                v2,
+                                v3,
+                                v4,
+                                v5,
+                                v6,
+                                v7,
+                                b0,
+                                b1,
+                                b2,
+                                b3,
+                                b4,
+                                b5,
+                                b6,
+                                b7,
+                                predicate,
+                                predicate_bits,
+                                states,
+                                scratch,
+                                layout.fields,
+                            ):
+                                return
+                        else:
+                            var want_sum = Bool(
+                                flags & (UInt32(1) << UInt32(field))
+                            )
+                            var want_extrema = Bool(
+                                (flags >> 4 | flags >> 8)
+                                & (UInt32(1) << UInt32(field))
+                            )
+                            var value = group_value[False, cases, simple_cases](
+                                metadata,
+                                field,
+                                row,
+                                1,
+                                want_sum or want_extrema,
+                                v0,
+                                v1,
+                                v2,
+                                v3,
+                                v4,
+                                v5,
+                                v6,
+                                v7,
+                                b0,
+                                b1,
+                                b2,
+                                b3,
+                                b4,
+                                b5,
+                                b6,
+                                b7,
+                                predicate,
+                                predicate_bits,
+                            )
+                            if value[2]:
+                                atomic_or(scratch.unsafe_offset(1), value[2])
+                                return
+                            if value[1]:
+                                var state_index = Int(slot)
+                                comptime if not global_state:
+                                    state_index = (
+                                        state_index * layout.blocks
+                                        + Int(block_idx.x)
+                                    )
+                                var state = states.unsafe_offset(
+                                    (state_index * layout.fields + field)
+                                    * GROUP_VALUE_WORDS
+                                )
+                                _ = Atomic[UInt32].fetch_add(
+                                    state.unsafe_offset(GROUP_COUNT), UInt32(1)
+                                )
+                                var number = bitcast[DType.int64](value[0])
+                                if want_sum:
+                                    add_integer_sum(state, number)
+                                if want_extrema:
+                                    update_ticket[True, cases, simple_cases](
+                                        min_cache,
+                                        state.unsafe_offset(GROUP_MIN),
+                                        number,
+                                        metadata,
+                                        field,
+                                        row,
+                                        v0,
+                                        v1,
+                                        v2,
+                                        v3,
+                                        v4,
+                                        v5,
+                                        v6,
+                                        v7,
+                                        b0,
+                                        b1,
+                                        b2,
+                                        b3,
+                                        b4,
+                                        b5,
+                                        b6,
+                                        b7,
+                                        predicate,
+                                        predicate_bits,
+                                    )
+                                    update_ticket[False, cases, simple_cases](
+                                        max_cache,
+                                        state.unsafe_offset(GROUP_MAX),
+                                        number,
+                                        metadata,
+                                        field,
+                                        row,
+                                        v0,
+                                        v1,
+                                        v2,
+                                        v3,
+                                        v4,
+                                        v5,
+                                        v6,
+                                        v7,
+                                        b0,
+                                        b1,
+                                        b2,
+                                        b3,
+                                        b4,
+                                        b5,
+                                        b6,
+                                        b7,
+                                        predicate,
+                                        predicate_bits,
+                                    )
         row += Int(metadata[unsafe_offset=1])
-    flush_cache[cases, simple_cases, global_state](
-        cache,
-        layout,
-        flags,
-        metadata,
-        counts,
-        first,
-        states,
-        v0,
-        v1,
-        v2,
-        v3,
-        v4,
-        v5,
-        v6,
-        v7,
-        b0,
-        b1,
-        b2,
-        b3,
-        b4,
-        b5,
-        b6,
-        b7,
-        predicate,
-        predicate_bits,
+    flush_rows[global_state](
+        cached_slot, cached_rows, cached_first, layout, scratch
     )
     if thread_idx.x == 0:
         _ = Atomic[UInt32].fetch_add(scratch.unsafe_offset(2), UInt32(1))
