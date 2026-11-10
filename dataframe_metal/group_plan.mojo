@@ -98,7 +98,7 @@ def plan_grouped(
 
 
 def grouped_key(plan: GroupedComposition) -> String:
-    var identity = String("grouped_reductions:v2:tuple:")
+    var identity = String("grouped_reductions:v3:local_updates:")
     for i in range(len(plan.keys.names)):
         var slot = -1
         for j in range(len(plan.selected.bundle.inputs)):

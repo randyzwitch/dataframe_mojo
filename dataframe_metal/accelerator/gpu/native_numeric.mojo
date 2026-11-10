@@ -1,5 +1,6 @@
 """Native numeric value operations without device Float64 arithmetic."""
 from std.memory import bitcast
+from std.bit import count_trailing_zeros
 from dataframe.expr import (
     NEG,
     ABS,
@@ -115,8 +116,19 @@ def integer_divmod_bits(
         return (UInt64(0), True, op == FLOORDIV)
     var x = UInt64(0) - UInt64(a) if a < 0 else UInt64(a)
     var y = UInt64(0) - UInt64(b) if b < 0 else UInt64(b)
-    var quotient = x // y
-    var remainder = x % y
+    var quotient = UInt64(0)
+    var remainder = UInt64(0)
+    if (y & (y - 1)) == 0:
+        quotient = x >> count_trailing_zeros(y)
+        remainder = x & (y - 1)
+    elif tag == 0:
+        # Int32 magnitudes fit UInt32, including abs(Int32.MIN).
+        var narrow = UInt32(x) // UInt32(y)
+        quotient = UInt64(narrow)
+        remainder = UInt64(UInt32(x) - narrow * UInt32(y))
+    else:
+        quotient = x // y
+        remainder = x - quotient * y
     var opposite = (a < 0) != (b < 0)
     var result = UInt64(0)
     if op == FLOORDIV:
@@ -180,8 +192,20 @@ def float32_divide_bits(a: UInt32, b: UInt32) -> Tuple[UInt32, Bool]:
     var shift = 23 if exponent > 0 else exponent + 22
     var numerator = UInt64(av) << UInt64(max(shift, 0))
     var denominator = UInt64(bv) << UInt64(max(-shift, 0))
-    var quotient = numerator // denominator
-    var remainder = numerator % denominator
+    # All estimate operands/results are normal binary32 values. Correct the
+    # estimate using exact integer products before deciding the final rounding;
+    # the hardware division's approximation cannot change the result bits.
+    var scale = bitcast[DType.float32](UInt32(127 + shift) << 23)
+    var estimate = (Float32(av) / Float32(bv)) * scale
+    var quotient = UInt64(UInt32(estimate))
+    var product = quotient * denominator
+    while product > numerator:
+        quotient -= 1
+        product -= denominator
+    var remainder = numerator - product
+    while remainder >= denominator:
+        quotient += 1
+        remainder -= denominator
     if remainder * 2 > denominator or (
         remainder * 2 == denominator and Bool(quotient & 1)
     ):
