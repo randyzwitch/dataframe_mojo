@@ -25,6 +25,7 @@ from dataframe.planning.model import (
     FILTER,
     PlanNode,
 )
+from dataframe.storage.retained import RetainedBuffers
 from dataframe.series import (
     Series,
 )
@@ -47,11 +48,12 @@ def _stream_split_groups() -> Int:
 
 
 def _stream_collect_bytes() -> Int:
-    """Bytes of collected batches a many-group streaming aggregation holds
-    before reducing them into a mergeable state and continuing, so its
-    memory stays bounded whatever the input's length. Default 4 GiB;
-    DATAFRAME_STREAM_COLLECT_BYTES overrides it, so tests can exercise the
-    bound on small inputs."""
+    """Retained-buffer threshold for reducing collected aggregate batches.
+
+    Default 4 GiB; DATAFRAME_STREAM_COLLECT_BYTES overrides it. Checked
+    between worker waves. Input owners, hash/aggregate state, temporary
+    allocations and final output can exceed it: this is not a query limit.
+    """
     var setting = getenv("DATAFRAME_STREAM_COLLECT_BYTES")
     if setting.byte_length() > 0:
         try:
@@ -62,17 +64,16 @@ def _stream_collect_bytes() -> Int:
 
 
 def _frame_bytes(frame: DataFrame) -> Int:
-    """Approximate bytes a frame's columns hold: fixed widths by dtype,
-    strings at 16 bytes a row plus their descriptors (an estimate; the
-    exact text length of a view-backed window costs a pass over it)."""
-    var total = 0
+    """Known buffer bytes retained by a frame, including backing allocations."""
+    var usage = RetainedBuffers()
+    _retain_frame(frame, usage)
+    return usage.bytes
+
+
+def _retain_frame(frame: DataFrame, mut usage: RetainedBuffers):
+    """Add a still-live frame to a shared retained-allocation count."""
     for column in frame._columns:
-        var bits = column.dtype().bit_width()
-        if bits > 0:
-            total += (frame.height() * bits + 7) // 8
-        else:
-            total += 32 * frame.height()
-    return total
+        column._retained_buffers(usage)
 
 
 def _held_groups(

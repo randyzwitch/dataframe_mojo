@@ -1,6 +1,7 @@
 """Runtime-tagged, named columns without per-element type erasure."""
 from dataframe.kernels.scalar_gather import gather_scalars
 from dataframe.storage.buffer import _Buffer
+from dataframe.storage.retained import RetainedBuffers
 from dataframe.storage.field_metadata import (
     _equal_metadata,
     _without_extensions,
@@ -16,7 +17,7 @@ from .dtype import DataType, NUMERIC_DTYPES, CategoricalDictionary
 from std.utils import Variant
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column, SCALAR_DTYPES, _copy_validity
-from dataframe.storage.nested import ListColumn, StructColumn
+from dataframe.storage.nested import ListColumn, StructColumn, _fields_at
 from dataframe.storage.string import StringCodes, StringColumn
 from dataframe.storage.string_view import StringViewStorage
 from .value import AnyValue
@@ -1742,6 +1743,25 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             indices.append(len(self) - 1 - i)
         return self.take(indices)
 
+    def _retained_buffers(self, mut usage: RetainedBuffers):
+        """Visit complete retained allocations, including slices and caches."""
+        _dtype_retained_buffers(self._dtype, usage)
+        if self._field_metadata:
+            usage.list(self._field_metadata.value()[])
+        if self._chunked:
+            ref chunks = self._chunked.value()[]
+            if usage.visit(Int(Pointer(to=chunks))):
+                usage.list(chunks.arrays)
+                usage.list(chunks.ends)
+                for array in chunks.arrays:
+                    _storage_retained_buffers(array, usage)
+                # Acquire the published cache exactly as the readers do.
+                if chunks.cache[].state.load() == 2:
+                    _storage_retained_buffers(
+                        chunks.cache[].merged.value(), usage
+                    )
+        _storage_retained_buffers(self._data, usage)
+
     def _text_bytes(self) -> Int:
         """Bytes of text this column holds, or 0 when it holds none."""
         if self.is_chunked():
@@ -2166,3 +2186,62 @@ def _merge_scalars[D: DType](parts: List[Series]) raises -> Column[Scalar[D]]:
         )
     run_jobs(jobs)
     return Column[Scalar[D]](values=values^, bits=bits^)
+
+
+def _dtype_retained_buffers(dtype: DataType, mut usage: RetainedBuffers):
+    if dtype._dictionary:
+        ref dictionary = dtype._dictionary.value()[]
+        if usage.visit(Int(Pointer(to=dictionary))):
+            usage.buffer(dictionary.bytes)
+            usage.buffer(dictionary.offsets)
+            usage.list(dictionary.canonical)
+    if dtype._nested:
+        ref text = dtype._nested.value()[].text
+        usage.add(Int(text.unsafe_ptr()), text.byte_length())
+
+
+def _storage_retained_buffers(storage: Storage, mut usage: RetainedBuffers):
+    comptime for i in range(len(FixedElements.Ts)):
+        comptime T: Copyable & Deinitable = FixedElements.Ts[i]
+        if storage.isa[Column[T]]():
+            ref column = storage[Column[T]]
+            usage.buffer(column._data)
+            usage.buffer(column._bits)
+            return
+    if storage.isa[BoolColumn]():
+        ref column = storage[BoolColumn]
+        usage.buffer(column._data)
+        usage.buffer(column._bits)
+    elif storage.isa[StringColumn]():
+        ref column = storage[StringColumn]
+        usage.buffer(column._bytes)
+        usage.buffer(column._offsets)
+        usage.buffer(column._bits)
+        if column._view_storage:
+            ref views = column._view_storage.value()
+            usage.buffer(views._views)
+            usage.buffer(views._bits)
+            if usage.visit(Int(views._buffers.ptr())):
+                usage.list(views._buffers[])
+                for buffer in views._buffers[]:
+                    usage.buffer(buffer)
+        if column._codes:
+            ref codes = column._codes.value()[]
+            usage.buffer(codes.codes)
+            _dtype_retained_buffers(codes.dtype, usage)
+            if codes.rows:
+                usage.list(codes.rows.value()[])
+    elif storage.isa[ListColumn]():
+        ref column = storage[ListColumn]
+        usage.buffer(column._offsets)
+        usage.buffer(column._bits)
+        if usage.visit(Int(column._child.ptr())):
+            column.child()._retained_buffers(usage)
+    elif storage.isa[StructColumn]():
+        ref column = storage[StructColumn]
+        usage.buffer(column._bits)
+        if usage.visit(Int(column._fields.ptr())):
+            ref fields = _fields_at(column._fields)
+            usage.list(fields)
+            for field in fields:
+                field._retained_buffers(usage)

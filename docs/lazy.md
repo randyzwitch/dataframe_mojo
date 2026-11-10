@@ -191,6 +191,47 @@ boundary still has to complete before downstream batches can run.
 See [the streaming measurements](design/lazy-streaming.md) for peak RSS, timings,
 raw samples and reproduction commands.
 
+## Memory limits
+
+The engine does not spill to disk. Streaming limits batches in flight, but
+join build sides, groups, distinct sets, materializing operators and collected
+output can grow with the input. `DATAFRAME_STREAM_COLLECT_BYTES` (default
+4 GiB) is a threshold for reducing collected aggregate batches between worker
+waves, not a bound on query memory.
+
+That threshold counts retained buffer capacities, including long string
+payloads, nested children, dictionaries, validity, selections and published
+merge caches. Slices retain their full backing allocations, and buffers shared
+by collected batches count once. Opaque foreign producers expose only declared
+buffer spans; allocator overhead and their undisclosed allocations are not
+included in this metric.
+
+To enforce a hard ceiling on a Linux query process, compile first and run:
+
+```sh
+python3 scripts/run_with_memory_limit.py --bytes 4294967296 -- ./build/query
+```
+
+The launcher requires Linux cgroup v2 and a running systemd user manager. It
+creates a temporary scope with `MemoryMax`, disables swap, and verifies the
+kernel settings before starting the query. The ceiling covers charged host
+memory for the query and its children, including native allocations, worker
+threads and file-cache pages charged to the scope. It permits untouched virtual
+reservations used by the Mojo allocator. Device memory is outside this limit,
+so run CPU queries when using it. Unsupported platforms or unavailable resource
+controls reject the request before executing the query.
+
+When the kernel cannot reclaim enough memory, it terminates the query scope.
+This is a process failure, not a catchable dataframe exception; there is no
+spill or successful partial result. Shared pages can be charged to another
+cgroup, and kernel accounting can temporarily exceed `memory.max`; the setting
+is not a byte-exact process RSS measurement. See the
+[Linux cgroup memory contract](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html#memory).
+
+Use an isolated query process when exhaustion must leave an application alive.
+Fatal allocation failure can bypass cleanup and leave a sink's temporary file;
+successful atomic publication is still required to replace its destination.
+
 ## Optimizations
 
 - **Predicate pushdown.** A filter moves below a `with_columns` or `select` when
