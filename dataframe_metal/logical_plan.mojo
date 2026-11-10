@@ -194,7 +194,7 @@ def plan_logical(region: LazyFrame) raises -> Optional[LogicalPlan]:
 
 
 def logical_key(plan: LogicalPlan) -> String:
-    var result = String("logical_reductions:v1:")
+    var result = String("logical_reductions:v2:ballot:")
     for output in plan.outputs:
         result += (
             String(output.op) + ":" + String(Int(output.ignore_nulls)) + ";"

@@ -69,6 +69,11 @@ pixi run --locked mojo build -O3 -I . scripts/check_metal_logical_device.mojo \
   -o build/contract-tests/metal-logical-device
 build/contract-tests/metal-logical-device
 
+echo "== Predicate/selection ballot state conformance"
+pixi run --locked mojo build -O3 -I . scripts/check_metal_logical_ballots.mojo \
+  -o build/contract-tests/metal-logical-ballots
+build/contract-tests/metal-logical-ballots
+
 echo "== Packed Boolean storage device conformance"
 pixi run --locked mojo build -O3 -I . scripts/check_metal_bool_storage.mojo \
   -o build/contract-tests/metal-bool-storage
