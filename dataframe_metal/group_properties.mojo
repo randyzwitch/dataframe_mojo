@@ -135,3 +135,31 @@ def sample_group_tuples(
             counts[identity] = 1
         hottest = max(hottest, counts[identity])
     return GroupSample(len(counts), hottest, nulls, samples, frame.height())
+
+
+def sample_group_stride_reuse(
+    frame: DataFrame, keys: List[String], stride: Int
+) raises -> Bool:
+    """Bounded dispatch hint only; the cached kernel still compares every key."""
+    if stride <= 0 or frame.height() < stride * 4:
+        return False
+    var columns = List[Series]()
+    for name in keys:
+        columns.append(frame.column(name))
+    var repeated = 0
+    var random = UInt64(0xBADC0FFEE)
+    for i in range(128):
+        random = random * UInt64(6364136223846793005) + 1
+        var row = Int((random >> 32) % UInt64(frame.height() - stride))
+        var same = True
+        for column in columns:
+            var a = column.get(row)
+            var b = column.get(row + stride)
+            if a.is_null() or b.is_null():
+                same = same and a.is_null() == b.is_null()
+            elif column.dtype() == DataType.INT32:
+                same = same and a.int32() == b.int32()
+            else:
+                same = same and a.int64() == b.int64()
+        repeated += Int(same)
+    return repeated >= 96

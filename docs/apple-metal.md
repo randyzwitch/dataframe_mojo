@@ -592,10 +592,21 @@ logical span. Shared key/value/predicate mappings reuse their reservation.
 The host merges GPU-discovered partials and orders groups by their first
 qualifying row. Large results use radix ordering and one flat native column
 per output, without per-group column allocations or retained input key
-buffers. Grouped costs use `grouped_reductions:v2:tuple:` identities, including
+buffers. Grouped costs use `grouped_reductions:v3:local_updates:` identities, including
 key types/layouts, programs, output work and bounded cardinality/skew/null
 samples. Sampling describes cost only; GPU hashing computes every group.
 Unmeasured shapes retain CPU placement.
+
+
+Repeated-key grouped scans can batch row-count/first-occurrence updates and
+reuse hash slots after comparing each actual key tuple. Int64 extrema cache
+the evaluated value of an immutable winning-row ticket separately for every
+field and extremum, avoiding repeated evaluation while that ticket remains
+current. Numeric sums and value counts retain the existing exact GPU state.
+Changing keys flushes row counts; changed tickets refresh their value cache.
+Checked expressions still evaluate every selected row. Moment reductions retain
+their existing scan. A bounded stride-reuse sample chooses this path; sampling
+describes cost only and never discovers the complete groups.
 
 ### Native casts inside aggregate values
 

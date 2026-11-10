@@ -25,6 +25,7 @@ from .accelerator.gpu.query_scope import Scope
 from .accelerator.gpu.reduction_inputs import HandoffTimings
 from .accelerator.gpu.target import METAL_TARGET
 from .accelerator.gpu.group_state import GROUP_STATE_WORDS
+from .accelerator.gpu.group_cached import cached_grouped_partials
 from .accelerator.gpu.group_tuple_hash import GROUP_CAPACITY_FAULT
 from .accelerator.gpu.group_general import (
     initialize_general_groups,
@@ -47,6 +48,7 @@ def scan_general_groups[
     mut timings: HandoffTimings,
     capacity: Int,
     moment_mask: UInt32 = 0,
+    cached: Bool = False,
 ) raises -> GroupedPartials:
     comptime if not METAL_TARGET:
         raise Error(
@@ -172,22 +174,23 @@ def scan_general_groups[
             # Int64 extrema reevaluate winning expressions under a ticket lock.
             # Compile those paths only when a moment query requests MIN/MAX.
             # Ordinary grouped kernels retain their existing specialization.
-            comptime for mode in range(2 if moments else 1):
+            comptime for mode in range(2):
                 comptime WITH_EXTREMA = mode == 0
                 if (
-                    not moments
-                    or has_extrema(plan.selected.bundle) == WITH_EXTREMA
-                ):
-                    ctx.enqueue_function[
-                        general_grouped_partials[
-                            cases,
-                            simple_cases,
-                            global_state,
-                            value_types,
-                            moments,
-                            WITH_EXTREMA,
-                        ]
-                    ](
+                    moments
+                    and has_extrema(plan.selected.bundle) == WITH_EXTREMA
+                ) or (not moments and cached == Bool(mode)):
+                    comptime kernel = cached_grouped_partials[
+                        cases, simple_cases, global_state, value_types
+                    ] if not moments and mode == 1 else general_grouped_partials[
+                        cases,
+                        simple_cases,
+                        global_state,
+                        value_types,
+                        moments,
+                        WITH_EXTREMA,
+                    ]
+                    ctx.enqueue_function[kernel](
                         inputs[0].values,
                         inputs[1].values,
                         inputs[2].values,
@@ -348,6 +351,7 @@ def _dispatch_general[
     mut timings: HandoffTimings,
     capacity: Int,
     moment_mask: UInt32 = 0,
+    cached: Bool = False,
 ) raises -> GroupedPartials:
     var dtypes = List[DataType]()
     for field in plan.selected.bundle.fields:
@@ -359,14 +363,41 @@ def _dispatch_general[
             if case_mode == 2:
                 return scan_general_groups[
                     True, True, global_state, mask, moments
-                ](plan, frame, scope, zero_copy, timings, capacity, moment_mask)
+                ](
+                    plan,
+                    frame,
+                    scope,
+                    zero_copy,
+                    timings,
+                    capacity,
+                    moment_mask,
+                    cached,
+                )
             if case_mode == 1:
                 return scan_general_groups[
                     True, False, global_state, mask, moments
-                ](plan, frame, scope, zero_copy, timings, capacity, moment_mask)
+                ](
+                    plan,
+                    frame,
+                    scope,
+                    zero_copy,
+                    timings,
+                    capacity,
+                    moment_mask,
+                    cached,
+                )
             return scan_general_groups[
                 False, False, global_state, mask, moments
-            ](plan, frame, scope, zero_copy, timings, capacity, moment_mask)
+            ](
+                plan,
+                frame,
+                scope,
+                zero_copy,
+                timings,
+                capacity,
+                moment_mask,
+                cached,
+            )
     raise Error("Metal grouped value dtype mask was not dispatched")
 
 
@@ -380,6 +411,7 @@ def general_partials[
     mut timings: HandoffTimings,
     force_global: Bool = False,
     moment_mask: UInt32 = 0,
+    cached: Bool = False,
 ) raises -> GroupedPartials:
     var sample = sample_group_tuples(frame, plan.keys.names)
     var capacity = sample.capacity()
@@ -393,9 +425,10 @@ def general_partials[
                 timings,
                 max(1024, capacity),
                 moment_mask,
+                cached,
             )
         return _dispatch_general[False, moments](
-            plan, frame, scope, zero_copy, timings, 512, moment_mask
+            plan, frame, scope, zero_copy, timings, 512, moment_mask, cached
         )
     except error:
         if String(error) != GROUP_CAPACITY_RETRY:
@@ -408,7 +441,7 @@ def general_partials[
     # the complete query on GPU with the full supported table.
     try:
         return _dispatch_general[True, moments](
-            plan, frame, scope, zero_copy, timings, 131072, moment_mask
+            plan, frame, scope, zero_copy, timings, 131072, moment_mask, cached
         )
     except error:
         if String(error) != GROUP_CAPACITY_RETRY:
