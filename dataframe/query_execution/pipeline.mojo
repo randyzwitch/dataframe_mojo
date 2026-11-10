@@ -79,6 +79,7 @@ from dataframe.joins.hash_table import JoinHashTable
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
+    join_emits_build_rows,
     JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
@@ -363,6 +364,32 @@ def plan_stream_execute(
         )
     )
     pipelines[count].probe[0].siblings = Int(Pointer(to=pipelines))
+    # Each right or full join's unmatched build rows, a finish-group
+    # pipeline of the probe's, in step order (DuckDB's `MetaPipeline`
+    # adds the join's scan as a pipeline sharing the probe's sink).
+    var probe_pipeline = count
+    var below = cursor
+    var previous = count
+    while below >= 0:
+        ref step = self._nodes[below]
+        if _stream_rows(step):
+            below = step.left
+            continue
+        if not _stream_join(step):
+            break
+        if join_emits_build_rows(step.how):
+            pipelines.append(
+                _StreamPipeline(
+                    _OuterScan(Int(Pointer(to=pipelines)), probe_pipeline)
+                )
+            )
+            metas.append(
+                MetaPipeline(
+                    META_REGULAR, -1, List[Int](), finish_group=previous
+                )
+            )
+            previous = len(pipelines) - 1
+        below = step.left
     try:
         run_pipelines(pipelines, metas, parallel=not self._report)
     except e:
@@ -491,34 +518,91 @@ struct _StreamProbe(Movable):
             swap(self.result, started.result)
 
 
+struct _OuterScan(Movable):
+    """A right or full join's unmatched build rows as a pipeline of the
+    probe's finish group: runs once the probe (and the round before) has
+    executed, each of the probe's workers one task (`PipelineRun`)."""
+
+    var siblings: Int
+    var probe: Int
+    var active: Bool
+
+    def __init__(out self, siblings: Int, probe: Int):
+        self.siblings = siblings
+        self.probe = probe
+        self.active = False
+
+    def _run(self) -> Pointer[PipelineRun, MutAnyOrigin]:
+        ref pipelines = Pointer[List[_StreamPipeline], MutAnyOrigin](
+            unsafe_from_address=self.siblings
+        )[]
+        return Pointer[PipelineRun, MutAnyOrigin](
+            to=pipelines[self.probe].probe[0].started[0].piped[0].run
+        )
+
+    def tasks(mut self) raises -> Int:
+        ref pipelines = Pointer[List[_StreamPipeline], MutAnyOrigin](
+            unsafe_from_address=self.siblings
+        )[]
+        ref probe = pipelines[self.probe].probe[0]
+        ref plan = Pointer[QueryContext, MutAnyOrigin](
+            unsafe_from_address=probe.plan
+        )[]
+        if len(probe.started[0].piped) == 0 or plan._report:
+            return 1
+        ref run = self._run()[]
+        self.active = run.begin_round()
+        return run.tasks() if self.active else 1
+
+    def execute(mut self, task: Int) raises:
+        if self.active:
+            self._run()[].execute(task)
+
+
 struct _StreamPipeline(SchedulablePipeline):
-    """A stream's schedule holds its inputs and its probe."""
+    """A stream's schedule holds its inputs, its probe and the outer scans
+    of its right and full joins."""
 
     var input: List[_SubplanPipeline]
     var probe: List[_StreamProbe]
+    var outer: List[_OuterScan]
 
     def __init__(out self, var input: _SubplanPipeline):
         self.input = List[_SubplanPipeline]()
         self.input.append(input^)
         self.probe = List[_StreamProbe]()
+        self.outer = List[_OuterScan]()
 
     def __init__(out self, var probe: _StreamProbe):
         self.input = List[_SubplanPipeline]()
         self.probe = List[_StreamProbe]()
         self.probe.append(probe^)
+        self.outer = List[_OuterScan]()
+
+    def __init__(out self, var outer: _OuterScan):
+        self.input = List[_SubplanPipeline]()
+        self.probe = List[_StreamProbe]()
+        self.outer = List[_OuterScan]()
+        self.outer.append(outer^)
 
     def initialize(mut self) raises:
         pass
 
     def max_execute_tasks(self) -> Int:
-        return configured_workers() if len(self.probe) > 0 else 1
+        return configured_workers() if len(self.input) == 0 else 1
 
     def execute_tasks(mut self) raises -> Int:
-        return self.probe[0].tasks() if len(self.probe) > 0 else 1
+        if len(self.probe) > 0:
+            return self.probe[0].tasks()
+        if len(self.outer) > 0:
+            return self.outer[0].tasks()
+        return 1
 
     def execute(mut self, task: Int) raises:
         if len(self.probe) > 0:
             self.probe[0].execute(task)
+        elif len(self.outer) > 0:
+            self.outer[0].execute(task)
         else:
             self.input[0].execute(task)
 
@@ -528,7 +612,7 @@ struct _StreamPipeline(SchedulablePipeline):
     def finalize(mut self) raises:
         if len(self.probe) > 0:
             self.probe[0].finalize()
-        else:
+        elif len(self.input) > 0:
             self.input[0].finalize()
 
 
