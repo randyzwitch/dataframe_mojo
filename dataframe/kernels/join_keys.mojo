@@ -5,7 +5,7 @@ dense integer lookup `replace` uses.
   buffer, `_BufferFacts.progression`). No join reads it since the hash
   join port; it stays with the buffer facts it publishes.
 - `_perfect_slots`: integer keys' rows by `key - least` within
-  `_PERFECT_SPAN`, DuckDB's perfect hash join span.
+  `_PERFECT_SPAN`, the maximum direct-address slot span.
 """
 from dataframe.series import Series
 from dataframe.storage.column import Column
@@ -157,7 +157,7 @@ def _l2_cache_bytes() -> Int:
     return 1 << 20
 
 
-# DuckDB's perfect hash join span (`CanDoPerfectHashJoin`).
+# Bound direct-address allocation even when key values are sparse.
 comptime _PERFECT_SPAN = 1_048_576
 
 

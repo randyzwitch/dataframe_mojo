@@ -1,7 +1,7 @@
 """Distinct counts in the aggregate table's distinct tables (each worker sinks
 every row's (keys, value) pair into a table of its own, and the finish sinks
 those groups into the main table's counts) against a scalar model: string,
-integer and float values with nulls counted once (Polars' n_unique), beside
+integer and float values with nulls counted once, beside
 other reductions, through the eager group-by and a pipeline's grouped sink
 after a filter, on tables that clear (eight workers), grow (two) and one
 worker; first-occurrence order is kept under maintain_order."""

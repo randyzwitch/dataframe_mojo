@@ -1,18 +1,9 @@
-"""Late materialization of a top-N over a table scan (DuckDB 2.0's
-`LateMaterialization`, optimizer/late_materialization.cpp).
+"""Delay wide-column reads until a top-N has selected source rows.
 
-For `ORDER BY ... LIMIT n` with n at most `late_materialization_max_rows`
-(50), over a chain of filters and projections on a table scan, the top-N
-runs on the columns the order and the filters read plus the scan's row
-id; the scan's other columns are then fetched for the surviving rows only
-and the projections computed over them. DuckDB joins the full scan to the
-top-N's row ids (a semi join) and orders the result again; here the rows
-are taken by row id in the top-N's order, which is that order already.
-
-`TryLateMaterialization`'s conditions: only projections and filters
-between the top-N and the scan, no volatile (here: no non-row-local)
-expression, a source that has row ids (an in-memory table), and fewer
-required columns than the scan emits.
+Scan only the sort keys and row ids, keep the best rows, then gather the
+requested payload columns and compute projections over that smaller set.
+This avoids reading and copying payload values for rows discarded by the
+limit. Row ids preserve the connection to the original source.
 """
 
 from std.collections import Optional

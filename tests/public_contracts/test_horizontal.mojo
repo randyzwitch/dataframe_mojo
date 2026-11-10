@@ -146,7 +146,7 @@ def test_integer_inputs_keep_integer_sums_and_skip_nulls() raises:
             sum_horizontal([col("b")]).alias("one"),
         ]
     )
-    # Named after the first input, typed as the supertype (Polars).
+    # Named after the first input, typed as the supertype.
     assert_equal(out.columns(), ["a", "strict", "min", "max", "mean", "one"])
     assert_equal(out.column("a").dtype(), DataType.INT64)
     assert_equal(out.column("one").dtype(), DataType.INT32)

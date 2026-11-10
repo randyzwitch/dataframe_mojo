@@ -553,7 +553,7 @@ def table_parts(
 
 
 def _reduction_batch() -> Int:
-    """Rows a reduction evaluates at a time: DuckDB's vector,
+    """Rows a reduction evaluates at a time: one bounded execution vector,
     STANDARD_VECTOR_SIZE (2,048)."""
     return 2048
 

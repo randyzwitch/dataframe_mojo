@@ -325,7 +325,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             if part.dtype() != result.dtype():
                 raise Error("Chunked series arrays must have the same dtype")
             # CSV decode jobs produce one array each. Append that array
-            # directly, as Polars vstack_mut_owned does, without allocating a
+            # directly, without allocating a
             # temporary one-element chunk list for every input part.
             if not part.is_chunked():
                 if len(part) == 0:

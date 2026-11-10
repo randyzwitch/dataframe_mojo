@@ -191,9 +191,7 @@ def _plain_inputs(expressions: List[Expr], frame: DataFrame) -> Bool:
 struct _BatchSinkJob(Job):
     """One worker's morsels into its aggregate table sink, a data chunk of
     at most `batch` rows at a time, each chunk's reduction inputs computed
-    by their compiled vector expressions (DuckDB's sink running its
-    `ExpressionExecutor` over each chunk, as the pipeline's table sink
-    does)."""
+    by their compiled vector expressions."""
 
     var columns: List[Series]
     var layout: AggregateLayout
@@ -383,10 +381,8 @@ struct GroupBy(Copyable):
         # Every grouping goes through the aggregate table whatever its
         # number of groups, whose per-thread tables adapt to however many
         # there are; keys whose statistics bound them to a few values make
-        # it a perfect hash table, as DuckDB's planner does. Neither DuckDB
-        # nor Polars picks a route by an estimate of the groups. An
-        # expression the table has no state for is evaluated over the
-        # groups, as Polars evaluates an expression over its group tuples.
+        # it a perfect hash table, using the key ranges. An expression the
+        # table has no state for is evaluated over each group's row list.
         if self._table_supported(expressions):
             var table = self._agg_table(expressions, workers, batch_size)
             if table:
@@ -418,8 +414,7 @@ struct GroupBy(Copyable):
         across workers in parallel (`aggregate_table.mojo`). None when some reduction's
         state does not fit inline in a group row."""
         # A float key's words are canonical (-0.0 and 0.0, or two NaNs, are
-        # one group), so its group shows its first row's value, as DuckDB's
-        # rows keep the value they were made from: each float key's first
+        # one group), so output uses the first row's original value. That
         # value comes from a FIRST state and replaces the key column.
         var float_keys = List[Int]()
         var all_expressions = expressions.copy()
@@ -468,8 +463,7 @@ struct GroupBy(Copyable):
         if not _plain_inputs(expressions, self._frame):
             # Computed reduction inputs are evaluated a batch of
             # `batch_size` rows at a time, each batch then updating the
-            # states (DuckDB's sink evaluates a DataChunk's inputs, then
-            # UpdateStates): an input error past the batch comes after the
+            # states: an input error past the batch comes after the
             # batch's update errors, as the batch size says.
             return self._agg_batches(
                 expressions, specs, empty, template, workers, batch_size
@@ -589,10 +583,8 @@ struct GroupBy(Copyable):
     ) raises -> DataFrame:
         """Expressions the aggregate table has no state for, over the
         groups it finds: each group's row numbers come out of the table as
-        a list (an implode, DuckDB's list aggregate, in input order), as
-        Polars' group_by finds each group's row indices, and the grouped
-        evaluator reduces every expression over those groups (Polars'
-        AggregationContext)."""
+        a list in input order, and the grouped
+        evaluator reduces every expression over those groups."""
         trace_path("group_by.row_lists")
         var height = self._frame.height()
         var numbers = List[Int64](capacity=height)

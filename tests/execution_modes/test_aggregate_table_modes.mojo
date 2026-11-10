@@ -1,7 +1,6 @@
 """A pipeline sinking into the aggregate table gives the scalar groups for
 every worker count and batch size. Without maintain_order the groups come
-back in no particular order (as Polars' group_by and DuckDB's GROUP BY give
-them), so runs are compared as sets of groups. With maintain_order they come
+back in no particular order, so runs are compared as sets of groups. With maintain_order they come
 back in first-occurrence order on every run, whichever worker took which
 morsel: the finish merges the workers' rows, each in first-row order,
 without a sort.

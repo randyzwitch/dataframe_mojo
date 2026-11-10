@@ -1,28 +1,13 @@
-"""DuckDB 2.0's tuple data scatter and gather (common/types/row/
-tuple_data_scatter_gather.cpp): heap sizes, writing a chunk's values into
-rows and reading rows back into vectors.
+"""Write chunk values into row layouts and gather rows back into vectors.
 
-Row format, as DuckDB's:
-- fixed-width values in place; a null stores NullValue<T> (the type's
-  minimum, NaN for floats) and clears its validity bit;
-- string_t: an inlined string in its 16 bytes; a longer one's length and
-  prefix, then a pointer to its bytes copied into the row's heap;
-- struct: a nested row (validity bytes, then the fields) in place;
-- list: a pointer into the heap, where the list stores its length, then
-  per child level a validity mask and the values. Within a list a string
-  is a 4-byte length in the values and its bytes after them; a list in a
-  list stores its children's lengths, and the grandchildren follow.
+Fixed-width values occupy their row fields. Validity bits identify nulls.
+Short strings store their bytes inline; long strings and nested values use
+the collection's heap. Dispatch on the physical type selects the matching
+scatter or gather routine.
 
-DuckDB picks a scatter and gather function per type when the collection
-is made and calls them through pointers. Here the same functions are
-chosen by a dispatch on the physical type at each call.
-
-Gather writes fixed-width and string columns straight into a chunk's
-vectors (strings point into the collection's heap, as DuckDB's do).
-Nested vectors are not vectors yet in our chunks (they are read through an
-at-rest column), so a nested column is gathered into per-level buffers the
-same way DuckDB fills a list or struct vector's children, then becomes an
-at-rest column the chunk's vector reads.
+Nested output is assembled in buffers for each level, then exposed through
+an at-rest column that the chunk's vector can read. String views retain
+the collection's owners so referenced bytes outlive the output vectors.
 """
 from std.ffi import external_call
 from std.memory import Pointer, unsafe_memcpy
@@ -432,9 +417,9 @@ def _scatter_fixed[
     offset_in_row: Int,
     col: Int,
 ):
-    """TupleDataTemplatedScatter: fixed-width values. DuckDB instantiates
-    one loop per (append selection, source selection, all valid); here the
-    loop without any of them is the one specialized."""
+    """Scatter fixed-width values. Specialize the loop with no append
+    selection, source selection or null checks, avoiding branches in the
+    common contiguous all-valid case."""
     if (
         not append_sel.is_set()
         and not source.sel.is_set()
@@ -943,7 +928,7 @@ def gather_rows_slots(
     """Column `column_id` of the `count` rows at the pointers at `rows` as
     a column of `size` values, the row at pointer i at slot `slots[i]`
     (FullScanHashTable's Gather through `sel_build`). The other slots'
-    values are not written, as DuckDB's; a reader reads only filled
+    values are not written; a reader reads only filled
     slots."""
     ref top = layout.nodes[][0]
     var physical = top.physicals[column_id]

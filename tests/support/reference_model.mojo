@@ -182,7 +182,7 @@ def precedes(
         if not lv:
             continue
         # NaN is the largest value: after numbers ascending, before them
-        # descending (Polars and DuckDB).
+        # descending.
         if keys[k] == "f":
             var ln = left.f != left.f
             var rn = right.f != right.f

@@ -59,7 +59,7 @@ from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.parallel import Job, Pool, configured_workers
 
 
-# Values per variance block, as in Polars' `moment.rs`: a block's mean and
+# Values per variance block: compute a block's mean and
 # squared deviations take two passes over values still in cache, and Chan's
 # update merges the block into the running moments.
 comptime _VARIANCE_BLOCK = 128
@@ -69,7 +69,7 @@ def _block_moments[
     D: DType
 ](values: Pointer[Scalar[D], MutAnyOrigin], count: Int) -> VarState:
     """Moments of `count` values: their mean, then the squared deviations
-    from it (Polars' `VarState::new`)."""
+    from it."""
     var lanes = SIMD[DType.float64, 8](0)
     var i = 0
     while i + 8 <= count:
@@ -101,7 +101,7 @@ def _variance_blocks[
     D: DType
 ](mut state: VarState, column: Column[Scalar[D]], start: Int, end: Int):
     """Accumulate the valid values of [start, end) into `state` a block at a
-    time (Polars' `var`): an all-valid interval is read in place, and a
+    time: an all-valid interval is read in place, and a
     nullable one gathers its valid values into a block first. Every ungrouped
     variance takes this path, so each route over the same rows adds them in
     the same order."""
@@ -1013,9 +1013,8 @@ struct Reducer(Movable):
     # (each kept within the result type) or Float64.
     var int_products: List[Int128]
     var float_products: List[Float64]
-    # The result already finished, from the aggregate table's group rows
-    # (DuckDB's FinalizeStates): `finish` returns it, and no state above
-    # is held.
+    # Already-finalized result from the aggregate table's group rows;
+    # `finish` returns it without retaining the partial states above.
     var finished: Optional[Series]
     # An implode's input field metadata (Arrow application metadata), which
     # its lists' child keeps, as the evaluator's implode keeps it.
@@ -1038,7 +1037,7 @@ struct Reducer(Movable):
         self.logical = logical.value() if logical else input_dtype
         if (op == SUM or op == MEAN) and input_dtype == DataType.BOOL:
             # A sum of Booleans counts the true values, as a UInt32 sum of
-            # zeros and ones would (Polars casts to its index type); the
+            # zeros and ones would; the
             # bits are read as they are, never widened (`_sum_bools`).
             self.input = DataType.UINT32
             self.logical = DataType.UINT32
@@ -1241,7 +1240,7 @@ struct Reducer(Movable):
             and chunk.dtype().decimal_width() != 128
         ):
             # A decimal32 or decimal64 sum adds at the column's own width
-            # into its 128-bit state, as DuckDB adds into a hugeint: values
+            # into its 128-bit state: values
             # under 10^18 cannot reach 10^38 before 10^20 rows, so neither
             # a widened copy nor a check per row.
             if chunk._data.isa[Column[Int64]]():
@@ -1335,7 +1334,7 @@ struct Reducer(Movable):
         own type (UInt64 raw, not as the biased keys of other states)."""
         var values = chunk.copy()
         if self.logical.is_decimal():
-            # A decimal's product is Float64, as DuckDB's is.
+            # A decimal's product is Float64.
             if not values.dtype().is_decimal():
                 values = values.with_dtype(self.logical)
             values = values.cast(DataType.FLOAT64)
@@ -2717,7 +2716,7 @@ struct Reducer(Movable):
                 if not picked:
                     for g in range(n):
                         # NaN is the result only when it is all a group
-                        # has, as in Polars (#816).
+                        # has (#816); return NaN only when no numeric value exists.
                         if self.nan_seen[g] and not self.seen[g]:
                             output[g] = Float64(0) / Float64(0)
                             valid[g] = True

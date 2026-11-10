@@ -451,8 +451,8 @@ struct ZonedOffset(Copyable):
 
     def apply(self, value: Int64, zone: TimeZone) raises -> Int64:
         var result = value
-        # Months, then days, each localized from the step before, as Polars
-        # does.
+        # Apply months, then days, localizing after each step so calendar
+        # boundaries use the updated wall time, including time-zone transitions.
         if self.months != 0:
             var local = to_local(result, self.dtype, zone)
             local = join(
@@ -696,7 +696,7 @@ def _epoch(value: Int64, dtype: DataType, unit: String) raises -> Int64:
 
 
 def _round(value: Int64, truncation: Truncation) raises -> Int64:
-    # Polars Window::round shifts by half the estimated duration and then
+    # Shift by half the estimated interval duration, then
     # truncates. Its calendar-month estimate is 28 days (also for years).
     if truncation.months:
         var per_day = Int64(1) if truncation.dtype.is_date() else ticks_per_day(
@@ -1140,7 +1140,7 @@ def cast_temporal(
     var n = len(input)
     var active = fit_mask(mask, n)
     # A zone-aware source casts to date, time and string at local time;
-    # casts between datetimes keep the instant, as in Polars.
+    # casts between datetimes keep the instant.
     var zone = zone_of(source)
     if target == DataType.STRING:
         var out = StringBuilder(n)

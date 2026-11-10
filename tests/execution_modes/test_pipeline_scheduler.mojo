@@ -1,6 +1,4 @@
-"""Pipelines scheduled as events (DuckDB's PipelineInitializeEvent,
-PipelineEvent, PipelinePrepareFinishEvent, PipelineFinishEvent and
-PipelineCompleteEvent) run each pipeline's stages in order, start a
+"""Pipelines scheduled as events run each pipeline's stages in order, start a
 pipeline only after the pipelines it depends on complete, finish sibling
 join builds only after all of them executed, run independent pipelines at
 the same time, survive nested parallel work inside a task, and report the

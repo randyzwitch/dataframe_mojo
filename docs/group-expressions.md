@@ -43,7 +43,5 @@ the original payload columns even when a key alias has the same name.
 
 Top/bottom-k currently use a full stable ordering. These APIs make no
 performance claim for large groups. Counts and positions use this library's
-Int64 convention. Reference semantics for appearance-ordered counts and
-non-null-preferred top-k are documented by
-[Polars unique_counts](https://docs.pola.rs/api/python/stable/reference/expressions/api/polars.Expr.unique_counts.html)
-and [Polars top_k](https://docs.pola.rs/api/python/stable/reference/expressions/api/polars.Expr.top_k.html).
+Int64 convention. Unique counts follow values' first-appearance order.
+Top-k prefers non-null values, placing nulls after valid candidates.

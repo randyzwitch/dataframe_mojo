@@ -1,6 +1,4 @@
-"""Segment statistics and their zone-map checks (DuckDB 2.0's
-`BaseStatistics`, `NumericStats` and `StringStats`, in
-`storage/statistics/`).
+"""Segment statistics and their zone-map checks.
 
 A `BaseStatistics` describes the valid values of one stretch of a column:
 whether it can hold a null and a non-null, and the least and greatest value.
@@ -8,12 +6,11 @@ Numbers keep their bounds in one of two domains: `Int128` for every type
 stored as an integer (integers, decimals at the column's scale, dates,
 datetimes, durations, times), `Float64` for floats. Strings keep the first
 `MAX_STRING_MINMAX_SIZE` bytes of their least and greatest value, marked
-exact or truncated, with the least and greatest length in bytes, as DuckDB's
-`StringStatsData` does.
+exact or truncated, with the least and greatest length in bytes.
 
 `check_numeric_zonemap` and `check_string_zonemap` answer whether a
-comparison with constants keeps every row, none, or some, the
-`FilterPropagateResult` DuckDB's scans prune row groups and vectors with.
+comparison with constants keeps every row, none, or some. A scan can
+skip a region only when these bounds prove no row can match.
 """
 
 # FilterPropagateResult (`enums/filter_propagate_result.hpp`).
@@ -23,7 +20,7 @@ comptime FILTER_ALWAYS_FALSE = 2
 comptime FILTER_TRUE_OR_NULL = 3
 comptime FILTER_FALSE_OR_NULL = 4
 
-# Comparison types a zone map answers (DuckDB's ExpressionType names).
+# Comparison types a zone map answers.
 comptime COMPARE_EQUAL = 0
 comptime COMPARE_NOTEQUAL = 1
 comptime COMPARE_LESSTHAN = 2
@@ -303,10 +300,8 @@ def _nan_answer(op: Int) -> Int:
 def check_float_zonemap(
     stats: BaseStatistics, op: Int, constants: List[Float64]
 ) -> Int:
-    """`NumericStats::CheckZonemap` over float constants, with NaN kept
-    in the statistics as DuckDB keeps it (there, the greatest float, by
-    its comparisons' total order; here, outside the bounds, answering as
-    `_nan_answer` says): a stretch holding NaN keeps every row or none
+    """Check float bounds while tracking NaN separately from numeric bounds.
+    `_nan_answer` supplies NaN's comparison result: a stretch holding NaN keeps every row or none
     only when its NaN rows agree. A NaN constant rules nothing out."""
     if stats.stats_type != FLOAT_STATS:
         return NO_PRUNING_POSSIBLE

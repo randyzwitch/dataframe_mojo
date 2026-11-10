@@ -42,14 +42,14 @@ public operation mutates a column in place.
 the frame. A negative offset counts from the end and clips at zero; an offset
 past the end returns zero rows. `length=-1` means all remaining rows, and any
 other negative length raises. `head(n)` and `tail(n)` default to five rows; a
-negative `n` drops `-n` rows from the other end, as in Polars. `limit` is
+negative `n` drops `-n` rows from the other end. `limit` is
 `head`. `reverse` reverses row order and `clear(n=0)` keeps the schema with
 `n` rows of nulls (zero rows by default). `gather(indices, null_on_oob=False)`
-returns the rows at `indices` in that order, as Polars' `gather`: a negative
+returns the rows at `indices` in that order: a negative
 index counts from the end, and an index out of range raises, or with
 `null_on_oob=True` gives a row of nulls.
 `shift(n=1, fill_value=None)` moves every column's values `n` rows later
-(earlier for a negative `n`), as Polars' `DataFrame.shift`: height and schema
+(earlier for a negative `n`): height and schema
 stay, and the `min(|n|, height)` vacated rows are null, or `fill_value` cast to
 each column's type. `fill_value` must be a scalar (a literal or a reduction
 such as `col("a").max()`); the input's own nulls are not filled. The lazy
@@ -59,15 +59,13 @@ Zero-column frames keep a correctly clipped height through all of these.
 `drop` and `rename` validate every name before building output: unknown names
 raise, `drop` rejects a name listed twice, and `rename` raises if the result
 would contain duplicate names. Renames apply simultaneously, so swapping two
-names works; `rename(mapping, strict=False)` ignores names the frame lacks, as
-in Polars. `with_row_index(name="index", offset=0)` prepends an Int64 column
+names works; `rename(mapping, strict=False)` ignores names the frame lacks. `with_row_index(name="index", offset=0)` prepends an Int64 column
 and raises if the name already exists.
 
 `shape()` is `(height, width)`. `null_count()` returns a one-row frame of Int64
 counts per column.
 
-`describe(percentiles=[0.25, 0.5, 0.75], interpolation="nearest")` follows
-Polars' layout: a `statistic` column with rows `count`, `null_count`, `mean`,
+`describe(percentiles=[0.25, 0.5, 0.75], interpolation="nearest")` returns a `statistic` column with rows `count`, `null_count`, `mean`,
 `std`, `min`, one row per percentile in ascending order (labelled `25%` and so
 on; an empty list gives none), and `max`, then one column per input column.
 Numeric and Bool columns give Float64; Bool `mean` is the share of true
@@ -76,8 +74,7 @@ valid value is NaN, as the `min` and `max` expressions do, while `mean` and
 `std` propagate it. String columns give
 String counts, `min` and `max`. Temporal columns give String counts, `mean`
 (a datetime for a Date column), `min`, percentiles and `max`, formatted as a
-cast to String formats them. Polars formats temporal values through Python,
-so its Duration text (`1 day, 0:00:00`) and sub-microsecond digits differ.
+cast to String formats them, retaining the dtype's time unit and precision.
 Nested columns give only the counts.
 
 `sample(n=None, fraction=None, with_replacement=False, shuffle=False,
@@ -85,9 +82,9 @@ seed=None)` on DataFrame and Series draws `n` rows, or `floor(fraction *
 height)`, or one row when neither is given; passing both raises. Without
 replacement no row repeats and a sample larger than the frame raises. Rows
 keep their original order unless `shuffle=True`, which also randomizes the
-order; Polars' order without `shuffle` is unspecified. The generator is
+order. The generator is
 SplitMix64 with unbiased bounded draws, so a seed gives the same rows on every
-platform and release but not the rows Polars gives for that seed. Without a
+platform and release. Without a
 seed it is seeded from the clock. `row(i)` returns a `List[AnyValue]` in schema order;
 `AnyValue` carries a dtype tag and validity, and its typed accessors raise on a
 dtype mismatch or null. `item()` requires exactly one cell; `item(row, column)`
@@ -156,10 +153,9 @@ reductions. Missing cells are null. New column names are the `on` values' text
 (`null` for a null key) and must not collide with index names. An empty index
 list yields a single row. `pivot` followed by `unpivot` on the same names
 restores the original rows up to order. The lazy `pivot` takes the new
-columns' names up front (`on_columns`) and gives the same cells. Polars 1.44
-differs on missing cells: its `sum`, `len` and `count` give 0 there, and its
-`count` counts rows like `len`; here a missing cell is null for every
-function and `count` skips null values.
+columns' names up front (`on_columns`) and gives the same cells. A missing
+cell is null for every aggregation function; within existing cells, `count`
+skips null values and `len` counts rows.
 
 ## Concatenation
 
@@ -174,8 +170,8 @@ frame position and column.
   several frames must have one dtype; there is no promotion. Frames lacking a
   column contribute nulls.
 - `horizontal` requires equal heights and globally unique names. `hstack`
-  accepts a dataframe or a list of series. Polars 1.44 still pads shorter
-  frames with nulls but has deprecated that in favor of equal heights.
+  accepts a dataframe or a list of series; differing heights raise rather
+  than inserting padding rows.
 
 `concat` also takes a list of LazyFrames and gives the same results and errors
 as one plan (see [lazy queries](lazy.md)).
@@ -216,12 +212,12 @@ the final result overflows. Grouped output order is unspecified unless
 `maintain_order=True`. Besides `agg`, a `GroupBy` has `len(name="len")` and
 `sum`, `mean`, `min`, `max`, `median`, `first`, `last`, `n_unique` and
 `quantile(q, interpolation="nearest")`, each the reduction of every column
-that is not a key (Polars' `all()` reduced, keys excluded); a key computed
+that is not a key; a key computed
 from an expression keeps its output name, so `group_by([col("a") % 2]).sum()`
 does not sum `a`.
 A categorical or dictionary-coded key groups by its label: codes that name the
 same label are one group, whichever route runs (eager, lazy with or without
-`maintain_order`, Metal), as in Polars, where a category never
+`maintain_order`, Metal), so a category never
 repeats a string. Arrow and Parquet dictionaries may repeat a label and are
 kept as given; only grouping merges the codes, and the group's key shows the
 first code of its label. `over()` partitions and row numbering for `unique`
@@ -240,8 +236,7 @@ nulls_last=[True, False])`. An empty key list or a length mismatch raises.
 
 Rows with equal keys come out in no particular order unless the sort is
 given `maintain_order=True`, which keeps their input order in either
-direction (Polars' `maintain_order`; DuckDB's `ORDER BY` promises no tie
-order either). Leaving ties free lets the planner reorder joins below a sort.
+direction. Leaving ties free lets the planner reorder joins below a sort.
 Null placement is independent of direction and defaults to last. NaNs follow
 all non-null non-NaN numeric values in either direction; nulls remain first or
 last according to the option. `-0.0` and `0.0` are equal keys. Strings use
@@ -253,7 +248,7 @@ direction, NaN, and null placement; a bottom-up mergesort then compares rank
 tuples. `arg_sort` returns the row order. `top_k(k, by)` returns exactly the
 first `k` rows of `sort(by, descending=True)` with nulls last, and `bottom_k`
 the first `k` rows of `sort(by)`; `reverse=True` flips the direction (nulls
-stay last), as in Polars. Both select with a bounded heap in O(n log k)
+stay last). Both select with a bounded heap in O(n log k)
 instead of sorting every row.
 
 ## Joins
@@ -276,8 +271,7 @@ matches `0.0`. Duplicate keys emit every matching pair.
 | `anti` | left rows with no match (including null keys) |
 | `cross` | every pair, via `join(right, how="cross")` |
 
-A join's output row order is unspecified, eager or lazy, as in DuckDB and in
-Polars' default (`maintain_order="none"`): the engine may build on either side
+A join's output row order is unspecified, eager or lazy: the engine may build on either side
 and stream the other. Sort the result when an order matters. `join_asof` is the
 exception: it keeps the left input's row order, and sorts its inputs itself
 when they are not already in key order.
@@ -285,8 +279,7 @@ when they are not already in key order.
 Output columns are the left columns, then the right non-key columns in right
 schema order. Right names that collide with left names gain `suffix`; any
 remaining collision raises before any work is done. Key columns keep their left
-names and positions. A coalesced `right` join is the mirror image, as in
-Polars: the left's non-key columns, then every right column in right schema
+names and positions. A coalesced `right` join is the mirror image: the left's non-key columns, then every right column in right schema
 order, its keys included under their right names (and their values, including
 the sign of zero); right names that collide with the left's non-key names gain
 `suffix`. For a `full` join the keys' values come from whichever side is

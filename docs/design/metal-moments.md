@@ -2,8 +2,9 @@
 
 Public Metal completion preserves the CPU library's statistical behavior
 within the floating-point tolerance `abs(metal-cpu) <= 1e-10*(1+abs(cpu))`.
-Consistency with CPU, DuckDB and Polars takes precedence over a different
-mathematically exact answer. It preserves the statistical API's input conversion:
+The public result must stay within this tolerance when execution moves
+between devices. Exact accumulation alone does not guarantee agreement with
+the CPU's rounded recurrence, so sensitive cases require CPU adjudication. It preserves the statistical API's input conversion:
 Float32 values are represented exactly, Int32 converts exactly to Float64,
 and Int64 first rounds to Float64 with round-to-nearest-even. Integer
 arithmetic and explicit casts are evaluated in their declared types before

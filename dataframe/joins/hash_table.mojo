@@ -1,66 +1,22 @@
-"""DuckDB 2.0's join hash table (`execution/join_hashtable.cpp`,
-`execution/operator/join/physical_hash_join.cpp`, `execution/ht_entry.hpp`,
-`common/row_operations/row_matcher.cpp`).
+"""Partitioned hash join storage and bounded probe output.
 
-The build side is a TupleDataCollection (`vector/tuple_data_collection`)
-whose layout is DuckDB's join layout (BuildJoinLayout):
+Build rows contain validity, keys, payload columns, original row numbers,
+match flags and hashes. Long strings live in retained heap storage. Workers
+append to private radix partitions, then independent tasks assemble one
+pointer-table region per partition, avoiding shared inserts.
 
-    [validity][key columns][payload columns][build row][found][hash]
+Each eight-byte pointer entry packs a 16-bit hash salt and a 48-bit row
+address. Linear probing locates an empty slot or a chain with equal keys.
+The salt rejects most unrelated entries before their key bytes are read.
+Each region holds at least twice as many entries as its rows, keeping
+probes short. Duplicate keys form chains in ascending build-row order;
+semi, anti and mark joins need only one row per key.
 
-- the key columns at their own widths (strings as string_t, the bytes of
-  a long one in the collection's heap);
-- the payload columns (the join's build side columns that are not keys);
-  a table with no payload (the eager join's) keeps only the build row;
-- the build row, which a probe reads for build side columns a plan adds
-  after the build;
-- the found flag (`PropagatesBuildSide` joins only), set in the row by a
-  probe that matches it and read by the outer scan (ScanFullOuter);
-- the hash, which becomes the row's next pointer once the row is
-  inserted (DuckDB's `pointer_offset`, the layout's last column).
-
-The build runs as DuckDB's HashJoinSink: each sink thread takes its share
-of the build rows chunk by chunk, hashes the keys, drops the rows with a
-null key (PrepareKeys) and appends the others to its own
-RadixPartitionedTupleData (`vector/partitioned_tuple_data`, 4 radix bits:
-HashJoinGlobalSinkState's `initial_radix_bits` below 100 threads).
-Combine merges the threads' partitions, and Finalize takes them as one
-collection (`Unpartition`) and inserts every row into the pointer table
-(HashJoinFinalizeEvent).
-
-The pointer table is an array of 8-byte `ht_entry_t`: the hash's upper 16
-bits (the salt) over the row's 48-bit address. Finalize differs from
-DuckDB's, which inserts on one thread below 1,048,576 rows
-(PARALLEL_CONSTRUCT_THRESHOLD) and with compare-and-swap above: each radix
-partition gets its own region of the table, zeroed and filled with no
-shared inserts by one of as many tasks as the build had sink threads, as Polars 2.0's streaming join builds a
-table per partition (`finalize_unordered`, polars-stream
-equi_join.rs:876-1000); a probe row looks in its partition's region.
-Measured on the operator harness, DuckDB's finalize was 1.36x slower on
-join-092 and 1.42x on join-168 (1M build rows, inserted on one thread).
-A region holds at least twice as many entries as its rows, and the
-regions together at least 16,384. A row is inserted by linear probing
-from its hash's low bits to an empty entry or to the entry of a row with
-the same salt and keys, whose chain it joins: every chain holds rows with
-equal keys, so a probe compares keys once per chain. Rows
-are inserted last row first, so each chain lists its rows in ascending
-build order (DuckDB's order is unspecified). A semi, anti or mark join
-keeps one row per key (`insert_duplicate_keys` false).
-
-A probe (`ScanStructure`) hashes a chunk of up to 2,048 rows and finds
-each row's chain by linear probing (salts compared once the table is
-larger than 8,192 entries, `USE_SALT_THRESHOLD`), prefetching 256 rows'
-entries at a time on tables of 32,768 entries or more (Polars'
-BLOCK_SIZE and MIN_PREFETCH_BUCKETS), compares the keys of the candidates
-(`RowMatcher`), and emits at most 2,048 matches per call to `next`,
-walking each probe row's chain before the next row's, so the matches come
-out in probe order. Rows with a null key match nothing.
-
-Right and full joins flag the rows they matched in the rows themselves, and
-`scan_chunk` then finds the build rows no probe matched, as DuckDB's
-ScanFullOuter. A
-semi or anti join built on its left input runs as DuckDB's RIGHT_SEMI or
-RIGHT_ANTI: the probe only flags build rows, and the scan emits the flagged
-(semi) or unflagged (anti) ones.
+Probe chunks contain at most 2,048 rows. Large tables prefetch entries in
+blocks of 256 probe rows so memory requests can overlap. A probe compares
+keys once per chain and emits at most one chunk per call to next. Null
+keys never match. Right/full joins record matched build rows for a later
+scan; build-side semi/anti joins emit flagged/unflagged rows respectively.
 """
 from std.collections import Optional
 from std.ffi import external_call
@@ -132,9 +88,8 @@ comptime DEFAULT_LOAD_FACTOR = 2.0
 comptime MINIMUM_CAPACITY = 16384
 # HashJoinGlobalSinkState::initial_radix_bits (num_threads < 100).
 comptime INITIAL_RADIX_BITS = 4
-# Polars' probe blocks (polars-expr `hash_keys.rs:25-27`): keys are hashed
-# and their buckets prefetched BLOCK_SIZE at a time, once a table holds at
-# least MIN_PREFETCH_BUCKETS buckets (smaller ones stay in the cache).
+# Hash and prefetch BLOCK_SIZE probe keys together once the table exceeds
+# MIN_PREFETCH_BUCKETS; smaller tables are expected to remain in cache.
 comptime BLOCK_SIZE = 256
 comptime MIN_PREFETCH_BUCKETS = 32768
 # PerfectHashJoinExecutor::CanDoPerfectHashJoin MAX_BUILD_SIZE: the widest
@@ -365,7 +320,7 @@ def _write_native(
 
 @fieldwise_init
 struct KeyLayout(Copyable, Movable):
-    """Where a join row's columns are (DuckDB's join TupleDataLayout), and
+    """Where a join row's columns are, and
     how its key fields compare (RowMatcher's per-column functions)."""
 
     var kinds: List[Int]
@@ -517,10 +472,9 @@ struct _TableData(Movable):
     # is built per partition): its first entry and its bitmask.
     var bases: List[UInt64]
     var masks: List[UInt64]
-    # The payload a row carries, as columns over the row order (DuckDB's
-    # dict_arrays) or over the perfect table's slots; its next pointers,
-    # kept apart from the rows when dictionary emission overwrites them
-    # with row numbers (`BuildDictionaryArrays`' aux_next_ptrs).
+    # Retain payload columns indexed by build-row order or perfect-table slot.
+    # Keep next pointers separate when dictionary emission replaces row links
+    # with row numbers.
     var dictionary: List[Series]
     var slot_rows: List[UInt64]
     var aux_next: List[UInt64]
@@ -614,7 +568,7 @@ struct _SinkJob(Job):
             for i in range(n):
                 rows[unsafe_offset=i] = UInt32(self.start + low + i)
             if self.found:
-                # Every row starts not found (DuckDB's `found` column).
+                # Every row starts not found.
                 var found = chunk.writable(found_column, PHYSICAL_BOOL)
                 _ = external_call["memset", Int](found.data, Int32(0), n)
             var hashes = chunk.writable(hash_column, PHYSICAL_UINT64)
@@ -679,7 +633,7 @@ struct _FinalizeJob(Job):
 struct _InsertJob(Copyable, Job):
     """A HashJoinFinalizeTask for one partition's region of the pointer
     table (at `base`, with `bitmask`): zero it, then insert the rows of
-    the partition's chunks (DuckDB's InsertHashesLoop), last row first, so
+    the partition's chunks, last row first, so
     each chain lists its rows in build order."""
 
     var layout: KeyLayout
@@ -830,24 +784,11 @@ def _perfect_slots(
     mut filled_rows: List[UInt64],
     mut filled_slots: List[UInt32],
 ) raises -> Optional[Tuple[UInt64, Int]]:
-    """PerfectHashJoinExecutor::CanDoPerfectHashJoin and its build
-    (BuildPerfectHashTable, FullScanHashTable): an integer key whose valid
-    values span at most PERFECT_MAX_BUILD_SIZE, with no more of them than
-    slots, each value once. Fills `slots` with each slot's build row and
-    `bits` with which slots hold one, `slot_rows` with each filled slot's
-    row, `filled_rows` and `filled_slots` with the rows and their slots
-    (FullScanHashTable's `tuples_addresses` and `sel_build`), and gives
-    the least value's word and the span; None otherwise.
-
-    As DuckDB's, the slots are not initialized: only the bitmap is
-    cleared, one bit a slot (`bitmap_build_idx.SetAllInvalid`), and a
-    slot's build row is read only when its bit is set.
-
-    DuckDB bails when `Count() > build_range`, its comment says for
-    duplicates, but build_range is max - min, one less than its slots: a
-    key that fills its range (a dimension's dense surrogate key) would take
-    the hash table for no duplicate. Here the count is checked against the
-    slots, so only duplicates bail."""
+    """Build a direct-address table for bounded unique integer keys. Reserve
+    max - min + 1 slots, clear only the validity bitmap, and read a slot
+    only when its bit is set. Reject counts above the slot count, then
+    verify uniqueness while filling slots. A densely populated range is
+    valid because both endpoints have slots."""
     var valid = _validity(key)
     var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid[0])
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -949,9 +890,8 @@ def _perfect_heads(
 
 
 def keys_only_join(how: Int) -> Bool:
-    """Whether a join of physical type `how` reads only whether its probe
-    keys are in the build (semi, anti, mark): DuckDB inserts one row per
-    key for it (`insert_duplicate_keys` false)."""
+    """Whether this join observes only key membership: semi, anti and mark
+    joins need a single build row per key rather than every duplicate match."""
     return how == JOIN_SEMI or how == JOIN_ANTI or how == JOIN_MARK
 
 
@@ -994,10 +934,9 @@ struct JoinHashTable(Copyable, Movable):
 
     var data: ArcPointer[_TableData]
     var layout: KeyLayout
-    # DuckDB's PerfectHashJoinExecutor: an inner join on one integer key
-    # whose build keys are unique within PERFECT_MAX_BUILD_SIZE values
-    # looks each probe key up at `key - perfect_base` in `data.slots`
-    # (the row, 0 for none) instead of the pointer table.
+    # For an inner join with unique bounded integer build keys, look up key -
+    # perfect_base in data.slots instead of hashing. Zero indicates an empty
+    # slot; otherwise it identifies the build row.
     var perfect: Bool
     var perfect_base: UInt64
     var perfect_span: Int
@@ -1257,8 +1196,7 @@ struct JoinHashTable(Copyable, Movable):
             self._build_dictionary_arrays()
 
     def _can_use_dictionary_emission(self, probe_cardinality: Int) -> Bool:
-        """JoinHashTable::CanUseDictionaryEmission (DuckDB's external and
-        SINGLE-join conditions cannot arise here)."""
+        """JoinHashTable::CanUseDictionaryEmission."""
         if len(self.output_columns) == 0 or self.rows_stored == 0:
             return False
         if probe_cardinality < _DICT_MIN_PROBE_ROWS:
@@ -1439,7 +1377,7 @@ struct JoinHashTable(Copyable, Movable):
 
 struct ScanStructure(Movable):
     """One thread's probe of a JoinHashTable, a chunk of at most
-    STANDARD_VECTOR_SIZE probe rows at a time (DuckDB's ScanStructure).
+    STANDARD_VECTOR_SIZE probe rows at a time.
 
     `probe` hashes the chunk's keys and finds each row's chain
     (`GetRowPointers`); `next` then emits the join's rows for the chunk,
@@ -1600,11 +1538,10 @@ struct ScanStructure(Movable):
         var records = Int(self.records.unsafe_ptr())
         var region = self.region.unsafe_ptr()
         var bitmasks = self.masks.unsafe_ptr()
-        # Polars' partition_and_probe (equi_join.rs:1045-1051): the
-        # chunk's rows are split by partition first
-        # (`gen_idxs_per_partition`, a counting pass and a placing pass,
-        # each partition's rows in ascending order), so the lookups then
-        # run one partition's region at a time.
+        # Split probe row indices by hash partition with a counting pass and a
+        # placing pass. Keep indices ascending within each partition so
+        # lookups reuse one table region while preserving the required per-
+        # partition order.
         if parts > 1:
             var starts = self.part_starts.unsafe_ptr()
             var part_of = self.part_of.unsafe_ptr()
@@ -1646,10 +1583,9 @@ struct ScanStructure(Movable):
                 offsets[unsafe_offset=i] = base + (
                     hashes[unsafe_offset=i] & mask
                 )
-        # Polars prefetches each block's buckets before looking any of
-        # them up, once its table no longer fits the cache
-        # (`should_prefetch`: MIN_PREFETCH_BUCKETS, BLOCK_SIZE,
-        # polars-expr hash_keys.rs:25-27).
+        # Prefetch all buckets in a probe block before reading any candidate
+        # rows, overlapping memory requests once the table is too large to
+        # stay cached.
         var fetch = self.table.capacity >= MIN_PREFETCH_BUCKETS
         while pending > 0:
             # ProbeForPointers: walk to an empty entry or a salt match.
@@ -1741,7 +1677,7 @@ struct ScanStructure(Movable):
 
     def next(mut self) -> Int:
         """The next at most STANDARD_VECTOR_SIZE output rows of the probed
-        chunk (DuckDB's ScanStructure::Next), or 0 once it is done."""
+        chunk, or 0 once it is done."""
         if self.finished:
             return 0
         var heads = self.heads.unsafe_ptr()

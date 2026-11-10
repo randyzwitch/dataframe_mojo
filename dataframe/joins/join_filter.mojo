@@ -1,30 +1,9 @@
-"""DuckDB 2.0's join filter pushdown: the filters a finished hash join build
-hands to the scan feeding its probe side (`physical_hash_join.cpp`
-JoinFilterPushdownInfo::FinalizeFilters, CanUseInFilter, CanUseBloomFilter,
-PushInFilter; `table_filter_selectivity_optional_function.cpp`).
+"""Derive probe-side filters from a finished hash join build.
 
-For each equality key of an inner, semi or right join whose probe column
-reaches the pipeline's source unchanged, from the build's non-null keys:
-
-- a single value (min = max): a comparison the scan applies to its rows,
-  and to each vector's statistics;
-- otherwise an IN list of the build's distinct keys when the build holds
-  more than one and at most 50 rows (`dynamic_or_filter_threshold`) whose
-  values are not dense, else the build's min/max range. Both are optional
-  filters: checked only against each vector's statistics, a vector they
-  rule out is not read (pushed as dynamic filters of step 3's
-  TableFilterSet);
-- and a bloom filter over the build's keys (one equality condition, a
-  build no larger than the probe side, and a build side without a filter
-  either at most a tenth of the probe side or at most 4,194,304 rows),
-  applied to rows. It pauses, per thread, once the first six vectors it
-  looked at kept half their rows or more, and looks again after ten times
-  as many vectors as it has paused (`SelectivityStats`).
-
-A key the probe side reads as an aggregate's group key reaches that
-aggregate's input as well (`join_filter_pushdown_optimizer.cpp`
-GetPushdownFilterTargets): the build runs first and the input's pipeline
-takes its filters (`PushedJoinFilter`).
+Build-key bounds and membership can reject probe rows that cannot match.
+Apply these filters only where dropping unmatched probe rows preserves the
+join's semantics. Each worker collects local bounds; merge them before
+probing so no key from another build partition is excluded.
 """
 from std.memory import ArcPointer, Pointer
 
@@ -124,9 +103,9 @@ def _row_key(dtype: DataType) -> Bool:
 
 
 struct _BoundsJob(Job):
-    """The least and greatest non-null value of one slice of an integer
-    key, as each DuckDB build thread keeps its keys' min and max in its
-    local join filter state (JoinFilterLocalState::Sink)."""
+    """Collect minimum and maximum values from each build key. Merge worker-
+    local bounds before using them to prune probe-side ranges; every build
+    key must remain within the final bounds."""
 
     var key: Series
     var least: Int64

@@ -35,16 +35,9 @@ from std.memory import (
 
 
 struct FrameSlots(Copyable, Movable, Sized):
-    """A plan's in-memory tables, by slot, shared by every copy of the plan.
-
-    A table never changes once it holds a slot; plans only add slots. So a
-    copy of the plan shares the list, and the copy that adds a slot while
-    another shares it copies the list first. Building a plan copies it at
-    every step (`push`, a join's two sides), and execution copies it for
-    each job: a copy that copied every table's columns made TPC-DS q14's
-    57 tables (1,555 columns) cost 214 us of a 281 us plan copy. Polars'
-    plans and DuckDB's relations hold their tables by shared pointer.
-    """
+    """Share source frames across plan and job copies. Copying a reference
+    avoids cloning every table's column metadata for every worker. The
+    frames remain alive for the plan's lifetime."""
 
     var _shared: ArcPointer[List[DataFrame]]
 
@@ -122,16 +115,15 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # table that subplan narrowed, so the join order still sees how
     # selective it is (`_spine_rows`, `_selectivity`).
     var _origin_rows: Dict[Int, Int]
-    # For a frame slot holding a shared subplan's result: each column's
-    # distinct count as its plan estimated it, DuckDB's relation
-    # statistics of a materialized CTE.
+    # Estimated distinct counts by column for a frame slot holding a
+    # materialized subplan. Preserve these estimates so consumers can plan
+    # without scanning the retained result.
     var _materialized_distinct: Dict[Int, Dict[String, Int]]
     # Provider-neutral envelope on dispatch copies; user plans stay unchanged.
     var _accelerator_settings: Optional[ExecutionSettings]
-    # Each node's empty result (its output names and types) while an
-    # optimizer pass reads them without rewiring the plan, as Polars' IR
-    # and DuckDB's logical operators keep their schemas; cleared by every
-    # rewrite (`_reorder`), None outside those passes.
+    # Memoize empty schemas while optimizer passes inspect names and types.
+    # Clear the memo whenever a rewrite changes the graph, preventing stale
+    # schema answers.
     var _schema_memo: Optional[ArcPointer[Dict[Int, DataFrame]]]
     # Results computed ahead of the node that reads them, by node: a
     # stream's breaker inputs run at once before its joins build
@@ -146,10 +138,8 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # HANDOFF_OFF, HANDOFF_FORCED (every node the provider supports, for
     # engine="accel"), or HANDOFF_AUTO (where measured costs favor it).
     var _handoff: Int
-    # Whether the logical optimizer passes already ran on these nodes:
-    # a shared subplan cut from an optimized plan is collected without
-    # optimizing it again, as Polars optimizes a cached subplan with the
-    # plan around it and DuckDB plans a materialized CTE once.
+    # Mark an already-optimized plan so collecting an extracted shared subtree
+    # does not optimize it a second time outside its original context.
     var _optimized: Bool
     # Nodes over an aggregate this run's stream of it may run in the
     # aggregate's finish (`_row_steps_above`); None otherwise.
