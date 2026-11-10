@@ -1,5 +1,5 @@
 """Internal comparison of owned Arrow C field metadata (arbitrary bytes)."""
-from dataframe.io.binary_endian import read_scalar
+from dataframe.storage.endian import read_scalar
 from std.sys import Endian
 from std.memory import ArcPointer
 

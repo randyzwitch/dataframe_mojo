@@ -1,5 +1,5 @@
 """Checked binary and character decoding for the shapefile components."""
-from dataframe.io.binary_endian import read_scalar
+from dataframe.storage.endian import read_scalar
 from std.memory import bitcast
 from std.sys import Endian
 from dataframe.text.utf8 import append_codepoint

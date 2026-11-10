@@ -1,5 +1,5 @@
 """Bounded ISO WKB traversal shared by storage validation and geometry accessors."""
-from dataframe.io.binary_endian import read_scalar
+from dataframe.storage.endian import read_scalar
 from std.sys import Endian
 from std.memory import bitcast
 from std.math import inf
