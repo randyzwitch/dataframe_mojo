@@ -17,8 +17,7 @@ flag threshold 1024.
 `RADIX`.
 """
 from std.bit import byte_swap, log2_floor
-from std.ffi import external_call
-from std.memory import Pointer
+from std.memory import Pointer, unsafe_memcmp
 
 # A key record held in registers: up to four 64-bit words (the widest
 # layout, `PAYLOAD_VARIABLE_32` or `PAYLOAD_FIXED_32`, is 32 bytes).
@@ -95,7 +94,11 @@ struct SortKeys[W: Int, VAR: Bool](ImplicitlyCopyable, Movable):
             if a[1] <= 8 or b[1] <= 8:
                 return a[1] < b[1]
             var n = min(a[1], b[1])
-            var c = external_call["memcmp", Int32](Int(a[2]), Int(b[2]), Int(n))
+            var c = unsafe_memcmp(
+                Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=Int(a[2])),
+                Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=Int(b[2])),
+                Int(n),
+            )
             return c < 0 or (c == 0 and a[1] < b[1])
         else:
             comptime for k in range(Self.W):

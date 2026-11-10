@@ -55,7 +55,13 @@ from std.bit import count_trailing_zeros
 from std.collections import Optional
 from std.math import log
 from std.ffi import external_call
-from std.memory import ArcPointer, Pointer, bitcast
+from std.memory import (
+    ArcPointer,
+    Pointer,
+    bitcast,
+    unsafe_memcmp,
+    unsafe_memcpy,
+)
 from std.sys import size_of
 
 from dataframe.aggregation.reducer import Reducer, float_key
@@ -390,7 +396,14 @@ def _same(
         var length = Int(base[unsafe_offset=_HEAD - 1 + w] & 0xFFFFFFFF)
         if length <= 12:
             return False
-        if external_call["memcmp", Int32](Int(stored), Int(mine), length) != 0:
+        if (
+            unsafe_memcmp(
+                Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=Int(stored)),
+                Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=Int(mine)),
+                length,
+            )
+            != 0
+        ):
             return False
     return True
 
@@ -413,7 +426,14 @@ def _same_rows(x_at: Int, y_at: Int, addressed: List[Bool]) -> Bool:
         var length = Int(x[unsafe_offset=_HEAD - 1 + w] & 0xFFFFFFFF)
         if length <= 12:
             return False
-        if external_call["memcmp", Int32](Int(u), Int(v), length) != 0:
+        if (
+            unsafe_memcmp(
+                Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=Int(u)),
+                Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=Int(v)),
+                length,
+            )
+            != 0
+        ):
             return False
     return True
 
@@ -2643,8 +2663,14 @@ struct _FinishJob(Job):
                 ordered = True
             else:
                 for k in range(len(spans)):
-                    _ = external_call["memcpy", Int](
-                        final.at(final.n), spans[k], 8 * sizes[k] * stride
+                    unsafe_memcpy(
+                        dest=Pointer[UInt8, MutAnyOrigin](
+                            unsafe_from_address=final.at(final.n)
+                        ),
+                        src=Pointer[UInt8, ImmutAnyOrigin](
+                            unsafe_from_address=spans[k]
+                        ),
+                        count=8 * sizes[k] * stride,
                     )
                     final.n += sizes[k]
         else:
@@ -3065,7 +3091,15 @@ struct _PerfectScanJob(Job):
                 if theirs[unsafe_offset=1] == 0:
                     continue
                 if mine[unsafe_offset=1] == 0:
-                    _ = external_call["memcpy", Int](into, other, bytes)
+                    unsafe_memcpy(
+                        dest=Pointer[UInt8, MutAnyOrigin](
+                            unsafe_from_address=into
+                        ),
+                        src=Pointer[UInt8, ImmutAnyOrigin](
+                            unsafe_from_address=other
+                        ),
+                        count=bytes,
+                    )
                     continue
                 combine(self.slots, into + states_bytes, other + states_bytes)
                 if theirs[unsafe_offset=2] < mine[unsafe_offset=2]:

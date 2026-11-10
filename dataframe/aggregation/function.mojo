@@ -16,8 +16,13 @@ buffer values and sequence numbers, then sort before finalizing.
 from dataframe.storage.buffer import _Buffer, _BufferData
 from std.collections import Optional
 from std.math import isnan
-from std.ffi import external_call
-from std.memory import ArcPointer, Pointer, bitcast
+from std.memory import (
+    ArcPointer,
+    Pointer,
+    bitcast,
+    unsafe_memcmp,
+    unsafe_memcpy,
+)
 
 from dataframe.aggregation.reducer import (
     Reducer,
@@ -326,8 +331,14 @@ def _values_gather(
         var segment = _words_at(at)
         var fill = Int(segment[unsafe_offset=1])
         end -= fill
-        _ = external_call["memcpy", Int](
-            Int(into) + 8 * end, at + 8 * _SEGMENT_HEAD, 8 * fill
+        unsafe_memcpy(
+            dest=Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=Int(into) + 8 * end
+            ),
+            src=Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=at + 8 * _SEGMENT_HEAD
+            ),
+            count=8 * fill,
         )
         at = Int(segment[])
 
@@ -498,7 +509,11 @@ struct _Groups(Movable):
     def copy_row(mut self, address: Int) -> Int:
         """A new group with the row at `address`; its id."""
         var g = self.n
-        _ = external_call["memcpy", Int](self.at(g), address, 8 * self.stride)
+        unsafe_memcpy(
+            dest=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.at(g)),
+            src=Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=address),
+            count=8 * self.stride,
+        )
         self.n += 1
         return g
 
@@ -756,7 +771,13 @@ def _string_order(at: Int, length: Int, state: Int) -> Int:
     var held = _words_at(state)
     var size = Int(held[] & 0xFFFFFFFF)
     var bytes = state + 4 if size <= 12 else Int(held[unsafe_offset=1])
-    var c = Int(external_call["memcmp", Int32](at, bytes, min(length, size)))
+    var c = Int(
+        unsafe_memcmp(
+            Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=at),
+            Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=bytes),
+            min(length, size),
+        )
+    )
     if c != 0:
         return c
     return length - size
