@@ -1,5 +1,6 @@
 """Compile-time Metal eligibility without instantiating an unknown GPU target."""
 from max.gpu.host.info import default_accelerator
+from max.gpu.host import DeviceContext
 from std.sys.info import _accelerator_arch
 
 
@@ -15,3 +16,7 @@ def compiled_for_metal() -> Bool:
 
 
 comptime METAL_TARGET = compiled_for_metal()
+
+# The SDK context now has a target parameter. CPU-only builds still need a
+# concrete declaration type, while the scope rejects GPU submission there.
+comptime MetalContext = DeviceContext[] if METAL_TARGET else DeviceContext.CPU
