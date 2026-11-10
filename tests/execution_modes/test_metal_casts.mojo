@@ -120,7 +120,9 @@ def test_metal_native_cast_planner_shares_values_and_preserves_cpu_types() raise
     assert_false(simple_conditional_trees(plan.value()))
     assert_equal(general_case_mode(plan.value()), 1)
     assert_true(
-        composition_key(plan.value()).startswith("typed_reductions:v1:")
+        composition_key(plan.value()).startswith(
+            "typed_reductions:v2:scalar_chain:"
+        )
     )
     var stages = (
         frame.lazy()
@@ -135,7 +137,7 @@ def test_metal_native_cast_planner_shares_values_and_preserves_cpu_types() raise
     )
     assert_true(Bool(f32))
     assert_equal(f32.value().dtype, DataType.FLOAT32)
-    assert_equal(f32.value().nodes[0].literal, UInt64(0))
+    assert_equal(f32.value().nodes[0].literal & 3, UInt64(2))
     assert_true(
         Bool(
             compile_typed_expression(
@@ -147,8 +149,9 @@ def test_metal_native_cast_planner_shares_values_and_preserves_cpu_types() raise
         compile_typed_expression(col("f").cast(DataType.INT32), frame)
         .value()
         .nodes[0]
-        .literal,
-        UInt64(1),
+        .literal
+        & 3,
+        UInt64(3),
     )
     assert_false(Bool(compile_typed_expression(col("n") + col("w"), frame)))
     assert_false(

@@ -42,6 +42,11 @@ pixi run --locked mojo build -O3 -I . scripts/check_metal_value_stack_device.moj
   -o build/contract-tests/metal-value-stack-device
 build/contract-tests/metal-value-stack-device
 
+echo "== Scalar and general expression fields in the production composed scan"
+pixi run --locked mojo build -O3 -I . scripts/check_metal_scalar_fields.mojo \
+  -o build/contract-tests/metal-scalar-fields
+build/contract-tests/metal-scalar-fields
+
 echo "== Production grouped value interpreter, including nullable inputs"
 pixi run --locked mojo build -O3 -I . scripts/check_metal_numeric_group_kernel.mojo \
   -o build/contract-tests/metal-numeric-group-kernel

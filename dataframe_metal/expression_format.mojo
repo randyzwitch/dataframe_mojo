@@ -26,6 +26,14 @@ comptime MAX_CASE_SOURCE_NODES = 262144
 comptime TYPED_HEADER = 0xFFFF_FFFA
 comptime VALUE_TYPE_SHIFT = 40
 
+# Typed-header flags: bit zero requires Float32 payloads even for COUNT.
+# Bit one proves a scalar accumulator schedule (no nested right subtree).
+# Bits 8..15 contain its operation count; bits 16..30 mark unary steps.
+comptime TYPED_CHAIN = 2
+
+# Composed-scan header word14: four scalar-field bits before moment bits24..27.
+comptime SCALAR_FIELD_SHIFT = 20
+
 # Unary predicate leaves reserve zero for null tests. COL itself is zero, so
 # native Bool values need a distinct ABI tag rather than their Expr opcode.
 comptime BOOL_COLUMN_COMPARISON = 0x7FFF

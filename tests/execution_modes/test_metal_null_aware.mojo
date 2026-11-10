@@ -104,9 +104,9 @@ def test_metal_fill_plans_read_nan_validity_for_count_and_keep_native_types() ra
     var nan = compile_typed_expression(
         col("f").fill_nan(null(DataType.FLOAT32)), frame
     )
-    assert_equal(nan.value().nodes[0].literal, UInt64(1))
+    assert_equal(nan.value().nodes[0].literal & 3, UInt64(3))
     var nullable = compile_typed_expression(col("f").fill_null(col("g")), frame)
-    assert_equal(nullable.value().nodes[0].literal, UInt64(0))
+    assert_equal(nullable.value().nodes[0].literal & 3, UInt64(2))
     var conditional = compile_conditional(
         when(col("a") > 0)
         .then(col("f").fill_nan(null(DataType.FLOAT32)))

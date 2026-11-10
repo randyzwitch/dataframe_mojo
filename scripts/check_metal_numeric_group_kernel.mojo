@@ -94,6 +94,8 @@ def run_check(nullable: Bool) raises:
     words[103] = 3
     # Typed Int32 ABS/CLIP.
     words[104] = UInt64(TYPED_HEADER)
+    # ABS, CLIP_LOW and CLIP_HIGH use the production scalar schedule.
+    words[107] = 2 | (UInt64(3) << 8) | (UInt64(1) << 16)
     node(words, 108, COL, 0, 1)
     node(words, 112, ABS, 0)
     node(words, 116, LIT_INT, 0)
