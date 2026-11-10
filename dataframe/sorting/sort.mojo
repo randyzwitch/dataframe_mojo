@@ -1,27 +1,9 @@
-"""DuckDB 2.0's sort (common/sorting/sort.cpp, sorted_run.cpp,
-sorted_run_merger.cpp) and top-N heap (physical_top_n.cpp).
+"""Sort normalized key records in runs and merge their row order.
 
-Sort, as a sink and a source:
-- Sink: every thread encodes the rows it takes into a run of key records
-  (`encode_keys`), and Combine sorts the run: vergesort, whose fallback for
-  unsorted stretches is the in-place radix sort `ska_sort`
-  (SortedRun::Finalize).
-- Finalize: partitions of DEFAULT_ROW_GROUP_SIZE rows of the output.
-- Source (SortedRunMerger): each partition's run boundaries come from a
-  K-way merge path over the runs; each partition copies its records from
-  every run and sorts them with vergesort, which finds the runs and merges
-  them; partitions run in parallel and are scanned out in order. The
-  payload is the row index, so the scan-out is the gather of the output
-  columns by row (the row ids LateMaterialization sorts).
-
-Top-N (PhysicalTopN): one heap per thread over the full key, holding the
-best `limit` keys and their rows; the threads' heaps combine into one,
-which is sorted. The heap reduces its key storage once it holds more than
-ReduceThreshold entries' worth.
-
-Callers come through `sort_rows`, which picks the top-N for a limit as
-DuckDB's TopN optimizer does (topn_optimizer.cpp: a full sort once the
-limit is over 5,000 rows and 0.7% of the input).
+Encode ordering, null placement and stability in the keys. Sort independent
+runs, then merge them into a global order. A small requested prefix uses a
+bounded top-N heap; a larger prefix uses the full-sort route to avoid the
+heap's repeated maintenance cost when most rows would be retained.
 """
 from std.collections import Optional
 from std.ffi import external_call

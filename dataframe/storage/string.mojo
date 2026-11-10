@@ -223,8 +223,8 @@ struct StringColumn(Copyable, Sized):
     def _select_rows(self, shared: ArcPointer[List[Int]]) -> Optional[Self]:
         """This column's rows at `shared` (every one a row of it, none
         missing) without copying a descriptor: the result reads this
-        column's view descriptors through the row list, as DuckDB's join
-        emits a build column as a dictionary vector over it, and carries
+        column's view descriptors through the row list, allowing a join to
+        emit a build column as a dictionary vector over it, and carries
         this column's dictionary codes the same way. Only the validity is
         gathered, when there are nulls. None when this column does not
         hold its own view descriptors (offsets, or a selection itself)."""

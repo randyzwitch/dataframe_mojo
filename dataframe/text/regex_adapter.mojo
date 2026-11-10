@@ -478,7 +478,7 @@ def regex_extract_groups(column: StringColumn, regex: Regex) raises -> Series:
     var names = regex.group_names()
     var n = len(column)
     if not len(names):
-        # Polars returns a valid empty struct even for null input strings.
+        # No capture fields means a valid empty struct, even for null input.
         return Series("", StructColumn(List[Series](), length=n))
     var workers = worker_count(n)
     var jobs = List[_GroupsJob]()

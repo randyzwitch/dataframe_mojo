@@ -1,19 +1,9 @@
-"""DuckDB 2.0's top-N (execution/operator/order/physical_top_n.cpp).
+"""Keep the best k normalized keys in a bounded heap.
 
-`TopNHeap` keeps the best `heap_size` key records seen, the worst on top
-(a max-heap under the key's order, as `std::push_heap` over
-`TopNEntry::operator<`). A record enters when the heap has room or when
-it is better than the top (`EntryShouldBeAdded`).
-
-`TopNBoundary` is TopNBoundaryValue: every thread whose heap is full
-publishes its worst key, and the shared boundary keeps the tightest one.
-Before a thread adds a chunk's rows it takes the boundary when it changed
-(a try-lock, as `TryGetBoundaryValue`), and a row whose key is not better
-than it cannot enter any heap's final top-N, so it is dropped
-(`CheckBoundaryValues`). The boundary is compared as the normalized key,
-with the same result as DuckDB's column-by-column comparison.
-
-The operator's sink over a stream of chunks is `top_n_sink.TopNSink`.
+The worst retained row forms the heap boundary. Reject candidates that
+cannot improve it; replace the boundary when a better candidate arrives.
+Sorting the retained keys produces the requested prefix. Keys include
+null placement and, when stable ordering is requested, input row ids.
 """
 from std.collections import Optional
 from std.atomic import Atomic

@@ -1,8 +1,9 @@
-"""Full-input, mergeable HyperLogLog sketches for expression reductions.
+"""Estimate distinct counts with a fixed-size cardinality sketch.
 
-Polars' CardinalitySketch uses 256 one-byte registers, a harmonic estimate
-and linear counting for a small domain. This does the same; planner
-statistics retain their separate sampled 64-register sketch.
+Hash values into 256 one-byte registers and retain the largest observed
+leading-zero rank in each register. Estimate population from the harmonic
+mean of register contributions, with a small-population correction based
+on empty registers. The bounded sketch avoids storing every unique value.
 """
 from std.bit import count_leading_zeros
 from std.math import log

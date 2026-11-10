@@ -755,13 +755,9 @@ struct _GatherJob(Job):
                                 1
                             ) << UInt8(k % 8)
                     return
-                # Validity eight rows at a time: each output byte is built
-                # from the source bitmap in a register and stored once, as
-                # Arrow's take and DuckDB's gather do. Setting one bit at a
-                # time chained every row's store on the row before through
-                # the same byte (TPC-DS q14's item payload with nulls,
-                # 1.6M rows a run). A job's range starts on a byte, so it
-                # owns the bytes it stores.
+                # Assemble validity bytes in local words, then write each
+                # output word once. Updating a single bit at a time would
+                # repeatedly read and modify the same byte.
                 var or_null = self.or_null
                 var source_bits = column.unsafe_validity()
                 var first = column.validity_offset()

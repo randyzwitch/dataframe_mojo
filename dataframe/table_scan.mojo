@@ -1,6 +1,4 @@
-"""A table scan with filters (DuckDB 2.0's `RowGroup::CheckZonemap`,
-`RowGroup::CheckZonemapSegments` and `ScanFilterInfo` in
-`storage/table/row_group.cpp`).
+"""A table scan with filters.
 
 The scan checks each table filter against the statistics of every row
 group first, then of every vector of a row group no filter ruled out: a

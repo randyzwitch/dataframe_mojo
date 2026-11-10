@@ -108,9 +108,8 @@ def _parse_8digits(word: UInt64) -> UInt64:
 def _try_parse_8digits(
     bytes: Span[UInt8, _], start: Int, mantissa: UInt64
 ) -> Tuple[Int, UInt64]:
-    # number.rs::try_parse_8digits uses a bounds-checked unaligned load, then
-    # its packed 8-digit reduction.  Returning zero leaves scalar parsing at
-    # the first non-eight-digit group, matching the Rust cursor behavior.
+    # Advance the numeric cursor only past complete eight-digit groups,
+    # leaving the first incomplete or invalid group for scalar parsing.
     if start + 8 > len(bytes):
         return (0, mantissa)
     var word = bitcast[DType.uint64, 1](

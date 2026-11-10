@@ -1,5 +1,4 @@
-"""Window layouts (DuckDB's hash-partitioned, per-group sorted window
-input): every partition's rows are contiguous and in input order (or in
+"""Window layouts: every partition's rows are contiguous and in input order (or in
 order-key order, ties in input order), with partition and peer boundaries
 marked; and `over()` on them gives each partition what the scalar window
 models give it: running sums both ways, shift, average rank, rolling mean,

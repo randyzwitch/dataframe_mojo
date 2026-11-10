@@ -1,6 +1,6 @@
-"""A pipeline's morsels cover its source's rows once, in order, never
-across a chunk boundary. Their count is Polars' ideal morsel count
-rounded up to a multiple of the workers."""
+"""Morsels cover source rows once in order without crossing chunk boundaries.
+Round the target morsel count up to a multiple of the workers so the final
+scheduling wave stays balanced."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_true
 
@@ -23,8 +23,8 @@ def check_cover(ranges: List[Int], n: Int) raises:
 
 
 def test_counts_round_to_a_multiple_of_the_workers() raises:
-    # Polars' in-memory source: ideal count of 100,000-row morsels, rounded
-    # up to a multiple of the workers; 1M rows on 8 workers is 16 morsels.
+    # Start from a target of 100,000 rows per morsel and round the count up to
+    # a worker multiple: 1M rows on eight workers gives 16 morsels.
     for n in [1_000_000, 100_000, 20_000, 5, 0]:
         var ranges = _morsel_ranges(rows(n), 8)
         check_cover(ranges, n)

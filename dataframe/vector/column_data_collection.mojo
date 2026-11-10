@@ -1,15 +1,10 @@
-"""DuckDB 2.0's `ColumnDataCollection` append and `BatchedDataCollection`
-(common/types/column/column_data_collection.cpp,
-common/types/batched_data_collection.cpp), and the materialize sink built
-on them (PhysicalBatchCollector's sink: one collection per batch index).
+"""Collect output chunks in owned columns without repeated concatenation.
 
-A collection copies every chunk it is given into storage it owns
-(`ColumnDataCopy`): fixed-width values a vector reads through its
-unified format are copied as raw bytes with their validity
-(`TemplatedColumnDataCopy`, `ColumnDataCopyValidity`), and other values
-are appended to an owned column. Nothing it holds points into the
-worker's arena, so the arena's columns can go when the next morsel
-starts.
+Append fixed-width vectors as raw bytes when their physical and logical
+types agree; otherwise retain values. Keep each chunk as a separate piece
+and join once when producing a frame, avoiding quadratic copying as the
+result grows. Batch collections can transfer independent pieces to output
+in parallel.
 """
 from std.memory import Pointer, unsafe_memcpy
 
@@ -163,13 +158,12 @@ def raw_series(
 
 
 struct ColumnDataCollection(Movable):
-    """Chunks of one schema copied into owned columns (DuckDB's
-    `ColumnDataCollection::Append`). A column is copied as raw bytes when
+    """Chunks of one schema copied into owned columns. A column is copied as raw bytes when
     its vectors are fixed-width and its type is their storage type (or
     the values were computed, typed afterwards), and otherwise appended
     as values; a column switches to values the first time a vector cannot
-    be copied raw. Values are kept as one piece per chunk, as DuckDB keeps
-    a collection's chunks in segments, and joined once by `frame` (an
+    be copied raw. Values are kept as one piece per chunk and joined
+    once by `frame` (an
     append per chunk copied every row so far again: quadratic)."""
 
     var schema: DataFrame
@@ -309,9 +303,8 @@ struct MaterializeSink(Sink):
 
 struct _FrameJob(Job):
     """One batch's collection turned into its frame, on a worker: each
-    batch's columns are copied out of its collection in parallel, as
-    Polars' in-memory sink keeps every morsel's frame as it came (no
-    serial pass over the result's rows)."""
+    batch's columns are copied out of its collection in parallel,
+    avoiding a serial pass over every result row."""
 
     var collection: Int
     var frame: DataFrame

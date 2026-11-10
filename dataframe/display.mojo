@@ -96,7 +96,7 @@ def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
                 if series.dtype().is_temporal():
                     var dtype = series.dtype()
                     # A zone-aware datetime shows local time and the zone's
-                    # abbreviation, as Polars prints it.
+                    # abbreviation to keep temporal dtype labels compact.
                     return format_temporal(
                         column._get(row).cast[DType.int64](),
                         dtype,
@@ -126,7 +126,7 @@ def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
             _wkb_display(column._row_bytes(row)), max_string_length
         )
     if series.dtype()._is_bytes():
-        # b"..." with non-printable bytes escaped, as Polars shows binary.
+        # b"..." with non-printable bytes escaped so arbitrary bytes are visible.
         return _truncate(
             escape_bytes(column._row_bytes(row)), max_string_length
         )

@@ -43,9 +43,9 @@ element, while a scalar where a list is required becomes a null list. Syntax
 errors, invalid Unicode escapes, invalid numbers and nonobject rows always
 raise. NDJSON errors identify the physical line, including blank lines.
 
-These two inference choices follow the issue's explicit contract and differ
-from Polars 2.0: Polars silently drops keys outside its sample, and a
-Boolean/integer mixture can infer Int64 and then fail conversion.
+Rejecting unknown fields prevents sampled inference from silently losing
+data. Promoting Boolean/integer mixtures to String preserves both kinds of
+values rather than choosing an integer type that cannot decode the Booleans.
 
 An empty NDJSON file needs an explicit schema. An empty JSON array is valid.
 Objects with no fields retain their rows: two `{}` records produce a frame
@@ -85,11 +85,11 @@ buffer size. Column and nested field order are retained.
 |---|---|
 | Null / null cell | `null` |
 | Integer / finite Float32 or Float64 | Number; finite floats and signed zero round-trip |
-| NaN / positive or negative infinity | `null`, as in Polars |
+| NaN / positive or negative infinity | `null`; JSON has no nonfinite number literals |
 | Bool / String | Boolean / escaped UTF-8 string |
 | Date / Datetime / Time | ISO 8601 string; aware datetimes use a canonical UTC offset |
 | Duration | Fixed ISO 8601 duration, such as `"-PT0.000000001S"` |
-| Decimal | Quoted exact decimal, as in Polars |
+| Decimal | Quoted exact decimal, preserving every digit |
 | Categorical | String label |
 | Binary / Geometry | Padded base64 string containing the original bytes |
 | List / Struct | Array / object, recursively with parent and child nulls |
@@ -103,6 +103,6 @@ Expanded ISO years retain full Date and Datetime storage bounds; positive
 years beyond four digits carry a leading `+`. This I/O parsing extension
 keeps the existing string expression parser's year policy unchanged.
 
-Time, Duration and Binary wire forms extend the pinned Polars reader, which
-does not round-trip those types. Duration parsing accepts fixed days, hours,
+Time, Duration and Binary use explicit string encodings so a reader with
+the original schema can reconstruct their logical values. Duration parsing accepts fixed days, hours,
 minutes and seconds; calendar months and years are not fixed tick counts.

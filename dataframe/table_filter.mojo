@@ -1,8 +1,6 @@
-"""Filters pushed into a table scan (DuckDB 2.0's `TableFilter`,
-`TableFilterSet` and `DynamicFilterData`, in `planner/filter/` and
-`planner/table_filter_set.hpp`).
+"""Filters pushed into a table scan.
 
-A table filter reads one column. It is a small tree of DuckDB's filter
+A table filter reads one column. It is a small tree of filter
 kinds (a comparison with a constant, IN, IS NULL, IS NOT NULL, AND and OR
 of filters on the same column, and a dynamic filter whose constant an
 operator sets while the query runs) that `check_statistics` answers against
@@ -71,9 +69,8 @@ from dataframe.storage.statistics import (
 )
 from dataframe.storage.string import StringColumn
 
-# Filter kinds (DuckDB's ConstantFilter, InFilter, IsNullFilter,
-# IsNotNullFilter, ConjunctionAndFilter, ConjunctionOrFilter,
-# DynamicFilter).
+# Single-column filter kinds: constant comparison, membership, null checks,
+# conjunctions and runtime-updated boundaries.
 comptime CONSTANT_COMPARISON = 0
 comptime IN_FILTER = 1
 comptime IS_NULL_FILTER = 2
@@ -360,7 +357,7 @@ struct TableFilter(Copyable, Movable):
     """One column's filter: `nodes` with the root last. `source` is the
     index of the predicate part it came from (-1 for a dynamic filter) and
     `expr` that part. An `optional` filter is only checked against
-    statistics (DuckDB's OptionalFilter): whatever it does not rule out
+    statistics: whatever it does not rule out
     is not evaluated by the scan."""
 
     var column: String

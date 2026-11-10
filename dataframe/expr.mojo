@@ -2912,7 +2912,7 @@ struct Then(Copyable):
                 self._values[i],
                 Optional[Expr](result^),
             )
-        # The chain is named after its first value, as in Polars.
+        # The chain is named after its first value.
         result._name = self._values[0]._name
         return result^
 
@@ -2934,8 +2934,7 @@ struct StrNamespace(Copyable):
 
     `contains`, `count_matches`, `extract`, `extract_all`, `replace`,
     `replace_all` and `split(literal=False)` take regular expressions in
-    the syntax of Rust's `regex` crate; see
-    docs/expressions.md for what is supported. A pattern that is plain text
+    the supported syntax documented in docs/expressions.md. A pattern that is plain text
     is searched as a substring."""
 
     var _expr: Expr

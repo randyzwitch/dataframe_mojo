@@ -1,25 +1,8 @@
-"""DuckDB 2.0's `RadixPartitionedTupleData` (common/types/row/
-partitioned_tuple_data.cpp, common/radix_partitioning.cpp): rows of one
-layout in one TupleDataCollection per radix partition of a hash column.
+"""Store fixed-layout rows in separate hash-radix partitions.
 
-    var rows = RadixPartitionedTupleData(layout, radix_bits, hash_column)
-    var append = PartitionedTupleDataAppendState()
-    rows.initialize_append_state(append)
-    # per chunk, after `to_unified_format` and the hashes are written:
-    rows.append_unified(append, chunk, append_sel, count)
-    combined.combine(rows)                    # a thread's rows, at Combine
-    var all = combined.get_unpartitioned()    # partition 0's rows first
-
-A row's partition is `radix_bits` bits of its hash, just below the 16
-salt bits (RadixPartitioning::ApplyMask). Appending computes every row's
-partition, makes one selection that lists each partition's rows together
-(BuildPartitionSel, a counting pass), makes room in each partition for
-its rows (BuildBufferSpace), and scatters the whole chunk in one call. A
-chunk whose rows all fall in one partition goes straight to it.
-
-There is no buffer manager, so blocks never move and no pin states are
-kept; `FlushAppendState` has nothing to unpin. Repartitioning to more bits
-is not ported: with no memory limit, the join never goes external.
+The selected hash bits choose one TupleDataCollection for each row.
+Separate partitions let workers build or finish independent regions
+without contending on the same hash-table entries.
 """
 from dataframe.vector.data_chunk import DataChunk
 from dataframe.vector.tuple_data_collection import TupleDataCollection

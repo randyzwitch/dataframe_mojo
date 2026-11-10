@@ -48,13 +48,10 @@ def finish_build(
     coalesce: Bool = True,
     probe_estimate: Int = -1,
 ) raises -> Optional[JoinHashTable]:
-    """A join's build side, finished as its build pipeline's last stage:
-    every column in one chunk, then the hash table over `keys` with the
-    build's other columns as its rows' payload (none when `keys` is
-    empty, or when a key cannot be hashed this way), as DuckDB finalizes
-    a hash join's table at the end of its build pipeline. Semi and anti
-    joins read no build column, so their rows have no payload.
-    `probe_estimate` is the probe side's estimated rows."""
+    """Finish a join build by retaining its columns and constructing its key
+    index. Return no index for absent or unsupported keys. Semi/anti joins
+    need no build payload because they emit only the preserved side.
+    probe_estimate describes the expected probe cardinality."""
     for column in built._columns:
         if column.is_chunked():
             built = built.rechunk()
@@ -81,10 +78,9 @@ def finish_build(
             if keys[k] == column.name():
                 key_at = k
         if key_at < 0:
-            # A string or nested column stays in the build frame, read by
-            # each row's number: a probe never copies its bytes (DuckDB's
-            # gather copies a string_t; a column here cannot reference
-            # the rows' heap).
+            # Keep String and nested columns in the build frame and read them
+            # by original row number, so probing does not copy variable-size
+            # payload bytes into row storage.
             if emits and _in_rows(column.dtype()):
                 payload.append(column.copy())
                 output_columns.append(len(keys) + len(payload) - 1)
@@ -115,12 +111,9 @@ def finish_build(
 
 
 struct _SubplanPipeline(SchedulablePipeline):
-    """One subplan (a union's or a join's input, a stream's build side or
-    breaker input), executed from its own copy of the plan as one
-    scheduled pipeline (`run_pipelines`). A join's build side given its
-    keys finishes as a build (`finish_build`) in its finish event, as
-    DuckDB's hash join finalizes its table in its build pipeline's
-    `PipelineFinishEvent`."""
+    """A scheduled input plan whose finish event prepares its columns and
+    optional join-key index. The dependent probe starts only after this
+    event completes."""
 
     var plan: QueryContext
     var index: Int

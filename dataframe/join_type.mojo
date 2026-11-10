@@ -7,8 +7,7 @@ comptime JOIN_FULL = 3
 comptime JOIN_SEMI = 4
 comptime JOIN_ANTI = 5
 comptime JOIN_CROSS = 6
-# Physical join types the hash join runs that no public `how` names
-# (DuckDB's JoinType): a semi or anti join whose table is built on its
+# Physical join types with no public `how` name: a semi or anti join built on its
 # left input flags the build rows a probe matched, then emits the flagged
 # (RIGHT_SEMI) or unflagged (RIGHT_ANTI) ones; a MARK join emits every
 # probe row with whether it matched.
@@ -19,7 +18,7 @@ comptime JOIN_MARK = 9
 
 def join_emits_build_rows(how: Int) -> Bool:
     """Whether a probe flags the build rows it matches for a scan after
-    the probe (DuckDB's `PropagatesBuildSide`; ScanFullOuter)."""
+    the probe."""
     return (
         how == JOIN_RIGHT
         or how == JOIN_FULL

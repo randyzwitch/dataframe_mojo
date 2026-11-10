@@ -14,7 +14,7 @@ the seams between operators and in the main thread's work between
 rounds. Kernel fixes move a few queries by 5 to 30% per PR; they do not
 change the shape that puts the threads to sleep.
 
-Three structural differences from DuckDB and Polars, each visible in a
+Three structural bottlenecks, each visible in a
 query that is outside the goal:
 
 1. **Every operator materializes its whole output.** PDS-H q2 joins 1,987
@@ -87,11 +87,13 @@ Polars (`crates/polars-stream/src/nodes/*.rs`, `morsel.rs`,
   preserved only when `preserve_order_probe` asks for it; otherwise the
   output morsels take a fresh sequence number.
 
-The two agree on the shape and differ on the morsel size. DuckDB's 2,048
-suits its vector kernels with no per-call cost; our kernels are column
-operations with a few microseconds of per-call cost (a `Series`, an
-`ArcPointer`, a job), so Polars' size is the one to copy: 64K to 128K
-rows a morsel, and no splitting inside a morsel.
+Morsel size must amortize this implementation's per-call cost: constructing
+a `Series`, retaining an `ArcPointer`, and posting a job take a few
+microseconds. Start with 64K to 128K rows per morsel so useful column work
+dominates that overhead, while retaining enough morsels to occupy all
+workers. Do not split a morsel again inside each operator; that would
+reintroduce scheduling barriers between stages. Measure this tradeoff on
+representative queries rather than choosing a size by source similarity.
 
 ## The design
 
@@ -113,7 +115,7 @@ it directly: materialization happens at most once per column and only
 for the columns an operator reads. The hash join probe produces a morsel
 whose probe-side columns are the input's with a new selection and whose
 build-side columns are gathered from the build payload for the matched
-rows, as DuckDB's `NextInnerJoin` does. A projection that drops a column
+rows. A projection that drops a column
 drops it before any gather.
 
 The current `_StreamJob` already carries a frame per batch and applies
@@ -122,7 +124,7 @@ with the rule that nothing gathers before an operator reads.
 
 ### Pipelines
 
-A plan becomes pipelines as in DuckDB: walking down from the collect, a
+A plan becomes pipelines by following its data dependencies: walking down from the collect, a
 pipeline breaker (a grouped or ungrouped aggregation, a sort or top-k, a
 join's build side, a unique) ends a pipeline and becomes its sink; the
 build side of a join is a pipeline of its own that must finish first. The
@@ -157,47 +159,43 @@ once. The main thread does no per-morsel work.
   states in place from the morsel's rows (a reduction of a computed
   input evaluates it once per morsel); combine merges the threads'
   parts of one hash on one thread, parts in parallel, or the unsplit
-  tables as one (DuckDB's thread-local radix-partitioned aggregate
-  table, which also partitions only as it grows).
+  tables as one. Partitioning only as the table grows avoids fixed
+  partition-management work for small aggregations.
   Many groups: each thread keeps its morsels' selections over the source
   frame (or their output frames when a step made columns), and the
   finish gathers the kept rows once and runs the eager partitioned
   group-by over them: one scatter of every row into buckets, each bucket
   encoded on its own thread, which inserting rows one at a time into
   tables that outgrow the caches does not match (ClickBench q32, 10M
-  groups: 850 ms inserted against 300 scattered); Polars' streaming
-  group-by and DuckDB's sink partition and finalize the same way once
-  their tables grow. There is no per-batch `_StreamReduction` and no
+  groups: 850 ms inserted against 300 scattered). Partitioning confines
+  updates to smaller tables and allows independent finalization. There is no per-batch `_StreamReduction` and no
   state merge on the main thread; the collect-or-merge judgement (#530)
   is made once, before any row is read. Open: strings. The tables
   compare keys by their words, exact for fixed-width keys only, and the
   late gather of string rows costs more than the eager route's per-chunk
   filter (q12: 85 ms against 48), so a plan that groups or reduces
   strings under a filter or projection still takes the eager route; the
-  fix is a row-layout key store with the strings' bytes, as DuckDB's
-  aggregate hash table keeps them.
+  fix is a row-layout key store that retains the strings' bytes and can
+  compare complete keys without repeatedly gathering source columns.
 - **Hash join**: the build side is a sub-plan collected before the
   pipeline runs (its own pipelines), rechunked once, and finalized into
-  DuckDB's join hash table (`JoinHashTable`: rows with key fields, salted
-  `ht_entry_t` pointers, chains of equal keys); the table is shared by
+  a hash table with key fields, salted pointers and chains of equal keys; the table is shared by
   every worker. The probe is a step: a worker probes the index with its
   morsel's rows on its own thread and gathers the matched rows of both
-  sides in one piece, which is the next step's morsel (DuckDB's
-  `PhysicalHashJoin::ExecuteInternal` on one chunk, Polars' probe task).
+  sides in one piece, which is the next step's morsel.
   Inner, left, semi and anti joins run this way under every sink except
   a grouped sink that must keep first-occurrence order, since a morsel's
   output rows carry no unique position in the join's left-major order.
   Still to do from the design: a build sink that partitions each
-  worker's morsels by hash and builds per partition (Polars'
-  `BuildState`), and a probe-side selection instead of a gather for
+  worker's morsels by hash and builds independent table partitions, and a probe-side selection instead of a gather for
   joins that keep most rows.
 - **Top-k**: each thread keeps its morsels' output rows as candidates and
   folds them to the k best once they pass a few thousand rows; after a
   fold it publishes its k-th first-key value into a bound shared by
   every thread through two atomics, and before each morsel adopts the
   tightest, narrowing the morsel to the rows that can still enter the
-  top k when at most one in eight can (DuckDB's top-n heap boundary
-  shared across threads). Candidates carry their place in the source as
+  top k when at most one in eight can. A shared boundary lets work on
+  one thread reduce scanning on every other thread. Candidates carry their place in the source as
   a hidden last sort key, so ties come out as a stable sort of the whole
   input would place them; the finish sorts all threads' candidates once.
 - **Sort**: still the materialize sink followed by the eager sort; sorted
@@ -206,12 +204,11 @@ once. The main thread does no per-morsel work.
 
 ### Order
 
-Joins promise no row order (since 2026-10-29), as DuckDB's and Polars'
-default joins do: output morsels take probe order and either side may
+Joins promise no row order (since 2026-10-29): output morsels take probe order and either side may
 build, so `_order_free_above` treats any join as the end of order
 significance. Ordered sinks use the morsel sequence. A sort or top-k
-above a join sees ties in probe order, which is the same contract Polars
-has had since 1.0.
+above a join can see ties in probe order. Stable sorting preserves that
+input order; it cannot make an unordered join deterministic.
 
 ### What it replaces
 

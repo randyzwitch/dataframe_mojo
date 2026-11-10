@@ -1,26 +1,9 @@
-"""DuckDB 2.0's `TupleDataCollection` (common/types/row/
-tuple_data_collection.cpp): rows of a fixed layout, appended from data
-chunks and gathered back into them.
+"""Append fixed-layout rows from chunks and gather them back into vectors.
 
-    var layout = TupleDataLayout(types)
-    var rows = TupleDataCollection(layout)
-    var append = TupleDataAppendState()
-    rows.initialize_append(append)
-    rows.append(append, chunk, arena)         # per chunk
-    var scan = TupleDataScanState()
-    rows.initialize_scan(scan)
-    while rows.scan(scan, out_chunk, arena):  # per chunk of rows
-        ...
-
-Appending converts each column to its unified format (`DataChunk.
-unified`; a nested column through its at-rest column, see
-`_storage_format`), computes each row's heap size, makes room for the
-rows (`TupleDataSegment.build`) and scatters the values. Gathering reads
-rows by pointer, so the hash join and the aggregate table can gather any
-rows they hold pointers to, not only whole chunks.
-
-A collection is used by one thread at a time; parallel builds give each
-thread its own and `combine` them, as DuckDB's sinks do.
+A collection owns row and heap blocks through its segments. Parallel
+builders use separate collections and combine their segments after the
+build, avoiding shared append state. Heap allocations retain stable
+addresses for as long as the collection is alive.
 """
 from dataframe.dtype import DataType
 from dataframe.series import Series
@@ -70,8 +53,8 @@ struct TupleDataCollection(Movable):
                 + String(TUPLE_DATA_BLOCK_SIZE)
             )
         self.layout = layout.copy()
-        # No segment until the first rows are built (DuckDB makes it in
-        # InitializeAppend), so an empty partition costs no allocator.
+        # Allocate the first segment only when rows arrive, so empty
+        # partitions cost no allocator.
         self.segments = List[TupleDataSegment]()
         self._count = 0
         self._data_size = 0
@@ -236,8 +219,7 @@ struct TupleDataCollection(Movable):
         other.reset()
 
     def reset(mut self):
-        """Reset: no rows and no segment; the next build makes one (DuckDB
-        keeps no segment once Combine moved them all out)."""
+        """Reset: no rows and no segment; the next build makes one."""
         self._count = 0
         self._data_size = 0
         self.segments = List[TupleDataSegment]()

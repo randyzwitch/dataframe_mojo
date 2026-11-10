@@ -13,7 +13,7 @@ is one value, -0.0 equals 0.0, strings compare by bytes, and a null key is
 one ordinary value. The permutation is stable: within a bucket, rows keep
 their input order, so first-occurrence order within a bucket is preserved.
 
-Every parallel encode scatters first, as DuckDB's radix partitioning does;
+Every parallel encode scatters first to make each partition contiguous;
 no sample chooses whether it pays.
 """
 from std.memory import Pointer, bitcast
@@ -35,7 +35,7 @@ from dataframe.storage.string_view import StringView, _mapped
 
 comptime _NULL_KEY = UInt64(0x9E3779B97F4A7C15)
 
-# Histogram granularity, DuckDB's largest radix partition count (2^8): the
+# Histogram granularity, capped at 2^8 radix partitions: the
 # scatter folds the 256 slots into its bucket count.
 comptime _SLOTS = 256
 comptime _SLOT_SHIFT = 56
@@ -132,8 +132,7 @@ def _hash_column(
                             write(i, bitcast[DType.uint64](Int64(value)))
                     return
                 # A bitmap: values and bits through pointers taken once,
-                # the null word chosen without a branch, as DuckDB's
-                # vector hash reads a flat vector and its validity mask.
+                # selecting the null word without a branch from each validity bit.
                 # A null slot's value is undefined but readable.
                 var bits = column._bits[].unsafe_ptr()
                 var bit_offset = column._offset

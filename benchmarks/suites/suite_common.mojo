@@ -91,7 +91,8 @@ def summary_value(frame: DataFrame, name: String) raises -> Float64:
     elif dtype.is_date():
         expr = col(name).cast(DataType.INT64).sum()
     elif dtype.is_datetime():
-        # Whole seconds, flooring like Polars' dt.epoch("s").
+        # Whole elapsed seconds since the epoch; floor negative fractional
+        # seconds rather than truncating toward zero.
         expr = (col(name).cast(DataType.INT64) // lit(dtype.per_second())).sum()
     elif dtype == DataType.BOOL or dtype.is_numeric():
         expr = col(name).cast(DataType.FLOAT64).sum()
