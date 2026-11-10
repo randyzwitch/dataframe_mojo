@@ -2,7 +2,13 @@
 from std.atomic import Atomic
 from std.memory import Pointer, bitcast
 from max.gpu import global_idx, block_idx, thread_idx
-from dataframe.expr import COL
+from dataframe.expr import COL, FILL_NULL, FILL_NAN
+from .native_fill import native_fill_bits
+from .native_numeric import (
+    numeric_unary,
+    float32_unary_bits,
+    integer_unary_bits,
+)
 from ...expression_format import TREE_OP
 from .multi_reduce import Bytes, read_integer
 from .filter_sum import _valid
@@ -85,6 +91,23 @@ def group_value[
     var li = Int(descriptor[unsafe_offset=1]) - 1
     var ri = Int(descriptor[unsafe_offset=2]) - 1
     var flags = UInt32(descriptor[unsafe_offset=3])
+    if op == UInt32(FILL_NULL) or op == UInt32(FILL_NAN):
+        var result = native_fill_bits(
+            _pointer(li, v0, v1, v2, v3, v4, v5, v6, v7, v7),
+            _pointer(ri, v0, v1, v2, v3, v4, v5, v6, v7, v7),
+            _pointer(li, b0, b1, b2, b3, b4, b5, b6, b7, b7),
+            _pointer(ri, b0, b1, b2, b3, b4, b5, b6, b7, b7),
+            UInt32(descriptor[unsafe_offset=4]),
+            UInt32(descriptor[unsafe_offset=5]),
+            row,
+            tag,
+            op,
+            flags,
+            UInt32(descriptor[unsafe_offset=6]),
+            descriptor[unsafe_offset=7],
+            want,
+        )
+        return (result[0], result[1], UInt32(0))
     var valid = True
     if flags & 1:
         valid = _valid(
@@ -114,6 +137,8 @@ def group_value[
         )
         if op == UInt32(COL):
             return (UInt64(a), True, UInt32(0))
+        if numeric_unary(Int(op)):
+            return (UInt64(float32_unary_bits(a, Int(op))), True, UInt32(0))
         var b = (
             UInt32(literal) if side
             == 2 else right.unsafe_bitcast[UInt32]()[unsafe_offset=row]
@@ -132,6 +157,11 @@ def group_value[
         )
         if op == UInt32(COL):
             return (bitcast[DType.uint64](a), True, UInt32(0))
+        if numeric_unary(Int(op)):
+            var result = integer_unary_bits(
+                bitcast[DType.uint64](a), tag, Int(op)
+            )
+            return (result[0], True, UInt32(result[1]))
         var b = bitcast[DType.int64](literal) if side == 2 else read_integer(
             right, tag, row
         )
