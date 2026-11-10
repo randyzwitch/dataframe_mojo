@@ -930,8 +930,7 @@ def _titlecase(column: StringColumn) raises -> Series:
 
 @no_inline
 def _automaton_chunks_host(input: Series) -> Bool:
-    """Admit readable unencoded windows; malformed metadata keeps the adapter.
-    """
+    """Admit readable unencoded windows; malformed metadata keeps the adapter."""
     ref chunks = input._chunked.value()[]
     if chunks.cache[].state.load() == 2:
         return False
