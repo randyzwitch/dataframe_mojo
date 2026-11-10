@@ -121,7 +121,7 @@ def test_metal_native_cast_planner_shares_values_and_preserves_cpu_types() raise
     assert_equal(general_case_mode(plan.value()), 1)
     assert_true(
         composition_key(plan.value()).startswith(
-            "typed_reductions:v2:scalar_chain:"
+            "typed_reductions:v3:scalar_registers:"
         )
     )
     var stages = (
