@@ -124,7 +124,9 @@ struct TopNSink(Sink):
             keys, descending, nulls_last, False, statistics=False
         )
         self.names = names.copy()
-        self.heap = TopNHeap(limit, self.layout.record_words())
+        self.heap = TopNHeap(
+            limit, self.layout.record_words(), variable=self.layout.variable
+        )
         self.schema = schema.clear()
         self.payload = List[Series](capacity=self.schema.width())
         for column in self.schema._columns:

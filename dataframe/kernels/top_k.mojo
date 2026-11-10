@@ -15,7 +15,8 @@ O(N + groups) scratch independent of groups * k, and visit each input row
 once per pass. The order is `rank`'s own key (`rank._key`), so NaN and -0.0 rank
 as they do there, and ties keep the earlier row, as ordinal rank does.
 """
-from std.collections import Optional
+from std.collections import BinaryHeap, Optional
+from std.sys import size_of
 from std.memory import Pointer
 
 from dataframe.binding import BoundExpr
@@ -37,35 +38,15 @@ from dataframe.trace import trace_path
 
 
 @always_inline
-def _keep_best(
-    heap: Pointer[UInt128, MutAnyOrigin], k: Int, count: Int, item: UInt128
-) -> Int:
-    """Insert into a bounded max-heap; return its new length."""
-    if count < k:
-        var at = count
-        while at > 0:
-            var parent = (at - 1) // 2
-            if heap[unsafe_offset=parent] >= item:
-                break
-            heap[unsafe_offset=at] = heap[unsafe_offset=parent]
-            at = parent
-        heap[unsafe_offset=at] = item
-        return count + 1
-    if item < heap[unsafe_offset=0]:
-        var at = 0
-        while at < count // 2:
-            var child = at * 2 + 1
-            if (
-                child + 1 < count
-                and heap[unsafe_offset=child + 1] > heap[unsafe_offset=child]
-            ):
-                child += 1
-            if heap[unsafe_offset=child] <= item:
-                break
-            heap[unsafe_offset=at] = heap[unsafe_offset=child]
-            at = child
-        heap[unsafe_offset=at] = item
-    return count
+def _retain_best(mut heap: BinaryHeap[UInt128], k: Int, item: UInt128):
+    """Retain the k smallest packed (rank key, row) pairs."""
+    if k <= 0:
+        return
+    if len(heap) == k:
+        if item >= heap.peek():
+            return
+        _ = heap.pop()
+    heap.push(item)
 
 
 @fieldwise_init
@@ -86,17 +67,15 @@ struct _LocalTopKJob[D: DType](Job):
     var k: Int
     var descending: Bool
     var heaps: Int
-    var counts: Int
 
     def run(mut self) raises:
         ref column = Pointer[Column[Scalar[Self.D]], MutAnyOrigin](
             unsafe_from_address=self.values
         )[]
         var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ids)
-        var heaps = Pointer[UInt128, MutAnyOrigin](
+        var heaps = Pointer[BinaryHeap[UInt128], MutAnyOrigin](
             unsafe_from_address=self.heaps
         )
-        var counts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.counts)
         var data = column._ptr()
         # One unsigned comparison tests 0 <= g < owned; without ownership
         # every group id passes.
@@ -110,12 +89,7 @@ struct _LocalTopKJob[D: DType](Job):
             var item = _pack(
                 _key[Self.D](data[unsafe_offset=row], self.descending), row
             )
-            counts[unsafe_offset=g] = _keep_best(
-                heaps.unsafe_offset(g * self.k),
-                self.k,
-                counts[unsafe_offset=g],
-                item,
-            )
+            _retain_best(heaps[unsafe_offset=g], self.k, item)
 
 
 @fieldwise_init
@@ -123,7 +97,6 @@ struct _MergeTopKJob(Job):
     """Merge local candidates, visiting each candidate once."""
 
     var heaps: Int
-    var counts: Int
     var groups: Int
     var workers: Int
     var first: Int
@@ -132,31 +105,26 @@ struct _MergeTopKJob(Job):
     var mask: Int
 
     def run(mut self) raises:
-        var heaps = Pointer[UInt128, MutAnyOrigin](
+        var heaps = Pointer[BinaryHeap[UInt128], MutAnyOrigin](
             unsafe_from_address=self.heaps
         )
-        var counts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.counts)
         var mask = Pointer[Bool, MutAnyOrigin](unsafe_from_address=self.mask)
         if self.workers == 1:
             for g in range(self.first, self.last):
-                for p in range(counts[unsafe_offset=g]):
-                    var item = heaps[unsafe_offset=g * self.k + p]
+                ref heap = heaps[unsafe_offset=g]
+                while len(heap):
+                    var item = heap.pop()
                     mask[unsafe_offset=Int(item & UInt128(UInt64.MAX))] = True
             return
-        var heap = List[UInt128](length=self.k, fill=0)
+        var heap = BinaryHeap[UInt128](capacity=self.k)
         for g in range(self.first, self.last):
-            var count = 0
             for w in range(self.workers):
-                var slot = w * self.groups + g
-                for p in range(counts[unsafe_offset=slot]):
-                    count = _keep_best(
-                        heap.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin](),
-                        self.k,
-                        count,
-                        heaps[unsafe_offset=slot * self.k + p],
-                    )
-            for p in range(count):
-                mask[unsafe_offset=Int(heap[p] & UInt128(UInt64.MAX))] = True
+                ref local = heaps[unsafe_offset=w * self.groups + g]
+                while len(local):
+                    _retain_best(heap, self.k, local.pop())
+            while len(heap):
+                var item = heap.pop()
+                mask[unsafe_offset=Int(item & UInt128(UInt64.MAX))] = True
 
 
 @fieldwise_init
@@ -187,7 +155,7 @@ struct _TopKJob[D: DType](Job):
             var size = starts[unsafe_offset=g + 1] - starts[unsafe_offset=g]
             if self.k < size:
                 capacity = max(capacity, self.k)
-        var heap = List[UInt128](length=capacity, fill=0)
+        var heap = BinaryHeap[UInt128](capacity=capacity)
         var data = column._ptr()
         for g in range(self.lo, self.hi):
             var first = starts[unsafe_offset=g]
@@ -199,7 +167,6 @@ struct _TopKJob[D: DType](Job):
                     if not self.nulls or column._valid(row):
                         mask[unsafe_offset=row] = True
                 continue
-            var count = 0
             for p in range(first, last):
                 var row = members[unsafe_offset=p]
                 if self.nulls and not column._valid(row):
@@ -207,14 +174,10 @@ struct _TopKJob[D: DType](Job):
                 var item = _pack(
                     _key[Self.D](data[unsafe_offset=row], self.descending), row
                 )
-                count = _keep_best(
-                    heap.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin](),
-                    self.k,
-                    count,
-                    item,
-                )
-            for p in range(count):
-                mask[unsafe_offset=Int(heap[p] & UInt128(UInt64.MAX))] = True
+                _retain_best(heap, self.k, item)
+            while len(heap):
+                var item = heap.pop()
+                mask[unsafe_offset=Int(item & UInt128(UInt64.MAX))] = True
 
 
 def _pattern(bound: BoundExpr) -> Tuple[Int, Int, Int]:
@@ -337,13 +300,15 @@ def top_k_mask(
             if count > 0 and k <= height // count:
                 var copies = workers if k <= height // count // workers else 1
                 var slots = count * copies
-                var candidates = slots * k
-                # Local heaps + counts + merge heaps need <= 40*N bytes,
-                # with or without ownership. Check before allocating.
-                if height > (Int.MAX - 16) // 48:
+                # At most N retained UInt128 entries, one heap header per
+                # slot (slots <= N), and at most N merge entries. Check the
+                # linear byte bound before multiplying slot counts.
+                comptime BYTES_PER_ROW = 32 + size_of[BinaryHeap[UInt128]]()
+                if height > Int.MAX // BYTES_PER_ROW:
                     raise Error("grouped top-k scratch size overflow")
-                var heaps = List[UInt128](length=candidates, fill=0)
-                var counts = List[Int](length=slots, fill=0)
+                var heaps = List[BinaryHeap[UInt128]](capacity=slots)
+                for _ in range(slots):
+                    heaps.append(BinaryHeap[UInt128](capacity=k))
                 var shares = min(workers, count)
                 var width = count // shares + Int(count % shares != 0)
                 var owning = copies == 1 and workers > 1
@@ -374,8 +339,7 @@ def top_k_mask(
                             last,
                             k,
                             descending,
-                            Int(heaps.unsafe_ptr().unsafe_offset(slot * k)),
-                            Int(counts.unsafe_ptr().unsafe_offset(slot)),
+                            Int(heaps.unsafe_ptr().unsafe_offset(slot)),
                         )
                     )
                 run_jobs(local)
@@ -384,7 +348,6 @@ def top_k_mask(
                     merge.append(
                         _MergeTopKJob(
                             Int(heaps.unsafe_ptr()),
-                            Int(counts.unsafe_ptr()),
                             count,
                             copies,
                             count // shares * w,
@@ -396,7 +359,6 @@ def top_k_mask(
                     )
                 run_jobs(merge)
                 _ = heaps^
-                _ = counts^
                 _ = partitions^
                 _ = whole^
                 return BoolColumn(mask)
