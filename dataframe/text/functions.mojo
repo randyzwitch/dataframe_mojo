@@ -11,7 +11,7 @@ are copied, as `slice_strings` does; other string results are appended to one
 each code point past ASCII). `contains_any` and `replace_many` match every
 pattern in one pass with an Aho-Corasick automaton over byte classes.
 """
-from std.collections.string import Codepoint
+from std.collections.string import Codepoint, atol
 from dataframe.storage.buffer import _Buffer
 from dataframe.text.byte_encoding import (
     encode_bytes,
@@ -764,32 +764,25 @@ def _to_integer(column: StringColumn, base: Int, strict: Bool) raises -> Series:
         var size = len(row)
         var data = row.unsafe_ptr()
         var at = 0
-        var negative = False
         if size > 0 and (data[] == 43 or data[] == 45):
-            negative = data[] == 45
             at = 1
-        # The magnitude, up to 2^63 for a negative value.
-        var limit = UInt64(1) << 63 if negative else (UInt64(1) << 63) - 1
-        var magnitude = UInt64(0)
+        # Keep the API's sign-and-digits grammar: atol also accepts
+        # surrounding whitespace, underscores, and radix prefixes.
         var ok = at < size
         while ok and at < size:
-            var digit = _digit(data[unsafe_offset=at])
-            if digit >= base or magnitude > (limit - UInt64(digit)) // UInt64(
-                base
-            ):
-                ok = False
-                break
-            magnitude = magnitude * UInt64(base) + UInt64(digit)
+            ok = _digit(data[unsafe_offset=at]) < base
             at += 1
+        if ok:
+            try:
+                values[i] = Int64(atol(StringSpan(unsafe_from_utf8=row), base))
+            except:
+                ok = False
         if not ok:
             if failures == 0:
                 first_failure = String(StringSlice(unsafe_from_utf8=row))
             failures += 1
             _clear_bit(bits, i, n)
             continue
-        values[i] = Int64(0) - Int64(
-            magnitude - 1
-        ) - 1 if negative and magnitude > 0 else Int64(magnitude)
     if strict and failures > 0:
         raise Error(
             "strict integer parsing failed for "
@@ -937,7 +930,8 @@ def _titlecase(column: StringColumn) raises -> Series:
 
 @no_inline
 def _automaton_chunks_host(input: Series) -> Bool:
-    """Admit readable unencoded windows; malformed metadata keeps the adapter."""
+    """Admit readable unencoded windows; malformed metadata keeps the adapter.
+    """
     ref chunks = input._chunked.value()[]
     if chunks.cache[].state.load() == 2:
         return False
