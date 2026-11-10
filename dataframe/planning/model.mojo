@@ -132,7 +132,7 @@ struct PlanNode(Copyable, Deinitable, Movable):
     def set_dataset(mut self, spec: DatasetSpec):
         self.dataset = spec.copy()
 
-    def dataset_spec(self) -> ref[self.dataset._value] DatasetSpec:
+    def dataset_spec(self) -> ref[self.dataset.value()] DatasetSpec:
         return self.dataset.value()
 
     # These views borrow the stored lists: reading a payload does not add a

@@ -1,12 +1,13 @@
 """Shared query scope, context ownership and checked byte accounting."""
 
-from max.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceBuffer
 from std.atomic import Atomic
 from std.ffi import _get_global
 from std.memory import ArcPointer, Pointer
 from std.memory.alloc import Layout, alloc
 from std.time import perf_counter_ns
 from .target import METAL_TARGET
+from .target import MetalContext as DeviceContext
 from .scratch_pool import ScratchPool
 
 comptime ContextCell = Optional[DeviceContext if METAL_TARGET else Int]
