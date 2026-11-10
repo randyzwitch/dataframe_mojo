@@ -1,22 +1,9 @@
-"""The scan order of a top-N's source (DuckDB 2.0's `RowGroupPruner`,
-optimizer/row_group_pruner.cpp, and `RowGroupReorderer`,
-storage/table/row_group_reorderer.cpp).
+"""Visit source row groups in a promising order for top-N pruning.
 
-For `ORDER BY c LIMIT n [OFFSET m]` over a scanned column `c`, the source's
-row groups are read in the order of their statistics on `c`: ascending by
-each group's minimum, descending by its maximum (`OrderByStatistics`).
-Row groups that cannot hold any of the first `n + m` rows are not read
-(`AddRowGroups`), and leading row groups that lie wholly inside the offset
-are dropped with the offset cut by their rows (`GetOffsetAfterPruning`).
-The TopN's heap then fills from the best row groups first, so its boundary
-is tight from the start.
-
-A row group is `ROW_GROUP_VECTORS` vectors of `STATISTICS_VECTOR_SIZE`
-rows (122,880, DuckDB's DEFAULT_ROW_GROUP_SIZE), counted from the start of
-each buffer of the column, as its segment statistics are kept. Workers
-take the ordered row groups one at a time, as DuckDB's
-`RowGroupCollection::NextParallelScan` gives each thread the reorderer's
-next row group whole.
+Use statistics for the leading sort key to order row groups. As the top-N
+boundary tightens, skip groups whose bounds cannot improve the result.
+Missing or overlapping statistics retain a group's normal scan path;
+statistics affect work and visit order, not which qualifying rows exist.
 """
 
 from std.collections import Optional

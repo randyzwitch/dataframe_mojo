@@ -1,39 +1,11 @@
-"""Plan statistics estimated before anything runs (DuckDB 2.0's
-`RelationStatisticsHelper` and `RelationStatsExtractor`, in
-`optimizer/relation_statistics/`).
+"""Estimate plan cardinalities and column domains without executing queries.
 
-Each plan node has a cardinality and, for each output column, a distinct
-count with its source (`DistinctCount`): a table's HyperLogLog count
-(`HLL`), the span of its integer bounds (`MIN_MAX`), a constant's one value
-(`EXACT`), or, with nothing known, the rows of the relation the column
-came from (`CARDINALITY`). Nothing is sampled or run:
-
-- A table scan has its table's rows. The filters right above it are its
-  table filters (`ExtractGetStats`): one the column's statistics prove
-  keeps no row makes the scan empty (`StatisticsPropagator`), an equality with a constant on a
-  column of known distinct count keeps the rows over that count, a
-  conjunction the fewest any part keeps, a filter the column's statistics
-  prove always true nothing; when no part narrows the estimate it keeps
-  `DEFAULT_SELECTIVITY` of the rows. A part reading several columns is a
-  filter above the scan, as any other filter: a fifth of its input.
-- Projections, windows and sorts keep their input's rows (a top-N at most
-  its limit); a projected column keeps its source column's count, a
-  constant has one value, a computed column its relation's rows.
-- An aggregate's groups come from its keys' counts
-  (`EstimateDistinctCardinality`), and so do a unique's rows.
-- A semi or anti join keeps a fifth of its left input's rows
-  (`DEFAULT_SEMI_ANTI_SELECTIVITY`), a mark join all of them, an outer join its
-  larger input's, a cross join both multiplied, and a union both added.
-  An inner join is DuckDB's estimate of joining two relations
-  (`CardinalityEstimator`): their rows multiplied, divided by the key
-  pairs' largest total domain, each pair's domain its most reliable
-  count (`DomainEstimate`: the larger HyperLogLog count, else the larger
-  bounds count, else the smaller relation's rows). A column of a join
-  keeps its side's count.
-
-A node's statistics are computed once per `PlanStatistics`, the memo a
-planning pass keeps (DuckDB's extractor cache), and column counts only
-for the columns asked for.
+Start from stored table statistics and carry counts through projections,
+filters, group keys and joins. Track whether distinct counts came from
+observed values, bounds or fallback row counts, so estimates can prefer
+reliable evidence. Join estimates divide the product of input rows by the
+shared key domain; unknown inputs retain unknown estimates rather than
+executing data to obtain them.
 """
 from std.collections import Dict, Optional
 from std.math import exp
@@ -103,8 +75,7 @@ comptime COUNT_EXACT = 3
 
 @fieldwise_init
 struct DistinctCount(Copyable, ImplicitlyCopyable, Movable):
-    """A column's distinct count and where it came from (DuckDB's
-    `DistinctCount`); `count` is -1 when the column has none (no such
+    """A column's distinct count and where it came from; `count` is -1 when the column has none (no such
     column, or a relation of unknown rows)."""
 
     var count: Int
@@ -169,7 +140,7 @@ def _filtered(rows: Int) -> Int:
 def _scan_under_filters(self: QueryContext, index: Int) -> Int:
     """The table scan under the chain of filters ending at `index`, or -1
     when the chain ends elsewhere: the filters a scan's table filters
-    come from (DuckDB pushes them into the get)."""
+    come from."""
     var cursor = index
     while cursor >= 0 and self._nodes[cursor].kind == FILTER:
         cursor = self._nodes[cursor].left
@@ -435,11 +406,9 @@ def _has_column(self: QueryContext, index: Int, name: String) raises -> Bool:
 def plan_distinct(
     self: QueryContext, mut stats: PlanStatistics, index: Int, name: String
 ) raises -> DistinctCount:
-    """Column `name`'s distinct count at node `index`, with its source,
-    carried from the table it reads through projections, filters,
-    aggregate keys and joins by name, as DuckDB carries a column's count
-    by its binding (`RelationColumnStatsLookup`). Unknown for a column
-    the node does not output or a relation of unknown rows."""
+    """Trace a column's distinct-count estimate through projections, filters,
+    grouping keys and named join outputs. Return unknown if the node does
+    not output that column or its relation has unknown cardinality."""
     if index < 0:
         return DistinctCount.unknown()
     var key = String(index) + "/" + name
@@ -463,8 +432,8 @@ def _scan_distinct(
     var rows = table.height()
     var count = table._distinct_count(name)
     if count < 0 and slot in self._materialized_distinct:
-        # A shared subplan's result has the counts its plan estimated,
-        # as DuckDB keeps a materialized CTE's relation statistics.
+        # A shared subplan result retains its estimated distinct counts,
+        # avoiding a fresh scan merely to plan its consumers.
         count = self._materialized_distinct[slot].get(name, -1)
     if count > 0:
         return DistinctCount(count, COUNT_HLL)

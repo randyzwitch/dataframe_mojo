@@ -330,7 +330,7 @@ def _reduce(lists: ListColumn, op: Int) raises -> Series:
                         continue
                     var value = column._get(r)
                     comptime if D.is_floating_point():
-                        # NaN gives way to any number, as in Polars (#816).
+                        # Prefer a numeric value to NaN; all-NaN input retains NaN (#816).
                         if isnan(value):
                             if not found:
                                 best = value

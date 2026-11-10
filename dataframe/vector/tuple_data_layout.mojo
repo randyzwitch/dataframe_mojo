@@ -1,21 +1,9 @@
-"""DuckDB 2.0's `TupleDataLayout` (common/types/row/tuple_data_layout.cpp):
-where each column of a row lives.
+"""Compute field offsets and sizes for fixed-layout rows.
 
-A row is `[validity bytes][heap size][column values...][aggregates...]`:
-- one validity bit a column (1 = valid), absent when the layout cannot
-  hold nulls;
-- the row's heap size (8 bytes) when any column is variable-sized, so a
-  top-level row knows how much heap it owns;
-- fixed-width values in place, string_t in its 16 bytes (the bytes of a
-  long string in the heap), a list as an 8-byte heap pointer, and a struct
-  as a nested row of its own layout (validity bytes then fields, no heap
-  size);
-- aggregate states, 8-byte aligned, when the layout has any.
-
-DuckDB keeps a struct's layout in a map inside its parent. A layout that
-contains its own kind fails as an imported Mojo module, so the layouts of
-one row live in one flat list: node 0 is the row, and a struct column
-names its node by index (`struct_layouts`).
+Rows store validity, fixed-width fields and references to variable-size
+heap data. Nested layouts live in a flat list: node zero describes the
+row, and struct fields point to their child nodes. Sharing this list
+between collections and allocators avoids copying layout metadata.
 """
 from std.memory import ArcPointer
 
@@ -29,8 +17,7 @@ from dataframe.vector.types import (
     physical_size,
 )
 
-# DuckDB's Storage::DEFAULT_BLOCK_SIZE (storage/storage_info.hpp):
-# DEFAULT_BLOCK_ALLOC_SIZE (262,144) less the 8-byte block header. Row
+# Use a 256 KiB allocation less an 8-byte block header. Row
 # blocks have this capacity; heap blocks at least this.
 comptime TUPLE_DATA_BLOCK_SIZE = 262144 - 8
 
@@ -131,8 +118,7 @@ struct TupleDataLayoutNode(Copyable, Movable):
 struct TupleDataLayout(Copyable, Movable):
     """The layout of a row and of every struct nested in it."""
 
-    # Shared by every copy, as DuckDB shares one `shared_ptr<TupleDataLayout>`
-    # among a collection, its partitions and their allocators: a copy is a
+    # Shared among a collection, its partitions and their allocators: a copy is a
     # reference count, not a copy of every node's lists.
     var nodes: ArcPointer[List[TupleDataLayoutNode]]
 

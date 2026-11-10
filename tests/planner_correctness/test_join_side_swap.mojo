@@ -1,11 +1,7 @@
-"""An inner join whose right side costs more to hash than its left, by
-DuckDB's build size (estimated rows times the row width of its columns'
-types) before the stream starts, is run with the sides swapped: the left is
-hashed and the right streams through it. A join promises no row order, so the swap applies whatever
-consumes the join, an ordered group-by included. The swap must not change
-the result, the join's column names (the left key's own name), its key type,
-or which rows join; it is declined where a shared non-key name would be
-suffixed."""
+"""Verify build-side selection from estimated rows and row widths before
+streaming starts. Swap an inner join when its left side is cheaper to hash;
+unspecified join row order permits either probe direction while ordered
+consumers still enforce their own contracts."""
 # contract-group: planner.relational
 from std.testing import assert_equal, assert_true
 
@@ -144,7 +140,7 @@ def assert_by_name_and_group(actual: DataFrame) raises:
 
 def swapped(paths: String) -> Bool:
     # The smaller side builds when the join order puts it on the build
-    # side (DuckDB's plan enumerator) or the build side optimizer flips
+    # side or the build side optimizer flips
     # the join at stream start.
     return (
         "dataframe-path: lazy.swap_join_sides\n" in paths
@@ -171,10 +167,9 @@ def test_larger_built_right_side_is_swapped_with_the_same_groups_either_optimiza
 
 
 def test_a_built_side_of_more_rows_but_fewer_cells_is_not_swapped() raises:
-    """The hash table's bytes decide, as DuckDB's build/probe side
-    optimizer counts them: 640 two-column facts (about 620 kept) build
-    cheaper than 500 three-column dimension rows, a string among them, so
-    the join keeps its sides."""
+    """Build memory depends on row width as well as row count: about 620 two-
+    column facts can be cheaper than 500 wider dimension rows containing
+    strings. Verify that cardinality alone does not force a swap."""
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     comptime ROWS = 640

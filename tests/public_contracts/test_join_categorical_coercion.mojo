@@ -54,7 +54,7 @@ def test_mixed_categorical_string_keys_share_value_identity_in_both_directions()
                 var pairs = nested_loop_pairs(lr, rr, how)
                 var actual = l.join(r, on="k", how=how)
                 # A right join keeps its right key, among the right
-                # columns (Polars).
+                # columns.
                 var names: List[String] = [
                     "p",
                     "k",

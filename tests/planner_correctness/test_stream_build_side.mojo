@@ -1,6 +1,5 @@
 """A stream builds a join on its left side when that side's hash table,
-estimated before the stream starts, is the smaller (DuckDB's
-BuildProbeSideOptimizer), flipping the join inside the pipeline (a join
+estimated before the stream starts, is the smaller, flipping the join inside the pipeline (a join
 promises no row order): the result has every row the written join gives,
 and a join whose left cannot be the smaller keeps building on its right."""
 # contract-group: planner.relational
@@ -82,9 +81,9 @@ def test_a_small_left_builds_inside_the_pipeline() raises:
 
 
 def test_a_small_left_semi_or_anti_join_streams_its_right_side() raises:
-    # A semi or anti join with a small left side hashes the left, as
-    # DuckDB's RIGHT_SEMI / RIGHT_ANTI, and the stock rows stream through
-    # it: the output is still the left's rows the written join keeps.
+    # Build-side semi/anti variants record probe matches, then scan the
+    # preserved build rows to emit matched/unmatched rows. Keep ordinary stock
+    # rows flowing through the same downstream pipeline.
     var t = frames()
     for how in [String("semi"), String("anti")]:
         var left = t[0].filter(col("p_size") == lit(Int64(3)))

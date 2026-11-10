@@ -51,7 +51,7 @@ struct CountLines:
         # True when the next SIMD block begins outside a quoted field.
         var outside_previous = True
         var n = len(bytes)
-        # Polars leaves exactly one 64-byte block for its scalar tail.
+        # Leave one 64-byte block for scalar tail handling at the input boundary.
         while total + _SIMD_WIDTH < n:
             var block = bytes.unsafe_ptr().unsafe_load[width=_SIMD_WIDTH](total)
             var eols = _mask64(

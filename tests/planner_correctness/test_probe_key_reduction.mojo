@@ -1,13 +1,7 @@
-"""Aggregates grouped by a join key on either side of inner and semi
-joins: every result equals the same joins over the separately collected
-inputs. Two aggregates on one key above a selective join chain (PDS-H
-q21's shape, distinct counts included), a semi join, an aggregate on
-another key, an aggregate grouped on both keys of a two-key join (PDS-H
-q20's shape), and an aggregate probed on its group keys by a filtered
-build. The planner's semi-join reduction through aggregates is retired;
-DuckDB's join filters (`joins/join_filter.mojo`) narrow the probe scan
-instead, and reach the input of an aggregate the probe side reads on its
-group keys (JoinFilterPushdownOptimizer)."""
+"""Join-build key filters narrow the probe scan without constructing a separate
+semi-join reduction. Filters through grouping keys may reach the aggregate
+input because removing whole groups leaves every retained group's values
+unchanged."""
 # contract-group: planner.relational
 from std.testing import assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit

@@ -1,28 +1,14 @@
-"""DuckDB's clustered aggregate update (`ClusteredAggr` and
-`ClusteredAggrState`, common/clustered_aggregate.cpp, with
-`RowOperations::UpdateStatesClustered` and the aggregates' cluster updates).
+"""Aggregate updates over consecutive runs of rows in the same group.
 
-A chunk's rows are clustered by group into runs: each run is rows of one
-group, in order. When at least 80% of the chunk's rows fall in runs of six
-or more, each reduction with a cluster update folds a run into its group's
-state once, the run's values accumulated in registers, instead of a load,
-update and store on the group's state for every row. With few groups (or
-repeating keys, or heavy hitters) the per-row updates hit the same state
-words back to back and wait on each other; a run's accumulation does not.
+A short sample estimates how often group ids change. Input already in runs
+is cut at each change; otherwise rows are clustered by group id. A run can
+reuse one state address and a local state copy instead of scattering every
+row's update through a separate address.
 
-The clustering is DuckDB's: a short dual-cursor sample stores the chunk's
-first group ids in a small hash table and counts how often the group
-changes, to see whether the input is already in runs. Input in runs is cut
-at each change of group with no hashing (the merge loop); otherwise hot
-keys keep collecting through the table until its budget is spent, and every
-other group forms sequential runs (the mixed loop). A chunk that does not
-cluster backs off: the next attempt is skipped, then twice as many after
-each failure.
-
-DuckDB's tables keep this state only when more than one aggregate has a
-cluster update (`n_clustered > 1` in the `GroupedAggregateHashTable` and
-`PerfectAggregateHashTable` constructors); `cluster_update` says which of
-ours DuckDB's would have.
+Only reductions with a compatible cluster update use this route. Decimal
+sums retain their per-value overflow checks, and unsupported state kinds
+keep the ordinary scatter path. Clustering state is allocated only when
+multiple reductions can share the work of finding runs.
 """
 from std.math import isnan
 from std.memory import Pointer, bitcast
@@ -77,8 +63,7 @@ comptime _GRP_MASK = UInt64((1 << SLOT_GRP_BITS) - 1)
 
 
 def cluster_update(op: Int, kind: Int) -> Bool:
-    """Whether DuckDB's aggregate for reduction `op` with state `kind` has
-    a cluster update (`GetStateClusterUpdateCallback`): count_star and
+    """Whether reduction `op` with state `kind` supports run updates: count_star and
     count, sum (`IntegerSumOperation`, `SumToHugeintOperation`,
     `NumericSumOperation`, the decimal sums over them), numeric min and max
     (`NumericMinMaxBase`), first and last. avg, the variances, quantiles
@@ -109,10 +94,10 @@ def cluster_update(op: Int, kind: Int) -> Bool:
 def cluster_kernel(op: Int, kind: Int) -> Bool:
     """Whether `update_clustered` folds runs into the state: the cluster
     updates of counts, integer and float sums, and numeric min and max.
-    first and last (DuckDB's early exit: a run's first or last row).
+    first and last.
     Decimal sums (whose overflow is checked as each value is added) and
     128-bit min and max keep their scatter, through the rows' addresses,
-    as DuckDB's aggregates with no cluster update do."""
+    when their state has no compatible cluster update."""
     return cluster_update(op, kind) and (
         kind == _K_LEN
         or kind == _K_FIRST
@@ -127,7 +112,7 @@ def cluster_kernel(op: Int, kind: Int) -> Bool:
 
 
 # A slot packs a run's cursor (its next position in its arena slice), the
-# run's index and its group id, as DuckDB's `Slot` bitfields do; adding one
+# run's index and its group id; adding one
 # advances the cursor.
 @always_inline
 def _slot(cursor: Int, idx: Int, gid: UInt64) -> UInt64:
@@ -478,9 +463,7 @@ def update_clustered(
     """`RowOperations::UpdateStatesClustered` for the reductions with a
     run kernel (`kernels`): each run of the chunk's `count` rows folded
     into its group's state (at `runs.rows[r]`, states from word
-    `states_at`) once, from a local copy of the state (DuckDB's
-    `ClusteredStateCopy`, so values add in row order as the scatter adds
-    them). `first` is the source row of the chunk's first, and `scratch`
+    `states_at`) once, from a local copy of the state. `first` is the source row of the chunk's first, and `scratch`
     the value states' three vectors of words."""
     for s in range(len(slots)):
         if not kernels[s]:

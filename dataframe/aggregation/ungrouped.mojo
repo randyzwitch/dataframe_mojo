@@ -1,20 +1,12 @@
-"""DuckDB's ungrouped aggregate (`PhysicalUngroupedAggregate`) on the
-aggregate table's states (`function.mojo`).
+"""Global reductions with one partial state per worker.
 
-Each worker holds one row of `AggregateFunction` states. Every data chunk
-a pipeline's steps produce is sunk into it directly (`Sink`): each
-reduction's input is computed over the chunk by its compiled vector
-expression (the `ExpressionExecutor` over DuckDB's payload chunk) and
-folded into its state a vector at a time through the unified vector format
-(`simple_update`), with no frame or column built in between. The workers'
-rows are combined at the end (`Combine`) and finalized once (`Finalize`).
+Evaluate each reduction's input expressions in chunks and fold them into
+the worker's state. Filtered reductions observe only selected rows. Merge
+partial states after the workers finish, then finalize one output row.
 
-A distinct count (`n_unique`) is DuckDB's `DistinctAggregateData`: each
-worker sinks every chunk's input vector, as a group key, into its own
-aggregate table of the input's distinct values (one radix table per
-distinct aggregate, `SinkDistinct`); at the end every worker's table of an
-aggregate is merged into its distinct values (`FinalizeDistinct`), whose
-number is the count. `distinct_count` is the same over a column.
+Distinct counts keep per-worker sets of observed values. Finalization
+unions those sets before counting, so a value seen by multiple workers is
+counted only once. Empty and null results follow each reduction's contract.
 """
 from std.math import isnan
 from std.sys import size_of
@@ -105,7 +97,7 @@ struct UngroupedLayout(Copyable, Movable):
 
     var layout: AggregateLayout
     var expressions: List[Optional[VectorExpression]]
-    # Per input, an aggregate filter (DuckDB's `FILTER (WHERE ...)`): an
+    # Per input, an aggregate filter: an
     # input `when(c).then(x)` with no otherwise, into a reduction that
     # skips nulls, is `x` over the rows where `c` holds, so `expressions`
     # computes `x` and the filter selects the rows.
@@ -330,8 +322,7 @@ def _words(address: Int) -> Pointer[UInt64, MutAnyOrigin]:
 
 struct UngroupedSink(Sink):
     """One worker's states of an ungrouped aggregate, and its own copy of
-    the compiled input expressions (DuckDB's thread-local
-    `UngroupedAggregateLocalSinkState`); the global state is the first
+    the compiled input expressions; the global state is the first
     worker's, which every other one combines into."""
 
     var slots: List[AggregateFunction]
@@ -358,7 +349,7 @@ struct UngroupedSink(Sink):
     var count: Int
     var sequence: Int
     # Per distinct count, this worker's table of its input's distinct
-    # values (DuckDB's `radix_tables` of `DistinctAggregateData`), in
+    # values, in
     # `AggregateLayout.distinct` order; the global state holds every
     # worker's after it, worker by worker (`combine`). Per state, its
     # distinct count's index there, or -1.
@@ -421,7 +412,7 @@ struct UngroupedSink(Sink):
         self.held_handles.clear()
 
     def sink(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
-        """A chunk of the sink's input into the states (DuckDB's `Sink`):
+        """A chunk of the sink's input into the states:
         each input computed over the chunk's rows, then each state updated
         from its vector."""
         var n = chunk.count
@@ -507,8 +498,7 @@ struct UngroupedSink(Sink):
         format: UnifiedVectorFormat,
         state: Int,
     ) raises:
-        """State s updated from its input's rows its filter keeps
-        (DuckDB's `AggregateFilterData::ApplyFilter` before the update)."""
+        """State s updated from its input's rows its filter keeps."""
         var through = self.through.unsafe_ptr()
         var kept = 0
         if self.filter_columns[s] >= 0:
@@ -636,7 +626,7 @@ struct UngroupedSink(Sink):
         self.rows = List[Int]()
 
     def combine_into(self, mut other: UngroupedSink) raises:
-        """These states folded into `other`'s (DuckDB's `Combine`)."""
+        """These states folded into `other`'s."""
         combine_states(
             self.slots,
             other.groups.at(0) + 8 * other.groups.states_at,
@@ -647,7 +637,7 @@ struct UngroupedSink(Sink):
             other.held.append(column.copy())
 
     def combine(var self, mut combined: List[UngroupedSink]) raises:
-        """These states into the global ones (DuckDB's `Combine`): the
+        """These states into the global ones: the
         first worker's states are the global states, which take this
         worker's distinct tables too."""
         if len(combined) == 0:
@@ -658,7 +648,7 @@ struct UngroupedSink(Sink):
             combined[0].distinct.append(self.distinct.pop(0))
 
     def finalize_distinct(mut self, layout: AggregateLayout) raises:
-        """DuckDB's `FinalizeDistinct` for the global state: each distinct
+        """Finalize the global distinct state: each distinct
         count's tables (every worker's) merged into the input's distinct
         values, whose number (less a null's, when nulls are ignored) is
         written into the count's state."""
@@ -739,8 +729,8 @@ def distinct_counts(
     values: Series, groups: List[Int], group_count: Int, ignore_nulls: Bool
 ) raises -> List[Int64]:
     """The distinct values of a column in each of `group_count` groups
-    (`n_unique` by group; row r is in group `groups[r]`), as DuckDB's
-    radix distinct tables count them: every row's (group, value) sunk, a
+    (`n_unique` by group; row r is in group `groups[r]`), counted in
+    radix-partitioned tables: every row's (group, value) sunk, a
     morsel per worker at a time, into the worker's aggregate table of those
     pairs, whose merged groups are then counted into their group. Values
     compare as `distinct_count`'s do; a null is one value unless
@@ -770,8 +760,7 @@ def distinct_counts(
 def ungrouped_finish(
     shared: UngroupedLayout, mut sinks: List[UngroupedSink]
 ) raises -> DataFrame:
-    """Every worker's states combined and finalized into one row (DuckDB's
-    `Combine` and `Finalize`)."""
+    """Every worker's states combined and finalized into one row."""
     var combined = List[UngroupedSink]()
     while len(sinks) > 0:
         sinks.pop(0).combine(combined)
@@ -924,8 +913,7 @@ def _simple_update(
     count: Int,
     state: Int,
 ) raises -> Bool:
-    """A vector's `count` rows folded into one state (DuckDB's
-    `simple_update`): counts, sums, decimal sums and numeric extremes,
+    """A vector's `count` rows folded into one state: counts, sums, decimal sums and numeric extremes,
     accumulated in registers and stored once. False for any other state
     or input, which the caller updates through the table's update."""
     if _flat_update(slot, format, 0, count, state):

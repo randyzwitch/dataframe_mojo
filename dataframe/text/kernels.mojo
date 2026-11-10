@@ -130,12 +130,12 @@ def string_op(
             Int(node.integer),
         )
     if node.op == STR_REPLACE:
-        # Polars replaces a pattern without ASCII punctuation literally, and
+        # Replace a pattern without ASCII punctuation literally, and
         # then does not expand `$` references in the value.
         var literal = node.min_count == 1 or is_literal_pattern(node.text)
         var limit = Int(node.integer)
         if not literal and limit == 0:
-            # Polars' regex path ignores n=0 and replaces the first match.
+            # The regex path treats n=0 as a request to replace the first match.
             limit = 1
         var regex = compiled.value().copy() if compiled else compile_pattern(
             node.text, literal

@@ -40,11 +40,8 @@ comptime UNNEST = 13
 comptime ASOF = 14
 # UNION ALL of two plans: the left input's rows, then the right's.
 comptime CONCAT = 15
-# Wide to long (DataFrame.unpivot): `names` the value columns (every
-# non-index column when empty), `names2` the index columns and
-# `right_keys` the variable and value column names. A breaker: its rows
-# come out by value column, then input row, so it needs its whole input,
-# as Polars' unpivot is a map function over a materialized frame.
+# Unpivot materializes the input and reshapes selected value columns into
+# name/value rows. It is not a row-local projection.
 comptime UNPIVOT = 20
 # Time windows (`DataFrame.group_by_dynamic` and `DataFrame.rolling`, then
 # `agg`). `names` holds the index column then the `by` keys, `names2` the
@@ -68,23 +65,18 @@ comptime SHIFT = 18
 # A leading Int64 row number named `names[0]`, starting at `offset`
 # (DataFrame.with_row_index).
 comptime ROW_INDEX = 19
-# The left input's columns, then the right's, side by side (a horizontal
-# concat, Polars' HCONCAT); the heights must match.
+# Horizontal concatenation places input columns side by side; input heights
+# must match.
 comptime HCONCAT = 40
 # The left input's rows at the positions the right input's one integer
-# column lists (Polars' Gather); `flags[0]` is null_on_oob.
+# column lists; `flags[0]` is null_on_oob.
 comptime GATHER = 41
 # Whole-input row selection: offset is the first row, length is the stride.
 comptime GATHER_EVERY = 47
 # Insert the right input's one column at offset in the left schema.
 comptime INSERT_COLUMN = 48
-# Grouping sets (`group_by_rollup`, `group_by_cube`,
-# `group_by_grouping_sets`, then `agg`). `names` holds every key any set
-# names, `flags` which keys each set groups by (one row of flags per set,
-# a flag per key), `exprs` the aggregations and `grouping` columns as
-# written. The result is each set's rows in turn, a key a set does not
-# group by null. It reads its input once: the stream sinks every morsel
-# into a table per set, as DuckDB's one sink feeds every set's table.
+# Grouping sets feed each input chunk into a separate table per set. Keys
+# omitted by a set become typed nulls in its output.
 comptime GROUPING_SETS = 43
 # How the executor offers nodes to an accelerator provider (`_handoff`).
 comptime HANDOFF_OFF = 0
@@ -120,10 +112,9 @@ struct PlanNode(Copyable, Deinitable, Movable):
     var json_schema: Optional[DataType]
     var dataset: Optional[DatasetSpec]
     var dataset_projected: Bool
-    # A JOIN whose build side a swap already chose: no swap rule flips it
-    # again, as DuckDB's build/probe optimizer decides a join's sides
-    # once. Without this a swap made on a low estimate could flip back
-    # once the other side's real height is known, and again after that.
+    # A build-side choice is fixed once selected. Otherwise an estimate-based
+    # swap could reverse when actual heights become known, then reverse again
+    # on later passes.
     var sides_fixed: Bool
 
     def has_dataset(self) -> Bool:
@@ -132,7 +123,7 @@ struct PlanNode(Copyable, Deinitable, Movable):
     def set_dataset(mut self, spec: DatasetSpec):
         self.dataset = spec.copy()
 
-    def dataset_spec(self) -> ref[self.dataset._value] DatasetSpec:
+    def dataset_spec(self) -> ref[self.dataset.value()] DatasetSpec:
         return self.dataset.value()
 
     # These views borrow the stored lists: reading a payload does not add a
@@ -483,10 +474,8 @@ def _plan_node(
     )
 
 
-# Long to wide with the output columns given up front (Polars 1.44's
-# QueryContext.pivot): `names` the index columns, then the column whose values
-# name the new columns, then the values column; `offset` the number of
-# index columns; `text` the aggregate function; `right_keys` the new
-# columns' names in order. One row per distinct index key, so it runs on
-# its whole input.
+# Long-to-wide pivot with output names declared in advance. names holds index
+# columns, then the on column and values column; offset gives the number of
+# index columns. Declared output names make the lazy schema knowable before
+# execution.
 comptime PIVOT = 42

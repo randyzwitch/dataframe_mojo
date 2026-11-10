@@ -1,13 +1,10 @@
-"""DuckDB 2.0's AdaptiveFilter (execution/adaptive_filter.cpp): the order a
-filter's conjuncts run in, adapted at run time from how long each ordering
-takes.
+"""Adapt the order of a filter's predicates using measured chunk time.
 
-After a warmup of 5 chunks, every 20 chunks one adjacent pair of conjuncts
-is swapped at random (weighted by how often swapping that pair helped
-before), the swap is observed for 10 chunks, and kept only when the mean
-time per chunk went down; a reverted swap halves its pair's likeliness. A
-filter with a conjunct that can raise keeps its order, as DuckDB disables
-permutations for a conjunct that `CanThrow`.
+Try adjacent swaps and keep an ordering when it reduces evaluation time.
+Predicates that reject rows early reduce the work for later predicates.
+A reverted swap makes that pair less likely to be tried again. Preserve
+the written order when a predicate can raise, because changing which rows
+it observes could change the query's errors.
 """
 from std.time import perf_counter_ns
 

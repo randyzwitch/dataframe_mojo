@@ -22,7 +22,7 @@ A query reports unsupported by raising an error that starts with
 "unsupported:"; any other error fails that query alone.
 """
 from std.collections import Dict
-from std.io import RawFileDescriptor
+from std.sys import stderr
 from std.sys import argv
 from std.time import monotonic
 
@@ -91,7 +91,8 @@ def summary_value(frame: DataFrame, name: String) raises -> Float64:
     elif dtype.is_date():
         expr = col(name).cast(DataType.INT64).sum()
     elif dtype.is_datetime():
-        # Whole seconds, flooring like Polars' dt.epoch("s").
+        # Whole elapsed seconds since the epoch; floor negative fractional
+        # seconds rather than truncating toward zero.
         expr = (col(name).cast(DataType.INT64) // lit(dtype.per_second())).sum()
     elif dtype == DataType.BOOL or dtype.is_numeric():
         expr = col(name).cast(DataType.FLOAT64).sum()
@@ -118,7 +119,7 @@ def run[
     for part in names:
         var name = String(part)
         # Lets a trace (DATAFRAME_TRACE_PATHS) attribute paths to queries.
-        print("dataframe-query:", name, file=RawFileDescriptor(2))
+        print("dataframe-query:", name, file=stderr)
         try:
             var result = query(name, tables)
             if reps == 0:

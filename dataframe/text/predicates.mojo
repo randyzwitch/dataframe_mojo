@@ -142,7 +142,7 @@ struct _PredicateJob[op: Int](Job):
         var literal = self.literals.get(0)
         # The literal's first view word (length and up to four bytes): a
         # view whose first word differs is unequal without reading its
-        # bytes, as DuckDB's string_t compare does.
+        # bytes, so unequal prefixes avoid reading the remaining string.
         var literal_head = UInt64(len(literal))
         for b in range(min(len(literal), 4)):
             literal_head |= UInt64(

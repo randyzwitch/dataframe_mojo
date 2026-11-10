@@ -278,7 +278,7 @@ def test_a_join_after_a_join_probes_the_kept_rows_in_place() raises:
     # the second probes its table in the pipeline with the rows they
     # select (perfect hash slots, or the hash table). A semi
     # or anti join is the first join: the cost-based join order runs one
-    # before an inner join its keys do not read, as DuckDB does.
+    # before an inner join its keys do not read.
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     for threads in [1, 8]:
         var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))

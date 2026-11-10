@@ -1,25 +1,9 @@
-"""DuckDB 2.0's WindowSegmentTree (function/window/window_segment_tree.cpp)
-on the aggregate state interface: every window aggregate over a frame is
-made of the `AggregateFunction` states, update, combine and finalize the
-aggregate table uses, so a frame's sum, mean, minimum, maximum, variance
-and whatever else those states cover are the same code as a group's.
+"""Evaluate window reductions with a tree of partial aggregate states.
 
-The tree is built over the rows of whole partitions laid out one after
-another. Level 0 is the input itself and keeps no states; each node of the
-levels above (`levels_flat_start`) holds the combined state of TREE_FANOUT
-entries below it, and a node that would contain a partition boundary stays
-empty, because a frame never crosses one. A frame [begin, end) is then
-combined from the whole nodes of the upper levels
-(`_TreePart.evaluate_upper`) and the ragged leaves at its two edges
-(`_TreePart.evaluate_leaves`).
-
-DuckDB's order-sensitive path (its `right_stack`) is not here: first and
-last states carry the sequence number of their row, so a combine is order
-insensitive. EXCLUDE and FILTER have no equivalent in the API, and frames
-are computed by the callers.
-
-A frame also keeps `_K_COUNT` of its valid values, because the rolling
-windows' `min_samples` rule reads it.
+Build aggregate states for consecutive input ranges, then answer a frame
+by combining states that cover it. Reusing interior ranges avoids
+recomputing each overlapping window from every source row. Order-sensitive
+reductions use their dedicated paths rather than unordered state merges.
 """
 from std.ffi import external_call
 from std.memory import Pointer, bitcast
@@ -527,11 +511,7 @@ def window_segment_tree(
     needed: Int,
 ) raises -> FrameResults:
     """The aggregate of each row's frame [begins[i], ends[i]) of `input`,
-    whose frames lie inside the partitions starting at `partition_offsets`
-    (DuckDB's WindowAggregateExecutor choice: the segment tree, or
-    WindowNaiveAggregator when the state's combine cannot stand in for the
-    frame's own adds, as a decimal sum's precision check on every add
-    cannot). A frame with fewer than `needed` valid values is left empty,
+    whose frames lie inside the partitions starting at `partition_offsets`. A frame with fewer than `needed` valid values is left empty,
     so its finalize cannot raise. One contiguous column, whose lifetime
     the arena holds."""
     var n = len(begins)

@@ -169,7 +169,7 @@ def fused_mask(mask: List[UInt8], height: Int) -> BoolColumn:
 
 # Selection trees: a filter part's AND/OR of comparisons and null tests,
 # evaluated on a list of row positions rather than on every row, the way
-# DuckDB's ConjunctionAnd/Or select narrow one selection vector. AND hands
+# Narrow a single row selection when evaluating conjunctions. AND hands
 # each child the rows the earlier ones kept; OR keeps a child's matches and
 # offers the next child only the rows still unmatched. A comparison or test
 # reads the source column at each listed row, so nothing is gathered.

@@ -188,10 +188,10 @@ def _float_scalar[op: Int, D: DType](x: Scalar[D], y: Scalar[D]) -> Scalar[D]:
             return Scalar[D](0) / Scalar[D](0)
         return x % y
     elif op == POW:
-        # Polars' pow_on_floats (crates/polars-expr/src/dispatch/pow.rs):
-        # exponent 0.5 is sqrt, and an integral exponent from 2 to 9
-        # multiplies left to right. The platform pow can miss the correctly
-        # rounded square by an ulp; multiplying matches Polars exactly.
+        # Use sqrt for exponent 0.5 and left-to-right multiplication for
+        # integer exponents 2 through 9. This defines the rounding sequence
+        # explicitly; a general power function can differ by an ulp even for a
+        # square.
         if y == 0.5:
             return sqrt(x)
         if y > 1 and y < 10 and y == floor(y):
@@ -1008,15 +1008,8 @@ def _decimal_dense[
     dtype: DataType,
     valid: List[UInt8],
 ) raises -> List[Int128]:
-    """Decimal ADD, SUB or MUL through pointers at the operands' storage
-    widths. `valid` is the operands' combined validity bitmap (empty when
-    every row is valid); it is read 64 rows at a time, as DuckDB's flat
-    binary executor reads its validity entries: a block of valid rows is
-    computed without testing a row, a block of nulls is skipped, and only
-    a mixed block tests each row. Null rows hold 0 and are never computed,
-    so their payloads cannot raise. `divisor` is the multiplication's
-    rescaling power of ten when it is one the compiler can specialize (0
-    otherwise, which divides by `rescale` at run time)."""
+    """Read packed validity 64 rows at a time. An absent bitmap means every row
+    is valid, so no mask bytes need to be loaded for all-valid input."""
     comptime if op == MUL and divisor > 0:
         var narrow = _decimal_mul_narrow[divisor](a, b, n)
         if narrow:
@@ -1716,14 +1709,10 @@ def _math[
     raise Error("Unsupported unary kernel")
 
 
-# --- math functions (#791) -------------------------------------------------
-#
-# Transcendental functions call the platform's IEEE implementations lane by
-# lane, as `log` does: the toolchain's vector approximations lose accuracy
-# at the edges, and Polars computes these with Rust's, which call the same
-# libm. sign, truncate, degrees and radians are vector operations. Float32
-# input computes in Float32, as in Polars; integers and decimals compute in
-# Float64.
+# Transcendental functions call the platform IEEE math functions lane by lane
+# because vector approximations lose accuracy near domain boundaries. sign,
+# truncate, degrees and radians use vector arithmetic. Float32 computes in
+# Float32; integers and decimals compute in Float64.
 
 
 @always_inline
@@ -1746,8 +1735,9 @@ def _math_value[
 ](x: Scalar[D], base: Scalar[D]) -> Scalar[D] where D.is_floating_point():
     """One lane of a transcendental `op`; `base` is LOG_BASE's base."""
     comptime if op == LOG_BASE:
-        # log10 and log2 are exact at powers of their base (Polars divides
-        # natural logarithms, so its log10(1000) is 2.9999999999999996).
+        # Use base-specific log10/log2 routines so exact powers of the base
+        # retain their exact integer logarithms rather than introducing error
+        # through a quotient of natural logs.
         if base == 10:
             return _libm["log10", "log10f", D](x)
         if base == 2:
@@ -1800,14 +1790,15 @@ def _math_block[
     var zero = SIMD[D, width](0)
     var result: SIMD[D, width]
     comptime if op == SIGN:
-        # NaN and signed zeros are their own sign, as in Polars.
+        # NaN and signed zeros are their own sign.
         result = x.gt(zero).select(
             SIMD[D, width](1), x.lt(zero).select(SIMD[D, width](-1), x)
         )
     elif op == TRUNCATE:
         result = x.lt(zero).select(ceil(x), floor(x))
     elif op == DEGREES:
-        # Rust's to_degrees and to_radians: one multiply by the constant.
+        # Convert degrees/radians with one multiplication by the corresponding
+        # precomputed constant, fixing the operation and rounding sequence.
         result = x * SIMD[D, width](57.29577951308232)
     elif op == RADIANS:
         result = x * SIMD[D, width](0.017453292519943295)
@@ -1991,7 +1982,7 @@ def _math_fn[
         return _math_float[op, width, DType.float64](
             input._data[Column[Float64]], base
         )
-    # Integers and decimals compute in Float64, as in Polars.
+    # Integers and decimals compute in Float64.
     var floats = input.cast(DataType.FLOAT64)
     return _math_float[op, width, DType.float64](
         floats._data[Column[Float64]], base

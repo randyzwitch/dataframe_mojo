@@ -81,7 +81,7 @@ def _matches(
         if kind == SELECT_COLS:
             if not regex:
                 return listed^
-            # Polars treats a mixed regex/name list as a schema-ordered
+            # Treat a mixed regex/name list as a schema-ordered
             # union, while a list of exact names retains its explicit order.
             for name in names:
                 if name in listed:

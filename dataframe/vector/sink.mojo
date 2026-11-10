@@ -1,16 +1,8 @@
-"""DuckDB 2.0's sink interface (`execution/physical_operator.hpp`): the
-operator a pipeline ends in takes the pipeline's data chunks one at a time.
+"""Pipeline sinks consume data chunks using worker-local state.
 
-Each worker holds its own local sink state (`GetLocalSinkState`) and feeds
-it every chunk the pipeline's last step makes (`Sink`). When the worker's
-run ends, its local state is combined into the global state every worker
-shares (`Combine`), and the global state is finalized once (`Finalize`).
-Here a local sink state is a struct implementing `Sink`, and the global
-state is the list its workers' states are combined into: one state that
-every other one folds into (an ungrouped aggregate), or every worker's
-state kept for a parallel finalize (an aggregate table's partitions, a
-top-N's heaps, a materialize sink's batches). Each sink kind's finalize
-reads that list.
+Each worker updates its own local state while processing input. Once input
+is exhausted, combine local states into the global state and finalize the
+result. Keeping updates local avoids synchronization on every chunk.
 """
 from dataframe.vector.data_chunk import ColumnArena, DataChunk
 
@@ -26,7 +18,7 @@ trait Sink(Deinitable, Movable):
         ...
 
     def sink(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
-        """One chunk of the sink's input (DuckDB's `Sink`): its columns are
+        """One chunk of the sink's input: its columns are
         the pipeline's output schema's, read through `arena`."""
         ...
 
@@ -36,5 +28,5 @@ trait Sink(Deinitable, Movable):
         ...
 
     def combine(var self, mut combined: List[Self]) raises:
-        """This local state into the global one (DuckDB's `Combine`)."""
+        """This local state into the global one."""
         ...

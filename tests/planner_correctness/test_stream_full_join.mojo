@@ -1,7 +1,7 @@
 """A full join streams: its left rows probe the right's index in morsels as a
 left join does, each worker flags the build rows its morsels matched, and the
 build rows none matched come out as a final morsel with the left columns
-null (DuckDB's FULL OUTER probe and its scan of the unmatched build rows).
+null.
 The rows are the eager join's, on two-column keys with duplicates and null
 keys on both sides, with and without coalescing the keys."""
 # contract-group: planner.relational

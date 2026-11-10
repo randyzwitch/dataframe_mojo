@@ -84,8 +84,8 @@ minimal backend implements only those two.
 
 - **Same results.** Column names, dtypes, row count, null behavior and result
   ordering do not depend on placement. A backend returns a normal CPU
-  `DataFrame`, with normal packed validity. Result types are the core's
-  (decimal precision and scale follow DuckDB); a backend may not change them.
+  `DataFrame`, with normal packed validity. Binding determines result types,
+  including decimal precision and scale; a backend may not change them.
 - **Binding first.** The core binds the query (literal coercion, intermediate
   and output dtypes, accumulator types, null propagation) before choosing a
   backend. A backend consumes the bound meaning and does not reinterpret an
@@ -98,7 +98,7 @@ minimal backend implements only those two.
   cancellation does not reject a representable result. The detail is in
   accelerator-backends.md.
 - **Ordering.** Filters are stable. Sort ties are unspecified unless
-  `maintain_order=True`, as in Polars, so a backend may break ties differently
+  `maintain_order=True`, so a backend may break ties differently
   from the CPU but must still return a valid order.
 - **Errors propagate.** A rejected forced-accelerator query raises before
   submission. Automatic selection may choose CPU; once work is submitted,

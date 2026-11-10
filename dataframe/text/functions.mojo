@@ -751,7 +751,7 @@ def _decode(column: StringColumn, hex: Bool, strict: Bool) raises -> Series:
 
 
 def _to_integer(column: StringColumn, base: Int, strict: Bool) raises -> Series:
-    """Rust's `i64::from_str_radix`: an optional sign, then one or more
+    """Parse an optional sign followed by one or more
     digits of the base; anything else, or a value out of range, fails."""
     var n = len(column)
     var rows = _Bytes(column)
@@ -828,8 +828,8 @@ def _ascii_row(row: _Row) -> Bool:
 
 def _ends_word(row: _Row, at: Int, width: Int, ranges: List[UInt32]) -> Bool:
     """Whether the code point at `at` follows an alphabetic one and is not
-    followed by one (Rust's final-sigma rule, without its skipping of
-    case-ignorable characters)."""
+    followed by one, checking adjacent code points without skipping
+    case-ignorable characters."""
     var data = row.unsafe_ptr()
     if at == 0:
         return False
@@ -896,7 +896,7 @@ def _titlecase(column: StringColumn) raises -> Series:
                 upper = not letter
                 b += width
                 continue
-            # Lowercase the code point (Rust's final sigma: a capital
+            # Lowercase the code point (final sigma: a capital
             # sigma ending a word becomes ς), then uppercase what follows
             # a character that is not alphabetic.
             var lowered: String

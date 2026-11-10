@@ -512,7 +512,7 @@ def _cell_text(series: Series, row: Int, zone: TimeZone) raises -> String:
         if series._data.isa[Column[Scalar[D]]]():
             var value = series._data[Column[Scalar[D]]]._get(row)
             comptime if D.is_floating_point():
-                # Polars writes and reads `NaN`; `nan` reads back as a
+                # Use the recognized `NaN` spelling; lowercase `nan` infers a
                 # string in both libraries (#368).
                 if value != value:
                     return "NaN"
@@ -688,7 +688,7 @@ def write_csv(
 def _reject_nested(frame: DataFrame) raises:
     for field in frame.schema():
         if field.dtype._is_bytes():
-            # As in Polars: CSV has no agreed encoding for raw bytes.
+            # CSV has no declared encoding for raw bytes.
             raise Error(
                 "CSV cannot hold binary columns: "
                 + field.name

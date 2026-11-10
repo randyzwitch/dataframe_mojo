@@ -6,8 +6,7 @@ pipeline_complete_event.cpp).
 
 A query's independent pipelines -- the build sides of a stream's joins
 and the probe that depends on them, the inputs of an eager join, shared
-subplans -- are scheduled as DuckDB
-schedules its MetaPipelines (`BuildPipelineSchedule`). Each pipeline
+subplans -- are scheduled by their data dependencies. Each pipeline
 becomes five events: initialize, execute, prepare finish, finish and
 complete, each depending on the one before. A pipeline that depends on
 another (its source is the other's sink) executes only after the other
@@ -91,17 +90,12 @@ trait SchedulablePipeline(Deinitable, Movable):
 
 
 struct MetaPipeline(Copyable, Movable):
-    """One MetaPipeline of a schedule, holding one pipeline (its base).
-
-    `parent` names the MetaPipeline whose pipeline reads this one's sink
-    (-1 for one no pipeline of this schedule reads);
-    JOIN_BUILD children of one parent are siblings. `dependencies` are the
-    pipelines (by index) that must complete before this one executes
-    (`Pipeline::GetDependencies`). `finish_group` names the pipeline
-    (of this MetaPipeline's group) whose execute this one's waits for
-    (-1: none), as DuckDB's right or full join scan follows its probe;
-    the group's base pipeline prepares its finish only after every
-    member executed (`MetaPipeline::AddFinishEvent`)."""
+    """Pipeline scheduling metadata. parent identifies the consumer of this
+    pipeline's sink, and dependencies must complete before execution.
+    JOIN_BUILD children with the same parent are siblings. finish_group
+    identifies a pipeline whose execution must finish first, such as the
+    probe before an unmatched-build scan; -1 means none. Prepare-finish
+    waits until all group members finish execution."""
 
     var type: Int
     var parent: Int

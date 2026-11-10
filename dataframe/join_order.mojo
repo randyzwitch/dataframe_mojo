@@ -5,7 +5,7 @@ edges. Each relation starts with its row count after local filters. To
 estimate a connected set, divide the product of its relation row counts by
 the product of edge domains on a spanning tree, choosing edges in descending
 domain order. Columns equated by joins or filters share an equivalence set,
-whose domain is DuckDB 2.0's `DomainEstimate`: the largest reliable
+whose estimated domain is the largest reliable
 distinct count among its columns (HyperLogLog or exact), else the largest
 count from integer bounds, else the smallest fallback count (a column's
 relation's rows). A cross-relation equality filter
@@ -14,13 +14,14 @@ domain raised to 2/3. Additional edges after connecting the set each
 contribute another domain factor. A plan's cost is the sum of estimated
 output rows for its joins.
 
-Semi, anti and left joins are operators of the graph (`JoinOperator`), as
-in DuckDB 2.0's join order optimizer: each one's right input is a relation
-of its own, and conflict rules from CD-C ("On the Correct and Complete
-Enumeration of the Core Search Space", Moerkotte, Fender and Eich) say
-which splits may apply it. A semi join can then run before inner joins
-its keys do not read. A semi or anti join keeps a fifth of its left
-input's rows (DuckDB's `DEFAULT_SEMI_ANTI_SELECTIVITY`); a left join keeps
+Semi, anti and left joins carry their own graph operators. Conflict rules
+restrict which relation sets can appear on each side, preserving null
+extension and membership tests while allowing safe reorderings. A semi
+join can run before inner joins whose keys it does not read. The conflict
+construction is derived from CD-C ("On the Correct and Complete Enumeration
+of the Core Search Space", Moerkotte, Fender and Eich).
+A semi or anti join keeps a fifth of its left
+input's rows; a left join keeps
 at least its left input's.
 
 Below `EXACT_RELATIONS`, dynamic programming tries every connected split
@@ -30,12 +31,12 @@ repeatedly merges the cheapest connected pair.
 from std.collections import Dict
 from std.bit import pop_count
 
-# DuckDB's THRESHOLD_TO_SWAP_TO_APPROXIMATE.
+# Bound exponential search: use greedy enumeration at this relation count.
 comptime EXACT_RELATIONS = 12
-# DuckDB's DEFAULT_SEMI_ANTI_SELECTIVITY: a semi or anti join keeps one
+# Without measured selectivity, estimate that semi/anti joins keep one
 # left row in five.
 comptime SEMI_ANTI_SELECTIVITY = 5.0
-# DuckDB's CompositeJoinPairStats: a row-count cap on a composite key is
+# A row-count cap on a composite key is
 # plausible only within this ratio of an observed single-column domain.
 comptime MAX_CARDINALITY_TO_DISTINCT_RATIO = 8.0
 # Operator kinds (`JoinOperator.kind`).
@@ -72,7 +73,7 @@ struct JoinEdge(Copyable, Movable):
 
 
 struct JoinOperator(Copyable, Movable):
-    """A join of the written plan, as DuckDB's `JoinOrderOperator`: its
+    """A join of the written plan: its
     kind, the relations under its left and right inputs, the relations its
     keys read (the syntactic eligibility set), and the operators under
     each input. `build_conflicts` fills in the conflict rules (`triggers`
@@ -274,7 +275,7 @@ struct JoinGraph(Movable):
     var tdom: List[Float64]
     var estimates: Dict[Int, Float64]
     # Whether each edge's (then filter's) total domain is a distinct count
-    # (DuckDB's `has_distinct_count_hll`) rather than table rows.
+    # rather than table rows.
     var counted: List[Bool]
     # Edges joining two relations on two or more equivalence classes
     # (`RelationPairEqualitySummary::HasDirectCompositeEquality`).
@@ -455,7 +456,7 @@ struct JoinGraph(Movable):
             component[r] = r
         var denominator = 1.0
         # Edges met once every relation is connected, by their distinct
-        # domains: each adds one to the denominator's multiplier, DuckDB's
+        # domains: each adds one to the denominator's multiplier, the
         # "slight penalty to cardinality for unused edges" (`GetDenominator`).
         var unused = List[Float64]()
         var parts = Int(pop_count(mask))
@@ -487,8 +488,7 @@ struct JoinGraph(Movable):
 
     def _composite_cap(self, k: Int) -> Float64:
         """The factor a composite join of two relations divides by:
-        DuckDB's FK/PK floor (`GetJoinPairCap`, `ApplyJoinPairCap`), the
-        smaller relation's rows, within `MAX_CARDINALITY_TO_DISTINCT_RATIO`
+        use the smaller relation's rows, within `MAX_CARDINALITY_TO_DISTINCT_RATIO`
         of the first single-column domain; else that domain."""
         var cap = min(self.rows[self.edges[k].a], self.rows[self.edges[k].b])
         var first = self.tdom[k]

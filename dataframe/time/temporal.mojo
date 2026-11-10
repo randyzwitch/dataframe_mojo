@@ -188,7 +188,7 @@ def default_format(dtype: DataType) -> String:
 
 
 # How localize treats a local time that occurs twice (clocks fall back) or
-# never (clocks spring forward), as in Polars' `ambiguous` and
+# never (clocks spring forward); the `ambiguous` and
 # `non_existent` options.
 comptime AMBIGUOUS_RAISE = 0
 comptime AMBIGUOUS_EARLIEST = 1
@@ -481,7 +481,7 @@ def _end(text: String, pos: Int) raises:
         raise Error("unexpected trailing text")
 
 
-# English names, as in chrono/Polars, independent of the process locale.
+# English names are fixed so formatting is independent of process locale.
 def _month_names(short: Bool) -> List[String]:
     if short:
         return [
