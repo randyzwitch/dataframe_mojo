@@ -184,11 +184,6 @@ def test_late_cast_errors_are_preserved_across_materialization_boundaries() rais
                 _error(plan, False, optimize, "invalid-last-row")
 
 
-# expected-failure: Predicate pushdown suppresses a checked arithmetic
-# expected-failure: overflow that occurs before the later filter in the
-# expected-failure: unoptimized plan.
-# expected-diagnostic: optimizer must preserve an overflow before a later
-# expected-diagnostic: filter
 def test_filter_pushdown_preserves_preceding_arithmetic_errors() raises:
     var source = DataFrame([Series("i", Column[Int64]([1, Int64.MAX]))])
     var plan = (
@@ -269,3 +264,77 @@ def test_relational_schema_preserves_key_coalescing_suffixes_and_reduction_types
         grouped.collect_schema(),
         ["left_key: int64", "sum: int32", "mean: float64", "count: int64"],
     )
+
+
+def test_row_elimination_preserves_checked_projection_errors() raises:
+    var source = DataFrame(
+        [
+            Series("i", Column[Int64]([1, Int64.MAX])),
+            Series("s", Column[String](["1", "invalid"])),
+        ]
+    )
+    for layout in range(3):
+        var frame = (
+            source.copy() if layout
+            == 0 else offset_layout(source) if layout
+            == 1 else chunk_layout(source)
+        )
+        for expression in [
+            (col("i") + 1).alias("v"),
+            col("s").cast(DataType.INT64).alias("v"),
+        ]:
+            var computed = frame.lazy().with_columns(expression)
+            var plans: List[LazyFrame] = [
+                computed.filter(col("i") == 1),
+                computed.filter(lit(False)),
+                computed.head(1),
+                computed.select(["i"]),
+            ]
+            for plan in plans:
+                for optimize in [False, True]:
+                    with assert_raises():
+                        _ = plan.collect(
+                            optimize=optimize, streaming=False, engine="cpu"
+                        )
+
+
+def test_partial_filter_keeps_the_rows_selected_by_an_earlier_filter() raises:
+    var source = DataFrame(
+        [
+            Series("i", Column[Int64]([1, Int64.MAX])),
+        ]
+    )
+    var plan = (
+        source.lazy()
+        .filter(col("i") < lit(Int64.MAX))
+        .filter((col("i") + 1) == 2)
+    )
+    for optimize in [False, True]:
+        assert_frame(
+            plan.collect(optimize=optimize, streaming=False, engine="cpu"),
+            source.head(1),
+        )
+
+
+def test_splitting_predicates_preserves_errors_in_each_conjunct() raises:
+    var source = DataFrame([Series("i", Column[Int64]([1, Int64.MAX]))])
+    for predicate in [
+        ((col("i") + 1) == 2) & (col("i") < lit(Int64.MAX)),
+        (col("i") < lit(Int64.MAX)) & ((col("i") + 1) == 2),
+    ]:
+        for optimize in [False, True]:
+            _error(source.lazy().filter(predicate), False, optimize, "overflow")
+
+
+def test_key_filter_preserves_aggregate_overflow_in_a_discarded_group() raises:
+    var source = DataFrame(
+        [
+            Series("g", Column[Int64]([0, 1, 1])),
+            Series("i", Column[Int64]([1, Int64.MAX, Int64.MAX])),
+        ]
+    )
+    var plan = (
+        source.lazy().group_by("g").agg(col("i").sum()).filter(col("g") == 0)
+    )
+    for optimize in [False, True]:
+        _error(plan, False, optimize, "overflow")

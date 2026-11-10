@@ -40,6 +40,7 @@ from dataframe.join_type import (
     JOIN_SEMI,
 )
 from dataframe.optimizer.expressions import (
+    _cannot_raise,
     _emit_shared,
     _fold_casts,
     _fold_constants,
@@ -412,6 +413,7 @@ def plan_filter_shared_subplans(mut self: QueryContext):
                 above >= 0
                 and self._nodes[above].kind == FILTER
                 and _row_local(self._nodes[above].exprs)
+                and _cannot_raise(self._nodes[above].exprs)
                 and not _pinned(self._nodes[above])
             ):
                 run.append(above)
@@ -456,7 +458,9 @@ def plan_split_filters(mut self: QueryContext, first: Int = 0):
     for i in range(first, count):
         if self._nodes[i].kind != FILTER:
             continue
-        if not _row_local(self._nodes[i].exprs):
+        if not _row_local(self._nodes[i].exprs) or not _cannot_raise(
+            self._nodes[i].exprs
+        ):
             continue
         var parts = _boolean_parts(self._nodes[i].exprs[0], AND)
         var extra = List[Expr]()
@@ -499,6 +503,10 @@ def plan_merge_filters(mut self: QueryContext):
                 break
             if not (_row_local(node.exprs) and _row_local(below.exprs)):
                 break
+            # Merging evaluates the upper predicate on rows removed by the
+            # lower filter. Preserve its boundary when evaluation can fail.
+            if not _cannot_raise(node.exprs):
+                break
             # A reader's pinned filters merge with each other, never
             # with the shared subplan's own.
             if _pinned(node) != _pinned(below):
@@ -527,11 +535,34 @@ def plan_push_predicates(mut self: QueryContext) raises:
         self._schema_memo = None
 
 
+def plan_can_discard(self: QueryContext, index: Int) -> Bool:
+    """Whether skipping this subtree preserves evaluation errors.
+
+    File scans can fail while decoding rows even if their schema is valid.
+    Only in-memory scans and operators with proven total expressions qualify.
+    """
+    var pending: List[Int] = [index]
+    while pending:
+        var at = pending.pop()
+        if at < 0:
+            continue
+        ref node = self._nodes[at]
+        if node.kind == SCAN_FRAME:
+            continue
+        if node.kind not in [SELECT, WITH_COLUMNS, FILTER, SORT, CONCAT, AGG]:
+            return False
+        if not _cannot_raise(node.exprs):
+            return False
+        pending.append(node.left)
+        pending.append(node.right)
+    return True
+
+
 def plan_drop_constant_filters(mut self: QueryContext) raises:
     """A filter folded to true (`_fold_constants`) keeps every row
     and goes; one folded to false keeps none, and it and its input
-    become an empty frame with the same columns. A UNION ALL branch
-    whose constant fails a filter is never run."""
+    become an empty frame with the same columns only when skipping the
+    input cannot suppress an evaluation error."""
     var parents = plan_parents(self)
     var changed = False
     for i in range(len(self._nodes)):
@@ -552,6 +583,8 @@ def plan_drop_constant_filters(mut self: QueryContext) raises:
                 self._nodes[parent].right = input
             parents[input] = parent
         else:
+            if not plan_can_discard(self, node.left):
+                continue
             var empty = self._execute(i, True)
             self._frames.append(empty^)
             self._schemas.append(Optional[CsvSchema]())
@@ -632,7 +665,9 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
             # could go further (a filter on an AND split into parts,
             # one on the keys of a group_by, one on its aggregates):
             # trade places, so this one moves on next time round.
-            if not _row_local(self._nodes[i].exprs):
+            if not _row_local(self._nodes[i].exprs) or not _cannot_raise(
+                self._nodes[i].exprs
+            ):
                 continue
             # The operator under the run of row-local filters below.
             var under = child
@@ -640,6 +675,7 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
                 under >= 0
                 and self._nodes[under].kind == FILTER
                 and _row_local(self._nodes[under].exprs)
+                and _cannot_raise(self._nodes[under].exprs)
             ):
                 under = self._nodes[under].left
             # Push each filter through as many semantically safe operators as
@@ -694,10 +730,17 @@ def plan_passes(self: QueryContext, filter: Int, child: Int) raises -> Int:
     `child` without changing its result: -1 when not, else the side of
     `child` it moves into (0 left or only input, 1 right)."""
     var reads = _references(self._nodes[filter].exprs[0])
-    if not reads or child < 0 or _pinned(self._nodes[filter]):
+    if (
+        not reads
+        or child < 0
+        or _pinned(self._nodes[filter])
+        or not _cannot_raise(self._nodes[filter].exprs)
+    ):
         return -1
     ref below = self._nodes[child]
     if below.kind == WITH_COLUMNS or below.kind == SELECT:
+        if not _cannot_raise(below.exprs):
+            return -1
         # A window or aggregate over the input (a rank, a sum over a
         # partition) depends on which rows are there: filtering first
         # changes its values even for rows the filter keeps (TPC-DS
@@ -729,6 +772,7 @@ def plan_passes(self: QueryContext, filter: Int, child: Int) raises -> Int:
         return 0
     if (
         below.kind == AGG
+        and _cannot_raise(below.exprs)
         and len(below.names) > 0
         and _row_local(self._nodes[filter].exprs)
         and _covers(below.names, reads.value())
@@ -739,6 +783,7 @@ def plan_passes(self: QueryContext, filter: Int, child: Int) raises -> Int:
         return 0
     if (
         below.kind == PIVOT
+        and below.text in ["min", "max", "first", "last", "count", "len"]
         and _row_local(self._nodes[filter].exprs)
         and _covers(
             List[String](below.pivot_columns()[: below.pivot_index_count()]),
@@ -784,7 +829,9 @@ def plan_left_join_to_inner(
     ref node = self._nodes[join]
     if node.kind != JOIN or node.how != JOIN_LEFT:
         return False
-    if not _row_local(self._nodes[filter].exprs):
+    if not _row_local(self._nodes[filter].exprs) or not _cannot_raise(
+        self._nodes[filter].exprs
+    ):
         return False
     var predicate = self._nodes[filter].exprs[0].copy()
     var reads = _references(predicate)
@@ -827,7 +874,9 @@ def plan_transfer_key_filter(
     ref node = self._nodes[join]
     if len(node.names) != len(node.right_keys) or len(node.names) == 0:
         return
-    if not _row_local(self._nodes[filter].exprs):
+    if not _row_local(self._nodes[filter].exprs) or not _cannot_raise(
+        self._nodes[filter].exprs
+    ):
         return
     var keys = node.right_keys.copy() if right_side else node.names.copy()
     var other = node.names.copy() if right_side else node.right_keys.copy()
@@ -923,7 +972,9 @@ def plan_push_slices(mut self: QueryContext) raises:
             ) and not plan_slice_over_ipc(self, node.left):
                 continue
             ref below = self._nodes[node.left]
-            var preserves_rows = _row_local(below.exprs)
+            var preserves_rows = _row_local(below.exprs) and _cannot_raise(
+                below.exprs
+            )
             if below.kind == SELECT and len(below.exprs):
                 # Literal-only selections and selectors matching no
                 # columns produce one row, even over an empty input.
@@ -1242,7 +1293,9 @@ def plan_prune_outputs(
     var kept = List[Expr]()
     for k in range(len(node.exprs)):
         var name = node.exprs[k]._name
-        if name in wanted and _produced_at(node.exprs, name) == k:
+        if (
+            name in wanted and _produced_at(node.exprs, name) == k
+        ) or not _cannot_raise(node.exprs[k]):
             kept.append(node.exprs[k].copy())
     if len(kept) == len(node.exprs):
         return

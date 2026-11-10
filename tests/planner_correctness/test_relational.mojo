@@ -434,7 +434,18 @@ def test_predicate_routes_prove_safe_sides_and_aggregate_barriers() raises:
         .agg(col("i").sum().alias("total"))
     )
     var keys = grouped.filter(col("b"))._optimized()
-    assert_equal(keys._plan._nodes[len(keys._plan._nodes) - 1].kind, AGG)
+    assert_equal(keys._plan._nodes[len(keys._plan._nodes) - 1].kind, FILTER)
+    var total_grouped = (
+        source.lazy()
+        .group_by("b", maintain_order=True)
+        .agg(col("i").min().alias("least"))
+        .filter(col("b"))
+        ._optimized()
+    )
+    assert_equal(
+        total_grouped._plan._nodes[len(total_grouped._plan._nodes) - 1].kind,
+        AGG,
+    )
     var totals = grouped.filter(col("total") > 0)._optimized()
     assert_equal(totals._plan._nodes[len(totals._plan._nodes) - 1].kind, FILTER)
 
