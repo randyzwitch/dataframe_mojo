@@ -1,4 +1,6 @@
 """Unicode 17 normalization with static tables and reusable row scratch space."""
+from std.collections.string import Codepoint
+from dataframe.text.utf8 import append_codepoint
 from dataframe.text.unicode.normalization_tables import (
     properties,
     decomposition,
@@ -14,35 +16,14 @@ comptime _Row = Span[UInt8, ImmutAnyOrigin]
 
 @always_inline
 def _codepoint(row: _Row, mut at: Int) -> Int:
-    var p = row.unsafe_ptr()
-    var cp = Int(p[unsafe_offset=at])
-    at += 1
-    if cp < 128:
-        return cp
-    var size = 1 if cp < 224 else (2 if cp < 240 else 3)
-    cp &= 31 if size == 1 else (15 if size == 2 else 7)
-    for _ in range(size):
-        cp = (cp << 6) | (Int(p[unsafe_offset=at]) & 63)
-        at += 1
-    return cp
+    var scalar, width = Codepoint.unsafe_decode_utf8_codepoint(row[at:])
+    at += width
+    return Int(scalar)
 
 
 @always_inline
 def _append_utf8(mut out: List[UInt8], cp: Int):
-    if cp < 128:
-        out.append(UInt8(cp))
-    elif cp < 2048:
-        out.append(UInt8(192 | (cp >> 6)))
-        out.append(UInt8(128 | (cp & 63)))
-    elif cp < 65536:
-        out.append(UInt8(224 | (cp >> 12)))
-        out.append(UInt8(128 | ((cp >> 6) & 63)))
-        out.append(UInt8(128 | (cp & 63)))
-    else:
-        out.append(UInt8(240 | (cp >> 18)))
-        out.append(UInt8(128 | ((cp >> 12) & 63)))
-        out.append(UInt8(128 | ((cp >> 6) & 63)))
-        out.append(UInt8(128 | (cp & 63)))
+    append_codepoint(out, cp)
 
 
 def _quick(row: _Row, shift: Int, mask: Int) -> Bool:

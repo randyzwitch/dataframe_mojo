@@ -1,33 +1,22 @@
 """Shared optional native I/O library loading, independent of frames/Arrow."""
-from std.ffi import external_call
-from std.memory import Pointer
+from std.ffi import OwnedDLHandle
+from std.memory import OwnedPointer, Pointer
 from std.os import getenv
 from std.os.path import exists
 from std.sys import CompilationTarget
 
 comptime PARQUET_LIBRARY_ENV = "DATAFRAME_PARQUET_LIBRARY"
-comptime _RTLD_NOW = Int32(2)
 comptime _FreeFn = def(Int) thin abi("C") -> None
-
-
-def _c_string(text: String) -> List[UInt8]:
-    var bytes = List[UInt8](capacity=text.byte_length() + 1)
-    bytes.extend(text.as_bytes())
-    bytes.append(0)
-    return bytes^
 
 
 def _read_c_string(address: Int) -> String:
     if address == 0:
         return ""
-    var pointer = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=address)
-    var length = 0
-    while pointer[unsafe_offset=length] != 0:
-        length += 1
-    var bytes = List[UInt8](capacity=length)
-    for i in range(length):
-        bytes.append(pointer[unsafe_offset=i])
-    return String(unsafe_from_utf8=bytes)
+    return String(
+        unsafe_from_utf8_ptr=Pointer[UInt8, ImmutAnyOrigin](
+            unsafe_from_address=address
+        )
+    )
 
 
 def parquet_library_candidates() -> List[String]:
@@ -58,34 +47,42 @@ struct _Library(Copyable, Movable):
     var version: Int
 
     def __init__(out self, path: String) raises:
-        var c_path = _c_string(path)
-        var handle = external_call["dlopen", Int](
-            c_path.unsafe_ptr(), _RTLD_NOW
-        )
-        if handle == 0 or len(c_path) == 0:
+        var library: OwnedDLHandle
+        try:
+            library = OwnedDLHandle(path, flags=2)
+        except error:
             raise Error(
-                "read_parquet could not load "
-                + path
-                + ": "
-                + _read_c_string(external_call["dlerror", Int]())
+                "read_parquet could not load " + path + ": " + String(error)
             )
-        self.handle = handle
-        self.read = Self._symbol(handle, "dfq_read_parquet_stream")
-        var c_name = _c_string("dfq_read_parquet_stream_dict")
-        self.read_dict = external_call["dlsym", Int](
-            handle, c_name.unsafe_ptr()
+        self.read = Self._entry(library, "dfq_read_parquet_stream")
+        var optional_read = library.get_symbol[NoneType](
+            "dfq_read_parquet_stream_dict"
         )
-        self.statistics = Self._symbol(handle, "dfq_row_group_statistics")
-        self.free = Self._symbol(handle, "dfq_free")
-        self.version = Self._symbol(handle, "dfq_arrow_version")
+        self.read_dict = Int(optional_read.value()) if optional_read else 0
+        self.statistics = Self._entry(library, "dfq_row_group_statistics")
+        self.free = Self._entry(library, "dfq_free")
+        self.version = Self._entry(library, "dfq_arrow_version")
+        # Returned Arrow streams retain callbacks after this loader returns.
+        # Keep their library loaded for the process, as before. Failed symbol
+        # resolution above still closes the local owner automatically.
+        var owner = OwnedPointer(library^)
+        self.handle = Int(owner^.unsafe_take_allocation().unsafe_leak())
+
+    @staticmethod
+    def _entry(library: OwnedDLHandle, name: String) raises -> Int:
+        var symbol = library.get_symbol[NoneType](name)
+        if not symbol:
+            raise Error("read_parquet: reader library lacks " + name)
+        return Int(symbol.value())
 
     @staticmethod
     def _symbol(handle: Int, name: String) raises -> Int:
-        var c_name = _c_string(name)
-        var address = external_call["dlsym", Int](handle, c_name.unsafe_ptr())
-        if address == 0 or len(c_name) == 0:
-            raise Error("read_parquet: reader library lacks " + name)
-        return address
+        return Self._entry(
+            Pointer[OwnedDLHandle, ImmutAnyOrigin](
+                unsafe_from_address=handle
+            )[],
+            name,
+        )
 
 
 def _load_library() raises -> _Library:

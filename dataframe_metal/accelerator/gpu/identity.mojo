@@ -5,7 +5,7 @@ context. Only the explicit device_count query discovers devices through MAX.
 The operating-system calls below read host facts; no dataframe native ABI is
 loaded. Hardware and power state are part of every calibration match.
 """
-from std.ffi import external_call
+from std.ffi import OwnedDLHandle, external_call
 from std.memory import Pointer
 from std.sys import CompilationTarget, size_of
 from .target import MetalContext as DeviceContext
@@ -14,10 +14,6 @@ from ..._build_identity import METAL_BUILD_ID
 from .target import METAL_TARGET
 
 comptime PROVIDER_BUILD = "dataframe-mojo-metal-v2"
-comptime _NameMessage = def(Int) thin abi("C") -> Int
-comptime _ObjectMessage = def(Int, Int) thin abi("C") -> Int
-comptime _BoolMessage = def(Int, Int) thin abi("C") -> UInt8
-comptime _IntegerMessage = def(Int, Int) thin abi("C") -> Int64
 
 
 def available() -> Bool:
@@ -38,23 +34,16 @@ def device_count() raises -> Int:
         return DeviceContext.number_of_devices()
 
 
-def _c_string(value: String) -> List[UInt8]:
-    var bytes = List[UInt8]()
-    bytes.extend(value.as_bytes())
-    bytes.append(0)
-    return bytes^
-
-
-def _sysctl_string(name: String) raises -> String:
+def _sysctl_string(var name: String) raises -> String:
     comptime if not CompilationTarget.is_macos():
         raise Error("Mojo Metal host identity requires macOS")
     else:
-        var key = _c_string(name)
+        var key = name.as_c_string_span()
         var bytes = List[UInt8](length=256, fill=0)
         var size = len(bytes)
         if (
             external_call["sysctlbyname", Int32](
-                key.unsafe_ptr(), bytes.unsafe_ptr(), Pointer(to=size), 0, 0
+                key.ptr(), bytes.unsafe_ptr(), Pointer(to=size), 0, 0
             )
             != 0
         ):
@@ -65,15 +54,15 @@ def _sysctl_string(name: String) raises -> String:
         return String(unsafe_from_utf8=bytes[0:length])
 
 
-def _sysctl_integer(name: String) raises -> UInt64:
+def _sysctl_integer(var name: String) raises -> UInt64:
     comptime if not CompilationTarget.is_macos():
         raise Error("Mojo Metal host identity requires macOS")
     else:
-        var key = _c_string(name)
+        var key = name.as_c_string_span()
         var value = UInt64(0)
         var size = size_of[UInt64]()
         if external_call["sysctlbyname", Int32](
-            key.unsafe_ptr(), Pointer(to=value), Pointer(to=size), 0, 0
+            key.ptr(), Pointer(to=value), Pointer(to=size), 0, 0
         ) != 0 or (size != 4 and size != 8):
             raise Error("Cannot read Apple calibration host identity: " + name)
         return value
@@ -83,69 +72,33 @@ def _power_state() raises -> Tuple[UInt8, Int64]:
     comptime if not CompilationTarget.is_macos():
         raise Error("Mojo Metal power identity requires macOS")
     else:
-        # Foundation supplies host power/thermal facts without a Metal device.
-        var path = _c_string(
+        var library = OwnedDLHandle(
             "/System/Library/Frameworks/Foundation.framework/Foundation"
         )
-        var handle = external_call["dlopen", Int](path.unsafe_ptr(), Int32(1))
-        if not handle:
-            raise Error("Cannot load Foundation host power metadata")
-        # Resolve Objective-C entry points through Foundation's dependencies;
-        # standalone executables need no additional framework linker flags.
-        var class_name = _c_string("objc_getClass")
-        var class_lookup = external_call["dlsym", Int](
-            handle, class_name.unsafe_ptr()
+        var class_lookup = library.get_function[Int]("objc_getClass")
+        var selector_lookup = library.get_function[Int]("sel_registerName")
+        var message = library.get_function[Int]("objc_msgSend")
+        var low_message = library.get_function[UInt8]("objc_msgSend")
+        var thermal_message = library.get_function[Int64]("objc_msgSend")
+        var name = String("NSProcessInfo")
+        var cls = class_lookup(name.as_c_string_span().ptr())
+        var process_name = String("processInfo")
+        var process_selector = selector_lookup(
+            process_name.as_c_string_span().ptr()
         )
-        var selector_name = _c_string("sel_registerName")
-        var selector_lookup = external_call["dlsym", Int](
-            handle, selector_name.unsafe_ptr()
-        )
-        if not class_lookup or not selector_lookup:
-            _ = external_call["dlclose", Int32](handle)
-            raise Error("Cannot resolve Foundation host metadata entry points")
-        var name = _c_string("NSProcessInfo")
-        var cls = Pointer(to=class_lookup).unsafe_bitcast[_NameMessage]()[](
-            Int(name.unsafe_ptr())
-        )
-        # Integer-address callback parameters erase pointer origins. Retain
-        # every C-string owner until its indirect Foundation call completes.
-        _ = name^
-        var process_name = _c_string("processInfo")
-        var process_selector = Pointer(to=selector_lookup).unsafe_bitcast[
-            _NameMessage
-        ]()[](Int(process_name.unsafe_ptr()))
-        _ = process_name^
-        var message_name = _c_string("objc_msgSend")
-        var message = external_call["dlsym", Int](
-            handle, message_name.unsafe_ptr()
-        )
-        if not message:
-            _ = external_call["dlclose", Int32](handle)
-            raise Error("Cannot read Foundation host metadata")
-        var process = Pointer(to=message).unsafe_bitcast[_ObjectMessage]()[](
-            cls, process_selector
-        )
+        var process = message(cls, process_selector)
         if not cls or not process:
-            _ = external_call["dlclose", Int32](handle)
             raise Error("Cannot identify Apple host power state")
-        var low_name = _c_string("isLowPowerModeEnabled")
-        var low_selector = Pointer(to=selector_lookup).unsafe_bitcast[
-            _NameMessage
-        ]()[](Int(low_name.unsafe_ptr()))
-        _ = low_name^
-        var thermal_name = _c_string("thermalState")
-        var thermal_selector = Pointer(to=selector_lookup).unsafe_bitcast[
-            _NameMessage
-        ]()[](Int(thermal_name.unsafe_ptr()))
-        _ = thermal_name^
-        var low = Pointer(to=message).unsafe_bitcast[_BoolMessage]()[](
-            process, low_selector
+        var low_name = String("isLowPowerModeEnabled")
+        var low_selector = selector_lookup(low_name.as_c_string_span().ptr())
+        var thermal_name = String("thermalState")
+        var thermal_selector = selector_lookup(
+            thermal_name.as_c_string_span().ptr()
         )
-        var thermal = Pointer(to=message).unsafe_bitcast[_IntegerMessage]()[](
-            process, thermal_selector
+        return (
+            low_message(process, low_selector),
+            thermal_message(process, thermal_selector),
         )
-        _ = external_call["dlclose", Int32](handle)
-        return (low, thermal)
 
 
 def _memory_headroom(total: Int) raises -> Int:

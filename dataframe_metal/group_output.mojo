@@ -102,31 +102,9 @@ def group_order(first: List[UInt32]) -> List[Int]:
     for slot in range(len(first)):
         if first[slot] != UInt32.MAX:
             order.append(slot)
-    if len(order) <= 256:
-        for at in range(1, len(order)):
-            var slot = order[at]
-            var cursor = at
-            while cursor > 0 and first[order[cursor - 1]] > first[slot]:
-                order[cursor] = order[cursor - 1]
-                cursor -= 1
-            order[cursor] = slot
-        return order^
-    var scratch = List[Int](length=len(order), fill=0)
-    for byte in range(4):
-        var counts = List[Int](length=256, fill=0)
-        var shift = UInt32(byte * 8)
-        for slot in order:
-            counts[Int((first[slot] >> shift) & 255)] += 1
-        var position = 0
-        for digit in range(256):
-            var count = counts[digit]
-            counts[digit] = position
-            position += count
-        for slot in order:
-            var digit = Int((first[slot] >> shift) & 255)
-            scratch[counts[digit]] = slot
-            counts[digit] += 1
-        var previous = order^
-        order = scratch^
-        scratch = previous^
+
+    def before(a: Int, b: Int) {imm first} -> Bool:
+        return first[a] < first[b]
+
+    sort[stable=True](order, before)
     return order^

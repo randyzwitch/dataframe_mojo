@@ -1,110 +1,20 @@
-"""Strict text parsing shared by read_csv and cast, so both agree."""
+"""Decimal grammar and range checks around standard numeric parsers."""
 from std.utils.numerics import isinf
-from std.memory import bitcast
 from std.sys import size_of
-from std.sys import Endian
-
-from dataframe.io.csv_numeric import _pow10_f64
-
-# Private APIs from the Mojo 1.2 nightly pinned in pixi.lock. These are the
-# same conversion routines Float64(String) uses; keep reference-bit tests
-# when upgrading Mojo. Passing a borrowed span avoids constructing a String.
-from std.collections.string._parsing_numbers.parsing_floats import (
-    _atof,
-    lemire_algorithm,
-)
-
-
-@no_inline
-def _short_decimal(bytes: Span[UInt8, _], start: Int) raises -> UInt64:
-    """Parse a decimal magnitude known to fit from a bounded byte span.
-
-    The packed reductions consume only complete 8- or 4-byte blocks; scalar
-    cleanup therefore remains safe for every StringSlice offset and length.
-    """
-    comptime assert (
-        Endian.native() == Endian.little
-    ), "packed decimal parsing requires little endian"
-    var index = start
-    var value = UInt64(0)
-    while index + 8 <= len(bytes):
-        var block = bytes.unsafe_ptr().unsafe_load[width=8](index)
-        var word = bitcast[DType.uint64, 1](block)
-        if (
-            (word + UInt64(0x4646464646464646))
-            | (word - UInt64(0x3030303030303030))
-        ) & UInt64(0x8080808080808080) != 0:
-            raise Error("non-decimal integer byte")
-        word -= UInt64(0x3030303030303030)
-        word = (word * 10 + (word >> 8)) & UInt64(0x00FF00FF00FF00FF)
-        word = (word * 100 + (word >> 16)) & UInt64(0x0000FFFF0000FFFF)
-        word = (word * 10000 + (word >> 32)) & UInt64(0xFFFFFFFF)
-        value = value * 100000000 + word
-        index += 8
-    if index + 4 <= len(bytes):
-        var block = bytes.unsafe_ptr().unsafe_load[width=4](index)
-        var word = bitcast[DType.uint32, 1](block)
-        if ((word + UInt32(0x46464646)) | (word - UInt32(0x30303030))) & UInt32(
-            0x80808080
-        ) != 0:
-            raise Error("non-decimal integer byte")
-        word -= UInt32(0x30303030)
-        word = (word * 10 + (word >> 8)) & UInt32(0x00FF00FF00FF00FF)
-        word = (word * 100 + (word >> 16)) & UInt32(0xFFFF)
-        value = value * 10000 + UInt64(word)
-        index += 4
-    while index < len(bytes):
-        var byte = bytes[index]
-        if byte < 48 or byte > 57:
-            raise Error("non-decimal integer byte")
-        value = value * 10 + UInt64(byte - 48)
-        index += 1
-    return value
 
 
 def parse_int64(text: StringSlice) raises -> Int64:
-    """Parse strict decimal Int64 without a floating-point round trip."""
+    """Parse decimal Int64 with the standard parser after lexical validation."""
     var bytes = text.as_bytes()
-    if len(bytes) == 0:
-        raise Error("empty integer")
-    var index = 0
-    var negative = False
-    if bytes[0] == 45 or bytes[0] == 43:
-        negative = bytes[0] == 45
-        index = 1
-    if index == len(bytes):
-        raise Error("integer sign without digits")
-    var digits = len(bytes) - index
-    if digits <= 18:
-        # Every 18-digit unsigned decimal fits Int64, including when it is
-        # negated.  The range check can therefore stay out of this loop,
-        # avoiding a divide per byte on the normal CSV path.
-        var magnitude = UInt64(0)
-        while index < len(bytes):
-            var byte = bytes[index]
-            if byte < 48 or byte > 57:
-                raise Error("non-decimal integer byte")
-            magnitude = magnitude * 10 + UInt64(byte - 48)
-            index += 1
-        if negative:
-            return -Int64(magnitude)
-        return Int64(magnitude)
-    var limit = UInt64(9223372036854775807) + UInt64(negative)
-    var magnitude = UInt64(0)
-    while index < len(bytes):
-        var byte = bytes[index]
-        if byte < 48 or byte > 57:
+    var start = 0
+    if len(bytes) and (bytes[0] == 43 or bytes[0] == 45):
+        start = 1
+    if start == len(bytes):
+        raise Error("integer requires digits")
+    for i in range(start, len(bytes)):
+        if bytes[i] < 48 or bytes[i] > 57:
             raise Error("non-decimal integer byte")
-        var digit = UInt64(byte - 48)
-        if magnitude > (limit - digit) // 10:
-            raise Error("Int64 overflow")
-        magnitude = magnitude * 10 + digit
-        index += 1
-    if negative:
-        if magnitude == UInt64(9223372036854775808):
-            return Int64(-9223372036854775807) - 1
-        return -Int64(magnitude)
-    return Int64(magnitude)
+    return Int64(Int(text))
 
 
 def parse_integer[D: DType](text: StringSlice) raises -> Scalar[D]:
@@ -112,8 +22,11 @@ def parse_integer[D: DType](text: StringSlice) raises -> Scalar[D]:
     digits themselves (no floating-point round trip). "-0" is 0 for
     unsigned types."""
     comptime assert D.is_integral(), "parse_integer needs an integer dtype"
-    comptime if D == DType.int64:
-        return rebind[Scalar[D]](parse_int64(text))
+    comptime if size_of[Scalar[D]]() < 8 or D == DType.int64:
+        var value = parse_int64(text)
+        if value < Int64(Scalar[D].MIN) or value > Int64(Scalar[D].MAX):
+            raise Error(String(D) + " overflow")
+        return value.cast[D]()
     var bytes = text.as_bytes()
     if len(bytes) == 0:
         raise Error("empty integer")
@@ -124,40 +37,6 @@ def parse_integer[D: DType](text: StringSlice) raises -> Scalar[D]:
         index = 1
     if index == len(bytes):
         raise Error("integer sign without digits")
-    # The fast branch only accepts lengths that fit every value of the dtype,
-    # so it cannot alter overflow-versus-invalid-byte precedence.
-    comptime safe_digits = 2 if size_of[Scalar[D]]() == 1 else (
-        4 if size_of[Scalar[D]]()
-        == 2 else (9 if size_of[Scalar[D]]() == 4 else 19)
-    )
-    var digits = len(bytes) - index
-    # All one- to three-digit values fit every signed or unsigned dtype at
-    # least 16 bits wide. Avoid the generic overflow division on those
-    # overwhelmingly common fields; unsigned negative values retain the
-    # reference path and its error behavior.
-    comptime if size_of[Scalar[D]]() >= 2:
-        if digits <= 3 and (D.is_signed() or not negative):
-            var magnitude = UInt64(0)
-            while index < len(bytes):
-                var byte = bytes[index]
-                if byte < 48 or byte > 57:
-                    raise Error("non-decimal integer byte")
-                magnitude = magnitude * 10 + UInt64(byte - 48)
-                index += 1
-            comptime if D.is_signed():
-                if negative:
-                    return (-Int64(magnitude)).cast[D]()
-            return magnitude.cast[D]()
-    if (
-        digits >= 4
-        and digits <= safe_digits
-        and (D.is_signed() or not negative)
-    ):
-        var magnitude = _short_decimal(bytes, index)
-        comptime if D.is_signed():
-            if negative:
-                return (-Int64(magnitude)).cast[D]()
-        return magnitude.cast[D]()
     var high = Scalar[D].MAX.cast[DType.uint64]()
     var limit = high
     comptime if D.is_signed():
@@ -266,110 +145,9 @@ def _is_special_float(text: StringSlice) -> Bool:
     return False
 
 
-# 2**53: above this a Float64 cannot hold every integer.  A fully consumed
-# plain decimal still passes directly to the standard converter, which is
-# responsible for its exact rounding.
-comptime _EXACT_LIMIT = UInt64(9007199254740992)
-
-
 def parse_float64(text: StringSlice) raises -> Float64:
-    """Strict decimal Float64. See the String overload for the contract.
-
-    Common plain decimals use one validated mantissa scan. Exponent inputs
-    use a separate specialization so their parsing work does not enlarge
-    the common loop; long and special values retain checked conversion.
-    """
-    return _scan_float64[False](text)
-
-
-@always_inline
-def _scan_float64[parse_exponent: Bool](text: StringSlice) raises -> Float64:
-    var b = text.as_bytes()
-    var n = len(b)
-    var mantissa = UInt64(0)
-    var digits = 0
-    var fraction = -1
-    var i = 0
-    # The strict grammar takes one leading sign, so reading it here leaves
-    # this path a subset of it. Signed data is not an edge case: half the
-    # float fields of a column centred on zero are negative, and sending
-    # every one of them to the strict parser -- which allocates a String to
-    # do it -- was 80 ms of a 730 ms single-threaded read of 1M rows.
-    var negative = False
-    if n > 0 and (b[0] == 43 or b[0] == 45):
-        negative = b[0] == 45
-        i = 1
-    while i < n:
-        var c = b[i]
-        if c >= 48 and c <= 57:
-            if digits == 19:
-                return _float_scan_fallback[parse_exponent](text)
-            mantissa = mantissa * 10 + UInt64(c - 48)
-            digits += 1
-            if fraction >= 0:
-                fraction += 1
-        elif c == 46 and fraction < 0:
-            fraction = 0
-        else:
-            comptime if parse_exponent:
-                if (c == 101 or c == 69) and digits > 0:
-                    i += 1
-                    var exponent_negative = False
-                    if i < n and (b[i] == 43 or b[i] == 45):
-                        exponent_negative = b[i] == 45
-                        i += 1
-                    if i == n:
-                        return _float_scan_fallback[parse_exponent](text)
-                    var exponent = 0
-                    while i < n:
-                        var digit = b[i]
-                        if digit < 48 or digit > 57 or exponent > 400:
-                            return _float_scan_fallback[parse_exponent](text)
-                        exponent = exponent * 10 + Int(digit - 48)
-                        i += 1
-                    if exponent_negative:
-                        exponent = -exponent
-                    exponent -= max(fraction, 0)
-                    if exponent < -342 or exponent > 308:
-                        return _float_scan_fallback[parse_exponent](text)
-                    var value: Float64
-                    if (
-                        mantissa <= _EXACT_LIMIT
-                        and exponent >= -22
-                        and exponent <= 22
-                    ):
-                        value = Float64(mantissa)
-                        if exponent < 0:
-                            value /= _pow10_f64(-exponent)
-                        else:
-                            value *= _pow10_f64(exponent)
-                    else:
-                        value = lemire_algorithm(mantissa, Int64(exponent))
-                    if isinf(value):
-                        raise Error(
-                            "Float64 overflow for '" + String(text) + "'"
-                        )
-                    return -value if negative else value
-            return _float_scan_fallback[parse_exponent](text)
-        i += 1
-    if (
-        digits == 0
-        or fraction == 0  # a trailing "." the strict grammar may reject
-        or fraction > 22
-    ):
-        return _float_scan_fallback[parse_exponent](text)
-    # The loop has consumed the complete strict plain-decimal grammar.  A
-    # field of at most 19 digits cannot overflow Float64, so wide mantissas
-    # can convert directly without walking their bytes a second time.
-    if mantissa > _EXACT_LIMIT:
-        var value = lemire_algorithm(mantissa, Int64(-max(fraction, 0)))
-        return -value if negative else value
-    var value = Float64(mantissa)
-    if fraction > 0:
-        value = value / _pow10_f64(fraction)
-    # The sign applies to the magnitude, so "-0.0" stays negative and no
-    # other value's rounding changes.
-    return -value if negative else value
+    """Validate the field grammar, then use the standard Float64 parser."""
+    return _checked_float64(text)
 
 
 def parse_float64(text: String) raises -> Float64:
@@ -380,18 +158,14 @@ def parse_float64(text: String) raises -> Float64:
 
 
 def _checked_float64(text: StringSlice) raises -> Float64:
-    """Validate strict grammar before using the borrowed standard converter.
-
-    Successful conversion does not construct an owned String. Error text is
-    materialized only on failure.
-    """
+    """Validate field grammar and overflow around standard conversion."""
     if edge_ascii_whitespace(text):
         raise Error("Float64 fields cannot have surrounding whitespace")
     if not _is_decimal(text) and not _is_special_float(text):
         raise Error("invalid Float64 value '" + String(text) + "'")
     var value: Float64
     try:
-        value = _atof(text)
+        value = Float64(text)
     except:
         raise Error("invalid Float64 value '" + String(text) + "'")
     if isinf(value) and not _is_special_float(text):
@@ -405,23 +179,3 @@ def parse_bool(text: StringSlice) raises -> Bool:
     if text == "false":
         return False
     raise Error("Boolean must be exactly 'true' or 'false'")
-
-
-def _float_scan_fallback[
-    parse_exponent: Bool
-](text: StringSlice) raises -> Float64:
-    comptime if parse_exponent:
-        return _checked_float64(text)
-    else:
-        return _parse_float64_borrowed(text)
-
-
-@no_inline
-def _parse_float64_borrowed(text: StringSlice) raises -> Float64:
-    """Parse exponent inputs without growing the common plain-decimal loop.
-
-    This specialization revisits the plain prefix but combines exponent
-    validation and conversion. Long mantissas and special values retain
-    the checked standard-library fallback.
-    """
-    return _scan_float64[True](text)

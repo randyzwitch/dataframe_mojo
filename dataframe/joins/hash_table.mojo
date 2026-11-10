@@ -21,7 +21,13 @@ scan; build-side semi/anti joins emit flagged/unflagged rows respectively.
 from std.bit import next_power_of_two
 from std.collections import Optional
 from std.ffi import external_call
-from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
+from std.memory import (
+    ArcPointer,
+    Pointer,
+    bitcast,
+    unsafe_memcpy,
+    unsafe_memcmp,
+)
 from std.sys.intrinsics import prefetch
 
 from dataframe.dtype import NUMERIC_DTYPES, DataType
@@ -372,20 +378,15 @@ struct KeyLayout(Copyable, Movable):
 
 @always_inline
 def _same_bytes(a: Int, b: Int, count: Int) -> Bool:
-    var w = 0
-    while w + 8 <= count:
-        if _load64(a + w) != _load64(b + w):
-            return False
-        w += 8
-    if w + 4 <= count:
-        if _load32(a + w) != _load32(b + w):
-            return False
-        w += 4
-    while w < count:
-        if _load8(a + w) != _load8(b + w):
-            return False
-        w += 1
-    return True
+    return (
+        count == 0
+        or unsafe_memcmp(
+            Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=a),
+            Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=b),
+            count,
+        )
+        == 0
+    )
 
 
 @always_inline

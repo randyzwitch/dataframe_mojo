@@ -26,6 +26,7 @@ for the requested result:
 If a DFA gives up (its cache keeps overflowing), the Pike VM answers
 instead, so every search stays linear in the haystack.
 """
+from dataframe.text.utf8 import append_codepoint
 from std.memory import ArcPointer
 
 from .backtrack import Backtracker
@@ -55,20 +56,7 @@ comptime _LITERAL_CAP = 256
 
 def _utf8(cp: Int) -> List[UInt8]:
     var out = List[UInt8]()
-    if cp < 0x80:
-        out.append(UInt8(cp))
-    elif cp < 0x800:
-        out.append(UInt8(0xC0 | (cp >> 6)))
-        out.append(UInt8(0x80 | (cp & 0x3F)))
-    elif cp < 0x10000:
-        out.append(UInt8(0xE0 | (cp >> 12)))
-        out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
-        out.append(UInt8(0x80 | (cp & 0x3F)))
-    else:
-        out.append(UInt8(0xF0 | (cp >> 18)))
-        out.append(UInt8(0x80 | ((cp >> 12) & 0x3F)))
-        out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
-        out.append(UInt8(0x80 | (cp & 0x3F)))
+    append_codepoint(out, cp)
     return out^
 
 
