@@ -1,8 +1,8 @@
 """Lazy rename, cast, group_by on expressions and the group_by reductions
 give the eager DataFrame methods' results under every executor setting.
-rename is a select of every column and cast a with_columns, so filters and
-column selections above them move below them:
-explain shows where they land."""
+Renames allow filters and column selections to move below them. Casts keep
+their evaluation boundaries, and filters move below grouped reductions only
+when the reductions are proven total. Explain shows where they land."""
 # contract-group: lazy.rename_cast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
@@ -176,15 +176,16 @@ def test_cast_matches_eager() raises:
     check(frame.lazy().cast(Dict[String, String]()), frame)
 
 
-def test_cast_lets_filters_and_projections_through() raises:
+def test_cast_keeps_evaluation_boundaries_and_requested_outputs() raises:
     var frame = source()
     var casts = mapping(["t", "int64", "f", "int64"])
-    # A filter on a column the cast leaves alone moves below it.
+    # Casts are conservatively treated as potentially raising, including
+    # non-strict casts, so an independent filter remains above them.
     var other = frame.lazy().cast(casts, strict=False).filter(col("k") > 1)
     check(other, frame.cast(casts, strict=False).filter(col("k") > 1))
     var text = other.explain(streaming=False)
     assert_true(
-        line_of(text, "FILTER") > line_of(text, "WITH_COLUMNS t, f"), text
+        line_of(text, "FILTER") < line_of(text, "WITH_COLUMNS t, f"), text
     )
     # A filter on a cast column stays above it.
     var cast_column = (
@@ -195,12 +196,17 @@ def test_cast_lets_filters_and_projections_through() raises:
     assert_true(
         line_of(text, "FILTER") < line_of(text, "WITH_COLUMNS t, f"), text
     )
-    # A cast column nothing above reads is not computed or scanned.
+    # Selecting fewer outputs retains the casts and their input columns;
+    # unused computations can still report an error.
     var selected = frame.lazy().cast(casts, strict=False).select(["k", "t"])
     check(selected, frame.cast(casts, strict=False).select(["k", "t"]))
     text = selected.explain(streaming=False)
-    assert_true(text.find("WITH_COLUMNS t\n") >= 0, text)
-    assert_true(text.find("SCAN frame [project k, t]") >= 0, text)
+    assert_true(text.find("WITH_COLUMNS t, f\n") >= 0, text)
+    assert_true(text.find("SCAN frame [project k, f, t]") >= 0, text)
+    # The invalid "x" belongs to a row the filter would discard. Neither
+    # filtering it out nor selecting only k may hide a preceding strict cast.
+    check_fails(frame.lazy().cast(casts).filter(col("k") > 1))
+    check_fails(frame.lazy().cast(casts).select(["k"]))
 
 
 def test_group_by_expressions_match_eager() raises:
@@ -225,8 +231,8 @@ def test_group_by_expressions_match_eager() raises:
                 frame.lazy().group_by(keys, maintain_order=True).agg(aggs),
                 frame.group_by(keys, maintain_order=True).agg(aggs),
             )
-    # Filters on a computed key move below the group_by, not below the
-    # key's computation.
+    # SUM is not proven total across its supported input types. Keep a key
+    # filter above it so discarded groups cannot hide reduction errors.
     var filtered = (
         frame.lazy()
         .group_by([(col("k") * 2).alias("double")], maintain_order=True)
@@ -243,6 +249,25 @@ def test_group_by_expressions_match_eager() raises:
     var group = line_of(text, "GROUP_BY double")
     var filter = line_of(text, "FILTER")
     var keys = line_of(text, "WITH_COLUMNS double")
+    assert_true(filter >= 0 and filter < group and group < keys, text)
+    # MAX is total, so its key filter can move below the grouping while
+    # remaining above the computed key's checked multiplication.
+    var maximum = (
+        frame.lazy()
+        .group_by([(col("k") * 2).alias("double")], maintain_order=True)
+        .agg(col("f").max().alias("top"))
+        .filter(col("double") > 2)
+    )
+    check(
+        maximum,
+        frame.group_by([(col("k") * 2).alias("double")], maintain_order=True)
+        .agg(col("f").max().alias("top"))
+        .filter(col("double") > 2),
+    )
+    text = maximum.explain(streaming=False)
+    group = line_of(text, "GROUP_BY double")
+    filter = line_of(text, "FILTER")
+    keys = line_of(text, "WITH_COLUMNS double")
     assert_true(group >= 0 and group < filter and filter < keys, text)
 
 
