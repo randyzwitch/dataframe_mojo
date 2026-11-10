@@ -9,6 +9,49 @@ from dataframe_metal.logical_plan import (
 )
 from dataframe_metal.predicate_plan import plan_predicates
 from dataframe_metal.group_plan import plan_grouped
+from dataframe_metal.logical_reduce import plan_packed_logical
+
+
+def test_metal_packed_logical_plan_keeps_only_plain_columns_and_boolean_not() raises:
+    var frame = DataFrame(
+        [
+            Series("b", Column[Bool]([True, False, True], [True, False, True])),
+            Series("n", Column[Int32]([1, 2, 3])),
+            Series("f", Column[Float32]([0, 1, 2])),
+        ]
+    )
+    var packed = plan_packed_logical(
+        frame.lazy().select_exprs(
+            [
+                col("b").any().alias("a"),
+                (~col("b")).all(False).alias("z"),
+                col("n").null_count().alias("nulls"),
+                col("f").len().alias("rows"),
+            ]
+        )
+    )
+    assert_true(Bool(packed))
+    assert_equal(packed.value().inputs, ["b", "n", "f"])
+    assert_equal(packed.value().values, [True, False, False])
+    assert_equal(packed.value().validity, [True, True, False])
+    assert_true(
+        not plan_packed_logical(
+            frame.lazy().filter(col("n") > 0).select(col("b").any())
+        )
+    )
+    assert_true(
+        not plan_packed_logical(
+            frame.lazy().select((col("b") | (col("n") > 0)).any())
+        )
+    )
+    assert_true(
+        not plan_packed_logical(frame.lazy().select((col("n") + 1).len()))
+    )
+    assert_true(
+        not plan_packed_logical(
+            frame.lazy().group_by(["n"]).agg([col("b").any()])
+        )
+    )
 
 
 def _logical_outputs(value: Expr) -> List[Expr]:
@@ -159,6 +202,96 @@ def test_metal_logical_plans_native_predicates_mixed_values_and_grouped_keys() r
         ) if grouped else derived.select_exprs(outputs)
         assert_true(not Bool(plan_logical(query)))
         assert_true(Bool(plan_moments(query)))
+
+
+# requires: metal
+def test_metal_packed_logical_public_empty_offsets_chunks_and_kleene() raises:
+    from tests.support.metal_outcomes import require_metal
+    from dataframe_metal.logical_reduce import execute_packed_logical
+    from std.memory import bitcast
+
+    var runtime = require_metal()
+    for pattern in range(4):
+        var values = List[Bool]()
+        var validity = List[Bool]()
+        var numbers = List[Int32]()
+        var floating = List[Float32]()
+        for row in range(272):
+            values.append(pattern == 1 or (pattern == 3 and row % 3 == 0))
+            validity.append(pattern != 0 and (pattern == 2 or row % 5 != 0))
+            numbers.append(Int32(row))
+            floating.append(bitcast[DType.float32](UInt32(0x7FC12345)))
+        var original = DataFrame(
+            [
+                Series("b", Column[Bool](values^, validity)),
+                Series("n", Column[Int32](numbers^, validity)),
+                Series("f", Column[Float32](floating^, validity)),
+            ]
+        )
+        for offset in [0, 7]:
+            for rows in [0, 1, 31, 32, 33, 129, 257]:
+                var sliced = original.slice(offset, rows)
+                for layout in range(3):
+                    var columns = List[Series]()
+                    for name in sliced.columns():
+                        var source = sliced.column(name)
+                        var left = List[Int]()
+                        var right = List[Int]()
+                        for i in range(rows):
+                            if i < rows // 2:
+                                left.append(i)
+                            else:
+                                right.append(i)
+                        if layout == 0:
+                            columns.append(source.copy())
+                        elif layout == 1:
+                            columns.append(
+                                Series._from_chunks(
+                                    [
+                                        source.slice(0, rows // 2),
+                                        source.slice(
+                                            rows // 2, rows - rows // 2
+                                        ),
+                                    ]
+                                )
+                            )
+                        else:
+                            columns.append(
+                                Series._from_chunks(
+                                    [
+                                        source.take(left),
+                                        source.take(right),
+                                    ]
+                                )
+                            )
+                    var frame = DataFrame(columns^)
+                    for negated in [False, True]:
+                        var outputs = _logical_outputs(
+                            ~col("b") if negated else col("b")
+                        )
+                        for name in ["n", "f"]:
+                            outputs.extend(
+                                [
+                                    col(name).len().alias(name + "_len"),
+                                    col(name).count().alias(name + "_valid"),
+                                    col(name)
+                                    .null_count()
+                                    .alias(name + "_nulls"),
+                                ]
+                            )
+                        var query = frame.lazy().select_exprs(outputs)
+                        var packed = plan_packed_logical(query)
+                        assert_true(Bool(packed))
+                        var expected = query.collect(engine="cpu")
+                        for zero_copy in [False, True]:
+                            assert_true(
+                                execute_packed_logical(
+                                    query, packed.value(), zero_copy
+                                )[0].equals(expected)
+                            )
+                        assert_true(
+                            query.collect(accelerator=runtime).equals(expected)
+                        )
 
 
 # requires: metal

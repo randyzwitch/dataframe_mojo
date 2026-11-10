@@ -27,6 +27,11 @@ if [[ "$capability" != available ]]; then
   exit 1
 fi
 
+echo "== Packed-word Boolean and validity counts"
+pixi run --locked mojo build -O3 -I . scripts/check_metal_logical_words.mojo \
+  -o build/contract-tests/metal-logical-words
+build/contract-tests/metal-logical-words
+
 echo "== Native numeric device conformance"
 pixi run --locked mojo build -O3 -I . scripts/check_metal_numeric_device.mojo \
   -o build/contract-tests/metal-numeric-device
