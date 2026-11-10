@@ -174,13 +174,6 @@ def test_csv_reader_accepts_independent_records_across_delimiters_endings_and_nu
                                     raise error
 
 
-# expected-failure: Verified independently authored final record ending in an
-# expected-failure: unquoted empty field without a newline raises Explicit
-# expected-failure: height does not match columns; valid CSV must preserve the
-# expected-failure: final field and row. Focused case stops at first affected
-# expected-failure: fixture; later dimensions await repair.
-# expected-diagnostic: unterminated trailing null CSV field must preserve
-# expected-diagnostic: record width
 def test_csv_unterminated_trailing_null_field_preserves_record_width_and_height() raises:
     var path = _path("trailing-null")
     for n in [1, 9, 65]:

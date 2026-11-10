@@ -547,10 +547,20 @@ struct StructColumn(Copyable, Deinitable, Movable, Sized):
             if self._valid(i) != other._valid(i):
                 return False
         try:
+            var visible = List[Int]()
+            if self.null_count() > 0:
+                for row in range(self._length):
+                    if self._valid(row):
+                        visible.append(row)
             for k in range(self.field_count()):
                 var a = self.field(k)
                 var b = other.field(k)
-                if a.name() != b.name() or not a.equals(b):
+                if a.name() != b.name() or a.dtype() != b.dtype():
+                    return False
+                if self.null_count() > 0:
+                    a = a.take(visible)
+                    b = b.take(visible)
+                if not a.equals(b):
                     return False
         except:
             return False

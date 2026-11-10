@@ -132,9 +132,6 @@ def test_unique_extended_keys_preserve_complete_payloads_keep_policies_and_boole
                         )
 
 
-# expected-failure: Struct key equality reads hidden fields of null parents,
-# expected-failure: retaining extra equivalent null keys.
-# expected-diagnostic: struct unique must ignore hidden null-parent fields
 def test_struct_unique_null_parents_ignore_every_hidden_field_payload() raises:
     var ignored_parent_failures = 0
     for n in [1, 9, 65]:

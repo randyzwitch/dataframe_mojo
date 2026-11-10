@@ -154,8 +154,6 @@ def test_selectors_expand_names_in_schema_order_and_validate_empty_frames() rais
             _ = zero.select(expression)
 
 
-# expected-failure: An empty selector expansion collapses input height to one.
-# expected-diagnostic: empty selector expansion must preserve input height
 def test_empty_selector_expansion_preserves_input_height() raises:
     var frame = frame_from_model(generated_model(9))
     var mismatches = List[String]()
@@ -176,9 +174,6 @@ def test_empty_selector_expansion_preserves_input_height() raises:
     )
 
 
-# expected-failure: Selecting all columns of a zero-column frame collapses its
-# expected-failure: height to one.
-# expected-diagnostic: all selector must preserve zero-column input height
 def test_all_selector_preserves_zero_column_frame_height() raises:
     var result = DataFrame(List[Series](), height=3).select(all_columns())
     assert_equal(result.width(), 0)

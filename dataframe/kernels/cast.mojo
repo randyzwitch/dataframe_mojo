@@ -2162,10 +2162,10 @@ def cast_series(
     if source.is_categorical() and target.is_categorical():
         if not target.has_dictionary() or source == target:
             return input.copy()
-        # A different dictionary still validates and recodes all source labels.
+        # Recode observed, active rows; unused labels need not be representable.
         # Keep its existing contiguous adapter, without comparing twice.
         var whole = input.rechunk() if input.is_chunked() else input.copy()
-        return recode(whole, target)
+        return recode(whole, target, strict, mask)
     if source == target:
         return input.copy()
     if source == DataType.STRING and target == DataType.BINARY:
@@ -2203,6 +2203,8 @@ def cast_series(
         # decimal q9 (fifteen conditional means of cast columns) 51 ms
         # against 3 for the DOUBLE variant.
         return _decimal_to_float(input)
+    if source.is_binary() or target.is_binary():
+        return _cast_binary(input, source, target, strict, offset, mask)
     if source.is_categorical() or target.is_categorical():
         # Categoricals convert through their values (#106): decode, cast
         # the strings, and encode when the target is categorical.
@@ -2215,10 +2217,8 @@ def cast_series(
             )
         )
         if target.has_dictionary():
-            return recode(strings, target)
+            return recode(strings, target, strict, mask)
         return encode(strings)
-    if source.is_binary() or target.is_binary():
-        return _cast_binary(input, source, target, strict, offset, mask)
     if source.is_temporal() or target.is_temporal():
         var observed = input.copy()
         return cast_temporal(observed, source, target, strict, mask)

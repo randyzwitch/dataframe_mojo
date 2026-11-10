@@ -501,6 +501,8 @@ def _cell_text(series: Series, row: Int, zone: TimeZone) raises -> String:
     if series.is_chunked():
         var part = series._chunk_at(row)
         return _cell_text(part[0], part[1], zone)
+    if series.dtype().is_categorical():
+        return series.get(row).string()
     if series.dtype().is_decimal():
         return format_decimal(series._decimal_raw(row), series.dtype().scale())
     if series.dtype().is_temporal():
@@ -610,6 +612,7 @@ struct _CsvWriter:
                 continue
             var is_string = (
                 column.dtype() == DataType.STRING
+                or column.dtype().is_categorical()
                 or column.dtype() == DataType.BOOL
             )
             line += _render_field(

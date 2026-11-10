@@ -591,6 +591,8 @@ def _fill_array(
         var days = List[UInt8](length=4 * length, fill=0)
         var out = days.unsafe_ptr().unsafe_bitcast[Int32]()
         for i in range(length):
+            if not column._valid(i):
+                continue
             var day = column._get(i)
             if day < Int64(Int32.MIN) or day > Int64(Int32.MAX):
                 raise Error("date outside the Arrow date32 range")
@@ -889,7 +891,11 @@ def _import_dictionary(
                 var code = flat_indices._data[Column[UInt32]]._get(
                     i
                 ) if compatible else codes[i]
-                strings.append(values.get(Int(code)).string())
+                var value = values.get(Int(code))
+                if value.is_null():
+                    strings.append_null()
+                else:
+                    strings.append(value.string())
             else:
                 strings.append_null()
         return encode(Series(name, strings^.finish()))
@@ -939,6 +945,17 @@ def _import_storage(
     var offset = Int(array.offset)
     if length < 0 or offset < 0 or offset > Int.MAX - length - 7:
         raise Error("Arrow array length and offset are invalid")
+
+    var required_buffers = (
+        0 if format
+        == "n" else 1 if format
+        == "+s" else 3 if format
+        in ["u", "U", "z", "Z", "vu", "vz"] else 2
+    )
+    if (required_buffers > 0 and array.buffers == 0) or array.n_buffers < Int64(
+        required_buffers
+    ):
+        raise Error("Arrow array has fewer buffers than required by its format")
 
     if array.dictionary != 0 and schema.dictionary != 0:
         return _import_dictionary(array, schema, name, owner)
@@ -1194,8 +1211,20 @@ def _ticks(
         return _import_fixed[Int64](array, length, offset)
     var values = List[Int64](capacity=length)
     var data = _buffer(array, 1)
+    var validity = _buffer(array, 0)
     for i in range(length):
-        var seconds = _read[Int64](data, offset + i)
+        var row = offset + i
+        if (
+            validity != 0
+            and array.null_count != 0
+            and (
+                _read[UInt8](validity, row // 8) & (UInt8(1) << UInt8(row % 8))
+            )
+            == 0
+        ):
+            values.append(0)
+            continue
+        var seconds = _read[Int64](data, row)
         if seconds > 9223372036854775 or seconds < -9223372036854775:
             raise Error("Arrow seconds value overflows milliseconds")
         values.append(seconds * 1000)
