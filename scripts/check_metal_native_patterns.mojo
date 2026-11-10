@@ -31,6 +31,12 @@ def _probe(
                         left[unsafe_offset=row] if side & 3
                         == 1 else right[unsafe_offset=row]
                     )
+                    if tag == 0:
+                        literal = bitcast[DType.uint64](
+                            Int64(bitcast[DType.int32](UInt32(literal)))
+                        )
+                    elif tag == 2:
+                        literal = UInt64(UInt32(literal))
                     var raw = UInt32(left[unsafe_offset=row])
                     var reused = tag == 2 and side & 3 != 1
                     var result = native_fill_bits(
@@ -119,14 +125,12 @@ def main() raises:
                         var x = left[row]
                         var y = right[row]
                         if tag == 0:
-                            if side & 3 != 1:
-                                x = bitcast[DType.uint64](
-                                    Int64(bitcast[DType.int32](UInt32(x)))
-                                )
-                            if side & 3 != 2:
-                                y = bitcast[DType.uint64](
-                                    Int64(bitcast[DType.int32](UInt32(y)))
-                                )
+                            x = bitcast[DType.uint64](
+                                Int64(bitcast[DType.int32](UInt32(x)))
+                            )
+                            y = bitcast[DType.uint64](
+                                Int64(bitcast[DType.int32](UInt32(y)))
+                            )
                         elif tag == 2:
                             x = UInt64(UInt32(x))
                             y = UInt64(UInt32(y))

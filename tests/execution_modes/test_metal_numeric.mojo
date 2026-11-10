@@ -473,7 +473,9 @@ def test_metal_native_leaf_patterns_keep_types_and_share_float_inputs() raises:
     assert_true(Bool(checked))
     assert_equal(checked.value().fields[0].op, TREE_OP)
     var casted = plan_composition(
-        frame.lazy().select(col("n").fill_null(lit(Int64(7))).sum())
+        frame.lazy().select(
+            col("n").cast(DataType.INT64).fill_null(col("w")).sum()
+        )
     )
     assert_true(Bool(casted))
     assert_equal(casted.value().fields[0].op, TREE_OP)
