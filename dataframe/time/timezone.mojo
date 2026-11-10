@@ -15,7 +15,7 @@ conda package or `TZDIR`. Instants after a file's last transition follow its
 POSIX TZ footer rule, as the RFC requires. Leap-second ("right/") files are
 not supported.
 """
-from dataframe.io.binary_endian import read_scalar
+from dataframe.storage.endian import read_scalar
 from std.sys import Endian
 from std.os import getenv
 
