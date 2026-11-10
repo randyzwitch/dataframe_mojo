@@ -24,12 +24,14 @@ lives outside the repository (benchmarks/suites/datagen.py).
 
 import argparse
 import datetime
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -236,16 +238,115 @@ def tables(suite, variant, scale):
 # --- building and running workers ------------------------------------------
 
 
+BUILD_FLAGS = ("-O3",)
+ENGINE_PATHS = (
+    "dataframe",
+    "dataframe_metal",
+    "dataframe_provider",
+    "providers",
+    "pixi.toml",
+    "pixi.lock",
+)
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _toolchain():
+    compiler = Path(shutil.which("mojo") or "mojo").resolve(strict=True)
+    prefix = Path(os.environ.get("CONDA_PREFIX", compiler.parent.parent))
+    packages = {}
+    for path in sorted((prefix / "conda-meta").glob("*.json")):
+        record = json.loads(path.read_text())
+        if record.get("name") in ("mojo", "max-core"):
+            packages[record["name"]] = {
+                "version": record["version"],
+                "build": record["build"],
+            }
+    return {
+        "compiler": str(compiler),
+        "compiler_sha256": _sha256(compiler),
+        "version": subprocess.check_output(
+            [str(compiler), "--version"], text=True
+        ).strip(),
+        "packages": packages,
+        "environment": {
+            key: os.environ.get(key, "")
+            for key in (
+                "MODULAR_HOME",
+                "MODULAR_MOJO_IMPORT_PATH",
+                "MOJO_IMPORT_PATH",
+            )
+        },
+    }
+
+
+def _runner_inputs(tree, name, toolchain):
+    sources = {}
+    for directory in ENGINE_PATHS[:4]:
+        for source in sorted((tree / directory).rglob("*.mojo")):
+            sources["engine/" + source.relative_to(tree).as_posix()] = _sha256(source)
+    for filename in ENGINE_PATHS[4:]:
+        sources["engine/" + filename] = _sha256(tree / filename)
+    for source in sorted(SUITES_DIR.rglob("*.mojo")):
+        sources["suite/" + source.relative_to(SUITES_DIR).as_posix()] = _sha256(source)
+    sources["build_recipe"] = _sha256(Path(__file__))
+    inputs = {
+        "schema": 1,
+        "runner": name,
+        "sources": sources,
+        "toolchain": toolchain,
+        "flags": list(BUILD_FLAGS),
+        "include_paths": [str(tree.resolve()), str(SUITES_DIR.resolve())],
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(inputs, sort_keys=True).encode()
+    ).hexdigest()
+    return {
+        "fingerprint": fingerprint,
+        "compiler": toolchain["version"],
+        "sdk": toolchain.get("packages", {}).get("max-core"),
+        "flags": list(BUILD_FLAGS),
+    }
+
+
+def _build_info_path(binary):
+    return binary.with_name(binary.name + ".build.json")
+
+
+def _read_build_info(binary):
+    info = json.loads(_build_info_path(binary).read_text())
+    if info["binary_sha256"] != _sha256(binary):
+        raise ValueError(
+            f"Runner binary does not match its build information: {binary}"
+        )
+    return info
+
+
+def _checkout_identity(tree, paths):
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tree, text=True).strip()
+
+    return {
+        "revision": git("rev-parse", "HEAD"),
+        "dirty": bool(git("status", "--porcelain", "--", *paths)),
+    }
+
+
 def _build(tree, name, binary):
-    """Build suite runner `name` against the dataframe package in `tree`,
-    always from this checkout's suite sources."""
+    """Build with the flags and include paths used by the cache key."""
     print(f"building {binary}", file=sys.stderr)
     binary.parent.mkdir(parents=True, exist_ok=True)
     subprocess.check_call(
         [
             "mojo",
             "build",
-            "-O3",
+            *BUILD_FLAGS,
             "-I",
             str(tree),
             "-I",
@@ -258,30 +359,46 @@ def _build(tree, name, binary):
     )
 
 
+def _cached_runner(tree, name, binary, toolchain, force=False):
+    expected = _runner_inputs(tree, name, toolchain)
+    if not force:
+        try:
+            if _read_build_info(binary)["fingerprint"] == expected["fingerprint"]:
+                return binary
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    # Never pair a failed build with old build information. Publish only a
+    # finished executable whose sources still match the pre-build fingerprint.
+    with tempfile.TemporaryDirectory(dir=binary.parent) as folder:
+        staged = Path(folder) / binary.name
+        engine = _checkout_identity(tree, ENGINE_PATHS)
+        _build(tree, name, staged)
+        if _runner_inputs(tree, name, _toolchain()) != expected:
+            raise RuntimeError(
+                "Runner inputs changed during compilation; retry the build"
+            )
+        info = dict(expected, binary_sha256=_sha256(staged), engine=engine)
+        info_file = _build_info_path(staged)
+        info_file.write_text(json.dumps(info, indent=2, sort_keys=True) + "\n")
+        staged.replace(binary)
+        info_file.replace(_build_info_path(binary))
+    return binary
+
+
 def build_runners(names, force=False):
-    """Runners for this checkout, rebuilt when a library or suite source is
-    newer than the binary."""
-    out = ROOT / "build" / "suites"
-    sources = list((ROOT / "dataframe").rglob("*.mojo")) + list(
-        SUITES_DIR.glob("*.mojo")
-    )
-    newest = max(path.stat().st_mtime for path in sources)
-    binaries = {}
-    for name in sorted(set(names)):
-        binary = out / f"suite_{name}"
-        if force or not binary.exists() or binary.stat().st_mtime < newest:
-            _build(ROOT, name, binary)
-        binaries[name] = binary
-    return binaries
+    """Reuse only binaries matching all current inputs and their build information."""
+    toolchain = _toolchain()
+    return {
+        name: _cached_runner(
+            ROOT, name, ROOT / "build/suites" / f"suite_{name}", toolchain, force
+        )
+        for name in sorted(set(names))
+    }
 
 
 def build_baseline(ref, names):
-    """Runners built against the library at `ref`, cached by commit.
-
-    The revision is checked out once as a detached git worktree under
-    build/suites/baseline/<sha>; its binaries are rebuilt only when this
-    checkout's suite sources change. Returns (label, binaries).
-    """
+    """Use baseline engine sources with current suite sources and toolchain."""
     sha = subprocess.check_output(
         ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
         cwd=ROOT,
@@ -292,14 +409,25 @@ def build_baseline(ref, names):
         subprocess.check_call(
             ["git", "worktree", "add", "--detach", str(tree), sha], cwd=ROOT
         )
-    newest = max(path.stat().st_mtime for path in SUITES_DIR.glob("*.mojo"))
-    binaries = {}
-    for name in sorted(set(names)):
-        binary = tree / "build" / "suites" / f"suite_{name}"
-        if not binary.exists() or binary.stat().st_mtime < newest:
-            _build(tree, name, binary)
-        binaries[name] = binary
+    toolchain = _toolchain()
+    binaries = {
+        name: _cached_runner(
+            tree, name, tree / "build/suites" / f"suite_{name}", toolchain
+        )
+        for name in sorted(set(names))
+    }
     return f"base@{sha[:7]}", binaries
+
+
+def runner_provenance(runners):
+    """Build-time identities, checked against the executable bytes being used."""
+    return {
+        engine: {
+            name: dict(_read_build_info(binary), path=str(binary))
+            for name, binary in binaries.items()
+        }
+        for engine, binaries in runners.items()
+    }
 
 
 def command(engine, runners, suite, queries, reps, paths):
@@ -346,17 +474,17 @@ def parse(output, queries, answer_directory=None):
                     Path(answer_directory) / "oracle" if kind
                     == "oracle" else answer_directory
                 )
-                receipt = suite_answers.pin_export(
+                info = suite_answers.pin_export(
                     json.loads(fields[2]), directory, query
                 )
                 answers = entry.setdefault(
                     "oracles" if kind == "oracle" else "answers", []
                 )
                 if any(
-                    a["repetition"] == receipt["repetition"] for a in answers
+                    a["repetition"] == info["repetition"] for a in answers
                 ):
                     raise ValueError("duplicate answer repetition")
-                answers.append(receipt)
+                answers.append(info)
             except (OSError, ValueError, TypeError, KeyError) as error:
                 entry["answer_error"] = str(error)
         elif kind == "oracle_error":
@@ -608,7 +736,7 @@ def provenance(args):
     return {
         "utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "revision": run(["git", "rev-parse", "HEAD"]),
-        "dirty": bool(run(["git", "status", "--porcelain", "dataframe"])),
+        "dirty": bool(run(["git", "status", "--porcelain", "--", *ENGINE_PATHS])),
         "mojo": run(["mojo", "--version"]),
         "polars": polars.__version__,
         "duckdb": duckdb.__version__,
@@ -743,7 +871,7 @@ def measure(args):
     measured = [e for e in engines if e in runners or not args.reuse_references]
     references = [e for e in engines if e not in measured]
     result = {
-        "provenance": provenance(args),
+        "provenance": dict(provenance(args), runner_builds=runner_provenance(runners)),
         "engines": engines,
         "baseline": next((e for e in engines if e.startswith("base@")), None),
         "runs": [],
@@ -904,7 +1032,7 @@ def evaluate(result):
         yield from records
 
     def compare(record, suite, query, oracle_key, check):
-        # The verdict depends only on the Parquet bytes, which the receipt's
+        # The verdict depends only on the Parquet bytes, which the info's
         # hash names once a check confirms it: a reused answer still gets
         # every hash and sidecar check, a new one is loaded (and checked).
         key = (oracle_key, record.get("path_sha256"))
