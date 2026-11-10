@@ -47,7 +47,9 @@ def test_metal_grouped_reduction_schema_and_predicate_programs() raises:
     assert_equal(len(matched.value().selected.program.clauses), 0)
     assert_equal(matched.value().selected.program.truth[0], UInt32(1))
     assert_true(
-        grouped_key(matched.value()).startswith("grouped_reductions:v2:tuple:")
+        grouped_key(matched.value()).startswith(
+            "grouped_reductions:v3:local_updates:"
+        )
     )
     var filtered = (
         frame.lazy()

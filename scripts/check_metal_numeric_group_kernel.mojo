@@ -16,6 +16,7 @@ from dataframe_metal.expression_format import (
     CASE_JUMP,
     VALUE_TYPE_SHIFT,
 )
+from dataframe_metal.accelerator.gpu.group_cached import cached_grouped_partials
 from dataframe_metal.group_layout import GroupLayout
 from dataframe_metal.exact_float import finish_float_bins
 from dataframe_metal.accelerator.gpu.query_scope import Scope
@@ -45,7 +46,7 @@ def node(
     words[at + 3] = literal
 
 
-def run_check(nullable: Bool) raises:
+def run_check[cached: Bool = False](nullable: Bool) raises:
     var rows = 65536
     var blocks = 128
     var layout = GroupLayout(512, 3, blocks, False)
@@ -159,9 +160,10 @@ def run_check(nullable: Bool) raises:
     stage("drain uploads before pipeline creation")
     scope.synchronize()
     stage("compile general before any dispatch")
-    var general = ctx.compile_function[
-        general_grouped_partials[True, False, False, 7]
-    ]()
+    comptime kernel = cached_grouped_partials[
+        True, False, False
+    ] if cached else general_grouped_partials[True, False, False, 7]
+    var general = ctx.compile_function[kernel]()
     stage("compile resolver before any dispatch")
     var resolver = ctx.compile_function[
         resolve_general_int64[True, False, False]
@@ -331,3 +333,5 @@ def run_check(nullable: Bool) raises:
 def main() raises:
     run_check(False)
     run_check(True)
+    run_check[True](False)
+    run_check[True](True)

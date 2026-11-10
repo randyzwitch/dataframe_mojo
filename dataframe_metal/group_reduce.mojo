@@ -3,7 +3,7 @@ from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
 from .composition_plan import needs_general_values
 from .group_partials import GroupedPartials
-from .group_properties import sample_group_tuples
+from .group_properties import sample_group_tuples, sample_group_stride_reuse
 from .group_layout import GROUP_CAPACITY_FAULT, GROUP_CAPACITY_RETRY
 from .group_general_reduce import general_partials
 
@@ -312,7 +312,12 @@ def execute_grouped(
     _ = scope.context()
     timings.context_ns = Int(perf_counter_ns()) - started
     var partials: GroupedPartials
-    if len(plan.keys.names) == 1 and not needs_general_values(
+    var blocks = min(128, max(1, (frame.height() + 255) // 256))
+    if sample_group_stride_reuse(frame, plan.keys.names, blocks * 256):
+        partials = general_partials(
+            plan, frame, scope, zero_copy, timings, cached=True
+        )
+    elif len(plan.keys.names) == 1 and not needs_general_values(
         plan.selected.bundle
     ):
         try:

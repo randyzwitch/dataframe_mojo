@@ -589,10 +589,20 @@ logical span. Shared key/value/predicate mappings reuse their reservation.
 The host merges GPU-discovered partials and orders groups by their first
 qualifying row. Large results use radix ordering and one flat native column
 per output, without per-group column allocations or retained input key
-buffers. Grouped costs use `grouped_reductions:v2:tuple:` identities, including
+buffers. Grouped costs use `grouped_reductions:v3:local_updates:` identities, including
 key types/layouts, programs, output work and bounded cardinality/skew/null
 samples. Sampling describes cost only; GPU hashing computes every group.
 Unmeasured shapes retain CPU placement.
+
+
+Repeated-key grouped scans can combine contributions in a per-thread cache
+before publishing hash/atomic state. A bounded key sample selects this path
+when keys repeat at the GPU grid stride; every actual row still compares its
+complete key tuple before reuse. Changing keys flush the cache. Float32 sums
+retain exact integer bins with a moving three-bin window, and Int32/Int64 sums
+retain the complete signed 96-bit state. Counts, first occurrence, null keys,
+ordered extrema and checked expression faults preserve the existing contract.
+Moment reductions retain their existing scan.
 
 ### Native casts inside aggregate values
 
