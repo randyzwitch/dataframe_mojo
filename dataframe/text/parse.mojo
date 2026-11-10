@@ -14,7 +14,11 @@ def parse_int64(text: StringSlice) raises -> Int64:
     for i in range(start, len(bytes)):
         if bytes[i] < 48 or bytes[i] > 57:
             raise Error("non-decimal integer byte")
-    return Int64(Int(text))
+    try:
+        return Int64(Int(text))
+    except:
+        # Grammar has already been checked; preserve the public range error.
+        raise Error("Int64 overflow")
 
 
 def parse_integer[D: DType](text: StringSlice) raises -> Scalar[D]:
