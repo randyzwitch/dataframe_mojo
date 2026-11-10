@@ -3,8 +3,8 @@
 Each alphabet class may reach at most one consuming instruction from a state.
 SAVE operations become a bit mask; assertions remain conditions on that edge.
 Ambiguity, epsilon cycles and resource limits leave the existing engines in
-charge. The construction follows the one-pass property described by RE2;
-this implementation compiles this engine's code-point alphabet. ASCII uses
+charge. A deterministic edge has at most one consuming instruction for
+each code-point class, allowing captures to be updated without branching. ASCII uses
 dense class tables; Unicode tests the state's disjoint consuming predicates
 without searching the complete alphabet. Assertions see the full input.
 """

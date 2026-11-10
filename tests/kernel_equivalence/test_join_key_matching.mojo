@@ -1,5 +1,4 @@
-"""The join hash table (`JoinHashTable`, DuckDB's RowMatcher over row
-fields) on several keys, against a nested-loop model: probes longer than a
+"""The join hash table on several keys, against a nested-loop model: probes longer than a
 chunk, strings stored as offsets or as Arrow views (inline lengths 0 to 12,
 and long strings that share their first bytes), floats with NaN and signed
 zero, Bool and Int128 keys, and a null in each key; every join type, and

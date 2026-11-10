@@ -116,7 +116,7 @@ def read_parallel(
 ) raises -> DataFrame:
     """Decode disjoint LF-aligned ranges and assemble their owned arrays.
 
-    Like Polars' NDJSON reader, ranges borrow one mapped source and retain
+    Ranges borrow one mapped source and retain
     source order. Reuse CSV's byte-budget sizing and produced-job lifetime
     protocol; the caller keeps the input alive through every worker join.
     """

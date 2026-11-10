@@ -1,6 +1,6 @@
 """The aggregate table's list states against a scalar model of each group:
-implode (DuckDB's list aggregate, a group's rows in input order) and mode
-(DuckDB's mode state, a count per value), through the eager group-by and a
+implode and mode
+, through the eager group-by and a
 pipeline's grouped sink after a filter, on tables that clear (eight
 workers) and on one worker. Expressions the table has no state for (a
 filtered sum, a sorted head) are evaluated over the groups the table

@@ -8,7 +8,7 @@ character, and whether the state matches. States are built only when the
 search first reaches them and their transitions are cached per alphabet
 class, so a search costs one table load per code point once warm.
 
-As in RE2, matches are reported one code point late: a state is "matching"
+Matches are reported one code point late: a state is "matching"
 when a match ended just before the code point that led into it. That
 delay is what lets `$`, `\\b` and friends look at the next code point. A
 final transition on the end-of-text class (or the code point just past the
@@ -22,7 +22,7 @@ instructions kept (longest match) finds where the match starts.
 
 Each worker owns its DFA (the cache is mutable); the program is shared.
 When the cache grows past its budget it is cleared and the search goes on
-from the current state, as RE2 does; if that happens too often, the search
+from the current state; if that happens too often, the search
 gives up and the caller falls back to the Pike VM.
 """
 from std.memory import Pointer, pack_bits
@@ -69,9 +69,9 @@ comptime DEAD: Int32 = -2
 
 comptime GAVE_UP = -2
 
-# Cache budget, in transition table entries (4 MB), and the progress a
-# reset must buy: RE2 gives up when fewer than ten bytes were searched per
-# state built since the last reset.
+# Require enough input progress per cached state to justify another cache
+# reset. If repeated resets consume work without advancing the search, fall
+# back to the NFA simulator.
 comptime _MAX_TRANSITIONS = 1 << 20
 comptime _MIN_BYTES_PER_STATE = 10
 
@@ -166,7 +166,7 @@ struct LazyDFA(Movable):
     ):
         """Add `start_pc` and everything reachable from it without
         consuming input, following assertions that `flag` satisfies
-        (RE2's `AddToQueue`)."""
+       ."""
         self.stack.append(Int32(start_pc))
         while len(self.stack) > 0:
             var pc = Int(self.stack.pop())
@@ -197,7 +197,7 @@ struct LazyDFA(Movable):
     def _cached_state(
         mut self, program: Program, from_q1: Bool, var flag: UInt32
     ) -> Int32:
-        """The state for a work queue (RE2's `WorkqToCachedState`): keep the
+        """The state for a work queue: keep the
         instructions that act on input or assertions, cut everything after
         a match in leftmost-first mode, and look the state up."""
         var mark = len(self.pool)
@@ -284,8 +284,7 @@ struct LazyDFA(Movable):
             self._add_to_queue(program, False, Int(self.pool[i]), flag)
 
     def _run_on_empty(mut self, program: Program, flag: UInt32):
-        """Re-follow q0 with more assertions holding, into q0 (RE2's
-        `RunWorkqOnEmptyString`)."""
+        """Re-follow q0 with more assertions holding, into q0."""
         self.q1.size = 0
         for i in range(self.q0.size):
             self._add_to_queue(program, True, Int(self.q0.dense[i]), flag)
@@ -294,8 +293,7 @@ struct LazyDFA(Movable):
     def _run_on_class(
         mut self, program: Program, cls: Int, after: UInt32
     ) -> Bool:
-        """Step q0 over one code point of class `cls` into q0 (RE2's
-        `RunWorkqOnByte`); returns whether a match instruction was
+        """Step q0 over one code point of class `cls` into q0; returns whether a match instruction was
         reached first."""
         self.q1.size = 0
         var matched = False
@@ -313,8 +311,7 @@ struct LazyDFA(Movable):
         return matched
 
     def _compute(mut self, program: Program, s: Int, cls: Int) -> Int32:
-        """The transition from state `s` on class `cls` (RE2's
-        `RunStateOnByte`)."""
+        """The transition from state `s` on class `cls`."""
         self._state_to_q0(program, s)
         var state_flag = self.flags[s]
         var need = state_flag >> NEED_SHIFT
@@ -1010,7 +1007,7 @@ struct LazyDFA(Movable):
 
 struct Prefilter(Copyable, Movable):
     """Finds where a match can begin, for skipping input while the DFA sits
-    in its start state (RE2's prefix accel, regex-automata's prefilters):
+    in its start state:
     a literal every match starts with, or a sequence of small byte sets
     every match starts with (`(?i)ab` is {A, a} then {B, b}; `(fox|dog)`
     is {f, d}, {o}, {x, g}). Literal alternatives preserve correlations

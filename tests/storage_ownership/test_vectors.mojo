@@ -1,6 +1,6 @@
 """Vectors over at-rest columns: flat windows without copies, dictionary
 slices that merge, constants, sequences, the unified format and chunk
-reuse (DuckDB's vector, data chunk and vector cache semantics)."""
+reuse."""
 # contract-group: storage.vectors
 from std.memory import Pointer
 from std.testing import assert_equal, assert_true, assert_false

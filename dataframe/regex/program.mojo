@@ -1,13 +1,11 @@
-"""Thompson construction: a syntax tree compiled to an NFA program over code
-points, as RE2's `Compiler` and regex-automata's `thompson::Compiler` do
-(they compile to bytes; this program steps one code point at a time, so
-`.` and classes are whole code points and every match starts and ends on a
-character boundary).
+"""Compile a syntax tree into a Thompson NFA over Unicode code points.
+
+Represent branches and repetitions explicitly. Each consuming instruction
+advances one code point, so classes and `.` cannot split a UTF-8 character.
 
 The program also carries the DFA's alphabet: code points partitioned into
-classes that no instruction distinguishes, like RE2's bytemap and
-regex-automata's `ByteClasses`, so a DFA state has one transition per class
-instead of one per code point.
+classes that no instruction distinguishes. A DFA state then needs one
+transition per class instead of one per code point.
 """
 from .charclass import (
     MAX_CODEPOINT,
@@ -51,7 +49,7 @@ comptime OP_LOOK: UInt8 = 7
 comptime OP_NOP: UInt8 = 8
 comptime OP_FAIL: UInt8 = 9
 
-# Programs larger than this are rejected, like Rust's size limit.
+# Reject larger programs to bound compilation memory and automaton size.
 comptime MAX_INSTRUCTIONS = 500_000
 # Special DFA states encode up to three ASCII exclusions in seven-bit lanes.
 comptime SUFFIX_LIMIT = Int(Int32.MIN) + (1 << 23)
@@ -485,8 +483,8 @@ struct _Compiler(Movable):
             return self.quest(self.compile(ast, child), greedy)
         if low == 1 and high == -1:
             return self.plus(ast, child, greedy)
-        # x{n,m}: n copies, then x* or (x(x(x)?)?)? for the optional rest,
-        # nested as RE2 does so failed optional copies stop early.
+        # Nest optional copies so a failed optional repetition can stop
+        # immediately instead of exploring later copies that require it.
         var start = -1
         var holes = List[Int]()
         for _ in range(low):
@@ -521,8 +519,9 @@ struct _Compiler(Movable):
 
 @always_inline
 def _seek_cut(points: List[UInt32], target: UInt32, var lo: Int) -> Int:
-    # Canonical ranges advance monotonically. As in Polars' exponential
-    # search, bracket a nearby key before doing a bounded binary search.
+    # Canonical character ranges advance monotonically. Exponential search
+    # skips large gaps before binary search locates the next overlapping
+    # interval.
     var count = len(points)
     if lo >= count or points[lo] >= target:
         return lo
@@ -579,10 +578,9 @@ def _build_alphabet(mut program: Program):
         ):
             program.boundaries.append(cut)
     var intervals = len(program.boundaries)
-    # Refine interval colors one set at a time, as RE2's ByteMapBuilder
-    # does. Each set's canonical ranges visit disjoint intervals, so a
-    # color is replaced consistently within this batch. Equal colors mean
-    # exactly the same set membership without formatting string keys.
+    # Refine alphabet interval classes one character set at a time. Code
+    # points with the same membership decisions can share one transition
+    # class.
     var colors = List[Int](length=intervals, fill=0)
     var next_color = 1
     var recolor = Dict[Int, Int]()

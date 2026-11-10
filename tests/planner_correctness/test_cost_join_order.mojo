@@ -853,7 +853,7 @@ def test_a_filter_rejecting_nulls_makes_a_left_join_inner() raises:
 def test_an_empty_build_ends_its_stream_with_the_rows_above_it() raises:
     # The products' filter keeps nothing. Planning runs nothing ahead; the
     # stream builds the products, finds them empty, and probes no fact
-    # row (DuckDB's `EmptyResultIfRHSIsEmpty`). A count above the inner
+    # row. A count above the inner
     # join still yields its one row.
     var t = tables()
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")

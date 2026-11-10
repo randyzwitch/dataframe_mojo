@@ -38,7 +38,7 @@ def test_decimal_branch_fill_and_coalesce_resolve_common_type_without_rounding()
             var a = DataType.decimal(7, 2, left_width)
             var b = DataType.decimal(7, 2, right_width)
             # Two widths of one precision: that precision at its width
-            # (DuckDB's common type).
+            #.
             var common = (
                 a.copy() if left_width
                 == right_width else DataType.decimal(7, 2, 32)
@@ -106,7 +106,7 @@ def test_decimal_branch_fill_and_coalesce_resolve_common_type_without_rounding()
                 )
                 assert_equal(grouped.columns(), ["g", "sum"])
                 assert_equal(grouped.height(), 2)
-                # A decimal sum is decimal(38) at its scale (DuckDB).
+                # A decimal sum is decimal(38) at its scale.
                 assert_true(
                     grouped.column("sum").dtype() == DataType.decimal(38, 2)
                 )

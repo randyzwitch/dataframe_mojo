@@ -678,9 +678,9 @@ use narrow bins, with wider retries for extreme Float32 inputs.
 Public results preserve CPU statistical behavior within the floating-point
 tolerance `abs(metal-cpu) <= 1e-10*(1+abs(cpu))`. Int64 values first round to
 Float64; Int32 and Float32 values convert exactly. Sensitive centering at
-large offsets uses explicit CPU adjudication, preserving the behavior shared
-with DuckDB and Polars rather than returning a materially different exact
-answer. The internal mathematical finisher remains independently tested.
+large offsets uses explicit CPU adjudication. This keeps the same query's
+statistical result within the shared tolerance when switching between CPU
+and Metal, even when finite-precision accumulation differs from exact arithmetic. The internal mathematical finisher remains independently tested.
 Large populations whose square sums exceed the Float64 exact-accumulation
 span also use CPU adjudication, including some full-precision Float32 data
 with zero mean. Quantized values can retain direct GPU completion.

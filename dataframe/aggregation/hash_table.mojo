@@ -42,8 +42,7 @@ The algorithm has two phases:
    row is read once. A run containing one worker's rows from a table that
    never cleared its entries has each group only once, so its rows can be
    copied directly. Without maintain_order, groups come out in whatever
-   order they merge, as DuckDB's GROUP BY and Polars' group_by give no
-   order. With it, groups are emitted by partition at the greatest bit
+   order they merge; no output order is promised. With it, groups are emitted by partition at the greatest bit
    depth the workers could reach, then by first row, which the caller
    merges into first-occurrence order.
 
@@ -146,15 +145,13 @@ from dataframe.vector.types import (
     zero_selection,
 )
 
-# A worker's table when more than two work: DuckDB's 32K-entry sink table,
+# With more than two workers, keep each local table at 32K entries,
 # cleared at two-thirds full rather than grown.
 comptime _SINK_CAPACITY = 1 << 15
-# Workers up to which tables grow instead (DuckDB's
-# GROW_STRATEGY_THREAD_THRESHOLD).
+# With at most this many workers, grow local tables instead of flushing.
 comptime _GROW_WORKERS = 2
-# Rows a worker sinks before it may stop probing, and between retries
-# (DuckDB's LOOKUP_SAMPLE_SIZE); the share of a cycle's rows a table must
-# remove to keep probing (MINIMUM_SMALL_TABLE_REDUCTION).
+# Rows sunk before checking whether probing still reduces output, and between
+# retries. Keep probing only when at least this share of rows is eliminated.
 comptime _LOOKUP_SAMPLE = 1 << 20
 comptime _MIN_REDUCTION = 0.05
 # A table grows when the bytes of the duplicate group rows it made exceed
@@ -163,9 +160,9 @@ comptime _GROWTH_DUPLICATE_BYTES = 4.0
 # HyperLogLog registers.
 comptime _HLL_BITS = 10
 # Bytes of groups a finish partition holds at most: half of a 256 KiB
-# block, where DuckDB adds partition bits.
+# block; exceeding this budget increases the partition count.
 comptime _PARTITION_BYTES = 128 * 1024
-# DuckDB's partition bits (`RadixHTConfig`): log2 of the workers to start,
+# Initial partition bits: log2 of the workers to start,
 # at most 4 (MAXIMUM_INITIAL_SINK_RADIX_BITS); more once a worker's rows per
 # partition pass half a 256 KiB block (BLOCK_FILL_FACTOR), up to 8.
 comptime _MAX_INITIAL_BITS = 4
@@ -582,7 +579,7 @@ struct AggregateLayout(Copyable, Movable):
     var state_words: Int
     var radix: ArcPointer[_SinkBits]
     var key_templates: List[Series]
-    # The distinct counts (DuckDB's `DistinctAggregateCollectionInfo`):
+    # The distinct counts:
     # each one's reduction, its distinct table's key columns (the keys,
     # then the counted input) and that table's partition bits, shared by
     # every worker's distinct table.
@@ -596,8 +593,8 @@ struct AggregateLayout(Copyable, Movable):
     var perfect: PerfectHash
 
     def use_perfect_hash(mut self, keys: List[Series]) raises:
-        """Make this a perfect hash table when DuckDB's planner would
-        (`CanUsePerfectHashAggregate`) for the grouping keys `keys`, the
+        """Use direct-address slots when the bounded domains are small enough
+        for the grouping keys `keys`, the
         layout's own key columns carrying their statistics: never with a
         distinct count, which perfect hash aggregates do not take."""
         if len(self.distinct) > 0 or len(keys) != len(self.key_templates):
@@ -727,9 +724,7 @@ def aggregate_layout(
 @fieldwise_init
 struct KeyVector(Copyable, ImplicitlyCopyable, Movable):
     """A group key column of a data chunk as the table reads it: its
-    `UnifiedVectorFormat` (DuckDB's group chunk vectors, which
-    `GroupedAggregateHashTable::AddChunk` reads through their unified
-    format), and how its values become key words.
+    `UnifiedVectorFormat`, and how its values become key words.
 
     - `codes`: the address of one dictionary code a row, for a string key
       whose source stored it dictionary-encoded (the format then gives
@@ -1160,7 +1155,7 @@ struct _DictionaryKeys(Movable):
     ):
         """The sole key's hashes and words for `count` dictionary entries
         (`entries`, one index a group; the dictionary's size is the null
-        key): DuckDB hashing the sliced dictionary's unique values."""
+        key), hashing each used dictionary value only once."""
         var first = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=first_word
         )
@@ -1198,7 +1193,7 @@ struct _DictionaryKeys(Movable):
 @always_inline
 def _perfect_bound(slot: UInt64, total: UInt64) raises:
     """A perfect hash table's slot within its `total` groups, or the error
-    DuckDB raises when the key statistics do not hold for the data."""
+    raised when a key is outside the range promised by its statistics."""
     if slot >= total:
         raise Error(
             "Perfect hash aggregate: aggregate group "
@@ -1210,14 +1205,12 @@ def _perfect_bound(slot: UInt64, total: UInt64) raises:
 
 
 struct _DictionaryGroups(Movable):
-    """DuckDB's `AggregateDictionaryState`: for the dictionary whose
-    entries a sole coded key's codes index (`identity`, its address, as
-    DuckDB's dictionary id), each entry's group row once it has been
+    """Cached group rows for the dictionary whose
+    entries a sole coded key's codes index, each entry's group row once it has been
     looked up (one past the entries is the null key), and how many are.
     Rows whose entries were looked up before take their group from here
     and are neither hashed nor probed. Reset when the table's entries are
-    cleared or its rows move (DuckDB resets the id in `ClearPointerTable`'s
-    callers)."""
+    cleared or its rows move."""
 
     var identity: Int
     var found: List[Bool]
@@ -1318,7 +1311,7 @@ struct AggregateSink(Movable):
     var capacity: Int
     var entries: List[UInt64]
     # Groups in the table this cycle, and every group row this worker
-    # made (DuckDB's materialized count).
+    # made.
     var live: Int
     var made: Int
     # Rows sunk; rows probed and skipped since the table was last
@@ -1341,9 +1334,8 @@ struct AggregateSink(Movable):
     var dictionaries: List[_DictionaryKeys]
     var dictionary_groups: _DictionaryGroups
     # Every morsel's string key columns, held until the finish: a group's
-    # long string key is the address of its bytes there, as DuckDB's rows
-    # point into their collection's heap (a morsel's column holds its
-    # buffers by reference, so nothing is copied). The finished key
+    # long string key points into those retained buffers, so hashing and
+    # grouping do not copy the string payload. The finished key
     # columns are views into the same buffers (`_HeldBuffers`).
     var held: List[Series]
     # A group row's worth of words the state updates may write for rows
@@ -1355,8 +1347,8 @@ struct AggregateSink(Movable):
     # value words into.
     var scratch: List[UInt64]
     # Per distinct count (`AggregateLayout.distinct`), this worker's table
-    # of its (keys, value) groups, which every morsel also sinks into
-    # (DuckDB's `SinkDistinct`); and, in a table the distinct groups are
+    # of its (keys, value) groups, which every morsel also sinks into;
+    # and, in a table the distinct groups are
     # sunk into at the finish, the one reduction rows count into.
     var distinct: _DistinctSinks
     var distinct_slots: List[Int]
@@ -1375,16 +1367,16 @@ struct AggregateSink(Movable):
     var owned: List[Reducer]
     var buffered: List[_OrderedBuffer]
     # A perfect hash table (`AggregateLayout.perfect`): its shape, and a
-    # row of `parts.stride` words for every group slot (DuckDB's `data`),
+    # row of `parts.stride` words for every group slot,
     # all empty until a row finds it; word 1 of a slot's row is then its
     # `group_is_set` flag and word 2 its first row. None for a hashed
     # table.
     var perfect: PerfectHash
     var perfect_rows: List[UInt64]
-    # DuckDB's `ClusteredAggrState`, made only when more than one reduction
+    # Shared run-clustering scratch, made only when more than one reduction
     # has a cluster update (`n_clustered > 1`); per reduction whether
     # `update_clustered` folds its runs; whether every reduction's does
-    # (DuckDB's `all_clustered`: the rows' addresses are then not needed);
+    # (row addresses can be skipped when every reduction uses run updates);
     # and the probe's entry offset of each row (`ht_offsets`), the hashed
     # table's group ids.
     var clustered: ClusteredAggrState
@@ -1413,8 +1405,7 @@ struct AggregateSink(Movable):
         # share among them.
         self.memory = _worker_memory(workers) // max(1, shares)
         self.capacity = _SINK_CAPACITY
-        # Made at the first probe, as DuckDB makes a local table at its
-        # first `Sink` (`if (!lstate.ht)`): a worker that sinks nothing
+        # Allocate entries at the first probe: a worker that sinks nothing
         # here (every reduction a distinct count) never clears one.
         self.entries = List[UInt64]()
         self.live = 0
@@ -1548,9 +1539,8 @@ struct AggregateSink(Movable):
         self.cycle = 0
         # With its entries gone, the rows may move (`MaybeRepartition`):
         # the most bits for every sink once this one's rows fill half a
-        # block per partition. DuckDB adds two bits at a time; each step
-        # copies every row made so far, which cost a fifth of a 100K-group
-        # aggregation here, so one step copies them once.
+        # block per partition. Jump directly to the maximum depth so rows
+        # move once rather than being recopied at every intermediate depth.
         var bits = self.parts.bits
         if 8 * self.made * self.parts.stride > (_BLOCK_BYTES // 2) << bits:
             bits = self.radix[].raise_to(self.max_bits)
@@ -1590,11 +1580,8 @@ struct AggregateSink(Movable):
         strings index a stored dictionary finds a group once per entry
         (`TryAddDictionaryGroups`); otherwise every row is hashed and
         probed (`FindOrCreateGroups`). The reductions whose states the rows
-        hold by address read their input as `columns` (by input, the
-        chunk's rows as a column; DuckDB's states that own memory update
-        through the same addresses). DuckDB's dictionary path also takes
-        a dictionary without an id when it has fewer than half the chunk's
-        rows; here every dictionary-coded key comes from a stored
+        hold by address read their input as `columns`. Every dictionary-coded
+        key here comes from a stored
         dictionary (an id), so that case does not arise.
 
         When every reduction is a distinct count, only the distinct tables
@@ -1622,8 +1609,7 @@ struct AggregateSink(Movable):
         for c in range(len(keys)):
             constant = constant and keys[c].format.sel.data == zero
         # The rows' group ids for the clustered update: the probe's entry
-        # offsets, or (for the compressed paths, as DuckDB's
-        # `UpdateAggregatesClustered` with `ht_offsets_valid` false) the
+        # offsets, or, for compressed paths, the
         # group rows' addresses, when their high bits are uniform.
         var gids = Int(self.groups.unsafe_ptr())
         if constant:
@@ -1786,9 +1772,9 @@ struct AggregateSink(Movable):
         """`PerfectAggregateHashTable::AddChunk`'s group ids: each row's
         slot from its keys' bits (`ComputeGroupLocation`) into `groups`.
         Each path checks them against the table's size (statistics that do
-        not hold for the data raise, as DuckDB's do)."""
+        not hold for the data raise)."""
         # The locations are computed into the address vector itself, each
-        # then replaced by its row's address (DuckDB's `addresses`).
+        # then replaced by its row's address.
         var groups = self.groups.unsafe_ptr()
         var slots = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=Int(groups)
@@ -1845,7 +1831,7 @@ struct AggregateSink(Movable):
         mut self, columns: List[Series], first: Int, count: Int
     ) raises:
         """The batch's states held by address: a group row's state with no
-        owner yet is made (DuckDB's `initialize` of a new group's state),
+        owner yet is made,
         its owner's address and its ordinal there written into the row;
         then each owner takes the batch's rows by their states' ordinals,
         a `Reducer` updating them and a buffer keeping the rows with their
@@ -1972,7 +1958,7 @@ struct AggregateSink(Movable):
     def _constant_groups(
         mut self, keys: List[KeyVector], first: Int, count: Int
     ) raises:
-        """DuckDB's `TryAddConstantGroups`: every key is constant, so the
+        """Every key is constant, so the
         chunk's first row finds the one group and every row takes it."""
         self._find_or_create(keys, first, 1)
         var group_at = self.groups.unsafe_ptr()
@@ -1985,7 +1971,7 @@ struct AggregateSink(Movable):
     def _dictionary_groups(
         mut self, key: KeyVector, first: Int, count: Int
     ) raises:
-        """DuckDB's `TryAddDictionaryGroups`: the sole key's rows are
+        """Reuse dictionary-entry group lookups: the sole key's rows are
         codes into a stored dictionary. The entries the chunk uses that no
         row looked up before (none once every entry has been) are hashed
         and probed once each, in first-row order, and their groups kept by
@@ -2070,7 +2056,7 @@ struct AggregateSink(Movable):
         """A batch's `count` rows (source rows from `row`, or with `listed`
         each one's at `rows`) into the table: each row's group address
         into `groups` and, when `offsets` is not 0, the entry it probed to
-        there (DuckDB's `ht_offsets`) while lookups are not skipped."""
+        there while lookups are not skipped."""
         var hash_ptr = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes)
         var offset_at = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=offsets
@@ -2096,7 +2082,7 @@ struct AggregateSink(Movable):
                 )
             if not self.grow:
                 # While lookups are skipped every row is a group, and the
-                # sketch sees them all (DuckDB's `ObserveHashes`).
+                # sketch sees them all.
                 for k in range(count):
                     self.hll.add(hash_ptr[unsafe_offset=k])
             self.made += count
@@ -2149,8 +2135,7 @@ struct AggregateSink(Movable):
         source's `columns` (in this order; none for a constant key of one
         zero word), into this table with their states merged rather than
         rebuilt from values: a coarser grouping from a finer one's groups
-        (DuckDB merges grouped states the same way across threads, and
-        `combine` is the finish's merge of the workers'). `widths` is each
+       . `widths` is each
         source key column's word count. Both tables hold the same reductions,
         all of which `reaggregable`. Rows are read where they are; the
         source's key buffers are kept for the long strings they point at.
@@ -2254,8 +2239,8 @@ struct AggregateSink(Movable):
         `nulls_count`, so a group of only nulls counts 0 even when the
         workers sank no rows into the main table (`CanSkipRegularSink`);
         each group's first row is its pair's, so the earliest pair's row is
-        the group's. DuckDB scans the distinct table a vector at a time and
-        sinks it into the main table (`HashAggregateDistinctFinalizeTask`).
+        the group's. Scan distinct pairs in chunks and sink them into the
+        main table, counting each unique pair once.
         """
         self.in_order = False
         var keys = len(widths) - 1
@@ -2561,8 +2546,7 @@ struct _FinishJob(Job):
     var rows_only: Bool
     var rows: List[_Groups]
     # Whether the groups come out in the output order (by partition, then
-    # by first row); otherwise in whatever order they merge, as DuckDB's
-    # GROUP BY and Polars' group_by without maintain_order give them.
+    # by first row); otherwise in whatever order partial states merge.
     var ordered: Bool
 
     def __init__(
@@ -2628,8 +2612,7 @@ struct _FinishJob(Job):
         var sinks = len(jobs)
         # One worker's rows alone, from a table that never abandoned its
         # entries, are its groups already, each once and in first-row order
-        # within a partition: copied as they are, with no table (DuckDB's
-        # `single_ht`, per run of partitions rather than per query).
+        # within a partition: copy them directly without rehashing into a table.
         var only = -1
         for j in range(sinks):
             for p in range(self.lo, self.hi):
@@ -2666,8 +2649,8 @@ struct _FinishJob(Job):
                     )
                     final.n += sizes[k]
         else:
-            # Each run's table at DuckDB's finalize capacity (its rows at a
-            # 1.5 load factor), in one buffer sized for the largest run.
+            # Reserve 1.5 entries per input row in one buffer sized for the
+            # largest run, leaving space to keep linear probes short.
             var largest = 0
             for r in range(len(self.run_rows)):
                 largest = max(largest, self.run_rows[r])
@@ -2678,7 +2661,7 @@ struct _FinishJob(Job):
             # Rows merged in first-row order only where that order comes
             # out: not for groups in no order (`ordered` false), nor when
             # some sink's rows are out of it, whose groups are sorted below.
-            # Those merge sink by sink, as DuckDB's finalize does.
+            # Merge those sink by sink to retain their required output order.
             var sequential = not self.ordered
             for j in range(sinks):
                 sequential = sequential or not jobs[j].in_order
@@ -2864,9 +2847,8 @@ def _scan_groups(
                 _ = into.copy_row(final.at(g))
             swap(final, into)
             _ = into^
-    # The groups are scanned out a vector of rows at a time (DuckDB's
-    # `Scan`: each chunk of rows gathered into every output column, its
-    # states finalized), so each group's row is read from memory once,
+    # Scan groups a vector at a time, gathering output columns and
+    # finalizing states together, so each group row is read once,
     # not once per reduction and key.
     var count = final.count()
     var outputs = List[_Finalizer](capacity=len(templates))
@@ -2929,8 +2911,7 @@ struct _CombineJob(Job):
 struct _DistinctJob(Job):
     """Finish runs' merged (keys, value) groups of a distinct table sunk
     into one new sink of the main table, each adding one to its group's
-    distinct count (DuckDB's `HashAggregateDistinctFinalizeTask`, whose
-    local sink takes every partition the task scans)."""
+    distinct count."""
 
     var groups: List[Int]
     var widths: List[Int]
@@ -2972,7 +2953,7 @@ struct _DistinctJob(Job):
 def _finalize_distinct(
     mut sinks: List[AggregateSink], layout: AggregateLayout
 ) raises:
-    """DuckDB's `FinalizeDistinct`: each distinct count's tables (one per
+    """Finalize distinct counts: each reduction's tables (one per
     worker) merged into their (keys, value) groups, whose rows are sunk
     into new sinks of the main table, on their own threads: as many as
     there are runs, at most one per worker (`CreateGlobalSources` and
@@ -3234,7 +3215,7 @@ def aggregate_finish(
     for j in range(len(sinks)):
         sinks[j].prepare_ordered()
     # Every sink's rows at the shared bits first, each on its own thread
-    # (DuckDB's `Combine`, which repartitions to the global bits).
+    # Repartition to the shared radix depth before merging.
     var bits = Int(layout.radix[].bits.load())
     var combines = List[_CombineJob]()
     for j in range(len(sinks)):
@@ -3251,7 +3232,7 @@ def aggregate_finish(
     # Runs: consecutive partitions holding about half a 256 KiB block of
     # rows, each merged in its own cache-sized table. Jobs: consecutive
     # runs holding about an equal share of the rows per worker, and at
-    # least a run's, each one chunk of the result, as Polars finishes a partition per thread (a
+    # least a run's, each one chunk of the result, so each thread can finish a separate partition (a
     # chunk per run made later steps pay their per-chunk cost hundreds of
     # times).
     var per_run = max(1, _PARTITION_BYTES // (8 * stride))

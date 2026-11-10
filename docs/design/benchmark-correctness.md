@@ -119,7 +119,7 @@ The smoke inputs exposed empty/all-null aggregate outputs that the legacy
 zero-valued summaries accepted. The native H2O sums, PDS-H q17 and TPC-DS
 q13/q32/q92 now request `sum(min_count=1)` to preserve SQL nulls. H2O q9
 returns null with no non-null pairs, while retaining NaN for singleton pairs
-and zero variance, as DuckDB does.
+and zero variance, where Pearson correlation has a zero denominator.
 
 TPC-DS q99 now projects and sorts the original call-center name; lowercasing
 it preserved string byte lengths and hid the previous answer discrepancy.

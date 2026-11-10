@@ -1,4 +1,4 @@
-"""Normalized sort keys for every column type (DuckDB 2.0's create_sort_key).
+"""Normalized sort keys for every column type.
 
 A row's key is one byte string whose unsigned byte order is the row order:
 for each key column a byte saying null or valid (1 and 2, swapped for
@@ -22,12 +22,12 @@ TupleDataLayout::Initialize(orders) decides: with the 8-byte payload, at
 most 16, 24 or 32 bytes take `PAYLOAD_FIXED_16/24/32`, anything wider or of
 unknown length `PAYLOAD_VARIABLE_32` (8 inlined bytes, the size, and the
 key's bytes elsewhere). A string column's widest form is 1 + its longest
-value + 1 bytes, the bound DuckDB reads from the column's statistics; here
+value + 1 bytes;
 the column is in memory and measured. The payload is the row's index into
 the sorted input.
 
 `maintain_order` appends the row index as a last key: equal keys then
-keep input order. Otherwise their order is unspecified, as Polars leaves
+keep input order. Otherwise their order is unspecified, including
 it.
 """
 from std.bit import byte_swap
@@ -1056,8 +1056,7 @@ def _string_prefixes(
     limits: Pointer[Int, MutAnyOrigin],
 ):
     """String rows encoded as `_encode_strings` does, from each value's
-    length and first four bytes alone (an Arrow view holds them inline, as
-    DuckDB's string_t its prefix): a longer value's remaining bytes are
+    length and first four bytes alone: a longer value's remaining bytes are
     left zero, a lower bound, and its row stops there."""
     var rows = _Bytes(column)
     var nulls = c.nulls and column.null_count() > 0

@@ -1,6 +1,6 @@
 """A pipeline skips the vectors of its source that each join build's key
 range or IN list rules out by their statistics, before any step runs
-(DuckDB's join filter pushdown into the scan's table filters). Joins against a
+. Joins against a
 scalar model: sorted keys (morsels wholly outside, wholly inside, or
 straddling the range) and scattered ones, nullable probe keys, a build
 with no rows, a build whose keys are all null, Int64, Int32 and Date

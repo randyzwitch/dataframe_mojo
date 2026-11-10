@@ -1,22 +1,15 @@
-"""DuckDB's perfect hash aggregate (`PhysicalPerfectHashAggregate` over a
-`PerfectAggregateHashTable`, execution/perfect_aggregate_hashtable.cpp),
-on the aggregate table's group rows and states (`hash_table.mojo`).
+"""Direct-address aggregation for small, bounded integer key domains.
 
-When every grouping key is an integer whose statistics bound it to a small
-range, a row's group is its position in a table holding every combination
-of key values: each key contributes `value - min + 1` (0 for a null)
-shifted into its own bits (`ComputeGroupLocation`), so no key is hashed or
-compared and no group is numbered. Each worker holds the whole table, every
-group's row allocated and empty up front; the workers' tables are combined
-slot by slot (`Combine`), and the occupied slots are scanned out in slot
-order, each key rebuilt from its bits (`Scan`, `ReconstructGroupVector`).
+Each key contributes `value - min + 1` to a packed slot index, with zero
+reserved for null. When the combined domains fit in at most 12 bits, a
+worker can allocate every possible slot up front and update states without
+hashing or comparing keys. Workers merge matching slots, and output keys
+are reconstructed from the slot bits.
 
-`perfect_hash` is the planner's rule (`CanUsePerfectHashAggregate`,
-physical_plan/plan_aggregate.cpp): integer keys only (a categorical's codes
-count as UINT32, bounded by its dictionary), each key's minimum and maximum
-from its column statistics (`segment_statistics.mojo`; an 8- or 16-bit key
-with none takes its type's bounds), a range below 2^31, and the keys'
-bits together at most DuckDB's `perfect_ht_threshold`.
+Eligibility requires integer keys, known bounds and a range below 2**31
+per key. Categorical codes use their dictionary bounds; 8- and 16-bit
+integers without statistics can use the physical type's limits. The slot
+limit bounds memory even when many possible key combinations never occur.
 """
 from std.memory import Pointer, bitcast
 from std.sys import size_of
@@ -31,8 +24,7 @@ from dataframe.storage.column import Column
 from dataframe.storage.statistics import NUMERIC_STATS
 from dataframe.vector.types import UnifiedVectorFormat, physical_of
 
-# DuckDB's `perfect_ht_threshold` default (settings.hpp): at most 2^12
-# group slots.
+# Cap direct-address storage at 2^12 slots, including unused combinations.
 comptime PERFECT_HT_THRESHOLD = 12
 
 
@@ -104,7 +96,7 @@ def perfect_hash(keys: List[Series]) raises -> PerfectHash:
         if dtype.is_nested():
             return PerfectHash.none()
         if dtype.is_categorical():
-            # The codes of a categorical (DuckDB's ENUM, a UINT32 inside)
+            # Categorical codes use UInt32 storage
             # lie in its dictionary.
             if not dtype.has_dictionary():
                 return PerfectHash.none()

@@ -1,14 +1,6 @@
-"""A bounded backtracker for capture groups, as RE2's `BitState` and
-regex-automata's `BoundedBacktracker`.
-
-It explores the NFA depth first in priority order, so the first match it
-reaches is the leftmost-first one, and it never visits the same
-(instruction, position) pair twice: a bitset of `len(program)` x
-(positions + 1) bits keeps the work linear in the span searched. For the
-short spans a dataframe cell holds this is much cheaper than the Pike VM,
-which copies every thread's slots at every step; `Matcher` uses it when the
-bitset stays within `MAX_VISITED_BITS` and the Pike VM otherwise.
-"""
+"""Capture-group search with a bounded visited-state bitmap. Visit each
+instruction/input-position pair at most once. Use this route only when the
+bitmap fits its memory budget; otherwise retain the NFA simulator."""
 from .pikevm import decode, look_holds
 from .program import (
     OP_FAIL,

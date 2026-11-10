@@ -3,8 +3,7 @@
 
 A pipeline is a source, a list of row-local steps, and a sink. Each worker
 thread takes morsels (ranges of the source) from the shared cursor, cuts
-each into data chunks of STANDARD_VECTOR_SIZE rows (DuckDB's DataChunk,
-`dataframe/vector`), runs the chunks through the steps, and updates its
+each into data chunks of STANDARD_VECTOR_SIZE rows, runs the chunks through the steps, and updates its
 own sink state. Sink states are combined once the source is exhausted;
 the main thread does no per-morsel work.
 
@@ -205,7 +204,7 @@ comptime STEP_JOIN = 4
 # within the morsel's output), so ties come out as a stable sort of the
 # whole input would place them, whichever worker held them.
 comptime _ORDER_COLUMN = "__pipeline_order"
-# A late-materialized top-N scan's row id column (DuckDB's `rowid`).
+# A late-materialized top-N scan's row id column.
 comptime ROW_ID_COLUMN = "__dataframe_row_id"
 # The constant key a grouping sets' grand total groups by; dropped from
 # that set's result.
@@ -244,9 +243,7 @@ def _key_statistics(
     frame: DataFrame, steps: List[Step], keys: List[String]
 ) -> List[Series]:
     """The source column whose statistics hold for each grouping key after
-    the steps (a key that is a source column, carried unchanged through
-    filters, joins and bare column projections, as DuckDB's statistics
-    propagate through them); empty when some key has none (a computed key,
+    the steps; empty when some key has none (a computed key,
     or one a right or full join coalesces with its build side's)."""
     var names = frame.columns()
     var sources = frame.columns()
@@ -315,14 +312,10 @@ def _extract_aggregate_inputs(
     keys: List[String],
     schema: DataFrame,
 ) raises -> Tuple[List[Step], List[Expr]]:
-    """DuckDB's ExtractAggregateExpressions (physical_plan/plan_aggregate.cpp):
-    every aggregate's computed input becomes a column of a projection
-    below the aggregate, and the aggregate reads that column. The
-    projection runs on the chunks the steps before it make, through their
-    selections, so a filter's kept rows reach the sink as the computed
-    values only, never as every input column gathered first. `schema` is
-    the steps' output; the steps are returned unchanged when no input is
-    computed (a projection of column references only moves no data)."""
+    """Project computed aggregate inputs into columns below the aggregate.
+    Evaluate the projection over preceding pipeline chunks, then let each
+    reduction read its input column. This shares expression evaluation and
+    avoids materializing the entire intermediate frame."""
     var projected = List[Expr]()
     var rewritten = List[Expr](capacity=len(expressions))
     for e in expressions:
@@ -331,10 +324,10 @@ def _extract_aggregate_inputs(
         for i in range(len(nodes)):
             if not is_reduction(nodes[i].op):
                 continue
-            # An input `when(c).then(x)` with no otherwise is DuckDB's
-            # aggregate FILTER (WHERE c) over x: its condition and its
-            # value are projected each on its own, as the aggregate's
-            # filter and child are (`bound_aggr.GetFilter()`).
+            # A conditional aggregate input with no otherwise can project its
+            # condition and value separately. Update the reduction only for
+            # rows where the condition is true, preserving which values and
+            # errors are observed.
             var targets = List[Int]()
             for child in node_children(nodes[i]):
                 if nodes[child].op == WHEN and nodes[child].extra < 0:
@@ -406,12 +399,10 @@ def _row_counted(
     expressions: List[Expr],
     null_free: List[Bool],
 ) raises -> Tuple[List[Expr], List[String], List[String]]:
-    """`expressions` with each count of a column that holds no null
-    (`null_free`, per column of `schema`) turned into a row count, the
-    columns they still read values of, and the columns read only by row
-    counts. DuckDB's rule (its count statistics callback): a count of a
-    column without nulls is count(*), so it is the kept-row count, and the
-    column is never gathered through its rows."""
+    """Identify columns read for values versus validity or row counts. COUNT
+    over a proven non-null column is the retained-row count, so it need not
+    gather that column through a row selection. Keep validity reads for
+    nullable columns."""
     var rewritten = List[Expr](capacity=len(expressions))
     var valued = List[String]()
     var counted = List[String]()
@@ -555,13 +546,10 @@ def _join_filters(
     pushed: List[PushedJoinFilter],
     mut scan: TableFilterSet,
 ) raises -> List[JoinFilter]:
-    """DuckDB's join filter pushdown into the source: for each inner, semi
-    or right join among `steps` whose probe key is a source column no
-    earlier step replaces (every build is finished before the first
-    morsel), and for each key `pushed` from a join above the aggregate
-    these steps feed whose column of the steps' output is such a source
-    column, its statistics filters go into `scan` and its row filters
-    come back (`join_filter.finalize_filters`)."""
+    """Derive source filters from finished builds of inner, semi and right
+    joins. Only push a probe key still referring to an unchanged source
+    column. Rejecting a source row must preserve the join's treatment of
+    unmatched probe rows and all preceding expression observations."""
     var filters = List[JoinFilter]()
     # Names the steps so far show for untouched source columns.
     var source = Dict[String, String]()
@@ -637,13 +625,10 @@ def _join_filters(
 
 
 struct _Columns(Copyable, Movable):
-    """A morsel's columns between the steps that read vectors and the
-    operators that do not yet (a join's probe, a sink): column c is the
-    rows from `starts[c]` of arena column `handles[c]`, or, when
-    `lists[c] >= 0`, the rows `row_lists[lists[c]]` of it, a dictionary
-    vector over the column (of any length) as DuckDB's join emits its
-    build side. Every column has `height` rows. Chunks of
-    STANDARD_VECTOR_SIZE rows are cut from it without a copy."""
+    """A source frame plus optional per-column row lists. A selected column is
+    a dictionary view over its original values, and every visible column has
+    height rows. Cut STANDARD_VECTOR_SIZE chunks without copying payload
+    buffers."""
 
     var handles: List[Int]
     var starts: List[Int]
@@ -1019,8 +1004,9 @@ struct _Collector(Movable):
                 result.starts.append(0)
                 var listed = List[UInt32]()
                 swap(listed, self.rows[c])
-                # Columns a filter sliced alike share one row list (one
-                # selection vector for the chunk, as DuckDB's slice).
+                # Columns sliced by the same filter share one row list and
+                # selection vector rather than allocating duplicate index
+                # arrays.
                 var shared = -1
                 for l in range(len(result.row_lists)):
                     if len(result.row_lists[l]) == len(listed) and (
@@ -1047,13 +1033,13 @@ struct _Collector(Movable):
 
 struct _VectorStep(Copyable, Movable):
     """One row-local step compiled for its input columns, with its output
-    chunk (DuckDB's operator state and output DataChunk), reused for
+    chunk, reused for
     every chunk a worker runs through it."""
 
     var kind: Int
-    # FILTER: the predicate (ExpressionExecutor::Select; its AND / OR
-    # nodes order their children with DuckDB's AdaptiveFilter); none for
-    # a literal true. SELECT / WITH_COLUMNS: the computed columns.
+    # FILTER holds the compiled predicate; AND/OR children can adapt order
+    # when errors permit. Literal true needs no evaluator. SELECT/WITH_COLUMNS
+    # hold their computed expressions.
     var expressions: List[VectorExpression]
     # SELECT / WITH_COLUMNS / DROP: per output column, the input column it
     # reads (>= 0) or the expression computing it (-1 - expression).
@@ -1197,15 +1183,14 @@ struct _ChunkRunner(Movable):
     cut chunks from. `counts` receives the rows fed, each step's input
     and output rows, and each step's busy nanoseconds."""
 
-    # Immutable and shared by every worker, as DuckDB's physical operators
-    # are; what a worker owns is made on its own thread (`begin_morsel`,
-    # `_compiled`, `begin_sink`) and freed there (`release_local`).
+    # Share immutable step descriptions. Construct each worker's mutable
+    # compiled expressions and sink state on its own thread, and release them
+    # there at the end of its run.
     var steps: ArcPointer[List[Step]]
     var schemas: ArcPointer[List[DataFrame]]
     var compiled: List[Optional[_VectorStep]]
-    # The steps compiled once for every worker (bound, constants
-    # evaluated); each worker copies its own (DuckDB's operator state is
-    # per thread, its expressions bound once).
+    # Bind expressions and evaluate constants once as shared templates. Each
+    # worker copies its own mutable evaluation state before processing chunks.
     var templates: ArcPointer[List[Optional[_VectorStep]]]
     var joins: ArcPointer[List[DataFrame]]
     var indexes: ArcPointer[List[Optional[JoinHashTable]]]
@@ -1215,11 +1200,9 @@ struct _ChunkRunner(Movable):
     var held: Int
     # Per join step, the arena handles of its build's columns.
     var builds: List[List[Int]]
-    # Per join step, the arena handles of the build frame's columns (a
-    # string or nested output column is a dictionary over them, read by
-    # row number: DuckDB's gather copies a string_t, no string bytes,
-    # and a row's string columns cannot be read into a column here without
-    # copying its bytes).
+    # Retain source build frames for String and nested output columns. Their
+    # dictionary views read payloads by row number without copying variable-
+    # size bytes into the join rows.
     var frame_builds: List[List[Int]]
     # Whether this worker's arena holds the builds' columns yet.
     var bound: Bool
@@ -1251,10 +1234,9 @@ struct _ChunkRunner(Movable):
     # its result.
     var materialize: List[MaterializeSink]
     var materializes: Bool
-    # The source's table filters, and the source row of the morsel's first
-    # row while the morsel's own rows run (-1 otherwise): a chunk whose
-    # vector the filters' statistics rule out is not read (DuckDB's
-    # `RowGroup::CheckZonemapSegments`).
+    # Retain scan-filter state and its source offset while the morsel runs.
+    # Statistics can skip a vector before any values are read; -1 denotes no
+    # source offset.
     var scan: Optional[ArcPointer[ScanFilterInfo]]
     var scan_offset: Int
 
@@ -1394,10 +1376,9 @@ struct _ChunkRunner(Movable):
             self.materialize[0].release()
 
     def release_local(mut self):
-        """Free what only this worker's run used, on its own thread, as a
-        DuckDB thread's pipeline executor dies with its task: else the
-        caller frees every worker's compiled steps in turn after the
-        round."""
+        """Release worker-local compiled steps on the worker that used them.
+        This distributes cleanup instead of serially freeing every worker's
+        state on the caller after each round."""
         self.compiled = List[Optional[_VectorStep]]()
         self.arena = ColumnArena()
         self.source = DataChunk()
@@ -1433,7 +1414,7 @@ struct _ChunkRunner(Movable):
         columns that segment reads and the step it starts at (the step
         count when the last step is a join). The segment then runs one
         chunk at a time through `chunk`, so a sink takes each chunk as it
-        is made (DuckDB's PipelineExecutor pushing a chunk to the sink)."""
+        is made."""
         var n = len(self.steps[])
         var last = n
         while last > first and self.steps[][last - 1].kind != STEP_JOIN:
@@ -1597,8 +1578,7 @@ struct _ChunkRunner(Movable):
     def _join(mut self, columns: _Columns, s: Int) raises -> _Columns:
         """A join step over a morsel's collected columns: it probes the
         step's table (`ScanStructure`) with the key columns only and keeps
-        the probe side a dictionary over where it is (the probe slices its
-        chunk, DuckDB's ScanStructure). An inner join leaves the build
+        the probe side a dictionary over where it is. An inner join leaves the build
         side a dictionary over the build's columns (`EmitDictVectors`); a
         left, full or right join gathers it (`GatherRHS`), and flags the
         build rows it matched for `begin_round`, as a right-semi or
@@ -1761,13 +1741,13 @@ def _build_series(
 def _sink_chunk[
     S: Sink
 ](mut sink: S, mut chunk: DataChunk, mut arena: ColumnArena) raises:
-    """One chunk into a worker's local sink state (DuckDB's `Sink`)."""
+    """One chunk into a worker's local sink state."""
     sink.sink(chunk, arena)
 
 
 def _combined[S: Sink](var locals: List[S]) raises -> List[S]:
     """Every worker's local sink state combined into the global state
-    (DuckDB's `Combine`), in worker order."""
+   , in worker order."""
     var combined = List[S]()
     while len(locals) > 0:
         locals.pop(0).combine(combined)
@@ -1947,8 +1927,8 @@ struct _PipelineJob(Job):
     var top_maintain_order: Bool
     var topn: List[TopNSink]
     var boundary: TopNBoundary
-    # The scan's dynamic filter on the first sort column (DuckDB's TopN
-    # filter pushdown), when that column is the source's own.
+    # Dynamic scan filter from the top-N boundary on the leading sort key,
+    # when that key is an unchanged source column.
     var top_filter: _TopScanFilter
     # Rows fed, then each step's input and output rows, for the report.
     var counts: List[Int]
@@ -2176,12 +2156,9 @@ struct _PipelineJob(Job):
         offset: Int,
         first_step: Int,
     ) raises:
-        """A morsel into the top-N one chunk at a time, as DuckDB's
-        PhysicalTopN sinks each chunk the scan makes, from step
-        `first_step` on. Before each vector is read, the scan checks the
-        dynamic filter again (the OptionalFilter on the TopN's boundary in
-        CheckZonemap), so a boundary the chunks before tightened skips the
-        vectors it rules out."""
+        """Feed a morsel into the top-N sink one chunk at a time from
+        first_step. Recheck the dynamic boundary before reading each vector:
+        earlier chunks may have tightened it enough to skip later vectors."""
         var ran = self.runner.run_to_last(source^, first_step)
         var columns = ran[0].copy()
         var first = ran[1]
@@ -2266,8 +2243,7 @@ struct _PipelineJob(Job):
 
     def _unmatched(self, chunk: Int, length: Int) raises -> DataFrame:
         """The build rows of the hash table's row chunk `chunk` the join
-        emits after the probe (DuckDB's ScanFullOuter, which reads the
-        rows' found flags, one chunk a task), as the step's output: a
+        emits after the probe, as the step's output: a
         right-semi or right-anti join's build columns, or an outer join's
         with the probe columns null, coalesced keys taken from the rows."""
         ref step = self.steps[][self.unmatched_step]
@@ -2373,12 +2349,11 @@ def _top_scan_filter(
     scan_key: Bool,
     maintain_order: Bool,
 ) raises -> _TopScanFilter:
-    """The dynamic filter for a TopN whose first sort column is read from
-    the source unchanged (`scan_key`): `c < boundary` ascending and
-    `c > boundary` descending, `<=` / `>=` with later keys to settle ties.
-    DuckDB ORs `IS NULL` for nulls first; a statistics check cannot keep
-    a vector's nulls apart, so a nulls-first key pushes nothing. Columns
-    whose order is not their storage's (categoricals) push nothing."""
+    """Derive a scan bound from the leading top-N key: strict inequality for
+    one key, or inclusive inequality when later keys must settle ties. Do
+    not push nulls-first keys because statistics cannot retain null rows
+    separately from rejected values. Categorical storage codes also cannot
+    supply label-order bounds."""
     var none = _TopScanFilter(None, None, 0, False, False)
     if top <= 0 or not scan_key or len(names) == 0 or not nulls_last[0]:
         return none^
@@ -2531,7 +2506,7 @@ def _merged_mask(
 
 def _morsel_ranges(frame: DataFrame, workers: Int) -> List[Int]:
     """(offset, length) pairs covering the frame, each aligned chunk of its
-    columns cut in pieces of `morsel_size` (Polars' in-memory source)."""
+    columns cut in pieces of `morsel_size`."""
     var ends = List[Int]()
     if can_filter_aligned_chunks(frame._columns):
         ends = frame._columns[0]._chunked.value()[].ends.copy()
@@ -2662,11 +2637,9 @@ def finish_pipeline(
 
 
 struct _FinishStepsJob(Job):
-    """One part of the aggregate table finished, then run through the
-    row-local steps above the aggregate on the worker that finished it,
-    as DuckDB runs a filter over an aggregate in the pipeline whose source
-    is the aggregate table's scan: the groups it drops are never
-    assembled into the whole result, nor filtered again over it."""
+    """Run row-local steps above an aggregate on the worker finishing its
+    groups. Apply filters before assembling the complete output, so rejected
+    groups are neither materialized nor scanned again."""
 
     var state: _StreamReduction
     var steps: List[Step]
@@ -2960,17 +2933,11 @@ struct PipelineRun(Movable):
         run_jobs(self.jobs)
 
     def begin_round(mut self) raises -> Bool:
-        """The workers set to the next round of the rows no probe matched,
-        for the next right or full join step, as morsels of that step's
-        output (the probe columns null) through the steps after it into
-        the workers' sinks: Polars' `emit_unmatched_build` and the outer
-        scan of DuckDB's `PhysicalHashJoin::GetData`, which hands each
-        thread its share of the table's rows; a finish-group pipeline of
-        the probe's when scheduled. Every worker flagged the rows its own
-        morsels matched; each now takes chunks of the table's rows, finds
-        those no worker flagged and makes their output rows
-        (`_PipelineJob._unmatched`). The last round also finishes the
-        workers' sinks. False when no round is left."""
+        """After probing, partition the build table's rows among workers and
+        emit the required matched/unmatched rows. Fill absent probe columns
+        with nulls and run the same downstream steps and sinks as ordinary
+        join output. Scheduling places this scan after probe completion so
+        match flags are final."""
         self.end_round()
         while self.next_round < len(self.outer_steps):
             var j = self.outer_steps[self.next_round]
@@ -3114,9 +3081,9 @@ def begin_pipeline(
                 table_inputs(empty, empty_keys, expressions),
                 table_specs(reduction),
             )
-            # Keys whose source statistics bound them to a few values: a
-            # perfect hash aggregate (DuckDB's planner, from the group
-            # statistics the propagator carries to the aggregate).
+            # Bounded source key statistics can select direct-address
+            # aggregation. Use those bounds only when every grouping key has a
+            # compatible estimate.
             var stats = _key_statistics(frame, steps, keys)
             if len(stats) == len(keys):
                 made.use_perfect_hash(stats)
@@ -3127,9 +3094,9 @@ def begin_pipeline(
     elif len(keys) > 0 and len(expressions) > 0:
         trace_path("pipeline.group_collect")
     var shared = ArcPointer(frame.copy())
-    # A top-N's row groups in their statistics order (RowGroupReorderer):
-    # workers take them in turn, one row group each, as DuckDB's
-    # NextParallelScan hands out the reorderer's next row group.
+    # Visit top-N row groups in statistics order, assigning one group at a
+    # time to each available worker so later groups can use a tighter
+    # boundary.
     var ranges = ArcPointer(
         top_ranges.value().copy() if top_ranges else _morsel_ranges(
             frame, workers
@@ -3272,7 +3239,7 @@ def begin_pipeline(
             )
         )
     # An ungrouped reduce sink: each worker's states updated from the
-    # last step's chunks (DuckDB's `PhysicalUngroupedAggregate`).
+    # last step's chunks.
     var ungrouped = List[ArcPointer[UngroupedLayout]]()
     if len(keys) == 0 and len(expressions) > 0 and top <= 0:
         var made = ungrouped_layout(schemas[][len(steps)], expressions)
@@ -3519,10 +3486,9 @@ def _finish_pipeline(
                 finish_counts,
             )
         else:
-            # A first step filtering on the reductions' outputs alone runs
-            # in the finish, before the groups are read out (DuckDB runs
-            # it on each chunk the aggregate's scan yields); the rest run
-            # on each part of the groups that remain.
+            # Run an initial filter on reduction outputs during aggregate
+            # finalization, before rejected groups enter output columns. Apply
+            # remaining row steps only to surviving groups.
             var having = _having(template[0], finish_steps[0], keys, batch_size)
             var rest = finish_steps.copy()
             var filter = Optional[GroupFilter]()

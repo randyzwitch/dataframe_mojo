@@ -20,8 +20,9 @@ def test_metal_moments_cpu_compatibility_adjudicates_sensitive_centering() raise
         float32_square_words,
     )
 
-    # Exact population variance of [2**60, 2**60+256] is 16384, while
-    # Mojo CPU, DuckDB and Polars return 32768. Preserve CPU completion.
+    # The CPU recurrence returns 32768 here. Public Metal completion must
+    # preserve the same query result within tolerance; this fixture
+    # distinguishes public device consistency from the exact-moment primitive.
     with assert_raises(contains="variance centering needs CPU adjudication"):
         require_cpu_moment_compatibility(
             List[Int128]([Int128(256), Int128(1) << 29]), 2, 0, 0, 16384
@@ -46,9 +47,9 @@ def test_metal_moments_cpu_compatibility_adjudicates_sensitive_centering() raise
         -149,
         bitcast[DType.float64](UInt64(725) << 52),
     )
-    # A zero mean does not prevent running-M2 accumulation drift. This
-    # alternating Float32 case differs by 6.1e-10 at 100M rows in the native
-    # CPU recurrence and DuckDB, exceeding our public comparison tolerance.
+    # At this population size, rounded CPU accumulation differs from exact
+    # square summation by more than the public device-comparison tolerance.
+    # Public completion therefore requires CPU adjudication.
     var words = float32_square_words(UInt32(0x3F9E0651))
     var parts = List[UInt32]([words[1], words[2], words[3]])
     var squares = List[Int128](length=18, fill=0)
@@ -1668,9 +1669,10 @@ def test_metal_moments_public_cancellation_subnormals_and_wide_retry() raises:
             )
             var expected = DataFrame(columns^)
             if family == 0:
-                # Preserve the statistical behavior users obtain from CPU,
-                # DuckDB and Polars, rather than returning an exact answer
-                # that materially differs from the library's CPU result.
+                # Public completion must keep CPU/Metal statistical results
+                # within the shared tolerance. Verify the observable result
+                # and adjudication rather than accepting a different exact-
+                # moment answer.
                 with assert_raises(
                     contains="variance centering needs CPU adjudication"
                 ):

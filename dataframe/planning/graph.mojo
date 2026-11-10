@@ -369,8 +369,11 @@ def plan_parents(self: QueryContext) -> List[Int]:
 
 
 def plan_columns_of(self: QueryContext, index: Int) raises -> List[String]:
-    """Node `index`'s output names, derived from its inputs' names where
-    that needs no types (`plan_names_of`), else from its schema."""
+    """Derive output column names from input names without executing rows or
+    constructing full typed schemas. Handle scans, projections, aggregates,
+    drops and equi-join naming. Return None when names require dtype-
+    dependent selectors, runtime decisions or collision checks, so the
+    caller can derive the full schema."""
     var names = plan_names_of(self, index)
     if names:
         return names.take()
@@ -380,17 +383,11 @@ def plan_columns_of(self: QueryContext, index: Int) raises -> List[String]:
 def plan_names_of(
     self: QueryContext, index: Int
 ) raises -> Optional[List[String]]:
-    """Node `index`'s output names from its inputs' names, as Polars'
-    IR and DuckDB's logical operators derive a node's output from its
-    children's without running anything: a scan's table or projection,
-    the row steps that keep their input's columns, a projection's or
-    aggregation's output names, a drop, and an equi-join's two sides
-    (`_join_schema`'s naming). Planner passes ask a node's names far
-    more often than its types, and deriving the whole schema on no rows
-    built every column of every node below it (TPC-DS q4: 5 ms of
-    planning a run). None where the names depend on types (a selector)
-    or on what running the node decides (other kinds, a name collision);
-    the caller then derives the schema."""
+    """Derive output column names from input names without executing rows or
+    constructing full typed schemas. Handle scans, projections, aggregates,
+    drops and equi-join naming. Return None when names require dtype-
+    dependent selectors, runtime decisions or collision checks, so the
+    caller can derive the full schema."""
     # A remembered schema is read in place, not copied out first.
     if self._schema_memo:
         ref memo = self._schema_memo.value()[]
@@ -552,9 +549,9 @@ def plan_projection_visits(self: QueryContext) -> Tuple[List[Int], List[Int]]:
     for c in classes:
         hits[c] = hits.get(c, 0) + 1
     var parents = plan_parents(self)
-    # The topmost repeated nodes: more copies than the node above
-    # them, and under no other such node (Polars caches the topmost
-    # and leaves the subplan below it whole).
+    # Cache only topmost repeated nodes: caching a parent already prevents
+    # recomputing its descendants, so nested caches would retain redundant
+    # results.
     var under = List[Bool](length=count, fill=False)
     var first = Dict[Int, Int]()
     var members = List[Int](length=count, fill=0)
@@ -643,11 +640,10 @@ def _frame_scan_slots(self: QueryContext) -> List[Bool]:
 
 
 def plan_merge_inputs(mut self: QueryContext, other: QueryContext) -> List[Int]:
-    """Append `other`'s inputs to this plan's for a plan joining both,
-    and return each of its slots' new number. A frame this plan already
-    scans keeps its one slot, as Polars' arena holds one scan of a
-    frame both sides read: a CTE read twice is then one table, not one
-    copy per reader for every pass to tell apart again."""
+    """Import source frame slots into this plan and return their remapped
+    indices. Reuse an existing slot for a frame already scanned, so repeated
+    readers share source identity instead of creating duplicate table
+    entries."""
     var mine = _frame_scan_slots(self)
     var theirs = _frame_scan_slots(other)
     # The frame-only slots by shape (height and width), as
@@ -903,7 +899,7 @@ def plan_order_free_above(
     """Whether the plan above `top` gives the same result whatever
     order `top`'s rows arrive in: row-local steps up to an aggregation
     that reads no row position, or up to a join. A join promises no row
-    order (as DuckDB's and Polars' joins by default), so neither the
+    order, so neither the
     order of its inputs nor its own output's order can show; `top` made
     by a join through row-local steps is free for the same reason.
     `through_joins` is kept for callers and no longer changes the
@@ -981,8 +977,8 @@ def plan_estimated_rows(self: QueryContext, index: Int) raises -> Int:
     var sample = self._frames[source.source_slot()].select(names)
     if height > runs * run:
         sample = self._frames[source.source_slot()]._sampled(names, runs, run)
-    # Only the matches are counted: the predicate's mask, as DuckDB
-    # counts a selection vector, with no filtered frame built.
+    # Count true predicate bits directly; a selectivity estimate needs the
+    # selected row count, not a materialized filtered frame.
     var kept = true_count(sample._selection(node.exprs[0], 8192))
     if height <= runs * run:
         return kept
@@ -1006,10 +1002,10 @@ struct GraphJoin(Copyable, Movable):
 
 
 def plan_graph_join(node: PlanNode) -> Bool:
-    """Whether join `node` is an operator of a join graph: an inner join
-    with coalesced keys, or a semi, anti or left join on equal keys (a
-    left join's coalesced), as DuckDB's join order reorders
-    (`JoinIsReorderable`)."""
+    """Whether an equi-join can participate in cost ordering: an inner join
+    with coalesced equal keys, or a semi, anti or left join with equal keys
+    and the required coalescing. Preserve joins whose output naming or key
+    semantics cannot be reconstructed safely."""
     if node.kind != JOIN:
         return False
     if _chain_member(node):
@@ -1040,7 +1036,7 @@ def plan_graph_input(self: QueryContext, parent: Int, child: Int) -> Bool:
     """Whether node `child`, an input of `parent`, belongs to `parent`'s
     join graph: anything under a graph step but the right input of a
     semi, anti or left join, which is a relation of its own whose graph
-    is ordered apart (DuckDB's child optimizer for that side)."""
+    is ordered apart."""
     if not plan_graph_step(self, parent):
         return False
     ref node = self._nodes[parent]
@@ -1099,11 +1095,9 @@ def plan_collect_graph(
 def plan_spine_source(
     self: QueryContext, index: Int, name: String
 ) raises -> Optional[Tuple[Int, String]]:
-    """The table slot and column that column `name` of node `index` reads,
-    along the steps `plan_spine_frame` follows and through renames: a
-    projection naming a plain column reference reads its source column,
-    as DuckDB binds a projected column to its child's. None for a
-    computed column or no table under it."""
+    """Trace a projected plain column reference to its source table column.
+    Return None for computed columns or when no source table can be
+    identified; statistics must describe the value actually read."""
     var column = name
     var cursor = index
     while cursor >= 0:
@@ -1185,11 +1179,10 @@ def _holds_window(exprs: List[Expr]) -> Bool:
 
 
 def plan_ends_in_aggregate(self: QueryContext, index: Int) -> Bool:
-    """DuckDB's `CTEInlining::EndsInAggregateOrDistinct`: an aggregate,
-    distinct or window down a chain of single-input steps. A union counts
-    when all its inputs do: DuckDB keeps a written union of aggregates
-    materialized as a CTE, reaching the end of `TryInlining` without
-    inlining it, and we have no CTE node to tell it from a repeated one."""
+    """Whether a chain of single-input steps ends in aggregate, distinct or
+    window work. A union qualifies when every input does. Such subplans can
+    be retained once for repeated readers rather than recomputing their
+    blocking work."""
     ref node = self._nodes[index]
     if (
         node.kind == AGG
@@ -1211,7 +1204,7 @@ def plan_ends_in_aggregate(self: QueryContext, index: Int) -> Bool:
 
 
 def plan_base_tables(self: QueryContext, index: Int) -> Int:
-    """The scans under `index` (DuckDB's `CountBaseTableReferences`)."""
+    """The scans under `index`."""
     ref node = self._nodes[index]
     if node.left < 0:
         return 1
@@ -1222,11 +1215,10 @@ def plan_base_tables(self: QueryContext, index: Int) -> Int:
 
 
 def plan_materialized(self: QueryContext, index: Int, refs: Int) -> Bool:
-    """Whether DuckDB 2.0's `CTEInlining::TryInlining` keeps a CTE with the
-    subtree at `index` as its definition and `refs` references
-    materialized by its query shape alone: one ending in an aggregate,
-    distinct or window, or one over more than two tables that more than
-    ten table reads would repeat if inlined."""
+    """Whether repeated use makes a subtree worth materializing based on plan
+    shape: a terminal aggregate, distinct or window, or more than two base
+    tables with over ten table reads if each reference recomputed the
+    subtree."""
     if plan_ends_in_aggregate(self, index):
         return True
     var tables = plan_base_tables(self, index)
@@ -1243,8 +1235,9 @@ def plan_class_refs(classes: List[Int], covered: List[Bool], index: Int) -> Int:
 
 
 def plan_filtered_scan(self: QueryContext, index: Int) -> Bool:
-    """Whether node `index` is one table under row-local filters and
-    projections only: what DuckDB's scan holds as one operator."""
+    """Whether this subtree is one table under row-local filters and
+    projections only. These steps can run in the scan and do not justify a
+    separate retained intermediate result."""
     var cursor = index
     while cursor >= 0:
         ref node = self._nodes[cursor]
@@ -1409,8 +1402,7 @@ def plan_subplan(self: QueryContext, root: Int) -> QueryContext:
     """The plan rooted at `root` on its own: its nodes copied children
     first and renumbered, with only the inputs they scan, as a whole
     copy is left by `_reorder` and `_compact_scan_slots`, without
-    copying the rest of the plan first (Polars hands a cached subplan
-    its own root in the shared arena)."""
+    copying the rest of the plan first."""
     var order = plan_topological(self, root)
     var position = List[Int](length=len(self._nodes), fill=-1)
     for k in range(len(order)):

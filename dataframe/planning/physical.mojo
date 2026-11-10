@@ -101,9 +101,8 @@ def plan_joins_below(self: QueryContext, index: Int) -> Bool:
     return False
 
 
-# DuckDB 2.0's BuildProbeSideOptimizer (build_probe_side_optimizer.hpp):
-# a build side whose other side is a join costs 15% more when it is no
-# join itself, since the join's rows are already in flight.
+# Penalize building a standalone relation against an already-streaming join by
+# 15% to account for the opportunity to keep those join rows in flight.
 comptime _PREFER_RIGHT_DEEP_PENALTY = 0.15
 # JoinFilterBuildSideHeuristics (build_probe_side_optimizer.cpp): a
 # build side that filters earns its runtime filter's bonus only against
@@ -120,7 +119,7 @@ def plan_side_estimate(
 ) raises -> Int:
     """Rows node `index` yields, estimated from statistics before it runs,
     as the build side optimizer reads a child's estimated cardinality
-    (`plan_cardinality`, DuckDB's `RelationStatisticsHelper`), with
+   , with
     nothing sampled or run. -1 when an input has no estimate."""
     return plan_cardinality(self, stats, index)
 
@@ -297,8 +296,7 @@ def _flip_left_join(
 ) raises -> Bool:
     """Flip the left join at `at` into a right join (`FlipChildren` with
     `InverseJoinType`): its right input probes and its left builds, the
-    build rows no probe row matched coming out last (`_emit_unmatched`,
-    DuckDB's right-outer scan), under a selection that restores the
+    build rows no probe row matched coming out last, under a selection that restores the
     join's columns: the left's, then the right's other than its keys.
     False, with nothing changed, when the sides share a column name, a
     key repeats, or the key types differ or need the general join
@@ -351,10 +349,9 @@ def _flip_left_join(
 def _flip_semi_join(
     mut plan: QueryContext, at: Int, batch_size: Int
 ) raises -> Bool:
-    """Flip the semi or anti join at `at` into DuckDB's RIGHT_SEMI or
-    RIGHT_ANTI (`InverseJoinType`): its right input probes, its left
-    builds and is the output. False, with nothing changed, when the key
-    types differ or are nested: such a join has no shared hash table."""
+    """Flip a semi/anti join so its left input builds and its right probes. The
+    build-side scan emits matched/unmatched left rows respectively. Decline
+    differing or nested key types that cannot share this hash table."""
     var node = plan._nodes[at].copy()
     var left = plan._execute(node.left, True, False, batch_size)
     var right = plan._execute(node.right, True, False, batch_size)
@@ -378,15 +375,11 @@ def _flip_semi_join(
 def plan_build_probe_sides(
     self: QueryContext, top: Int, batch_size: Int
 ) raises -> Optional[QueryContext]:
-    """Choose the build side of every join the stream below `top` runs,
-    before anything runs or is scheduled: DuckDB 2.0's
-    `BuildProbeSideOptimizer` on the joins' estimated inputs
-    (`_builds_on_left`). A join that should build on its left is
-    flipped: an inner join probes its right input against its left, a
-    left join becomes a right join, and a semi or anti join DuckDB's
-    RIGHT_SEMI or RIGHT_ANTI (`_flip_semi_join`). A copy of the plan with
-    the flips made, or None when every join keeps its sides. A flipped join
-    is decided (`sides_fixed`), so the stream the copy starts keeps it."""
+    """Choose build sides from estimated input cardinalities before scheduling.
+    Flip inner joins to probe the chosen build, exchange left/right outer
+    kinds, and use build-side semi/anti kinds as needed. Mark each choice
+    fixed so later cardinality observations cannot repeatedly reverse it.
+    Return None when all joins keep their sides."""
     var spine = List[Int]()
     var cursor = top
     while cursor >= 0:
@@ -427,8 +420,7 @@ def plan_build_probe_sides(
 def plan_order_joins(
     mut self: QueryContext, streaming: Bool, batch_size: Int
 ) raises:
-    """Order each join graph by estimated cost (`plan_cost_order_joins`,
-    DuckDB 2.0's `JoinOrderOptimizer`), from statistics alone: nothing
+    """Order each join graph by estimated cost, from statistics alone: nothing
     runs while planning. Run when the plan executes, not in `explain`.
     Projection pushdown runs again afterwards, as each reordered graph
     ends with one selection of its original output."""
@@ -442,25 +434,11 @@ def plan_order_joins(
 def plan_cost_order_joins(
     mut self: QueryContext, root: Int, streaming: Bool, batch_size: Int
 ) raises -> Bool:
-    """Order each join graph of two or more relations by estimated cost
-    (`join_order.mojo`): inner joins flattened across nested inputs into
-    relations and key pairs, each relation's rows estimated after its
-    own filters from statistics (`plan_cardinality`), and the cheapest
-    tree built. A semi, anti or left join is an
-    operator of the graph whose right input is one relation, as in
-    DuckDB 2.0 (`JoinOrderOperator`): its conflict rules say where it
-    may go, so a semi join can run before inner joins its keys do not
-    read, and it keeps its sides. A filter reading a left join's right
-    columns stays above that join (`PinFilterAfterLeftJoin`). Choose each hash-build side
-    using rows times columns, with a lone relation costing 15% more
-    when the other
-    side is a join). Filters between joins follow the lowest join
-    holding their columns; a selection restores the graph's output,
-    a key a join dropped read from the key it matched.
-
-    Only where nothing above reads the rows' order
-    (`_order_free_above`) and every column name is unique across the
-    relations but a key pair of one name, so no join renames one. True when a graph changed."""
+    """Order a join graph subject to semantic conflict rules. Semi joins may
+    move before inner joins whose keys they do not read. Predicates on an
+    outer join's nullable side stay above it unless proven safe. Rebuild the
+    graph with projected names preserved and choose hash-build sides after
+    choosing join order."""
     var parents = plan_live_parents(self, root)
     var changed = False
     var count = len(self._nodes)
@@ -492,10 +470,9 @@ def plan_cost_order_joins(
                 hidden[g.right_from] = True
             elif how == JOIN_LEFT:
                 nullable[g.right_from] = True
-        # Which relation holds each column. A name several relations share
-        # is one column only as inner join key pairs of that name joining
-        # them all (coalesced into one, as DuckDB's bindings equate them);
-        # `twins` holds its other relations, checked below.
+        # A repeated output name identifies one provider only when inner-join
+        # key pairs coalesce all contributing columns. Record the other
+        # relations in twins for validation.
         var provider = Dict[String, Int]()
         var twins = Dict[String, List[Int]]()
         var columns = List[List[String]]()
@@ -642,14 +619,9 @@ def plan_cost_order_joins(
         if not known:
             continue
         var output = plan_columns_of(self, top)
-        # Each relation's statistics (`RelationStatisticsHelper`), with
-        # nothing run: its estimated rows after its own filters, and the
-        # distinct counts of the columns the graph compares. A semi or
-        # anti join's right relation is in no estimate. A left join's
-        # right relation of no estimate is left out of the estimates
-        # (`uncounted`): the join keeps every left row. Any other
-        # relation without one leaves the graph as written, as DuckDB
-        # reorders only a graph whose relations all have statistics.
+        # An uncounted preserved side does not reduce left-join cardinality.
+        # For other missing relation estimates, retain the written graph:
+        # choosing an order without comparable costs would be arbitrary.
         var stats = PlanStatistics()
         var rows = List[Float64](capacity=n)
         var domains = List[Float64](capacity=n)
@@ -682,9 +654,8 @@ def plan_cost_order_joins(
         ):
             changed = True
             continue
-        # Filters comparing a column of one relation with a column of
-        # another: edges of DuckDB's graph (`CreateHyperGraphEdges`),
-        # which the estimate counts as join conditions.
+        # Cross-relation comparisons become graph edges and contribute join
+        # conditions to the cardinality estimate.
         var compares = List[FilterEdge]()
         for f in filters:
             for part in conjuncts(self._nodes[f].exprs[0]):
@@ -843,9 +814,8 @@ def plan_cost_order_joins(
                 right_keys=right_keys,
                 suffix="_right",
             )
-            # Its sides are the tree's (`plan_tree_swaps`) until the build
-            # side optimizer decides them at stream start, as DuckDB runs
-            # `BuildProbeSideOptimizer` after the join order.
+            # Keep the tree's chosen sides until the build-side pass runs at
+            # stream start, after join-order selection.
             added.append(join^)
             var current = _place_graph_filters(
                 self,
@@ -944,13 +914,10 @@ def plan_tree_swaps(
     edges: List[JoinEdge],
     ops: List[JoinOperator],
 ) raises -> List[Bool]:
-    """For each entry of `tree` that joins two others, whether its left
-    child builds rather than its right. DuckDB's build side: the side of
-    fewer rows times columns builds, a lone relation 15% dearer against
-    a join, and a lone relation joined on one key whose values are a
-    progression costs nothing, since it builds no hash table (the other
-    side looks its rows up by position, `join.progression`). A semi,
-    anti or left join keeps its sides: its right input builds."""
+    """For each binary join tree entry, choose the build side using estimated
+    rows times row width. Penalize a standalone input against an already-
+    streaming join by 15%. A single-key integer progression needs no hash
+    table and therefore has a lower build cost."""
     var n = len(relations)
     var entries = len(tree.mask)
     var swaps = List[Bool](length=entries, fill=False)
@@ -1013,13 +980,10 @@ def plan_empty_graph(
     estimates: List[Int],
     batch_size: Int,
 ) raises -> Bool:
-    """Replace the graph at `top` by its empty result when one of the
-    relations `counted` (run, so their counts are exact) has no rows and
-    every output row needs one of its rows: any relation but the right
-    input of an anti or left join (`nullable`, or `hidden` and so never
-    run). DuckDB's `EmptyResultPullup`: an inner or semi join with an
-    empty input is empty, and so are an anti or left join with an empty
-    left. Nothing else of the graph then runs. True when replaced."""
+    """Replace a join graph with an empty result when its semantics prove no
+    output is possible. An inner/semi join with either input empty is empty;
+    a left/anti join is empty only when its left input is empty. Preserve
+    schema and skip unnecessary graph execution."""
     for r in counted:
         if hidden[r] or nullable[r] or estimates[r] != 0:
             continue

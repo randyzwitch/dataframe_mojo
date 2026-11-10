@@ -1,15 +1,9 @@
-"""DuckDB 2.0's tuple data states (common/types/row/tuple_data_states.hpp):
-the unified formats of the vectors being appended, and the row and heap
-pointers of the rows being written or read.
+"""Track vector formats and row/heap pointers during append and scan.
 
-DuckDB's `TupleDataVectorFormat` holds its children's formats in a vector
-of its own type. Here the formats of one chunk state are one flat list:
-the first `column_count` entries are the columns, and an entry names its
-children (a struct's fields, a list's child) by index.
-
-There is no pin state. Blocks live in memory for the collection's whole
-life and never move (DuckDB's KEEP_EVERYTHING_PINNED), so heap pointers
-stored in rows stay valid and are never recomputed.
+Nested vector formats live in a flat list. The first column_count entries
+are the top-level columns; child indices identify nested entries. Blocks
+stay allocated at stable addresses, so pointers remain valid for the
+collection's lifetime.
 """
 from dataframe.vector.types import (
     PHYSICAL_OPAQUE,

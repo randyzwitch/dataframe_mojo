@@ -37,7 +37,7 @@ def decimal_add_type(left: DataType, right: DataType) raises -> DataType:
     )
     var precision = min(38, integral + scale + 1)
     # Inputs of at most 18 digits keep 64-bit arithmetic: the result is
-    # capped at 18 digits and checked for overflow, as DuckDB does.
+    # capped at 18 digits and checked for overflow.
     if precision > 18 and max(left.precision(), right.precision()) <= 18:
         precision = 18
     return DataType.decimal(precision, scale, decimal_width_for(precision))

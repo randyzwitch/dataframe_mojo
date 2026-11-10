@@ -1,6 +1,5 @@
 """A stream builds a join on its left side when that side's hash table,
-estimated before the stream starts, is the smaller (DuckDB's
-BuildProbeSideOptimizer), flipping the join inside the pipeline (a join
+estimated before the stream starts, is the smaller, flipping the join inside the pipeline (a join
 promises no row order): the result has every row the written join gives,
 and a join whose left cannot be the smaller keeps building on its right."""
 # contract-group: planner.relational

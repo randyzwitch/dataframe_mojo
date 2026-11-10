@@ -149,13 +149,13 @@ or execution facades, or accelerator dispatch, and has no internal module cycles
 
 `DataFrame.join` retains its public overloads, key-argument checks, and cross-join
 name/overflow validation. `_join_impl` delegates to `joins/eager.mojo`, which
-chooses the build side (DuckDB's `BuildProbeSideOptimizer` on exact sizes), runs
+chooses the build side from exact input sizes and row widths, runs
 the hash join and assembles the output. Key dtype and struct preparation remain
 in that implementation with their original error ordering.
 
-`joins/hash_table.mojo` is DuckDB 2.0's join hash table: build rows laid out
-with their key fields, a pointer table of salted `ht_entry_t` entries with
-linear probing and chains of equal keys, and `ScanStructure`, which probes a
+`joins/hash_table.mojo` stores build rows with their key fields. A pointer
+table uses salted `ht_entry_t` entries, linear probing and chains of equal
+keys. `ScanStructure` probes a
 chunk of 2,048 rows and emits every join type (inner, left, right, full, semi,
 anti, mark, right semi and right anti). Eager joins and pipeline probes both
 run on it; `kernels/join_keys.mojo` keeps the key facts planning reads.
@@ -279,7 +279,7 @@ binds/evaluates constants and prepares comparisons and selection trees, then
 calls the comparison kernel. `table_filter.mojo` binds/evaluates the constants
 of a scan's table filters and checks them against the statistics
 `kernels/segment_statistics.mojo` keeps with each buffer; `table_scan.mojo`
-prunes the scan's vectors with them (DuckDB's zone maps). Neither kernel
+prunes scan vectors whose bounds prove they cannot match. Neither kernel
 imports its adapter or the expression evaluator. The shared eight-lane bitmap
 primitive lives in `kernels/validity.mojo`; execution re-exports it for existing
 consumers. Existing bound-expression value models and operation tags can be

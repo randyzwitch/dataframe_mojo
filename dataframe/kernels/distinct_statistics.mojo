@@ -25,7 +25,7 @@ comptime _P = 6
 comptime _M = 64
 comptime _Q = 58
 comptime _ALPHA = 0.721347520444481703680
-# DuckDB's vector size and its sampled share of each vector
+# Bounded execution-vector size and sampled share of each vector
 # (`STANDARD_VECTOR_SIZE`, `INTEGRAL_SAMPLE_RATE`, `BASE_SAMPLE_RATE`).
 comptime _VECTOR = 2048
 comptime _INTEGRAL_SAMPLE = 614
@@ -249,8 +249,7 @@ struct _ColumnSample(Copyable, Movable):
 struct TableStatistics(Movable):
     """Distinct counts and row samples of one loaded table's columns,
     shared by every copy of the table and filled on first request
-    (`TableStatistics`; DuckDB keeps a sample with each table's statistics
-    too). Each entry remembers the storage it was taken over, so a column
+   . Each entry remembers the storage it was taken over, so a column
     replaced in a copy is taken again rather than read from the original."""
 
     var lock: Atomic[Int64]

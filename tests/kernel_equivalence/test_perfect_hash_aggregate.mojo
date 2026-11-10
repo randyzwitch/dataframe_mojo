@@ -1,5 +1,4 @@
-"""Perfect hash group-by (integer keys whose statistics bound them to a
-small span, DuckDB's perfect hash aggregate) against the same grouping by
+"""Perfect hash group-by against the same grouping by
 string copies of the keys, which takes the hashed table."""
 # contract-group: kernel.reduce
 from std.testing import assert_equal, assert_false, assert_true

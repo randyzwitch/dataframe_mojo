@@ -67,8 +67,9 @@ The next form of the contract offers a pipeline, not a node:
 
 1. **Unit.** A pipeline's source columns, its steps (filters, projections)
    and its sink (an aggregation, a hash-join build or probe, a top-k).
-   This is DuckDB's unit of physical execution, and the steps are exactly
-   what a GPU fuses into one kernel.
+   Keeping these steps together allows filters and projections to feed
+   the sink without materializing each intermediate result. A provider can
+   fuse compatible steps into a kernel and amortize its launch overhead.
 2. **Granularity.** On shared memory the whole source can go in one launch
    (morsels exist to spread work over CPU threads; a GPU's fixed launch
    cost of about 2 ms on an M1 makes CPU-sized morsels a poor unit).

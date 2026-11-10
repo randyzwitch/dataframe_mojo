@@ -3059,8 +3059,7 @@ struct LazyGroupingSets(Copyable):
 
         The plan has one node that reads its input once: when the
         aggregations keep their states inline, every morsel of the input is
-        sunk into one aggregate table per set (DuckDB's single sink over all
-        grouping sets); otherwise each set groups the collected input.
+        sunk into one aggregate table per set; otherwise each set groups the collected input.
         """
         if len(self._sets) == 0:
             raise Error("grouping sets need at least one set")

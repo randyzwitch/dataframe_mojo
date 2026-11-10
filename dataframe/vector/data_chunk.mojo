@@ -1,19 +1,9 @@
-"""DuckDB 2.0's `DataChunk` and `VectorCache` (common/types/data_chunk.hpp,
-common/types/data_chunk.cpp, common/types/vector_cache.cpp), and the
-bridge between vectors and our at-rest columns.
+"""Bridge execution vectors and retained column storage.
 
-A chunk holds at most STANDARD_VECTOR_SIZE rows. Its buffers (value
-caches, selection buffers, decode scratch) are allocated the first time a
-step writes them and reused after every `reset`, so a pipeline allocates
-per worker, not per chunk, as DuckDB's operators keep one output chunk
-each and `Reset` it.
-
-At-rest columns stay the storage format, as DuckDB keeps its column
-segments apart from its vectors. A `ColumnArena` holds the columns a
-worker's vectors read (the morsel's source columns, join builds, columns
-gathered for an adapter), and `flat_over` wraps a window of one as a flat
-vector without copying. `to_series` turns a vector back into a column for
-operators not yet on vectors.
+A chunk owns reusable value, selection and decoding buffers. Allocate them
+per worker, then reset the chunk between calls instead of allocating for
+every batch. A ColumnArena retains the columns backing borrowed vectors,
+including source columns, join payloads and expression results.
 """
 from std.memory import Pointer, unsafe_memcpy
 
@@ -69,7 +59,7 @@ struct ColumnArena(Movable):
     var columns: List[Series]
     # Per column, its values decoded once when a kernel first reads them:
     # string_t for an Arrow string column, a byte a value for a packed
-    # Boolean one (DuckDB's string_t / bool vectors); empty until then.
+    # Boolean one; empty until decoding is needed.
     var decoded: List[List[UInt8]]
 
     def __init__(out self):
@@ -176,13 +166,12 @@ def flat_over(arena: ColumnArena, handle: Int, offset: Int) -> Vector:
 
 
 struct DataChunk(Copyable, Movable):
-    """A set of vectors of equal length (DuckDB `DataChunk`), at most
+    """A set of vectors of equal length, at most
     STANDARD_VECTOR_SIZE rows.
 
     `caches` are the per-column value buffers (`VectorCache`) a step writes
     its results into; `selections` the selection buffers this chunk's
-    dictionary vectors point at (DuckDB's SelectionData, owned here rather
-    than shared); `scratch` the buffers `unified` decodes encoded vectors
+    dictionary vectors point at; `scratch` the buffers `unified` decodes encoded vectors
     into. All three are kept across `reset`.
     """
 

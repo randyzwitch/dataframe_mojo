@@ -216,7 +216,7 @@ def assert_typed_reductions(
             # The number of true values, as UInt32 in Polars.
             expected_dtype = DataType.UINT32
         if expected_dtype.is_decimal():
-            # Any decimal sums to decimal(38) at its scale, as in DuckDB.
+            # Any decimal sums to decimal(38) at its scale.
             expected_dtype = DataType.decimal(38, expected_dtype.scale())
         for threshold in [0, 3]:
             var name = "sum" if threshold == 0 else "sum3"

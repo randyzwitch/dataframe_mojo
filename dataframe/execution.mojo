@@ -2863,8 +2863,7 @@ def _on_dictionary[
 
 def _distinct_in_table(bound: BoundExpr, node: Node) -> Bool:
     """Whether `n_unique` counts its input in an aggregate table
-    (`distinct_count` over no groups, `distinct_counts` by group: DuckDB's
-    distinct tables): every input the table groups by, which leaves out
+   : every input the table groups by, which leaves out
     nested ones."""
     if node.op != N_UNIQUE:
         return False
@@ -3130,15 +3129,15 @@ from .window_sort import (
 )
 
 
-# DuckDB's STANDARD_VECTOR_SIZE: window tasks are sized in blocks of it.
+# Bound window tasks in execution-vector-sized blocks to share existing
+# scratch and kernel batching.
 comptime _WINDOW_BLOCK = 2048
 
 
 struct WindowLayouts(Movable):
-    """Window layouts for a frame's window expressions. Expressions with the
-    same partition and order keys in a `with_columns` share one sorted
-    layout, as DuckDB's PhysicalWindow evaluates every window function of
-    one partitioning and ordering over one sort."""
+    """Cache one sorted partition/order layout for windows sharing the same
+    keys in a with_columns operation. Reusing the layout avoids sorting the
+    same input separately for each window expression."""
 
     var keys: List[String]
     var layouts: List[WindowLayout]
@@ -3220,11 +3219,9 @@ def _over_constant[
     batch_size: Int,
     cache_address: Int,
 ) raises -> Series:
-    """An aggregate over whole partitions (no ORDER BY, so every row's
-    frame is its partition): DuckDB's WindowConstantAggregator. Each
-    partition is aggregated once and the result is broadcast to its rows;
-    the rows are numbered by partition (hash-partitioned, one dictionary
-    per task of hash groups) and never gathered or sorted."""
+    """For a window over a whole partition with no order key, aggregate each
+    partition once and broadcast its result to every member row. Number rows
+    by hash partition without gathering or sorting the input values."""
     var cache = Pointer[WindowLayouts, MutAnyOrigin](
         unsafe_from_address=cache_address
     )
@@ -3272,10 +3269,9 @@ def _over_rank(
     height: Int,
     cache_address: Int,
 ) raises -> Series:
-    """rank() directly under over(): DuckDB plans it as rank() OVER
-    (PARTITION BY keys ORDER BY value), so the value joins the layout's
-    order keys and the ranks are read off its peer boundaries, with no
-    second sort per partition."""
+    """Evaluate rank directly from the window layout's peer boundaries. Add the
+    ranked value to the order keys so the existing sort supplies the rank
+    order without a second per-partition sort."""
     ref rank = argument_expr._nodes[len(argument_expr._nodes) - 1]
     var name = argument_expr._nodes[rank.left].text
     var value = Series("", Column[Int64](List[Int64]()))
@@ -3336,12 +3332,9 @@ def _layout_index(
 
 
 def _crosses_partitions(bound: BoundExpr, keys: String) -> Bool:
-    """Whether a nested over() in `bound` can see rows outside one
-    partition of `keys`: a global one, or one partitioned without every
-    key. A nested over() partitioned by all of them (perhaps more) splits
-    each partition further, so a hash group holds its rows, as DuckDB
-    evaluates a window whose partition keys extend another's within the
-    other's sorted partitions."""
+    """A nested window whose partition keys include every outer key can split
+    each outer partition independently. Keep its row groups within the outer
+    sorted partition instead of repartitioning unrelated rows together."""
     var outer = split_names(keys)
     for node in bound.expr._nodes:
         if node.op != OVER:
@@ -3477,11 +3470,10 @@ def _project_arguments[
     height: Int,
     batch_size: Int,
 ) raises -> Int:
-    """Lower `inner` (the expression under an over()) so that every
-    largest row-local subexpression is computed once over the input rows,
-    in input order, and read back as a column: DuckDB evaluates a window's
-    argument expressions in a projection below PhysicalWindow, before the
-    rows are partitioned and sorted."""
+    """Compute each largest row-local argument expression once over input rows
+    before partitioning and sorting. Read its result as a column during
+    window evaluation, preserving input-order expression faults and avoiding
+    repeated computation in overlapping frames."""
     var node = inner.expr._nodes[index].copy()
     if local[index] and inner.shapes[index] == ROWS and node.op != COL:
         var value = evaluate[width](
@@ -3610,13 +3602,10 @@ def _over[
     batch_size: Int,
     layouts: Int = 0,
 ) raises -> Series:
-    """Evaluate a node's child per partition and align results to rows.
-
-    DuckDB's PhysicalWindow: the rows are hash-partitioned and each hash
-    group sorted by partition and order keys (`window_layout`); the columns
-    the child reads are gathered into that order once; hash groups are
-    evaluated in parallel, each on its own whole partitions; and results go
-    back to row order through the inverse permutation."""
+    """Evaluate windows by hash-partitioning rows and sorting each group by
+    partition/order keys. Gather required columns once into that order,
+    evaluate independent groups in parallel over complete partitions, and
+    scatter results back to original row positions."""
     ref node = bound.expr._nodes[index]
     var inner = bind(subtree(bound.expr, node.left), columns)
     var mapped = (node.integer & OVER_MAPPING_MASK) != 0
@@ -3625,8 +3614,8 @@ def _over[
             inner, columns, height, batch_size=batch_size
         )
         return scalar._broadcast(height)
-    # Argument expressions over the input rows first (DuckDB's projection
-    # below the window), so their faults come before partitioning.
+    # Evaluate argument expressions in input order before partitioning so
+    # checked-expression faults are observed before window execution.
     var inputs = columns.copy()
     var argument_expr = inner.expr.copy()
     if not mapped:

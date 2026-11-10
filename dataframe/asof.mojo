@@ -111,7 +111,7 @@ def _scan[
     var groups = len(matchable)
     # Stable CSR buckets: total storage and work are linear, even for many
     # groups or long runs of duplicate keys. Nearest retains null positions
-    # to preserve Polars' duplicate-run boundaries; nulls cannot be matches.
+    # to preserve duplicate-run boundaries; nulls cannot be matches.
     var starts = List[Int](length=groups + 1, fill=0)
     for row in range(len(right)):
         var g = right_ids[row] if len(right_ids) else 0

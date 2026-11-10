@@ -1,16 +1,8 @@
-"""A linear-time regular expression engine in the family of RE2 and Rust's
-`regex` crate: a parser for Rust's syntax, a Thompson NFA, a lazily built
-DFA (forward for match ends, reverse for match starts), a bounded
-backtracker and a Pike VM for capture groups, and literal prefilters. No
-search revisits a state, so every search is linear in the haystack;
-look-around and backreferences are not supported.
+"""Regular expression compilation and matching over Unicode code points.
 
-    var regex = Regex("([a-z]+)-([0-9]+)")
-    var matcher = Matcher(regex)
-    if matcher.captures(text.as_bytes()):
-        ...  # matcher.slots holds the group offsets
-
-A `Regex` is immutable and shared by every worker; each worker searches
-with its own `Matcher`.
+Parse patterns into a Thompson NFA. Lazy forward and reverse DFAs find
+match bounds; capture engines record group positions. Bounded caches fall
+back to NFA simulation rather than allowing input-dependent exponential
+backtracking. Literal prefilters reject impossible matches cheaply.
 """
 from .regex import Matcher, Regex, Template, escape

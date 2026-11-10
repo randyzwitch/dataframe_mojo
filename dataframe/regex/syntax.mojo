@@ -819,7 +819,7 @@ struct _Parser(Movable):
 
 
 def parse(pattern: String) raises -> Ast:
-    """Parse a pattern in the syntax of Rust's `regex` crate."""
+    """Parse a regular expression into character classes, groups and repetitions."""
     var parser = _Parser(pattern)
     var root = parser.parse_alternation()
     if not parser.at_end():

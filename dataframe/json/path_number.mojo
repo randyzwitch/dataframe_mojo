@@ -1,4 +1,4 @@
-"""JSONPath floating-point conversion matching Polars' serde_json reader.
+"""JSONPath floating-point conversion with decimal significand rounding.
 
 The JSON grammar is validated by the shared reader. Retain a UInt64 decimal
 significand and scale it by rounded powers of ten, as serde_json's default

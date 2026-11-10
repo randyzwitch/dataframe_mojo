@@ -636,7 +636,7 @@ def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
             raise Error(op_name(op) + " requires two decimal operands")
         if is_comparison(op) or missing:
             return DataType.BOOL
-        # DuckDB's decimal arithmetic types: sums and differences at the
+        # Decimal arithmetic result types: sums and differences at the
         # larger scale with one more integer digit, exact products, and
         # quotients as DOUBLE.
         if op == ADD or op == SUB:
@@ -747,7 +747,7 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
         if input.is_duration():
             return input
         if input == DataType.BOOL:
-            # The number of true values, as UInt32 like Polars' sum of a
+            # Count true values as UInt32 by summing a
             # Boolean (its index type), not the Int64 of count and len.
             return DataType.UINT32
         if not _numeric(input):
@@ -801,8 +801,8 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
         return DataType.FLOAT64
     if op == MEAN or op == STD or op == VAR or op == MEDIAN or op == QUANTILE:
         if op == MEAN and input.is_decimal():
-            # Float64, as Polars returns (#341): a mean rarely has the
-            # input's scale, and truncating to it lost digits.
+            # Use Float64 because a mean can require more fractional digits
+            # than the input's fixed decimal scale (#341).
             return DataType.FLOAT64
         if op == MEAN and input == DataType.BOOL:
             # The share of true values among the valid ones.
@@ -1563,8 +1563,8 @@ def bind(
             if is_distinct_flag(node.op) or (
                 node.op == RANK and input.is_struct()
             ):
-                # A struct ranks by its fields in turn, as Polars ranks
-                # pl.struct(...) (a multi-column order).
+                # Compare struct fields in sequence to obtain a lexicographic
+                # multi-column rank.
                 if input.is_list():
                     raise Error(
                         op_name(node.op) + " does not support list values"
@@ -1658,7 +1658,7 @@ def bind(
                 elif node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY:
                     dtype = DataType.FLOAT64
             elif node.op == CUM_SUM and input == DataType.BOOL:
-                # A running count of true values, UInt32 as in Polars.
+                # A running count of true values, UInt32.
                 dtype = DataType.UINT32
             elif node.op == CUM_PROD:
                 if not _numeric(input) and input != DataType.BOOL:
@@ -2045,7 +2045,7 @@ def bind(
                     + " and "
                     + x.name()
                 )
-            # Polars casts x to y's float type, Float64 for any other y.
+            # Cast x to y's float type; use Float64 when y is not floating-point.
             dtype = DataType.FLOAT32 if y == DataType.FLOAT32 else (
                 DataType.FLOAT64
             )
@@ -2080,7 +2080,7 @@ def bind(
                 elif right.is_untyped():
                     _adopt(nodes, types, node.right, _target(left))
                 # A string literal compared with binary stands for its
-                # UTF-8 bytes, as in Polars; both share one storage layout.
+                # UTF-8 bytes; both share one storage layout.
                 if (
                     is_comparison(node.op)
                     or node.op == EQ_MISSING

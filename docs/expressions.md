@@ -67,7 +67,7 @@ and UInt64 compute in 128 bits and range-check the result.
 | `.log(base)`, `.log10()`, `.log1p()`, `.cbrt()` | numeric | Float64 (Float32 for Float32) | `log(base)` is `ln(x) / ln(base)`, with `log10` and base 2 exact at powers of the base; `log10(0)` is -inf, `log10(-1)` NaN; `log1p(-1)` is -inf |
 | `.sin()`, `.cos()`, `.tan()`, `.cot()`, `.arcsin()`, `.arccos()`, `.arctan()` | numeric | Float64 (Float32 for Float32) | radians; out-of-domain input (`arcsin(2)`) is NaN; `cot(0)` is inf |
 | `.sinh()`, `.cosh()`, `.tanh()`, `.arcsinh()`, `.arccosh()`, `.arctanh()` | numeric | Float64 (Float32 for Float32) | `arccosh` is NaN below 1; `arctanh(1)` is inf |
-| `.degrees()`, `.radians()` | numeric | Float64 (Float32 for Float32) | one multiply by `180 / pi` or `pi / 180`, as Rust does |
+| `.degrees()`, `.radians()` | numeric | Float64 (Float32 for Float32) | one multiply by `180 / pi` or `pi / 180` |
 | `arctan2(y, x)` | two numeric | Float64 (Float32 when `y` is Float32) | `x` is cast to `y`'s float type; null when either side is null |
 | `.sign()` | numeric | same | -1, 0 or 1 (unsigned: 0 or 1); a float NaN stays NaN and a signed zero keeps its sign; a decimal's sign is at its scale |
 | `.truncate()` | numeric | same | toward zero; identity for integers |
@@ -86,7 +86,7 @@ directly, eight rows per step. Fusion covers Float64 arithmetic, and
 comparisons over it; a comparison of two plain columns or literals uses the
 bitmap kernel instead. The logarithms beyond `log()`, `log1p`, `cbrt`, the
 trigonometric and hyperbolic functions and `arctan2` call the platform's IEEE
-`libm` lane by lane, as Polars does through Rust; `sign`, `truncate`,
+`libm` lane by lane; `sign`, `truncate`,
 `degrees` and `radians` are SIMD. Integer and decimal inputs compute in
 Float64. `sqrt`, `exp`, `log`, and `pow` use
 Mojo's `std.math`, whose results can differ from the correctly rounded value by
@@ -94,14 +94,14 @@ about 1e-12 relative; tests compare them with a tolerance. Binder errors name
 the operator and dtypes, for example `/ requires matching dtypes, found int64
 and float64; use typed literals`.
 
-Decimal arithmetic follows current Polars result types: `+`, `-`, `*`, and `/`
+Decimal arithmetic determines result types from the operand precision and scale: `+`, `-`, `*`, and `/`
 return precision 38 with the larger operand scale. Multiplication and division
-round the digits past that scale half to even, as Polars does (0.625 becomes
+round the digits past that scale half to even (0.625 becomes
 0.62, 0.375 becomes 0.38, and -0.625 becomes -0.62). Casts that drop decimal
 digits, to a smaller scale or to an integer, round the same way (1.5 and 2.5
 both become 2). Decimal division by zero produces null. Decimal `sum`, `min`,
 and `max` keep the input's decimal type (`sum` is exact and raises when it
-exceeds the precision); `mean` returns Float64, as Polars does, computed from
+exceeds the precision); `mean` returns Float64, computed from
 the exact sum so that only the final conversion rounds.
 
 ### Selectors
@@ -113,7 +113,7 @@ expression expands into one expression per match, in schema order for `all`,
 `exclude`, and `by_dtype`, and in the listed order for `col([...])`. The
 exception is a selector among the inputs of a horizontal reduction
 (`sum_horizontal([by_dtype(["int64"])])`): it expands into more inputs of
-that one expression, as in Polars. Expansion
+that one expression. Expansion
 happens for `select`, `select_exprs`, `with_columns`, `agg`, and `group_by`
 key expressions; `filter` requires exactly one match. An empty expansion adds
 no columns.
@@ -135,13 +135,13 @@ row-valued. See the Narwhals order-dependence notes cited above.
 | Method | Result | Nulls |
 |---|---|---|
 | `cum_sum(reverse=False)` | numeric, same dtype; Int64 checked; Bool gives UInt32, a running count of true values | null rows stay null and are skipped |
-| `cum_min`, `cum_max` | same dtype; NaN is skipped, so a NaN row repeats the running value and is NaN only before the first number, as in Polars | as `cum_sum` |
+| `cum_min`, `cum_max` | same dtype; NaN is skipped, so a NaN row repeats the running value and is NaN only before the first number | as `cum_sum` |
 | `cum_prod(reverse=False)` | as `product()`: Int64 for Bool and integers up to 32 bits, UInt64/Int64/floats keep theirs, decimals Float64; integers checked | as `cum_sum` |
 | `cum_count(reverse=False)` | Int64, never null | counts non-null values |
 | `shift(n=1)` | same dtype; negative `n` shifts earlier | vacated rows are null |
 | `diff(n=1)`, `pct_change(n=1)` | `x - x.shift(n)`; `pct_change` is Float64 | null when either side is null |
 | `rank(method="average", descending=False)` | `average` Float64; `min`, `max`, `dense`, `ordinal` Int64 | nulls get null; ranks start at 1; `ordinal` breaks ties by row order; NaN is the largest value, so it ranks after numbers ascending and before them descending |
-| `rolling_sum/mean/min/max(window_size, min_samples=window_size)` | sum/min/max same dtype, mean Float64 | the window is the current row and the `window_size - 1` before it; nulls are skipped; fewer than `min_samples` valid values give null; a window holding NaN gives NaN for `rolling_min` and `rolling_max`, as in Polars |
+| `rolling_sum/mean/min/max(window_size, min_samples=window_size)` | sum/min/max same dtype, mean Float64 | the window is the current row and the `window_size - 1` before it; nulls are skipped; fewer than `min_samples` valid values give null; a window holding NaN gives NaN for `rolling_min` and `rolling_max` |
 | `forward_fill(limit=-1)`, `backward_fill(limit=-1)` | same dtype | fill from the nearest valid value at most `limit` rows away |
 | `interpolate(method="linear"|"nearest")` | Float64 for linear, input dtype for nearest | fills only interior nulls; nearest ties choose the following value |
 | `interpolate_by(by)` | Float64 | linear interpolation at the numeric `by` coordinates |
@@ -230,10 +230,9 @@ Calendar reporting adds `quarter()` (1–4), ISO `week()` and `iso_year()`,
 `century()`, `millennium()`, `millisecond()` and `microsecond()` (within the
 second). `days_in_month()` returns the local month's length and
 `is_leap_year()` returns a Boolean. `month_start()` and `month_end()` change
-only the day, preserving a datetime's local time of day. `round(every)` shifts by half the interval and then truncates, as in
-[Polars](https://github.com/pola-rs/polars/blob/main/crates/polars-time/src/windows/window.rs).
-Fixed-unit ties round forward; month/year intervals use Polars' 28-day
-estimate for each month. Zoned inputs apply this rule to local time.
+only the day, preserving a datetime's local time of day. `round(every)` shifts by half the interval and then truncates.
+Fixed-unit ties round forward; month/year intervals estimate each month as
+28 days when computing that shift. Zoned inputs apply this rule to local time.
 
 `epoch(time_unit="us")` returns Int64 elapsed units since 1970-01-01 in
 `"d"`, `"s"`, `"ms"`, `"us"` or `"ns"`; `timestamp(time_unit="us")` accepts
@@ -299,7 +298,7 @@ A datetime without a time zone is naive: a wall-clock reading. With one
 timestamp with its zone set, and the zone decides how values are shown,
 parsed and split into fields. Zones are IANA names, `"UTC"`, or Arrow fixed
 offsets such as `"+05:30"`. Dtypes in different zones are different types:
-comparing, subtracting, joining or concatenating them raises, as in Polars.
+comparing, subtracting, joining or concatenating them raises.
 
 - `dt().replace_time_zone(zone, ambiguous="raise", non_existent="raise")`
   keeps each wall-clock time and reads it in `zone` (`""` makes it naive).
@@ -312,7 +311,7 @@ comparing, subtracting, joining or concatenating them raises, as in Polars.
   business dates, and calendar offsets
   (`d`, `w`, `mo`, `y`) use local time; fixed offsets (`h`, `m`, `s`, ...)
   and duration arithmetic move the UTC instant. A shifted or truncated
-  local time that falls in a DST gap or overlap is resolved as Polars does
+  local time that falls in a DST gap or overlap is resolved
   (RFC 5545): the result keeps the original's daylight-saving state.
 - Casting to string, date or time uses local time; casting between
   datetimes keeps the instant, so a zone-aware value cast to a naive
@@ -364,9 +363,9 @@ exactly when the same text would load from CSV: no surrounding whitespace, an
 optional sign, and only explicit infinity spellings. Casting numbers and
 Booleans to string and back reproduces them exactly, including `-0.0` and NaN.
 
-Binary casts follow Polars: anything that casts to string casts to binary as
+Anything that casts to String casts to Binary as
 its UTF-8 bytes, and binary casts only to string, where each value must be
-valid UTF-8 (strict raises; otherwise the row is null, where Polars raises).
+valid UTF-8 (strict raises; otherwise the row is null).
 
 ### Binary
 
@@ -382,10 +381,10 @@ grouping and join keys, `min`/`max`/`first`/`last`/`mode`/`n_unique`/
 `count`/`value_counts`, `fill_null`, `when`, windows, and equality and
 ordering comparisons (a string literal stands for its UTF-8 bytes:
 `col("b") == "abc"`). Binary and string are different dtypes, so joining
-or stacking one with the other raises, as in Polars; `.str()` operations
+or stacking one with the other raises; `.str()` operations
 need a cast to string. Values display as `b"..."` with non-printable bytes
-escaped (`b"\xff\x00z"`). `write_csv` rejects binary columns, as Polars
-does, since CSV has no agreed encoding for raw bytes.
+escaped (`b"\xff\x00z"`). `write_csv` rejects binary columns because CSV
+has no declared encoding for raw bytes.
 
 ### Boolean logic and nulls
 
@@ -411,7 +410,7 @@ Kleene AND, so a null bound yields null unless the other side is false.
 ### Recoding values
 
 `replace` and `replace_strict` map values to other values in one expression,
-following Polars:
+with these rules:
 
 ```mojo
 df.with_columns(col("fruit").replace(["aple", "banan"], ["apple", "banana"]))
@@ -450,9 +449,9 @@ df.with_columns(col("code").replace_strict([1, 2, 3], ["low", "mid", "high"]))
 
 The old values are cast and put in a lookup table once per expression; every
 row probes it, in parallel, and the result is written in a second parallel
-pass (Polars does this as a left join against the old values). Batches that a
+pass, retaining unmatched values where required. Batches that a
 streamed reduction feeds itself build the table per batch. Accelerators do not run these expressions and fall back to
-the CPU. Polars also accepts expressions for `old` and `new`; here they must
+the CPU. The `old` and `new` arguments must
 be literals.
 
 ### Strings
@@ -487,7 +486,7 @@ same method convention. Inputs must be String and nulls propagate.
 | `normalize(form="NFC")` | String | Unicode 17.0 NFC, NFD, NFKC or NFKD; nulls propagate |
 | `json_decode(dtype)` | `dtype` | decode into an explicit scalar, list or struct schema; invalid JSON and incompatible value kinds raise |
 | `json_path_match(path)` | String | first match, with strings unquoted and containers compact; malformed JSON, missing matches and JSON null return null; invalid paths raise |
-| `to_integer(base=10, strict=True)` | Int64 | optional sign then digits of base 2-36, as Rust's `from_str_radix`; failures raise, or are null with `strict=False` |
+| `to_integer(base=10, strict=True)` | Int64 | optional sign then digits of base 2-36; failures raise, or are null with `strict=False` |
 | `split_exact(by, n, inclusive=False)` | Struct | `n + 1` String fields `field_0`..`field_n`; extra parts are dropped, missing parts null |
 | `splitn(by, n)` | Struct | `n` String fields; the last keeps the rest of the string |
 | `join(delimiter="", ignore_nulls=True)` | String | an aggregation: every value (per group in `agg`) joined; nulls skipped, or with `ignore_nulls=False` a null makes the result null; no values give `""` |
@@ -495,16 +494,14 @@ same method convention. Inputs must be String and nulls propagate.
 `concat_str([exprs], separator="", ignore_nulls=False)` joins String
 expressions row-wise and is null when any input is null. With
 `ignore_nulls=True` null inputs are left out with their separator and a row
-of only nulls is `""` (DuckDB's `concat_ws`). Character operations work on
+of only nulls is `""`. Character operations work on
 code points, not grapheme clusters: `"e\u0301"` has length 2 and reverses its
 combining mark.
 
-These follow Polars 1.44. `normalize` uses Unicode 17.0 and matches the pinned
-Polars 2.0 normalization and JSON oracles. Where DuckDB differs:
-`strpos`/`instr` count code points from 1 and give 0 when absent (`find`
-counts bytes from 0 and gives null), `split_part` gives `""` for a missing
-part (null here), and `to_hex` writes uppercase digits. `splitn(by, 0)`
-raises; Polars returns a struct with no fields. The `Alphabetic` table behind
+`normalize` uses Unicode 17.0. String positions count UTF-8 bytes from
+zero; a missing match returns null. `split_part` returns null for a missing
+part, `to_hex` writes lowercase digits, and `splitn(by, 0)` raises because
+its requested output would contain no fields. The `Alphabetic` table behind
 `to_titlecase` is Unicode 15.0. Row kernels read offsets and string-view
 storage alike; stripped affixes and split fields are views into the input's
 buffers rather than copies, and a categorical input runs each function once
@@ -534,14 +531,13 @@ a one-element list; JSON null and input null remain null. Numeric overflow
 becomes null; incompatible value kinds raise with the input row. Datetime
 strings without a zone keep their wall time for a naive output; UTC output
 requires an explicit offset. Other output time zones and Binary/geometry
-schemas raise during binding. Unpaired Unicode surrogates are rejected,
-where Polars 2.0's decoder can produce NUL instead.
+schemas raise during binding. Unpaired Unicode surrogates are rejected because they do not encode a
+Unicode scalar value.
 
 `json_path_match` accepts a constant path rooted at `$`: dot or quoted
 fields, array indices (including negative ones), wildcards, recursive descent,
 name/index unions, slices with positive steps, and comparison filters with
-`&&`, `||`, `@` and `$` references. It follows the first-match ordering and
-selection behavior of Polars 2.0's JSONPath evaluator. Duplicate object keys
+`&&`, `||`, `@` and `$` references. Paths visit selections in order and return the first match. Duplicate object keys
 keep their last value. Strings are returned unquoted; numbers, Booleans and
 containers use compact JSON spelling. A first match of JSON null ends the
 search and returns null. Unsupported syntax, including regular-expression
@@ -552,20 +548,18 @@ once, and output builders write directly into typed buffers. Nested result
 batches are concatenated once per child level, avoiding repeated copies of
 earlier batches. Categorical children share one dictionary mapping for the
 whole concatenation.
-Wildcard paths inside predicates are also supported; Polars 2.0 can panic
-for this combination, so those contracts use an independent Python JSON
-selection reference. JSONPath uses Polars' serde-style floating-point
-conversion and spelling, separately from typed decoding's correctly rounded
-conversion.
+Wildcard paths inside predicates are also supported and checked against
+an independent Python JSON selection reference. JSONPath converts numbers
+by rounding the decimal significand before applying its exponent; typed
+decoding uses a separate correctly rounded conversion.
 
 #### Regular expressions
 
 `contains`, `count_matches`, `extract`, `extract_all`, `extract_groups`, `replace`, `replace_all`
-and `split(literal=False)` take patterns in the syntax of Rust's `regex` crate,
-which Polars uses, and return what Polars returns: leftmost-first matches,
-non-overlapping and searched left to right, with Rust's rule that an empty match
-right after the previous match is skipped. The engine (`dataframe/regex`) is in
-the RE2 / Rust family: a Thompson NFA, a lazily built DFA for match ends and a
+and `split(literal=False)` take regular expressions and return leftmost-first,
+non-overlapping matches searched left to right. An empty match immediately
+after the previous match is skipped, preventing adjacent empty matches from
+repeating the same position. The engine (`dataframe/regex`) uses a Thompson NFA, a lazily built DFA for match ends and a
 reverse DFA for match starts, a Pike VM for capture groups, and literal
 prefilters. Nothing backtracks, so every search is linear in the string. One
 compiled pattern is shared by all workers; each worker has its own DFA cache.
@@ -586,9 +580,9 @@ compiled pattern is shared by all workers; each worker has its own DFA cache.
 
 Matching works on code points: `.` and classes consume a whole character, and
 matches start and end on character boundaries. Look-around and backreferences
-raise an error, as they do in Rust. `(?-u)` switches Perl classes, word
+raise an error. `(?-u)` switches Perl classes, word
 boundaries and case folding to ASCII semantics; scoped `(?-u:...)` can mix
-with Unicode parts. As in Polars' UTF-8 string regex, a pattern that could
+with Unicode parts. A pattern that could
 match invalid UTF-8 (such as `(?-u).`, `(?-u)\W`, or `(?-u)[^a]`) raises.
 Literal Unicode characters remain valid, as do Unicode escapes like
 `(?-u)\u00E9` and `(?-u)\x{E9}`; raw byte escapes above ASCII such as
@@ -596,18 +590,18 @@ Literal Unicode characters remain valid, as do Unicode escapes like
 
 Replacement values refer to groups as `$1`, `${1}`, `$name` or `${name}`;
 `$name` takes the longest run of letters, digits and `_`, so write `${1}x` for
-group 1 followed by `x`; `$$` is a dollar sign. As in Polars, a pattern without
+group 1 followed by `x`; `$$` is a dollar sign. A pattern without
 ASCII punctuation is replaced literally and its value is not expanded, and
 `literal=True` treats any pattern as text. A pattern that matches one literal
 string is searched as a substring.
 
 Regex selection uses the same engine: `col("^cost_.*$")` expands to matching
-column names in schema order, as Polars does. Anchored patterns also work in
+column names in schema order. Anchored patterns also work in
 `col(["id", "^cost_.*$"])`; a list containing a regex selects the union in
 schema order, while a list of exact names keeps its requested order. Operations, name prefixes/suffixes, reductions,
 `with_columns` and horizontal inputs use the existing selector expansion.
 An ordinary `col("name")` still requires that exact column name.
-`columns("cost")` searches anywhere in each name, like DuckDB's
+`columns("cost")` searches anywhere in each name, using
 `COLUMNS('cost')`; use anchors for a whole-name match. This library has no
 SQL text parser: `columns` is the Mojo expression equivalent. Invalid
 selector patterns raise even on an empty frame.
@@ -616,8 +610,7 @@ selector patterns raise even on an empty frame.
 
 `sum_horizontal`, `min_horizontal`, `max_horizontal`, `mean_horizontal`,
 `any_horizontal` and `all_horizontal` take a list of expressions and reduce
-across them within each row, as Polars' functions of the same names do
-(DuckDB's `greatest` and `least` are `max_horizontal` and `min_horizontal`).
+across them within each row.
 The result is named after the first input. Selectors among the inputs expand
 into more inputs: `sum_horizontal([all()])` adds every column of a row.
 Inputs may be columns, literals or other expressions, including aggregates
@@ -634,11 +627,11 @@ frame.with_columns(
 ```
 
 Unlike the binary operators, these functions cast their inputs to a common
-type first: Polars' supertype for integers, floats and Bool (Int8 with
+type first: a shared numeric type for integers, floats and Bool (Int8 with
 UInt8 is Int16, Int32 with Float32 is Float64, Int64 with UInt64 is
-Float64), and DuckDB's for decimals (an integer meeting a decimal becomes a
-decimal holding its digits: Int64 with Decimal(10, 2) is Decimal(21, 2);
-a decimal meeting a float is Float64). An untyped number adopts the other
+Float64). An integer meeting a decimal becomes a decimal with enough
+integer digits: Int64 with Decimal(10, 2) is Decimal(21, 2).
+A decimal meeting a float becomes Float64. An untyped number adopts the other
 inputs' type. Other combinations, such as a String with an integer, raise.
 
 | Function | Result | Nulls |
@@ -648,18 +641,17 @@ inputs' type. Other combinations, such as a String with an integer, raise.
 | `min_horizontal(exprs)`, `max_horizontal(exprs)` | common type (numeric, Bool, String, temporal) | nulls are skipped; a row of nulls is null |
 | `any_horizontal(exprs)`, `all_horizontal(exprs)` | Bool | Kleene OR and AND, as `\|` and `&` are; numeric inputs read nonzero as true |
 
-Integer sums keep `+`'s overflow check and raise where Polars wraps. A
-decimal sum has the type DuckDB gives the same chain of `+` (one more
+Integer sums keep `+`'s overflow check and raise on overflow. A
+decimal sum has the type obtained by the same chain of `+` (one more
 integer digit per addition, up to 38). NaN propagates through sums and
-means; `min_horizontal` and `max_horizontal` skip it, as Polars does, so
-the result is NaN only when a row has nothing else. DuckDB's `greatest`
-treats NaN as the largest value instead. A selector that matches no columns
+means; `min_horizontal` and `max_horizontal` skip it, so
+the result is NaN only when a row has nothing else. A selector that matches no columns
 leaves `any_horizontal` false and `all_horizontal` true and is an error for
 the others. As filters, `any_horizontal` and `all_horizontal` keep the rows
 that are true.
 
 Each function is one expression node. Its inputs are evaluated once, cast
-to the common type, and reduced pairwise as Polars does: Float sums and
+to the common type, and reduced pairwise: Float sums and
 means, and numeric `min`/`max`, accumulate into one output buffer a SIMD
 vector at a time; integer and decimal sums fill nulls with zero and add
 with the `+` kernel; `any`/`all` run the Kleene bitmap kernels. No
@@ -733,24 +725,21 @@ columns outside grouping.
 | `corr(a, b, method="pearson")`, `cov(a, b, ddof=1)` | two numeric | Float64 | NaN / null | Pearson and `cov` yes; Spearman keeps pairs |
 
 `min` and `max` order strings byte-lexicographically and `false < true`. Float
-`min` and `max` skip NaN, as in Polars: the result is NaN only when every valid
-value is NaN (#816). DuckDB instead treats NaN as the largest value, so its
-`max` is NaN if any value is. `sort`, `rank` and `top_k` still put NaN above
+`min` and `max` skip NaN: the result is NaN only when every valid
+value is NaN (#816). `sort`, `rank` and `top_k` still put NaN above
 every number. Ties keep the first value.
 `mean` of Int64 input divides the exact 128-bit total, so it cannot overflow.
-A Bool sums as zeros and ones, as in Polars: `sum` and `cum_sum` count the true
-values as UInt32 (Polars' index type; `count`, `len` and `null_count` stay
-Int64 here), and `mean` is the share of true values among the valid ones.
+A Bool sums as zeros and ones: `sum` and `cum_sum` count the true
+values as UInt32 (`count`, `len` and `null_count` return Int64), and `mean` is the share of true values among the valid ones.
 Ungrouped sums count set bits 64 rows at a time without unpacking them.
-`product` follows Polars' result types, but where Polars wraps an integer
-product silently, this one raises, as `cum_sum` does. A decimal's product is
-Float64, as DuckDB's `product` is (Polars keeps the scale of a single factor).
+Integer `product` raises on overflow, as `cum_sum` does. A decimal's
+product returns Float64 because multiplying an arbitrary number of values
+cannot preserve a fixed decimal scale.
 `first` and `last` return the first or last row's value even when it is null.
 `n_unique` counts null as one value, treats every NaN as one value, and treats
 `-0.0` as equal to `0.0`. Use `n_unique(ignore_nulls=True)` for SQL
 `COUNT(DISTINCT x)`, which excludes nulls and returns 0 for empty or all-null
-inputs. This is equivalent to Polars' `drop_nulls().n_unique()`; Polars does
-not expose an `ignore_nulls` parameter. Both modes use the same distinct
+inputs. Both modes use the same distinct
 counting paths, including grouped, streaming and categorical inputs.
 `var` and `std` convert Int64 to Float64; infinities
 produce NaN. `median` is `quantile(0.5, "linear")`. For `quantile`, `q` must be
@@ -764,9 +753,8 @@ reduction outputs (for example `col("x").max() - col("x").min()`) is allowed.
 `arg_min` and `arg_max` return the index of the first minimum or maximum,
 counting every row including nulls; inside `group_by(...).agg(...)` and
 `over(...)` the index is within the group. Nulls are skipped, and NaN counts
-only when every valid value is NaN (then the first NaN's index), as in
-Polars. Polars' global `arg_max` on strings returns the last of tied indices;
-this library returns the first in every context.
+only when every valid value is NaN (then the first NaN's index). Ties
+return the first index in every context, including String input.
 
 `mode` returns every most frequent value, ascending, with NaN above numbers
 and null last; null counts as a value and `-0.0` equals `0.0`. In `select` it
@@ -779,12 +767,12 @@ fields are the input's name and `name` (`"count"`, or `"proportion"` with
 `normalize=True`, which gives Float64 shares of all rows, nulls included).
 Counts are UInt32. Values are ascending, with NaN above numbers and null
 last; `sort=True` orders by count, highest first, with ties in value order.
-Polars leaves both orders unspecified. Null counts as a value and `-0.0`
+Null counts as a value and `-0.0`
 equals `0.0`. Like `mode`, it yields one row per value in `select`, a list
 per group in `group_by(...).agg(...)`, and is not available in `over(...)`.
 `name` must differ from the input's name.
 
-`skew` and `kurtosis` follow scipy and Polars: `bias=False` applies the
+`skew` and `kurtosis` use standardized third and fourth central moments: `bias=False` applies the
 sample-size correction and gives null below three (skew) or four (kurtosis)
 values; constant input gives NaN; `fisher=True` reports excess kurtosis.
 
@@ -792,9 +780,9 @@ values; constant input gives NaN; `fisher=True` reports excess kurtosis.
 Rows where either side is null are dropped pairwise. `corr` is Pearson's r,
 or Pearson on average ranks with `method="spearman"`, and is NaN below two
 pairs or for a constant side. `cov` is null with no pairs and 0.0 when the
-pairs do not exceed `ddof`, as Polars returns. A NaN in any pair makes both
-NaN. Polars' grouped `corr`/`cov` do not always drop null pairs; the
-differential oracle compares complete pairs.
+pairs do not exceed `ddof`. A NaN in any pair makes both
+NaN. Validation compares complete pairs so the reference uses the same
+null-selection rule.
 
 Integer sums use signed 128-bit totals plus valid counts. Every possible Int64
 column with length representable by Int fits this accumulator. Partial states
@@ -811,8 +799,8 @@ infinities retain IEEE behavior, subject to reassociation.
 ## Rollups, cubes and grouping sets
 
 `group_by_rollup(keys)`, `group_by_cube(keys)` and
-`group_by_grouping_sets(sets)` on `DataFrame` and `LazyFrame` are DuckDB's
-`GROUP BY ROLLUP`, `CUBE` and `GROUPING SETS`. Each returns an object whose
+`group_by_grouping_sets(sets)` on `DataFrame` and `LazyFrame` compute
+subtotals over a sequence of grouping-key sets. Each returns an object whose
 `agg(exprs)` aggregates as `group_by(...).agg(...)` does, once per grouping
 set, and returns the rows of every set one after another (a `DataFrame` from
 the eager form, a `LazyFrame` from the lazy form).
@@ -827,8 +815,7 @@ var report = sales.lazy().group_by_rollup(["region", "product"]).agg([
 - ROLLUP `(a, b)` is the sets `(a, b)`, `(a)`, `()`. CUBE `(a, b)` is all four
   subsets. GROUPING SETS lists the sets itself; the empty set is the grand
   total. A set listed twice gives its rows twice, a key listed twice in one
-  set counts once, and `rollup(a, a)` is `(a, a)`, `(a)`, `()` (all as in
-  DuckDB).
+  set counts once, and `rollup(a, a)` is `(a, a)`, `(a)`, `()`.
 - The output columns are the keys (every key any set names, in order of
   first appearance), then the aggregations. In a set's rows the keys the set
   does not group by are typed nulls.
@@ -839,7 +826,7 @@ var report = sales.lazy().group_by_rollup(["region", "product"]).agg([
   null key value: the rows `(x, null)` with `grouping_id` 0 and 1 are
   different groups.
 - The empty set yields one row even over no rows (a sum there is 0, as `sum`
-  of no rows is everywhere in this library; DuckDB's is null); every other
+  of no rows is everywhere in this library); every other
   set yields no rows over no rows.
 - Row order is unspecified unless the result is sorted.
 - Known limits: `grouping` and `grouping_id` must be a whole aggregation
@@ -938,7 +925,7 @@ improvements to pursue with benchmarks, not reasons to change expression semanti
 `list[string]`: an empty string gives one empty part, a separator at either
 end gives an empty part there, and a null string gives a null list. With
 `inclusive=True` each part but the last keeps the separator. With
-`literal=False` the separator is a regular expression, split as Rust's
+`literal=False` the separator is a regular expression, split using the
 `Regex::split` does; an empty pattern splits into code points.
 `str().extract_all(p)` also gives `list[string]`.
 

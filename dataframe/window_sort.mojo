@@ -1,25 +1,9 @@
-"""DuckDB 2.0's window partitioning: the sort strategies of PhysicalWindow
-(common/sort/sort_strategy.cpp, hashed_sort.cpp, full_sort.cpp,
-natural_sort.cpp) and the boundary masks of WindowHashGroup
-(physical_window.cpp, ComputeMasks).
+"""Partition and stably order rows for window evaluation.
 
-- HashedSort (partition keys): every row's partition keys are hashed and
-  the rows are radix-partitioned by hash into 2^bits hash groups, stable
-  within a group. Each hash group is then sorted on its own, groups in
-  parallel, by the partition keys (ascending, nulls first) and then the
-  order keys. A group with no order keys whose rows all share one key
-  needs no sort (PartitionKeyTracker::CanBypass).
-- FullSort (order keys only): one hash group, sorted as a whole.
-- NaturalSort (neither): one hash group in input order.
-
-The sorted layout is the hash groups one after another. Walking it marks
-where each partition starts (DuckDB's partition_mask) and where each run
-of rows with equal partition and order keys starts (its order_mask, the
-peer boundaries). Every partition lies inside one hash group, so groups
-are evaluated independently.
-
-Sorts are DuckDB's (`dataframe.sorting.sort_rows`), kept stable (ties in
-input order), as `over(order_by=...)` keeps input order on ties.
+Hash the partition keys, order each partition by its sort keys and record
+partition and peer boundaries. Stable ordering keeps input order among
+equal keys, which makes positional window functions deterministic. The
+result maps computed values back to the original row positions.
 """
 from std.ffi import external_call
 from std.memory import Pointer
@@ -503,8 +487,7 @@ struct _LocalNumberJob(Job):
 
 struct _KeyEquality(Movable):
     """`_rows_equal` over a partition key, the comparison hoisted: a single
-    integer key's values are compared in place (DuckDB's typed row
-    match), any other keys through `_rows_equal`."""
+    integer key's values are compared in place, any other keys through `_rows_equal`."""
 
     var keys: List[Series]
     var data: Int
@@ -739,7 +722,7 @@ def sort_key_rows(
     nulls_last: List[Bool],
     stable: Bool = True,
 ) raises -> List[Int]:
-    """The sorted order of the key columns' rows: DuckDB's sort
+    """The sorted order of the key columns' rows: normalize keys and sort
     (`sort_rows`), with ties in input order when `stable`, as
     over(order_by=...) keeps them. Threads come from the shared budget, so
     groups sorted on several workers at once share it."""
@@ -1132,7 +1115,7 @@ def rank_order_keys(
     """Append the order keys that rank `input`: its value (a struct's
     fields in turn), nulls first in each partition so that ranks count
     from the first value. A struct field's nulls are its smallest values
-    (Polars); a null struct sorts before every value."""
+   ; a null struct sorts before every value."""
     var column = input.rechunk() if input.is_chunked() else input.copy()
     if column.dtype().is_struct():
         var structs = column.struct_column()
@@ -1314,7 +1297,7 @@ def rank_from_layout(
 ) raises -> Series:
     """Every row's rank within its partition, read off a layout whose last
     order keys are `rank_order_keys(input)`: runs of equal values are
-    peers, as DuckDB's rank executors read them from the order mask. Ranks
+    peers, identified by adjacent equal sort keys. Ranks
     are computed in sorted order and gathered back to rows. Nulls
     rank as null; ranks count from a partition's first value. Ordinal
     ranks peers in layout order (input order when the layout is stable).

@@ -254,7 +254,7 @@ def _extreme_block[
 def _extreme[
     D: DType, is_max: Bool
 ](inputs: List[Series], n: Int) raises -> Series:
-    # Polars' min/max horizontal also separates null-free inputs. They need
+    # Separate null-free min/max inputs: they need
     # only payload comparisons: no running validity bitmap to unpack/repack.
     var dense = True
     for input in inputs:
@@ -579,7 +579,7 @@ def horizontal(
             return _float_fold[DType.float64, True](inputs, n, ignore_nulls)
         return _float_fold[DType.float64, False](inputs, n, ignore_nulls)
     if kind == H_SUM:
-        # Polars' sum_horizontal: nulls become zero, then pairwise `+`.
+        # Replace nulls with zero before pairwise addition when nulls are ignored.
         # Durations add as their Int64 counts.
         if target.is_duration():
             for k in range(len(inputs)):

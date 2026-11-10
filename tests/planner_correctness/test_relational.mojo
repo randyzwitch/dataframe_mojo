@@ -95,7 +95,7 @@ def test_join_predicates_preserve_outer_null_rows_and_side_dependencies() raises
                         assert_frame_unordered(optimized, raw)
                     # A differently named right key must not attract a predicate
                     # referring to the output's coalesced left key. A right
-                    # join's output key is the right one (Polars), named back
+                    # join's output key is the right one, named back
                     # for the model.
                     var renamed = right.rename({"i": "right_key"})
                     var plan = left.lazy().join(
@@ -183,7 +183,7 @@ def test_join_projection_retains_both_keys_suffix_payloads_and_empty_schema() ra
                     var pairs = reference_join(
                         left_model, right_model, ["s"], how
                     )
-                    # A right join's key is the right one (Polars).
+                    # A right join's key is the right one.
                     var key = String("right_key" if how == "right" else "s")
                     for optimize in [False, True]:
                         var actual = _fixed(
@@ -391,7 +391,7 @@ def test_predicate_routes_prove_safe_sides_and_aggregate_barriers() raises:
         }
     )
     for how in ["inner", "left", "semi", "anti", "right", "full"]:
-        # A right join's output key is the right one (Polars).
+        # A right join's output key is the right one.
         var key = String("right_key" if how == "right" else "i")
         var plan = (
             source.lazy()
@@ -422,7 +422,7 @@ def test_predicate_routes_prove_safe_sides_and_aggregate_barriers() raises:
             ._optimized()
         )
         # No null row passes the filter, so the left join keeps the inner
-        # join's rows and becomes one (DuckDB's `PushdownLeftJoin`); the
+        # join's rows and becomes one; the
         # filter then moves into the right input.
         ref root = plan._plan._nodes[len(plan._plan._nodes) - 1]
         assert_equal(root.kind, JOIN)

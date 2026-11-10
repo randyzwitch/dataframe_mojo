@@ -1,8 +1,7 @@
 # CSV ingestion contract
 
 `read_csv(path, schema, ...)` reads typed columns; `read_csv(path, ...)`
-infers their types. Both use one native Mojo pipeline derived from Polars
-1.44.2: mapped input, quote-aware record scanning, borrowed field splitting,
+infers their types. Both use one native Mojo pipeline: mapped input, quote-aware record scanning, borrowed field splitting,
 typed builders, and chunk-preserving assembly. There is no alternate legacy
 reader. Uncompressed input has no Python, Arrow, Polars, Rayon or jemalloc
 runtime dependency.
@@ -78,7 +77,7 @@ explicit schema API. An empty or duplicate-name shorthand schema raises.
 `.datetime`, `.time`, or `CsvField(name, dtype)` for any supported numeric width. Explicit schema
 names label columns by position, including when the file has different header
 names. `CsvField.nullable` remains accepted metadata; it does not prohibit null
-CSV values, matching Polars' nullable columns.
+CSV values; validity is represented separately from the values.
 
 Use `CsvField.categorical("region")`, `CsvField("region", DataType.CATEGORICAL)`,
 or `("region", DataType.CATEGORICAL)` to read dictionary-encoded strings.
@@ -95,13 +94,13 @@ Empty and header-only files produce zero rows with an explicit schema. Short
 records are padded with nulls. Extra fields raise unless truncation or a partial
 projection permits skipping the remaining source fields. LF, CRLF, missing
 final newlines, quoted separators, doubled quotes and multiline fields are
-supported. Quote handling follows Polars' splitter and builders; the old
+supported. Quote handling uses the same rules in field splitting and typed building; the old
 strict tokenizer's rejection rules and error priority are not retained.
 The UTF-8 BOM is removed only at the beginning of the input.
 
 Temporal fields accept an optional format; an empty format selects the existing
 ISO temporal converter. The writer emits ISO text. Temporal conversion uses
-this library's existing parser; it is not a complete port of Polars' chrono
+this library's existing parser; it does not implement every calendar
 format inference. `CsvSchema.of(frame)` retains temporal types.
 
 ## Nulls and conversion
@@ -133,15 +132,16 @@ passes through the numeric grammar checks.
 
 The default sample is **100 rows**; `infer_schema_length=-1` samples the whole
 input. Inference and decoding share the same mapped input. Boolean, Int64,
-Float64 and String candidates follow Polars' lexical inference rules. Leading
+Float64 and String candidates are selected from the text's numeric and
+Boolean grammar. Leading
 zeroes do not force String, and an integer-shaped value can infer Int64 then
 fail range checking during decoding. Null fields are ignored; an all-null
 column defaults to String. Mixed integer/float candidates become Float64.
 
 `try_parse_dates=True` enables temporal inference; the default is False.
 `schema_overrides` maps names to dtype strings and overrides inferred types.
-Unknown names are ignored, as in Polars; invalid dtype names for known columns
-raise. Duplicate header names use Polars' `_duplicated_N` suffixes; headerless
+Unknown names are ignored; invalid dtype names for known columns
+raise. Duplicate header names gain `_duplicated_N` suffixes to make them unique; headerless
 columns are `column_1`, `column_2`, and so on. Empty inferred input raises an error. Use explicit types or a longer sample when later values
 cannot be represented by the inferred dtype.
 

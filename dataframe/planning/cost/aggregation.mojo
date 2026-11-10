@@ -49,11 +49,10 @@ def select_aggregation_strategy(
     eligibility: PipelineEligibility,
     inline_table_eligible: Bool,
 ) raises -> AggregationDecision:
-    """Choose one route, retaining the original preference and sampling order.
-
-    Semantic pipeline/inline-state eligibility is supplied by the caller;
-    group keys are grouped as their values, as DuckDB's aggregate does.
-    """
+    """Estimate grouped reduction work from rows, key widths and reduction
+    state sizes. Computed group keys are grouped by their values. Use
+    estimated properties only to choose execution cost; they do not change
+    grouping equality."""
     var choice = AggregationDecision(
         MORSEL_PIPELINE if eligibility.allowed else BATCH_STREAM,
         eligibility.reason,

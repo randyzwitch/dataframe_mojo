@@ -78,8 +78,7 @@ def _column_names(expr: Expr) -> List[String]:
 
 
 def count_rows_by(expression: Expr, key: String) -> Expr:
-    """`expression` with each `len()` (a count of the group's rows, DuckDB's
-    `count_star`) as `col(key).len()`, a reduction with a state in the
+    """`expression` with each `len()` as `col(key).len()`, a reduction with a state in the
     aggregate table: every row has a value of the key, null or not, so the
     counts are the same. Unchanged when it has none, or when the result is
     no streaming reduction (`len()` inside a window or a sequence)."""
@@ -133,7 +132,7 @@ def _stream_reductions(
     """Whether every expression is reductions of row-local inputs, combined
     row by row. `holistic` admits medians and quantiles; `listed` also
     mode and implode, whose states the aggregate table holds by address
-    (DuckDB's mode and list aggregates)."""
+   ."""
     if len(expressions) == 0:
         return False
     for expression in expressions:
