@@ -20,13 +20,13 @@ scan; build-side semi/anti joins emit flagged/unflagged rows respectively.
 """
 from std.bit import next_power_of_two
 from std.collections import Optional
-from std.ffi import external_call
 from std.memory import (
     ArcPointer,
     Pointer,
     bitcast,
     unsafe_memcpy,
     unsafe_memcmp,
+    unsafe_memset_zero,
 )
 from std.sys.intrinsics import prefetch
 
@@ -411,8 +411,14 @@ def _same_text(a: Int, b: Int) -> Bool:
         )
         return (_load64(a + 8) ^ _load64(b + 8)) & mask == 0
     return (
-        external_call["memcmp", Int32](
-            Int(_load64(a + 8)), Int(_load64(b + 8)), n
+        unsafe_memcmp(
+            Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=Int(_load64(a + 8))
+            ),
+            Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=Int(_load64(b + 8))
+            ),
+            n,
         )
         == 0
     )
@@ -572,7 +578,12 @@ struct _SinkJob(Job):
             if self.found:
                 # Every row starts not found.
                 var found = chunk.writable(found_column, PHYSICAL_BOOL)
-                _ = external_call["memset", Int](found.data, Int32(0), n)
+                unsafe_memset_zero(
+                    Pointer[UInt8, MutAnyOrigin](
+                        unsafe_from_address=found.data
+                    ),
+                    n,
+                )
             var hashes = chunk.writable(hash_column, PHYSICAL_UINT64)
             for k in range(fields):
                 _hash_column(
@@ -687,8 +698,9 @@ struct _InsertJob(Copyable, Job):
         self.offsets_at = Int(self.layout.offsets.unsafe_ptr())
         self.widths_at = Int(self.layout.widths.unsafe_ptr())
         var region = self.entries + 8 * self.base
-        _ = external_call["memset", Int](
-            region, Int32(0), 8 * (Int(self.bitmask) + 1)
+        unsafe_memset_zero(
+            Pointer[UInt8, MutAnyOrigin](unsafe_from_address=region),
+            8 * (Int(self.bitmask) + 1),
         )
         ref rows = Pointer[TupleDataCollection, MutAnyOrigin](
             unsafe_from_address=self.collection
@@ -818,8 +830,11 @@ def _perfect_slots(
                 var size = Int(span) + 1
                 slots = List[UInt32](unsafe_uninit_length=size)
                 bits = List[UInt8](unsafe_uninit_length=(size + 7) // 8)
-                _ = external_call["memset", Int](
-                    Int(bits.unsafe_ptr()), Int32(0), (size + 7) // 8
+                unsafe_memset_zero(
+                    Pointer[UInt8, MutAnyOrigin](
+                        unsafe_from_address=Int(bits.unsafe_ptr())
+                    ),
+                    (size + 7) // 8,
                 )
                 var table = slots.unsafe_ptr()
                 var set = bits.unsafe_ptr()

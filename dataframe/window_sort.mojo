@@ -5,8 +5,7 @@ partition and peer boundaries. Stable ordering keeps input order among
 equal keys, which makes positional window functions deterministic. The
 result maps computed values back to the original row positions.
 """
-from std.ffi import external_call
-from std.memory import Pointer
+from std.memory import Pointer, unsafe_memcmp
 from std.sys import size_of
 
 from dataframe.storage.allocation import huge_uninit
@@ -178,8 +177,14 @@ def _string_changes(
                 var x = views._get_unchecked(base + previous).as_bytes()
                 var y = views._get_unchecked(base + row).as_bytes()
                 differs = (
-                    external_call["memcmp", Int32](
-                        Int(x.unsafe_ptr()), Int(y.unsafe_ptr()), len(x)
+                    unsafe_memcmp(
+                        Pointer[UInt8, ImmutAnyOrigin](
+                            unsafe_from_address=Int(x.unsafe_ptr())
+                        ),
+                        Pointer[UInt8, ImmutAnyOrigin](
+                            unsafe_from_address=Int(y.unsafe_ptr())
+                        ),
+                        len(x),
                     )
                     != 0
                 )
@@ -200,9 +205,13 @@ def _string_changes(
         var b0 = Int(offsets[unsafe_offset=row])
         var b1 = Int(offsets[unsafe_offset=row + 1])
         var differs = a1 - a0 != b1 - b0 or (
-            external_call["memcmp", Int32](
-                Int(data.unsafe_offset(a0)),
-                Int(data.unsafe_offset(b0)),
+            unsafe_memcmp(
+                Pointer[UInt8, ImmutAnyOrigin](
+                    unsafe_from_address=Int(data.unsafe_offset(a0))
+                ),
+                Pointer[UInt8, ImmutAnyOrigin](
+                    unsafe_from_address=Int(data.unsafe_offset(b0))
+                ),
                 a1 - a0,
             )
             != 0
@@ -265,16 +274,28 @@ def _strings_equal(strings: StringColumn, a: Int, b: Int) -> Bool:
         var p = views._get_unchecked(strings._offset + a).as_bytes()
         var q = views._get_unchecked(strings._offset + b).as_bytes()
         return (
-            external_call["memcmp", Int32](
-                Int(p.unsafe_ptr()), Int(q.unsafe_ptr()), len(p)
+            unsafe_memcmp(
+                Pointer[UInt8, ImmutAnyOrigin](
+                    unsafe_from_address=Int(p.unsafe_ptr())
+                ),
+                Pointer[UInt8, ImmutAnyOrigin](
+                    unsafe_from_address=Int(q.unsafe_ptr())
+                ),
+                len(p),
             )
             == 0
         )
     var p = strings._row_bytes(a)
     var q = strings._row_bytes(b)
     return len(p) == len(q) and (
-        external_call["memcmp", Int32](
-            Int(p.unsafe_ptr()), Int(q.unsafe_ptr()), len(p)
+        unsafe_memcmp(
+            Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=Int(p.unsafe_ptr())
+            ),
+            Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=Int(q.unsafe_ptr())
+            ),
+            len(p),
         )
         == 0
     )
@@ -487,7 +508,8 @@ struct _LocalNumberJob(Job):
 
 struct _KeyEquality(Movable):
     """`_rows_equal` over a partition key, the comparison hoisted: a single
-    integer key's values are compared in place, any other keys through `_rows_equal`."""
+    integer key's values are compared in place, any other keys through `_rows_equal`.
+    """
 
     var keys: List[Series]
     var data: Int
@@ -538,9 +560,13 @@ struct _KeyEquality(Movable):
             )
             return values[unsafe_offset=a] == values[unsafe_offset=b]
         return (
-            external_call["memcmp", Int32](
-                self.data + a * self.width,
-                self.data + b * self.width,
+            unsafe_memcmp(
+                Pointer[UInt8, ImmutAnyOrigin](
+                    unsafe_from_address=self.data + a * self.width
+                ),
+                Pointer[UInt8, ImmutAnyOrigin](
+                    unsafe_from_address=self.data + b * self.width
+                ),
                 self.width,
             )
             == 0
@@ -1114,7 +1140,8 @@ def rank_order_keys(
 ) raises:
     """Append the order keys that rank `input`: its value (a struct's
     fields in turn), nulls first in each partition so that ranks count
-    from the first value. A struct field's nulls are its smallest values; a null struct sorts before every value."""
+    from the first value. A struct field's nulls are its smallest values; a null struct sorts before every value.
+    """
     var column = input.rechunk() if input.is_chunked() else input.copy()
     if column.dtype().is_struct():
         var structs = column.struct_column()

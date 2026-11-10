@@ -5,8 +5,7 @@ by combining states that cover it. Reusing interior ranges avoids
 recomputing each overlapping window from every source row. Order-sensitive
 reductions use their dedicated paths rather than unordered state merges.
 """
-from std.ffi import external_call
-from std.memory import Pointer, bitcast
+from std.memory import Pointer, bitcast, unsafe_memset_zero
 from std.collections import Optional
 
 from dataframe.aggregation.function import (
@@ -417,9 +416,10 @@ struct _EvaluateJob(Job):
         var begins = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.begins)
         var ends = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ends)
         var part = _TreePart(tree)
-        _ = external_call["memset", Int](
-            self.rows + self.lo * self.step,
-            Int32(0),
+        unsafe_memset_zero(
+            Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=self.rows + self.lo * self.step
+            ),
             (self.hi - self.lo) * self.step,
         )
         if self.naive:

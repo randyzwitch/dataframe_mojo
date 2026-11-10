@@ -21,7 +21,13 @@ from std.atomic import Atomic
 from std.bit import count_trailing_zeros
 from std.os import getenv
 from std.ffi import external_call
-from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
+from std.memory import (
+    ArcPointer,
+    Pointer,
+    bitcast,
+    unsafe_memcpy,
+    unsafe_memcmp,
+)
 from std.sys import size_of
 from std.time import perf_counter_ns
 
@@ -1010,9 +1016,15 @@ struct _Collector(Movable):
                 var shared = -1
                 for l in range(len(result.row_lists)):
                     if len(result.row_lists[l]) == len(listed) and (
-                        external_call["memcmp", Int32](
-                            Int(result.row_lists[l].unsafe_ptr()),
-                            Int(listed.unsafe_ptr()),
+                        unsafe_memcmp(
+                            Pointer[UInt8, ImmutAnyOrigin](
+                                unsafe_from_address=Int(
+                                    result.row_lists[l].unsafe_ptr()
+                                )
+                            ),
+                            Pointer[UInt8, ImmutAnyOrigin](
+                                unsafe_from_address=Int(listed.unsafe_ptr())
+                            ),
                             4 * len(listed),
                         )
                         == 0
@@ -1746,7 +1758,8 @@ def _sink_chunk[
 
 
 def _combined[S: Sink](var locals: List[S]) raises -> List[S]:
-    """Every worker's local sink state combined into the global state, in worker order."""
+    """Every worker's local sink state combined into the global state, in worker order.
+    """
     var combined = List[S]()
     while len(locals) > 0:
         locals.pop(0).combine(combined)
