@@ -36,7 +36,6 @@ from std.sys import bit_width_of
 from dataframe.categorical import codes_to_ranks, dictionary_ranks
 from dataframe.dtype import DataType
 from dataframe.series import Series
-from dataframe.sorting.algorithms import SkaInfo
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
@@ -157,8 +156,7 @@ def _longest(column: Series) -> Int:
 
 struct SortKeyLayout(Copyable, Movable):
     """The key of a sort (Sort's create_sort_key binding plus the key
-    TupleDataLayout): its columns, its record form, and the radix sort's
-    settings."""
+    TupleDataLayout): its columns and packed record form."""
 
     var columns: List[SortKeyColumn]
     var rows: Int
@@ -169,7 +167,6 @@ struct SortKeyLayout(Copyable, Movable):
     var words: Int
     var variable: Bool
     var sort_width: Int
-    var info: SkaInfo
 
     def __init__(
         out self,
@@ -242,30 +239,16 @@ struct SortKeyLayout(Copyable, Movable):
                     UnifiedVectorFormat(),
                 )
             )
-        # TupleDataLayout::Initialize(orders): the widest key, and the null
-        # bytes every key shares while the key is still all fixed-width
-        # and valid.
+        # Choose the packed record width from the widest encoded key.
         var all_constant = True
         var constant_size = 0
         var sort_width = 0
-        var skippable = 0
-        var all_valid_and_truly_constant = True
         for c in columns:
             if c.encoding == _ENC_ROW:
                 constant_size += 8
                 if sort_width >= 0:
                     sort_width += 8
-                all_valid_and_truly_constant = False
                 continue
-            if (
-                all_valid_and_truly_constant
-                and not c.nulls
-                and c.constant_size()
-                and sort_width < 7
-            ):
-                skippable |= 1 << sort_width
-            else:
-                all_valid_and_truly_constant = False
             if c.constant_size():
                 constant_size += 1 + c.width
                 if sort_width >= 0:
@@ -295,14 +278,12 @@ struct SortKeyLayout(Copyable, Movable):
             words = 2
         else:
             words = 3
-        var ska_sort_width = 8 if sort_width < 0 else min(sort_width, 8)
         self.columns = columns^
         self.rows = rows
         self.vectors = False
         self.words = words
         self.variable = variable
         self.sort_width = sort_width
-        self.info = SkaInfo(variable or words != 1, ska_sort_width, skippable)
 
     def record_words(self) -> Int:
         return 4 if self.variable else self.words + 1

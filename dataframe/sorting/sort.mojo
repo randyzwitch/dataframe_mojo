@@ -11,14 +11,7 @@ from std.memory import Pointer, unsafe_memcpy
 
 from dataframe.parallel import Job, configured_workers, partitions, run_jobs
 from dataframe.series import Series
-from dataframe.sorting.algorithms import (
-    MergeBuffer,
-    Rec,
-    SkaInfo,
-    SortKeys,
-    pdqsort_branchless,
-    vergesort,
-)
+from dataframe.sorting.algorithms import Rec, SortKeys, sort_keys
 from dataframe.sorting.top_n import TopNBoundary, TopNHeap
 from dataframe.sorting.sort_key import (
     DEFAULT_ROW_GROUP_SIZE,
@@ -72,12 +65,8 @@ struct _SinkRunJob[W: Int, VAR: Bool](Job):
         )[]
         self.block = encode_keys(layout, self.lo, self.hi)
         var n = self.block.count
-        var buffer = MergeBuffer(n, layout.record_words())
         var keys = SortKeys[Self.W, Self.VAR](self.block.address())
-        vergesort[Self.W, Self.VAR, True](
-            keys, 0, n, layout.info, buffer.address()
-        )
-        _ = buffer^
+        sort_keys(keys, 0, n)
 
 
 # ===----------------------------------------------------------------------=== #
@@ -152,14 +141,12 @@ struct _BoundaryJob[W: Int, VAR: Bool](Job):
 
 
 struct _MergePartitionJob[W: Int, VAR: Bool](Job):
-    """TemplatedMergePartition and the partition's scan: its records from
-    every run, sorted by vergesort (pdqsort for unsorted stretches), then
-    its row ids written at the partition's place in the output."""
+    """Sort a partition's records with the standard comparator sort,
+    then write their row ids at the partition's place in the output."""
 
     var runs: List[Int]
     var begins: List[Int]
     var ends: List[Int]
-    var info: SkaInfo
     var output: Int
     var start: Int
 
@@ -168,14 +155,12 @@ struct _MergePartitionJob[W: Int, VAR: Bool](Job):
         runs: List[Int],
         begins: List[Int],
         ends: List[Int],
-        info: SkaInfo,
         output: Int,
         start: Int,
     ):
         self.runs = runs.copy()
         self.begins = begins.copy()
         self.ends = ends.copy()
-        self.info = info
         self.output = output
         self.start = start
 
@@ -205,11 +190,7 @@ struct _MergePartitionJob[W: Int, VAR: Bool](Job):
             at += n * R * 8
         var keys = K(Int(merged.unsafe_ptr()))
         if active > 1:
-            var buffer = MergeBuffer(count, R)
-            vergesort[Self.W, Self.VAR, False](
-                keys, 0, count, self.info, buffer.address()
-            )
-            _ = buffer^
+            sort_keys(keys, 0, count)
         var output = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.output)
         for i in range(count):
             output[unsafe_offset=self.start + i] = keys.payload(i)
@@ -275,7 +256,6 @@ def _sorted_rows[
                 runs,
                 previous,
                 ends,
-                layout.info,
                 Int(order.unsafe_ptr()),
                 p * partition_size,
             )

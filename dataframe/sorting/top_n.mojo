@@ -10,7 +10,7 @@ from std.atomic import Atomic
 from std.ffi import external_call
 from std.memory import Pointer, unsafe_memcpy
 
-from dataframe.sorting.algorithms import Rec, SortKeys, pdqsort_branchless
+from dataframe.sorting.algorithms import Rec, SortKeys, sort_keys
 from dataframe.sorting.sort_key import KeyBlock
 
 
@@ -311,7 +311,7 @@ struct TopNHeap(Movable):
 
     def finalize[W: Int, VAR: Bool](self):
         """Finalize: the entries in key order."""
-        pdqsort_branchless(self.keys[W, VAR](), 0, self.size)
+        sort_keys(self.keys[W, VAR](), 0, self.size)
 
     def combine[W: Int, VAR: Bool](mut self, other: TopNHeap):
         """Combine: another thread's finalized heap, best first, until an
