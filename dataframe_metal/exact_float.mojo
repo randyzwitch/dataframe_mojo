@@ -1,4 +1,5 @@
 """Host finishing for exact Float32 exponent bins used by Float64 means."""
+from std.bit import bit_width
 from std.memory import bitcast
 from std.utils.numerics import inf
 
@@ -34,11 +35,7 @@ def finish_float_bins(
         top -= 1
     if top < 0:
         return 0
-    var leading = digits[top]
-    var bits = 0
-    while leading:
-        leading >>= 1
-        bits += 1
+    var bits = Int(bit_width(digits[top]))
     var width = top * 32 + bits
     var shift = max(0, width - 53)
     var significand = UInt64(0)

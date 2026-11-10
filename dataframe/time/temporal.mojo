@@ -25,8 +25,6 @@ from dataframe.time.calendar import (
     civil_from_days,
     days_from_civil,
     days_in_month,
-    floor_div,
-    floor_mod,
     is_leap,
 )
 from dataframe.dtype import DataType
@@ -71,7 +69,7 @@ def checked_floor_div(a: Int64, b: Int64) raises -> Int64:
     """Checked temporal quotient; the caller handles zero divisors as null."""
     if a == INT64_MIN and b == -1:
         raise Error("temporal value overflows Int64")
-    return floor_div(a, b)
+    return a // b
 
 
 def ticks_per_day(dtype: DataType) -> Int64:
@@ -97,8 +95,8 @@ def split(value: Int64, dtype: DataType) -> Parts:
         var ymd = civil_from_days(value)
         return Parts(ymd[0], ymd[1], ymd[2], 0, 0, 0, 0)
     var per_day = NANOS_PER_DAY if dtype.is_time() else ticks_per_day(dtype)
-    var days = Int64(0) if dtype.is_time() else floor_div(value, per_day)
-    var within = floor_mod(value, per_day)
+    var days = Int64(0) if dtype.is_time() else (value // per_day)
+    var within = value % per_day
     var per_second = dtype.per_second()
     var seconds = within // per_second
     var nanos = (within % per_second) * (1000000000 // per_second)
@@ -233,7 +231,7 @@ def zone_of(dtype: DataType) raises -> TimeZone:
 def to_local(value: Int64, dtype: DataType, zone: TimeZone) -> Int64:
     """The wall-clock ticks in `zone` of UTC ticks `value`."""
     var per_second = dtype.per_second()
-    return value + zone.offset_at(floor_div(value, per_second)) * per_second
+    return value + zone.offset_at((value // per_second)) * per_second
 
 
 def localize(
@@ -247,7 +245,7 @@ def localize(
     options ask for null. Raises for a non-existent or ambiguous time when
     the corresponding option is set to "raise"."""
     var per_second = dtype.per_second()
-    var seconds = floor_div(local, per_second)
+    var seconds = local // per_second
     var fraction = local - seconds * per_second
     var found = zone.resolve(seconds)
     var instant = found[1]
@@ -283,8 +281,8 @@ def relocalize(
     """UTC ticks for wall-clock ticks `local` produced by shifting the value
     at UTC ticks `original` in local time (see TimeZone.relocalize)."""
     var per_second = dtype.per_second()
-    var seconds = floor_div(local, per_second)
-    var instant = zone.relocalize(seconds, floor_div(original, per_second))
+    var seconds = local // per_second
+    var instant = zone.relocalize(seconds, (original // per_second))
     return checked_add(
         checked_mul(instant, per_second), local - seconds * per_second
     )
@@ -557,7 +555,7 @@ def _parse_name(
 
 
 def _iso_weekday(days: Int64) -> Int64:
-    return floor_mod(floor_mod(days, 7) + 3, 7) + 1
+    return (((days % 7) + 3) % 7) + 1
 
 
 def _week_number(days: Int64, year: Int64, monday: Bool) -> Int64:
@@ -749,9 +747,7 @@ def _parse_prepared(
             _iso_weekday(jan1) - 1 if monday else _iso_weekday(jan1) % 7
         )
         var within_week = weekday - 1 if monday else weekday % 7
-        var day = (
-            jan1 + floor_mod(-jan_weekday, 7) + (week - 1) * 7 + within_week
-        )
+        var day = jan1 + (-jan_weekday % 7) + (week - 1) * 7 + within_week
         var ymd = civil_from_days(day)
         if ymd[0] != parts.year:
             raise Error("week date falls outside the requested year")
@@ -801,7 +797,7 @@ def format_in(
     if not dtype.is_datetime() or dtype.time_zone().byte_length() == 0:
         return _render(value, dtype, pattern, 0, "", False)
     var per_second = dtype.per_second()
-    var type = zone.type_at(floor_div(value, per_second))
+    var type = zone.type_at((value // per_second))
     var offset = zone.offset_of(type)
     return _render(
         value + offset * per_second,
@@ -821,7 +817,7 @@ def format_prepared_in(
     if not dtype.is_datetime() or dtype.time_zone().byte_length() == 0:
         return _render_prepared(value, dtype, plan, 0, "", False)
     var per_second = dtype.per_second()
-    var type = zone.type_at(floor_div(value, per_second))
+    var type = zone.type_at((value // per_second))
     var offset = zone.offset_of(type)
     return _render_prepared(
         value + offset * per_second,
@@ -873,7 +869,7 @@ def _render_prepared(
             if d == 89:
                 out += _pad(p.year, 4)
             elif d == 121:
-                out += _pad(floor_mod(p.year, 100), 2)
+                out += _pad((p.year % 100), 2)
             elif d == 98 or d == 66:
                 out += (plan.short_months if d == 98 else plan.months)[
                     Int(p.month - 1)
@@ -1060,8 +1056,8 @@ def parse_interval(every: String) raises -> Tuple[Int64, Int64, Int64]:
 def add_months(parts: Parts, months: Int64) -> Parts:
     """Shift by calendar months, clamping the day to the target month."""
     var index = parts.year * 12 + (parts.month - 1) + months
-    var year = floor_div(index, 12)
-    var month = floor_mod(index, 12) + 1
+    var year = index // 12
+    var month = (index % 12) + 1
     var day = min(parts.day, days_in_month(year, month))
     return Parts(
         year, month, day, parts.hour, parts.minute, parts.second, parts.nanos

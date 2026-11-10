@@ -11,6 +11,7 @@ per key. Categorical codes use their dictionary bounds; 8- and 16-bit
 integers without statistics can use the physical type's limits. The slot
 limit bounds memory even when many possible key combinations never occur.
 """
+from std.bit import bit_width
 from std.memory import Pointer, bitcast
 from std.sys import size_of
 
@@ -48,16 +49,6 @@ struct PerfectHash(Copyable, Movable):
     def total_groups(self) -> Int:
         """`total_groups`: 2^total_required_bits."""
         return 1 << self.total_bits
-
-
-def _required_bits(n: UInt64) -> Int:
-    """`RequiredBitsForValue`: the bits needed to represent n."""
-    var bits = 0
-    var rest = n
-    while rest > 0:
-        rest >>= 1
-        bits += 1
-    return bits
 
 
 def _integer_storage(part: Series) -> Int:
@@ -136,7 +127,7 @@ def perfect_hash(keys: List[Series]) raises -> PerfectHash:
         if range >= Int128(Int32.MAX):
             return PerfectHash.none()
         # One slot for null and one more for the one-based values.
-        var needed = _required_bits(UInt64(range + 2))
+        var needed = Int(bit_width(UInt64(range + 2)))
         total += needed
         if total > PERFECT_HT_THRESHOLD:
             return PerfectHash.none()

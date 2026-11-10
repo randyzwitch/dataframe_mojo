@@ -6,6 +6,7 @@ Mergeable states (sums, counts, min/max, moments, logic, distinct sets) could
 be kept per worker and merged; first/last need partition order, and
 median/quantile keep every valid value of a group.
 """
+from std.bit import bit_width
 from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
 from std.memory import ArcPointer, bitcast
@@ -751,7 +752,7 @@ def _select(mut values: List[Float64], k: Int):
     var lo = 0
     var hi = len(values)
     var rounds = 0
-    var limit = 2 * _bit_length(hi) + 8
+    var limit = 2 * bit_width(hi) + 8
     while hi - lo > 24:
         if rounds == limit:
             sort(Span(values)[lo:hi])
@@ -790,16 +791,6 @@ def _select(mut values: List[Float64], k: Int):
             data[unsafe_offset=j] = data[unsafe_offset=j - 1]
             j -= 1
         data[unsafe_offset=j] = x
-
-
-@always_inline
-def _bit_length(n: Int) -> Int:
-    var bits = 0
-    var x = n
-    while x > 0:
-        bits += 1
-        x >>= 1
-    return bits
 
 
 def quantile_of(

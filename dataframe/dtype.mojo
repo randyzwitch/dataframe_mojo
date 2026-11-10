@@ -11,6 +11,7 @@ spec behind a shared pointer and decode them on demand. A DataType cannot
 hold a `List[DataType]`, even indirectly: Mojo rejects that cycle in an
 imported module.
 """
+from std.bit import next_power_of_two
 from dataframe.storage.buffer import _Buffer
 from std.collections import Optional
 from std.memory import ArcPointer
@@ -101,9 +102,7 @@ struct CategoricalDictionary(Movable, Sized):
         equal labels are equal group keys (#943)."""
         self.canonical = List[UInt32]()
         var n = len(self)
-        var size = 16
-        while size < 2 * n:
-            size *= 2
+        var size = max(16, next_power_of_two(2 * n))
         var table = List[Int32](length=size, fill=-1)
         var result = List[UInt32](capacity=n)
         var repeated = False

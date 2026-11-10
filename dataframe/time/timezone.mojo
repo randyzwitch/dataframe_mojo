@@ -21,8 +21,6 @@ from dataframe.time.calendar import (
     civil_from_days,
     days_from_civil,
     days_in_month,
-    floor_div,
-    floor_mod,
     is_leap,
 )
 
@@ -50,8 +48,8 @@ struct _RuleDate(Copyable, ImplicitlyCopyable, Movable):
             return first + self.day
         var start = days_from_civil(year, self.month, 1)
         # 1970-01-01 was a Thursday; POSIX counts Sunday as day 0.
-        var weekday = floor_mod(start + 4, 7)
-        var day = start + floor_mod(self.day - weekday, 7) + (self.week - 1) * 7
+        var weekday = (start + 4) % 7
+        var day = start + ((self.day - weekday) % 7) + (self.week - 1) * 7
         var end = start + days_in_month(year, self.month)
         while day >= end:
             day -= 7
@@ -149,7 +147,7 @@ struct TimeZone(Copyable, Movable):
             return self._std
         var std = self._offsets[self._std]
         var dst = self._offsets[self._dst]
-        var year = civil_from_days(floor_div(seconds + std, 86400))[0]
+        var year = civil_from_days(((seconds + std) // 86400))[0]
         var start = self._start.day_in(year) * 86400 + self._start.seconds - std
         var end = self._end.day_in(year) * 86400 + self._end.seconds - dst
         var daylight: Bool

@@ -10,6 +10,7 @@ touch makes the kernel back it with 2 MB pages: two faults for a 4 MB
 table instead of 1024, and a probe's scattered reads miss the TLB less.
 """
 from std.ffi import external_call
+from std.math import align_down, align_up
 from std.sys import CompilationTarget, size_of
 
 # Linux `MADV_HUGEPAGE`.
@@ -27,8 +28,8 @@ def advise_huge_pages(address: Int, bytes: Int):
         return
     if bytes < _HUGE_PAGE:
         return
-    var start = (address + _PAGE - 1) & ~(_PAGE - 1)
-    var end = (address + bytes) & ~(_PAGE - 1)
+    var start = align_up(address, _PAGE)
+    var end = align_down(address + bytes, _PAGE)
     if end - start >= _HUGE_PAGE:
         _ = external_call["madvise", Int32](start, end - start, _MADV_HUGEPAGE)
 

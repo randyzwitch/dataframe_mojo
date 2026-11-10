@@ -5,6 +5,7 @@ heap data. Nested layouts live in a flat list: node zero describes the
 row, and struct fields point to their child nodes. Sharing this list
 between collections and allocators avoids copying layout metadata.
 """
+from std.math import align_up
 from std.memory import ArcPointer
 
 from dataframe.dtype import DataType
@@ -50,12 +51,6 @@ def constant_size(physical: Int) -> Bool:
         and physical != PHYSICAL_LIST
         and physical != PHYSICAL_STRUCT
     )
-
-
-@always_inline
-def _align(value: Int) -> Int:
-    """AlignValue: the next multiple of 8."""
-    return (value + 7) & ~7
 
 
 def physical_of_dtype(dtype: DataType) raises -> Int:
@@ -193,14 +188,14 @@ struct TupleDataLayout(Copyable, Movable):
         # Aggregate states, aligned.
         var align = len(aggregate_sizes) > 0
         if align:
-            node.row_width = _align(node.row_width)
+            node.row_width = align_up(node.row_width, 8)
         node.data_width = node.row_width - node.flag_width
         for size in aggregate_sizes:
             node.offsets.append(node.row_width)
             node.row_width += size
         node.aggr_width = node.row_width - node.data_width - node.flag_width
         if align:
-            node.row_width = _align(node.row_width)
+            node.row_width = align_up(node.row_width, 8)
 
         nodes[index] = node^
         return index

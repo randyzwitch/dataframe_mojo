@@ -4,6 +4,7 @@
 dataframe.parse, so the clean CSV decoder can preserve its float
 parsing behavior without changing legacy cast behavior.
 """
+from std.math import mulhi
 from std.memory import bitcast
 from std.bit import count_leading_zeros
 from std.builtin.globals import global_constant
@@ -360,8 +361,7 @@ def _power(q: Int) -> Int:
 
 @always_inline
 def _full_multiply(a: UInt64, b: UInt64) -> _Product128:
-    var product = UInt128(a) * UInt128(b)
-    return _Product128(UInt64(product), UInt64(product >> 64))
+    return _Product128(a * b, mulhi(a, b))
 
 
 @always_inline

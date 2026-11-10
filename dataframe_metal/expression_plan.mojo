@@ -1,4 +1,5 @@
 """Compile checked native arithmetic without evaluating input values."""
+from std.bit import count_trailing_zeros
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Expr
 from dataframe.expr import COL, LIT_INT, LIT_FLOAT, ADD, SUB, MUL, UNTYPED
@@ -51,8 +52,7 @@ def _integer_fits_float32(value: Int64) -> Bool:
         magnitude = UInt64(0) - magnitude
     if magnitude == 0:
         return True
-    while (magnitude & 1) == 0:
-        magnitude >>= 1
+    magnitude >>= count_trailing_zeros(magnitude)
     return magnitude < (UInt64(1) << 24)
 
 

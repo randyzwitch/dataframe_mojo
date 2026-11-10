@@ -13,6 +13,7 @@ once per dictionary value (`_on_dictionary` in
 execution), so a recode costs a lookup per distinct value and a gather of
 the codes.
 """
+from std.bit import next_power_of_two
 from std.collections import Optional
 from std.memory import ArcPointer, Pointer, bitcast
 
@@ -354,9 +355,7 @@ struct _Lookup(Copyable, Movable):
                     if slot >= 0:
                         self.direct[at] = Int32(positions[slot])
                 return
-        var capacity = 16
-        while capacity < 2 * len(positions):
-            capacity *= 2
+        var capacity = max(16, next_power_of_two(2 * len(positions)))
         self.mask = capacity - 1
         self.words = List[UInt64](length=capacity, fill=0)
         self.slots = List[Int32](length=capacity, fill=-1)

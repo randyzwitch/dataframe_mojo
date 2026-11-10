@@ -12,6 +12,7 @@ run: the at-rest columns (`ColumnArena`), the `DataChunk` whose caches
 and selection buffers a step wrote, and the constants of a bound
 expression. Copying a vector is copying a few words.
 """
+from std.bit import byte_swap
 from std.memory import Pointer, unsafe_memcpy
 from std.ffi import external_call
 
@@ -312,8 +313,8 @@ def string_compare(a: Int, b: Int) -> Int:
     var left = Pointer[StringT, MutAnyOrigin](unsafe_from_address=a)[]
     var right = Pointer[StringT, MutAnyOrigin](unsafe_from_address=b)[]
     if left.prefix != right.prefix:
-        var l = _bswap32(left.prefix)
-        var r = _bswap32(right.prefix)
+        var l = byte_swap(left.prefix)
+        var r = byte_swap(right.prefix)
         return -1 if l < r else 1
     var left_length = Int(left.length)
     var right_length = Int(right.length)
@@ -327,16 +328,6 @@ def string_compare(a: Int, b: Int) -> Int:
         if compared != 0:
             return Int(compared)
     return left_length - right_length
-
-
-@always_inline
-def _bswap32(value: UInt32) -> UInt32:
-    return (
-        (value >> 24)
-        | ((value >> 8) & 0xFF00)
-        | ((value << 8) & 0xFF0000)
-        | (value << 24)
-    )
 
 
 struct UnifiedVectorFormat(Copyable, ImplicitlyCopyable, Movable):

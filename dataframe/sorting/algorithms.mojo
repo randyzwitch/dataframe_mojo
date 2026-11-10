@@ -16,7 +16,7 @@ flag threshold 1024.
 `vergesort(fallback = pdqsort_branchless)`; `vergesort` takes the choice as
 `RADIX`.
 """
-from std.bit import byte_swap
+from std.bit import byte_swap, log2_floor
 from std.ffi import external_call
 from std.memory import Pointer
 
@@ -124,16 +124,6 @@ struct MergeBuffer(Movable):
 
     def address(self) -> Int:
         return Int(self.data.unsafe_ptr())
-
-
-@always_inline
-def _log2(n: Int) -> Int:
-    var log = 0
-    var m = n
-    while m > 1:
-        m >>= 1
-        log += 1
-    return log
 
 
 # ===----------------------------------------------------------------------=== #
@@ -525,7 +515,7 @@ def vergesort[
     if dist < _VERGESORT_MINIMUM:
         _fallback[W, VAR, RADIX](k, first, last, info, buffer)
         return
-    var unstable_limit = dist // _log2(dist)
+    var unstable_limit = dist // log2_floor(dist)
     var runs = List[Int]()
     var begin_unstable = last
     var current = first

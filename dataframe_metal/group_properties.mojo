@@ -3,6 +3,7 @@
 These samples describe cost only. GPU hashing independently discovers every
 actual group, checks its cardinality limit, and computes the complete result.
 """
+from std.bit import next_power_of_two
 from std.collections import Dict
 from dataframe import DataFrame, DataType, LazyFrame, Series
 
@@ -38,9 +39,7 @@ def group_properties(region: LazyFrame, key: String) raises -> String:
                 counts[value] = 1
             hottest = max(hottest, counts[value])
     var groups = len(counts) + Int(nulls > 0)
-    var bucket = 1
-    while bucket < groups:
-        bucket <<= 1
+    var bucket = next_power_of_two(groups)
     hottest = max(hottest, nulls)
     return (
         ":sample:v1:groups"
@@ -73,17 +72,12 @@ struct GroupSample(Copyable, Movable):
                 131072 if self.distinct * 4
                 >= self.samples * 3 else self.distinct * 4
             )
-        var capacity = 512
-        while capacity < wanted and capacity < 131072:
-            capacity <<= 1
-        return capacity
+        return next_power_of_two(min(max(wanted, 512), 131072))
 
     def key(self) -> String:
         if not self.samples:
             return ":sample:v2:empty"
-        var bucket = 1
-        while bucket < self.distinct:
-            bucket <<= 1
+        var bucket = next_power_of_two(self.distinct)
         return (
             ":sample:v2:groups"
             + String(bucket)
