@@ -44,13 +44,15 @@ def sales(salt: Int) raises -> DataFrame:
     )
 
 
-def channel(source: DataFrame, tag: String) raises -> LazyFrame:
-    """One channel's yearly totals per customer, renamed and tagged with
-    a constant, as TPC-DS q4's year_total is written."""
+def channel(
+    source: DataFrame, tag: String, checked: Bool = True
+) raises -> LazyFrame:
+    """One channel's checked sums or total maxima, renamed and tagged."""
+    var total = col("amount").sum() if checked else col("amount").max()
     return (
         source.lazy()
         .group_by(["customer", "year"])
-        .agg([col("amount").sum().alias("total")])
+        .agg([total.alias("total")])
         .select_exprs(
             [
                 col("customer").alias("id"),
@@ -97,30 +99,42 @@ def rows_from(plan: LazyFrame, operator: String) raises -> List[Int]:
 
 def test_filter_moves_through_a_rename_to_the_grouped_rows() raises:
     var source = sales(3)
-    var plan = channel(source, "s").filter(col("dyear") == lit(Int64(2001)))
-    assert_same(plan)
-    # The year filter reached the rows before grouping: the group_by
-    # reads only 2001's rows.
     var kept = source.filter(col("year") == lit(Int64(2001))).height()
     assert_true(kept < ROWS)
-    assert_equal(rows_into(plan, "GROUP_BY"), [kept])
+    for checked in [False, True]:
+        var plan = channel(source, "s", checked).filter(
+            col("dyear") == lit(Int64(2001))
+        )
+        assert_same(plan)
+        # A checked sum must still evaluate the groups discarded later.
+        # A total maximum permits moving the key filter before grouping.
+        assert_equal(rows_into(plan, "GROUP_BY"), [ROWS if checked else kept])
 
 
 def test_a_constant_tag_prunes_union_inputs() raises:
     var a = sales(3)
     var b = sales(5)
     var c = sales(7)
-    var union = channel(a, "s").concat(channel(b, "w")).concat(channel(c, "c"))
-    for tag in ["s", "w", "c", "x"]:
-        for negate in [False, True]:
-            var keep = (col("kind") != tag) if negate else (col("kind") == tag)
-            assert_same(union.filter(keep & (col("dyear") >= lit(Int64(2001)))))
-    # Only the "w" input is grouped; the other two become empty.
-    var grouped = rows_into(union.filter(col("kind") == "w"), "GROUP_BY")
-    var read = 0
-    for rows in grouped:
-        read += rows
-    assert_equal(read, ROWS)
+    for checked in [False, True]:
+        var union = (
+            channel(a, "s", checked)
+            .concat(channel(b, "w", checked))
+            .concat(channel(c, "c", checked))
+        )
+        for tag in ["s", "w", "c", "x"]:
+            for negate in [False, True]:
+                var keep = (col("kind") != tag) if negate else (
+                    col("kind") == tag
+                )
+                assert_same(
+                    union.filter(keep & (col("dyear") >= lit(Int64(2001))))
+                )
+        # Only total branches may be skipped when their tag does not match.
+        var grouped = rows_into(union.filter(col("kind") == "w"), "GROUP_BY")
+        var read = 0
+        for rows in grouped:
+            read += rows
+        assert_equal(read, ROWS * 3 if checked else ROWS)
 
 
 def test_readers_of_one_subplan_keep_their_own_filters() raises:
@@ -192,33 +206,39 @@ def year_rows(salt: Int, year: Int) raises -> Int:
 
 
 def test_a_filter_on_join_keys_also_filters_the_other_input() raises:
-    var left = channel(sales(3), "s")
-    var right = channel(sales(5), "w").select_exprs(
-        [
-            col("id").alias("w_id"),
-            col("dyear").alias("w_year"),
-            col("total").alias("w_total"),
-        ]
-    )
-    for how in ["inner", "left", "semi", "anti"]:
-        var joined = left.join(
-            right,
-            left_on=["dyear", "id"],
-            right_on=["w_year", "w_id"],
-            how=how,
+    for checked in [False, True]:
+        var left = channel(sales(3), "s", checked)
+        var right = channel(sales(5), "w", checked).select_exprs(
+            [
+                col("id").alias("w_id"),
+                col("dyear").alias("w_year"),
+                col("total").alias("w_total"),
+            ]
         )
-        for keep in [
-            col("dyear") == lit(Int64(2001)),
-            (col("dyear") >= lit(Int64(2002))) | col("dyear").is_null(),
-            (col("dyear") == lit(Int64(2003))) & (col("id") < lit(Int64(6))),
-        ]:
-            assert_same(joined.filter(keep))
-        # The year reaches both inputs: each groups only 2001's rows.
-        var plan = joined.filter(col("dyear") == lit(Int64(2001)))
-        var read = rows_into(plan, "GROUP_BY")
-        assert_equal(len(read), 2)
-        var total = read[0] + read[1]
-        assert_equal(total, year_rows(3, 2001) + year_rows(5, 2001))
+        for how in ["inner", "left", "semi", "anti"]:
+            var joined = left.join(
+                right,
+                left_on=["dyear", "id"],
+                right_on=["w_year", "w_id"],
+                how=how,
+            )
+            for keep in [
+                col("dyear") == lit(Int64(2001)),
+                (col("dyear") >= lit(Int64(2002))) | col("dyear").is_null(),
+                (col("dyear") == lit(Int64(2003)))
+                & (col("id") < lit(Int64(6))),
+            ]:
+                assert_same(joined.filter(keep))
+            # The key reaches both inputs, stopping above checked sums.
+            var plan = joined.filter(col("dyear") == lit(Int64(2001)))
+            var read = rows_into(plan, "GROUP_BY")
+            assert_equal(len(read), 2)
+            var total = read[0] + read[1]
+            assert_equal(
+                total,
+                2 * ROWS if checked else year_rows(3, 2001)
+                + year_rows(5, 2001),
+            )
 
 
 def test_unique_over_every_column_runs_as_a_group_by() raises:

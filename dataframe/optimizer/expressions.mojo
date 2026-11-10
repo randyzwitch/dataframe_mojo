@@ -15,6 +15,23 @@ from dataframe.expr import (
     CAST,
     COL,
     EQ,
+    GE,
+    GT,
+    LE,
+    LT,
+    IS_NULL,
+    IS_NOT_NULL,
+    IS_NAN,
+    IS_NOT_NAN,
+    IS_FINITE,
+    IS_INFINITE,
+    COUNT,
+    LEN,
+    NULL_COUNT,
+    MIN,
+    MAX,
+    FIRST,
+    LAST,
     Expr,
     HORIZONTAL_ARGS,
     LIT_BOOL,
@@ -46,6 +63,57 @@ from std.collections import (
     Dict,
     Optional,
 )
+
+
+def _cannot_raise(expr: Expr) -> Bool:
+    """Whether evaluation is total after schema binding.
+
+    Row locality alone does not permit removing input rows: checked arithmetic,
+    casts, parsing and other partial operations can fail on a discarded row.
+    Keep unknown operations behind the same evaluation boundary. Add an opcode
+    here only when all of its bound implementations are total.
+    """
+    for node in expr._nodes:
+        if node.op not in [
+            COL,
+            SELECTOR,
+            LIT_BOOL,
+            LIT_INT,
+            LIT_FLOAT,
+            LIT_STRING,
+            LIT_NULL,
+            EQ,
+            NE,
+            LT,
+            LE,
+            GT,
+            GE,
+            AND,
+            OR,
+            NOT,
+            IS_NULL,
+            IS_NOT_NULL,
+            IS_NAN,
+            IS_NOT_NAN,
+            IS_FINITE,
+            IS_INFINITE,
+            COUNT,
+            LEN,
+            NULL_COUNT,
+            MIN,
+            MAX,
+            FIRST,
+            LAST,
+        ]:
+            return False
+    return True
+
+
+def _cannot_raise(exprs: List[Expr]) -> Bool:
+    for expr in exprs:
+        if not _cannot_raise(expr):
+            return False
+    return True
 
 
 def _same_literal(a: Node, b: Node) -> Int:

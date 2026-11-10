@@ -276,8 +276,8 @@ def test_a_subquery_two_joins_build_on_runs_once() raises:
 def test_copies_read_differently_keep_the_union_and_run_once() raises:
     """A CTE read in two places, each reader using other columns of it, is
     pruned in both copies to the columns some reader uses: the copies stay
-    alike and run once,
-    and a column neither reads is not computed."""
+    alike and run once. Unused total expressions are pruned; unused checked
+    arithmetic still runs so that evaluation errors remain observable."""
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var frame = sales()
     var per_item = (
@@ -296,6 +296,7 @@ def test_copies_read_differently_keep_the_union_and_run_once() raises:
                 col("total").alias("t"),
                 col("rows").alias("n"),
                 (col("most") * lit(Int64(2))).alias("m"),
+                col("most").alias("unused"),
             ]
         )
     )
@@ -303,7 +304,7 @@ def test_copies_read_differently_keep_the_union_and_run_once() raises:
         per_item.select(["ss_item", "n"]), on=["ss_item"]
     )
     var plan = query.explain(streaming=False)
-    assert_equal(plan.count("SELECT ss_item, t, n\n"), 2, plan)
+    assert_equal(plan.count("SELECT ss_item, t, n, m\n"), 2, plan)
     for optimize in [True, False]:
         var observed = StrategyTrace()
         var actual = query.collect(optimize=optimize)
