@@ -302,7 +302,7 @@ from std.collections import (
     Optional,
 )
 from std.io import (
-    RawFileDescriptor,
+    stderr,
 )
 from std.memory import (
     ArcPointer,
@@ -2017,7 +2017,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         parts.append(cell.string())
                 print(
                     "dataframe-operator:\t" + String("\t").join(parts),
-                    file=RawFileDescriptor(2),
+                    file=stderr,
                 )
             return profiled[0].copy()
         var plan = (
@@ -2806,7 +2806,7 @@ def _collect_placed[
                     labels[planned],
                     "at start",
                     labels[device],
-                    file=RawFileDescriptor(2),
+                    file=stderr,
                 )
             if device == _PLACE_CPU:
                 # The CPU runs it with the rest, on the inputs computed

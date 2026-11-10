@@ -8,10 +8,10 @@ a fast path fitted to a benchmark rather than to a data property (see
 docs/design/benchmarks.md). Unset, each call costs one environment lookup; calls
 sit at operator level, never inside row loops.
 """
-from std.io import RawFileDescriptor
+from std.io import stderr
 from std.os import getenv
 
 
 def trace_path(name: StaticString):
     if getenv("DATAFRAME_TRACE_PATHS"):
-        print("dataframe-path:", name, file=RawFileDescriptor(2))
+        print("dataframe-path:", name, file=stderr)
