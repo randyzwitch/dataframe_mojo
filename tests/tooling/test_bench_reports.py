@@ -217,32 +217,126 @@ class BenchmarkReports(unittest.TestCase):
         self.assertIn("lazy.cost_join_order", paths)
         self.assertIn("filter.float_rows", paths)
 
-    def test_nested_library_changes_invalidate_runner_binaries(self):
+    def test_runner_cache_tracks_content_toolchain_and_binary(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            nested = root / "dataframe/planning/model.mojo"
-            nested.parent.mkdir(parents=True)
-            nested.write_text("comptime SCAN_FRAME = 0\n")
-            suites = root / "benchmarks/suites"
-            suites.mkdir(parents=True)
-            suite = suites / "example.mojo"
-            suite.write_text("def main(): pass\n")
+            for name in (
+                "dataframe/planning/model.mojo",
+                "dataframe_metal/kernel.mojo",
+                "dataframe_provider/__init__.mojo",
+                "providers/cpu/provider.mojo",
+                "benchmarks/suites/example.mojo",
+                "benchmarks/suites/nested/helper.mojo",
+                "pixi.lock",
+                "pixi.toml",
+            ):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("original")
             binary = root / "build/suites/suite_example"
-            binary.parent.mkdir(parents=True)
-            binary.touch()
-            os.utime(nested, (10, 10))
-            os.utime(suite, (10, 10))
-            os.utime(binary, (20, 20))
+            toolchain = {"version": "compiler-v1", "packages": {"max-core": "v1"}}
+
+            def compile_runner(tree, name, output):
+                output.write_bytes(b"compiled runner")
+
             with patch.object(bench, "ROOT", root), patch.object(
-                bench, "SUITES_DIR", suites
-            ), patch.object(bench, "_build") as build:
-                self.assertEqual(
-                    bench.build_runners(["example"]), {"example": binary}
-                )
-                build.assert_not_called()
-                os.utime(nested, (30, 30))
+                bench, "SUITES_DIR", root / "benchmarks/suites"
+            ), patch.object(bench, "_toolchain", return_value=toolchain), patch.object(
+                bench,
+                "_checkout_identity",
+                return_value={"revision": "build-revision", "dirty": True},
+            ), patch.object(
+                bench, "_build", side_effect=compile_runner
+            ) as build:
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"legacy binary without info")
                 bench.build_runners(["example"])
-                build.assert_called_once_with(root, "example", binary)
+                self.assertEqual(build.call_count, 1)
+                bench.build_runners(["example"])
+                self.assertEqual(build.call_count, 1)
+                for name in (
+                    "dataframe/planning/model.mojo",
+                    "dataframe_metal/kernel.mojo",
+                    "dataframe_provider/__init__.mojo",
+                    "providers/cpu/provider.mojo",
+                    "benchmarks/suites/nested/helper.mojo",
+                    "pixi.lock",
+                ):
+                    path = root / name
+                    previous = path.stat()
+                    path.write_text("changed without newer mtime")
+                    os.utime(path, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+                    before = build.call_count
+                    bench.build_runners(["example"])
+                    self.assertEqual(build.call_count, before + 1, name)
+                for key in ("version", "packages"):
+                    before = build.call_count
+                    toolchain[key] = "v2" if key == "version" else {"max-core": "v2"}
+                    bench.build_runners(["example"])
+                    self.assertEqual(build.call_count, before + 1)
+                with patch.object(bench, "BUILD_FLAGS", ("-O2",)):
+                    before = build.call_count
+                    bench.build_runners(["example"])
+                    self.assertEqual(build.call_count, before + 1)
+                records = bench.runner_provenance({"mojo": {"example": binary}})
+                info = records["mojo"]["example"]
+                self.assertEqual(info["engine"]["revision"], "build-revision")
+                self.assertEqual(info["binary_sha256"], bench._sha256(binary))
+                binary.write_bytes(b"replaced executable")
+                with self.assertRaisesRegex(ValueError, "does not match"):
+                    bench.runner_provenance({"mojo": {"example": binary}})
+                bench.build_runners(["example"])
+                # Source additions and deletions invalidate independently of timestamps.
+                added = root / "dataframe/new.mojo"
+                for exists in (True, False):
+                    added.write_text("new") if exists else added.unlink()
+                    before = build.call_count
+                    bench.build_runners(["example"])
+                    self.assertEqual(build.call_count, before + 1)
+                baseline = root / "build/suites/baseline/abc123"
+                for name in (
+                    "dataframe/model.mojo",
+                    "dataframe_metal/kernel.mojo",
+                    "pixi.lock",
+                    "pixi.toml",
+                ):
+                    path = baseline / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("baseline")
+                with patch.object(
+                    bench.subprocess, "check_output", return_value="abc123\n"
+                ):
+                    label, binaries = bench.build_baseline("main", ["example"])
+                    self.assertEqual(label, "base@abc123")
+                    before = build.call_count
+                    bench.build_baseline("main", ["example"])
+                    self.assertEqual(build.call_count, before)
+                    (baseline / "dataframe_metal/kernel.mojo").write_text(
+                        "changed baseline"
+                    )
+                    bench.build_baseline("main", ["example"])
+                    self.assertEqual(build.call_count, before + 1)
+                    (root / "benchmarks/suites/example.mojo").write_text(
+                        "updated suite"
+                    )
+                    bench.build_baseline("main", ["example"])
+                    self.assertEqual(build.call_count, before + 2)
+                    self.assertIn(
+                        "fingerprint",
+                        bench.runner_provenance({label: binaries})[label]["example"],
+                    )
+                previous = bench._read_build_info(binary)
+
+                def changed_during_build(tree, name, output):
+                    compile_runner(tree, name, output)
+                    (root / "dataframe/planning/model.mojo").write_text(
+                        "concurrent edit"
+                    )
+
+                build.side_effect = changed_during_build
+                with self.assertRaisesRegex(RuntimeError, "changed during compilation"):
+                    bench.build_runners(["example"], force=True)
+                self.assertEqual(bench._read_build_info(binary), previous)
 
     def test_reference_cache_is_invalidated_by_query_source(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -337,7 +431,7 @@ class CorrectnessOnly(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         root = Path(self.directory.name)
-        self.receipts = []
+        self.infos = []
         for label, values in (("good", [2]), ("wrong", [2, 3])):
             folder = root / label
             folder.mkdir()
@@ -365,7 +459,7 @@ class CorrectnessOnly(unittest.TestCase):
                     }
                 )
             )
-            self.receipts.append(
+            self.infos.append(
                 bench.suite_answers.pin_export(
                     {
                         "path": str(path),
@@ -389,8 +483,8 @@ class CorrectnessOnly(unittest.TestCase):
                 engine=engine,
                 status=status if engine == "mojo" else "ok",
                 summary=dict(height=1, values=[2.0], names=["value"]),
-                answers=[self.receipts[0]],
-                oracles=[self.receipts[0]] if engine == "duckdb" else [],
+                answers=[self.infos[0]],
+                oracles=[self.infos[0]] if engine == "duckdb" else [],
             )
             for engine in (["mojo", "duckdb"] if reference else ["mojo"])
         ]
@@ -410,7 +504,7 @@ class CorrectnessOnly(unittest.TestCase):
                 bench.check_correctness(self.result(reference=False))
             )
             result = self.result()
-            result["runs"][0]["answers"] = [self.receipts[1]]
+            result["runs"][0]["answers"] = [self.infos[1]]
             self.assertTrue(bench.check_correctness(result))
             result["runs"] = []
             self.assertTrue(bench.check_correctness(result))
@@ -472,7 +566,7 @@ class CorrectnessOnly(unittest.TestCase):
         ), patch("sys.stdout"):
             bench.main()
             self.assertEqual(render.call_args.args[1][("h2o_groupby", "base", "q1", "mojo")]["status"], "ok")
-            Path(self.receipts[0]["path"]).write_bytes(b"corrupt answer")
+            Path(self.infos[0]["path"]).write_bytes(b"corrupt answer")
             bench.main()
         self.assertEqual(evaluate.call_count, 2)
         cell = render.call_args.args[1][("h2o_groupby", "base", "q1", "mojo")]
