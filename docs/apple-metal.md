@@ -499,6 +499,15 @@ payload conversion or Boolean mask materialization. New logical programs use
 
 ### Null-aware values and total comparisons
 
+Simple native column unary operations and leaf-only `fill_null`/`fill_nan`
+patterns use direct value slots rather than the general expression evaluator.
+Related Float32 outputs over the same left column share its payload load and
+validity test. Fill operands retain independent validity: a null left value can
+be replaced by a valid right value, while `fill_nan` preserves input nulls and
+still reads the payload when only a count is requested. Checked replacement
+expressions and operands requiring casts retain the general checked evaluator.
+These shapes use `native_value_reductions:v1:shared_loads:` calibration keys.
+
 Native Int32, Int64 and Float32 aggregate expressions support `fill_null`.
 Float32 expressions also support `fill_nan`, including a null replacement.
 The replacement retains normal binding rules. `fill_nan` leaves input nulls

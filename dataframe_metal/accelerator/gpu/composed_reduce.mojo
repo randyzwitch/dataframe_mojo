@@ -9,7 +9,13 @@ from std.memory import Pointer, bitcast
 from std.utils.static_tuple import StaticTuple
 from max.gpu import global_idx, thread_idx, block_idx
 from max.gpu.primitives import block
-from dataframe.expr import COL, ADD, SUB, MUL
+from dataframe.expr import COL, ADD, SUB, MUL, FILL_NULL, FILL_NAN
+from .native_numeric import (
+    numeric_unary,
+    float32_unary_bits,
+    integer_unary_bits,
+)
+from .native_fill import native_fill_bits
 from .filter_sum import BLOCK_SIZE, _valid
 from .multi_reduce import Bytes, read_integer
 from .arithmetic_sum import integer_binary
@@ -121,6 +127,13 @@ def float_value(
     )
     if op == UInt32(COL):
         return (a, False)
+    if numeric_unary(Int(op)):
+        return (
+            bitcast[DType.float32](
+                float32_unary_bits(bitcast[DType.uint32](a), Int(op))
+            ),
+            False,
+        )
     var b = literal if side == 2 else (
         pf if reuse_right else right.unsafe_bitcast[Float32]()[
             unsafe_offset=row
@@ -147,6 +160,9 @@ def int_value(
     )
     if op == UInt32(COL):
         return (a, False)
+    if numeric_unary(Int(op)):
+        var result = integer_unary_bits(bitcast[DType.uint64](a), tag, Int(op))
+        return (bitcast[DType.int64](result[0]), result[1])
     var b = literal if side == 2 else (
         pi if reuse_right else read_integer(right, tag, row)
     )
@@ -371,6 +387,10 @@ def _composed_scan[
     var ext_count = SIMD[DType.uint32, 4](0)
     var ext_special = SIMD[DType.uint32, 4](0)
     var extent_flags = (sum_flags >> 4) | (sum_flags >> 8)
+    var shared_left = Bool(sum_flags & (UInt32(1) << 12))
+    var shared_want = Bool((sum_flags | extent_flags) & 15)
+    comptime for field in range(arity):
+        shared_want = shared_want or ops[field] == UInt32(FILL_NAN)
     var fault = UInt32(0)
     var row = geometry[1] * BLOCK_SIZE + Int(thread_idx.x)
     while row < Int(rows):
@@ -468,13 +488,55 @@ def _composed_scan[
                         case_values |= evaluated[0]
                         case_valid |= evaluated[1]
                         fault |= evaluated[2]
+        var shared_valid = kept
+        var shared_raw = UInt32(0)
+        if shared_left:
+            if flags[0] & 1:
+                shared_valid = shared_valid and _valid(
+                    left_bits[0], loff[0], row
+                )
+            if shared_valid and shared_want:
+                shared_raw = lefts[0].unsafe_bitcast[UInt32]()[
+                    unsafe_offset=row
+                ]
         comptime for field in range(arity):
-            var valid = kept
-            if flags[field] & 1:
+            var valid = shared_valid if shared_left else kept
+            if not shared_left and flags[field] & 1:
                 valid = valid & _valid(left_bits[field], loff[field], row)
             if flags[field] & 2:
                 valid = valid & _valid(right_bits[field], roff[field], row)
             var tree_bits = UInt64(0)
+            var fill = ops[field] == UInt32(FILL_NULL) or ops[field] == UInt32(
+                FILL_NAN
+            )
+            if kept and fill:
+                comptime TAG = 2 if field < float_fields else (
+                    0 if field < float_fields + int32_fields else 1
+                )
+                var filled = native_fill_bits(
+                    lefts[field],
+                    rights[field],
+                    left_bits[field],
+                    right_bits[field],
+                    loff[field],
+                    roff[field],
+                    row,
+                    UInt32(TAG),
+                    ops[field],
+                    flags[field],
+                    sides[field],
+                    UInt64(bitcast[DType.uint32](flit[field])) if TAG
+                    == 2 else bitcast[DType.uint64](ilit[field]),
+                    Bool(
+                        (sum_flags | extent_flags)
+                        & (UInt32(1) << UInt32(field))
+                    ),
+                    shared_left,
+                    shared_raw,
+                    shared_valid,
+                )
+                tree_bits = filled[0]
+                valid = filled[1]
             comptime if trees:
                 if kept and ops[field] == UInt32(TREE_OP):
                     comptime if cases:
@@ -589,7 +651,7 @@ def _composed_scan[
                     ):
                         var raw = UInt32(0)
                         var result = (Float32(0), False)
-                        if trees and ops[field] == UInt32(TREE_OP):
+                        if fill or (trees and ops[field] == UInt32(TREE_OP)):
                             raw = UInt32(tree_bits)
                             result = (bitcast[DType.float32](raw), False)
                         else:
@@ -609,8 +671,10 @@ def _composed_scan[
                                         ops[field],
                                         sides[field],
                                         flit[field],
-                                        pf,
-                                        Bool(reuse_l[field]),
+                                        bitcast[DType.float32](
+                                            shared_raw
+                                        ) if shared_left else pf,
+                                        shared_left or Bool(reuse_l[field]),
                                         Bool(reuse_r[field]),
                                         row,
                                     )
@@ -622,8 +686,10 @@ def _composed_scan[
                                     ops[field],
                                     sides[field],
                                     flit[field],
-                                    pf,
-                                    Bool(reuse_l[field]),
+                                    bitcast[DType.float32](
+                                        shared_raw
+                                    ) if shared_left else pf,
+                                    shared_left or Bool(reuse_l[field]),
                                     Bool(reuse_r[field]),
                                     row,
                                 )
@@ -681,7 +747,7 @@ def _composed_scan[
                         )
                     ):
                         var result = (Int64(0), False)
-                        if trees and ops[field] == UInt32(TREE_OP):
+                        if fill or (trees and ops[field] == UInt32(TREE_OP)):
                             result = (bitcast[DType.int64](tree_bits), False)
                         else:
                             result = int_value(

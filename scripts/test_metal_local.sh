@@ -64,6 +64,11 @@ pixi run --locked mojo build -O3 -I . scripts/check_metal_null_device.mojo \
   -o build/contract-tests/metal-null-device
 build/contract-tests/metal-null-device
 
+echo "== Native leaf fill validity and payload conformance"
+pixi run --locked mojo build -O3 -I . scripts/check_metal_native_patterns.mojo \
+  -o build/contract-tests/metal-native-patterns
+build/contract-tests/metal-native-patterns
+
 echo "== Boolean predicate device conformance"
 pixi run --locked mojo build -O3 -I . scripts/check_metal_logical_device.mojo \
   -o build/contract-tests/metal-logical-device

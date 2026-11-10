@@ -12,6 +12,15 @@ from dataframe.expr import (
     SUB,
     MUL,
     LIT_INT,
+    NEG,
+    ABS,
+    SIGN,
+    FLOOR,
+    CEIL,
+    TRUNCATE,
+    ROUND,
+    FILL_NULL,
+    FILL_NAN,
     DIV,
     FLOORDIV,
     MOD,
@@ -100,7 +109,9 @@ def _input_slot(mut names: List[String], name: String) -> Int:
 
 
 def plan_composition(
-    region: LazyFrame, include_native: Bool = False
+    region: LazyFrame,
+    include_native: Bool = False,
+    native_patterns: Bool = True,
 ) raises -> Optional[Composition]:
     var n = len(region._plan._nodes)
     if n < 2 or region._plan._nodes[0].kind != SCAN_FRAME:
@@ -262,6 +273,8 @@ def plan_composition(
             if not predicate:
                 predicate = p^
             arithmetic = True
+        if native_patterns:
+            _specialize_native_pattern(value)
         var slot = -1
         for i in range(len(fields)):
             if fields[i].same_value(value):
@@ -329,9 +342,13 @@ def plan_composition(
                         inputs, fields[i].tree[j].column
                     )
             continue
-        if fields[i].literal_side != 1:
+        if fields[i].literal_side & 3 != 1:
             fields[i].left_input = _input_slot(inputs, fields[i].left)
-        if fields[i].op != COL and fields[i].literal_side != 2:
+        if (
+            fields[i].op != COL
+            and not native_unary(fields[i].op)
+            and fields[i].literal_side & 3 != 2
+        ):
             fields[i].right_input = _input_slot(inputs, fields[i].right)
     if len(inputs) > MAX_VALUE_INPUTS:
         return None
@@ -360,7 +377,9 @@ def composition_key(plan: Composition) -> String:
     # Names do not affect costs; canonical source slots describe reuse.
     var key = (
         String(
-            "typed_reductions:v3:scalar_registers:" if has_typed_values(
+            "native_value_reductions:v1:shared_loads:" if has_native_patterns(
+                plan
+            ) else "typed_reductions:v3:scalar_registers:" if has_typed_values(
                 plan
             ) else "conditional_reductions:v1:" if has_conditions(
                 plan
@@ -450,7 +469,7 @@ def single_float_composition(plan: Composition) -> Bool:
         return False
     var arithmetic = 0
     for field in plan.fields:
-        if field.dtype != DataType.FLOAT32:
+        if field.dtype != DataType.FLOAT32 or field.op in [FILL_NULL, FILL_NAN]:
             return False
         arithmetic += Int(field.op != COL)
     return arithmetic == 1
@@ -569,3 +588,79 @@ def has_typed_values(plan: Composition) -> Bool:
 def needs_general_values(plan: Composition) -> Bool:
     """Use the general value path for branches or per-node native types."""
     return has_conditions(plan) or has_typed_values(plan)
+
+
+def native_unary(op: Int) -> Bool:
+    return op in [NEG, ABS, SIGN, FLOOR, CEIL, TRUNCATE, ROUND]
+
+
+def has_native_patterns(plan: Composition) -> Bool:
+    for field in plan.fields:
+        if native_unary(field.op) or field.op in [FILL_NULL, FILL_NAN]:
+            return True
+    return False
+
+
+def shared_native_left(plan: Composition) -> Bool:
+    if len(plan.fields) < 2:
+        return False
+    var source = plan.fields[0].left_input
+    if source < 0:
+        return False
+    for field in plan.fields:
+        if (
+            field.dtype != DataType.FLOAT32
+            or field.tree
+            or field.left_input != source
+            or field.literal_side & 3 == 1
+            or not (native_unary(field.op) or field.op in [FILL_NULL, FILL_NAN])
+        ):
+            return False
+    return True
+
+
+def _specialize_native_pattern(mut value: ValueField):
+    var n = len(value.tree)
+    if value.conditions or n not in [3, 4] or value.tree[0].op != TYPED_HEADER:
+        return
+    var tag = 2 if value.dtype == DataType.FLOAT32 else (
+        1 if value.dtype == DataType.INT64 else 0
+    )
+    var op = value.tree[n - 1].op
+    if value.tree[n - 1].tag != tag:
+        return
+    if n == 3:
+        if (
+            not native_unary(op)
+            or value.tree[1].op != COL
+            or value.tree[1].tag != tag
+        ):
+            return
+        value.left = value.tree[1].column.copy()
+        value.right = String()
+    else:
+        if op not in [FILL_NULL, FILL_NAN]:
+            return
+        var columns = 0
+        for i in range(1, 3):
+            ref leaf = value.tree[i]
+            if leaf.op == COL:
+                if leaf.tag != tag:
+                    return
+                columns += 1
+            elif leaf.op not in [LIT_INT, CASE_NULL] or (
+                leaf.op != CASE_NULL and leaf.tag != tag
+            ):
+                return
+        if columns == 0:
+            return
+        value.left = value.tree[1].column.copy()
+        value.right = value.tree[2].column.copy()
+        for i in range(1, 3):
+            ref leaf = value.tree[i]
+            if leaf.op != COL:
+                value.literal_side = i | (4 if leaf.op == CASE_NULL else 0)
+                value.integer = bitcast[DType.int64](leaf.literal)
+                value.floating = bitcast[DType.float32](UInt32(leaf.literal))
+    value.op = op
+    value.tree = List[ValueNode]()

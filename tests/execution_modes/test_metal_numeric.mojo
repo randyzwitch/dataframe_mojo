@@ -395,6 +395,107 @@ def test_metal_typed_schedules_keep_checked_nested_right_trees() raises:
     assert_equal(Int(longer.value().nodes[0].literal >> 16), 25)
 
 
+def test_metal_native_leaf_patterns_keep_types_and_share_float_inputs() raises:
+    from dataframe import lit, null
+    from dataframe.expr import (
+        FLOOR,
+        CEIL,
+        ROUND,
+        SIGN,
+        ABS,
+        FILL_NULL,
+        FILL_NAN,
+    )
+    from dataframe_metal.composition_plan import shared_native_left
+    from dataframe_metal.expression_format import TREE_OP
+
+    var frame = DataFrame(
+        [
+            Series("n", Column[Int32]([-7, 0, 4])),
+            Series("w", Column[Int64]([-9, 0, 12])),
+            Series("f", Column[Float32]([-1.5, 0, 3.5])),
+            Series("g", Column[Float32]([2, 4, 8])),
+        ]
+    )
+    var values = List[Expr](
+        [
+            col("f").floor(),
+            col("f").ceil(),
+            col("f").round(),
+            col("f").sign(),
+            col("n").abs(),
+            col("w").fill_null(lit(Int64(7))),
+            null(DataType.INT64).fill_null(col("w")),
+            col("f").fill_null(col("g")),
+            col("f").fill_nan(null(DataType.FLOAT32)),
+        ]
+    )
+    var ops = [
+        FLOOR,
+        CEIL,
+        ROUND,
+        SIGN,
+        ABS,
+        FILL_NULL,
+        FILL_NULL,
+        FILL_NULL,
+        FILL_NAN,
+    ]
+    for i in range(len(values)):
+        var query = frame.lazy().select_exprs(
+            [
+                values[i].sum().alias("s"),
+                values[i].count().alias("n"),
+                values[i].min().alias("lo"),
+                values[i].max().alias("hi"),
+            ]
+        )
+        var matched = plan_composition(query)
+        assert_true(Bool(matched))
+        assert_equal(matched.value().fields[0].op, ops[i])
+        assert_false(Bool(matched.value().fields[0].tree))
+        var reference = plan_composition(query, native_patterns=False)
+        assert_true(Bool(reference))
+        assert_equal(reference.value().fields[0].op, TREE_OP)
+        assert_false(
+            composition_key(matched.value())
+            == composition_key(reference.value())
+        )
+        if i < 5:
+            assert_equal(len(matched.value().inputs), 1)
+            assert_equal(matched.value().fields[0].right_input, -1)
+        if i == 6:
+            assert_equal(matched.value().fields[0].literal_side, 5)
+            assert_equal(matched.value().fields[0].left_input, -1)
+            assert_equal(matched.value().fields[0].right_input, 0)
+        if i == 8:
+            assert_equal(matched.value().fields[0].literal_side, 6)
+    var query = frame.lazy().select_exprs(
+        [
+            col("f").floor().sum().alias("floor"),
+            col("f").ceil().sum().alias("ceil"),
+            col("f").round().sum().alias("round"),
+            col("f").sign().sum().alias("sign"),
+        ]
+    )
+    var shared = plan_composition(query)
+    assert_true(Bool(shared))
+    assert_true(shared_native_left(shared.value()))
+    assert_equal(len(shared.value().inputs), 1)
+    var checked = plan_composition(
+        frame.lazy().select(col("w").fill_null(col("w").abs()).sum())
+    )
+    assert_true(Bool(checked))
+    assert_equal(checked.value().fields[0].op, TREE_OP)
+    var casted = plan_composition(
+        frame.lazy().select(
+            col("n").cast(DataType.INT64).fill_null(col("w")).sum()
+        )
+    )
+    assert_true(Bool(casted))
+    assert_equal(casted.value().fields[0].op, TREE_OP)
+
+
 def test_metal_divmod_cost_identity_versions_changed_arithmetic_only() raises:
     var frame = DataFrame(
         [
