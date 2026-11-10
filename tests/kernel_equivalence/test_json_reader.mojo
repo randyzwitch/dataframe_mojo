@@ -65,6 +65,8 @@ def test_shared_json_reader_rejects_invalid_tokens_and_unicode() raises:
         "1e",
         "1e+",
         "true false",
+        "\vnull",
+        "null\f",
         "nul",
         "[1,]",
         '{"a":1,}',
@@ -96,3 +98,58 @@ def test_shared_json_reader_rejects_invalid_tokens_and_unicode() raises:
     var malformed = String(unsafe_from_utf8=malformed_bytes)
     with assert_raises(contains="UTF-8"):
         _ = JsonValue(malformed)
+
+
+def _detached_json_child() raises -> JsonValue:
+    var parent = JsonValue(
+        ' \t{"ignored":0,"value":{"z":[{"\\u0061":"é"},2],"a":null}}\n'
+    )
+    return parent.get("value")
+
+
+def test_indexed_json_children_keep_offsets_and_outlive_parent() raises:
+    var child = _detached_json_child()
+    var copy = child.copy()
+    _ = child^
+    assert_equal(copy.keys(), List[String](["z", "a"]))
+    assert_true(copy.has("a"))
+    assert_true(not copy.has("missing"))
+    assert_equal(copy.get("a").kind(), UInt8(110))
+    assert_equal(copy.get("missing").text, "null")
+    assert_equal(copy.get("z").items()[0].get("a").string(), "é")
+    assert_equal(copy.canonical(), '{"a":null,"z":[{"a":"é"},2]}')
+    with assert_raises(contains="object"):
+        _ = copy.get("z").has("a")
+    with assert_raises(contains="string"):
+        _ = copy.string()
+
+
+def test_indexed_json_wide_reverse_keys_and_nested_values() raises:
+    var source = String("{")
+    var expected = String("{")
+    var count = 2048
+    for i in range(count):
+        if i:
+            source += ","
+            expected += ","
+        # Fixed-width keys make lexical and numerical order identical.
+        var key = String(10000 + count - i - 1)
+        source += json_quote(key) + ':[{"value":' + String(i) + "}]"
+        expected += (
+            json_quote(String(10000 + i))
+            + ':[{"value":'
+            + String(count - i - 1)
+            + "}]"
+        )
+    source += "}"
+    expected += "}"
+    var value = JsonValue(source)
+    assert_equal(len(value.keys()), count)
+    for i in range(count):
+        var key = String(10000 + i)
+        assert_true(value.has(key))
+        assert_equal(
+            value.get(key).items()[0].get("value").text,
+            String(count - i - 1),
+        )
+    assert_equal(value.canonical(), expected)
