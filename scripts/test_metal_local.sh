@@ -37,6 +37,14 @@ pixi run --locked mojo build -O3 -I . scripts/check_metal_numeric_device.mojo \
   -o build/contract-tests/metal-numeric-device
 build/contract-tests/metal-numeric-device
 
+echo "== Exact Fraction division oracle and actual-device divmod checks"
+pixi run --locked python scripts/check_metal_numeric_accuracy.py \
+  --output build/contract-tests/metal-divmod-oracle
+pixi run --locked mojo build -O3 -I . scripts/check_metal_divmod_device.mojo \
+  -o build/contract-tests/metal-divmod-device
+build/contract-tests/metal-divmod-device \
+  build/contract-tests/metal-divmod-oracle/fixtures.csv
+
 echo "== Shared value interpreter control flow and checked faults"
 pixi run --locked mojo build -O3 -I . scripts/check_metal_value_stack_device.mojo \
   -o build/contract-tests/metal-value-stack-device

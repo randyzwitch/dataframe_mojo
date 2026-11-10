@@ -271,7 +271,9 @@ def test_metal_group_tuple_finish_copies_flat_keys_and_preserves_row_counts() ra
     assert_true(Bool(matched))
     assert_equal(matched.value().keys.names, List[String](["a", "b"]))
     assert_true(
-        grouped_key(matched.value()).startswith("grouped_reductions:v2:tuple:")
+        grouped_key(matched.value()).startswith(
+            "grouped_reductions:v3:local_updates:"
+        )
     )
     var fields = len(matched.value().selected.bundle.fields)
     var first = List[UInt32](length=5, fill=UInt32.MAX)
@@ -1085,3 +1087,30 @@ def test_metal_general_group_case_dispatch_requires_register_shape() raises:
     )
     assert_true(Bool(mixed))
     assert_equal(general_case_mode(mixed.value().selected.bundle), 1)
+
+
+def test_metal_group_stride_hint_requires_actual_repeated_tuples() raises:
+    from dataframe_metal.group_properties import sample_group_stride_reuse
+
+    var periodic = List[Int32]()
+    var unique = List[Int64]()
+    var nulls = List[Bool]()
+    for i in range(2048):
+        periodic.append(Int32(i % 32))
+        unique.append(Int64(i))
+        nulls.append(i % 8 != 3)
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int32](periodic^, nulls^)),
+            Series("u", Column[Int64](unique^)),
+        ]
+    )
+    assert_true(sample_group_stride_reuse(frame, [String("k")], 256))
+    assert_false(sample_group_stride_reuse(frame, [String("u")], 256))
+    assert_false(
+        sample_group_stride_reuse(frame, [String("k"), String("u")], 256)
+    )
+    assert_false(sample_group_stride_reuse(frame, [String("k")], 257))
+    assert_false(
+        sample_group_stride_reuse(frame.slice(0, 32), [String("k")], 256)
+    )
