@@ -497,8 +497,7 @@ def ensure_statistics(series: Series) raises:
 
 
 def compute_table_statistics(columns: List[Series]) raises:
-    """Statistics for every column of a loaded table, all computed at once
-   ."""
+    """Statistics for every column of a loaded table, all computed at once."""
     var arrays = List[Storage]()
     for column in columns:
         arrays.extend(_missing(column))

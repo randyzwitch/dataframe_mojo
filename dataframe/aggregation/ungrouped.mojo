@@ -498,8 +498,7 @@ struct UngroupedSink(Sink):
         format: UnifiedVectorFormat,
         state: Int,
     ) raises:
-        """State s updated from its input's rows its filter keeps
-       ."""
+        """State s updated from its input's rows its filter keeps."""
         var through = self.through.unsafe_ptr()
         var kept = 0
         if self.filter_columns[s] >= 0:
@@ -730,8 +729,8 @@ def distinct_counts(
     values: Series, groups: List[Int], group_count: Int, ignore_nulls: Bool
 ) raises -> List[Int64]:
     """The distinct values of a column in each of `group_count` groups
-    (`n_unique` by group; row r is in group `groups[r]`), using the
-    radix distinct tables count them: every row's (group, value) sunk, a
+    (`n_unique` by group; row r is in group `groups[r]`), counted in
+    radix-partitioned tables: every row's (group, value) sunk, a
     morsel per worker at a time, into the worker's aggregate table of those
     pairs, whose merged groups are then counted into their group. Values
     compare as `distinct_count`'s do; a null is one value unless

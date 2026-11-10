@@ -511,8 +511,7 @@ def window_segment_tree(
     needed: Int,
 ) raises -> FrameResults:
     """The aggregate of each row's frame [begins[i], ends[i]) of `input`,
-    whose frames lie inside the partitions starting at `partition_offsets`
-   . A frame with fewer than `needed` valid values is left empty,
+    whose frames lie inside the partitions starting at `partition_offsets`. A frame with fewer than `needed` valid values is left empty,
     so its finalize cannot raise. One contiguous column, whose lifetime
     the arena holds."""
     var n = len(begins)

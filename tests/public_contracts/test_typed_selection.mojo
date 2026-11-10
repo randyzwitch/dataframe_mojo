@@ -37,8 +37,8 @@ def test_decimal_branch_fill_and_coalesce_resolve_common_type_without_rounding()
         for right_width in [32, 64, 128]:
             var a = DataType.decimal(7, 2, left_width)
             var b = DataType.decimal(7, 2, right_width)
-            # Two widths of one precision: that precision at its width
-            #.
+            # Two storage widths with the same precision resolve to that
+            # precision without changing the represented decimal scale.
             var common = (
                 a.copy() if left_width
                 == right_width else DataType.decimal(7, 2, 32)

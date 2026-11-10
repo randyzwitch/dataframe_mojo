@@ -14,11 +14,13 @@ domain raised to 2/3. Additional edges after connecting the set each
 contribute another domain factor. A plan's cost is the sum of estimated
 output rows for its joins.
 
-Semi, anti and left joins are operators of the graph (`JoinOperator`): each one's right input is a relation
-of its own, and conflict rules from CD-C ("On the Correct and Complete
-Enumeration of the Core Search Space", Moerkotte, Fender and Eich) say
-which splits may apply it. A semi join can then run before inner joins
-its keys do not read. A semi or anti join keeps a fifth of its left
+Semi, anti and left joins carry their own graph operators. Conflict rules
+restrict which relation sets can appear on each side, preserving null
+extension and membership tests while allowing safe reorderings. A semi
+join can run before inner joins whose keys it does not read. The conflict
+construction is derived from CD-C ("On the Correct and Complete Enumeration
+of the Core Search Space", Moerkotte, Fender and Eich).
+A semi or anti join keeps a fifth of its left
 input's rows; a left join keeps
 at least its left input's.
 

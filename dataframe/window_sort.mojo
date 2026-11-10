@@ -1114,8 +1114,7 @@ def rank_order_keys(
 ) raises:
     """Append the order keys that rank `input`: its value (a struct's
     fields in turn), nulls first in each partition so that ranks count
-    from the first value. A struct field's nulls are its smallest values
-   ; a null struct sorts before every value."""
+    from the first value. A struct field's nulls are its smallest values; a null struct sorts before every value."""
     var column = input.rechunk() if input.is_chunked() else input.copy()
     if column.dtype().is_struct():
         var structs = column.struct_column()

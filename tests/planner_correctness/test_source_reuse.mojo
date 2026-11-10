@@ -69,9 +69,9 @@ def _assert_members(
 
 
 def test_join_order_runs_no_source_while_planning() raises:
-    # The join order estimates its relations from statistics (DuckDB's
-    # `RelationStatisticsHelper`): ordering runs none of them, and the
-    # plan then runs each source once.
+    # Join-order estimates use retained source statistics. Repeated plan reads
+    # must preserve one source identity and avoid resampling the same table
+    # unnecessarily.
     for limits in [(3, 6), (12, 2)]:
         for streaming in [False, True]:
             var query = (

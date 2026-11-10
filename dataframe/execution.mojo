@@ -2862,8 +2862,7 @@ def _on_dictionary[
 
 
 def _distinct_in_table(bound: BoundExpr, node: Node) -> Bool:
-    """Whether `n_unique` counts its input in an aggregate table
-   : every input the table groups by, which leaves out
+    """Whether `n_unique` counts its input in an aggregate table: every input the table groups by, which leaves out
     nested ones."""
     if node.op != N_UNIQUE:
         return False

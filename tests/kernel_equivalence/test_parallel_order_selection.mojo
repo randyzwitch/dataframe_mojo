@@ -155,10 +155,9 @@ def test_partition_top_k_replicated_owned_and_bucketed_routes_match_complete_sca
 
 
 def test_partition_top_k_through_the_aggregate_table_matches_scalar_memberships() raises:
-    # Up to TOP_ROWS_INLINE pairs a group: each worker's table keeps every
-    # group's best (value, row) pairs in the group's row, merged at the
-    # finish (DuckDB's arg_max(row, value, k)). Few groups and many, a
-    # null key, NaN and null values, ties kept by row, chunked values.
+    # Retain each group's first k row ids by the specified ordering, then
+    # compare grouped output with a scalar rank-and-slice reference across
+    # group counts and worker counts.
     var setting = WorkerSetting(4)
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var n = 196609

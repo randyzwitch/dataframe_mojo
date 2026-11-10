@@ -27,8 +27,7 @@ the column is in memory and measured. The payload is the row's index into
 the sorted input.
 
 `maintain_order` appends the row index as a last key: equal keys then
-keep input order. Otherwise their order is unspecified, including
-it.
+keep input order. Otherwise their order is unspecified.
 """
 from std.bit import byte_swap
 from std.memory import Pointer, bitcast

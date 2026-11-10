@@ -2134,8 +2134,7 @@ struct AggregateSink(Movable):
         """The group rows of another sink, with this table's keys the
         source's `columns` (in this order; none for a constant key of one
         zero word), into this table with their states merged rather than
-        rebuilt from values: a coarser grouping from a finer one's groups
-       . `widths` is each
+        rebuilt from values: a coarser grouping from a finer one's groups. `widths` is each
         source key column's word count. Both tables hold the same reductions,
         all of which `reaggregable`. Rows are read where they are; the
         source's key buffers are kept for the long strings they point at.

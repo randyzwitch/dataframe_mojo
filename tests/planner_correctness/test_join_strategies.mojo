@@ -161,10 +161,8 @@ def _join_below(plan: LazyFrame) raises -> Tuple[Int, List[Int]]:
 
 
 def test_a_join_is_free_to_reorder_under_any_consumer() raises:
-    # A join promises no row order (as DuckDB's and Polars' default joins),
-    # so its rows may arrive in any order under every consumer: a sort,
-    # one keeping ties in input order, a partitioned mean and a running
-    # sum alike. The orders those read were never specified.
+    # Join row order is unspecified, so compare complete row sets after
+    # canonical sorting rather than requiring a particular build/probe order.
     var inputs = _inputs()
     var joined = (
         inputs[0].lazy().join(inputs[1].lazy(), left_on=["a"], right_on=["b"])

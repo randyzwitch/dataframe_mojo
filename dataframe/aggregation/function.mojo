@@ -707,8 +707,7 @@ def _words_at(address: Int) -> Pointer[UInt64, MutAnyOrigin]:
 
 
 def _format_nulls(format: UnifiedVectorFormat, start: Int, count: Int) -> Bool:
-    """Whether rows [start, start + count) of a vector may be null
-   : never without a mask. A flat vector's mask is counted over
+    """Whether rows [start, start + count) of a vector may be null: never without a mask. A flat vector's mask is counted over
     those rows, so an all-valid bitmap (as Parquet columns carry) reads
     as none."""
     var validity = format.validity
@@ -1764,8 +1763,7 @@ def _unload(
 
 
 struct _OrderedBuffer(Movable):
-    """A worker's buffered input rows of one order-sensitive reduction
-   : each row's value, its group's ordinal among this buffer's
+    """A worker's buffered input rows of one order-sensitive reduction: each row's value, its group's ordinal among this buffer's
     groups and its sequence number (its place in the input). `prepare`
     makes the values one column and indexes the rows by group, once the
     worker's run is over."""
@@ -1972,8 +1970,7 @@ def _replay_ordered(
     hi: Int,
 ) raises:
     """An order-sensitive reduction of groups [lo, hi) (`_K_ORDERED`):
-    their buffered rows sorted into input order, then into `reducer`
-   ."""
+    their buffered rows sorted into input order, then into `reducer`."""
     var owners = List[Int]()
     var owner_of = List[Int]()
     var positions = List[Int]()

@@ -131,8 +131,7 @@ def _stream_reductions(
 ) -> Bool:
     """Whether every expression is reductions of row-local inputs, combined
     row by row. `holistic` admits medians and quantiles; `listed` also
-    mode and implode, whose states the aggregate table holds by address
-   ."""
+    mode and implode, whose states the aggregate table holds by address."""
     if len(expressions) == 0:
         return False
     for expression in expressions:

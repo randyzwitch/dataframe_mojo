@@ -561,7 +561,9 @@ non-overlapping matches searched left to right. An empty match immediately
 after the previous match is skipped, preventing adjacent empty matches from
 repeating the same position. The engine (`dataframe/regex`) uses a Thompson NFA, a lazily built DFA for match ends and a
 reverse DFA for match starts, a Pike VM for capture groups, and literal
-prefilters. Nothing backtracks, so every search is linear in the string. One
+prefilters. Visited-state tracking and NFA fallback prevent repeated exploration
+from growing exponentially; for a fixed pattern, search work is linear in the
+input length. One
 compiled pattern is shared by all workers; each worker has its own DFA cache.
 
 | Syntax | Meaning |

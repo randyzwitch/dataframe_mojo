@@ -100,8 +100,8 @@ The UTF-8 BOM is removed only at the beginning of the input.
 
 Temporal fields accept an optional format; an empty format selects the existing
 ISO temporal converter. The writer emits ISO text. Temporal conversion uses
-this library's existing parser; it does not implement every calendar
-format inference. `CsvSchema.of(frame)` retains temporal types.
+this library's existing parser and supports the formats that parser recognizes.
+`CsvSchema.of(frame)` retains temporal types.
 
 ## Nulls and conversion
 

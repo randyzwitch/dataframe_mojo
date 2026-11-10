@@ -118,8 +118,7 @@ def plan_side_estimate(
     self: QueryContext, mut stats: PlanStatistics, index: Int
 ) raises -> Int:
     """Rows node `index` yields, estimated from statistics before it runs,
-    as the build side optimizer reads a child's estimated cardinality
-   , with
+    as the build side optimizer reads a child's estimated cardinality, with
     nothing sampled or run. -1 when an input has no estimate."""
     return plan_cardinality(self, stats, index)
 

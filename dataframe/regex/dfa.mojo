@@ -165,8 +165,7 @@ struct LazyDFA(Movable):
         mut self, program: Program, into_q1: Bool, start_pc: Int, flag: UInt32
     ):
         """Add `start_pc` and everything reachable from it without
-        consuming input, following assertions that `flag` satisfies
-       ."""
+        consuming input, following assertions that `flag` satisfies."""
         self.stack.append(Int32(start_pc))
         while len(self.stack) > 0:
             var pc = Int(self.stack.pop())

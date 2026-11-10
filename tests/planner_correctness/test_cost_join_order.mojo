@@ -353,11 +353,9 @@ def test_joins_over_tables_with_statistics_match_the_written_order() raises:
 
 
 def test_join_estimates_follow_duckdbs_relation_statistics() raises:
-    # DuckDB's estimate of a join (`RelationStatisticsHelper`): a left,
-    # right or full join yields its larger input's rows, a semi or anti
-    # join a fifth of its left input's, and an inner join both inputs' rows over the
-    # keys' total domain, here the products' rows (no table statistics:
-    # each key counts its relation's rows, and the smaller one bounds).
+    # Verify the estimator's join-kind rules: outer joins use the larger input
+    # estimate, semi/anti joins retain a fifth of the left estimate, and inner
+    # joins divide input-row products by the shared key domain.
     var t = tables()
     var left = t[0].join(
         t[1], left_on=["f_product"], right_on=["p_id"], how="left"
@@ -485,12 +483,9 @@ def test_a_join_graph_over_a_left_join_orders_without_running_it() raises:
 
 
 def test_join_key_distinct_counts_follow_renames_to_their_table_column() raises:
-    # A dimension's key is often an alias of its table's column (TPC-DS's
-    # d1_sk for d_date_sk). The join order reads that column's distinct
-    # count through the rename, as DuckDB carries a column's count through
-    # a projection by its binding. Without it the key had no count, and a
-    # set's domain fell to the other side's foreign key count: TPC-DS q72's
-    # sales chain was estimated at 16K rows for 1.1K.
+    # A renamed join key retains its source distinct-count estimate through
+    # the projection. Losing it would substitute a foreign-key domain and
+    # change estimated join cardinality.
     var table = tables()[1].collect()._with_statistics()
     var renamed = (
         table.lazy()
@@ -505,8 +500,8 @@ def test_join_key_distinct_counts_follow_renames_to_their_table_column() raises:
         renamed._distinct(top, "p_category").count,
         table._distinct_count("p_category"),
     )
-    # A computed column counts its relation's rows (DuckDB's
-    # `DistinctCountSource::CARDINALITY`).
+    # Without a measured distinct count, a computed column falls back to its
+    # relation's row count.
     var computed = table.lazy().with_columns(
         [(col("p_id") + lit(Int64(1))).alias("pk")]
     )
@@ -553,9 +548,9 @@ def test_a_semi_join_runs_before_inner_joins_its_keys_do_not_read() raises:
 
 
 def test_inner_joins_on_a_left_joins_right_columns_stay_above_it() raises:
-    # A left join B, then B's column joins C: C cannot join B before A
-    # does, since the left join would then keep A's unmatched rows that
-    # the inner join drops (CD-C's conflict rule, as DuckDB 2.0 builds).
+    # The left join cannot cross an inner join that removes its preserved
+    # rows: doing so would introduce unmatched rows absent from the original
+    # expression. Verify the conflict rules reject that split.
     var rows: List[Float64] = [1000.0, 100.0, 10.0]
     var ops: List[JoinOperator] = [
         JoinOperator(OPERATOR_LEFT, 0b001, 0b010, 0b011, [], []),
@@ -635,9 +630,9 @@ def test_semi_anti_and_left_joins_are_ordered_with_the_inner_joins() raises:
 
 
 def test_composite_keys_cap_the_join_domain_at_the_smaller_relation() raises:
-    # DuckDB's `ApplyJoinPairCap`: a two-column join of the same two
-    # relations divides by the smaller relation's rows when that is within
-    # eight times the keys' domain, not by the domain alone.
+    # For two equality keys joining the same relations, cap the estimated key
+    # domain at the smaller relation's rows when that count is within eight
+    # times the observed domain.
     var edges: List[JoinEdge] = [JoinEdge(0, 1, ["a", "b"], ["c", "d"])]
     var distinct = Dict[String, Float64]()
     distinct["0/a"] = 100.0
@@ -655,10 +650,9 @@ def test_composite_keys_cap_the_join_domain_at_the_smaller_relation() raises:
 
 
 def test_one_table_slices_are_not_shared() raises:
-    # Two channels read one projection of a date table. DuckDB holds a
-    # projection or filter over one table as a scan, never worth
-    # materializing, so the copies stay table scans and their columns keep
-    # the table's distinct counts.
+    # Two readers share a source table but keep their own scan projections. A
+    # filter/projection over a single table does not justify materializing a
+    # separate shared frame, and source statistics remain available.
     var day = List[Int64]()
     var year = List[Int64]()
     for d in range(7000):
@@ -769,10 +763,8 @@ def test_a_filtered_relation_streaming_into_a_build_is_not_run_ahead() raises:
 
 
 def test_a_graph_with_an_empty_relation_is_its_empty_result() raises:
-    # The categories table has no rows, which its statistics say, and an
-    # inner join with an empty input is empty, as DuckDB pulls an empty
-    # result up (`EmptyResultPullup`): nothing else of the graph runs,
-    # and the result keeps the graph's columns.
+    # Stored statistics prove one inner-join input empty. Skip the remaining
+    # graph work while retaining the full result schema.
     var t = tables()
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var none = List[Int64]()
@@ -807,10 +799,9 @@ def test_a_graph_with_an_empty_relation_is_its_empty_result() raises:
 
 
 def test_a_filter_rejecting_nulls_makes_a_left_join_inner() raises:
-    # DuckDB's `PushdownLeftJoin`: a filter on a left join's right
-    # columns that no null row passes drops every unmatched row, so the
-    # join is an inner join and the filter moves into its right input.
-    # One that keeps null rows leaves the left join as it is.
+    # A filter on right columns that rejects nulls removes every unmatched
+    # left-join row. Convert to an inner join and push the eligible filter
+    # into the right input.
     var t = tables()
     var products = t[1].filter(col("p_id") < lit(Int64(1500)))
     var rejecting = (

@@ -450,9 +450,8 @@ def _casts(plan: LazyFrame) -> Int:
 
 
 def test_casts_of_constants_fold_to_typed_literals_once() raises:
-    # DuckDB's constant folding: a cast of a column-free expression becomes
-    # the literal it evaluates to while the plan is optimized, so no batch
-    # parses it again. The rows are the unfolded plan's.
+    # A cast of a column-free expression can fold once into a typed constant,
+    # provided the fold preserves the original value and error behavior.
     var values = List[Float64]()
     for i in range(40):
         values.append(Float64(i) * 0.25)

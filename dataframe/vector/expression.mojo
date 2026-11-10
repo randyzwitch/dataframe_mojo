@@ -441,8 +441,7 @@ struct VectorExpression(Copyable, Movable):
 
     def _plan_direct(mut self):
         """The comparisons Select runs straight over a column's vector:
-        a column of a numeric type against a constant of the same type
-       ."""
+        a column of a numeric type against a constant of the same type."""
         for i in range(len(self.kinds)):
             if self.kinds[i] != _KIND_LANE:
                 continue
@@ -1691,8 +1690,7 @@ struct VectorExpression(Copyable, Movable):
         return Int(self.lane_ints[index].unsafe_ptr())
 
     def _fill_null(mut self, index: Int, left: Int, right: Int, count: Int):
-        """fill_null: the left value where it is valid, else the right
-       , as the column kernel's
+        """fill_null: the left value where it is valid, else the right, as the column kernel's
         `(x & av) | (y & ~av)`."""
         var lane = self.lanes[index]
         var target = self._lane_address(index)
@@ -2542,8 +2540,7 @@ struct VectorExpression(Copyable, Movable):
     ) -> Int:
         """The rows node `index` (evaluated) is true and valid for, and the
         others into `false_target` when set: branch-free, every row
-        written to both and each slot advancing by the row's outcome
-       ."""
+        written to both and each slot advancing by the row's outcome."""
         var kept = 0
         if self.kinds[index] == _KIND_CONSTANT:
             if self.constant_valid[index] and self.ints[index] != 0:

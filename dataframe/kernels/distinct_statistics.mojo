@@ -248,8 +248,7 @@ struct _ColumnSample(Copyable, Movable):
 
 struct TableStatistics(Movable):
     """Distinct counts and row samples of one loaded table's columns,
-    shared by every copy of the table and filled on first request
-   . Each entry remembers the storage it was taken over, so a column
+    shared by every copy of the table and filled on first request. Each entry remembers the storage it was taken over, so a column
     replaced in a copy is taken again rather than read from the original."""
 
     var lock: Atomic[Int64]

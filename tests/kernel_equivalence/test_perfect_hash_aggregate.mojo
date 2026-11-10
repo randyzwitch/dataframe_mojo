@@ -123,8 +123,8 @@ def test_perfect_hash_group_by_matches_string_keys() raises:
 
 
 def test_perfect_hash_layout_follows_key_span() raises:
-    # 100 values and a null need 7 bits; two such keys need 14, more than
-    # DuckDB's 12-bit perfect_ht_threshold.
+    # One key with 100 values plus null needs seven bits. Two such keys need
+    # 14 bits, exceeding the 12-bit direct-address slot budget.
     var narrow = _frame(500, 100, False)
     var one = perfect_hash([narrow.column("b")])
     assert_true(one.used())
@@ -195,9 +195,9 @@ def test_categorical_keys_group_by_their_codes() raises:
 
 
 def test_perfect_hash_groups_come_out_in_slot_order() raises:
-    # Without maintain_order the groups come out as DuckDB's perfect hash
-    # aggregate scans them: by slot, the null key first, then ascending
-    # values. A distinct count keeps the hashed table, whose groups agree.
+    # Direct-address output scans occupied slots in order: null first, then
+    # ascending values. A distinct count uses the hashed route but must
+    # produce equivalent groups.
     var frame = _frame(3000, 40, True)
     var grouped = frame.group_by("b").agg(
         [col("v").sum().alias("sum"), col("v").n_unique().alias("distinct")]
