@@ -63,18 +63,18 @@ def main() raises:
     _ = require_metal()
     var edges = List[UInt64](
         [
-            0,
-            0x80000000,
-            1,
-            0x80000001,
-            0x3F800000,
-            0xBF800000,
-            0x7F800000,
-            0xFF800000,
-            0x7F800001,
-            0x7FC12345,
-            0xFFC54321,
-            0x8000000000000000,
+            UInt64(0),
+            UInt64(0x80000000),
+            UInt64(1),
+            UInt64(0x80000001),
+            UInt64(0x3F800000),
+            UInt64(0xBF800000),
+            UInt64(0x7F800000),
+            UInt64(0xFF800000),
+            UInt64(0x7F800001),
+            UInt64(0x7FC12345),
+            UInt64(0xFFC54321),
+            UInt64(0x8000000000000000),
             UInt64.MAX,
         ]
     )
