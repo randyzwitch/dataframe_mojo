@@ -1,6 +1,6 @@
 """Boolean and count reductions preserve empty, nullable and Kleene rules."""
 # contract-group: execution.backends
-from std.testing import assert_true, assert_equal
+from std.testing import assert_true, assert_equal, assert_false
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from dataframe_metal.logical_plan import (
     plan_logical,
