@@ -87,7 +87,10 @@ struct Recorded(SchedulablePipeline):
     def initialize(mut self) raises:
         self.initialized = self._now()
 
-    def execute_tasks(self) -> Int:
+    def max_execute_tasks(self) -> Int:
+        return self.tasks
+
+    def execute_tasks(mut self) raises -> Int:
         return self.tasks
 
     def execute(mut self, task: Int) raises:
