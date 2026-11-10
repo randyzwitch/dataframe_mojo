@@ -38,9 +38,8 @@ Nothing is linked at build time, so a program that never reads Parquet
 never needs the library. Once opened it stays open for the process: the
 exported batch's release callback lives in the library, and Arrow's thread
 pool would otherwise be torn down and rebuilt on every read. The standard
-library's `OwnedDLHandle` closes on destruction, so the library is opened
-with `dlopen` directly and its handle is never closed; repeat opens only
-bump the loader's reference count.
+library loads and resolves symbols through `OwnedDLHandle`; its owner is
+retained for process lifetime so exported callbacks remain callable.
 """
 from .file_sources import has_pattern, resolve_paths
 from .dataset_options import DatasetOptions, DatasetSpec

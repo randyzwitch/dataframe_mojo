@@ -1,8 +1,7 @@
-"""CSV-only numeric conversion paths.
+"""CSV Float32 rounding and standard Float64 conversion.
 
-`parse_csv_float32` and `parse_csv_float64` are deliberately separate from
-dataframe.parse, so the clean CSV decoder can preserve its float
-parsing behavior without changing legacy cast behavior.
+Float32 parses directly at target precision to avoid double rounding near
+midpoints; Float64 uses the standard constructor after CSV syntax checks.
 """
 from std.math import mulhi
 from std.memory import bitcast
@@ -285,40 +284,13 @@ comptime _POW10_F32: Array[Float32, 16] = [
     0.0,
     0.0,
 ]
-comptime _POW10_F64: Array[Float64, 32] = [
-    1e0,
-    1e1,
-    1e2,
-    1e3,
-    1e4,
-    1e5,
-    1e6,
-    1e7,
-    1e8,
-    1e9,
-    1e10,
-    1e11,
-    1e12,
-    1e13,
-    1e14,
-    1e15,
-    1e16,
-    1e17,
-    1e18,
-    1e19,
-    1e20,
-    1e21,
-    1e22,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-]
+
+
+@always_inline
+def _pow10_f32(k: Int) -> Float32:
+    return global_constant[_POW10_F32]()[k & 15]
+
+
 comptime _INT_POW10: Array[UInt64, 16] = [
     1,
     10,
@@ -337,16 +309,6 @@ comptime _INT_POW10: Array[UInt64, 16] = [
     100000000000000,
     1000000000000000,
 ]
-
-
-@always_inline
-def _pow10_f32(k: Int) -> Float32:
-    return global_constant[_POW10_F32]()[k & 15]
-
-
-@always_inline
-def _pow10_f64(k: Int) -> Float64:
-    return global_constant[_POW10_F64]()[k & 31]
 
 
 @always_inline
@@ -589,210 +551,8 @@ def parse_csv_float32(text: StringSlice) raises -> Float32:
     return -value if number.negative else value
 
 
-comptime _F64_MANTISSA_BITS = 52
-comptime _F64_MIN_EXPONENT = -1023
-comptime _F64_INFINITY_POWER = 2047
-comptime _F64_SMALLEST_POWER_OF_TEN = -342
-comptime _F64_LARGEST_POWER_OF_TEN = 308
-comptime _F64_MAX_EXACT_INTEGER = UInt64(1 << 53)
-
-
-@fieldwise_init
-struct _Adjusted64:
-    var mantissa: UInt64
-    var power2: Int
-
-
-@always_inline
-def _float64_from_bits(bits: UInt64) -> Float64:
-    return bitcast[DType.float64](bits)
-
-
-@always_inline
-def _float64_zero(negative: Bool) -> Float64:
-    return _float64_from_bits(UInt64(1 << 63) if negative else UInt64(0))
-
-
-@always_inline
-def _float64_inf(negative: Bool) -> Float64:
-    return _float64_from_bits(
-        UInt64(0xFFF0000000000000) if negative else UInt64(0x7FF0000000000000)
-    )
-
-
-@always_inline
-def _product_approx64(q: Int, w: UInt64) -> _Product128:
-    var index = 2 * (q - SMALLEST_POWER_OF_5)
-    var first = _full_multiply(w, get_power_of_5(index))
-    var precision_mask = UInt64(0xFFFFFFFFFFFFFFFF) >> UInt64(
-        _F64_MANTISSA_BITS + 3
-    )
-    if (first.high & precision_mask) == precision_mask:
-        var second = _full_multiply(w, get_power_of_5(index + 1))
-        first.low += second.high
-        if second.high > first.low:
-            first.high += 1
-    return first^
-
-
-@always_inline
-def _make_float64(mantissa: UInt64, exponent: Int) -> Float64:
-    var bits = mantissa & UInt64((1 << _F64_MANTISSA_BITS) - 1)
-    bits |= UInt64(exponent + 1023) << 52
-    return _float64_from_bits(bits)
-
-
-@always_inline
-def _compute_float64(q: Int, input: UInt64) -> _Adjusted64:
-    if input == 0 or q < _F64_SMALLEST_POWER_OF_TEN:
-        return _Adjusted64(0, 0)
-    if q > _F64_LARGEST_POWER_OF_TEN:
-        return _Adjusted64(0, _F64_INFINITY_POWER)
-    var lz = Int(count_leading_zeros(input))
-    var w = input << UInt64(lz)
-    var product = _product_approx64(q, w)
-    if product.low == UInt64(0xFFFFFFFFFFFFFFFF) and (q < -27 or q > 55):
-        return _Adjusted64(0, -1)
-    var upper = Int(product.high >> 63)
-    var shift = upper + 64 - _F64_MANTISSA_BITS - 3
-    var mantissa = product.high >> UInt64(shift)
-    var power2 = _power(q) + upper - lz - _F64_MIN_EXPONENT
-    if power2 <= 0:
-        if -power2 + 1 >= 64:
-            return _Adjusted64(0, 0)
-        mantissa >>= UInt64(-power2 + 1)
-        mantissa += mantissa & 1
-        mantissa >>= 1
-        power2 = 1 if mantissa >= UInt64(1 << _F64_MANTISSA_BITS) else 0
-        return _Adjusted64(mantissa, power2)
-    if (
-        product.low <= 1
-        and q >= -4
-        and q <= 23
-        and (mantissa & 3) == 1
-        and (mantissa << UInt64(shift)) == product.high
-    ):
-        mantissa &= ~UInt64(1)
-    mantissa += mantissa & 1
-    mantissa >>= 1
-    if mantissa >= UInt64(2 << _F64_MANTISSA_BITS):
-        mantissa = UInt64(1 << _F64_MANTISSA_BITS)
-        power2 += 1
-    mantissa &= ~UInt64(1 << _F64_MANTISSA_BITS)
-    if power2 >= _F64_INFINITY_POWER:
-        return _Adjusted64(0, _F64_INFINITY_POWER)
-    return _Adjusted64(mantissa, power2)
-
-
-@always_inline
-def _try_fast_float64(
-    mantissa: UInt64, exponent: Int, negative: Bool, many_digits: Bool
-) -> Tuple[Bool, Float64]:
-    # number.rs::Number::try_fast_path for Float64, including checked disguise.
-    if (
-        many_digits
-        or mantissa > _F64_MAX_EXACT_INTEGER
-        or exponent < -22
-        or exponent > 37
-    ):
-        return (False, Float64(0))
-    var value = Float64(mantissa)
-    if exponent <= 22:
-        if exponent < 0:
-            value /= _pow10_f64(-exponent)
-        else:
-            value *= _pow10_f64(exponent)
-    else:
-        var product = UInt128(mantissa) * UInt128(_int_pow10(exponent - 22))
-        if product > UInt128(_F64_MAX_EXACT_INTEGER):
-            return (False, Float64(0))
-        value = Float64(UInt64(product)) * _pow10_f64(22)
-    return (True, -value if negative else value)
-
-
-def _long_float64(text: StringSlice) raises -> Float64:
-    # Direct simple::parse_long_mantissa control flow through CsvDecimal.
-    var negative = text.as_bytes()[0] == 45
-    var d = parse_csv_decimal(text)
-    if d.num_digits == 0 or d.decimal_point < -324:
-        return _float64_zero(negative)
-    if d.decimal_point >= 310:
-        return _float64_inf(negative)
-    var exp2 = 0
-    while d.decimal_point > 0:
-        var shift = _shift_amount(d.decimal_point)
-        d.right_shift(shift)
-        if d.decimal_point < -2047:
-            return _float64_zero(negative)
-        exp2 += shift
-    while d.decimal_point <= 0:
-        var shift = _shift_amount(-d.decimal_point)
-        if d.decimal_point == 0:
-            if d.digits[0] >= 5:
-                break
-            shift = 2 if d.digits[0] <= 1 else 1
-        d.left_shift(shift)
-        if d.decimal_point > 2047:
-            return _float64_inf(negative)
-        exp2 -= shift
-    exp2 -= 1
-    while _F64_MIN_EXPONENT + 1 > exp2:
-        var shift = min(_F64_MIN_EXPONENT + 1 - exp2, 60)
-        d.right_shift(shift)
-        exp2 += shift
-    if exp2 - _F64_MIN_EXPONENT >= _F64_INFINITY_POWER:
-        return _float64_inf(negative)
-    d.left_shift(_F64_MANTISSA_BITS + 1)
-    var mantissa = d.round()
-    if mantissa >= UInt64(1 << (_F64_MANTISSA_BITS + 1)):
-        d.right_shift(1)
-        exp2 += 1
-        mantissa = d.round()
-        if exp2 - _F64_MIN_EXPONENT >= _F64_INFINITY_POWER:
-            return _float64_inf(negative)
-    var power2 = exp2 - _F64_MIN_EXPONENT
-    if mantissa < UInt64(1 << _F64_MANTISSA_BITS):
-        power2 -= 1
-    mantissa &= UInt64((1 << _F64_MANTISSA_BITS) - 1)
-    var value = _make_float64(mantissa, power2 - 1023)
-    return -value if negative else value
-
-
 def parse_csv_float64(text: StringSlice) raises -> Float64:
-    """Strict CSV Float64 without a standard-parser fallback."""
-    var scanned = _scan_csv_number(text)
-    if not scanned[0]:
-        var special = _scan_special(text)
-        if special[0] == 1:
-            return _float64_from_bits(
-                UInt64(0xFFF8000000000000) if special[1] else UInt64(
-                    0x7FF8000000000000
-                )
-            )
-        if special[0] == 2:
-            return _float64_inf(special[1])
+    """Validate CSV numeric syntax and delegate conversion to Float64."""
+    if not _scan_csv_number(text)[0] and not _scan_special(text)[0]:
         raise Error("invalid floating-point value")
-    var number = _ScannedNumber(
-        scanned[1].negative,
-        scanned[1].mantissa,
-        scanned[1].exponent,
-        scanned[1].many_digits,
-    )
-    var fast = _try_fast_float64(
-        number.mantissa, number.exponent, number.negative, number.many_digits
-    )
-    if fast[0]:
-        return fast[1]
-    var adjusted = _compute_float64(number.exponent, number.mantissa)
-    var needs_long = adjusted.power2 < 0
-    if number.many_digits:
-        var next = _compute_float64(number.exponent, number.mantissa + 1)
-        needs_long = (
-            needs_long
-            or adjusted.mantissa != next.mantissa
-            or adjusted.power2 != next.power2
-        )
-    if needs_long:
-        return _long_float64(text)
-    var value = _make_float64(adjusted.mantissa, adjusted.power2 - 1023)
-    return -value if number.negative else value
+    return Float64(text)

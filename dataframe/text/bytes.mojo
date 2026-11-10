@@ -4,14 +4,12 @@
 for every row, and `Span`'s `==` checks the bounds of every byte; in a loop
 over every row those checks cost more than the comparison itself. `_Bytes`
 reads offsets and bytes (or view storage) directly, and `_same_bytes` and
-`_order_bytes` compare eight bytes at a time.
+`_order_bytes` use the standard byte comparison primitive.
 """
 from dataframe.storage.buffer import _Buffer
-from std.bit import byte_swap
 
-from std.memory import ArcPointer, Pointer
+from std.memory import ArcPointer, Pointer, unsafe_memcmp
 
-from dataframe.regex.dfa import find_literal_bytes
 from dataframe.storage.string import StringColumn
 from dataframe.storage.string_view import StringView
 
@@ -20,26 +18,10 @@ from dataframe.storage.string_view import StringView
 def _same_bytes(
     a: Span[UInt8, ImmutAnyOrigin], b: Span[UInt8, ImmutAnyOrigin]
 ) -> Bool:
-    """Byte equality eight bytes at a time; Span's == checks the bounds of
-    each byte, which was most of a string count."""
-    var n = len(a)
-    if n != len(b):
-        return False
-    var x = a.unsafe_ptr()
-    var y = b.unsafe_ptr()
-    var i = 0
-    while i + 8 <= n:
-        if (
-            x.unsafe_offset(i).unsafe_bitcast[UInt64]().unsafe_load()
-            != y.unsafe_offset(i).unsafe_bitcast[UInt64]().unsafe_load()
-        ):
-            return False
-        i += 8
-    while i < n:
-        if x.unsafe_offset(i)[] != y.unsafe_offset(i)[]:
-            return False
-        i += 1
-    return True
+    return len(a) == len(b) and (
+        len(a) == 0
+        or unsafe_memcmp(a.unsafe_ptr(), b.unsafe_ptr(), len(a)) == 0
+    )
 
 
 struct _Bytes(Copyable, Movable):
@@ -152,29 +134,13 @@ struct _Bytes(Copyable, Movable):
 def _order_bytes(
     a: Span[UInt8, ImmutAnyOrigin], b: Span[UInt8, ImmutAnyOrigin]
 ) -> Int:
-    """-1, 0 or 1 as `a` sorts before, equal to or after `b`, byte by byte
-    (which for UTF-8 is code point order), the shorter first on a tie."""
+    """Compare unsigned bytes, with the shorter span first on a prefix tie."""
     var n = min(len(a), len(b))
-    var x = a.unsafe_ptr()
-    var y = b.unsafe_ptr()
-    var i = 0
-    while i + 8 <= n:
-        var u = x.unsafe_offset(i).unsafe_bitcast[UInt64]().unsafe_load()
-        var v = y.unsafe_offset(i).unsafe_bitcast[UInt64]().unsafe_load()
-        if u != v:
-            # Loaded little-endian; swapped, the first byte is the most
-            # significant, so integer order is byte order.
-            return -1 if byte_swap(u) < byte_swap(v) else 1
-        i += 8
-    while i < n:
-        var u = x.unsafe_offset(i)[]
-        var v = y.unsafe_offset(i)[]
-        if u != v:
-            return -1 if u < v else 1
-        i += 1
-    if len(a) == len(b):
-        return 0
-    return -1 if len(a) < len(b) else 1
+    if n:
+        var order = unsafe_memcmp(a.unsafe_ptr(), b.unsafe_ptr(), n)
+        if order:
+            return -1 if order < 0 else 1
+    return 0 if len(a) == len(b) else (-1 if len(a) < len(b) else 1)
 
 
 @always_inline
@@ -183,11 +149,12 @@ def _find_bytes(
     needle: Span[UInt8, ImmutAnyOrigin],
     start: Int,
 ) -> Int:
-    """The first position at or after `start` where `needle` occurs in
-    `hay`, or -1: the regex engine's SIMD memmem (`find_literal_bytes`),
-    which extracts candidate positions from a lane mask and scans 64 bytes a
-    step; failed candidates advance without rescanning the whole prefix."""
-    return find_literal_bytes(hay, needle.unsafe_ptr(), len(needle), start)
+    """Find a literal in validated UTF-8 row bytes, returning a byte offset."""
+    if len(needle) == 0:
+        return start if start <= len(hay) else -1
+    return StringSpan(unsafe_from_utf8=hay).find(
+        StringSpan(unsafe_from_utf8=needle), start
+    )
 
 
 @always_inline

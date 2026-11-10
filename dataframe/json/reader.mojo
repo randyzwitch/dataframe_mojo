@@ -4,6 +4,7 @@ The caller keeps the source bytes alive. Scanning can validate a value without
 allocating a tape (metadata), or reuse one tape across column rows. Strings
 are validated without constructing per-character or unselected value objects.
 """
+from dataframe.text.utf8 import append_codepoint
 from std.memory import Pointer
 
 comptime JsonBytes = Span[UInt8, ImmutAnyOrigin]
@@ -19,20 +20,7 @@ def json_bytes(text: String) -> JsonBytes:
 
 @always_inline
 def _utf8(mut out: List[UInt8], cp: Int):
-    if cp < 128:
-        out.append(UInt8(cp))
-    elif cp < 2048:
-        out.append(UInt8(192 | (cp >> 6)))
-        out.append(UInt8(128 | (cp & 63)))
-    elif cp < 65536:
-        out.append(UInt8(224 | (cp >> 12)))
-        out.append(UInt8(128 | ((cp >> 6) & 63)))
-        out.append(UInt8(128 | (cp & 63)))
-    else:
-        out.append(UInt8(240 | (cp >> 18)))
-        out.append(UInt8(128 | ((cp >> 12) & 63)))
-        out.append(UInt8(128 | ((cp >> 6) & 63)))
-        out.append(UInt8(128 | (cp & 63)))
+    append_codepoint(out, cp)
 
 
 @fieldwise_init
