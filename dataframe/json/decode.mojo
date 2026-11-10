@@ -669,7 +669,7 @@ def _append_value(
             except:
                 valid = False
         elif kind == 6 and source == 45 and not _fraction(reader.raw(value)):
-            # Polars accepts the signed Int64 JSON representation of a
+            # Accept the signed Int64 JSON representation of a
             # timestamp; unsigned and fractional JSON numbers are errors.
             result = parse_integer[DType.int64](reader.raw(value))
         elif (

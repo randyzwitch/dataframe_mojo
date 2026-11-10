@@ -1,5 +1,5 @@
 """A join build no larger than the rows it filters hands the pipeline a
-bloom filter over its keys (DuckDB's CanUseBloomFilter, `join_filter.mojo`);
+bloom filter over its keys;
 a probe row whose key the filter lacks is dropped before any step reads it. Joins against a scalar model: inner and semi joins,
 Int64 and Int32 keys, nullable probe keys, a second join after the first so
 the filter works on rows an earlier filter kept, a probe filter before the

@@ -1,8 +1,6 @@
-"""DuckDB's join hash table (`dataframe/joins/hash_table.mojo`): a build on
-several sink workers into radix-partitioned rows keeps every duplicate and
-null of the build and lists each key's rows in ascending order; an eager
-join builds on the side of the smaller hash table and, when its rows are
-read in order, returns them in the unflipped join's order."""
+"""Verify join hash-table builds and probes against independently enumerated
+row pairs. Exercise duplicate keys, nulls, bounded probe output and
+unmatched build-row scans."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_true
 
@@ -68,9 +66,8 @@ def test_partitioned_build_keeps_every_duplicate_null_and_row() raises:
 
 
 def test_partitioned_key_set_finds_exactly_the_build_keys() raises:
-    # The table of semi, anti and mark joins (DuckDB's
-    # insert_duplicate_keys false): duplicates kept once, null keys left
-    # out, large enough that its lookups prefetch.
+    # Semi, anti and mark joins observe membership only, so duplicate build
+    # keys must not multiply emitted probe rows.
     var setting = JoinWorkers(4)
     var domain = 300_000
     var n = 500_001

@@ -127,7 +127,7 @@ def assert_typed_join(
     var left_only = how == "semi" or how == "anti"
     var keep_right_key = how == "cross" or (not coalesce and not left_only)
     # A coalesced right join keeps the right key, among the right columns
-    # after the left's other ones (Polars).
+    # after the left's other ones.
     var names: List[String] = [
         "p",
         "k",

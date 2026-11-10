@@ -596,7 +596,7 @@ def _select(
                 return _send(program, reader, path, next, node, out, limit)
             return False
         # Recursive predicate paths select the matching descendants in the
-        # Polars evaluator; ordinary field predicates retain their owners.
+        # selection evaluator; ordinary field predicates retain their owners.
         if _recursive_operand(program, step.predicate):
             for selected in _values(program, reader, step.predicate, node):
                 if _send(program, reader, path, next, selected, out, limit):
@@ -652,7 +652,7 @@ def _select(
             matched = True
             if _send(program, reader, path, next, node, out, limit):
                 return True
-        # Polars' JSONPath inequality retains its current input selection
+        # Direct JSONPath inequality retains its current input selection
         # when no elements satisfy that direct inequality predicate.
         if not matched and predicate.kind == 4 and predicate.op == 2:
             return _send(program, reader, path, next, node, out, limit)
@@ -936,7 +936,7 @@ def _comparison(
         and program.simple[a.path]
         and program.simple[b.path]
     ):
-        # Relative path terms in Polars compare their owning selections,
+        # Relative path terms compare their owning selections,
         # whereas a path versus a scalar literal compares the field value.
         var left = _resolve(program, reader, a.path, current) >= 0
         var right = _resolve(program, reader, b.path, current) >= 0

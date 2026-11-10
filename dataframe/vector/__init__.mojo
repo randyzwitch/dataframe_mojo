@@ -1,2 +1,4 @@
-"""DuckDB 2.0's vector format: the data chunks pipelines pass between
-steps (see `types.mojo` and `data_chunk.mojo`)."""
+"""Data chunks passed between pipeline steps.
+
+See `types.mojo` for vector layouts and `data_chunk.mojo` for ownership.
+"""

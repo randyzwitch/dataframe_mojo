@@ -245,13 +245,9 @@ def encode_sort_keys(
             filled = True
 
         if not filled:
-            # A string: its first STRING_PREFIX_BYTES bytes, big-endian so
-            # word order is byte order, then its length. Padding with zeros
-            # and comparing the length last is exact for any two strings
-            # that fit, including one that is a prefix of the other and
-            # including embedded NUL bytes -- "ab" and "ab\0" pad alike and
-            # are separated by the length. Polars escapes instead, which it
-            # needs because its keys are a byte stream with no length.
+            # Store a big-endian string prefix followed by its length.
+            # Zero padding then preserves byte order, while the length
+            # distinguishes equal prefixes such as "ab" and "ab\0".
             if not column._data.isa[StringColumn]():
                 raise Error("row encoding requires a fixed-width dtype")
             ref typed = column._data[StringColumn]

@@ -1,10 +1,10 @@
-"""The bloom filter a finished hash join build hands to the scan that feeds
-its probe side (`joins/join_filter.mojo`, DuckDB's join filter pushdown).
-DuckDB's register-blocked bloom filter (`bloom_filter.cpp`) over
-the build's integer keys: a key sets four bits of one 64-bit word, so a
-lookup is one load and one compare, and lookups are made eight keys at a
-time. A probe row whose key the filter lacks joins nothing, so the scan
-drops it before any step reads or gathers its other columns.
+"""Membership filtering with register-blocked Bloom filters.
+
+Hash each build key into a small block of bits. A probe missing any required
+bit cannot be present; a possible hit still needs the join's exact key
+comparison. Workers can build filters privately and merge their bits,
+avoiding atomic operations on every build key. False positives only add
+probe work, while false negatives would incorrectly discard result rows.
 """
 from std.memory import ArcPointer, Pointer
 
@@ -13,9 +13,9 @@ from dataframe.dtype import DataType
 from dataframe.parallel import Job, partitions, run_jobs, worker_count
 from dataframe.series import Series
 
-# Bits per key a filter is sized for, and the smallest and largest filter
-# built, in bits (DuckDB's MIN_NUM_BITS_PER_KEY, MIN_NUM_BITS and
-# MAX_NUM_SECTORS).
+# Bloom-filter bit budget per key, minimum allocation and maximum allocation.
+# The maximum bounds memory; declining a larger filter preserves correctness
+# by leaving exact probing enabled.
 comptime _BITS_PER_KEY = 12
 comptime _MIN_BITS = 512
 comptime _MAX_WORDS = 1 << 22
@@ -43,7 +43,7 @@ def _hash_keys[
 def _word_masks[
     width: Int
 ](hashes: SIMD[DType.uint64, width]) -> SIMD[DType.uint64, width]:
-    """The four bits each hash sets in its word (DuckDB's `GetMask`)."""
+    """The four bits each hash sets in its word."""
     var shifts = hashes & SIMD[DType.uint64, width](_SHIFT_MASK)
     var one = SIMD[DType.uint64, width](1)
     var low = SIMD[DType.uint64, width](63)
@@ -182,10 +182,9 @@ def build_bloom(
     `rows` keys, or None when it would be larger than is built. The keys
     are split over the workers, each filling a filter of its own, and the
     filters are merged by or-ing their words, each worker a range of them.
-    DuckDB's build threads insert into one filter with atomic ors
-    (BloomFilter::InsertOne); here that took 4 ms of join-092's build (1M
-    keys, eight threads), the threads contending for the filter's words,
-    so each worker fills its own and the merge runs on every worker."""
+    Private filters avoid workers contending on shared atomic bit updates.
+    Their bitwise union admits every build key; any extra bits can only
+    increase false positives, which exact join comparisons reject."""
     var blocks = bloom_blocks_for(rows)
     if blocks == 0:
         return None

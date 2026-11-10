@@ -1,6 +1,6 @@
 """Concatenate nested Arrow arrays once per level, including sliced children.
 
-Like Polars' concatenate_list/concatenate_struct, gather child arrays first
+Gather child arrays first
 and merge each child once. Repeated binary append recopies earlier batches.
 """
 from dataframe.storage.column import Column, _append_validity

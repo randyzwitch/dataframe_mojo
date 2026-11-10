@@ -63,18 +63,12 @@ from std.collections import (
 def plan_share_subplans(
     mut self: QueryContext, streaming: Bool, batch_size: Int
 ) raises:
-    """Execute once a subplan the query computes in several places, under
-    the conditions DuckDB 2.0 keeps one materialized (`plan_materialized`,
-    `_selective_multi_table_plan`). Our plans hold no CTE nodes: a lazy
-    frame used twice is copied into each reader, so a CTE written twice
-    and a subplan repeated are the same thing here, and the two passes
-    that decide them in DuckDB (`CTEInlining`, `CommonSubplanOptimizer`)
-    are one test. A subtree that passes is collected on its own and every
-    node holding it becomes a scan of the result; largest first, then the
-    next largest holding no copy of it (`plan_collect_shared`). A filter
-    or a projection over one table does not pass: DuckDB has that filter
-    in the scan, one operator, which is never worth materializing, and
-    each reader then scans with the table's own statistics."""
+    """Execute eligible repeated subplans once and replace their readers with
+    scans of the retained result. Process the largest eligible subtree
+    first, then disjoint repeated subtrees. Sharing avoids repeated blocking
+    work or selective multi-table computation. A simple filter/projection
+    over one table stays in each scan, retaining scan pruning without an
+    extra intermediate result."""
     var computed = plan_subplan_classes(self)
     ref classes = computed[0]
     ref sizes = computed[1]
@@ -156,10 +150,9 @@ def plan_share_subplans(
 def _relation_stats(
     self: QueryContext, mut stats: PlanStatistics, index: Int
 ) raises -> Tuple[Int, Int]:
-    """DuckDB's `GetSubplanStats`: how many base tables the subtree at
-    `index` reads and the largest one's estimated rows. A table's filters
-    belong to its scan there, so a scan under row-local steps counts as
-    one table with the rows those steps keep."""
+    """Count base tables read by a subtree and report the largest estimated
+    table cardinality. Row-local filters belong to the scan, so use the
+    number of rows those filters retain."""
     ref node = self._nodes[index]
     if node.left < 0 or plan_filtered_scan(self, index):
         return (1, max(plan_cardinality(self, stats, index), 0))
@@ -173,9 +166,10 @@ def _relation_stats(
 def _selective_multi_table_plan(
     self: QueryContext, mut stats: PlanStatistics, index: Int
 ) raises -> Bool:
-    """DuckDB's `IsSelectiveMultiTablePlan`, with its constants: a subplan
-    over two or more tables is worth materializing when its estimate is
-    at most 2,048 rows or under half its largest table."""
+    """Whether a subplan over at least two tables is selective enough to
+    retain: its estimate is at most 2,048 rows or below half the largest
+    input table. This limits retained output relative to repeated upstream
+    work."""
     comptime CARDINALITY_THRESHOLD = 2048
     comptime CARDINALITY_RATIO = 2
     var rows = plan_cardinality(self, stats, index)
@@ -204,9 +198,8 @@ def _holds(self: QueryContext, index: Int, marked: List[Bool]) -> Bool:
 
 
 struct _SharedPipeline(SchedulablePipeline):
-    """One shared subtree, collected from its own copy of the plan as a
-    scheduled pipeline, as DuckDB materializes a CTE in a pipeline of its
-    own."""
+    """Collect a shared subtree from its own plan copy as an independently
+    scheduled pipeline. Retain the result until all readers finish."""
 
     var plan: QueryContext
     var aggregated: Bool
@@ -250,10 +243,9 @@ struct _SharedPipeline(SchedulablePipeline):
         pass
 
     def finalize(mut self) raises:
-        # A materialized result keeps the distinct counts its plan estimated
-        # for it, as DuckDB gives a CTE reference its definition's relation
-        # statistics (`AddMaterializedCTEStats`). An aggregate's result
-        # has its own columns counted (`ExtractAggregationStats`).
+        # Preserve a materialized result's estimated distinct counts. For
+        # aggregate outputs, count their own result columns before downstream
+        # planning.
         if self.aggregated:
             self.result = self.result^._with_statistics()
             return
@@ -273,14 +265,10 @@ def plan_collect_shared(
     batch_size: Int,
     mut distinct_counts: List[Dict[String, Int]],
 ) raises -> List[DataFrame]:
-    """Each shared subtree in `picks`, collected on its own. The subtrees
-    are independent, so outside an execution report they are scheduled
-    as pipelines that run at once (`run_pipelines`), as DuckDB schedules
-    the pipelines of independent materialized CTEs together: one subtree's
-    serial steps (its planning, a small eager input, an aggregate's
-    final frame) then overlap another's parallel work. The plan around
-    them already optimized each, so only the passes after optimization
-    run on it again (sharing, join order)."""
+    """Collect independent shared subtrees concurrently as scheduled pipelines.
+    This lets one subtree's serial planning or final assembly overlap
+    another's parallel work. Retain their results for the surrounding plan
+    instead of recomputing them at every reference."""
     var jobs = List[_SharedPipeline](capacity=len(picks))
     var metas = List[MetaPipeline](capacity=len(picks))
     for k in range(len(picks)):
@@ -328,22 +316,11 @@ struct _StreamInputs(Movable):
 def plan_schedule_inputs(
     self: QueryContext, top: Int, batch_size: Int
 ) raises -> _StreamInputs:
-    """The inputs the stream below `top` will execute in full, as
-    pipelines for its schedule: every join's build side, a table already
-    in memory included (its build finishes into a hash index like any
-    other), and its source where that ends in a pipeline breaker. Build
-    sides are chosen before this (`plan_build_probe_sides`), so no build
-    made here is one a swap would stream instead. Each is a MetaPipeline
-    of the stream's pipeline: a build side is a JOIN_BUILD child, the
-    source a REGULAR one, as DuckDB's `MetaPipeline::Build` makes them.
-    The stream's probe depends on them all (`plan_stream_execute`).
-
-    A build side's finish event also finishes it as a build
-    (`finish_build`): its columns in one chunk and its keys' hash
-    index, as DuckDB finalizes each hash join's table in its build
-    pipeline's finish event. Sibling builds all execute before any
-    finishes (`BuildPipelineSchedule`). The results wait in `_prefetched`
-    (`_prefetched_indexes` for the index) for the probe."""
+    """Schedule computed join inputs as children of the probe pipeline. Each
+    build finishes its columns and hash index in its finish event. The probe
+    depends on all build completions. Sibling builds finish execution before
+    finalization; retained frames and indexes are consumed from the
+    prefetched slots."""
     var ahead = self._prefetched.value()
     var inputs = _StreamInputs()
     var stats = PlanStatistics()

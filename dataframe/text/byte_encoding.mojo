@@ -62,8 +62,7 @@ def _sextet(byte: UInt8) -> Int:
 def decode_bytes(row: Span[UInt8, _], hex: Bool, mut out: List[UInt8]) -> Bool:
     """Append the bytes a row encodes; False (with `out` partly written) if
     the row is not valid hex (an even number of digits) or canonical padded
-    base64 (Rust's `base64` STANDARD engine: padding required, unused bits
-    zero)."""
+    base64."""
     var size = len(row)
     var data = row.unsafe_ptr()
     if hex:

@@ -306,7 +306,7 @@ def plan_stream_execute(
             through.value(), index, batch_size, sink
         )
     # Every join's build side is chosen before anything runs or is
-    # scheduled, from estimates (DuckDB's `BuildProbeSideOptimizer`):
+    # scheduled, from estimates:
     # the stream then builds each join's right input as it stands.
     var sided = plan_build_probe_sides(self, cursor, batch_size)
     if sided:
@@ -330,10 +330,9 @@ def plan_stream_execute(
     )
     if not self._prefetched:
         return _stream_probe(self, index, batch_size, sink, head^)
-    # Each computed input is a MetaPipeline under the stream's (DuckDB's
-    # `MetaPipeline::Build`); the probe is the pipeline that depends on
-    # them all (`Pipeline::AddDependency`), so builds overlap and the
-    # caller only waits. An execution report records one task at a time.
+    # Schedule computed inputs as child pipelines. The probe depends on all
+    # child completions, allowing independent builds to overlap. Execution
+    # reports serialize these tasks to attribute their measurements.
     var inputs = plan_schedule_inputs(self, cursor, batch_size)
     if len(inputs.wanted) == 0:
         return _stream_probe(self, index, batch_size, sink, head^)
@@ -364,9 +363,9 @@ def plan_stream_execute(
         )
     )
     pipelines[count].probe[0].siblings = Int(Pointer(to=pipelines))
-    # Each right or full join's unmatched build rows, a finish-group
-    # pipeline of the probe's, in step order (DuckDB's `MetaPipeline`
-    # adds the join's scan as a pipeline sharing the probe's sink).
+    # Schedule unmatched build-row scans after the probe in operator order,
+    # sharing its downstream sink so outer-join rows receive the same later
+    # processing.
     var probe_pipeline = count
     var below = cursor
     var previous = count
@@ -650,13 +649,9 @@ def _probe_start(
     # The plan node of each join built so far.
     var join_nodes = List[Int]()
     var indexes = List[Optional[JoinHashTable]]()
-    # A computed source (a union, an aggregate, a sort) is run in full
-    # whatever the stream does with it; as an in-memory table its rows
-    # run through the morsel pipelines and the aggregate table on every
-    # worker, as DuckDB's union children sink into their parent's
-    # aggregate. Batched, a grouped reduction over it ran on one thread
-    # (TPC-DS q76's three channels). It is found and run before any
-    # join below builds, so no build is made twice.
+    # Run union inputs through morsel pipelines into worker-local aggregate
+    # tables. Discover this route before building joins below it, avoiding
+    # duplicate build work.
     var first = cursor
     while first >= 0:
         ref step = self._nodes[first]
@@ -667,12 +662,9 @@ def _probe_start(
         else:
             break
     if first >= 0 and first != index and not _is_scan(self._nodes[first].kind):
-        # Row-local steps all the way up from an aggregate (a filter on
-        # its outputs, as SQL's HAVING, and projections): the aggregate's
-        # finish runs them on each worker's part of its groups, as
-        # DuckDB's pipeline whose source is the aggregate table's scan
-        # runs a filter over each scanned chunk, so the groups they drop
-        # are never assembled and scanned again.
+        # Run row-local steps during each worker's aggregate scan. Discard
+        # rejected groups before assembling a frame, avoiding an additional
+        # scan of materialized groups.
         var above = _row_steps_above(self, index, first, sink, len(expressions))
         if len(above) > 0 and top < 0 and limit < 0 and skip == 0:
             var plan = self.copy()
@@ -716,13 +708,9 @@ def _probe_start(
                 or node.how == JOIN_SEMI
                 or node.how == JOIN_RIGHT
             ):
-                # No output is possible below this join (DuckDB's
-                # `EmptyResultIfRHSIsEmpty`: its sink finalizes as
-                # NO_OUTPUT_POSSIBLE and the probe pipeline never runs):
-                # the join's result is empty, and nothing under it runs.
-                # The steps above it run on no rows, so an aggregate
-                # without keys still yields its one row; the builds
-                # already made are kept.
+                # Join semantics prove the result empty: finalize the sink and
+                # skip both probe work and unnecessary execution beneath the
+                # join.
                 var plan = self.copy()
                 for k in range(len(joins)):
                     plan._frames.append(joins[k].copy())
@@ -959,10 +947,9 @@ def _probe_start(
         input = self._frames[source.source_slot()].copy()
         if len(source.names):
             input = input.select(source.names)
-        # A first filter over the frame is the scan's table filters
-        # (DuckDB's filter pushdown into the table scan): vectors their
-        # statistics rule out are never batched, and parts that keep
-        # every row left are not evaluated.
+        # Apply the first row-local filter as a scan filter. Skip vectors
+        # ruled out by statistics and omit predicate evaluation where every
+        # remaining row is proven to pass.
         if (
             len(operations) > 0
             and operations[0].kind == FILTER
@@ -1009,11 +996,9 @@ def _probe_start(
     # on separate workers and interleaved by first occurrence at the end.
     var split_groups = _stream_split_groups()
     var acc = _StateAccumulator(workers, split_groups)
-    # A grouped reduction whose first batch shows many groups collects
-    # the batches (the columns it reads) and runs one eager group-by
-    # at the end, where the hash-partitioned reduce encodes every key
-    # once and never merges: a state per batch merged through a key
-    # index cost TPC-DS q39 (1M groups) 761 ms against DuckDB's 32.
+    # Update each group's state in place instead of merging per-batch states
+    # through an additional key index. Repeated indexing adds work
+    # proportional to the groups in every batch.
     var collecting = False
     var collected = List[DataFrame]()
     var collected_bytes = 0
@@ -1938,20 +1923,11 @@ def _keyed_rows(frame: DataFrame, keys: List[String]) raises -> Int:
 def plan_push_filters_through_aggregate(
     self: QueryContext, top: Int, batch_size: Int
 ) raises -> Optional[QueryContext]:
-    """DuckDB's join filters through an aggregate's group keys
-    (`JoinFilterPushdownOptimizer::GenerateJoinFilters` and
-    `GetPushdownFilterTargets`, the LOGICAL_AGGREGATE_AND_GROUP_BY case):
-    when the stream below `top` starts from an aggregate, each inner, semi
-    or right join above it whose probe keys reach the aggregate as group
-    keys (all of them, but those a projection computes) has its build
-    side run first, and the aggregate's input pipeline filters its source
-    by the build's keys, as a hash join's dynamic filters reach the scan
-    under the aggregate. A probe row whose keys no build row has joins
-    nothing, and a filter on group keys removes whole groups, so the
-    result is unchanged. DuckDB makes the probe side's pipelines wait for
-    the build (`PhysicalJoin::BuildJoinPipelines`); here the builds run
-    before the stream and replace their inputs, so nothing runs twice.
-    None when no join qualifies."""
+    """Push safe join-key filters below an aggregate through its grouping keys.
+    A filter on group keys removes whole groups, preserving every retained
+    group's aggregate values. Prepare the build inputs first so the probe
+    filters use complete key information. Return None when no join permits
+    this transformation."""
     if self._pushed_filters:
         return None
     var first = top

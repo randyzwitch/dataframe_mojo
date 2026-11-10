@@ -1,4 +1,4 @@
-"""Visible buffer accounting, following Polars' Arrow array size estimates."""
+"""Visible buffer accounting for values, offsets, validity and nested children."""
 from std.sys import size_of
 from .frame import DataFrame
 from .series import Series, FixedElements

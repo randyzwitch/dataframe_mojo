@@ -63,14 +63,14 @@ struct CsvSplitFields:
     var separator: UInt8
     var quote: UInt8
     var quoting: Bool
-    # Polars stores these SIMD splats in `SplitFields`, rather than rebuilding
+    # Store these SIMD splats in `SplitFields`, rather than rebuilding
     # them in every 64-byte block scan.
     var simd_separator: SIMD[DType.uint8, _SIMD_WIDTH]
     var simd_eol: SIMD[DType.uint8, _SIMD_WIDTH]
     var simd_quote: SIMD[DType.uint8, _SIMD_WIDTH]
     var position: Int
     var finished: Bool
-    # `previous_valid_ends` from Polars. Bit zero is relative to `position`;
+    # Cached valid field endings. Bit zero is relative to `position`;
     # consuming an end shifts the remaining mask into the next field's frame.
     var cached_ends: UInt64
 
@@ -153,7 +153,7 @@ struct CsvSplitFields:
             var structural = _mask64(
                 block.eq(self.simd_separator) | block.eq(self.simd_eol)
             )
-            # Equivalent to Polars' `prefix_xorsum_inclusive`: one bit for
+            # Inclusive prefix XOR produces one bit for
             # every byte that is inside a quoted field after that byte.
             var inside_mask = _prefix_xor_inclusive(quote_mask)
             if inside:
@@ -162,7 +162,7 @@ struct CsvSplitFields:
             var ends = structural & outside
             if ends != 0:
                 var bit = Int(count_trailing_zeros(ends))
-                # Match Rust's cache relative to the slice advanced past the
+                # Keep the cache relative to the slice advanced past the
                 # selected end. Shifting by 64 is invalid, hence its explicit
                 # final-lane branch in the source.
                 self.cached_ends = UInt64(

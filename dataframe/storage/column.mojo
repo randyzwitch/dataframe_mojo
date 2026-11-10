@@ -468,7 +468,7 @@ def _validity_at(bits: Pointer[UInt8, _], index: Int) -> Bool:
     return (bits.unsafe_offset(index // 8)[] >> UInt8(index % 8)) & 1 == 1
 
 
-# Arrow/Polars validity is absent until the first null. An empty validity
+# Omit the validity bitmap until the first null needs a cleared bit. An empty validity
 # list represents that absence; payload bitmaps always use the raw helpers.
 def _validity_bit(bits: Span[UInt8, _], index: Int) -> Bool:
     return len(bits) == 0 or _bit(bits, index)

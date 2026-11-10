@@ -1,4 +1,4 @@
-"""The comparison and radix sorts DuckDB 2.0 sorts its key rows with.
+"""Comparison and radix sorts over normalized key records.
 
 Ported from DuckDB's third_party sources over this package's key records
 (`SortKeys`): pdqsort_branchless (pdqsort.h, Orson Peters), vergesort
@@ -38,8 +38,7 @@ struct SortKeys[W: Int, VAR: Bool](ImplicitlyCopyable, Movable):
     a payload). Fixed: `W` key words, then the payload (the row id).
     Variable (`VAR`): the key's first 8 bytes, its byte size, the address
     of the whole key, then the payload. Key words are stored so that
-    unsigned word order is the key bytes' order (DuckDB byte-swaps its
-    keys the same way to compare them as integers)."""
+    unsigned word order is the key bytes' order."""
 
     comptime R = 4 if Self.VAR else Self.W + 1
     var base: Int
@@ -397,7 +396,7 @@ def _pdqsort_loop[
         var r_size = end - (pivot_pos + 1)
         var highly_unbalanced = l_size < size // 8 or r_size < size // 8
         if highly_unbalanced:
-            # (DuckDB's copy leaves out the heapsort fallback.)
+            # Heapsort bounds worst-case work when partitioning stops making progress.
             if l_size >= _INSERTION_SORT_THRESHOLD:
                 k.swap(begin, begin + l_size // 4)
                 k.swap(pivot_pos - 1, pivot_pos - l_size // 4)

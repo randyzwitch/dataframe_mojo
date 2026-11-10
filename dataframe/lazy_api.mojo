@@ -301,8 +301,8 @@ from std.collections import (
     Dict,
     Optional,
 )
-from std.io import (
-    RawFileDescriptor,
+from std.sys import (
+    stderr,
 )
 from std.memory import (
     ArcPointer,
@@ -2017,7 +2017,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         parts.append(cell.string())
                 print(
                     "dataframe-operator:\t" + String("\t").join(parts),
-                    file=RawFileDescriptor(2),
+                    file=stderr,
                 )
             return profiled[0].copy()
         var plan = (
@@ -2806,7 +2806,7 @@ def _collect_placed[
                     labels[planned],
                     "at start",
                     labels[device],
-                    file=RawFileDescriptor(2),
+                    file=stderr,
                 )
             if device == _PLACE_CPU:
                 # The CPU runs it with the rest, on the inputs computed
@@ -3059,8 +3059,7 @@ struct LazyGroupingSets(Copyable):
 
         The plan has one node that reads its input once: when the
         aggregations keep their states inline, every morsel of the input is
-        sunk into one aggregate table per set (DuckDB's single sink over all
-        grouping sets); otherwise each set groups the collected input.
+        sunk into one aggregate table per set; otherwise each set groups the collected input.
         """
         if len(self._sets) == 0:
             raise Error("grouping sets need at least one set")

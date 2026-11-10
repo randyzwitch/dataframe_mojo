@@ -53,7 +53,7 @@ def _inline_view(bytes: Span[UInt8, ImmutAnyOrigin]) -> StringView:
     var length = len(bytes)
     assert length <= STRING_VIEW_INLINE_BYTES
     var view = StringView(UInt32(length), 0, 0, 0)
-    # Polars copies directly into the bytes after the length field. This
+    # Inline bytes begin immediately after the length field. This
     # preserves the exact 16-byte View layout, including zeroed tail bytes.
     unsafe_memcpy(
         dest=Pointer(to=view).unsafe_bitcast[UInt8]().unsafe_offset(4),
@@ -97,7 +97,7 @@ struct StringViewStorage(Copyable, Sized):
 
     A storage can select its rows from another's descriptors instead of
     holding its own (its descriptor buffer then carries a row list,
-    `_Buffer.selecting`), as DuckDB's dictionary vector is a child vector
+    `_Buffer.selecting`), so a dictionary view is a child vector
     and a selection vector: a join's build-side strings are
     then the build's descriptors and the matched rows, and no descriptor
     is copied until a kernel needs them contiguous (`_flat`). Validity is
@@ -654,7 +654,7 @@ struct StringViewBuilder(Movable):
             return _inline_view(bytes)
 
         self._total_buffer_bytes += len(bytes)
-        # Polars flushes before a growth realloc so a prior view always points
+        # Flush before a growth reallocation so an existing view always points
         # at immutable completed storage; it never copies between blocks.
         if len(self._in_progress) + len(bytes) > min(
             _STRING_VIEW_BUFFER_LIMIT, self._in_progress.capacity()

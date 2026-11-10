@@ -40,7 +40,7 @@ def test_checked_decimal_group_and_over_distinct_operand_batches() raises:
         _ = frame.group_by("g").agg(feed_expression(), batch_size=1025)
     var over = feed_expression().over("g")
     # A window's argument (a * b) is computed over every input row before
-    # any partition is summed (DuckDB's projection below PhysicalWindow),
+    # any partition is summed,
     # so row 1024's product fault comes first at any batch size.
     with assert_raises(contains="decimal multiplication overflow"):
         _ = frame.select(over, batch_size=1024)
@@ -91,10 +91,9 @@ def test_checked_decimal_group_range_workers_before_partial_merges() raises:
     # input fault each worker holds 6e37; only their merge exceeds precision.
     with assert_raises(contains="decimal precision 38"):
         _ = _frame(131072, -1, 65536).group_by("g").agg(feed_expression())
-    # Morsels go to workers as they free up, as DuckDB hands them out, so
-    # one worker may take both 6e37 rows (0 and 65536) and fail precision
-    # before another reaches the operand fault at the last row: either
-    # decimal fault may come first.
+    # Assign morsels to workers as they become free. One worker may receive
+    # both 6e37 rows and fail precision before another reaches the final
+    # multiplication fault. Either decimal fault may therefore arrive first.
     var raised = String()
     try:
         _ = _frame(131072, 131071, 65536).group_by("g").agg(feed_expression())
@@ -151,10 +150,8 @@ def test_checked_decimal_over_source_faults_precede_partition_faults() raises:
         _ = frame.select(feed_expression().over("g"))
     _ = serial^
     var parallel = WorkerSetting(2)
-    # A window's argument expressions are computed over the input rows
-    # before the rows are partitioned (DuckDB's projection below
-    # PhysicalWindow), so source row 1's product fault comes before any
-    # partition's prefix sum, with any number of workers.
+    # Evaluate checked input expressions before partitioning rows so a window
+    # cannot move their faults into a different observation order.
     print("CPU OVER two workers: source batch row 1 multiplication fault")
     with assert_raises(contains="decimal multiplication overflow"):
         _ = frame.select(feed_expression().over("g"))

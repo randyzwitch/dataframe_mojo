@@ -46,8 +46,7 @@ struct _RowSelection(Movable):
 
 
 struct _StatsRecord(Movable):
-    """A buffer's segment statistics (DuckDB keeps them with each column
-    segment): one `BaseStatistics` per `STATISTICS_VECTOR_SIZE` rows of the
+    """A buffer's segment statistics: one `BaseStatistics` per `STATISTICS_VECTOR_SIZE` rows of the
     buffer from its first element, and one per `ROW_GROUP_VECTORS` vectors.
     They describe the values of buffer rows [first, end) (a borrowed Arrow
     buffer's declared window) with the validity bitmap they were taken with

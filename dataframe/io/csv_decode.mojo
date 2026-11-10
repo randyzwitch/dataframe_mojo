@@ -161,7 +161,7 @@ def decode_chunk(
     if selected == 0:
         raise Error("decode_chunk requires at least one selected column")
 
-    # Polars validates the record-aligned chunk once before borrowed Utf8
+    # Validate the record-aligned chunk once before borrowed UTF-8
     # handoff. Numeric-only projections retain raw byte parsing.
     if needs_utf8 and options.encoding == "utf8":
         try:
@@ -169,7 +169,7 @@ def decode_chunk(
         except:
             raise Error("CSV input is not valid UTF-8")
 
-    # Polars parse_lines receives compiled projection indices, not a mask
+    # Decode with compiled projection indices rather than a mask
     # scanned again for every record. Compile the API mask once per chunk.
     var quoting = options.quote_char.byte_length() == 1
     var quote = options.quote_char.as_bytes()[0] if quoting else UInt8(34)

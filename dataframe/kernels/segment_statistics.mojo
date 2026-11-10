@@ -1,7 +1,5 @@
 """Segment statistics of column buffers: computed, published, and read
-back for a window (DuckDB 2.0 keeps a `BaseStatistics` with every column
-segment and row group, filled while rows are appended, and checks scan
-filters against them: `ColumnSegment`, `RowGroup::CheckZonemap`).
+back for a window.
 
 Statistics belong to a buffer, not to a column window: every window onto
 the buffer reads the same `_StatsRecord` (`storage/buffer.mojo`), one entry
@@ -10,10 +8,10 @@ per `ROW_GROUP_VECTORS` vectors. A window that covers part of a vector reads
 that vector's statistics, which hold every value of the window and possibly
 more: wider bounds rule fewer rows out but never a row that is there.
 
-Loaded tables get them when they are read (`compute_table_statistics`),
-as DuckDB fills them while appending. Other frames have none unless a
-caller asks (`ensure_statistics`): a scan of them is not pruned, as
-DuckDB's scans of data it does not store are not.
+Loaded tables receive statistics when read (`compute_table_statistics`).
+Other frames have none unless requested (`ensure_statistics`). Without
+statistics a scan reads every region, because it has no bounds that could
+prove rows irrelevant.
 """
 from std.memory import ArcPointer, Pointer
 from std.collections import Optional
@@ -499,8 +497,7 @@ def ensure_statistics(series: Series) raises:
 
 
 def compute_table_statistics(columns: List[Series]) raises:
-    """Statistics for every column of a loaded table, all computed at once
-    (DuckDB fills them while appending the rows)."""
+    """Statistics for every column of a loaded table, all computed at once."""
     var arrays = List[Storage]()
     for column in columns:
         arrays.extend(_missing(column))

@@ -223,8 +223,8 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
     if op_code == CUM_PROD:
         return _cum_prod(input, ids, node.min_count == 1)
     if op_code == CUM_SUM and input.dtype() == DataType.BOOL:
-        # A running count of true values: the UInt32 zeros and ones Polars
-        # casts a Boolean to, summed as any UInt32 column is.
+        # Cast Booleans to UInt32 zeros and ones, then sum them to count
+        # true values cumulatively.
         return window_op(node, input.cast(DataType.UINT32), ids)
     if input.dtype().is_decimal():
         if op_code == CUM_SUM:
@@ -1013,11 +1013,11 @@ def _frames(
     needed: Int,
 ) raises -> Series:
     """Each row's frame [begins, ends) of `input`, inside the partitions
-    at `starts` (DuckDB's WindowAggregateExecutor): the states the
+    at `starts`: the states the
     aggregate table uses, combined over the frame by the segment tree.
     Fewer than `needed` valid values give null, and a frame without any
     gives null unless it is an empty sum. A minimum or maximum over a frame
-    holding a NaN is NaN, as Polars' rolling_min and rolling_max."""
+    holding a NaN is NaN."""
     var reduction = _reduction_of(node.op)
     var moments = reduction == STD or reduction == VAR
     var feed = _origin_shifted(input, starts) if moments else input.copy()

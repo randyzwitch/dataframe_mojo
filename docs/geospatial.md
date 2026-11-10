@@ -106,8 +106,8 @@ bounds, while their original validity and geometry type remain distinct.
 `total_bounds()` returns `Optional[GeometryBounds]`, with `xmin`, `ymin`, `xmax`,
 and `ymax` fields; it is absent when there are no non-empty geometries.
 
-These are axis-aligned coordinate extrema, matching the planar interpretation
-of [GeoPandas bounds](https://geopandas.org/en/stable/docs/reference/api/geopandas.GeoSeries.bounds.html).
+These are axis-aligned coordinate extrema: independently take the minimum
+and maximum stored X and Y coordinates, without projecting or wrapping them.
 A line from longitude 179 to -179 has xmin=-179 and xmax=179. Longitude is not
 wrapped, no shortest antimeridian interval is selected, and spherical arc
 extrema are not computed. Bounds reject non-finite XY coordinates except the
@@ -130,8 +130,8 @@ Metadata rules follow the [GeoParquet 1.1 specification](https://geoparquet.org/
 
 - Omitted CRS means OGC:CRS84; explicit `null` means unknown. CRS PROJJSON, edge
   interpretation, orientation, and coordinate epoch are retained per column.
-- Conflicting GeoArrow and GeoParquet CRS/edge metadata raises. GeoPandas'
-  omission of optional datum-ensemble member IDs is accepted when the remaining
+- Conflicting GeoArrow and GeoParquet CRS/edge metadata raises. Missing
+  optional datum-ensemble member IDs are accepted when the remaining
   CRS content agrees; IDs present in both copies must match. The Arrow CRS
   is preserved. Other CRS differences still raise without a CRS database
   to establish equivalence.

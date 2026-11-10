@@ -217,7 +217,7 @@ struct DataFrame(Copyable, Sized, Writable):
 
     def _with_storage_statistics(var self) raises -> Self:
         """Compute the segment statistics of every column's buffers, as a
-        table is stored (DuckDB fills them while appending): scans of this
+        table is stored: scans of this
         table and of its windows check their filters against them."""
         compute_table_statistics(self._columns)
         return self^
@@ -428,9 +428,9 @@ struct DataFrame(Copyable, Sized, Writable):
         Includes validity, chunks, nested children, and foreign buffers;
         excludes capacity, object metadata, caches, and categorical mappings.
         Shared buffers may be counted more than once. Binary-view strings
-        count visible non-null value bytes, following Polars' estimate.
-        Slices count their visible ranges, not retained allocations. Storage
-        layouts differ from Polars, so estimates can differ for equal data.
+        count visible non-null value bytes. Slices count their visible ranges,
+        not retained allocations; this estimates data size rather than
+        process memory usage.
         """
         return frame_size(self, unit)
 
@@ -1425,8 +1425,7 @@ struct DataFrame(Copyable, Sized, Writable):
         nulls_last: List[Bool],
         maintain_order: Bool = False,
     ) raises -> List[Int]:
-        """Row order of the sort: DuckDB's sort over normalized keys
-        (`dataframe.sorting`). Equal keys come in no particular order
+        """Return row indices ordered by normalized sort keys. Equal keys come in no particular order
         unless `maintain_order` keeps their input order."""
         return sort_rows(
             self._sort_columns(by),
@@ -1494,8 +1493,8 @@ struct DataFrame(Copyable, Sized, Writable):
         maintain_order: Bool = True,
     ) raises -> List[Int]:
         """The first k rows of arg_sort(by, ...), in order: a top-N heap
-        (`sort_rows` with a limit), or the full sort past DuckDB's TopN
-        limit. `threads` caps the sink's threads (0: the configured
+        (`sort_rows` with a limit), or a full sort when the requested
+        prefix is too large for the bounded-heap route. `threads` caps the sink's threads (0: the configured
         count); a streaming batch, already on a worker, passes 1."""
         if k < 0:
             raise Error("k must be nonnegative")
@@ -1855,13 +1854,12 @@ struct DataFrame(Copyable, Sized, Writable):
         """Hash join on key columns of any dtype; null keys never match.
 
         how: inner, left, right, full, semi, anti. The output's row order
-        is unspecified, as in DuckDB and Polars' default: the join may
+        is unspecified: the join may
         build on either side. Sort the result when an order matters.
         Output: left columns, then right non-key columns, with suffix on
         names that collide with left names. Key columns keep left names and
         take whichever side is present; a right join instead keeps the right
-        keys, among the right columns after the left's non-key columns, as
-        Polars does. With coalesce=False (inner, left,
+        keys, among the right columns after the left's non-key columns. With coalesce=False (inner, left,
         right and full joins), the right keys are kept as columns of their
         own instead, after the left columns and suffixed where their names
         collide, and the left keys keep the left side's values: a left
@@ -1965,7 +1963,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var columns = List[Series]()
         if batch_size <= 0:
             raise Error("batch_size must be positive")
-        # A top-level mode() yields one row per mode, as in Polars; scalar
+        # A top-level mode() yields one row per mode; scalar
         # siblings repeat, and row-valued siblings cannot align with it.
         var modes = List[String]()
         for expression in bound:
@@ -2092,7 +2090,7 @@ struct DataFrame(Copyable, Sized, Writable):
             raise Error("batch_size must be positive")
         # A scan with table filters: vectors whose statistics rule every
         # row out are not read, and parts that keep every row of those
-        # left are not evaluated (DuckDB's zone maps).
+        # left are not evaluated.
         if scan and self._height > 0 and _row_local(predicates):
             var parts = conjuncts(predicates[0])
             var scanned = scan_filtered(self, parts)
@@ -2322,7 +2320,7 @@ struct DataFrame(Copyable, Sized, Writable):
             if k < len(order):
                 # Later parts made of comparisons and null tests narrow the
                 # kept rows in place, reading the source columns at those
-                # rows (DuckDB's selection vectors): nothing is gathered.
+                # rows: nothing is gathered.
                 var trees = List[SelectionTree]()
                 for j in range(k, len(order)):
                     var tree = selection_tree(parts[order[j]], self._columns)
@@ -3046,8 +3044,7 @@ struct DataFrame(Copyable, Sized, Writable):
         """Group by one or more columns of any dtype.
 
         Group output order is unspecified unless maintain_order=True, which
-        guarantees first-occurrence order. Without it, as in Polars and
-        DuckDB, the order may differ between runs and thread counts; sort
+        guarantees first-occurrence order. Without it, order may differ between runs and thread counts; sort
         the result when the order matters. Null keys form their own groups.
         """
         if len(keys) == 0:
@@ -3289,7 +3286,7 @@ def concat(
                         + first[c].dtype.name()
                     )
             height += shared[f].height()
-        # Polars accumulate_dataframes_vertical / vstack_mut_owned:
+        # Stack owned column chunks without copying their value buffers:
         # append Arrow array references; keep the output multi-chunk.
         var columns = List[Series](capacity=len(first))
         for c in range(len(first)):

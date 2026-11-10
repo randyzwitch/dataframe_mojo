@@ -1,37 +1,17 @@
-"""Expressions over data chunks, read through the unified vector format.
+"""Evaluate bound expressions over execution chunks.
 
-DuckDB's `ExpressionExecutor` (execution/expression_executor.cpp) runs a
-bound expression over a chunk: every function reads its inputs through
-`UnifiedVectorFormat` (selection, data, validity), so a dictionary vector
-from a filter or a join is read where it is and never gathered first, and
-`Select` evaluates a filter's conjuncts one after another, each on the
-rows the ones before kept (`ExpressionExecutor::Select`,
-`SelectAnd`). This module does the same for one bound expression,
-compiled once per worker for a step's input columns:
-
-- a column reads its input vector; a subtree that reads no column is one
-  constant, computed once;
-- integer, decimal and float arithmetic and numeric casts compute in
-  lanes (Int64, Int128, Float64), with the exact decimal rounding and
-  overflow checks of the column kernels (`kernels/binary.mojo`,
-  `decimal.mojo`);
-- comparisons of numbers or strings (string_t), Kleene AND/OR, NOT and
-  null tests compute in bytes;
-- any other node is computed by the at-rest evaluator (`execution.mojo`)
-  over the rows it needs, gathered: the adapter step 2's expression
-  executor removes.
-
-Rows are processed a chunk at a time: `evaluate` is given the chunk rows
-to compute (`rows`, a selection over the chunk, or every row) and computes
-each node for exactly those rows, in order. A dropped row is never
-computed, so it never raises.
+Inputs use a common selection/data/validity view, allowing flat, constant
+and dictionary vectors to share kernels. Reuse per-node output buffers
+between chunks. Filters write row selections rather than copying values;
+conditional branches evaluate only the rows that observe them, preserving
+null behavior and checked-expression errors.
 """
 from std.bit import count_trailing_zeros, pop_count
 from std.math import ceil, floor
 from std.memory import Pointer, unsafe_memcpy
 
 from std.ffi import external_call
-from std.io import RawFileDescriptor
+from std.sys import stderr
 from std.os import getenv
 from dataframe.binding import BoundExpr, bind, op_name
 from dataframe.decimal import divide_half_even, pow10, precision_limit
@@ -221,8 +201,7 @@ def _computed_supported(bound: BoundExpr, index: Int) raises -> Bool:
         if node.dtypes[0].value() != dtype:
             return False
         if _lane(source) == _LANE_BOOL:
-            # A Boolean casts to 1 or 0 (DuckDB's BOOL -> BIGINT / DOUBLE
-            # casts), which never fails.
+            # A Boolean casts exactly to integer or floating-point 1 or 0.
             return dtype == DataType.INT64 or dtype == DataType.FLOAT64
         if not _numeric_lane(_lane(source)) or source.is_temporal():
             return False
@@ -300,8 +279,7 @@ struct _Shape(Copyable, ImplicitlyCopyable, Movable):
 
 struct VectorExpression(Copyable, Movable):
     """One bound expression compiled for a step's input columns, with the
-    per-node buffers it computes into (DuckDB's ExpressionState and its
-    intermediate chunk), reused for every chunk."""
+    per-node buffers it computes into, reused for every chunk."""
 
     var bound: BoundExpr
     var root: Int
@@ -354,16 +332,15 @@ struct VectorExpression(Copyable, Movable):
     var composed: List[UInt32]
     # Select: per comparison node, the column child it compares with a
     # constant directly at the column's own type (-1: evaluated in lanes);
-    # per AND / OR node, its flattened children (DuckDB binds an n-ary
-    # conjunction) and the two selections it writes into.
+    # per AND / OR node, flatten children and retain two selection buffers.
     var direct: List[Int]
     # Per AND node of two such comparisons on one column: that column
-    # (a range, selected in one pass as DuckDB's BETWEEN), else -1.
+    # (a range selected in one pass), else -1.
     var ranges: List[Int]
     var select_rows: List[List[UInt32]]
     var children: List[List[Int]]
-    # Per AND / OR node, the order its children run in (DuckDB's
-    # ConjunctionState::adaptive_filter); disabled for any other node.
+    # Per AND / OR node, adapt child order to measured evaluation time;
+    # disabled for other node kinds.
     var adaptive: List[AdaptiveFilter]
     var scratch: DataChunk
 
@@ -428,9 +405,7 @@ struct VectorExpression(Copyable, Movable):
 
     def _share_columns(mut self):
         """Point every node reading a column at one node per column and
-        lane, so the column is loaded once (DuckDB binds one
-        BoundReferenceExpression per column read through the same input
-        vector). Not under CASE WHEN, whose branches load their own
+        lane, so the column is loaded once. Not under CASE WHEN, whose branches load their own
         rows."""
         for node in self.bound.expr._nodes:
             if node.op == WHEN:
@@ -466,10 +441,7 @@ struct VectorExpression(Copyable, Movable):
 
     def _plan_direct(mut self):
         """The comparisons Select runs straight over a column's vector:
-        a column of a numeric type against a constant of the same type
-        (DuckDB's ExpressionExecutor::Select on a BoundComparisonExpression
-        runs the comparison's selection kernel over the column's unified
-        format, never loading the values first)."""
+        a column of a numeric type against a constant of the same type."""
         for i in range(len(self.kinds)):
             if self.kinds[i] != _KIND_LANE:
                 continue
@@ -546,7 +518,7 @@ struct VectorExpression(Copyable, Movable):
 
     def _allocate(mut self):
         """The buffers every node computed in lanes or read in one writes,
-        constants filled in (DuckDB's ExpressionState intermediates)."""
+        constants filled in."""
         var n = len(self.kinds)
         self.composed = List[UInt32](
             unsafe_uninit_length=2 * STANDARD_VECTOR_SIZE
@@ -888,7 +860,7 @@ struct VectorExpression(Copyable, Movable):
             print(
                 "dataframe-path: vector.fallback."
                 + op_name(self.bound.expr._nodes[index].op),
-                file=RawFileDescriptor(2),
+                file=stderr,
             )
         var reads = List[Int]()
         _subtree_columns(self.bound, index, self.schema, reads)
@@ -1423,7 +1395,7 @@ struct VectorExpression(Copyable, Movable):
         rows: SelectionVector,
         count: Int,
     ) raises:
-        """CASE WHEN (DuckDB's ExpressionExecutor for BoundCaseExpression):
+        """CASE WHEN:
         the predicate over the rows, then each branch over only the rows
         that take it, scattered into place; a null predicate takes the
         otherwise branch, and no otherwise is null. A branch never sees a
@@ -1718,8 +1690,7 @@ struct VectorExpression(Copyable, Movable):
         return Int(self.lane_ints[index].unsafe_ptr())
 
     def _fill_null(mut self, index: Int, left: Int, right: Int, count: Int):
-        """fill_null: the left value where it is valid, else the right
-        (DuckDB's COALESCE over two children), as the column kernel's
+        """fill_null: the left value where it is valid, else the right, as the column kernel's
         `(x & av) | (y & ~av)`."""
         var lane = self.lanes[index]
         var target = self._lane_address(index)
@@ -1847,8 +1818,7 @@ struct VectorExpression(Copyable, Movable):
     ):
         """Code points [offset, offset + length) of each string, as
         `_slice` clips them, without copying: a long result points into
-        its input's bytes, a short one is inlined (DuckDB's SubstringFun
-        returns string_t over the input the same way)."""
+        its input's bytes, a short one is inlined."""
         self._copy_validity(index, left, count)
         var offset = Int(self.bound.expr._nodes[index].integer)
         var length = self.bound.expr._nodes[index].min_count
@@ -2157,9 +2127,8 @@ struct VectorExpression(Copyable, Movable):
             var x = self.lane_ints[left].unsafe_ptr()
             var y = self.lane_ints[right].unsafe_ptr()
             var out = self.lane_ints[index].unsafe_ptr()
-            # DuckDB's TryAddOperator / TrySubtractOperator /
-            # TryMultiplyOperator (function/scalar/operator/*.cpp): the
-            # result and an overflow flag per row (__builtin_*_overflow),
+            # Compute both the result and an overflow flag per row using
+            # the arithmetic overflow intrinsics,
             # no division and no branch; the error is raised after the
             # loop when a valid row overflowed.
             var overflow = False
@@ -2571,8 +2540,7 @@ struct VectorExpression(Copyable, Movable):
     ) -> Int:
         """The rows node `index` (evaluated) is true and valid for, and the
         others into `false_target` when set: branch-free, every row
-        written to both and each slot advancing by the row's outcome
-        (DuckDB's SelectGenericLoop)."""
+        written to both and each slot advancing by the row's outcome."""
         var kept = 0
         if self.kinds[index] == _KIND_CONSTANT:
             if self.constant_valid[index] and self.ints[index] != 0:
@@ -2711,8 +2679,7 @@ def _like_segments(pattern: String) -> Optional[List[String]]:
 
 
 def _like_match(data: Int, length: Int, segments: List[String]) -> Bool:
-    """Whether `length` bytes at `data` match LIKE segments (DuckDB's
-    LikeOperatorFunction over '%' only): the first anchored at the start,
+    """Whether `length` bytes at `data` match LIKE segments: the first anchored at the start,
     the last at the end, the middle ones found in order between."""
     var n = len(segments)
     var head = segments[0].byte_length()
@@ -2798,8 +2765,7 @@ def _select_compare[
     false_target: Int = 0,
 ) -> Int:
     """The rows among `rows` whose value OP `value` holds, valid only,
-    written to `target` in order (DuckDB's SelectComparison over a
-    UnifiedVectorFormat with a constant right side), branch-free."""
+    written to `target` in order, branch-free."""
     if op == EQ:
         return _select_compare_op[D, EQ](
             format, rows, count, value, target, value, false_target
@@ -2839,7 +2805,7 @@ def _select_range[
     false_target: Int = 0,
 ) -> Int:
     """The rows whose value is within a range (low_op GT or GE, high_op LT
-    or LE) in one pass: DuckDB's Select for a BoundBetweenExpression."""
+    or LE) in one pass, avoiding a separate selection for each bound."""
     if low_op == GE and high_op == LE:
         return _select_compare_op[D, GE, LE](
             format, rows, count, low, target, high, false_target
@@ -2922,7 +2888,7 @@ def _select_compare_op[
         var mask = UInt64(0)
         if contiguous and n == 64:
             comptime for g in range(8):
-                var x = data.unsafe_offset(k + 8 * g).load[width=8]()
+                var x = data.unsafe_offset(k + 8 * g).unsafe_load[width=8]()
                 var byte = (
                     _test[D, OP, OP2, 8](x, value, value2) * weights
                 ).reduce_add()
@@ -3163,7 +3129,7 @@ def _compare_lanes[
     T: DType
 ](op: Int, a: List[Scalar[T]], b: List[Scalar[T]], address: Int, count: Int):
     """`count` comparisons of two lanes into bytes, a SIMD vector at a
-    time (DuckDB's BinaryExecutor over flat data)."""
+    time."""
     if op == EQ:
         _compare_simd[T, EQ](a, b, address, count)
     elif op == NE:

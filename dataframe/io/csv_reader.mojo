@@ -132,7 +132,7 @@ struct _DecodeJob(Job):
                 self.length,
             )
             if self.context[].options.ignore_errors:
-                # This runtime has no warning subsystem; retain Polars'
+                # This runtime has no warning subsystem; retain the
                 # observable permissive-mode warning rather than dropping it.
                 print("warning: " + message)
             else:
@@ -449,8 +449,8 @@ def _read_mapped_body(
     # otherwise find_next would have included the second boundary in the
     # first range. Doubling the hint only reduces the maximum job count.
     var capacity = 2 * ((len(bytes) - offset + size - 1) // size) + 2
-    # Polars uses a persistent Rayon pool. This repository's scoped Pool is
-    # an explicit remaining runtime deviation (startup once per read).
+    # This scoped pool starts once per read; include that startup in
+    # whole-reader timing rather than attributing it to field decoding.
     var pool = Pool(workers)
     var produced = _ProducedJobs[_DecodeJob](capacity)
     pool.run_produced(produced)
@@ -478,8 +478,8 @@ def _read_mapped_body(
     var jobs = produced.finish()
     pool.release()
     var frames = List[DataFrame](capacity=len(jobs))
-    # Jobs retain source order; this is equivalent to Polars sorting by input
-    # byte address, without introducing any output-value sort.
+    # Jobs retain source byte order, preserving row order without sorting
+    # decoded output values.
     jobs.reverse()
     while len(jobs) > 0:
         frames.append(jobs.pop().into_frame())

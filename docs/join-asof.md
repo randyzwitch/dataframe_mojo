@@ -30,9 +30,9 @@ overflow a signed 64-bit key.
 | `nearest` | Closest right key; ties prefer the later key and last adjacent duplicate |
 
 `allow_exact_matches=False` excludes equal keys. Null ordered keys never match,
-and a null in any grouping key prevents a match. Nearest follows Polars' scan
-and duplicate-run behavior, including the effect of null positions in the
-right input. Unmatched right values are null.
+and a null in any grouping key prevents a match. Nearest advances a
+monotone right-side cursor; duplicate runs are adjacent non-null keys with
+equal values, so an intervening null separates runs. Unmatched right values are null.
 
 `tolerance` is inclusive and nonnegative. Plain integers and floats use the
 ordered key's physical unit: days for Date and the declared unit for Datetime

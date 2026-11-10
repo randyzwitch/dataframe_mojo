@@ -5,11 +5,14 @@ from dataframe import Column, DataFrame, DataType, Expr, Series, col, when
 from tests.support.lifecycle_jobs import WorkerSetting
 from dataframe.binding import bind
 from dataframe.execution import evaluate
+from dataframe.decimal import pow10
 
 
-def decimal_feed_frame(fault_row: Int, rows: Int = 1025) raises -> DataFrame:
+def decimal_feed_frame(
+    fault_row: Int, rows: Int = 1025, precision: Int = 3
+) raises -> DataFrame:
     var values = List[Int128](length=rows, fill=0)
-    values[0] = 999
+    values[0] = pow10(precision) - 1
     values[1] = 1
     var integers = List[Int64](length=rows, fill=0)
     var selected = List[Bool](length=rows, fill=False)
@@ -19,7 +22,7 @@ def decimal_feed_frame(fault_row: Int, rows: Int = 1025) raises -> DataFrame:
     return DataFrame(
         [
             Series("d", Column[Int128](values^)).with_dtype(
-                DataType.decimal(3, 0, 128)
+                DataType.decimal(precision, 0, 128)
             ),
             Series("x", Column[Int64](integers^)),
             Series("keep", Column[Bool](selected^)),
@@ -28,10 +31,14 @@ def decimal_feed_frame(fault_row: Int, rows: Int = 1025) raises -> DataFrame:
     )
 
 
-def decimal_feed_operand() raises -> Expr:
+def decimal_feed_operand(precision: Int = 3) raises -> Expr:
     return (
         when(col("keep"))
-        .then(col("x").cast(DataType.INT8).cast(DataType.decimal(3, 0, 128)))
+        .then(
+            col("x")
+            .cast(DataType.INT8)
+            .cast(DataType.decimal(precision, 0, 128))
+        )
         .otherwise(col("d"))
     )
 
@@ -50,18 +57,25 @@ def test_grouped_feed_input_batch_precedes_decimal_update_same_batch_only() rais
                 _ = frame.group_by("k").agg(
                     decimal_feed_operand().sum(), batch_size=1024
                 )
+            # MEAN widens its accumulator to precision 38 even for a
+            # Decimal128 input. Overflow that state to exercise update order.
+            var mean_frame = decimal_feed_frame(fault_row, precision=38)
             with assert_raises(
                 contains="cast from int64 to int8 failed" if fault_row
-                < 1024 else "decimal precision"
+                < 1024 else "decimal precision 38"
             ):
-                _ = frame.group_by("k").agg(
-                    decimal_feed_operand().mean(), batch_size=1024
+                _ = mean_frame.group_by("k").agg(
+                    decimal_feed_operand(38).mean(), batch_size=1024
                 )
             # Changing the actual eager GroupBy batch boundary changes phase
             # precedence. This is a contract, not a global fixed8192 assumption.
             with assert_raises(contains="decimal precision"):
                 _ = frame.group_by("k").agg(
                     decimal_feed_operand().sum(), batch_size=1
+                )
+            with assert_raises(contains="decimal precision 38"):
+                _ = mean_frame.group_by("k").agg(
+                    decimal_feed_operand(38).mean(), batch_size=1
                 )
         for fault_row in [1023, 1024]:
             var decimals = List[Int128](length=1025, fill=0)

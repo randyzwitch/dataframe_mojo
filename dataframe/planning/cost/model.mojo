@@ -1,5 +1,5 @@
 """Explicit streaming-reduction strategies and their observed decision facts."""
-from std.io import RawFileDescriptor
+from std.sys import stderr
 from std.os import getenv
 
 comptime BATCH_STREAM = 0
@@ -66,6 +66,4 @@ def trace_decision(decision: AggregationDecision):
     A separate prefix leaves specialized-path coverage events unchanged.
     """
     if getenv("DATAFRAME_TRACE_PATHS"):
-        print(
-            "dataframe-strategy:", decision.explain(), file=RawFileDescriptor(2)
-        )
+        print("dataframe-strategy:", decision.explain(), file=stderr)

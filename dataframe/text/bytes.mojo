@@ -186,7 +186,7 @@ def _find_bytes(
     """The first position at or after `start` where `needle` occurs in
     `hay`, or -1: the regex engine's SIMD memmem (`find_literal_bytes`),
     which extracts candidate positions from a lane mask and scans 64 bytes a
-    step, as Polars' `memmem` and DuckDB's `ContainsFun` find a literal."""
+    step; failed candidates advance without rescanning the whole prefix."""
     return find_literal_bytes(hay, needle.unsafe_ptr(), len(needle), start)
 
 

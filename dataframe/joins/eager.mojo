@@ -1,5 +1,9 @@
-"""Eager joins: DuckDB's hash join (`joins/hash_table.mojo`) over two
-frames, and the output's assembly."""
+"""Run hash joins over two materialized frames.
+
+Choose a build side, retain its columns and populate the join hash table.
+Probe the other frame in chunks, then gather the matched payload columns.
+Outer and build-side semi/anti joins scan match flags after probing.
+"""
 from dataframe.aggregation.keys import (
     _expand_struct_keys,
 )
@@ -214,7 +218,7 @@ def join_frames(
     var keep_right_keys = not coalesce and how != JOIN_SEMI and how != JOIN_ANTI
     # A coalesced right join keeps the right keys, under their names and
     # in their places among the right columns, after the left's other
-    # columns, as Polars' right join (a left join with the sides
+    # columns, for a right join (a left join with the sides
     # swapped) names them: the left keys are what it drops.
     var right_coalesced = how == JOIN_RIGHT and coalesce
     var right_output = List[Int]()
@@ -240,10 +244,8 @@ def join_frames(
     var left_rows = List[Int]()
     var right_rows = List[Int]()
     if self.height() == 0 and (how == JOIN_FULL or how == JOIN_RIGHT):
-        # No probe rows: every build row comes out once, in order, beside
-        # null probe columns, with nothing hashed or gathered (a
-        # pipeline's unmatched build rows join an empty probe side, as
-        # DuckDB's outer scan reads them straight from its build).
+        # Emit unmatched build rows against null probe columns while retaining
+        # original column types and output naming.
         var m = right.height()
         var columns = List[Series](capacity=self.width() + len(right_output))
         for c in range(self.width()):
@@ -270,14 +272,10 @@ def join_frames(
                 right._columns[right_output[k]].renamed(right_names[k])
             )
         return DataFrame(columns^, height=m)
-    # The join's sides, as DuckDB's hash join runs it: the probe streams
-    # through the table built on the other side. A right join probes its
-    # right input against the left (a left join with the sides swapped,
-    # Polars' order); every other kind probes the left. The side with
-    # the smaller hash table builds (`BuildProbeSideOptimizer`, on exact
-    # sizes here): a flipped join probes the other input with the inverse
-    # join type, and a semi or anti join becomes DuckDB's RIGHT_SEMI or
-    # RIGHT_ANTI, which flags the build rows and emits them by a scan.
+    # A right join probes the right input against a left build; other kinds
+    # initially probe the left. Compare exact build sizes and invert join kind
+    # when swapping sides. Build-side semi/anti variants flag rows during
+    # probing and emit them in a final scan.
     var probe_left = how != JOIN_RIGHT
     var left_cost = build_size(self)
     var right_cost = build_size(right)
@@ -317,9 +315,9 @@ def join_frames(
         or physical == JOIN_SEMI
         or physical == JOIN_RIGHT_SEMI
     ):
-        # An empty build matches no probe row (DuckDB's
-        # `EmptyResultIfRHSIsEmpty`: the hash join's sink finalizes as
-        # NO_OUTPUT_POSSIBLE), so nothing is probed.
+        # For join kinds that require a match, an empty build proves the
+        # result empty. Skip probing rather than hashing rows that cannot
+        # contribute output.
         trace_path("join.empty_build")
     else:
         pairs = probe_pairs(table, probe_keys, physical, 0)
@@ -438,9 +436,8 @@ def join_frames(
     return DataFrame(columns^, height=len(left_rows))
 
 
-# DuckDB's BuildProbeSideOptimizer: a column's bytes in a hash table row
-# beyond its TupleDataLayout width, and the pointer table's bytes a row
-# (about three ht_entry_t, the average of NextPowerOfTwo(2 * count)).
+# Estimate build memory from row-layout widths plus per-column overhead and
+# pointer-table capacity, which rounds up to a power of two.
 comptime _COLUMN_COUNT_PENALTY = 2
 comptime _VARCHAR_PENALTY = 8
 comptime _NESTED_PENALTY = 32

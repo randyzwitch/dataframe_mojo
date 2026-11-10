@@ -1,12 +1,6 @@
-"""DuckDB's TupleDataCollection: every column type round-trips through
-append (scatter into rows and heap) and gather back into chunks, compared
-with the input. Types: every fixed width, Booleans, dates, decimal128,
-strings (empty, inlined, long, Unicode, one larger than a heap block),
-structs (with a list field and a struct field) and lists (of strings, of
-lists, of structs), with nulls at every level. Sizes cross chunk, row
-block and heap block boundaries. Appends cover flat windows, dictionary
-chunks and append selections; gathers cover whole scans, row pointers
-read through scan and target selections, and combined collections."""
+"""Round-trip every supported column type through fixed-layout row storage,
+checking payloads, validity, nested children and collection ownership
+independently."""
 # contract-group: kernel.tuple_data
 from std.testing import assert_equal, assert_true
 

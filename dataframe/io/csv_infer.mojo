@@ -28,7 +28,7 @@ comptime _STRING = 8
 comptime _DATE = 16
 comptime _DATETIME = 32
 comptime _TIME = 64
-# Datetimes that all carry a UTC offset infer as UTC-aware, as in Polars;
+# Datetimes that all carry a UTC offset infer as UTC-aware;
 # a column mixing them with naive datetimes stays String.
 comptime _DATETIME_UTC = 128
 
@@ -236,7 +236,7 @@ def _infer_field(
     if len(raw) > 0 and raw[0] == 45:
         start = 1
     if _digits(raw, start, len(raw)):
-        # With no dtype-i128 feature Polars preserves INTEGER_RE as Int64
+        # Keep integer-shaped text as an Int64 candidate
         # even when parse::<i64>() overflows. The clean API has no Int128.
         return _INT
     if try_parse_dates:
@@ -475,6 +475,6 @@ struct _CsvInferenceState(Movable):
                 dtype = DataType.TIME
             elif self.candidates[i] == _STRING:
                 dtype = DataType.STRING
-            # Polars' Null/unsupported result becomes the clean API's String.
+            # All-null or unsupported inference candidates default to String.
             fields.append(CsvField(self.names[i], dtype, True))
         return CsvSchema(fields^)

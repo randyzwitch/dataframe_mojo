@@ -1,15 +1,9 @@
-"""DuckDB's grouped hash aggregate sink (`PhysicalHashAggregate::Sink` into
-`RadixPartitionedHashTable::Sink`) over the aggregate table
-(`hash_table.mojo`).
+"""Feed pipeline chunks into worker-local grouped aggregate tables.
 
-Every data chunk a pipeline's steps produce is sunk into the worker's
-table as it is made: the chunk's group columns are the group chunk
-(`PopulateGroupChunk`), each reduction's input is the chunk's column or
-its compiled vector expression over the chunk (the aggregate input chunk),
-and both go into the worker's table a chunk at a time (`AddChunk`). At the
-end of its run a worker's table is combined into the global state, the
-list of every worker's partitioned rows (`Combine`), which the table's
-finish merges partition by partition (`Finalize`, `aggregate_finish`).
+For each chunk, evaluate the group keys and reduction inputs, then update
+the worker's table. At the end of a worker's run, transfer its partitioned
+rows into the global state. Finalization merges one partition at a time,
+so independent partitions can finish concurrently without shared updates.
 """
 from dataframe.aggregation.function import (
     AggregateFunction,
@@ -277,7 +271,7 @@ struct TableSinkInputs(Movable):
         mut hold: List[Series],
     ) raises -> List[KeyVector]:
         """The chunk's group columns as the table reads them: each key
-        vector's unified format (DuckDB's group chunk), its codes when its
+        vector's unified format, its codes when its
         strings carry a small dictionary's, and its categorical labels'
         canonical codes. The columns long string keys point into join
         `hold`. A vector stored other than as the key (a column narrower
@@ -297,7 +291,7 @@ struct TableSinkInputs(Movable):
             if v.physical == PHYSICAL_VARCHAR:
                 self._hold(arena, v.source, hold)
                 ref strings = arena.columns[v.source]._data[StringColumn]
-                # DuckDB's TryAddDictionaryGroups: a stored dictionary's
+                # Cache group lookups by dictionary entry: a stored dictionary's
                 # entries are looked up once only while it holds fewer
                 # than MAX_DICTIONARY_SIZE_THRESHOLD (20,000); a larger
                 # one is hashed row by row like any string.
@@ -347,8 +341,7 @@ struct TableSinkInputs(Movable):
         mut hold: List[Series],
     ) raises -> List[UnifiedVectorFormat]:
         """Each reduction's input over the chunk's rows as its vector's
-        unified format (DuckDB's payload chunk, which `UpdateStates`
-        reads through `ToUnifiedFormat`): the chunk's column, or what its
+        unified format: the chunk's column, or what its
         compiled expression wrote; none for a row count. The columns
         string inputs point into join `hold` (`input_vector`). An input a
         state by address reads is a column of the chunk's rows instead,
@@ -458,8 +451,7 @@ def sink_frame(
     over them reach the pipeline's sink: `reader` (from a
     `TableSinkLayout` over such columns) reads each chunk's group chunk and
     evaluates its aggregate input chunk, compiled input expressions
-    included (DuckDB's sink executing its `ExpressionExecutor` on each
-    chunk)."""
+    included."""
     var arena = ColumnArena()
     var handles = List[Int](capacity=len(columns))
     for column in columns:
@@ -613,8 +605,7 @@ def aggregate_top_rows(
 
 
 struct TableSink(Sink):
-    """One worker's table sink state (DuckDB's `HashAggregateLocalSinkState`
-    over a `RadixHTLocalSinkState`): its table, its chunk reader, and the
+    """One worker's table sink state: its table, its chunk reader, and the
     next row's number."""
 
     var table: AggregateSink
@@ -708,8 +699,7 @@ struct GroupingSetsLayout(Copyable, Movable):
 struct GroupingSetsSink(Sink):
     """One worker's grouping sets sink state: one table per set, every
     chunk's group columns and reduction inputs read once and sunk into the
-    table of each set that is not derived (DuckDB's one sink feeding every
-    grouping set's table, `PhysicalHashAggregate::Sink`). When the
+    table of each set that is not derived. When the
     worker's run ends, each derived set's table takes its source set's
     group rows, so a coarser grouping reads groups, not input rows."""
 

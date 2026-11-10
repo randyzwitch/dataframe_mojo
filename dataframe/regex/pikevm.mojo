@@ -1,15 +1,6 @@
-"""The Pike VM: an NFA simulation that tracks capture positions, as in RE2's
-`NFA` and regex-automata's `PikeVM`.
-
-Every live thread is one program counter with its own capture slots; all of
-them advance together one code point at a time, and a sparse set drops
-threads that reach an instruction another (higher priority) thread already
-holds, so the work per code point is bounded by the program size. Threads
-are kept in priority order, which gives leftmost-first ("Perl") match
-semantics: once a thread matches, the lower priority ones are cut.
-
-The VM is scratch space for one worker; the program it runs is shared.
-"""
+"""Simulate the NFA while tracking capture positions. Keep a bounded set of
+active instructions at each input position; deduplicate visits so
+alternatives cannot cause exponential recursive search."""
 from .program import (
     OP_FAIL,
     OP_LOOK,

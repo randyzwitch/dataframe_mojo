@@ -124,10 +124,9 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
     plan_lower_right_joins(plan)
     plan_split_filters(plan)
     plan_filter_shared_subplans(plan)
-    # From predicate to projection pushdown, a node keeps the schema it
-    # derived across renumbering and the passes between, as Polars' IR
-    # nodes keep theirs: those passes change no node's output, and
-    # forget the nodes they rewrite.
+    # Memoize derived schemas across predicate and projection pushdown. These
+    # passes retain output shape; invalidate memo entries for nodes that are
+    # rewritten or renumbered.
     plan._schema_memo = Optional(ArcPointer(Dict[Int, DataFrame]()))
     try:
         plan_push_predicates(plan)
@@ -144,14 +143,10 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
 
 
 def plan_lower_right_joins(mut self: QueryContext) raises:
-    """Run each coalesced right join as the right join that keeps both
-    sides' keys, under a selection that drops the left keys and names
-    the right columns as the coalesced join does (`join_frames`): its
-    output is that join's, without the left keys. The kept-keys right
-    join streams, building on the right and emitting its unmatched rows
-    last, as DuckDB's RIGHT OUTER join does; the coalesced one ran
-    outside the pipeline. A join whose kept-keys names would collide, or
-    whose keys repeat or are missing, is left to raise as it is."""
+    """Normalize outer-join column naming so the join can stream with an
+    explicit unmatched-build scan. Preserve the left/right column order and
+    decline conflicting, repeated or missing key names so existing
+    validation still reports them."""
     var changed = False
     for i in range(len(self._nodes)):
         if (
@@ -345,14 +340,10 @@ def plan_unique_as_aggregate(mut self: QueryContext) raises:
 
 
 def plan_filter_shared_subplans(mut self: QueryContext):
-    """DuckDB 2.0's `CTEFilterPusher`. A subplan written in several places
-    that `plan_share_subplans` will compute once (`plan_materialized`),
-    read by every copy only through row-local filters, needs only the rows
-    some reader keeps: the OR of the readers' filters goes above every
-    copy and moves into it. Each reader's own filters stay, pinned, so
-    the copies stay alike and are still computed once. TPC-DS q4, q11
-    and q74 read one yearly total per channel and year from a table of
-    every channel and year."""
+    """For a shared subplan read only through row-local filters, push the union
+    of reader predicates into the shared computation. Keep each reader's own
+    filter above it. The retained result then contains every row any reader
+    needs while discarding rows none can observe."""
     # Copies need two aggregates or joins alike in their keys, expression
     # count and subtree size at least; most plans have none, and
     # subplan classes are not worth finding for them (ClickBench q29's
@@ -494,11 +485,9 @@ def plan_merge_filters(mut self: QueryContext):
     """Join a row-local filter directly over another into one filter
     on both predicates, lower first, so a scan below sees them all (CSV
     range filters, Parquet row-group pruning)."""
-    # One walk, children before parents, as DuckDB's filter pullup and
-    # pushdown visit each operator once: a run of filters folds into its
-    # top, which absorbs the filter below it until another kind of node
-    # (or one it may not merge with) is reached. The plan is renumbered
-    # once at the end, dropping the absorbed filters.
+    # Walk children before parents. Fold a run of compatible filters into its
+    # top node, stopping at operator kinds or error boundaries that prevent
+    # merging, then renumber the rewritten plan.
     var changed = False
     for i in range(len(self._nodes)):
         while True:
@@ -653,8 +642,8 @@ def plan_push_predicates_now(mut self: QueryContext) raises:
                 and _row_local(self._nodes[under].exprs)
             ):
                 under = self._nodes[under].left
-            # Over any operator, joins included: DuckDB's FilterPushdown
-            # takes every filter as far down as it can go.
+            # Push each filter through as many semantically safe operators as
+            # possible, including eligible join inputs.
             if (
                 under != child
                 and under >= 0
@@ -721,12 +710,9 @@ def plan_passes(self: QueryContext, filter: Int, child: Int) raises -> Int:
             return -1
         if below.kind == SELECT and not _reads_input(below.exprs):
             return -1
-        # Each column the filter reads must be an input column the
-        # projection passes on, renamed or not, or a constant: the
-        # filter is then rewritten in the input's terms
-        # (`_through_projection`), as Polars renames a predicate's
-        # columns through an alias projection and DuckDB substitutes a
-        # projection's expressions (`PushdownProjection`).
+        # Rewrite pushed predicates in the projection's input terms: replace
+        # aliases and substitute eligible projected expressions before moving
+        # the filter below the projection.
         for name in reads.value():
             var at = _produced_at(below.exprs, name)
             if at < 0:
@@ -747,11 +733,9 @@ def plan_passes(self: QueryContext, filter: Int, child: Int) raises -> Int:
         and _row_local(self._nodes[filter].exprs)
         and _covers(below.names, reads.value())
     ):
-        # A predicate on the grouping keys alone is the same for every
-        # row of a group, so filtering rows before the aggregation keeps
-        # exactly the groups it would keep after, with the same values
-        # and first-occurrence order (Polars and DuckDB push it down
-        # too; TPC-DS q39 filters d_moy after grouping 2.3M rows).
+        # A filter depending only on group keys removes whole groups, so
+        # pushing it below aggregation preserves retained values and first-
+        # occurrence order.
         return 0
     if (
         below.kind == PIVOT
@@ -793,13 +777,10 @@ def plan_passes(self: QueryContext, filter: Int, child: Int) raises -> Int:
 def plan_left_join_to_inner(
     mut self: QueryContext, filter: Int, join: Int
 ) raises -> Bool:
-    """Make the left join at `join` an inner join when the filter above
-    it keeps no row whose right columns are null, DuckDB's
-    `PushdownLeftJoin` (`FilterRemovesNull`): such a filter drops every
-    row the join adds for an unmatched left row, so the join keeps the
-    same rows as an inner join, and the filter can then move into its
-    right input. For a row-local filter reading only right columns,
-    tested on one row of nulls. True when the join changed."""
+    """Convert a left join to an inner join when the filter above it rejects
+    every row with null right-side columns. Those are exactly the extra
+    unmatched rows supplied by the left join; the filter can then move into
+    eligible join inputs without changing the result."""
     ref node = self._nodes[join]
     if node.kind != JOIN or node.how != JOIN_LEFT:
         return False
@@ -895,12 +876,9 @@ def plan_swap_in_place(
     right_side: Bool,
     mut parents: List[Int],
 ):
-    """`_swap_down` without renumbering the plan: the nodes keep their
-    indices, so it is out of children-before-parents order until the
-    next `_reorder`; `parents` is updated to match. Only the moved
-    filter's schema is forgotten: a filter keeps its input's columns,
-    so `child`, now over the filter, and the nodes above keep theirs,
-    as DuckDB's bindings stay valid when a filter moves."""
+    """Move a filter through a child while preserving the child's and its
+    ancestors' output names. Rewrite input references before reconnecting
+    nodes so moving the filter does not leave stale column bindings."""
     var parent = parents[filter]
     var target = (
         self._nodes[child].right if right_side else self._nodes[child].left

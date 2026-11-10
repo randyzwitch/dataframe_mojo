@@ -1,26 +1,15 @@
-"""DuckDB 2.0's `TupleDataAllocator` and `TupleDataSegment`
-(common/types/row/tuple_data_allocator.cpp, tuple_data_segment.cpp): the
-row and heap blocks of a collection, and the chunks and chunk parts that
-say where each appended row went.
+"""Allocate fixed-layout row blocks and variable-size heap blocks.
 
-- A row block holds whole rows, TUPLE_DATA_BLOCK_SIZE bytes. A heap block
-  holds the variable-sized data of rows, at least that large (larger when
-  one row's heap is).
-- A chunk is at most STANDARD_VECTOR_SIZE rows. It is made of parts; a
-  part is a run of rows in one row block whose heap data is one run in
-  one heap block.
+A row block holds whole rows. A heap block holds their variable-size data
+and grows beyond the standard block size when a single row needs it.
+Chunks contain at most STANDARD_VECTOR_SIZE rows and are divided into
+parts: each part occupies consecutive row bytes and consecutive heap bytes.
 
-DuckDB allocates blocks through its buffer manager, which can evict and
-reload them; a reloaded heap block may sit at a new address, so rows'
-heap pointers are recomputed on pin. We have no buffer manager: blocks
-are plain allocations that live as long as the collection and never
-move, so a part's heap pointer is fixed when it is built.
-
-Each segment owns its allocator. DuckDB shares one allocator among the
-segments of a collection, but a collection has at most one segment of its
-own (made by its first build) until it combines another's, which keeps
-its own allocator, so ownership is the same. Blocks are made when rows
-first land, so an empty partition allocates nothing.
+Blocks stay allocated at stable addresses until their collection is
+released, so heap pointers remain valid without pinning or relocation.
+Each segment owns its allocator. Combining collections transfers segments
+with their owners; allocating only when rows arrive makes empty partitions
+cost no row or heap storage.
 """
 from dataframe.vector.tuple_data_layout import (
     TUPLE_DATA_BLOCK_SIZE,
@@ -209,9 +198,7 @@ struct TupleDataSegment(Copyable, Movable):
 
     def _merge_last_chunk_part(mut self, chunk_index: Int):
         """TupleDataChunk::MergeLastChunkPart: the last two parts of a chunk
-        become one when their rows (and heaps) are adjacent. (DuckDB
-        compares the heap offset with `heap_block_index + total_heap_size`;
-        the offset is meant, as written here.)"""
+        become one when their rows (and heaps) are adjacent."""
         ref chunk = self.chunks[chunk_index]
         if chunk.part_ids.size() < 2:
             return

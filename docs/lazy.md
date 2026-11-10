@@ -41,7 +41,7 @@ when `engine="auto"` is supplied; omitting `engine` on these explicit-provider
 overloads retains forced acceleration for compatibility.
 
 `rename(mapping, strict=True)` and `cast(dtypes, strict=True)` give the eager
-methods' results. As Polars builds them, `rename` is a `select` of every input
+methods' results. `rename` is a `select` of every input
 column, aliased where renamed (the input's names are resolved when it is
 called, as `collect_schema` resolves them), and `cast` is a `with_columns` of
 `col(name).cast(dtype, strict)` per entry, so both let filters and column
@@ -55,13 +55,12 @@ names the input lacks; a strict cast that fails raises when the plan runs.
 `group_by` takes column names or expressions, as `DataFrame.group_by` does.
 An expression key is evaluated once and named by its output name, and the
 aggregations still read the input's columns: computed keys become a
-`with_columns` below the group_by (DuckDB moves group expressions into a
-projection under its aggregate the same way), under a placeholder name that
+`with_columns` below the group_by, under a placeholder name that
 is renamed afterwards when an aggregation reads a column of the key's name.
 Besides `agg`, a `LazyGroupBy` has `len(name="len")` (rows per group as
 Int64) and `sum`, `mean`, `min`, `max`, `median`, `first`, `last`,
 `n_unique` and `quantile(q, interpolation="nearest")`, which reduce every
-column that is not a key, as Polars' do; the eager `GroupBy` has the same
+column that is not a key; the eager `GroupBy` has the same
 methods.
 
 `join(other, on, how)` joins on keys named alike on both sides;
@@ -72,19 +71,19 @@ c_custkey`.
 
 `gather`, `top_k`, `bottom_k` and `clear` record plan nodes too.
 `describe(percentiles, interpolation)` returns `DataFrame.describe`'s summary,
-computed as Polars computes it: one `select` of the summary reductions over
+computed with one `select` of the summary reductions over
 the plan, collected, so the rows are not materialized whole. `clear(n)` is
-`head(0)` for `n = 0` and otherwise, as in Polars, a new plan over `n` rows of
+`head(0)` for `n = 0` and otherwise a new plan over `n` rows of
 nulls with the schema. `top_k(k, by, reverse=False)` and `bottom_k` are a
 sort with nulls last followed by `head(k)`, which runs as one top-k selection
 (see Optimizations). `gather(indices, null_on_oob=False)` takes a list of
 positions or a plan with one integer column (a null position gives a row of
-nulls); it is its own operator, like Polars' `Gather`, and filters and slices
+nulls); it is its own operator, and filters and slices
 above it stay above it.
 
 `concat([lf1, lf2, ...], how)` combines plans with the eager `concat`'s
 results and errors. `vertical` stacks them (`lf1.concat(lf2)` is the
-two-plan form). `diagonal`, as Polars plans it, stacks the inputs each
+two-plan form). `diagonal` stacks the inputs each
 selected to the union of the columns, a typed null filling the columns an
 input lacks; the inputs' names and types are resolved when `concat` is
 called, and a filter or column selection above reaches every input.
@@ -99,8 +98,7 @@ retains the materializing executor for comparison. Eager operations keep
 their existing behavior.
 
 `pivot(on, on_columns, index=[...], values=..., aggregate_function="")` is
-`DataFrame.pivot` with the new columns named up front, as Polars 1.44's
-`LazyFrame.pivot(on, on_columns, ...)` takes them, so the plan's schema is
+`DataFrame.pivot` with the new columns named up front, so the plan's schema is
 known before it runs. The output is the index columns, then one column per
 entry of `on_columns` in that order (a list of names, or a Series of `on`
 values named by their text, `null` for a null), each holding the cells whose

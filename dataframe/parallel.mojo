@@ -939,9 +939,8 @@ struct _Crew(Movable):
         """Join another posting that still wants a helper and run its
         jobs: True when it ran some. A caller whose own jobs are taken
         waits for the threads running them, and the jobs those threads
-        start wait for helpers; rayon's `join` (Polars' thread pool) and
-        DuckDB's executor thread run queued work while they wait in the
-        same way. The caller's thread already runs jobs, so it joins
+        start wait for helpers. Run queued work while waiting, so nested
+        jobs can progress instead of leaving all workers blocked. The caller's thread already runs jobs, so it joins
         without a budget slot (`_reserve_helpers`): the threads running
         jobs stay at the budget plus the callers. A posting it joins was
         made by a job that does not wait on its own caller, so no wait
@@ -1121,13 +1120,12 @@ struct Crew(Movable):
     begins one unless one is already running (then this one does nothing),
     and `release` must be called when the operation ends, error or not.
 
-    The threads outlive the operation, as DuckDB's task scheduler threads
-    and Polars' rayon pool do: `release` parks a crew whose threads were
+    The threads outlive the operation: `release` parks a crew whose threads were
     created, and the next `start` takes it back, so a query pays thread
     creation once, not each time (seven threads took 266 us). A crew is
     kept only while `DATAFRAME_THREADS` (or the core count) is what it was
     sized for; a start under another setting joins the parked threads and
-    creates a crew of the new size, as DuckDB's `SetThreads` resizes."""
+    creates a crew of the new size."""
 
     var address: Int
 
@@ -1269,7 +1267,7 @@ def _run_jobs[
         return
     if len(jobs) > 1 and limit > 1 and _current_crew().load() == 0:
         # An eager call outside any operation borrows the parked crew for
-        # this call, as Polars' eager operations run on its global rayon
+        # this call, by reusing the process-wide worker
         # pool: starting and joining seven threads each call cost an 18-row
         # by 600K-row join 0.85 ms against 0.23 ms on a crew (#378).
         var crew = Crew.start()
@@ -1352,14 +1350,14 @@ def _run_jobs[
         jobs.append(slots.pop(0).into_job())
 
 
-# Polars' DEFAULT_IDEAL_MORSEL_SIZE (polars-config): the rows a morsel of an
+# Target rows per morsel of an
 # in-memory source aims for.
 comptime IDEAL_MORSEL_ROWS = 100_000
 
 
 def morsel_size(height: Int, workers: Int, align: Int = 64) -> Int:
     """Rows in each morsel of an in-memory source of `height` rows, as
-    Polars' `InMemorySourceNode` sizes them: the ideal morsel count, rounded
+    Choose the ideal morsel count, rounded
     up to a multiple of the workers so the last round of morsels is as full
     as the first, then the rows divided among them. The workers claim the
     morsels from a shared cursor, so uneven work still balances. Rounded up

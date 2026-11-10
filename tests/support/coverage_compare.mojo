@@ -241,7 +241,7 @@ def assert_join_pairs(
 ) raises:
     """Check complete join cells for an independently transformed pair relation."""
     # A coalesced right join keeps the right keys among the right
-    # columns and drops the left ones, as Polars does.
+    # columns and drops the left ones.
     var right_keys_kept = how == "right" and coalesce
     var left_fields = List[String]()
     for name in left.names:

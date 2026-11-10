@@ -1,4 +1,4 @@
-"""DuckDB 2.0's vector format: vector types, selection vectors, validity
+"""Execution vector types, selection vectors, validity
 masks, 16-byte strings and the unified format kernels read through.
 
 Ported from duckdb-2.0 `common/vector_size.hpp`, `common/enums/
@@ -7,8 +7,7 @@ validity_mask.hpp`, `common/types/string_type.hpp`, `common/types/
 vector.hpp` and `common/vector/unified_vector_format.hpp`.
 
 A `Vector` here is a plain value: addresses and counts, no reference
-counts. DuckDB's vectors hold their buffers through shared pointers; ours
-borrow them from three owners that outlive every vector of a pipeline
+counts. Vectors borrow their buffers from three owners that outlive every vector of a pipeline
 run: the at-rest columns (`ColumnArena`), the `DataChunk` whose caches
 and selection buffers a step wrote, and the constants of a bound
 expression. Copying a vector is copying a few words.
@@ -16,8 +15,7 @@ expression. Copying a vector is copying a few words.
 from std.memory import Pointer, unsafe_memcpy
 from std.ffi import external_call
 
-# DuckDB's STANDARD_VECTOR_SIZE (common/vector_size.hpp): the rows of one
-# data chunk.
+# Maximum rows per execution chunk; bounds scratch storage and loop batches.
 comptime STANDARD_VECTOR_SIZE = 2048
 
 # VectorType (common/enums/vector_type.hpp), same numbering. FSST and
@@ -45,7 +43,7 @@ comptime PHYSICAL_UINT64 = 8
 comptime PHYSICAL_INT64 = 9
 comptime PHYSICAL_FLOAT = 11
 comptime PHYSICAL_DOUBLE = 12
-# Nested types (STRUCT = 100, LIST = 101 in DuckDB). A vector of either
+# Nested physical types. A vector of either
 # is still OPAQUE in the chunk: it is read through its at-rest column. The
 # row layout (`tuple_data_layout.mojo`) uses these to describe columns.
 comptime PHYSICAL_STRUCT = 100
@@ -123,7 +121,7 @@ def _u8_at(address: Int) -> Pointer[UInt8, MutAnyOrigin]:
 
 
 struct SelectionVector(Copyable, ImplicitlyCopyable, Movable):
-    """DuckDB's `SelectionVector`: `sel_t` (uint32) row indices, or none
+    """UInt32 row indices selecting a vector's visible rows, or none
     (address 0), which selects rows 0, 1, 2, ... (`get_index(i) == i`).
 
     The entries belong to whoever made them (a `DataChunk`'s selection
@@ -161,10 +159,10 @@ struct SelectionVector(Copyable, ImplicitlyCopyable, Movable):
 
 
 struct ValidityMask(Copyable, ImplicitlyCopyable, Movable):
-    """DuckDB's `ValidityMask`: a bit a row, 1 = valid, or no bitmap
+    """One validity bit per row, 1 = valid, or no bitmap
     (address 0) when every row is valid.
 
-    One difference: DuckDB's bitmap starts at row 0. Ours may start at bit
+    A view may start at bit
     `offset` of an Arrow bitmap, because a dictionary's child or a flat
     vector over storage is a window onto an at-rest column at any row.
     Bitmaps a kernel writes start at bit 0.
@@ -228,7 +226,7 @@ comptime STRING_PREFIX_BYTES = 4
 
 @fieldwise_init
 struct StringT(Copyable, ImplicitlyCopyable, Movable):
-    """DuckDB's `string_t`. `prefix` holds the first four bytes in either
+    """A 16-byte string value. `prefix` holds the first four bytes in either
     form; `rest` holds bytes 4 to 11 of an inlined string, or the address
     of a longer string's bytes. Arrow's inline view is the same 16 bytes,
     so an inline Utf8View descriptor is a string_t as it stands."""
@@ -342,7 +340,7 @@ def _bswap32(value: UInt32) -> UInt32:
 
 
 struct UnifiedVectorFormat(Copyable, ImplicitlyCopyable, Movable):
-    """DuckDB's `UnifiedVectorFormat`: row i of any flat, constant or
+    """A common view over encoded vectors: row i of any flat, constant or
     dictionary vector is `data[sel.get_index(i)]`, valid when
     `validity.row_is_valid(sel.get_index(i))`. Strings are string_t and
     booleans one byte, whatever the storage they came from."""
@@ -379,7 +377,7 @@ struct UnifiedVectorFormat(Copyable, ImplicitlyCopyable, Movable):
 
 
 struct Vector(Copyable, ImplicitlyCopyable, Movable):
-    """A column of a data chunk (DuckDB `Vector`), as a plain value.
+    """A column of a data chunk, as a plain value.
 
     - FLAT: `data` is row 0 of the values.
     - CONSTANT: `data` holds the one value; every row reads it.
@@ -393,8 +391,7 @@ struct Vector(Copyable, ImplicitlyCopyable, Movable):
     flat values (or of the dictionary's child), -1 when the values live in
     a chunk's cache. A vector over an Arrow string or packed boolean column
     is `encoded`: `data` is 0 and the values are read through the at-rest
-    column until `DataChunk.unified` decodes them, as DuckDB decodes an
-    FSST vector on `ToUnifiedFormat`.
+    column until `DataChunk.unified` decodes them into readable values.
     """
 
     var vector_type: Int

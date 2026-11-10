@@ -2,14 +2,13 @@
 
 `Regex` compiles a pattern once into immutable programs shared by every
 worker (an `ArcPointer`); `Matcher` is one worker's mutable scratch space:
-its two lazy DFAs and Pike VM. A search goes the way Rust's `regex` meta
-engine goes:
+its two lazy DFAs and Pike VM. A search selects the least work needed
+for the requested result:
 
 1. A pattern that is one literal string is a substring search. A single
    character class tests its membership bitmap directly.
 2. Otherwise a literal every match must contain rejects most
-   non-matching rows with one substring search (RE2's prefilter idea, for
-   a single pattern).
+   non-matching rows with one substring search.
 3. The forward DFA finds where the leftmost-first match ends, skipping
    input with literal prefixes or a byte-set prefilter while it sits in its
    start state.
@@ -20,7 +19,7 @@ engine goes:
 5. Only when capture groups are needed does a capture engine run.
    Eligible deterministic programs use one-pass tables; other programs use
    the bounded backtracker when its visited set fits in 256 KiB, the Pike VM
-   otherwise. Anchored one-pass captures skip the DFAs. As in RE2, anchored
+   otherwise. Anchored one-pass captures skip the DFAs. Anchored
    captures also skip the DFAs when the
    backtracker can cover the whole text.
 
@@ -612,11 +611,11 @@ struct Regex(Copyable, Movable):
     groups, the repetitions `* + ? {m} {m,} {m,n}` and their lazy forms,
     and the flags `i m s U x` (as `(?flags)` or `(?flags:...)`).
 
-    Rejected with an error, as Rust does: look-around and backreferences.
+    Rejected with an error: look-around and backreferences.
     Unicode properties (`\\p{Greek}`, `\\pL`, `\\P{...}`) and word-start/end
     anchors (`\\<`, `\\>`) are supported. `(?-u)` selects ASCII classes,
     boundaries and case folding, provided the pattern cannot match invalid
-    UTF-8, as in Rust's string regex. CRLF mode `(?R)` is not supported.
+    UTF-8, so matches never split an encoded code point. CRLF mode `(?R)` is not supported.
     """
 
     var _compiled: ArcPointer[_Compiled]
@@ -833,8 +832,8 @@ struct Matcher(Movable):
         if end == -1:
             return (-1, -1)
         if end != GAVE_UP and c.anchored:
-            # The anchored forward search already knows where the match
-            # starts; RE2 runs the reverse DFA only for unanchored ones.
+            # Anchored matches already have a known start; only unanchored
+            # matches need a reverse search to recover it.
             return (start, end)
         if end != GAVE_UP and c.fixed_width >= 0:
             # The forward match's end and its code-point count determine
@@ -934,10 +933,10 @@ struct Matcher(Movable):
         return self._groups(text, m[0], m[1])
 
     def _direct_captures(self, text: Span[UInt8, ImmutAnyOrigin]) -> Bool:
-        """Whether a capture search should skip the DFAs: RE2's `Match`
-        sends an anchored pattern with groups over a text the bounded
-        backtracker covers straight to it, since the DFA pass would only
-        find the span the backtracker then walks again."""
+        """Skip preliminary DFA passes for anchored capture searches when the
+        bounded backtracker can cover the text. It can find the known start
+        and record captures in one pass instead of walking the same span
+        twice."""
         ref c = self.regex._compiled[]
         return (
             c.anchored
@@ -984,10 +983,9 @@ struct Matcher(Movable):
         self._last_end = -1
 
     def next(mut self, text: Span[UInt8, ImmutAnyOrigin]) -> Tuple[Int, Int]:
-        """The next non-overlapping match after `reset`, or (-1, -1), with
-        Rust's rule for empty matches: an empty match that ends where the
-        previous match ended is skipped by searching again one code point
-        later."""
+        """Return the next non-overlapping match after reset, or (-1, -1). Skip
+        an empty match ending at the previous match's end by advancing one
+        code point before searching again, guaranteeing iterator progress."""
         return self._next[False](text)
 
     def _capture_span(

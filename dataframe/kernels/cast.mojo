@@ -116,7 +116,7 @@ def _read_source(
         if target.is_float():
             values.floats[i] = Float64(raw) / Float64(pow10(source.scale()))
         else:
-            # Half to even, as Polars casts: 1.5 to 2, 0.5 to 0 (#342).
+            # Round halfway cases to the even integer: 1.5 -> 2, 0.5 -> 0 (#342).
             values.ints[i] = divide_half_even(raw, pow10(source.scale()))
         return
     if source == DataType.STRING:
@@ -206,7 +206,7 @@ def _scaled_integers[
     # DECIMAL(19,0), INTEGER to DECIMAL(10,0) or wider): no row can
     # overflow, so the scaling is one unchecked pass over every slot,
     # which vectorizes, and the source's validity is copied as it is.
-    # DuckDB's binder makes the same choice from the types alone.
+    # Determine conversion eligibility from the types before reading values.
     var bound = Scalar[D].MAX.cast[DType.int128]() + 1
     if bound <= (limit - 1) // factor:
         var scaled = Scalar[W](factor.cast[W]())

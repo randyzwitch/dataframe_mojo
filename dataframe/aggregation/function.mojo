@@ -1,40 +1,17 @@
-"""DuckDB's aggregate function state interface for the aggregate table.
+"""Aggregate state stored inline in each group's row.
 
-Every reduction the aggregate table runs is an `AggregateFunction`
-(DuckDB's `AggregateFunction`, function/aggregate_function.hpp): a state of
-`state_size` 64-bit words held inline in a group's row (DuckDB's
-TupleDataLayout with aggregates), which `initialize` sets to all zero
-words (empty), `update` folds a vector of input rows into through each
-row's state address, `combine` merges into another state, `finalize`
-writes as a vector of results, and `destroy` releases (nothing here: a
-state's variable-size parts live in arenas the sink owns, freed with it).
+Each reduction reserves `state_size` 64-bit words after the keys.
+`initialize` zeros an empty state, `update` folds input rows into it,
+`combine` merges workers' partial states, and `finalize` writes results.
+Variable-size state lives in arenas or reducers owned by the sink, so
+destroying the sink releases it without a separate allocation per row.
 
-States by kind:
-- counts, sums (Int64, 128-bit, Float64, decimal), means, variance and
-  co-moments, quantile value chains, and per-group top rows, as before;
-- minimum and maximum of every type: numbers as canonical words, decimals
-  as 128-bit values, Booleans as the logic flags, and strings as a
-  string_t (length and prefix, then the inline bytes or the address of the
-  bytes, DuckDB's `MinMaxStringState`);
-- first and last (DuckDB's `FirstState`: value, whether it is valid, and
-  whether the state is set) of every type, with the row's sequence number,
-  so a combine keeps the earlier (first) or later (last) row whichever
-  worker saw it: Polars' first and last by row order;
-- any and all (Kleene flags: true, false and null seen);
-- any other state by address (DuckDB's aggregates whose state owns memory:
-  `initialize` allocates it, `destroy` frees it): the row holds the
-  address of its owner, the worker's `Reducer` of such states, and the
-  state's ordinal there (`_K_STATE`);
-- an order-sensitive reduction of any type (DuckDB's ordered aggregate,
-  `SortedAggregateFunction`): the row holds the address of the worker's
-  buffer of the reduction's input rows and their sequence numbers, which
-  the finish sorts by sequence before the rows reach the reduction
-  (`_K_ORDERED`).
-
-A string state never copies its bytes: the input column outlives the
-aggregation (the sink holds it, as it holds string keys), so a long string
-is the address of its bytes there, as DuckDB's arena copy would be, and the
-finished column is views into the same buffers (`_HeldBuffers`).
+Counts, sums, moments and numeric extrema keep fixed-size state. String
+extrema hold a length, prefix and inline bytes or a pointer into retained
+input buffers. First and last also keep sequence numbers, so merging
+workers preserves input order. Boolean reductions track true, false and
+null flags. Quantiles retain value chains. Reductions requiring input order
+buffer values and sequence numbers, then sort before finalizing.
 """
 from dataframe.storage.buffer import _Buffer, _BufferData
 from std.collections import Optional
@@ -109,7 +86,7 @@ from dataframe.storage.string_view import (
     _STRING_VIEW_BUFFER_LIMIT,
 )
 
-# Rows updated at a time (DuckDB's STANDARD_VECTOR_SIZE).
+# Rows updated at a time.
 comptime _BATCH = 2048
 # Bytes of a sink's arena: two huge pages.
 comptime _ARENA_BYTES = 4 << 20
@@ -167,8 +144,8 @@ def table_reduction(op: Int) -> Bool:
     """Whether the aggregate table holds a reduction's state for groups:
     an `AggregateFunction` of its own (`reduction_supported`), or a state by
     address (`_K_STATE`, `_K_ORDERED`) for the positional, product and
-    moment reductions, mode (DuckDB's mode state, a count per value) and
-    implode (DuckDB's list aggregate, its rows kept in input order)."""
+    moment reductions, mode and
+    implode."""
     return reduction_supported(op) or op in [
         ARG_MIN,
         ARG_MAX,
@@ -190,32 +167,29 @@ comptime _K_MIN = 5  # best, flags (1 seen, 2 NaN seen)
 comptime _K_MAX = 6
 comptime _K_MOMENTS = 7  # count, mean, m2 (Welford, as `VarState`)
 # Int64 total, count: an integer input of at most 32 bits over fewer than
-# 2^31 rows cannot overflow it (DuckDB's `sum_no_overflow`).
+# 2^31 rows cannot overflow it.
 comptime _K_NARROW_SUM = 8
 # A decimal sum or mean: 128-bit total, count; the total is held to the
 # result's precision on every add, as the `Reducer`'s decimal sums are.
 comptime _K_DECIMAL_SUM = 9
-# A group's k first (value, row) pairs by ordinal rank (DuckDB's
-# `arg_max(row, value, k)`, which its TopN window elimination makes of
-# `row_number() OVER (PARTITION BY ... ORDER BY value) <= k`): how many are
+# A group's first k (value, row) pairs by ordinal rank: how many are
 # held, then each pair's order key and row, kept sorted, first best.
 comptime _K_TOP_ROWS = 10
 # A median or quantile: three words, the newest and the oldest segment of
-# the group's chain of values (DuckDB's `QuantileState`, a vector of every
-# valid value) and how many it holds; all 0 when it has none.
+# the group's chain of valid values and how many it holds; all 0 when empty.
 comptime _K_VALUES = 11
-# A correlation or covariance of two columns (DuckDB's `CorrState` and
-# `CovarState`): pairs counted, the two means, the co-moment and the two
+# A correlation or covariance of two columns: pairs counted, the two
+# means, the co-moment and the two
 # second moments (Welford's update, merged pairwise). The second column is
 # an input after the reductions' own (`AggregateFunction.k` is its index).
 comptime _K_COMOMENT = 12
-# A string's minimum or maximum (DuckDB's `MinMaxStringState`): the value
+# A string's minimum or maximum: the value
 # as a string_t (its length and first four bytes, then up to eight more
 # inline bytes or the address of its bytes in the held input), then a word
 # that is 1 once a value is held.
 comptime _K_STRING_MIN = 13
 comptime _K_STRING_MAX = 14
-# A first or last value (DuckDB's `FirstState`): its value words (as a key
+# A first or last value: its value words (as a key
 # column's: one, or two for a 128-bit value or a string), the sequence
 # number of its row, then flags (1 set, 2 the value is valid). A worker
 # sees its rows in increasing sequence, so an update keeps its first (or
@@ -230,13 +204,12 @@ comptime _K_LOGIC = 17
 # value is held.
 comptime _K_WIDE_MIN = 18
 comptime _K_WIDE_MAX = 19
-# A distinct count (DuckDB's distinct aggregate): the number of the
+# A distinct count: the number of the
 # group's distinct values, which the sink's distinct table of (keys, value)
 # groups adds to its group (`AggregateSink.distinct`); a row's update
 # leaves it alone.
 comptime _K_DISTINCT = 20
-# A state by address (DuckDB's `state_size` of a pointer, with an
-# `initialize` that allocates and a `destructor` that frees): the address
+# A state held by its owner rather than inline in the group row: the address
 # of its owner, the worker's `Reducer` of such states (one per reduction),
 # the state's ordinal there plus one, and the address of the next state
 # merged into this group's (0 for none). A combine links the other
@@ -245,8 +218,7 @@ comptime _K_DISTINCT = 20
 # `Reducer` of the job's groups. The owner's states live as long as the
 # worker's sink, and go with it.
 comptime _K_STATE = 21
-# An order-sensitive reduction's state (DuckDB's `SortedAggregateFunction`,
-# whose state buffers its arguments and their sort keys): the same three
+# An order-sensitive reduction buffers arguments and sort keys: the same three
 # words, the owner being the worker's `_OrderedBuffer` of the reduction's
 # input rows and their sequence numbers. The finish sorts the group's
 # buffered rows by sequence (their input order) and only then reduces them:
@@ -261,8 +233,7 @@ comptime TOP_ROWS_INLINE = 16
 # value arena, chained from the newest back: a segment is its previous
 # segment's address, the values it holds, its capacity, then the values as
 # Float64. Segments double from two values to 1024, so a group's values
-# are never copied as they grow (DuckDB's `QuantileState` vector is, on
-# each doubling), and merging two groups links one chain under the other.
+# are never copied as they grow; merging groups links their chains.
 comptime _VALUES_FIRST = 2
 comptime _VALUES_LAST = 1024
 comptime _SEGMENT_HEAD = 3
@@ -363,8 +334,7 @@ def _values_gather(
 
 @fieldwise_init
 struct AggregateFunction(Copyable, Movable):
-    """One reduction's state in a group row (DuckDB's `AggregateFunction`
-    with its offset in the row's `TupleDataLayout`): its kind, its first
+    """One reduction's state in a group row: its kind, its first
     word after the keys, and what its values are. A state of all zero words
     is empty (`initialize`); `update`, `combine` and `finalize` are the
     `_update_states`, `combine` and `_Finalizer` of its kind."""
@@ -407,7 +377,7 @@ struct AggregateFunction(Copyable, Movable):
         ) else 1
 
     def state_size(self) -> Int:
-        """The state's words (DuckDB's `state_size`)."""
+        """The state's words."""
         if self.kind == _K_TOP_ROWS:
             return 1 + 2 * self.k
         if self.kind == _K_COMOMENT:
@@ -460,7 +430,7 @@ struct AggregateFunction(Copyable, Movable):
         return self.kind == _K_STATE or self.kind == _K_ORDERED
 
     def destroy(self, state: Int):
-        """DuckDB's `destructor`: nothing per row. Value chains live in
+        """Release state: no per-row destruction is needed. Value chains live in
         the sink's arena, and states by address in the sink's `Reducer`s
         and buffers, all freed with the sink."""
         pass
@@ -586,8 +556,7 @@ def _slot_kind(spec: ReducerSpec, input: Series) -> Int:
         return _K_LEN
     var storage = _storage_kind(input)
     if (spec.op == COUNT or spec.op == NULL_COUNT) and storage != _VALUE_NONE:
-        # A count reads only validity, whatever the values' type, as
-        # DuckDB's count(ANY) does.
+        # A count reads only validity, whatever the values' type.
         return _K_COUNT if spec.op == COUNT else _K_NULLS
     if spec.op == N_UNIQUE:
         return _K_DISTINCT if storage != _VALUE_NONE else -1
@@ -738,9 +707,7 @@ def _words_at(address: Int) -> Pointer[UInt64, MutAnyOrigin]:
 
 
 def _format_nulls(format: UnifiedVectorFormat, start: Int, count: Int) -> Bool:
-    """Whether rows [start, start + count) of a vector may be null
-    (`ValidityMask::CanHaveNull`, which every DuckDB scatter loop checks
-    first): never without a mask. A flat vector's mask is counted over
+    """Whether rows [start, start + count) of a vector may be null: never without a mask. A flat vector's mask is counted over
     those rows, so an all-valid bitmap (as Parquet columns carry) reads
     as none."""
     var validity = format.validity
@@ -785,7 +752,7 @@ def _update_counts(
 def _string_order(at: Int, length: Int, state: Int) -> Int:
     """The order of `length` bytes at `at` against the string_t held at
     `state` (negative, zero or positive): bytes compared as unsigned, then
-    lengths, as DuckDB's `string_t` comparison and Polars' order them."""
+    lengths, so a shorter equal prefix sorts first."""
     var held = _words_at(state)
     var size = Int(held[] & 0xFFFFFFFF)
     var bytes = state + 4 if size <= 12 else Int(held[unsafe_offset=1])
@@ -1015,10 +982,8 @@ def _update_slot[
     discard: Int,
 ):
     """Update group state words with a batch's values of `D`, rows
-    [start, start + count) of a vector (DuckDB's `UnaryScatter`, through
-    the vector's selection when `selected`). `base` is the byte offset in
-    each group row, and `rows` holds the group-row addresses. As DuckDB's
-    scatter is a template per aggregate operation and input type, each
+    [start, start + count) of a vector. `base` is the byte offset in
+    each group row, and `rows` holds the group-row addresses. Each
     state kind has its own loop, and a vector without nulls takes one that
     reads no validity (`UnaryScatterLoop`'s quick path)."""
     var nulls = _format_nulls(format, start, count)
@@ -1263,7 +1228,7 @@ def _update_comoment(
     scratch: Int,
 ) raises:
     """A batch's (x, y) pairs into their groups' co-moment states; a pair
-    with a null on either side is dropped (DuckDB's `BinaryScatterLoop`).
+    with a null on either side is dropped.
     The pairs are loaded into `scratch` (three vectors of words: x values,
     y values, then both validity flags), allocated once per sink."""
     var xs = Pointer[Float64, MutAnyOrigin](unsafe_from_address=scratch)
@@ -1320,9 +1285,7 @@ def _update_states(
     only: Int = -1,
     skip: List[Bool] = List[Bool](),
 ) raises:
-    """Every reduction's `update` for a batch (DuckDB's
-    `RowOperations::UpdateStates`, each aggregate's scatter over its
-    input's `UnifiedVectorFormat`): `inputs` are the reductions' vectors,
+    """Every reduction's `update` for a batch: `inputs` are the reductions' vectors,
     rows [start, start + count) of each; `rows` the addresses of the
     rows' groups, whose states start at word `states_at`; `first` the
     source row of the vectors' first, rows numbered on from it; `scratch`
@@ -1489,7 +1452,7 @@ def _update_top_rows[
 
 
 def combine(slots: List[AggregateFunction], into: Int, other: Int) raises:
-    """Every reduction's `combine` (DuckDB's `combine`): group row
+    """Every reduction's `combine`: group row
     `other`'s states folded into group row `into` (both the addresses of
     their first state word's row)."""
     var a = _words_at(into)
@@ -1800,9 +1763,7 @@ def _unload(
 
 
 struct _OrderedBuffer(Movable):
-    """A worker's buffered input rows of one order-sensitive reduction
-    (DuckDB's `SortedAggregateState`, which holds a group's arguments and
-    sort keys): each row's value, its group's ordinal among this buffer's
+    """A worker's buffered input rows of one order-sensitive reduction: each row's value, its group's ordinal among this buffer's
     groups and its sequence number (its place in the input). `prepare`
     makes the values one column and indexes the rows by group, once the
     worker's run is over."""
@@ -1896,7 +1857,7 @@ def _unload_states(
 ) raises:
     """States by address (`_K_STATE`) of groups [lo, hi): every state of a
     group's chain merged into the group's state in `reducer`, owner by
-    owner (DuckDB's `Combine` of the states into the finalize's)."""
+    owner."""
     var owners = List[Int]()
     var sources = List[List[Int]]()
     var targets = List[List[Int]]()
@@ -2009,9 +1970,7 @@ def _replay_ordered(
     hi: Int,
 ) raises:
     """An order-sensitive reduction of groups [lo, hi) (`_K_ORDERED`):
-    their buffered rows sorted into input order, then into `reducer`
-    (DuckDB's `SortedAggregateFunction::Finalize`, which sorts a group's
-    buffered arguments before the inner aggregate's update)."""
+    their buffered rows sorted into input order, then into `reducer`."""
     var owners = List[Int]()
     var owner_of = List[Int]()
     var positions = List[Int]()
@@ -2048,7 +2007,7 @@ comptime _F_WIDE = 11
 # An ordered first or last (`_K_ORDERED`): the value of the group's
 # earliest or latest buffered row, of any type.
 comptime _F_PICK = 12
-# An ordered implode (`_K_ORDERED`, DuckDB's list aggregate): every row of
+# An ordered implode (`_K_ORDERED`): every row of
 # the group in input order, as a list.
 comptime _F_LIST = 13
 
@@ -2089,7 +2048,7 @@ def _finalize_mode(slot: AggregateFunction, template: Reducer) -> Int:
         return _F_QUANTILE
     if kind == _K_DECIMAL_SUM:
         # The 128-bit total is the result's unscaled value (its precision
-        # held on every add), as DuckDB's decimal SUM finalizes.
+        # held on every add), so finalization needs no further rounding.
         return _F_DECIMAL_SUM if template.op == SUM else _F_DECIMAL_MEAN
     var summed = (
         kind == _K_INT_SUM or kind == _K_NARROW_SUM or kind == _K_FLOAT_SUM

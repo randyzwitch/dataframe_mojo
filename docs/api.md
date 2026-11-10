@@ -459,7 +459,7 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def sort(self, by: String, descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> Self`
   Single-column sort. NaNs follow non-null numbers. Rows with equal keys come out in no particular order unless `maintain_order` keeps their input order.
 - `def arg_sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool], maintain_order: Bool = False) -> List[Int]`
-  Row order of the sort: DuckDB's sort over normalized keys (`dataframe.sorting`). Equal keys come in no particular order unless `maintain_order` keeps their input order.
+  Return row indices ordered by normalized sort keys. Equal keys come in no particular order unless `maintain_order` keeps their input order.
 - `def arg_sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True, *, maintain_order: Bool = False) -> List[Int]`
 - `def top_k(self, k: Int, by: List[String], *, reverse: Bool = False) -> Self`
   The k rows with greatest values by `by` (ascending when `reverse=True`).
@@ -2169,8 +2169,7 @@ String expressions. Character operations work on Unicode code points; there is n
 
 `contains`, `count_matches`, `extract`, `extract_all`, `replace`,
 `replace_all` and `split(literal=False)` take regular expressions in
-the syntax of Rust's `regex` crate; see
-docs/expressions.md for what is supported. A pattern that is plain text
+the supported syntax documented in docs/expressions.md. A pattern that is plain text
 is searched as a substring.
 
 - `def len_chars(self) -> Expr`
