@@ -1,5 +1,5 @@
 """Build/use the Mojo ABI observer and scope native-library selection."""
-from std.ffi import external_call
+from std.ffi import OwnedDLHandle, external_call
 from std.memory import Pointer
 from std.os import getenv
 from std.os.path import exists
@@ -40,7 +40,7 @@ struct Observer(Movable):
     var previous_delegate: String
     var path: String
     var delegate: String
-    var handle: Int
+    var handle: OwnedDLHandle
     var reset_entry: Int
     var get_entry: Int
 
@@ -53,7 +53,6 @@ struct Observer(Movable):
             + (".dylib" if CompilationTarget.is_macos() else ".so")
         )
         self.delegate = ""
-        self.handle = 0
         self.reset_entry = 0
         self.get_entry = 0
         for candidate in parquet_library_candidates():
@@ -76,23 +75,12 @@ struct Observer(Movable):
                 external_call["system", Int32](command.unsafe_ptr()), Int32(0)
             )
             _ = command^
-        var c_path = self.path + "\0"
-        self.handle = external_call["dlopen", Int](
-            c_path.unsafe_ptr(), Int32(2)
-        )
-        _ = c_path^
-        assert_true(self.handle != 0)
-        var reset = String("df_test_reset\0")
-        var get = String("df_test_get\0")
-        self.reset_entry = external_call["dlsym", Int](
-            self.handle, reset.unsafe_ptr()
-        )
-        self.get_entry = external_call["dlsym", Int](
-            self.handle, get.unsafe_ptr()
-        )
-        assert_true(self.reset_entry != 0 and self.get_entry != 0)
-        _ = reset^
-        _ = get^
+        self.handle = OwnedDLHandle(self.path, flags=2)
+        var reset = self.handle.get_symbol[NoneType]("df_test_reset")
+        var get = self.handle.get_symbol[NoneType]("df_test_get")
+        assert_true(Bool(reset) and Bool(get))
+        self.reset_entry = Int(reset.value())
+        self.get_entry = Int(get.value())
         set_setting("DATAFRAME_TEST_PARQUET_DELEGATE", self.delegate)
         set_setting("DATAFRAME_PARQUET_LIBRARY", self.path)
         self.reset()
@@ -100,8 +88,6 @@ struct Observer(Movable):
     def __deinit__(deinit self):
         set_setting("DATAFRAME_PARQUET_LIBRARY", self.previous_library)
         set_setting("DATAFRAME_TEST_PARQUET_DELEGATE", self.previous_delegate)
-        if self.handle:
-            _ = external_call["dlclose", Int32](self.handle)
 
     def reset(self):
         var entry = self.reset_entry
