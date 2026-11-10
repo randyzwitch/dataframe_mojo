@@ -70,8 +70,6 @@ from dataframe.time.temporal import (
     checked_sub,
     checked_floor_div,
     days_from_civil,
-    floor_div,
-    floor_mod,
     format,
     format_in,
     join,
@@ -338,13 +336,13 @@ def _chunk_temporal_binary[
 
 def _weekday(days: Int64) -> Int64:
     # 1970-01-01 was a Thursday (ISO weekday 4).
-    return floor_mod(floor_mod(days, 7) + 3, 7) + 1
+    return (((days % 7) + 3) % 7) + 1
 
 
 def _days(value: Int64, dtype: DataType) -> Int64:
     if dtype.is_date():
         return value
-    return floor_div(value, ticks_per_day(dtype))
+    return value // ticks_per_day(dtype)
 
 
 @fieldwise_init
@@ -398,12 +396,12 @@ struct Truncation(Copyable):
         if self.months > 0:
             var p = split(value, self.dtype)
             var index = (
-                floor_div(p.year * 12 + p.month - 1, self.months) * self.months
-            )
+                (p.year * 12 + p.month - 1) // self.months
+            ) * self.months
             return join(
                 Parts(
-                    floor_div(index, 12),
-                    floor_mod(index, 12) + 1,
+                    (index // 12),
+                    (index % 12) + 1,
                     1,
                     0,
                     0,
@@ -412,9 +410,7 @@ struct Truncation(Copyable):
                 ),
                 self.dtype,
             )
-        return (
-            floor_div(value - self.origin, self.step) * self.step + self.origin
-        )
+        return ((value - self.origin) // self.step) * self.step + self.origin
 
 
 def _truncate(value: Int64, dtype: DataType, every: String) raises -> Int64:
@@ -515,7 +511,7 @@ struct Offset(Copyable):
         if self.ticks != 0:
             result = checked_add(result, self.ticks)
             if self.dtype.is_time():
-                result = floor_mod(result, NANOS_PER_DAY)
+                result = result % NANOS_PER_DAY
         return result
 
 
@@ -688,9 +684,9 @@ def _epoch(value: Int64, dtype: DataType, unit: String) raises -> Int64:
             value, checked_mul(86400, per)
         )
     if unit == "d":
-        return floor_div(value, ticks_per_day(dtype))
+        return value // ticks_per_day(dtype)
     var source = dtype.per_second()
-    return floor_div(value, source // per) if source >= per else checked_mul(
+    return (value // (source // per)) if source >= per else checked_mul(
         value, per // source
     )
 
@@ -943,7 +939,7 @@ def dt_op(
         if aware and (op == DT_TRUNCATE or op == DT_ROUND):
             # Truncate the local time, then map back keeping the offset.
             var per_second = dtype.per_second()
-            var offset = zone.offset_at(floor_div(v, per_second))
+            var offset = zone.offset_at((v // per_second))
             values[i] = relocalize(
                 _round(v + offset * per_second, truncation) if op
                 == DT_ROUND else truncation.apply(v + offset * per_second),
@@ -969,7 +965,7 @@ def dt_op(
         elif op == DT_DATE:
             values[i] = _days(v, dtype)
         elif op == DT_TIME:
-            values[i] = floor_mod(v, ticks_per_day(dtype)) * (
+            values[i] = (v % ticks_per_day(dtype)) * (
                 Int64(1000000000) // dtype.per_second()
             )
         elif op == DT_WEEKDAY:
@@ -992,9 +988,9 @@ def dt_op(
             if op == DT_QUARTER:
                 values[i] = (p.month - 1) // 3 + 1
             elif op == DT_CENTURY:
-                values[i] = floor_div(p.year - 1, 100) + 1
+                values[i] = ((p.year - 1) // 100) + 1
             elif op == DT_MILLENNIUM:
-                values[i] = floor_div(p.year - 1, 1000) + 1
+                values[i] = ((p.year - 1) // 1000) + 1
             elif op == DT_DAYS_IN_MONTH:
                 values[i] = days_in_month(p.year, p.month)
             elif op == DT_IS_LEAP_YEAR:
@@ -1020,8 +1016,8 @@ def dt_op(
         else:
             # Time-of-day fields need no calendar: the ticks within the
             # day (ClickBench q18 takes the minute of 10M timestamps).
-            var within = floor_mod(
-                v, NANOS_PER_DAY if dtype.is_time() else ticks_per_day(dtype)
+            var within = v % (
+                NANOS_PER_DAY if dtype.is_time() else ticks_per_day(dtype)
             )
             var per_second = dtype.per_second()
             var seconds = within // per_second
@@ -1195,19 +1191,17 @@ def cast_temporal(
             elif date_to_datetime:
                 values[i] = checked_mul(v, ticks_per_day(target))
             elif datetime_to_date:
-                values[i] = floor_div(
-                    to_local(v, source, zone), ticks_per_day(source)
-                )
+                values[i] = to_local(v, source, zone) // ticks_per_day(source)
             elif datetime_to_time:
                 v = to_local(v, source, zone)
-                values[i] = floor_mod(v, ticks_per_day(source)) * (
+                values[i] = (v % ticks_per_day(source)) * (
                     Int64(1000000000) // source.per_second()
                 )
             else:
                 var a = source.per_second()
                 var b = target.per_second()
-                values[i] = checked_mul(v, b // a) if b >= a else floor_div(
-                    v, a // b
+                values[i] = checked_mul(v, b // a) if b >= a else (
+                    v // (a // b)
                 )
             valid[i] = True
         except e:
@@ -1236,7 +1230,7 @@ def _zoned_range(
         raise Error("range interval must be positive, found " + interval)
     var fixed = _ticks(step[2], dtype, interval)
     var per_second = dtype.per_second()
-    var offset = zone.offset_at(floor_div(first, per_second))
+    var offset = zone.offset_at((first // per_second))
     var local = checked_add(first, offset * per_second)
     var values = List[Int64]()
     var current = first

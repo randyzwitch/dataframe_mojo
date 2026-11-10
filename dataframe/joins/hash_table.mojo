@@ -18,6 +18,7 @@ keys once per chain and emits at most one chunk per call to next. Null
 keys never match. Right/full joins record matched build rows for a later
 scan; build-side semi/anti joins emit flagged/unflagged rows respectively.
 """
+from std.bit import next_power_of_two
 from std.collections import Optional
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
@@ -895,13 +896,6 @@ def keys_only_join(how: Int) -> Bool:
     return how == JOIN_SEMI or how == JOIN_ANTI or how == JOIN_MARK
 
 
-def _next_power_of_two(value: Int) -> Int:
-    var power = 1
-    while power < value:
-        power <<= 1
-    return power
-
-
 def _validity(key: Series) -> Tuple[Int, Int]:
     """A key's validity bitmap address (0 when every row is valid) and the
     bit of its row 0."""
@@ -1141,12 +1135,12 @@ struct JoinHashTable(Copyable, Movable):
         # Each partition its own region of the table; the regions together
         # at least MINIMUM_CAPACITY.
         self.parts = partition_count
-        var floor = _next_power_of_two(
+        var floor = next_power_of_two(
             (MINIMUM_CAPACITY + self.parts - 1) // self.parts
         )
         for p in range(self.parts):
             var size = max(
-                _next_power_of_two(
+                next_power_of_two(
                     Int(Float64(partition_rows[p]) * DEFAULT_LOAD_FACTOR)
                 ),
                 floor,

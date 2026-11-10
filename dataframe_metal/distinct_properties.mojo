@@ -1,4 +1,5 @@
 """Bounded cardinality hints for placement, never for the exact GPU answer."""
+from std.bit import next_power_of_two
 from std.memory import bitcast
 from dataframe import DataFrame, DataType
 from .distinct_plan import DistinctPlan
@@ -75,8 +76,6 @@ def cardinality_key(plan: DistinctPlan, frame: DataFrame) raises -> String:
         if samples >= 256 and count * 4 >= samples * 3:
             result += ":distinct_cardinality=uncertain"
         else:
-            var bucket = 1
-            while bucket < count:
-                bucket *= 2
+            var bucket = next_power_of_two(count)
             result += ":distinct_cardinality=" + String(bucket)
     return result^

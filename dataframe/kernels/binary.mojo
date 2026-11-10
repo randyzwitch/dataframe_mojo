@@ -1540,22 +1540,6 @@ def _exp_edge[
         ]()
 
 
-@always_inline
-def _log_value[
-    D: DType
-](value: Scalar[D]) -> Scalar[D] where D.is_floating_point():
-    # The toolchain approximation loses accuracy (including log(10)) and
-    # returns NaN for +infinity. Use the platform IEEE implementation.
-    comptime if D == DType.float32:
-        return external_call["logf", Float32](value.cast[DType.float32]()).cast[
-            D
-        ]()
-    else:
-        return external_call["log", Float64](value.cast[DType.float64]()).cast[
-            D
-        ]()
-
-
 def _unary_block[
     op: Int, width: Int, D: DType
 ](
@@ -1588,7 +1572,7 @@ def _unary_block[
         result = SIMD[D, width](0)
         comptime for lane in range(width):
             if mask[lane]:
-                result[lane] = _log_value[D](x[lane])
+                result[lane] = log(x[lane])
     elif op == FLOOR:
         result = floor(x)
     elif op == CEIL:
@@ -1662,7 +1646,7 @@ def _write_unary_int[
                 value
             ) > 700 else exp(value)
         elif op == LOG:
-            floats[i] = _log_value[DType.float64](x.cast[DType.float64]())
+            floats[i] = log(x.cast[DType.float64]())
         else:
             values[i] = x
 
@@ -1748,7 +1732,7 @@ def _math_value[
             return _libm["log10", "log10f", D](x)
         if base == 2:
             return _libm["log2", "log2f", D](x)
-        return _log_value[D](x) / _log_value[D](base)
+        return log(x) / log(base)
     elif op == LOG1P:
         return _libm["log1p", "log1pf", D](x)
     elif op == CBRT:

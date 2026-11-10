@@ -5,18 +5,10 @@ package so both can use it without an import cycle.
 """
 
 
-def floor_div(a: Int64, b: Int64) -> Int64:
-    return a // b
-
-
-def floor_mod(a: Int64, b: Int64) -> Int64:
-    return a % b
-
-
 def days_from_civil(year: Int64, month: Int64, day: Int64) -> Int64:
     """Days since 1970-01-01 for a proleptic Gregorian date."""
     var y = year - (Int64(1) if month <= 2 else Int64(0))
-    var era = floor_div(y, 400)
+    var era = y // 400
     var yoe = y - era * 400
     var mp = (month + 9) % 12
     var doy = (153 * mp + 2) // 5 + day - 1
@@ -28,10 +20,10 @@ def civil_from_days(days: Int64) -> Tuple[Int64, Int64, Int64]:
     """(year, month, day) for days since 1970-01-01."""
     # Decompose before aligning epochs: days + 719468 can exceed Int64,
     # and multiplying a negative floor quotient back can underflow too.
-    var era = floor_div(days, 146097)
-    var shifted_remainder = floor_mod(days, 146097) + 719468
-    era += floor_div(shifted_remainder, 146097)
-    var doe = floor_mod(shifted_remainder, 146097)
+    var era = days // 146097
+    var shifted_remainder = (days % 146097) + 719468
+    era += shifted_remainder // 146097
+    var doe = shifted_remainder % 146097
     var yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
     var doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
     var mp = (5 * doy + 2) // 153

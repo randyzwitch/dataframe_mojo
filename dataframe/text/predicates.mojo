@@ -10,6 +10,7 @@ writes the result bitmap; validity is the input's, copied once. Equality
 checks the length before any byte; `is_in` with more than eight values
 probes a small open-addressing table of their hashes.
 """
+from std.bit import next_power_of_two
 from dataframe.storage.buffer import _Buffer
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import _append_validity, _copy_validity
@@ -76,9 +77,7 @@ struct _Literals(Copyable, Movable):
         self.slots = List[Int32]()
         var count = len(values)
         if count > 8:
-            var size = 16
-            while size < 2 * count:
-                size *= 2
+            var size = max(16, next_power_of_two(2 * count))
             self.slots = List[Int32](length=size, fill=-1)
             for k in range(count):
                 var slot = Int(_hash_bytes(self.get(k)) & UInt64(size - 1))
