@@ -27,6 +27,7 @@ from dataframe.join_type import (
     JOIN_RIGHT_ANTI,
     JOIN_RIGHT_SEMI,
     JOIN_SEMI,
+    join_emits_build_rows,
     join_name,
 )
 from dataframe.joins.hash_table import (
@@ -275,6 +276,7 @@ def join_frames(
         build_keys,
         perfect=physical == JOIN_INNER,
         keys_only=keys_only_join(physical),
+        propagate=join_emits_build_rows(physical),
     )
     var pairs = Tuple[List[Int], List[Int]](List[Int](), List[Int]())
     if table.count == 0 and (

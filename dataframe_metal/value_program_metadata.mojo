@@ -5,6 +5,8 @@ from .expression_plan import ValueNode
 from .predicate_program import PredicateProgram
 from .expression_format import (
     CASE_TEST,
+    TYPED_HEADER,
+    TYPED_REGISTERS,
     EXPRESSION_NODE_WORDS,
     VALUE_TYPE_SHIFT,
 )
@@ -110,6 +112,8 @@ def pack_value_program(
             words[at + 2] = UInt64(input.bit_offset) | (
                 UInt64(input.nullable) << 32
             )
+        elif node.op == TYPED_HEADER and node.literal & UInt64(TYPED_REGISTERS):
+            words[at + 1] = UInt64(node.input)
         elif node.op == CASE_TEST:
             words[at + 1] = UInt64(starts[node.input])
         if node.tag >= 0:

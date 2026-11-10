@@ -30,6 +30,7 @@ from .expression_plan import ValueNode, ExpressionTree
 from .expression_format import (
     TYPED_HEADER,
     TYPED_CHAIN,
+    TYPED_REGISTERS,
     MAX_EXPRESSION_NODES,
     MAX_EXPRESSION_STACK,
     CASE_NULL,
@@ -84,6 +85,8 @@ def compile_typed_expression(
     var nodes = List[ValueNode]([ValueNode(TYPED_HEADER, "", -1, 0)])
     var stack = List[Int]()
     var seed = String()
+    var register_slots = UInt64(0)
+    var register_count = 0
     for i in range(last + 1):
         ref original = expression._nodes[i]
         ref node = bound.expr._nodes[i]
@@ -178,12 +181,21 @@ def compile_typed_expression(
             nodes.append(ValueNode(node.op, "", -1, 0, tag))
         else:
             return None
+        register_slots |= UInt64(len(stack)) << UInt64(i * 3)
+        register_count = max(register_count, len(stack) + 1)
         stack.append(i)
         if len(stack) > MAX_EXPRESSION_STACK:
             return None
     if len(stack) != 1 or stack[0] != last or not seed:
         return None
-    nodes[0].literal |= scalar_chain_schedule(nodes)
+    var chain = scalar_chain_schedule(nodes)
+    if chain:
+        nodes[0].literal |= chain
+    else:
+        nodes[0].literal |= UInt64(TYPED_REGISTERS) | (
+            UInt64(register_count) << 8
+        )
+        nodes[0].input = Int(register_slots)
     return ExpressionTree(bound.dtypes[last], nodes^, seed^)
 
 
