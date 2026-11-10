@@ -400,16 +400,34 @@ def test_chunked_categorical_identity_keeps_source_dictionary_and_metadata_owner
     )
     var missing_unused = _dictionary(["red", "blue"])
     for strict in [False, True]:
-        with assert_raises():
-            _ = cast_series(
-                source,
-                missing_unused,
-                strict,
-                0,
-                List[Bool](length=6, fill=False),
-            )
-        with assert_raises():
-            _ = cast_series(flat.slice(0, 0), missing_unused, strict, 0, [])
+        # Unused dictionary members are not values that need conversion.
+        _same(
+            cast_series(source, missing_unused, strict, 0, []),
+            expected.with_dtype(missing_unused),
+        )
+        var inactive = cast_series(
+            source, missing_unused, strict, 0, List[Bool](length=6, fill=False)
+        )
+        assert_true(inactive.dtype() == missing_unused)
+        assert_equal(len(inactive), 6)
+        assert_equal(inactive.null_count(), 6)
+        _same(
+            cast_series(flat.slice(0, 0), missing_unused, strict, 0, []),
+            expected.slice(0, 0).with_dtype(missing_unused),
+        )
+    var only_red = _dictionary(["red"])
+    with assert_raises():
+        _ = cast_series(source, only_red, True, 0, [])
+    for strict in [False, True]:
+        var mask: List[Bool] = [False, False, True, False, False, True]
+        var result = cast_series(
+            source, only_red, strict, 0, mask.copy() if strict else []
+        )
+        assert_true(result.dtype() == only_red)
+        for row in range(6):
+            assert_equal(result.get(row).is_null(), row != 2 and row != 5)
+            if row == 2 or row == 5:
+                assert_equal(result.get(row).string(), "red")
 
 
 def _text_master(views: Bool) raises -> Series:

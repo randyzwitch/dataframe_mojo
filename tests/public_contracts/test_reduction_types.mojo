@@ -294,18 +294,10 @@ def _advertised_decimal_scalar(operation: String) raises:
                 near(value.float64(), expected)
 
 
-# expected-failure: Advertised decimal reduction aborts while accessing
-# expected-failure: physical storage as the wrong variant.
-# expected-diagnostic: reducer.mojo:1525:49: get: wrong variant type
-# expected-exit: variant-abort
 def test_decimal_variance_retains_numeric_scale() raises:
     _advertised_decimal_scalar("var")
 
 
-# expected-failure: Advertised decimal reduction aborts while accessing
-# expected-failure: physical storage as the wrong variant.
-# expected-diagnostic: reducer.mojo:1525:49: get: wrong variant type
-# expected-exit: variant-abort
 def test_decimal_standard_deviation_retains_numeric_scale() raises:
     _advertised_decimal_scalar("std")
 
@@ -318,16 +310,10 @@ def test_decimal_quantile_retains_numeric_scale() raises:
     _advertised_decimal_scalar("quantile")
 
 
-# expected-failure: Advertised public reduction does not satisfy its
-# expected-failure: documented numeric contract.
-# expected-diagnostic: expected a numeric column
 def test_decimal_skew_accepts_advertised_numeric_input() raises:
     _advertised_decimal_scalar("skew")
 
 
-# expected-failure: Advertised public reduction does not satisfy its
-# expected-failure: documented numeric contract.
-# expected-diagnostic: expected a numeric column
 def test_decimal_kurtosis_accepts_advertised_numeric_input() raises:
     _advertised_decimal_scalar("kurtosis")
 

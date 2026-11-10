@@ -343,7 +343,7 @@ def decode_chunk(
         var next_selected = projection.unsafe_ptr()[]
         var processed = 0
         var complete = False
-        while not complete and offset < len(bytes):
+        while not complete:
             var next = fields.next(input)
             if not next:
                 break
@@ -398,7 +398,7 @@ def decode_chunk(
                     if (
                         not partial_projection
                         and not options.truncate_ragged_lines
-                        and offset < len(bytes)
+                        and field.terminator == separator
                     ):
                         _flush_staged(
                             bytes,

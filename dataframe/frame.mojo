@@ -1956,7 +1956,7 @@ struct DataFrame(Copyable, Sized, Writable):
         including zero rows. An empty selection preserves the input height.
         """
         var bound = _bind_all(expressions, self._columns)
-        var has_rows = len(expressions) == 0
+        var has_rows = len(bound) == 0
         for expression in bound:
             has_rows = has_rows or expression.shape() == ROWS
         var height = self._height if has_rows else 1

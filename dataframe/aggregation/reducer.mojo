@@ -568,6 +568,8 @@ comptime _UINT64_BIAS = UInt64(1) << 63
 
 def _float_values(chunk: Series) raises -> Tuple[List[Float64], List[Bool]]:
     """Any numeric chunk as Float64 values and validity (UInt64 unbiased)."""
+    if chunk.dtype().is_decimal():
+        return _float_values(chunk.cast(DataType.FLOAT64))
     var values = List[Float64](capacity=len(chunk))
     var valid = List[Bool](capacity=len(chunk))
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -1044,7 +1046,9 @@ struct Reducer(Movable):
         self.dtype = self.logical if self.logical.is_decimal() else _state_type(
             self.input
         )
-        if self.dtype.is_decimal() and self.dtype.decimal_width() != 128:
+        if self.dtype.is_decimal() and (
+            self.dtype.decimal_width() != 128 or op == MEAN
+        ):
             # Decimal states are 128-bit. A narrow decimal's sum widens to
             # precision 38 (`sum_type`); its min, max, first and last keep
             # its precision and narrow back to its width when finished.
@@ -1266,7 +1270,9 @@ struct Reducer(Movable):
             # Decimal states are 128-bit: widen a narrow decimal input.
             self.update(chunk._decimal128(), offset, grouped, groups)
             return
-        if (self.op == STD or self.op == VAR) and self.input == DataType.UINT64:
+        if (self.op == STD or self.op == VAR) and (
+            self.input == DataType.UINT64 or chunk.dtype().is_decimal()
+        ):
             # Ordering uses biased Int64 keys for UInt64, but converting
             # those keys to Float64 destroys variance among small values.
             var floats = _float_values(chunk)

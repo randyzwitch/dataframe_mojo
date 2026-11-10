@@ -1476,20 +1476,10 @@ def _infinite_divisor_modulo[D: DType]() raises:
                 )
 
 
-# expected-failure: Finite floating remainder with an infinite divisor returns
-# expected-failure: NaN instead of the user-selected Python divisor-sign
-# expected-failure: policy.
-# expected-diagnostic: finite modulo infinite divisor must follow Python
-# expected-diagnostic: remainder, not NaN
 def test_float32_modulo_infinite_divisor_matches_selected_python_policy() raises:
     _infinite_divisor_modulo[DType.float32]()
 
 
-# expected-failure: Finite floating remainder with an infinite divisor returns
-# expected-failure: NaN instead of the user-selected Python divisor-sign
-# expected-failure: policy.
-# expected-diagnostic: finite modulo infinite divisor must follow Python
-# expected-diagnostic: remainder, not NaN
 def test_float64_modulo_infinite_divisor_matches_selected_python_policy() raises:
     _infinite_divisor_modulo[DType.float64]()
 

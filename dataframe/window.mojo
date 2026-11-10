@@ -245,12 +245,19 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
     ):
         return window_op(node, input.cast(DataType.FLOAT64), ids)
     if (
-        op_code == CUM_SUM
-        or op_code == ROLLING_SUM
-        or op_code == ROLLING_MEAN
-        or op_code == ROLLING_STD
-        or op_code == ROLLING_VAR
-    ) and _is_narrow(input.dtype()):
+        (
+            op_code == CUM_SUM
+            or op_code == ROLLING_SUM
+            or op_code == ROLLING_MEAN
+            or op_code == ROLLING_STD
+            or op_code == ROLLING_VAR
+        )
+        and _is_narrow(input.dtype())
+        and not (
+            input.dtype() == DataType.UINT64
+            and op_code in [CUM_SUM, ROLLING_SUM]
+        )
+    ):
         var result = window_op(node, _widen(input), ids)
         if (
             op_code == ROLLING_MEAN
@@ -593,6 +600,10 @@ def _running(
                 counts[unsafe_offset=g] += 1
             written[unsafe_offset=i] = counts[unsafe_offset=g]
         return Series("", Column[Int64](out^))
+    if input._data.isa[Column[UInt64]]():
+        return _running_values[DType.uint64](
+            op, input, input._data[Column[UInt64]], ids, groups, reverse
+        )
     if input._data.isa[Column[Int64]]():
         var result = _running_values[DType.int64](
             op, input, input._data[Column[Int64]], ids, groups, reverse
@@ -666,6 +677,10 @@ def _running_values[
                 current = rebind[Scalar[D]](
                     checked_add(rebind[Int64](current), rebind[Int64](value))
                 )
+            elif D == DType.uint64:
+                if value > Scalar[D].MAX - current:
+                    raise Error("uint64 window sum overflow")
+                current += value
             else:
                 current += value
         elif not started[unsafe_offset=g]:

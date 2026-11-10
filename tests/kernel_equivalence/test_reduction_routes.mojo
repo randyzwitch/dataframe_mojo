@@ -465,12 +465,6 @@ def test_indexed_numeric_reducers_match_independent_ordered_groups_including_emp
         _indexed[FLOAT_DTYPES[index]]()
 
 
-# expected-failure: Verified indexed VAR on UInt64 [0,3,6] returns0 instead
-# expected-failure: of6 (ddof0) because ordering-key signed recoding collapses
-# expected-failure: small differences during Float64 conversion. Focused first
-# expected-failure: assertion verified; later STD/ddof paths await repair.
-# expected-diagnostic: UInt64 indexed moments must preserve small unsigned
-# expected-diagnostic: differences
 def test_uint64_indexed_moments_preserve_small_differences_before_float_conversion() raises:
     var columns: List[Series] = [Series("x", Column[UInt64]([0, 3, 6]))]
     var rows: List[Int] = [2, 0, 1]

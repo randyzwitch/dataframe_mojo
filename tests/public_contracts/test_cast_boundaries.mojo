@@ -151,10 +151,6 @@ def test_categorical_decoding_ignores_unused_members_and_hidden_invalid_codes() 
         )
 
 
-# expected-failure: Explicit source dictionary has an unused absent entry; all
-# expected-failure: observed values fit target dictionary. Ordinary
-# expected-failure: DictKeyError[String]() verified.
-# expected-diagnostic: DictKeyError[String]()
 def test_categorical_recode_does_not_require_unused_source_members_in_target() raises:
     var source = Series("x", Column[UInt32]([1, 1])).with_dtype(
         _dictionary(["unused source", "present"])
@@ -171,10 +167,6 @@ def test_categorical_recode_does_not_require_unused_source_members_in_target() r
         )
 
 
-# expected-failure: strict=False must null an observed value missing from
-# expected-failure: target dictionary and keep representable rows. Ordinary
-# expected-failure: DictKeyError[String]() verified.
-# expected-diagnostic: DictKeyError[String]()
 def test_categorical_recode_relaxed_conversion_nulls_missing_observed_values() raises:
     var source = Series(
         "x", Column[String](["present", "missing", "present"])
@@ -400,11 +392,6 @@ def test_duration_categorical_conversion_preserves_formatted_unit_text() raises:
         assert_true(actual.get(2).is_null())
 
 
-# expected-failure: Explicit docs binary-only-to-String boundary, strict
-# expected-failure: false/true and observed valid/invalid byte/null matrix.
-# expected-failure: Unsupported target must reject; first reached successful
-# expected-failure: valid ASCII conversion isolates failure.
-# expected-diagnostic: binary to categorical must reject unsupported target
 def test_binary_to_categorical_rejects_unsupported_target_even_for_valid_utf8() raises:
     # docs/expressions.md explicitly restricts binary casts to String. An
     # unsupported target must reject even valid UTF-8 and strict=False; row

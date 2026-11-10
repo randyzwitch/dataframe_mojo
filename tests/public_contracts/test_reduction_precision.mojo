@@ -203,62 +203,26 @@ def _wide_mean(grouped: Bool, lazy: Bool, streaming: Bool) raises:
                         assert_equal(actual.item(row, "m").float64(), expected)
 
 
-# expected-failure: Decimal128(3,2)
-# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
-# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
-# expected-failure: optimizeFalse reached before ordinary error; later
-# expected-failure: variants are unexecuted.
-# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_eager_global_mean_uses_wide_total() raises:
     _wide_mean(False, False, False)
 
 
-# expected-failure: Decimal128(3,2)
-# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
-# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
-# expected-failure: optimizeFalse reached before ordinary error; later
-# expected-failure: variants are unexecuted.
-# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_eager_grouped_mean_uses_wide_total() raises:
     _wide_mean(True, False, False)
 
 
-# expected-failure: Decimal128(3,2)
-# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
-# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
-# expected-failure: optimizeFalse reached before ordinary error; later
-# expected-failure: variants are unexecuted.
-# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_lazy_materialized_global_mean_uses_wide_total() raises:
     _wide_mean(False, True, False)
 
 
-# expected-failure: Decimal128(3,2)
-# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
-# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
-# expected-failure: optimizeFalse reached before ordinary error; later
-# expected-failure: variants are unexecuted.
-# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_lazy_materialized_grouped_mean_uses_wide_total() raises:
     _wide_mean(True, True, False)
 
 
-# expected-failure: Decimal128(3,2)
-# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
-# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
-# expected-failure: optimizeFalse reached before ordinary error; later
-# expected-failure: variants are unexecuted.
-# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_lazy_streaming_global_mean_uses_wide_total() raises:
     _wide_mean(False, True, True)
 
 
-# expected-failure: Decimal128(3,2)
-# expected-failure: validscaled[900,900,900,900],hidden999null; exactwide
-# expected-failure: Int128 total3600 gives Float64mean9.0; only first layout0
-# expected-failure: optimizeFalse reached before ordinary error; later
-# expected-failure: variants are unexecuted.
-# expected-diagnostic: value exceeds decimal precision 3
 def test_decimal128_lazy_streaming_grouped_mean_uses_wide_total() raises:
     _wide_mean(True, True, True)
 

@@ -229,12 +229,6 @@ def test_csv_categorical_values_keep_quoted_empty_null_tokens_and_unicode() rais
         assert_true(colliding.item(row, "v").is_null())
 
 
-# expected-failure: Verified to_csv_string emits UInt32 dictionary codes while
-# expected-failure: write_csv decodes categorical values; public same-text
-# expected-failure: contract requires decoded values. Later layouts await
-# expected-failure: first failure repair.
-# expected-diagnostic: CSV writer must emit categorical values rather than
-# expected-diagnostic: dictionary codes
 def test_csv_writer_emits_categorical_values_instead_of_dictionary_codes() raises:
     var raw = Series(
         "v",

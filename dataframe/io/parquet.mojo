@@ -666,6 +666,7 @@ struct _CodedStringsJob(Job):
         strings._data[StringColumn]._codes = ArcPointer(
             StringCodes(shared, self.final)
         )
+        strings._field_metadata = self.chunk._field_metadata
         self.result = strings^
 
 
@@ -860,6 +861,7 @@ struct _NarrowDecimalJob(Job):
                 self.source.name(),
                 Column[Int32](values=narrow^, bits=column._bits[].copy()),
             ).with_dtype(DataType.decimal(dtype.precision(), dtype.scale(), 32))
+            self.result._field_metadata = self.source._field_metadata
             return
         var values = List[Int64](unsafe_uninit_length=n)
         var out = values.unsafe_ptr()
@@ -869,6 +871,7 @@ struct _NarrowDecimalJob(Job):
             self.source.name(),
             Column[Int64](values=values^, bits=column._bits[].copy()),
         ).with_dtype(DataType.decimal(dtype.precision(), dtype.scale(), 64))
+        self.result._field_metadata = self.source._field_metadata
 
 
 def _narrow_decimals(frame: DataFrame) raises -> DataFrame:

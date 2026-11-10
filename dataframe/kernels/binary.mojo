@@ -186,6 +186,12 @@ def _float_scalar[op: Int, D: DType](x: Scalar[D], y: Scalar[D]) -> Scalar[D]:
     elif op == MOD:
         if y == 0 or isnan(x) or isnan(y) or isinf(x):
             return Scalar[D](0) / Scalar[D](0)
+        if isinf(y):
+            # Python's divisor-sign remainder: opposite signs select the
+            # infinite divisor; zero keeps the divisor's sign.
+            if x == 0:
+                return Scalar[D](-0.0) if y < 0 else Scalar[D](0.0)
+            return y if (x < 0) != (y < 0) else x
         return x % y
     elif op == POW:
         # Use sqrt for exponent 0.5 and left-to-right multiplication for

@@ -13,6 +13,8 @@ from dataframe.categorical import (
 from dataframe.dtype import (
     DataType,
 )
+from dataframe.kernels.hashing import encode_rows
+from dataframe.storage.column import Column
 from dataframe.kernels.binary import (
     choose,
 )
@@ -166,13 +168,44 @@ def join_frames(
             var right_parts = _expand_struct_keys(
                 [right._columns[right_keys[i]].renamed(left_on[i])]
             )
-            right_side = right_side.drop([right_on[i]])
+            var combined = List[Series]()
             for p in range(len(left_parts)):
-                left_side = left_side.with_column(left_parts[p].copy())
-                right_side = right_side.with_column(right_parts[p].copy())
-                new_left_on.append(left_parts[p].name())
-                new_right_on.append(left_parts[p].name())
-                helpers.append(left_parts[p].name())
+                combined.append(left_parts[p].append(right_parts[p]))
+            var labels = encode_rows(combined, True)
+            var helper = left_parts[len(left_parts) - 1].name()
+            while (
+                helper in left_side.columns() or helper in right_side.columns()
+            ):
+                helper += "_"
+            var left_codes = List[Int64](capacity=self.height())
+            var right_codes = List[Int64](capacity=right.height())
+            for row in range(self.height()):
+                left_codes.append(Int64(labels.ids[row]))
+            for row in range(right.height()):
+                right_codes.append(Int64(labels.ids[self.height() + row]))
+            left_side = left_side.with_column(
+                Series(
+                    helper,
+                    Column[Int64](
+                        left_codes^,
+                        self._columns[left_keys[i]].struct_column().validity(),
+                    ),
+                )
+            )
+            right_side = right_side.drop([right_on[i]]).with_column(
+                Series(
+                    helper,
+                    Column[Int64](
+                        right_codes^,
+                        right._columns[right_keys[i]]
+                        .struct_column()
+                        .validity(),
+                    ),
+                )
+            )
+            new_left_on.append(helper)
+            new_right_on.append(helper)
+            helpers.append(helper)
         return left_side._join_impl(
             right_side,
             left_on=new_left_on,

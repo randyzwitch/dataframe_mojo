@@ -42,8 +42,14 @@ def _expand_struct_keys(columns: List[Series]) raises -> List[Series]:
             out.append(column.copy())
             continue
         var structs = column.struct_column()
+        var visible = List[Int]()
+        if structs.null_count() > 0:
+            for row in range(len(structs)):
+                visible.append(row if structs._valid(row) else -1)
         for i in range(structs.field_count()):
             var field = structs.field(i)
+            if len(visible):
+                field = field.take_or_null(visible)
             if field.dtype().is_nested():
                 raise Error(
                     "struct keys with nested fields are not supported yet: "

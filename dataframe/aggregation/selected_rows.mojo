@@ -375,7 +375,7 @@ def _reduce_ints[
             var row = rows[unsafe_offset=p]
             if not nulls or column._valid(row):
                 reducer.moments[g[unsafe_offset=p]].add(
-                    Float64(_canonical_int[D](values[unsafe_offset=row]))
+                    values[unsafe_offset=row].cast[DType.float64]()
                 )
     elif op == N_UNIQUE:
         for p in range(n):

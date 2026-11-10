@@ -185,9 +185,17 @@ def union_of(
     return merged^
 
 
-def recode(values: Series, target: DataType) raises -> Series:
-    """`values` (categorical or String) on `target`'s dictionary, which must
-    hold every value (see `union_of`)."""
+def recode(
+    values: Series,
+    target: DataType,
+    strict: Bool = True,
+    mask: List[Bool] = List[Bool](),
+) raises -> Series:
+    """Recode active, non-null values onto `target`'s dictionary.
+
+    Missing observed labels raise in strict mode and become null otherwise.
+    Unused source labels and masked-out rows need not occur in the target.
+    """
     var strings = decode(values)
     var dictionary = target.dictionary()
     var lookup = Dict[String, Int]()
@@ -202,21 +210,35 @@ def recode(values: Series, target: DataType) raises -> Series:
     # source is categorical.
     if values.dtype().is_categorical() and values.dtype().has_dictionary():
         var source = values.dtype().dictionary()
-        var mapping = List[UInt32](capacity=len(source[]))
+        var mapping = List[Int](capacity=len(source[]))
         for code in range(len(source[])):
-            mapping.append(UInt32(lookup[String(source[].get(code))]))
+            mapping.append(lookup.get(String(source[].get(code)), -1))
         var original = (
             values.rechunk() if values.is_chunked() else values.copy()
         )
         ref from_codes = original._data[Column[UInt32]]
         for i in range(n):
-            if from_codes._valid(i):
-                codes[i] = mapping[Int(from_codes._get(i))]
+            if from_codes._valid(i) and (len(mask) != n or mask[i]):
+                var mapped = mapping[Int(from_codes._get(i))]
+                if mapped < 0:
+                    if strict:
+                        raise Error(
+                            "categorical value is absent from target dictionary"
+                        )
+                    continue
+                codes[i] = UInt32(mapped)
                 valid[i] = True
     else:
         for i in range(n):
-            if column._valid(i):
-                codes[i] = UInt32(lookup[String(column._get(i))])
+            if column._valid(i) and (len(mask) != n or mask[i]):
+                var mapped = lookup.get(String(column._get(i)), -1)
+                if mapped < 0:
+                    if strict:
+                        raise Error(
+                            "categorical value is absent from target dictionary"
+                        )
+                    continue
+                codes[i] = UInt32(mapped)
                 valid[i] = True
     var result = Series(
         values.name(), Column[UInt32](codes^, valid)
