@@ -1758,8 +1758,7 @@ def _sink_chunk[
 
 
 def _combined[S: Sink](var locals: List[S]) raises -> List[S]:
-    """Every worker's local sink state combined into the global state, in worker order.
-    """
+    """Every worker's local sink state combined into the global state, in worker order."""
     var combined = List[S]()
     while len(locals) > 0:
         locals.pop(0).combine(combined)
