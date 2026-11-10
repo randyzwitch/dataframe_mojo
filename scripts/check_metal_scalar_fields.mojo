@@ -48,6 +48,8 @@ def run_check[D: DType](nullable: Bool, direct: Bool) raises:
     node(words, 68, LIT_INT, UInt64(12 if D == DType.int32 else 1 << 44))
     node(words, 72, CLIP_HIGH)
     words[76] = UInt64(TYPED_HEADER)
+    words[77] = 576
+    words[79] = 4 | (UInt64(2) << 8)
     node(words, 80, COL)
     node(words, 84, ABS)
     node(words, 88, COL)

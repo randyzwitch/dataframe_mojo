@@ -31,6 +31,10 @@ comptime VALUE_TYPE_SHIFT = 40
 # Bits 8..15 contain its operation count; bits 16..30 mark unary steps.
 comptime TYPED_CHAIN = 2
 
+# Typed-header word1 records three-bit result-register slots per instruction.
+# The literal word uses bits8..11 for the register count when this flag is set.
+comptime TYPED_REGISTERS = 4
+
 # Composed-scan header word14: four scalar-field bits before moment bits24..27.
 comptime SCALAR_FIELD_SHIFT = 20
 

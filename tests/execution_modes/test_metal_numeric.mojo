@@ -310,9 +310,9 @@ def test_metal_numeric_case_lazy_faults_and_cpu_overflow_errors() raises:
     same_outcome(frame.lazy().select((col("a") // col("b")).count()))
 
 
-def test_metal_typed_scalar_chain_keeps_nested_right_trees_on_general_path() raises:
+def test_metal_typed_schedules_keep_checked_nested_right_trees() raises:
     from dataframe import lit, null
-    from dataframe_metal.expression_format import TYPED_CHAIN
+    from dataframe_metal.expression_format import TYPED_CHAIN, TYPED_REGISTERS
 
     var frame = DataFrame(
         [
@@ -356,7 +356,7 @@ def test_metal_typed_scalar_chain_keeps_nested_right_trees_on_general_path() rai
         )
         assert_true(Bool(plan_composition(query)))
     # The right expression can fault independently, even when the left is
-    # null. Preserve its eager evaluation with the general interpreter.
+    # null. The register schedule must preserve its eager evaluation.
     var trees = List[Expr](
         [
             col("n").abs() + col("n").abs(),
@@ -365,11 +365,22 @@ def test_metal_typed_scalar_chain_keeps_nested_right_trees_on_general_path() rai
             (-col("n")).cast(DataType.FLOAT32) / col("g") * col("f").abs(),
         ]
     )
-    for value in trees:
+    var expected_slots = [576, 648, 72, 295424]
+    var expected_registers = [2, 3, 2, 2]
+    for i in range(len(trees)):
+        var value = trees[i].copy()
         var compiled = compile_typed_expression(value, frame)
         assert_true(Bool(compiled))
         assert_false(
             Bool(compiled.value().nodes[0].literal & UInt64(TYPED_CHAIN))
+        )
+        assert_true(
+            Bool(compiled.value().nodes[0].literal & UInt64(TYPED_REGISTERS))
+        )
+        assert_equal(compiled.value().nodes[0].input, expected_slots[i])
+        assert_equal(
+            Int((compiled.value().nodes[0].literal >> 8) & 15),
+            expected_registers[i],
         )
 
     var longer = compile_typed_expression(
