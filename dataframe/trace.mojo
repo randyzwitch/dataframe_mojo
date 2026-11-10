@@ -8,7 +8,7 @@ a fast path fitted to a benchmark rather than to a data property (see
 docs/design/benchmarks.md). Unset, each call costs one environment lookup; calls
 sit at operator level, never inside row loops.
 """
-from std.io import stderr
+from std.sys import stderr
 from std.os import getenv
 
 

@@ -3,7 +3,7 @@
 Prints `available` or `absent` on stdout, and on stderr why: the accelerator
 this program was compiled for (none unless the compiler detected or was told
 one), and the devices found."""
-from std.io import stderr
+from std.sys import stderr
 from std.sys import CompilationTarget
 from std.sys.info import _accelerator_arch
 from dataframe_metal.accelerator.gpu.target import compiled_for_metal

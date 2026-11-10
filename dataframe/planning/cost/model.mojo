@@ -1,5 +1,5 @@
 """Explicit streaming-reduction strategies and their observed decision facts."""
-from std.io import stderr
+from std.sys import stderr
 from std.os import getenv
 
 comptime BATCH_STREAM = 0

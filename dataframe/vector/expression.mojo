@@ -31,7 +31,7 @@ from std.math import ceil, floor
 from std.memory import Pointer, unsafe_memcpy
 
 from std.ffi import external_call
-from std.io import stderr
+from std.sys import stderr
 from std.os import getenv
 from dataframe.binding import BoundExpr, bind, op_name
 from dataframe.decimal import divide_half_even, pow10, precision_limit

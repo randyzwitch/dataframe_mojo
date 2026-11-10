@@ -22,7 +22,7 @@ A query reports unsupported by raising an error that starts with
 "unsupported:"; any other error fails that query alone.
 """
 from std.collections import Dict
-from std.io import stderr
+from std.sys import stderr
 from std.sys import argv
 from std.time import monotonic
 

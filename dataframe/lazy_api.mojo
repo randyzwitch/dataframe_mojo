@@ -301,7 +301,7 @@ from std.collections import (
     Dict,
     Optional,
 )
-from std.io import (
+from std.sys import (
     stderr,
 )
 from std.memory import (
