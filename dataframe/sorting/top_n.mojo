@@ -272,6 +272,7 @@ struct TopNHeap(Movable):
         self.view = _BoundaryView()
         self.added = 0
 
+    @always_inline
     def keys[W: Int, VAR: Bool](self) -> SortKeys[W, VAR]:
         # The standard heap owns these records. This single storage adapter
         # exposes them for payload renumbering, arena compaction, and final
