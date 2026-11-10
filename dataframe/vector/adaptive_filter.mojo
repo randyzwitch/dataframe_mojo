@@ -7,6 +7,7 @@ the written order when a predicate can raise, because changing which rows
 it observes could change the query's errors.
 """
 from std.time import perf_counter_ns
+from std.random.philox import Random
 
 
 struct AdaptiveFilter(Copyable, Movable):
@@ -22,7 +23,7 @@ struct AdaptiveFilter(Copyable, Movable):
     var prev_mean: Float64
     var swap_idx: Int
     var right_random_border: Int
-    var seed: UInt64
+    var random: Random[]
 
     def __init__(out self, conjuncts: Int, can_throw: Bool):
         self.permutation = List[Int](capacity=conjuncts)
@@ -41,7 +42,7 @@ struct AdaptiveFilter(Copyable, Movable):
         self.prev_mean = 0.0
         self.swap_idx = 0
         self.right_random_border = 100 * max(conjuncts - 1, 0)
-        self.seed = 0x9E3779B97F4A7C15
+        self.random = Random(seed=0x9E3779B97F4A7C15)
 
     def begin(self) -> Int:
         """BeginFilter: the start time, 0 when the order never changes."""
@@ -56,11 +57,9 @@ struct AdaptiveFilter(Copyable, Movable):
         self._adapt(Float64(Int(perf_counter_ns()) - start) * 1e-9)
 
     def _random(mut self, low: Int, high: Int) -> Int:
-        """A pseudo-random integer in [low, high] (xorshift64*)."""
-        self.seed ^= self.seed >> 12
-        self.seed ^= self.seed << 25
-        self.seed ^= self.seed >> 27
-        var value = self.seed * 0x2545F4914F6CDD1D
+        """An owned Philox draw mapped to the inclusive trial-slot range."""
+        var draw = self.random.step()
+        var value = (UInt64(draw[0]) << 32) | UInt64(draw[1])
         return low + Int(value % UInt64(high - low + 1))
 
     def _adapt(mut self, duration: Float64):

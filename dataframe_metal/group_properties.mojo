@@ -5,6 +5,7 @@ actual group, checks its cardinality limit, and computes the complete result.
 """
 from std.bit import next_power_of_two
 from std.collections import Dict
+from std.random.philox import Random
 from dataframe import DataFrame, DataType, LazyFrame, Series
 
 
@@ -17,14 +18,15 @@ def group_properties(region: LazyFrame, key: String) raises -> String:
     var counts = Dict[Int64, Int]()
     var nulls = 0
     var hottest = 0
-    var random = UInt64(0x9E3779B97F4A7C15)
+    var random = Random(seed=0x9E3779B97F4A7C15)
     for i in range(samples):
         # Randomized positions avoid aliasing periodic keys with a fixed
         # sampling stride. Small inputs are examined once in natural order.
-        random = random * UInt64(6364136223846793005) + UInt64(1)
-        var row = i if frame.height() <= 4096 else Int(
-            (random >> 32) % UInt64(frame.height())
-        )
+        var row = i
+        if frame.height() > 4096:
+            var draw = random.step()
+            var value = (UInt64(draw[0]) << 32) | UInt64(draw[1])
+            row = Int(value % UInt64(frame.height()))
         var item = source.get(row)
         if item.is_null():
             nulls += 1
@@ -42,7 +44,7 @@ def group_properties(region: LazyFrame, key: String) raises -> String:
     var bucket = next_power_of_two(groups)
     hottest = max(hottest, nulls)
     return (
-        ":sample:v1:groups"
+        ":sample:v1:philox:groups"
         + String(bucket)
         + ":hot"
         + String((hottest * 8 + samples - 1) // samples)
@@ -76,10 +78,10 @@ struct GroupSample(Copyable, Movable):
 
     def key(self) -> String:
         if not self.samples:
-            return ":sample:v2:empty"
+            return ":sample:v2:philox:empty"
         var bucket = next_power_of_two(self.distinct)
         return (
-            ":sample:v2:groups"
+            ":sample:v2:philox:groups"
             + String(bucket)
             + ":hot"
             + String((self.hottest * 8 + self.samples - 1) // self.samples)
@@ -102,12 +104,13 @@ def sample_group_tuples(
     var counts = Dict[String, Int]()
     var nulls = 0
     var hottest = 0
-    var random = UInt64(0x9E3779B97F4A7C15)
+    var random = Random(seed=0x9E3779B97F4A7C15)
     for i in range(samples):
-        random = random * UInt64(6364136223846793005) + UInt64(1)
-        var row = i if frame.height() <= 4096 else Int(
-            (random >> 32) % UInt64(frame.height())
-        )
+        var row = i
+        if frame.height() > 4096:
+            var draw = random.step()
+            var value = (UInt64(draw[0]) << 32) | UInt64(draw[1])
+            row = Int(value % UInt64(frame.height()))
         var identity = String()
         var has_null = False
         for column in columns:
@@ -141,10 +144,11 @@ def sample_group_stride_reuse(
     for name in keys:
         columns.append(frame.column(name))
     var repeated = 0
-    var random = UInt64(0xBADC0FFEE)
+    var random = Random(seed=0xBADC0FFEE)
     for i in range(128):
-        random = random * UInt64(6364136223846793005) + 1
-        var row = Int((random >> 32) % UInt64(frame.height() - stride))
+        var draw = random.step()
+        var value = (UInt64(draw[0]) << 32) | UInt64(draw[1])
+        var row = Int(value % UInt64(frame.height() - stride))
         var same = True
         for column in columns:
             var a = column.get(row)

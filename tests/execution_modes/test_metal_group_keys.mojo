@@ -420,10 +420,15 @@ def test_metal_group_tuple_sampling_does_not_prove_actual_cardinality() raises:
     from dataframe_metal.group_properties import sample_group_tuples
 
     var sampled = List[Bool](length=8192, fill=False)
-    var random = UInt64(0x9E3779B97F4A7C15)
-    for i in range(4096):
-        random = random * UInt64(6364136223846793005) + UInt64(1)
-        sampled[Int((random >> 32) % 8192)] = True
+    from std.random.philox import Random
+
+    # Construct adversarial rows outside the deterministic cost sample.
+    # The sample must never become proof that no other groups exist.
+    var random = Random(seed=0x9E3779B97F4A7C15)
+    for _ in range(4096):
+        var draw = random.step()
+        var value = (UInt64(draw[0]) << 32) | UInt64(draw[1])
+        sampled[Int(value % 8192)] = True
     var a = List[Int32](length=8192, fill=0)
     var b = List[Int64](length=8192, fill=0)
     var rare = 0
@@ -649,10 +654,15 @@ def test_metal_group_tuple_four_values_ninth_predicate_case_membership_and_rows(
 
 def _rare_tuple_fixture() raises -> Tuple[DataFrame, DataFrame]:
     var sampled = List[Bool](length=8192, fill=False)
-    var random = UInt64(0x9E3779B97F4A7C15)
-    for i in range(4096):
-        random = random * UInt64(6364136223846793005) + UInt64(1)
-        sampled[Int((random >> 32) % 8192)] = True
+    from std.random.philox import Random
+
+    # Construct adversarial rows outside the deterministic cost sample.
+    # The sample must never become proof that no other groups exist.
+    var random = Random(seed=0x9E3779B97F4A7C15)
+    for _ in range(4096):
+        var draw = random.step()
+        var value = (UInt64(draw[0]) << 32) | UInt64(draw[1])
+        sampled[Int(value % 8192)] = True
     var a = List[Int32](length=8197, fill=0)
     var b = List[Int64](length=8197, fill=0)
     var values = List[Float32](length=8197, fill=0)
@@ -1114,3 +1124,36 @@ def test_metal_group_stride_hint_requires_actual_repeated_tuples() raises:
     assert_false(
         sample_group_stride_reuse(frame.slice(0, 32), [String("k")], 256)
     )
+
+
+def test_metal_group_samples_own_reproducible_random_streams() raises:
+    from dataframe_metal.group_properties import (
+        group_properties,
+        sample_group_tuples,
+    )
+    from dataframe.vector.adaptive_filter import AdaptiveFilter
+    from dataframe.kernels.sampling import sample_indices
+    from std.collections import Optional
+
+    var values = List[Int64]()
+    for i in range(8192):
+        values.append(Int64(i % 37))
+    var frame = DataFrame([Series("k", Column[Int64](values^))])
+    var expected = sample_group_tuples(frame, ["k"])
+    var key = group_properties(frame.lazy(), "k")
+    var public_rows = sample_indices(100, 17, False, True, Optional[Int](7))
+    assert_equal(expected.samples, 4096)
+    assert_equal(expected.population, 8192)
+    assert_equal(expected.distinct, 37)
+    assert_equal(expected.nulls, 0)
+    for _ in range(3):
+        var unrelated = AdaptiveFilter(8, False)
+        for _ in range(100):
+            _ = unrelated._random(0, 699)
+        var sample = sample_group_tuples(frame, ["k"])
+        assert_equal(sample.key(), expected.key())
+        assert_equal(sample.hottest, expected.hottest)
+        assert_equal(group_properties(frame.lazy(), "k"), key)
+        assert_equal(
+            sample_indices(100, 17, False, True, Optional[Int](7)), public_rows
+        )

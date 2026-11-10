@@ -176,16 +176,20 @@ def test_metal_grouped_cost_properties_distinguish_cardinality_and_skew() raises
         ]
     )
     assert_equal(
-        group_properties(low.lazy(), "k"), ":sample:v1:groups16:hot1:null0"
+        group_properties(low.lazy(), "k"),
+        ":sample:v1:philox:groups16:hot1:null0",
     )
     assert_equal(
-        group_properties(high.lazy(), "k"), ":sample:v1:groups256:hot1:null0"
+        group_properties(high.lazy(), "k"),
+        ":sample:v1:philox:groups256:hot1:null0",
     )
     assert_equal(
-        group_properties(hot.lazy(), "k"), ":sample:v1:groups16:hot8:null0"
+        group_properties(hot.lazy(), "k"),
+        ":sample:v1:philox:groups16:hot8:null0",
     )
     assert_equal(
-        group_properties(nulls.lazy(), "k"), ":sample:v1:groups1:hot8:null8"
+        group_properties(nulls.lazy(), "k"),
+        ":sample:v1:philox:groups1:hot8:null8",
     )
 
 

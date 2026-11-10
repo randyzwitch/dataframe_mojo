@@ -24,3 +24,23 @@ def test_adaptive_filter_long_scan_keeps_swap_indices_in_bounds() raises:
             assert_true(not seen[index])
             seen[index] = True
         assert_equal(len(adaptive.permutation), conjuncts)
+
+
+def test_adaptive_filter_random_stream_is_owned_and_copyable() raises:
+    var first = AdaptiveFilter(8, False)
+    var second = AdaptiveFilter(8, False)
+    var unrelated = AdaptiveFilter(3, False)
+    var low_seen = False
+    var high_seen = False
+    for _ in range(4096):
+        _ = unrelated._random(-100, 100)
+        var value = first._random(-3, 3)
+        assert_equal(value, second._random(-3, 3))
+        assert_true(-3 <= value <= 3)
+        low_seen = low_seen or value == -3
+        high_seen = high_seen or value == 3
+    assert_true(low_seen and high_seen)
+    var copied = first.copy()
+    for _ in range(100):
+        assert_equal(first._random(0, 699), copied._random(0, 699))
+    assert_equal(first._random(7, 7), 7)
