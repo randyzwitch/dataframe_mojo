@@ -191,8 +191,11 @@ def recode(
     strict: Bool = True,
     mask: List[Bool] = List[Bool](),
 ) raises -> Series:
-    """`values` (categorical or String) on `target`'s dictionary, which must
-    hold every value (see `union_of`)."""
+    """Recode active, non-null values onto `target`'s dictionary.
+
+    Missing observed labels raise in strict mode and become null otherwise.
+    Unused source labels and masked-out rows need not occur in the target.
+    """
     var strings = decode(values)
     var dictionary = target.dictionary()
     var lookup = Dict[String, Int]()
