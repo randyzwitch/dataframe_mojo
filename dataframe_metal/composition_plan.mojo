@@ -12,6 +12,9 @@ from dataframe.expr import (
     SUB,
     MUL,
     LIT_INT,
+    DIV,
+    FLOORDIV,
+    MOD,
 )
 from dataframe.lazy import FILTER, SCAN_FRAME, SELECT
 from .filter_plan import FilterSum, plan_region
@@ -416,6 +419,12 @@ def composition_key(plan: Composition) -> String:
                         key += ":min" if op == MIN else ":max"
                         break
     key += ":exact_float" if plan.precise_float else ":native"
+    var native_divmod = False
+    for field in plan.fields:
+        for node in field.tree:
+            native_divmod = native_divmod or node.op in [DIV, FLOORDIV, MOD]
+    if native_divmod:
+        key += ":native_divmod_v2"
     for field in plan.fields:
         for condition in field.conditions:
             key += ":" + condition_key(condition, names=False)

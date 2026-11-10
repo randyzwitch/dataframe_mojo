@@ -730,3 +730,12 @@ Placement keys include the null modes and sampled cardinality. A mostly
 unique sample cannot establish that the bounded table will fit, so automatic
 placement retains CPU for `distinct_cardinality=uncertain` shapes. Other
 shapes require matching measured costs for `distinct_reductions:v1:` keys.
+
+Native signed integer division/modulo uses shifts and masks for power-of-two
+magnitudes, UInt32 division for Int32 inputs, and one quotient with an exact
+remainder for general Int64 inputs. Float32 division estimates its normalized
+significand quotient using normal-range device arithmetic, then corrects it
+with exact integer products/remainders before ties-to-even rounding. Subnormal
+operands/results, signed zero and CPU adjudication of non-finite/zero-divisor
+cases retain their existing behavior. Changed arithmetic calibration identities
+include `:native_divmod_v2`.
