@@ -482,7 +482,7 @@ same method convention. Inputs must be String and nulls propagate.
 | `contains_any(patterns, ascii_case_insensitive=False)` | Bool | any literal pattern occurs |
 | `replace_many(patterns, replace_with, ascii_case_insensitive=False, leftmost=False)` | String | one pass over all literal patterns; `replace_with` is one string or one per pattern |
 | `encode("hex" \| "base64")` | String | UTF-8 bytes as lowercase hex or padded standard base64 |
-| `decode("hex" \| "base64", strict=True)` | Binary | invalid text raises, or is null with `strict=False`; base64 uses standard-library padding rules and accepts whitespace and nonzero pad bits |
+| `decode("hex" \| "base64", strict=True)` | Binary | invalid text raises, or is null with `strict=False`; base64 accepts whitespace and nonzero pad bits, while malformed padding remains invalid |
 | `normalize(form="NFC")` | String | Unicode 17.0 NFC, NFD, NFKC or NFKD; nulls propagate |
 | `json_decode(dtype)` | `dtype` | decode into an explicit scalar, list or struct schema; invalid JSON and incompatible value kinds raise |
 | `json_path_match(path)` | String | first match, with strings unquoted and containers compact; malformed JSON, missing matches and JSON null return null; invalid paths raise |
