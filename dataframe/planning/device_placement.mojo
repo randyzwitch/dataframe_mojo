@@ -294,7 +294,8 @@ def _kind_name(kind: Int) -> String:
 
 def _row_bytes(schema: DataFrame) -> Int:
     """Estimated bytes per row: fixed widths by type, 32 for strings and
-    other variable-width values (as `_frame_bytes` estimates them)."""
+    other variable-width values when only a schema is available. Runtime
+    retained-buffer accounting uses actual allocations instead."""
     var total = 0
     for column in schema._columns:
         var bits = column.dtype().bit_width()

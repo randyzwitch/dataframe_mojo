@@ -370,11 +370,9 @@ def test_streamed_collect_budget_boundaries_preserve_complete_composite_groups()
             == 0 else offset_layout(raw) if layout
             == 1 else chunk_layout(raw)
         )
-        # The retained columns have an88-byte/row fixed-width/descriptor
-        # estimate. The join grows batches to129rows and hands one worker
-        # four batches a round:516retained rows reach45408bytes. Adjacent
-        # budgets exercise the first-round flush comparison at that boundary.
-        for bytes in [1, 45407, 45408, 45409, 1 << 30]:
+        # Small collection thresholds and a comfortably large threshold must
+        # preserve the same groups across independent physical layouts.
+        for bytes in [1, 4095, 4096, 4097, 65536, 1 << 30]:
             var budget = ScopedEnvironment(
                 "DATAFRAME_STREAM_COLLECT_BYTES", String(bytes)
             )
@@ -393,14 +391,18 @@ def test_streamed_collect_budget_boundaries_preserve_complete_composite_groups()
                     True,
                 )
             var paths = observed.text()
-            assert_equal(
-                "dataframe-path: lazy.collect_group_by_bounded\n" in paths,
-                bytes != 1 << 30,
-            )
-            assert_equal(
-                "dataframe-path: lazy.collect_group_by\n" in paths,
-                bytes == 1 << 30,
-            )
+            # Backing capacities and sharing vary by layout. Only the minimum
+            # and comfortably large thresholds guarantee a particular route.
+            # Every intermediate threshold must still produce complete groups.
+            if bytes == 1 or bytes == 1 << 30:
+                assert_equal(
+                    "dataframe-path: lazy.collect_group_by_bounded\n" in paths,
+                    bytes == 1,
+                )
+                assert_equal(
+                    "dataframe-path: lazy.collect_group_by\n" in paths,
+                    bytes == 1 << 30,
+                )
             _ = observed^
             _ = budget^
     var unlimited = ScopedEnvironment(
@@ -412,6 +414,40 @@ def test_streamed_collect_budget_boundaries_preserve_complete_composite_groups()
     _assert_groups(profiled[0], 517, 32, True)
     _assert_profile(profiled[1], 517, 32)
     _ = unlimited^
+    _ = trace^
+    _ = workers^
+    _ = split^
+
+
+def test_collect_threshold_counts_long_payloads_beyond_row_width_estimates() raises:
+    var split = ScopedEnvironment("DATAFRAME_STREAM_SPLIT_GROUPS", "32")
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "1")
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var raw = _source(517, 32)
+    var words = List[String]()
+    for i in range(raw.height()):
+        words.append(String("x") * 4096 + String(i))
+    var frame = raw.with_column(Series("w", Column[String](words^)))
+    var plan = _plan(frame, True)
+    var expected = plan.collect(streaming=False, optimize=False, engine="cpu")
+    # The former 88-byte row estimate totaled under 64 KiB for this input;
+    # its retained text alone exceeds 2 MiB.
+    for bytes in [65536, 1 << 28]:
+        var budget = ScopedEnvironment(
+            "DATAFRAME_STREAM_COLLECT_BYTES", String(bytes)
+        )
+        var observed = StrategyTrace()
+        var actual = plan.collect(
+            optimize=False, streaming=True, batch_size=33, engine="cpu"
+        )
+        assert_true(actual.equals(expected))
+        assert_equal(
+            "dataframe-path: lazy.collect_group_by_bounded\n"
+            in observed.text(),
+            bytes == 65536,
+        )
+        _ = observed^
+        _ = budget^
     _ = trace^
     _ = workers^
     _ = split^

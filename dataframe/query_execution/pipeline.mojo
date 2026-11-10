@@ -185,7 +185,7 @@ from dataframe.planning.scans import (
 )
 from dataframe.planning.cost.sampling import (
     _all_reduced,
-    _frame_bytes,
+    _retain_frame,
     _judge_held,
     _stream_collect_bytes,
     _stream_split_groups,
@@ -224,6 +224,7 @@ from std.collections import (
     Dict,
     Optional,
 )
+from dataframe.storage.retained import RetainedBuffers
 from std.memory import (
     ArcPointer,
     Pointer,
@@ -1001,7 +1002,7 @@ def _probe_start(
     # proportional to the groups in every batch.
     var collecting = False
     var collected = List[DataFrame]()
-    var collected_bytes = 0
+    var collected_memory = RetainedBuffers()
     var collected_rows = 0
     var collect_budget = _stream_collect_bytes()
     # The decision waits for a batch with enough rows to judge: an
@@ -1338,7 +1339,7 @@ def _probe_start(
         # completion order. Merge states and assemble rows in that order.
         for i in range(len(jobs)):
             if collecting:
-                collected_bytes += _frame_bytes(jobs[i].frame)
+                _retain_frame(jobs[i].frame, collected_memory)
                 collected_rows += jobs[i].rows
                 collected.append(jobs[i].frame.copy())
             elif len(expressions) and undecided:
@@ -1375,7 +1376,7 @@ def _probe_start(
                             var kept = frame.select(projection) if len(
                                 projection
                             ) else frame.copy()
-                            collected_bytes += _frame_bytes(kept)
+                            _retain_frame(kept, collected_memory)
                             collected_rows += kept.height()
                             collected.append(kept^)
                         held = List[DataFrame]()
@@ -1389,7 +1390,7 @@ def _probe_start(
                                 ) else jobs[j]
                                 .frame.copy()
                             )
-                            collected_bytes += _frame_bytes(kept)
+                            _retain_frame(kept, collected_memory)
                             collected_rows += jobs[j].rows
                             collected.append(kept^)
                         break
@@ -1449,7 +1450,7 @@ def _probe_start(
                     )[].append(part)
                 else:
                     outputs.append(part^)
-        if collecting and collected_bytes >= collect_budget:
+        if collecting and collected_memory.bytes >= collect_budget:
             # The budget is reached: reduce what is collected into one
             # state (every key encoded once) and keep collecting. The
             # states merge at the end as batch states do.
@@ -1457,7 +1458,7 @@ def _probe_start(
             part.shift_firsts(acc.rows_seen)
             acc.rows_seen += collected_rows
             collected = List[DataFrame]()
-            collected_bytes = 0
+            collected_memory = RetainedBuffers()
             collected_rows = 0
             if len(acc.states) == 0:
                 acc.pending.append(List[_StreamReduction]())
@@ -1490,7 +1491,7 @@ def _probe_start(
                     var kept = frame.select(projection) if len(
                         projection
                     ) else frame.copy()
-                    collected_bytes += _frame_bytes(kept)
+                    _retain_frame(kept, collected_memory)
                     collected_rows += kept.height()
                     collected.append(kept^)
                 acc.rows_seen = collected_rows
