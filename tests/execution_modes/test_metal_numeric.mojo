@@ -49,11 +49,15 @@ def test_metal_native_integer_numeric_boundaries_and_floor_remainders() raises:
         ]:
             for b in [
                 smallest,
+                Int64(-1024),
+                Int64(-8),
                 Int64(-7),
                 Int64(-1),
                 Int64(0),
                 Int64(1),
                 Int64(7),
+                Int64(8),
+                Int64(1024),
                 largest,
             ]:
                 for op in [FLOORDIV, MOD]:
@@ -378,3 +382,20 @@ def test_metal_typed_scalar_chain_keeps_nested_right_trees_on_general_path() rai
     assert_true(Bool(longer))
     assert_equal(Int((longer.value().nodes[0].literal >> 8) & 255), 5)
     assert_equal(Int(longer.value().nodes[0].literal >> 16), 25)
+
+
+def test_metal_divmod_cost_identity_versions_changed_arithmetic_only() raises:
+    var frame = DataFrame(
+        [
+            Series("a", Column[Int32]([1, 2, 3])),
+            Series("b", Column[Int32]([2, 3, 4])),
+        ]
+    )
+    var division = plan_composition(
+        frame.lazy().select((col("a") // col("b")).sum())
+    )
+    assert_true(Bool(division))
+    assert_true(":native_divmod_v2" in composition_key(division.value()))
+    var unary = plan_composition(frame.lazy().select(col("a").abs().sum()))
+    assert_true(Bool(unary))
+    assert_false(":native_divmod_v2" in composition_key(unary.value()))
