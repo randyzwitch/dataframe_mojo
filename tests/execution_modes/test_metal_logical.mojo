@@ -384,3 +384,177 @@ def test_metal_logical_length_and_null_count_preserve_checked_value_work() raise
     var value = col("w") + 1
     same_outcome(frame.lazy().select(value.len()))
     same_outcome(frame.lazy().select(value.null_count()))
+
+
+def test_metal_predicate_logical_masks_share_states_and_keep_checked_residuals() raises:
+    from std.memory import bitcast
+    from dataframe import lit
+    from dataframe.expr import LEN, SUM
+    from dataframe_metal.predicate_logical_plan import plan_predicate_logical
+    from dataframe_metal.predicate_logical_reduce import (
+        finish_predicate_logical,
+        merge_predicate_logical,
+    )
+
+    var frame = DataFrame(
+        [
+            Series(
+                "b", Column[Bool]([True, False, False], [True, True, False])
+            ),
+            Series("n", Column[Int32]([1, -2, 0], [True, False, True])),
+            Series(
+                "f",
+                Column[Float32](
+                    [bitcast[DType.float32](UInt32(0x7FC12345)), 1, 2]
+                ),
+            ),
+        ]
+    )
+    var value = col("b") | (col("n") > 0)
+    var query = (
+        frame.lazy()
+        .filter(col("n") > -8)
+        .select_exprs(
+            [
+                value.any().alias("a"),
+                col("n").sum().alias("s"),
+                value.all(False).alias("z"),
+                value.count().alias("count"),
+                value.null_count().alias("nulls"),
+                value.len().alias("len"),
+                col("n").null_count().alias("nn"),
+                col("f").count().alias("nf"),
+            ]
+        )
+    )
+    var matched = plan_predicate_logical(query)
+    assert_true(Bool(matched))
+    var plan = matched.take()
+    assert_equal(len(plan.positive), 3)
+    assert_equal(len(plan.residual), 1)
+    assert_equal(
+        plan.residual[0]._nodes[len(plan.residual[0]._nodes) - 1].op, SUM
+    )
+    assert_equal(plan.inputs, List[String](["n", "b", "f"]))
+    assert_equal(plan.values, List[Bool]([True, True, False]))
+    assert_equal(plan.validity, List[Bool]([True, True, True]))
+    var logical = finish_predicate_logical(plan, 2, [1, 2, 2], [0, 0, 0])
+    var numeric = DataFrame([Series("s", Column[Int32]([1]))])
+    var merged = merge_predicate_logical(plan, logical, numeric)
+    assert_equal(merged.columns(), plan.order)
+    assert_equal(merged.item(0, "s").int32(), Int32(1))
+    assert_true(merged.item(0, "a").bool())
+    assert_true(merged.item(0, "z").is_null())
+    # NaN equality is a payload test despite sharing the null-clause encoding.
+    var nan_match = plan_predicate_logical(
+        frame.lazy().select(
+            (
+                col("b")
+                | col("f").eq_missing(
+                    lit(bitcast[DType.float32](UInt32(0x7FC12345)))
+                )
+            ).count()
+        )
+    )
+    assert_true(Bool(nan_match))
+    assert_equal(nan_match.value().inputs, List[String](["b", "f"]))
+    assert_equal(nan_match.value().values, List[Bool]([True, True]))
+    var checked = plan_predicate_logical(
+        frame.lazy().select_exprs(
+            [
+                value.any().alias("a"),
+                (col("n") + 1).len().alias("checked_len"),
+            ]
+        )
+    )
+    assert_true(Bool(checked))
+    assert_equal(len(checked.value().residual), 1)
+    var checked_plan = checked.take()
+    var checked_size = len(checked_plan.residual[0]._nodes)
+    assert_equal(checked_plan.residual[0]._nodes[checked_size - 1].op, LEN)
+    assert_false(
+        Bool(
+            plan_predicate_logical(
+                frame.lazy().select(((col("n") + 1) > 0).any())
+            )
+        )
+    )
+    assert_false(
+        Bool(
+            plan_predicate_logical(
+                frame.lazy().group_by(["n"]).agg([value.any()])
+            )
+        )
+    )
+
+
+def test_metal_predicate_logical_finish_all_small_kleene_states() raises:
+    from dataframe_metal.predicate_logical_plan import plan_predicate_logical
+    from dataframe_metal.predicate_logical_reduce import (
+        finish_predicate_logical,
+    )
+
+    var frame = DataFrame([Series("b", Column[Bool]([True]))])
+    var matched = plan_predicate_logical(
+        frame.lazy().select_exprs(_logical_outputs(col("b")))
+    )
+    var plan = matched.take()
+    for rows in range(5):
+        for nt in range(rows + 1):
+            for nf in range(rows - nt + 1):
+                var missing = rows - nt - nf
+                var result = finish_predicate_logical(
+                    plan, Int64(rows), [Int64(nt)], [Int64(nf)]
+                )
+                assert_equal(result.item(0, "any").bool(), nt > 0)
+                assert_equal(result.item(0, "all").bool(), nf == 0)
+                assert_equal(
+                    result.item(0, "kleene_any").is_null(),
+                    nt == 0 and missing > 0,
+                )
+                assert_equal(
+                    result.item(0, "kleene_all").is_null(),
+                    nf == 0 and missing > 0,
+                )
+                assert_equal(result.item(0, "valid").int64(), Int64(nt + nf))
+                assert_equal(result.item(0, "nulls").int64(), Int64(missing))
+                assert_equal(result.item(0, "rows").int64(), Int64(rows))
+
+
+# requires: metal
+def test_metal_logical_ballots_nan_payload_chunks_and_numeric_residual() raises:
+    from std.memory import bitcast
+    from dataframe import lit
+    from tests.support.metal_outcomes import require_metal, same_outcome
+
+    _ = require_metal()
+    var nan = bitcast[DType.float32](UInt32(0x7FC12345))
+    var bs = List[Bool]()
+    var fs = List[Float32]()
+    var bb = List[Bool]()
+    var fb = List[Bool]()
+    for i in range(270):
+        bs.append((i // 3) % 2 == 0)
+        fs.append(nan if i % 8 == 0 else Float32(i % 32 - 16))
+        bb.append(i % 8 != 3)
+        fb.append(i % 16 != 4)
+    var base = DataFrame(
+        [
+            Series("b", Column[Bool](bs^, bb^)),
+            Series("f", Column[Float32](fs^, fb^)),
+        ]
+    ).slice(5, 257)
+    var columns = List[Series]()
+    for name in base.columns():
+        var parts = List[Series]()
+        for i in range(8):
+            var first = base.height() * i // 8
+            var end = base.height() * (i + 1) // 8
+            parts.append(base.column(name).slice(first, end - first))
+        columns.append(Series._from_chunks(parts))
+    var frame = DataFrame(columns^)
+    var value = col("b") | col("f").eq_missing(lit(nan))
+    var outputs = _logical_outputs(value)
+    outputs.insert(1, col("f").sum().alias("numeric_sum"))
+    same_outcome(frame.lazy().select_exprs(outputs))
+    same_outcome(frame.lazy().filter(col("f") > -8).select_exprs(outputs))

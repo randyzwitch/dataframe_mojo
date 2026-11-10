@@ -476,8 +476,14 @@ Unfiltered global projections of plain-column logical reductions use packed-word
 counts. The GPU counts 32 value/validity bits at a time, shares true/valid counts
 across repeated outputs and Boolean negations, and reads no payload for numeric
 counts. All-valid counts use the known row count without scanning the input.
-Filtered, grouped, derived-value and mixed numeric-aggregate projections retain
-the general fused scan, including checked-expression errors.
+Filtered and derived global Boolean reductions use selection, true and false
+ballots followed by population counts. Repeated aggregates over the same value
+share one state, including Kleene null behavior. Predicate input roles distinguish
+validity-only counts from payload-dependent NaN and Boolean tests. Up to eight
+distinct logical states and nine native input bindings use this path. Supported
+numeric residual aggregates execute separately on Metal and merge at result size
+in the original projection order; checked expressions retain their checked route.
+Grouped and unsupported predicate shapes retain the general fused scan.
 
 Global `len`, `null_count` on native values, and Bool `count` use the same
 state. They can share a projection with supported numeric aggregates and
@@ -486,7 +492,7 @@ The existing limits of four distinct aggregate values and nine native input
 bindings apply after lowering; shared Boolean state consumes one value and
 row counts consume one more. The host only finishes result rows, with no input
 payload conversion or Boolean mask materialization. New logical programs use
-`logical_reductions:v1:` keys and require their own measured placement costs.
+`logical_reductions:v2:ballot:` keys and require their own measured placement costs.
 
 ### Null-aware values and total comparisons
 

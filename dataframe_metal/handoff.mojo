@@ -44,6 +44,11 @@ from .group_reduce import execute_grouped
 from .predicate_reduce import execute_predicates
 from .moment_plan import plan_moments, moment_key
 from .logical_reduce import plan_packed_logical, execute_packed_logical
+from .predicate_logical_plan import plan_predicate_logical
+from .predicate_logical_reduce import (
+    execute_predicate_logical,
+    merge_predicate_logical,
+)
 from .moment_reduce import execute_global_moments_math
 from .moment_group_reduce import execute_grouped_moments_math
 from .accelerator.gpu.reduction_inputs import (
@@ -77,6 +82,15 @@ def supports(region: LazyFrame) -> Bool:
             return True
         var logical = plan_logical(region)
         if logical:
+            var ballot = plan_predicate_logical(region)
+            if ballot:
+                if not ballot.value().residual:
+                    return True
+                var residual = region.copy()
+                residual._plan._nodes[
+                    len(residual._plan._nodes) - 1
+                ].exprs = ballot.value().residual.copy()
+                return supports(residual)
             return supports(logical.value().region)
         if plan_moments(region):
             return True
@@ -589,6 +603,27 @@ def execute_timed(
             var packed = plan_packed_logical(region)
             if packed:
                 return execute_packed_logical(region, packed.value(), zero_copy)
+            var ballot = plan_predicate_logical(region)
+            if ballot:
+                var plan = ballot.take()
+                var result = execute_predicate_logical(region, plan, zero_copy)
+                if not plan.residual:
+                    return result^
+                var residual = region.copy()
+                residual._plan._nodes[
+                    len(residual._plan._nodes) - 1
+                ].exprs = plan.residual.copy()
+                var extra = execute_timed(residual, zero_copy)
+                var started = Int(perf_counter_ns())
+                var merged = merge_predicate_logical(plan, result[0], extra[0])
+                var timings = result[1].copy()
+                timings.context_ns += extra[1].context_ns
+                timings.upload_ns += extra[1].upload_ns
+                timings.kernel_ns += extra[1].kernel_ns
+                timings.finish_ns += (
+                    extra[1].finish_ns + Int(perf_counter_ns()) - started
+                )
+                return (merged^, timings^)
             var result = execute_timed(logical.value().region, zero_copy)
             var started = Int(perf_counter_ns())
             var finished = finish_logical(logical.value(), result[0])
