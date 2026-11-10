@@ -8,6 +8,7 @@ from .composition_plan import (
     Composition,
     plan_composition,
     single_float_composition,
+    shared_native_left,
     has_extrema,
     has_trees,
     needs_general_values,
@@ -327,6 +328,8 @@ def _scan[
                 < len(bundle.inputs) else 0
             )
             words[at + 14] |= UInt64(nf) << 16
+            if shared_native_left(bundle):
+                words[at + 14] |= UInt64(1) << 12
             var tree_at = base_words + index * tail_words + predicate_words
             for field in range(nf):
                 ref value = bundle.fields[field]

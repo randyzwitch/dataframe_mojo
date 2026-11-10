@@ -11,7 +11,7 @@ from std.math import ceil, floor
 from std.memory import Pointer, unsafe_memcpy
 
 from std.ffi import external_call
-from std.io import RawFileDescriptor
+from std.sys import stderr
 from std.os import getenv
 from dataframe.binding import BoundExpr, bind, op_name
 from dataframe.decimal import divide_half_even, pow10, precision_limit
@@ -860,7 +860,7 @@ struct VectorExpression(Copyable, Movable):
             print(
                 "dataframe-path: vector.fallback."
                 + op_name(self.bound.expr._nodes[index].op),
-                file=RawFileDescriptor(2),
+                file=stderr,
             )
         var reads = List[Int]()
         _subtree_columns(self.bound, index, self.schema, reads)
@@ -2888,7 +2888,7 @@ def _select_compare_op[
         var mask = UInt64(0)
         if contiguous and n == 64:
             comptime for g in range(8):
-                var x = data.unsafe_offset(k + 8 * g).load[width=8]()
+                var x = data.unsafe_offset(k + 8 * g).unsafe_load[width=8]()
                 var byte = (
                     _test[D, OP, OP2, 8](x, value, value2) * weights
                 ).reduce_add()

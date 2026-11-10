@@ -314,7 +314,7 @@ def _try_map(path: String) raises -> _Mapping:
             length,
             Int32(_PROT_READ),
             Int32(_MAP_PRIVATE),
-            Int32(file._get_raw_fd()),
+            file._get_raw_fd()._raw(),
             0,
         )
         if address == 0 or address == -1:

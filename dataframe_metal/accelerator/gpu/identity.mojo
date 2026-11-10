@@ -8,7 +8,7 @@ loaded. Hardware and power state are part of every calibration match.
 from std.ffi import external_call
 from std.memory import Pointer
 from std.sys import CompilationTarget, size_of
-from max.gpu.host import DeviceContext
+from .target import MetalContext as DeviceContext
 from dataframe._build_identity import CPU_BUILD_ID
 from ..._build_identity import METAL_BUILD_ID
 from .target import METAL_TARGET
