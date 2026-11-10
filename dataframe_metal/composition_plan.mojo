@@ -376,7 +376,7 @@ def composition_key(plan: Composition) -> String:
         String(
             "native_value_reductions:v1:shared_loads:" if has_native_patterns(
                 plan
-            ) else "typed_reductions:v2:scalar_chain:" if has_typed_values(
+            ) else "typed_reductions:v3:scalar_registers:" if has_typed_values(
                 plan
             ) else "conditional_reductions:v1:" if has_conditions(
                 plan

@@ -21,15 +21,18 @@ complete event has finished (`Executor::ExecutionIsFinished`).
 
 The crew's threads and the caller take tasks from that queue until then
 (`Executor::WorkOnTasks`), so a pipeline never waits for another it does
-not depend on, and independent builds run at the same time. A thread
-with no task queued runs the jobs that running tasks post to the crew
-(`_Crew._help`): until every operator runs as a task of its pipeline, a
-task's own morsels still run through `run_jobs`. The workers themselves
-are posted so that only idle crew threads join them (`_UNHELPABLE`).
+not depend on, and independent builds run at the same time. A pipeline
+says how many tasks its execute event makes when that event schedules
+(`Pipeline::Schedule`): a stream's probe makes one per morsel worker. A
+thread with no task queued runs the jobs that running tasks post to the
+crew (`_Crew._help`): a build side's own plan still runs inside its one
+execute task. The workers themselves are posted so that only idle crew
+threads join them (`_UNHELPABLE`).
 """
 from std.atomic import Atomic
 from std.ffi import external_call
 from std.memory import Pointer
+from std.time import perf_counter_ns
 
 from dataframe.parallel import (
     Job,
@@ -62,9 +65,16 @@ trait SchedulablePipeline(Deinitable, Movable):
         """`PipelineInitializeTask`: reset the sink."""
         ...
 
-    def execute_tasks(self) -> Int:
-        """How many tasks `Pipeline::Schedule` makes for the execute
-        event (at least one)."""
+    def max_execute_tasks(self) -> Int:
+        """The most execute tasks `execute_tasks` can make, known before
+        any event runs: the queue is sized from it."""
+        ...
+
+    def execute_tasks(mut self) raises -> Int:
+        """`Pipeline::Schedule`, called when the execute event is
+        scheduled (its dependencies complete): set up the source and
+        operators, and say how many tasks to make (at least one, at most
+        `max_execute_tasks`)."""
         ...
 
     def execute(mut self, task: Int) raises:
@@ -87,21 +97,28 @@ struct MetaPipeline(Copyable, Movable):
     (-1 for one no pipeline of this schedule reads);
     JOIN_BUILD children of one parent are siblings. `dependencies` are the
     pipelines (by index) that must complete before this one executes
-    (`Pipeline::GetDependencies`)."""
+    (`Pipeline::GetDependencies`). `finish_group` names the pipeline
+    (of this MetaPipeline's group) whose execute this one's waits for
+    (-1: none), as DuckDB's right or full join scan follows its probe;
+    the group's base pipeline prepares its finish only after every
+    member executed (`MetaPipeline::AddFinishEvent`)."""
 
     var type: Int
     var parent: Int
     var dependencies: List[Int]
+    var finish_group: Int
 
     def __init__(
         out self,
         type: Int,
         parent: Int = -1,
         dependencies: List[Int] = List[Int](),
+        finish_group: Int = -1,
     ):
         self.type = type
         self.parent = parent
         self.dependencies = dependencies.copy()
+        self.finish_group = finish_group
 
 
 struct PipelineScheduleStage(Copyable, Movable):
@@ -152,6 +169,21 @@ def build_pipeline_schedule(
             stages[5 * p + STAGE_EXECUTE].dependencies.append(
                 5 * d + STAGE_COMPLETE
             )
+    # A finish group: each member executes after the one it names, and the
+    # group's base prepares its finish after every member executed.
+    for p in range(len(metas)):
+        var g = metas[p].finish_group
+        if g < 0:
+            continue
+        if g >= len(metas) or g == p:
+            raise Error("pipeline finish group out of range")
+        stages[5 * p + STAGE_EXECUTE].dependencies.append(5 * g + STAGE_EXECUTE)
+        var base = g
+        while metas[base].finish_group >= 0:
+            base = metas[base].finish_group
+        stages[5 * base + STAGE_PREPARE_FINISH].dependencies.append(
+            5 * p + STAGE_EXECUTE
+        )
     # Sibling join builds: all execute through Combine before any runs
     # PrepareFinalize, and all prepare before any runs Finalize, so the
     # memory every build needs is known when they finalize.
@@ -238,6 +270,9 @@ struct _Executor[P: SchedulablePipeline](Movable):
     var completed_pipelines: Atomic[Int64]
     var failed: Atomic[Int64]
     var error: String
+    # When the schedule began: orders it against schedules nested in its
+    # tasks for `_Crew._help`.
+    var stamp: Int
 
     def __init__(
         out self,
@@ -256,15 +291,16 @@ struct _Executor[P: SchedulablePipeline](Movable):
             self.pipeline.append(s.pipeline)
             self.parents.append(List[Int]())
             self.total_dependencies.append(len(s.dependencies))
-            var tasks = 0
-            if s.type == STAGE_EXECUTE:
-                tasks = max(1, pipelines[s.pipeline].execute_tasks())
-            elif s.type != STAGE_COMPLETE:
-                # Initialize, prepare finish and finish each make one task;
-                # complete makes none and finishes when scheduled.
-                tasks = 1
+            # The execute event learns its count when it schedules
+            # (`Pipeline::Schedule`); here it reserves its most. Initialize,
+            # prepare finish and finish each make one task; complete makes
+            # none and finishes when scheduled.
+            var tasks = 0 if s.type == STAGE_COMPLETE else 1
             self.total_tasks.append(tasks)
-            capacity += tasks
+            if s.type == STAGE_EXECUTE:
+                capacity += max(1, pipelines[s.pipeline].max_execute_tasks())
+            else:
+                capacity += tasks
         # `Event::AddDependency`: the dependency learns its parent.
         for e in range(len(stages)):
             for d in stages[e].dependencies:
@@ -278,6 +314,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
         self.completed_pipelines = Atomic[Int64](0)
         self.failed = Atomic[Int64](0)
         self.error = String()
+        self.stamp = Int(perf_counter_ns())
 
     def _pipelines(self) -> ref[MutAnyOrigin] List[Self.P]:
         return Pointer[List[Self.P], MutAnyOrigin](
@@ -302,6 +339,16 @@ struct _Executor[P: SchedulablePipeline](Movable):
         """`Event::Schedule` then `SetTasks`; an event without tasks
         finishes now (`AutoFinishWithoutTasks`)."""
         var tasks = self.total_tasks[event]
+        if self.stage[event] == STAGE_EXECUTE:
+            ref pipeline = self._pipelines()[self.pipeline[event]]
+            try:
+                tasks = max(1, pipeline.execute_tasks())
+                if tasks > max(1, pipeline.max_execute_tasks()):
+                    raise Error("more execute tasks than max_execute_tasks")
+            except e:
+                self._fail(e)
+                return
+            self.total_tasks[event] = tasks
         if tasks == 0:
             self._finish(event)
             return
@@ -363,13 +410,16 @@ struct _Executor[P: SchedulablePipeline](Movable):
             else:
                 pipeline.finalize()
         except e:
-            # `Executor::PushError`: the first error is the query's; the
-            # failed event never finishes, so every worker stops.
-            var none = Int64(0)
-            if self.failed.compare_exchange(none, Int64(1)):
-                self.error = String(e)
+            self._fail(e)
             return
         self._finish_task(event)
+
+    def _fail(mut self, e: Error):
+        """`Executor::PushError`: the first error is the query's; the
+        failed event never finishes, so every worker stops."""
+        var none = Int64(0)
+        if self.failed.compare_exchange(none, Int64(1)):
+            self.error = String(e)
 
     def work_on_tasks(mut self):
         """`Executor::WorkOnTasks` until the schedule is done. With no
@@ -383,7 +433,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
             var crew = Int(_current_crew().load())
             if crew == 0 or not Pointer[_Crew, MutAnyOrigin](
                 unsafe_from_address=crew
-            )[]._help(-1):
+            )[]._help(-1, self.stamp):
                 _ = external_call["sched_yield", Int32]()
 
 
@@ -424,7 +474,7 @@ def run_pipelines[
     # tasks, within the thread count.
     var width = 0
     for p in range(len(pipelines)):
-        width += max(1, pipelines[p].execute_tasks())
+        width += max(1, pipelines[p].max_execute_tasks())
     var threads = min(width, configured_workers()) if parallel else 1
     if threads <= 1:
         executor.work_on_tasks()
@@ -435,7 +485,7 @@ def run_pipelines[
             workers.append(_EventWorker[P](address))
         # Posted for idle crew threads only: a thread waiting inside one
         # of these tasks must not take a worker that waits for that task.
-        _run_jobs(workers, Int.MAX, helpable=False)
+        _run_jobs(workers, Int.MAX, helpable=False, schedule=executor.stamp)
     if executor.failed.load() != 0:
         raise Error(executor.error)
     if executor.completed_pipelines.load() < Int64(len(pipelines)):

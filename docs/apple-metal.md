@@ -76,12 +76,15 @@ reused for the specialized kernels.
 Typed numeric and null-aware expression chains use scalar accumulator schedules
 inside the existing reduction kernels. The planner records each operation's
 arity; chains of up to three operations use fixed scalar steps, and longer
-chains use a scalar loop. Integer chains feed statically assigned reduction fields directly; Float32
-chains keep the shared field evaluator alongside their exact aggregate state.
-This avoids indexed interpreter stacks while retaining
-native rounding, null validity and eager checked intermediates. Nested right
-subtrees and conditional expressions retain the general interpreter. These
-kernels use the `typed_reductions:v2:scalar_chain` calibration revision.
+chains use a scalar loop. Integer chains feed statically assigned reduction
+fields directly; Float32 chains keep the shared field evaluator alongside their
+exact aggregate state. This avoids indexed interpreter stacks while retaining
+native rounding, null validity and eager checked intermediates.
+Nested numeric/null-aware trees use host-assigned scalar registers, with frame
+sizes of two, three, four or eight. Their operand locations are resolved before
+submission. Conditional expressions retain the general interpreter and lazy
+branch evaluation. These kernels use the `typed_reductions:v3:scalar_registers`
+calibration revision.
 
 A single SUM may reduce a binary `+`, `-` or `*` expression, for example
 `(col("price") * col("quantity")).sum()`. Both columns must have the same
@@ -625,10 +628,11 @@ range checks still execute. Required Float32 arithmetic retains intermediate
 rounding and gradual-underflow adjudication. Row-local cast definitions can
 be inlined under the existing definition-order and checked-work rules.
 
-Typed programs have separate `typed_reductions:v2:scalar_chain:` identities.
+Typed programs have separate `typed_reductions:v3:scalar_registers:` identities.
 Existing homogeneous arithmetic and proven simple CASE kernels keep their
-specialized routes; nested typed trees use the general value path. Automatic placement requires
-matching measurements for the current build, types and physical layout.
+specialized routes. Nested typed trees use fixed scalar-register schedules;
+lazy CASE retains the general evaluator. Automatic placement requires matching
+measurements for the current build, types and physical layout.
 
 ### Native numeric value programs
 

@@ -5,14 +5,16 @@
 The build side is a TupleDataCollection (`vector/tuple_data_collection`)
 whose layout is DuckDB's join layout (BuildJoinLayout):
 
-    [validity][key columns][payload columns][build row][hash]
+    [validity][key columns][payload columns][build row][found][hash]
 
 - the key columns at their own widths (strings as string_t, the bytes of
   a long one in the collection's heap);
 - the payload columns (the join's build side columns that are not keys);
   a table with no payload (the eager join's) keeps only the build row;
 - the build row, which a probe reads for build side columns a plan adds
-  after the build and for the join's match flags;
+  after the build;
+- the found flag (`PropagatesBuildSide` joins only), set in the row by a
+  probe that matches it and read by the outer scan (ScanFullOuter);
 - the hash, which becomes the row's next pointer once the row is
   inserted (DuckDB's `pointer_offset`, the layout's last column).
 
@@ -53,9 +55,9 @@ BLOCK_SIZE and MIN_PREFETCH_BUCKETS), compares the keys of the candidates
 walking each probe row's chain before the next row's, so the matches come
 out in probe order. Rows with a null key match nothing.
 
-Right and full joins flag the build rows they matched (`found`, one byte
-per build row; DuckDB keeps the flag in the row), and `scan_full_outer`
-then emits the build rows no probe matched, as DuckDB's ScanFullOuter. A
+Right and full joins flag the rows they matched in the rows themselves, and
+`scan_chunk` then finds the build rows no probe matched, as DuckDB's
+ScanFullOuter. A
 semi or anti join built on its left input runs as DuckDB's RIGHT_SEMI or
 RIGHT_ANTI: the probe only flags build rows, and the scan emits the flagged
 (semi) or unflagged (anti) ones.
@@ -110,6 +112,7 @@ from dataframe.vector.tuple_data_scatter_gather import (
 )
 from dataframe.vector.tuple_data_states import TupleDataChunkState
 from dataframe.vector.types import (
+    PHYSICAL_BOOL,
     PHYSICAL_UINT32,
     PHYSICAL_UINT64,
     STANDARD_VECTOR_SIZE,
@@ -374,12 +377,16 @@ struct KeyLayout(Copyable, Movable):
     var plain: Bool
     var key_offset: Int
     var index_offset: Int
+    var found_offset: Int
     var pointer_offset: Int
     var width: Int
 
     @staticmethod
     def of(
-        layout: TupleDataLayout, keys: List[Series], index_column: Int
+        layout: TupleDataLayout,
+        keys: List[Series],
+        index_column: Int,
+        found_column: Int,
     ) -> KeyLayout:
         var at = layout.offsets()
         var fields = len(keys)
@@ -401,6 +408,7 @@ struct KeyLayout(Copyable, Movable):
             plain,
             at[0],
             at[index_column],
+            at[found_column] if found_column >= 0 else -1,
             at[len(layout.types()) - 1],
             layout.row_width(),
         )
@@ -494,12 +502,10 @@ def _same_keys(
 
 
 struct _TableData(Movable):
-    """What a table owns: its rows, its pointer table, the flags of the build
-    rows a probe matched, and the build keys."""
+    """What a table owns: its rows, its pointer table and the build keys."""
 
     var collection: TupleDataCollection
     var entries: List[UInt64]
-    var found: List[UInt8]
     var keys: List[Series]
     # A perfect hash join's table (PerfectHashJoinExecutor's
     # `perfect_hash_table` and `bitmap_build_idx`): per key slot its build
@@ -526,7 +532,6 @@ struct _TableData(Movable):
     ) raises:
         self.collection = TupleDataCollection(layout)
         self.entries = List[UInt64]()
-        self.found = List[UInt8]()
         self.keys = keys^
         self.slots = List[UInt32]()
         self.slot_bits = List[UInt8]()
@@ -550,6 +555,7 @@ struct _SinkJob(Job):
     var start: Int
     var count: Int
     var invalid: Int
+    var found: Bool
     var rows: RadixPartitionedTupleData
 
     def __init__(
@@ -559,6 +565,7 @@ struct _SinkJob(Job):
         layout: TupleDataLayout,
         start: Int,
         count: Int,
+        found: Bool,
     ) raises:
         self.keys = List[Series](capacity=len(keys))
         for key in keys:
@@ -570,22 +577,26 @@ struct _SinkJob(Job):
         self.start = start
         self.count = count
         self.invalid = 0
+        self.found = found
         self.rows = RadixPartitionedTupleData(
-            self.layout, INITIAL_RADIX_BITS, len(keys) + len(payload) + 1
+            self.layout,
+            INITIAL_RADIX_BITS,
+            len(keys) + len(payload) + 1 + (1 if found else 0),
         )
 
     def run(mut self) raises:
         var fields = len(self.keys)
         var columns = fields + len(self.payload)
         var index_column = columns
-        var hash_column = columns + 1
+        var found_column = columns + 1
+        var hash_column = columns + (2 if self.found else 1)
         var arena = ColumnArena()
         var handles = List[Int](capacity=columns)
         for key in self.keys:
             handles.append(arena.add(key))
         for column in self.payload:
             handles.append(arena.add(column))
-        var chunk = DataChunk(columns + 2)
+        var chunk = DataChunk(hash_column + 1)
         var state = PartitionedTupleDataAppendState()
         self.rows.initialize_append_state(state)
         var kept = List[UInt32](unsafe_uninit_length=STANDARD_VECTOR_SIZE)
@@ -602,6 +613,10 @@ struct _SinkJob(Job):
             )
             for i in range(n):
                 rows[unsafe_offset=i] = UInt32(self.start + low + i)
+            if self.found:
+                # Every row starts not found (DuckDB's `found` column).
+                var found = chunk.writable(found_column, PHYSICAL_BOOL)
+                _ = external_call["memset", Int](found.data, Int32(0), n)
             var hashes = chunk.writable(hash_column, PHYSICAL_UINT64)
             for k in range(fields):
                 _hash_column(
@@ -632,7 +647,13 @@ struct _SinkJob(Job):
                 added = kept_count
                 append_sel = SelectionVector(Int(sel))
             self.invalid += n - added
-            self.rows.append_unified(state, chunk, append_sel, added)
+            if self.found:
+                # A join that reads the found flags keeps its rows with a
+                # null key (never matched, so its scan emits them); only
+                # the insert skips them.
+                self.rows.append_unified(state, chunk, SelectionVector(), n)
+            else:
+                self.rows.append_unified(state, chunk, append_sel, added)
             low += n
         self.rows.flush_append_state(state)
         _ = kept^
@@ -669,6 +690,7 @@ struct _InsertJob(Copyable, Job):
     var base: Int
     var bitmask: UInt64
     var duplicates: Bool
+    var skip_null_keys: Bool
     var chained: Bool
     var kinds_at: Int
     var offsets_at: Int
@@ -683,6 +705,7 @@ struct _InsertJob(Copyable, Job):
         base: Int,
         bitmask: UInt64,
         duplicates: Bool,
+        skip_null_keys: Bool,
     ):
         self.layout = layout.copy()
         self.collection = collection
@@ -691,6 +714,7 @@ struct _InsertJob(Copyable, Job):
         self.base = base
         self.bitmask = bitmask
         self.duplicates = duplicates
+        self.skip_null_keys = skip_null_keys
         self.chained = False
         self.kinds_at = 0
         self.offsets_at = 0
@@ -724,10 +748,22 @@ struct _InsertJob(Copyable, Job):
                 var at = state.row_locations.unsafe_ptr()
                 var i = n - 1
                 while i >= 0:
-                    self._insert(region, at[unsafe_offset=i])
+                    if not self.skip_null_keys or self._keys_valid(
+                        at[unsafe_offset=i]
+                    ):
+                        self._insert(region, at[unsafe_offset=i])
                     i -= 1
                 c -= 1
             r -= 1
+
+    @always_inline
+    def _keys_valid(self, row: Int) -> Bool:
+        """Whether the row's key columns are all valid (the row's validity
+        bytes, one bit a column; the keys are the layout's first columns)."""
+        for k in range(len(self.layout.kinds)):
+            if (_load8(row + (k >> 3)) >> UInt8(k & 7)) & 1 == 0:
+                return False
+        return True
 
     @always_inline
     def _match(self, a: Int, b: Int) -> Bool:
@@ -989,6 +1025,9 @@ struct JoinHashTable(Copyable, Movable):
     # Whether a probe emits `data.dictionary` (perfect or dictionary
     # emission) rather than gathering from the rows.
     var use_dictionary: Bool
+    # The rows the collection holds: `inserted`, plus a right or full
+    # join's rows with a null key.
+    var rows_stored: Int
 
     def __init__(
         out self,
@@ -1000,6 +1039,7 @@ struct JoinHashTable(Copyable, Movable):
         perfect: Bool = False,
         keys_only: Bool = False,
         probe_estimate: Int = -1,
+        propagate: Bool = True,
     ) raises:
         """Build and finalize the table over `keys` (one column per
         equality condition, all of one length). `payload`: the build
@@ -1011,7 +1051,8 @@ struct JoinHashTable(Copyable, Movable):
         inner join, which may run as a perfect hash join. `keys_only`: the
         join is a semi, anti or mark join (`keys_only_join`), which keeps
         one row per key. `probe_estimate`: the probe side's estimated
-        rows (dictionary emission; -1 when unknown)."""
+        rows (dictionary emission; -1 when unknown). `propagate`: the join
+        reads the rows' found flags (`PropagatesBuildSide`)."""
         var unchunked = List[Series](capacity=len(keys))
         for key in keys:
             if key.dtype().is_nested():
@@ -1038,27 +1079,26 @@ struct JoinHashTable(Copyable, Movable):
                 types.append(_row_type(column))
         var index_column = len(types)
         types.append(DataType.UINT32)
+        var found_column = -1
+        if propagate and not perfect and not keys_only:
+            found_column = len(types)
+            types.append(DataType.BOOL)
         types.append(DataType.UINT64)
         var row_layout = TupleDataLayout(types)
-        self.layout = KeyLayout.of(row_layout, unchunked, index_column)
+        self.layout = KeyLayout.of(
+            row_layout, unchunked, index_column, found_column
+        )
         self.row_layout = row_layout.copy()
         self.output_columns = output_columns.copy()
         self.output_names = output_names.copy()
         self.output_types = output_types.copy()
         self.frame_only = List[String]()
         self.use_dictionary = False
+        self.rows_stored = 0
         self.count = len(unchunked[0]) if len(unchunked) > 0 else 0
         if self.count > Int(Int32.MAX):
             raise Error("A join build exceeds 2^31 - 1 rows")
         self.data = ArcPointer(_TableData(unchunked.copy(), row_layout))
-        # The match flags only a join that emits build rows reads (DuckDB's
-        # PropagatesBuildSide): never an inner join (`perfect`) nor a
-        # semi, anti or mark join (`keys_only`).
-        var flags = 1 if perfect or keys_only else max(self.count, 1)
-        self.data[].found = List[UInt8](unsafe_uninit_length=flags)
-        _ = external_call["memset", Int](
-            Int(self.data[].found.unsafe_ptr()), Int32(0), flags
-        )
         # Sink: each thread its share of the rows, in chunks, into its own
         # partitioned rows.
         var workers = worker_count(self.count)
@@ -1073,6 +1113,7 @@ struct JoinHashTable(Copyable, Movable):
                         row_layout,
                         bounds[w],
                         bounds[w + 1] - bounds[w],
+                        found_column >= 0,
                     )
                 )
         if len(sinks) == 1:
@@ -1084,7 +1125,10 @@ struct JoinHashTable(Copyable, Movable):
         var sink = RadixPartitionedTupleData(
             row_layout,
             INITIAL_RADIX_BITS,
-            len(unchunked) + len(payload_columns) + 1,
+            len(unchunked)
+            + len(payload_columns)
+            + 1
+            + (1 if found_column >= 0 else 0),
         )
         var invalid = 0
         for w in range(len(sinks)):
@@ -1116,6 +1160,7 @@ struct JoinHashTable(Copyable, Movable):
                 first_segment += len(sink.partitions[p].segments)
         segment_starts.append(first_segment)
         self.data[].collection = sink.get_unpartitioned()
+        self.rows_stored = self.data[].collection.count()
         if self.inserted == 0:
             return
         ref rows = self.data[].collection
@@ -1188,6 +1233,7 @@ struct JoinHashTable(Copyable, Movable):
                     Int(self.data[].bases[p]),
                     self.data[].masks[p],
                     not keys_only,
+                    self.has_null and found_column >= 0,
                 )
             )
         # As many tasks as the build had sink threads, each filling a run
@@ -1213,11 +1259,11 @@ struct JoinHashTable(Copyable, Movable):
     def _can_use_dictionary_emission(self, probe_cardinality: Int) -> Bool:
         """JoinHashTable::CanUseDictionaryEmission (DuckDB's external and
         SINGLE-join conditions cannot arise here)."""
-        if len(self.output_columns) == 0 or self.inserted == 0:
+        if len(self.output_columns) == 0 or self.rows_stored == 0:
             return False
         if probe_cardinality < _DICT_MIN_PROBE_ROWS:
             return False
-        if probe_cardinality < _DICT_PROBE_BUILD_RATIO * self.inserted:
+        if probe_cardinality < _DICT_PROBE_BUILD_RATIO * self.rows_stored:
             return False
         var bytes_per_row = 0
         for t in self.output_types:
@@ -1227,7 +1273,7 @@ struct JoinHashTable(Copyable, Movable):
                 bytes_per_row += physical_size(physical_of_dtype(t))
             except:
                 return False
-        return self.inserted * bytes_per_row <= _DICT_MAX_PAYLOAD_BYTES
+        return self.rows_stored * bytes_per_row <= _DICT_MAX_PAYLOAD_BYTES
 
     def _gather_dictionary(mut self, rows: List[UInt64]) raises:
         """Gather every output column at the row pointers `rows`."""
@@ -1279,7 +1325,7 @@ struct JoinHashTable(Copyable, Movable):
         last for a left join's unmatched probe rows), each row's number
         stored where its next pointer was, and the next pointers kept in
         `aux_next` (a chain ends at the extra slot)."""
-        var pointers = List[UInt64](capacity=self.inserted + 1)
+        var pointers = List[UInt64](capacity=self.rows_stored + 1)
         var state = TupleDataChunkState()
         ref rows = self.data[].collection
         for s in range(len(rows.segments)):
@@ -1293,11 +1339,11 @@ struct JoinHashTable(Copyable, Movable):
         self._gather_dictionary(pointers)
         var next_offset = self.layout.pointer_offset
         self.data[].aux_next = List[UInt64](
-            unsafe_uninit_length=self.inserted + 1
+            unsafe_uninit_length=self.rows_stored + 1
         )
         var aux = self.data[].aux_next.unsafe_ptr()
-        aux[unsafe_offset=self.inserted] = 0
-        for i in range(self.inserted):
+        aux[unsafe_offset=self.rows_stored] = 0
+        for i in range(self.rows_stored):
             var row = Int(pointers[i])
             aux[unsafe_offset=i] = _load64(row + next_offset)
             _store64(row + next_offset, UInt64(i))
@@ -1326,15 +1372,30 @@ struct JoinHashTable(Copyable, Movable):
     def entries_address(self) -> Int:
         return Int(self.data[].entries.unsafe_ptr())
 
-    def found_address(self) -> Int:
-        """One byte per build row, set once a probe matched it."""
-        return Int(self.data[].found.unsafe_ptr())
-
     def reset_found(self):
-        """Clear every build row's match flag before a new probe phase."""
-        var found = self.data[].found.unsafe_ptr()
-        for i in range(len(self.data[].found)):
-            found[unsafe_offset=i] = 0
+        """Clear every row's found flag before a new probe phase."""
+        var found_offset = self.layout.found_offset
+        if found_offset < 0:
+            return
+        var state = TupleDataChunkState()
+        ref rows = self.data[].collection
+        for s in range(len(rows.segments)):
+            ref segment = rows.segments[s]
+            for c in range(segment.chunk_count()):
+                var n = segment.initialize_chunk_state(state, c, False)
+                var at = state.row_locations.unsafe_ptr()
+                for i in range(n):
+                    _store8(at[unsafe_offset=i] + found_offset, 0)
+
+    def output_index(self, name: String) -> Int:
+        """The output column `name`'s place among the outputs gathered from
+        the rows, -1 when it is read from the build frame instead."""
+        for c in range(len(self.output_names)):
+            if self.output_names[c] == name:
+                if name in self.frame_only:
+                    return -1
+                return c
+        return -1
 
     def use_salt(self) -> Bool:
         """JoinHashTable::UseSalt."""
@@ -1344,24 +1405,36 @@ struct JoinHashTable(Copyable, Movable):
         """The build row of the row at `pointer`."""
         return Int(_load32(Int(pointer) + self.layout.index_offset))
 
-    def scan_full_outer(
-        self, mut position: Int, want: UInt8, mut rows: List[Int]
-    ) -> Int:
-        """DuckDB's ScanFullOuter: from build row `position` on, append up to
-        STANDARD_VECTOR_SIZE build rows whose match flag is `want` (0: the
-        rows no probe matched, for right, full and right-anti joins; 1:
-        the matched ones, for right-semi joins) to `rows`, and advance
-        `position`. Returns how many were appended."""
-        var found = Pointer[UInt8, MutAnyOrigin](
-            unsafe_from_address=self.found_address()
-        )
-        var appended = 0
-        while position < self.count and appended < STANDARD_VECTOR_SIZE:
-            if found[unsafe_offset=position] == want:
-                rows.append(position)
-                appended += 1
-            position += 1
-        return appended
+    def scan_chunk(
+        self, chunk: Int, want: UInt8, mut rows: List[UInt64]
+    ) raises:
+        """ScanFullOuter over one chunk of the rows (each worker takes its
+        own): append the pointers of the rows whose found flag is `want`
+        (0: no probe matched them; 1: a right-semi join's matches)."""
+        var state = TupleDataChunkState()
+        var found_offset = self.layout.found_offset
+        var count = self.data[].collection.fetch_chunk(state, chunk, False)
+        var at = state.row_locations.unsafe_ptr()
+        for i in range(count):
+            var row = at[unsafe_offset=i]
+            if _load8(row + found_offset) == want:
+                rows.append(UInt64(row))
+
+    def chunk_count(self) -> Int:
+        """The rows' chunks (one scan morsel each)."""
+        return self.data[].collection.chunk_count()
+
+    def full_outer_rows(self, want: UInt8) raises -> List[Int]:
+        """Every build row whose found flag is `want`."""
+        var rows = List[Int]()
+        var pointers = List[UInt64]()
+        for c in range(self.chunk_count()):
+            self.scan_chunk(c, want, pointers)
+        for r in range(len(pointers)):
+            rows.append(self.build_side_row(pointers[r]))
+        # In build order, as the eager join's output lists them.
+        sort(rows)
+        return rows^
 
 
 struct ScanStructure(Movable):
@@ -1683,9 +1756,7 @@ struct ScanStructure(Movable):
         var dictionary = self.table.use_dictionary
         var index_offset = self.table.layout.index_offset
         var next_offset = self.table.layout.pointer_offset
-        var found = Pointer[UInt8, MutAnyOrigin](
-            unsafe_from_address=self.table.found_address()
-        )
+        var found_offset = self.table.layout.found_offset
         var out = 0
         if (
             self.how == JOIN_SEMI
@@ -1721,13 +1792,10 @@ struct ScanStructure(Movable):
                 var p = heads[unsafe_offset=i]
                 if p == 0:
                     continue
-                if (
-                    found[unsafe_offset=Int(_load32(Int(p) + index_offset))]
-                    != 0
-                ):
+                if _load8(Int(p) + found_offset) != 0:
                     continue
                 while p != 0:
-                    found[unsafe_offset=Int(_load32(Int(p) + index_offset))] = 1
+                    _store8(Int(p) + found_offset, 1)
                     if dict_emission:
                         p = aux[
                             unsafe_offset=Int(_load64(Int(p) + next_offset))
@@ -1773,7 +1841,7 @@ struct ScanStructure(Movable):
                     if outer:
                         out_probe[unsafe_offset=out] = Int32(i)
                         out_build[unsafe_offset=out] = Int32(
-                            self.table.inserted
+                            self.table.rows_stored
                         ) if dict_emission else -1
                         out_row[unsafe_offset=out] = null_row
                         out += 1
@@ -1786,7 +1854,7 @@ struct ScanStructure(Movable):
                 out_probe[unsafe_offset=out] = Int32(i)
                 out_row[unsafe_offset=out] = p
                 if flag:
-                    found[unsafe_offset=Int(b)] = 1
+                    _store8(Int(p) + found_offset, 1)
                 out += 1
                 if dict_emission:
                     # GetNextPointer: the row number sits where the next
@@ -1977,16 +2045,11 @@ def probe_pairs(
         run_jobs(copies)
     _ = jobs^
     if how == JOIN_RIGHT or how == JOIN_FULL:
-        var position = 0
-        while table.scan_full_outer(position, 0, build) > 0:
-            pass
+        for row in table.full_outer_rows(0):
+            build.append(row)
         while len(probe) < len(build):
             probe.append(-1)
     elif how == JOIN_RIGHT_SEMI or how == JOIN_RIGHT_ANTI:
-        var rows = List[Int]()
-        var position = 0
         var want = UInt8(1) if how == JOIN_RIGHT_SEMI else UInt8(0)
-        while table.scan_full_outer(position, want, rows) > 0:
-            pass
-        return (List[Int](), rows^)
+        return (List[Int](), table.full_outer_rows(want))
     return (probe^, build^)

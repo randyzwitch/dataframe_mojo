@@ -87,7 +87,10 @@ struct Recorded(SchedulablePipeline):
     def initialize(mut self) raises:
         self.initialized = self._now()
 
-    def execute_tasks(self) -> Int:
+    def max_execute_tasks(self) -> Int:
+        return self.tasks
+
+    def execute_tasks(mut self) raises -> Int:
         return self.tasks
 
     def execute(mut self, task: Int) raises:
@@ -173,6 +176,25 @@ def test_stages_follow_dependencies_and_sibling_builds_finish_together() raises:
     # Five pipelines' stages, every one once: 4 initialize, prepare and
     # finalize ticks plus one per execute task.
     assert_equal(Int(clock[].tick.load()), 5 * 3 + 3 * 3 + 2 + 1)
+
+
+def test_a_finish_group_runs_after_the_base_executes_and_before_it_finishes() raises:
+    """Pipelines 1 and 2 are finish-group members of 0 and 1: each executes
+    after the one it names, and pipeline 0 prepares its finish only after
+    both executed."""
+    var clock = ArcPointer(Clock())
+    var pipelines = List[Recorded]()
+    var metas = List[MetaPipeline]()
+    pipelines.append(Recorded(clock, tasks=2))
+    metas.append(MetaPipeline(META_REGULAR))
+    pipelines.append(Recorded(clock, tasks=2))
+    metas.append(MetaPipeline(META_REGULAR, finish_group=0))
+    pipelines.append(Recorded(clock, tasks=2))
+    metas.append(MetaPipeline(META_REGULAR, finish_group=1))
+    run_pipelines(pipelines, metas)
+    assert_true(_last_execute(pipelines[0]) < _first_execute(pipelines[1]))
+    assert_true(_last_execute(pipelines[1]) < _first_execute(pipelines[2]))
+    assert_true(_last_execute(pipelines[2]) < pipelines[0].prepared)
 
 
 def test_independent_pipelines_run_at_the_same_time() raises:
