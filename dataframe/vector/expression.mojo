@@ -10,7 +10,6 @@ from std.bit import count_trailing_zeros, pop_count
 from std.math import ceil, floor
 from std.memory import Pointer, unsafe_memcpy, unsafe_memcmp
 
-from std.ffi import external_call
 from std.sys import stderr
 from std.os import getenv
 from dataframe.binding import BoundExpr, bind, op_name
@@ -63,6 +62,7 @@ from dataframe.kernels.binary import (
 )
 from dataframe.time.calendar import civil_from_days
 from dataframe.series import Series
+from dataframe.text.bytes import _find_bytes
 from dataframe.text.predicates import decode_values
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
@@ -1605,9 +1605,23 @@ struct VectorExpression(Copyable, Movable):
                         == 0
                     )
                 else:
-                    found = n == 0 or (
-                        external_call["memmem", Int](bytes, length, probe, n)
-                        != 0
+                    found = (
+                        _find_bytes(
+                            Span[UInt8, ImmutAnyOrigin](
+                                unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                                    unsafe_from_address=bytes
+                                ),
+                                length=length,
+                            ),
+                            Span[UInt8, ImmutAnyOrigin](
+                                unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                                    unsafe_from_address=probe
+                                ),
+                                length=n,
+                            ),
+                            0,
+                        )
+                        >= 0
                     )
             target[unsafe_offset=k] = UInt8(1) if found else UInt8(0)
         _ = needle^
@@ -2745,12 +2759,19 @@ def _like_match(data: Int, length: Int, segments: List[String]) -> Bool:
             continue
         if at + size > end:
             return False
-        var found = external_call["memmem", Int](
-            data + at, end - at, Int(segments[k].unsafe_ptr()), size
+        var found = _find_bytes(
+            Span[UInt8, ImmutAnyOrigin](
+                unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                    unsafe_from_address=data
+                ),
+                length=end,
+            ),
+            segments[k].as_bytes(),
+            at,
         )
-        if found == 0:
+        if found < 0:
             return False
-        at = found - data + size
+        at = found + size
     return True
 
 

@@ -329,3 +329,56 @@ def test_adaptive_conjunctions_keep_the_eager_rows() raises:
                 picked.append(target.get_index(k))
             assert_frame(rows.take(picked), expected)
             _ = out^
+
+
+def test_literal_search_keeps_utf8_nuls_empty_patterns_and_like_boundaries() raises:
+    var source = DataFrame(
+        [
+            Series(
+                "s",
+                StringColumn(
+                    [
+                        "",
+                        "é🙂tail",
+                        "a\x00b",
+                        "ababa",
+                        "prefix-middle-tail",
+                        "aééz",
+                        "tail",
+                        "ignored",
+                    ],
+                    [True, True, True, True, True, True, True, False],
+                ),
+            )
+        ]
+    )
+    var patterns = List[Expr]()
+    for needle in ["", "é", "🙂", "\x00", "aba", "absent"]:
+        patterns.append(col("s").str().contains(needle, literal=True))
+    for pattern in [
+        "%",
+        "%é%",
+        "%🙂%tail",
+        "a%ba%ba",
+        "%tail%tail",
+        "prefix%middle%tail",
+        "a%é%é%z",
+        "%\x00%b",
+    ]:
+        patterns.append(col("s").str().like(pattern))
+    for keep_every in [1, 2]:
+        var arena = ColumnArena()
+        var chunk = chunk_of(source, arena, 0, source.height(), keep_every)
+        var rows = expected_rows(source, 0, source.height(), keep_every)
+        for p in patterns:
+            var compiled = VectorExpression(p, source.clear()._columns)
+            var out = DataChunk()
+            var target = out.new_selection()
+            var kept = compiled.select(
+                chunk, arena, SelectionVector(), chunk.count, target
+            )
+            var picked = List[Int]()
+            for k in range(kept):
+                picked.append(target.get_index(k))
+            assert_frame(rows.take(picked), rows.filter(p))
+            _ = out^
