@@ -55,7 +55,7 @@ from dataframe.json.decode import decode_json
 from dataframe.json.strings import json_path_match
 from dataframe.text.unicode.normalization import normalize_series
 from unicode_mojo.casing import AlphabeticTitleCaser
-from unicode_mojo.utf8 import unsafe_codepoint_width
+from unicode_mojo.utf8 import unsafe_codepoint_width, count_codepoints
 
 comptime _Row = Span[UInt8, ImmutAnyOrigin]
 
@@ -441,10 +441,7 @@ def _find_or_count(
             continue
         var matches = 0
         if len(needle) == 0:
-            matches = 1
-            for b in range(len(row)):
-                if (row.unsafe_ptr()[unsafe_offset=b] & 0xC0) != 0x80:
-                    matches += 1
+            matches = 1 + count_codepoints(StringSpan(unsafe_from_utf8=row))
         else:
             var at = _find_bytes(row, needle, 0)
             while at >= 0:

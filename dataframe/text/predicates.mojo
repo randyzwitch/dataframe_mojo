@@ -19,6 +19,7 @@ from dataframe.parallel import Job, run_jobs, worker_count
 from dataframe.kernels.partition import _hash_bytes
 from dataframe.series import Series
 from dataframe.kernels.physical_input import _has_physical_storage
+from unicode_mojo.transform import codepoint_slice_bounds
 from dataframe.text.bytes import (
     _Bytes,
     _find_bytes,
@@ -637,21 +638,6 @@ def string_like(column: StringColumn, pattern: String) raises -> Series:
     return _predicate[LIKE](column, _Literals(pieces, flags))
 
 
-@always_inline
-def _codepoint_end(
-    bytes: Pointer[UInt8, ImmutAnyOrigin], length: Int, at: Int, count: Int
-) -> Int:
-    """The byte position `count` code points after byte `at`, clipped."""
-    var i = at
-    var left = count
-    while left > 0 and i < length:
-        i += 1
-        while i < length and (bytes.unsafe_offset(i)[] & 0xC0) == 0x80:
-            i += 1
-        left -= 1
-    return i
-
-
 def slice_strings(
     column: StringColumn, offset: Int, length: Int
 ) raises -> StringColumn:
@@ -682,7 +668,6 @@ def slice_strings(
             continue
         var text = column._get(k).as_bytes()
         var data = text.unsafe_ptr()
-        var size = len(text)
         var buffer = UInt64(0)
         var base: Int
         if views_storage:
@@ -693,16 +678,9 @@ def slice_strings(
             base = Int(view.offset)
         else:
             base = column._start(k)
-        var b0: Int
-        if offset >= 0:
-            b0 = _codepoint_end(data, size, 0, offset)
-        else:
-            var points = 0
-            for i in range(size):
-                if (data.unsafe_offset(i)[] & 0xC0) != 0x80:
-                    points += 1
-            b0 = _codepoint_end(data, size, 0, max(points + offset, 0))
-        var b1 = size if length < 0 else _codepoint_end(data, size, b0, length)
+        var b0, b1 = codepoint_slice_bounds(
+            StringSpan(unsafe_from_utf8=text), offset, length
+        )
         var part = b1 - b0
         var low = UInt64(part)
         var high = UInt64(0)

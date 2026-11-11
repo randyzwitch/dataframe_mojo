@@ -1,32 +1,11 @@
 """String lengths from storage metadata and UTF-8 leading bytes."""
 from std.memory import Pointer
+from unicode_mojo.utf8 import count_codepoints
 from dataframe.storage.column import Column, _append_validity, _copy_validity
 from dataframe.series import Series
 from dataframe.text.bytes import _Bytes
 from dataframe.storage.string import StringColumn
 from dataframe.storage.string_view import _mapped
-
-
-@always_inline
-def _count_chars(row: Span[UInt8, ImmutAnyOrigin]) -> Int64:
-    # Every UTF-8 byte except a continuation starts one code point. This
-    # counts combining marks separately, just as String.codepoints does.
-    var p = row.unsafe_ptr()
-    var count = Int64(0)
-    var i = 0
-    while i + 32 <= len(row):
-        var bytes = p.unsafe_offset(i).unsafe_load[width=32]()
-        count += Int64(
-            (bytes & SIMD[DType.uint8, 32](192))
-            .ne(SIMD[DType.uint8, 32](128))
-            .cast[DType.uint8]()
-            .reduce_add()
-        )
-        i += 32
-    while i < len(row):
-        count += Int64((p.unsafe_offset(i)[] & 192) != 128)
-        i += 1
-    return count
 
 
 def _write_lengths[
@@ -39,7 +18,9 @@ def _write_lengths[
         var rows = _Bytes(column)
         for i in range(n):
             if not nullable or column._valid(i):
-                out.unsafe_offset(i)[] = _count_chars(rows.get(i))
+                out.unsafe_offset(i)[] = Int64(
+                    count_codepoints(StringSpan(unsafe_from_utf8=rows.get(i)))
+                )
     else:
         if column._is_view_storage():
             ref storage = column._view_storage.value()

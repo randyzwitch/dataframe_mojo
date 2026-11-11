@@ -373,7 +373,7 @@ using their own package manifests. These revisions carry the compiler
 compatibility fixes and pin the same Mojo compiler as this project. The dataframe packages resolve these dependencies from the
 installed environment.
 Normalization, Unicode properties, case folding, title casing, and UTF-8
-primitives come from the standalone
+counting, traversal, slicing, reversal, and trimming come from the standalone
 [unicode_mojo](https://github.com/randyzwitch/unicode_mojo) package, resolved
 through Pixi at a pinned Git revision. Its algorithms, generated tables,
 generators, and conformance fixtures live there; dataframe retains storage,
