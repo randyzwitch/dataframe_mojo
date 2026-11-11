@@ -5,6 +5,7 @@ The reference reduction schedule is serial; Float64 results may be reassociated
 by future parallel implementations. Int64 sums use exact wide states and check final overflow.
 """
 from dataframe.kernels.validity import _valid_lanes
+from dataframe.storage.bitmap import _bitmap_word
 from dataframe.kernels.bitmap_input import _BoolInput, _write_bitmap_byte
 from dataframe.storage.buffer import _Buffer, _BufferData
 from dataframe.kernels.binary import validity
@@ -1354,13 +1355,9 @@ def _and_validity(
 def _byte_from(bits: Pointer[UInt8, _], bytes: Int, bit: Int) -> UInt8:
     """Bits [bit, bit + 8) of a bitmap of `bytes` bytes as one byte, LSB
     first; bits past its end read as 0."""
-    var at = bit >> 3
-    var shift = bit & 7
-    var low = bits[unsafe_offset=at]
-    if shift == 0:
-        return low
-    var high = bits[unsafe_offset=at + 1] if at + 1 < bytes else UInt8(0)
-    return (low >> UInt8(shift)) | (high << UInt8(8 - shift))
+    return _bitmap_word[DType.uint8](
+        Span(unsafe_ptr=bits, length=bytes), bit, 8
+    )
 
 
 def _conditional[

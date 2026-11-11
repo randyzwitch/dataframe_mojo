@@ -1,4 +1,5 @@
 """Batch kernels: operation/dtype dispatch occurs outside element loops."""
+from dataframe.storage.bitmap import _bitmap_word
 from dataframe.storage.buffer import _Buffer, _BufferData
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from std.ffi import external_call
@@ -2139,15 +2140,7 @@ def _arctan2[
 def _window_byte(bits: Span[UInt8, _], bit: Int, empty: UInt8) -> UInt8:
     """Eight bits of a bitmap starting at bit `bit`, LSB first; `empty`
     when the bitmap is empty (no nulls). Bits past the end read as zero."""
-    if len(bits) == 0:
-        return empty
-    var j = bit >> 3
-    var shift = UInt8(bit & 7)
-    var low = bits[j] >> shift if j < len(bits) else UInt8(0)
-    if shift == 0:
-        return low
-    var high = bits[j + 1] << (8 - shift) if j + 1 < len(bits) else UInt8(0)
-    return low | high
+    return _bitmap_word[DType.uint8](bits, bit, 8, empty)
 
 
 def _window_bytes(
