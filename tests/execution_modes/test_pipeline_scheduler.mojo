@@ -1,7 +1,8 @@
 """Pipelines scheduled as events run each pipeline's stages in order, start a
 pipeline only after the pipelines it depends on complete, finish sibling
 join builds only after all of them executed, run independent pipelines at
-the same time, survive nested parallel work inside a task, and report the
+the same time, survive nested parallel work inside a task, run the tasks a
+sink's Finalize adds before the finish event finishes, and report the
 first task error."""
 # contract-group: execution.lifecycle
 from std.atomic import Atomic
@@ -58,6 +59,11 @@ struct Recorded(SchedulablePipeline):
     # Nested parallel work inside the execute task.
     var nested: Bool
     var nested_total: Int
+    # Tasks its Finalize inserts (a join build's finalize event), when
+    # each ran, and when that event finished.
+    var finals: Int
+    var final_ticks: List[Int]
+    var finished_finals: Int
 
     def __init__(
         out self,
@@ -66,6 +72,7 @@ struct Recorded(SchedulablePipeline):
         meet: Int = 0,
         fail: Bool = False,
         nested: Bool = False,
+        finals: Int = 0,
     ):
         self.clock = clock.copy()
         self.tasks = tasks
@@ -78,6 +85,9 @@ struct Recorded(SchedulablePipeline):
         self.fail = fail
         self.nested = nested
         self.nested_total = 0
+        self.finals = finals
+        self.final_ticks = List[Int](length=finals, fill=-1)
+        self.finished_finals = -1
 
     def _now(self) -> Int:
         return Int(self.clock[].tick.fetch_add(1))
@@ -125,6 +135,18 @@ struct Recorded(SchedulablePipeline):
         if self.fail:
             raise Error("finalize failed on purpose")
         self.finalized = self._now()
+
+    def max_finalize_tasks(self) -> Int:
+        return self.finals
+
+    def finalize_tasks(mut self) raises -> Int:
+        return self.finals
+
+    def finalize_task(mut self, task: Int) raises:
+        self.final_ticks[task] = self._now()
+
+    def finish_finalize(mut self) raises:
+        self.finished_finals = self._now()
 
 
 def _last_execute(p: Recorded) -> Int:
@@ -193,6 +215,25 @@ def test_a_finish_group_runs_after_the_base_executes_and_before_it_finishes() ra
     assert_true(_last_execute(pipelines[0]) < _first_execute(pipelines[1]))
     assert_true(_last_execute(pipelines[1]) < _first_execute(pipelines[2]))
     assert_true(_last_execute(pipelines[2]) < pipelines[0].prepared)
+
+
+def test_finalize_tasks_run_before_the_finish_event_finishes() raises:
+    """Pipeline 0's Finalize inserts four tasks (a join build's finalize
+    event): each runs after Finalize, the event's FinishEvent after all of
+    them, and pipeline 1, which reads 0's sink, executes only after."""
+    var clock = ArcPointer(Clock())
+    var pipelines = List[Recorded]()
+    var metas = List[MetaPipeline]()
+    pipelines.append(Recorded(clock, finals=4))
+    metas.append(MetaPipeline(META_JOIN_BUILD, parent=1))
+    pipelines.append(Recorded(clock, tasks=2))
+    metas.append(MetaPipeline(META_REGULAR, dependencies=[0]))
+    run_pipelines(pipelines, metas)
+    ref build = pipelines[0]
+    for t in build.final_ticks:
+        assert_true(build.finalized < t)
+        assert_true(t < build.finished_finals)
+    assert_true(build.finished_finals < _first_execute(pipelines[1]))
 
 
 def test_independent_pipelines_run_at_the_same_time() raises:

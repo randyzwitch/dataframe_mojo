@@ -25,7 +25,9 @@ says how many tasks its execute event makes when that event schedules
 (`Pipeline::Schedule`): a stream's probe makes one per morsel worker. A
 thread with no task queued runs the jobs that running tasks post to the
 crew (`_Crew._help`): a build side's own plan still runs inside its one
-execute task. The workers themselves are posted so that only idle crew
+execute task. A finish event whose sink's Finalize has parallel work (a
+join build's `HashJoinFinalizeEvent`) adds that work's tasks to the
+queue, and finishes after the last of them. The workers themselves are posted so that only idle crew
 threads join them (`_UNHELPABLE`).
 """
 from std.atomic import Atomic
@@ -87,6 +89,25 @@ trait SchedulablePipeline(Deinitable, Movable):
     def finalize(mut self) raises:
         """`PipelineFinishTask`: `Sink::Finalize`."""
         ...
+
+    def max_finalize_tasks(self) -> Int:
+        """The most tasks `finalize_tasks` can make, known before any event
+        runs: the queue is sized from it."""
+        return 0
+
+    def finalize_tasks(mut self) raises -> Int:
+        """After `finalize`: the tasks of the event the sink's Finalize
+        inserts before the finish event's parents (`Event::InsertEvent`,
+        a join build's `HashJoinFinalizeEvent`); 0 for none."""
+        return 0
+
+    def finalize_task(mut self, task: Int) raises:
+        """One task of that event; they run at the same time."""
+        pass
+
+    def finish_finalize(mut self) raises:
+        """That event's `FinishEvent`, after its last task."""
+        pass
 
 
 struct MetaPipeline(Copyable, Movable):
@@ -289,10 +310,16 @@ struct _Executor[P: SchedulablePipeline](Movable):
             # (`Pipeline::Schedule`); here it reserves its most. Initialize,
             # prepare finish and finish each make one task; complete makes
             # none and finishes when scheduled.
+            # A finish event's Finalize may add the tasks of the event it
+            # inserts (`finalize_tasks`); here it reserves their most.
             var tasks = 0 if s.type == STAGE_COMPLETE else 1
             self.total_tasks.append(tasks)
             if s.type == STAGE_EXECUTE:
                 capacity += max(1, pipelines[s.pipeline].max_execute_tasks())
+            elif s.type == STAGE_FINISH:
+                capacity += tasks + max(
+                    0, pipelines[s.pipeline].max_finalize_tasks()
+                )
             else:
                 capacity += tasks
         # `Event::AddDependency`: the dependency learns its parent.
@@ -369,11 +396,36 @@ struct _Executor[P: SchedulablePipeline](Movable):
             _ = self.completed_pipelines.fetch_add(1)
 
     def _finish_task(mut self, event: Int):
-        """`Event::FinishTask`: the event's last task finishes it."""
+        """`Event::FinishTask`: the event's last task finishes it. A
+        finish event with finalize tasks runs their `FinishEvent` first."""
         var base = Int(self.finished_tasks.unsafe_ptr())
         var done = Int(_counter(base, event).fetch_add(1)) + 1
         if done == self.total_tasks[event]:
+            if self.stage[event] == STAGE_FINISH and done > 1:
+                try:
+                    self._pipelines()[self.pipeline[event]].finish_finalize()
+                except e:
+                    self._fail(e)
+                    return
             self._finish(event)
+
+    def _insert_finalize_tasks(mut self, event: Int) raises:
+        """After a finish event's Finalize: the tasks of the event it
+        inserts (`Event::InsertEvent`), as more tasks of the finish event,
+        task t + 1 running `finalize_task(t)`. The finish event finishes,
+        and its parents' dependencies complete, only after them."""
+        ref pipeline = self._pipelines()[self.pipeline[event]]
+        var tasks = pipeline.finalize_tasks()
+        if tasks == 0:
+            return
+        if tasks > pipeline.max_finalize_tasks():
+            raise Error("more finalize tasks than max_finalize_tasks")
+        self.total_tasks[event] = 1 + tasks
+        for t in range(tasks):
+            var at = Int(self.reserved.fetch_add(1))
+            _counter(Int(self.queue.unsafe_ptr()), at).store(
+                Int64((event << _TASK_BITS) | (t + 1)) + 1
+            )
 
     def _dequeue(mut self) -> Int:
         """The next published task, or -1."""
@@ -401,8 +453,11 @@ struct _Executor[P: SchedulablePipeline](Movable):
                 pipeline.execute(task)
             elif stage == STAGE_PREPARE_FINISH:
                 pipeline.prepare_finalize()
+            elif task > 0:
+                pipeline.finalize_task(task - 1)
             else:
                 pipeline.finalize()
+                self._insert_finalize_tasks(event)
         except e:
             self._fail(e)
             return
@@ -465,10 +520,14 @@ def run_pipelines[
     var executor = _Executor[P](pipelines, stages)
     executor.schedule_events()
     # As many threads as tasks can run at once: every pipeline's execute
-    # tasks, within the thread count.
+    # tasks or finalize tasks, within the thread count.
     var width = 0
     for p in range(len(pipelines)):
-        width += max(1, pipelines[p].max_execute_tasks())
+        width += max(
+            1,
+            pipelines[p].max_execute_tasks(),
+            pipelines[p].max_finalize_tasks(),
+        )
     var threads = min(width, configured_workers()) if parallel else 1
     if threads <= 1:
         executor.work_on_tasks()

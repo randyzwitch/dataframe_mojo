@@ -500,6 +500,8 @@ struct _TableData(Movable):
     var null_row: List[UInt8]
     # The rows' heap blocks, which gathered string columns reference.
     var heaps: TupleDataHeaps
+    # The finalize tasks not yet run (HashJoinFinalizeEvent's tasks).
+    var pending: List[_FinalizeJob]
 
     def __init__(
         out self, var keys: List[Series], layout: TupleDataLayout
@@ -517,6 +519,7 @@ struct _TableData(Movable):
         self.aux_next = List[UInt64]()
         self.null_row = List[UInt8](length=layout.row_width(), fill=0)
         self.heaps = TupleDataHeaps()
+        self.pending = List[_FinalizeJob]()
 
 
 struct _SinkJob(Job):
@@ -989,6 +992,8 @@ struct JoinHashTable(Copyable, Movable):
     # The rows the collection holds: `inserted`, plus a right or full
     # join's rows with a null key.
     var rows_stored: Int
+    # The probe side's estimated rows (dictionary emission at finish).
+    var probe_estimate: Int
 
     def __init__(
         out self,
@@ -1001,6 +1006,7 @@ struct JoinHashTable(Copyable, Movable):
         keys_only: Bool = False,
         probe_estimate: Int = -1,
         propagate: Bool = True,
+        defer_finalize: Bool = False,
     ) raises:
         """Build and finalize the table over `keys` (one column per
         equality condition, all of one length). `payload`: the build
@@ -1013,7 +1019,10 @@ struct JoinHashTable(Copyable, Movable):
         join is a semi, anti or mark join (`keys_only_join`), which keeps
         one row per key. `probe_estimate`: the probe side's estimated
         rows (dictionary emission; -1 when unknown). `propagate`: the join
-        reads the rows' found flags (`PropagatesBuildSide`)."""
+        reads the rows' found flags (`PropagatesBuildSide`).
+        `defer_finalize`: leave the finalize tasks to the caller's finish
+        event (`finalize_tasks`, `finalize_task`, `finish_finalize`)
+        rather than running them here."""
         var unchunked = List[Series](capacity=len(keys))
         for key in keys:
             if key.dtype().is_nested():
@@ -1055,6 +1064,7 @@ struct JoinHashTable(Copyable, Movable):
         self.output_types = output_types.copy()
         self.use_dictionary = False
         self.rows_stored = 0
+        self.probe_estimate = probe_estimate
         self.count = len(unchunked[0]) if len(unchunked) > 0 else 0
         if self.count > Int(Int32.MAX):
             raise Error("A join build exceeds 2^31 - 1 rows")
@@ -1211,15 +1221,38 @@ struct JoinHashTable(Copyable, Movable):
             tasks[p * sink_threads // self.parts].regions.append(
                 inserts[p].copy()
             )
-        if len(tasks) == 1:
-            tasks[0].run()
+        self.data[].pending = tasks^
+        if defer_finalize:
+            return
+        if self.finalize_tasks() == 1:
+            self.finalize_task(0)
         else:
-            run_jobs(tasks)
-        for t in range(len(tasks)):
+            run_jobs(self.data[].pending)
+        self.finish_finalize()
+
+    def finalize_tasks(self) -> Int:
+        """The finalize tasks left to run (HashJoinFinalizeEvent::GetTasks:
+        one per build sink thread, each filling a run of partitions'
+        regions of the pointer table)."""
+        return len(self.data[].pending)
+
+    def finalize_task(self, task: Int) raises:
+        """Run finalize task `task` (HashJoinFinalizeTask); tasks run at
+        the same time, each on its own regions."""
+        self.data[].pending[task].run()
+
+    def finish_finalize(mut self) raises:
+        """After the last finalize task (HashJoinFinalizeEvent::
+        FinishEvent): whether any chain is longer than one, then
+        dictionary emission's arrays when it applies."""
+        if len(self.data[].pending) == 0:
+            return
+        for t in range(len(self.data[].pending)):
             self.chains_longer_than_one = (
-                self.chains_longer_than_one or tasks[t].chained
+                self.chains_longer_than_one or self.data[].pending[t].chained
             )
-        if self._can_use_dictionary_emission(probe_estimate):
+        self.data[].pending = List[_FinalizeJob]()
+        if self._can_use_dictionary_emission(self.probe_estimate):
             self._build_dictionary_arrays()
 
     def _can_use_dictionary_emission(self, probe_cardinality: Int) -> Bool:
