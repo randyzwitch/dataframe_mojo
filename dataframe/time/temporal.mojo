@@ -21,6 +21,11 @@ abbreviation, formatting only), %b/%B (English month names), %a/%A
 number from Sunday/Monday), %u (ISO weekday), and %%. Any other character must match
 literally. A parsed offset makes the value UTC.
 """
+from dataframe.checked import (
+    add as _int64_add,
+    sub as _int64_sub,
+    mul as _int64_mul,
+)
 from dataframe.time.calendar import (
     civil_from_days,
     days_from_civil,
@@ -37,32 +42,15 @@ comptime INT64_MIN = Int64(-9223372036854775807) - 1
 
 
 def checked_mul(a: Int64, b: Int64) raises -> Int64:
-    # Unsigned magnitudes represent abs(MIN) without signed negation overflow.
-    # A negative product may have magnitude 2**63; a positive one may not.
-    var negative = (a < 0) != (b < 0)
-    var left = a.cast[DType.uint64]()
-    var right = b.cast[DType.uint64]()
-    left = UInt64(0) - left if a < 0 else left
-    right = UInt64(0) - right if b < 0 else right
-    var limit = (UInt64(1) << 63) - UInt64(not negative)
-    if right != 0 and left > limit // right:
-        raise Error("temporal value overflows Int64")
-    var magnitude = left * right
-    var result = UInt64(0) - magnitude if negative else magnitude
-    return result.cast[DType.int64]()
+    return _int64_mul["temporal value overflows Int64"](a, b)
 
 
 def checked_add(a: Int64, b: Int64) raises -> Int64:
-    if (b > 0 and a > INT64_MAX - b) or (b < 0 and a < INT64_MIN - b):
-        raise Error("temporal value overflows Int64")
-    return a + b
+    return _int64_add["temporal value overflows Int64"](a, b)
 
 
 def checked_sub(a: Int64, b: Int64) raises -> Int64:
-    # Test the representable difference directly; -MIN is unrepresentable.
-    if (b > 0 and a < INT64_MIN + b) or (b < 0 and a > INT64_MAX + b):
-        raise Error("temporal value overflows Int64")
-    return a - b
+    return _int64_sub["temporal value overflows Int64"](a, b)
 
 
 def checked_floor_div(a: Int64, b: Int64) raises -> Int64:
