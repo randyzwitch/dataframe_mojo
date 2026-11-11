@@ -7,6 +7,7 @@ multiply-and-reject method, which has no modulo bias. Distinct indices come
 from Floyd's algorithm when few rows are wanted and from a partial
 Fisher-Yates shuffle otherwise.
 """
+from dataframe.hash_bits import _splitmix64
 from std.collections import Dict, Optional
 from std.time import perf_counter_ns
 
@@ -19,10 +20,7 @@ struct SplitMix64(Movable):
 
     def next(mut self) -> UInt64:
         self.state += 0x9E3779B97F4A7C15
-        var z = self.state
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EB
-        return z ^ (z >> 31)
+        return _splitmix64(self.state)
 
     def below(mut self, bound: Int) -> Int:
         """Uniform integer in [0, bound); bound must be positive."""

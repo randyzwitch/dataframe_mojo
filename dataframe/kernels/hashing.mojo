@@ -5,6 +5,7 @@ combined one column at a time and re-densified, so ids never depend on
 string concatenation or hash collisions: equality is exact per column.
 Float64 keys treat every NaN as one value and -0.0 as equal to 0.0.
 """
+from dataframe.hash_bits import _splitmix64
 from std.collections import Dict
 from std.memory import Pointer, bitcast, unsafe_memcpy
 from std.sys import size_of
@@ -218,10 +219,8 @@ struct _InlineStringCodes(Movable):
                 self.fallback[key] = next_id
                 return next_id
             return code
-        var hash_value = UInt64(key) ^ UInt64(key >> 64)
-        hash_value = (hash_value ^ (hash_value >> 30)) * 0xBF58476D1CE4E5B9
-        hash_value = (hash_value ^ (hash_value >> 27)) * 0x94D049BB133111EB
-        var slot = Int((hash_value ^ (hash_value >> 31)) & 511)
+        var hash_value = _splitmix64(UInt64(key) ^ UInt64(key >> 64))
+        var slot = Int(hash_value & 511)
         var keys = self.keys.unsafe_ptr()
         var codes = self.codes.unsafe_ptr()
         while codes[unsafe_offset=slot] >= 0:

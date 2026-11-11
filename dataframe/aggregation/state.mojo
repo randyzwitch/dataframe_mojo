@@ -1,4 +1,5 @@
 """Mergeable reduction state shared by eager grouping and streaming."""
+from dataframe.hash_bits import _splitmix64
 from dataframe.aggregation.reducer import (
     Reducer,
 )
@@ -136,10 +137,7 @@ def _equality_words(columns: List[Series]) raises -> List[List[Int]]:
 def _word_hash(words: List[List[Int]], row: Int) -> UInt64:
     var h = UInt64(0x9E3779B97F4A7C15)
     for w in range(len(words)):
-        var z = h ^ UInt64(words[w][row])
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EB
-        h = z ^ (z >> 31)
+        h = _splitmix64(h ^ UInt64(words[w][row]))
     return h
 
 
