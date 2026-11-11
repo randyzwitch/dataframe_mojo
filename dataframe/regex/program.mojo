@@ -7,13 +7,9 @@ The program also carries the DFA's alphabet: code points partitioned into
 classes that no instruction distinguishes. A DFA state then needs one
 transition per class instead of one per code point.
 """
-from .charclass import (
-    MAX_CODEPOINT,
-    _sort,
-    class_contains,
-    word_class,
-    ascii_class,
-)
+from .charclass import ascii_class
+from unicode_mojo.ranges import MAX_CODEPOINT, contains
+from unicode_mojo.properties import word_ranges
 from .alphabet_lookup import wide_alphabet_class
 from .class_lookup import build_unicode_membership, unicode_class_has
 from .syntax import (
@@ -225,7 +221,7 @@ struct Program(Movable, Sized):
                 len(self.class_ranges),
                 cp,
             )
-        return class_contains(self.word, cp)
+        return contains(self.word, cp)
 
     @always_inline
     def class_of(self, cp: UInt32) -> Int:
@@ -568,7 +564,7 @@ def _build_alphabet(mut program: Program):
     var keys = List[UInt64]()
     for c in cuts:
         keys.append(UInt64(c))
-    _sort(keys)
+    sort(Span(keys))
     program.boundaries = List[UInt32]()
     for k in keys:
         var cut = UInt32(k)
@@ -676,9 +672,9 @@ def _compile_program(
     if program.looks & LOOK_UNICODE_WORD:
         program.word = word^
         if len(program.word) == 0:
-            program.word = word_class()
+            program.word = word_ranges()
         for cp in range(128):
-            program.word_ascii[cp] = class_contains(program.word, UInt32(cp))
+            program.word_ascii[cp] = contains(program.word, UInt32(cp))
     _build_two_byte_membership(program)
     build_unicode_membership(
         program.class_ascii,

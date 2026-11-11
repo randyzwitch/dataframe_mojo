@@ -514,7 +514,7 @@ views. Changed chunks use a shared output builder and reuse decomposition
 scratch across rows. Canonical ordering uses bounded insertion for short
 combining runs and stable counting sort for long runs. Tables and all 20,034
 conformance vectors come from the official Unicode 17.0 data under the
-[Unicode License v3](../scripts/vendor/unicode-LICENSE). The standalone
+[Unicode License v3](https://github.com/randyzwitch/unicode_mojo/blob/main/scripts/vendor/unicode-LICENSE). The standalone
 `unicode_mojo` dependency owns the normalization algorithms, generated tables,
 data generator, conformance corpus, and Unicode 15.0 Alphabetic ranges.
 Run its `pixi run conformance` task for the full Unicode corpus. In that

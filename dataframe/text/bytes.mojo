@@ -6,6 +6,7 @@ over every row those checks cost more than the comparison itself. `_Bytes`
 reads offsets and bytes (or view storage) directly, and `_same_bytes` and
 `_order_bytes` use the standard byte comparison primitive.
 """
+from unicode_mojo.utf8 import unsafe_codepoint_width
 from dataframe.storage.buffer import _Buffer
 
 from std.memory import ArcPointer, Pointer, unsafe_memcmp
@@ -157,17 +158,6 @@ def _find_bytes(
     )
 
 
-@always_inline
-def _utf8_width(byte: UInt8) -> Int:
-    if byte < 0x80:
-        return 1
-    if byte < 0xE0:
-        return 2
-    if byte < 0xF0:
-        return 3
-    return 4
-
-
 def _match_at(
     value: Span[UInt8, ImmutAnyOrigin],
     at: Int,
@@ -182,7 +172,7 @@ def _match_at(
         if i >= len(value):
             return -1
         if b == 95:
-            i += _utf8_width(v.unsafe_offset(i)[])
+            i += unsafe_codepoint_width(v.unsafe_offset(i)[])
         elif v.unsafe_offset(i)[] == b:
             i += 1
         else:

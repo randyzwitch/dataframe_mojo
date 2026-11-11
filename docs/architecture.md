@@ -334,17 +334,24 @@ null/empty rules, and error timing. No parser or wire format changes here.
 
 The standalone `unicode_mojo` package owns normalization algorithms, static
 tables, the data generator, the full Unicode 17 conformance corpus, and Unicode
-15 Alphabetic ranges. It imports only the Mojo standard library. Pixi resolves
+15 Alphabetic ranges. It also owns Unicode 16 property lookup and aliases,
+the frozen regex character classes and simple folding orbits, code-point range
+operations, alphabetic title casing, and shared UTF-8 append/width primitives.
+It imports only the Mojo standard library. Pixi resolves
 the [public repository](https://github.com/randyzwitch/unicode_mojo) at the Git
 revision pinned in the workspace and package dependencies.
 
 `text/unicode/normalization.mojo` adapts borrowed row spans to the package's
 reusable normalizer. Dataframe owns null handling, chunks, Arrow layouts,
-unchanged-buffer reuse and the output builder. Title casing consumes the
-package's Alphabetic ranges while retaining its existing casing rules.
-Regex Unicode property tables remain with the matching engine.
+unchanged-buffer reuse and the output builder. Title casing passes borrowed
+row spans and the shared output buffer to the package's reusable title caser.
+Its existing Alphabetic word rule and adjacent-neighbor final-sigma rule are
+preserved. JSON and shapefile text decoders use the package's UTF-8 encoder.
+The regex parser, NFA/DFA engines, compiled class directories, and vectorized
+matching remain in dataframe; they consume the package's properties, simple
+folding, and range operations through direct imports.
 
 The text boundary gate still checks the dataframe adapter and legacy aliases.
 The dependency's standalone tests cover algorithms and Unicode data; dataframe
-integration tests cover storage and execution behavior. Both Unicode versions
-and their observable string semantics are preserved.
+integration tests cover storage and execution behavior. All existing Unicode
+versions and their observable string semantics are preserved.
