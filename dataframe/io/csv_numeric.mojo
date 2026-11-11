@@ -1,558 +1,180 @@
-"""CSV Float32 rounding and standard Float64 conversion.
+"""CSV numeric syntax around EmberJSON Float32 and standard Float64 conversion.
 
-Float32 parses directly at target precision to avoid double rounding near
-midpoints; Float64 uses the standard constructor after CSV syntax checks.
+EmberJSON owns Float32 rounding, including halfway and subnormal values. This
+adapter preserves CSV signs, leading zeroes, decimal-point forms, special
+values, and overflow to infinity without a local decimal conversion algorithm.
 """
-from std.math import mulhi
+from emberjson import Parser, DerErrorKind, DeserializationError
 from std.memory import bitcast
-from std.bit import count_leading_zeros
-from std.builtin.globals import global_constant
-
-from dataframe.io.csv_decimal import parse_csv_decimal
-from std.collections.string._parsing_numbers.constants import (
-    SMALLEST_POWER_OF_5,
-    get_power_of_5,
-)
-
-
-comptime _F32_MANTISSA_BITS = 23
-comptime _F32_MIN_EXPONENT = -127
-comptime _F32_INFINITY_POWER = 255
-comptime _F32_SMALLEST_POWER_OF_TEN = -65
-comptime _F32_LARGEST_POWER_OF_TEN = 38
-comptime _F32_MAX_EXACT_INTEGER = UInt64(1 << 24)
-
-
-@fieldwise_init
-struct _Product128:
-    var low: UInt64
-    var high: UInt64
-
-
-@fieldwise_init
-struct _Adjusted32:
-    var mantissa: UInt64
-    var power2: Int
-
-
-@fieldwise_init
-struct _ScannedNumber:
-    var negative: Bool
-    var mantissa: UInt64
-    var exponent: Int
-    var many_digits: Bool
 
 
 @always_inline
-def _ascii_lower(byte: UInt8) -> UInt8:
-    return byte | UInt8(0x20)
+def _digit(c: UInt8) -> Bool:
+    return c >= 48 and c <= 57
 
 
-# fast-float2 parse_inf_nan: return (none=0, nan=1, inf=2, negative).
-def _scan_special(text: StringSlice) -> Tuple[Int, Bool]:
+def _scan(text: StringSlice) raises -> Tuple[Int, Int, Int]:
+    """Validate the whole CSV field; return sign, integer and exponent ends."""
+    var b = text.as_bytes()
+    var n = len(b)
+    var i = 0
+    if n and (b[0] == 43 or b[0] == 45):
+        i = 1
+    var start = i
+    while i < n and _digit(b[i]):
+        i += 1
+    var integer_end = i
+    var digits = i - start
+    if i < n and b[i] == 46:
+        i += 1
+        var fraction_start = i
+        while i < n and _digit(b[i]):
+            i += 1
+        digits += i - fraction_start
+    var exponent_start = i
+    if i < n and (b[i] == 101 or b[i] == 69):
+        i += 1
+        if i < n and (b[i] == 43 or b[i] == 45):
+            i += 1
+        var exponent_digits = i
+        while i < n and _digit(b[i]):
+            i += 1
+        if i == exponent_digits:
+            raise Error("invalid floating-point value")
+    if digits == 0 or i != n:
+        raise Error("invalid floating-point value")
+    return start, integer_end, exponent_start
+
+
+def _special(text: StringSlice) -> Tuple[Bool, Float32]:
     var b = text.as_bytes()
     var start = 0
     var negative = False
-    if len(b) > 0 and (b[0] == 43 or b[0] == 45):
+    if len(b) and (b[0] == 43 or b[0] == 45):
         negative = b[0] == 45
         start = 1
     var n = len(b) - start
-    if n == 3 and (
-        _ascii_lower(b[start]) == 110
-        and _ascii_lower(b[start + 1]) == 97
-        and _ascii_lower(b[start + 2]) == 110
-    ):
-        return (1, negative)
-    if n == 3 and (
-        _ascii_lower(b[start]) == 105
-        and _ascii_lower(b[start + 1]) == 110
-        and _ascii_lower(b[start + 2]) == 102
-    ):
-        return (2, negative)
-    if n == 8 and (
-        _ascii_lower(b[start]) == 105
-        and _ascii_lower(b[start + 1]) == 110
-        and _ascii_lower(b[start + 2]) == 102
-        and _ascii_lower(b[start + 3]) == 105
-        and _ascii_lower(b[start + 4]) == 110
-        and _ascii_lower(b[start + 5]) == 105
-        and _ascii_lower(b[start + 6]) == 116
-        and _ascii_lower(b[start + 7]) == 121
-    ):
-        return (2, negative)
-    return (0, False)
-
-
-# fast-float2 number.rs::parse_number translated for a strict CSV field.
-# It builds the common <=19-digit mantissa during its first grammar pass.  Only
-# the source algorithm's many-digit path reparses the first 19 digits.
-@always_inline
-def _is_decimal_digit(byte: UInt8) -> Bool:
-    return byte >= 48 and byte <= 57
-
-
-@always_inline
-def _parse_8digits(word: UInt64) -> UInt64:
-    # fast-float2 number.rs::parse_8digits.  The caller has already established
-    # that every byte is an ASCII digit and that this 8-byte load is in bounds.
-    var value = word - UInt64(0x3030303030303030)
-    value = value * 10 + (value >> 8)
-    var left = (value & UInt64(0x000000FF000000FF)) * UInt64(0x000F424000000064)
-    var right = ((value >> 16) & UInt64(0x000000FF000000FF)) * UInt64(
-        0x0000271000000001
-    )
-    return UInt64(UInt32((left + right) >> 32))
-
-
-@always_inline
-def _try_parse_8digits(
-    bytes: Span[UInt8, _], start: Int, mantissa: UInt64
-) -> Tuple[Int, UInt64]:
-    # Advance the numeric cursor only past complete eight-digit groups,
-    # leaving the first incomplete or invalid group for scalar parsing.
-    if start + 8 > len(bytes):
-        return (0, mantissa)
-    var word = bitcast[DType.uint64, 1](
-        bytes.unsafe_ptr().unsafe_load[width=8](start)
-    )
+    var bits = UInt32(0)
     if (
-        (word + UInt64(0x4646464646464646))
-        | (word - UInt64(0x3030303030303030))
-    ) & UInt64(0x8080808080808080) != 0:
-        return (0, mantissa)
-    return (8, mantissa * UInt64(100000000) + _parse_8digits(word))
+        n == 3
+        and b[start] | 32 == 110
+        and b[start + 1] | 32 == 97
+        and b[start + 2] | 32 == 110
+    ):
+        bits = 0x7FC00000
+    elif (
+        (n == 3 or n == 8)
+        and b[start] | 32 == 105
+        and b[start + 1] | 32 == 110
+        and b[start + 2] | 32 == 102
+    ):
+        if n == 8 and not (
+            b[start + 3] | 32 == 105
+            and b[start + 4] | 32 == 110
+            and b[start + 5] | 32 == 105
+            and b[start + 6] | 32 == 116
+            and b[start + 7] | 32 == 121
+        ):
+            return False, 0
+        bits = 0x7F800000
+    else:
+        return False, 0
+    if negative:
+        bits |= 0x80000000
+    return True, bitcast[DType.float32](bits)
 
 
-@always_inline
-def _parse_to_19(
-    bytes: Span[UInt8, _], start: Int, mantissa: UInt64
-) -> Tuple[Int, UInt64]:
-    # number.rs::try_parse_19digits: stop as soon as 19 digits are present.
-    var i = start
-    var value = mantissa
-    while i < len(bytes) and value < UInt64(1000000000000000000):
-        var byte = bytes[i]
-        if not _is_decimal_digit(byte):
-            break
-        value = value * 10 + UInt64(byte - 48)
-        i += 1
-    return (i, value)
+def _overflow(error: DeserializationError) -> Bool:
+    # EmberJSON 0.5.0 has no distinct range-error kind. Match only its two
+    # overflow diagnostics; changing this dependency requires range tests.
+    return error.kind == DerErrorKind.InvalidValue and (
+        error.message == "Infinite float" or error.message == "float overflow"
+    )
 
 
-def _scan_csv_number(text: StringSlice) -> Tuple[Bool, _ScannedNumber]:
+def _parse_json(text: StringSlice) raises -> Float32:
+    var parser = Parser(text)
+    var result = Float32(0)
+    try:
+        result = parser.expect_float[DType.float32]()
+    except err:
+        # The caller already validated the complete CSV field.
+        if _overflow(err):
+            return bitcast[DType.float32](UInt32(0x7F800000))
+        raise Error(String(err))
+    if parser.has_more():
+        raise Error("invalid floating-point value")
+    return result
+
+
+def _adapt_csv_float32(text: StringSlice) raises -> Float32:
+    var special = _special(text)
+    if special[0]:
+        return special[1]
+    var scanned = _scan(text)
+    var start = scanned[0]
+    var integer_end = scanned[1]
+    var exponent_start = scanned[2]
     var bytes = text.as_bytes()
-    if len(bytes) == 0:
-        return (False, _ScannedNumber(False, 0, 0, False))
-
-    # parse_number: optional sign, followed by the integer component.
-    var i = 0
-    var negative = False
-    if bytes[0] == 45:
-        negative = True
-        i = 1
-        if i == len(bytes):
-            return (False, _ScannedNumber(False, 0, 0, False))
-    elif bytes[0] == 43:
-        i = 1
-        if i == len(bytes):
-            return (False, _ScannedNumber(False, 0, 0, False))
-
-    var mantissa = UInt64(0)
-    var digits_start = i
-    while i < len(bytes) and _is_decimal_digit(bytes[i]):
-        # number.rs::try_parse_digits deliberately wraps here.  The uncommon
-        # many-digit branch below discards it and derives a bounded mantissa.
-        mantissa = mantissa * 10 + UInt64(bytes[i] - 48)
-        i += 1
-    var integer_digits = i - digits_start
-    var int_end = i
-
-    # parse_number's fractional branch uses up to two packed 8-byte groups
-    # before its scalar cursor.  The scalar tail also validates full CSV input.
-    var fractional_digits = 0
-    var exponent = 0
-    if i < len(bytes) and bytes[i] == 46:
-        i += 1
-        var fractional_start = i
-        var block = _try_parse_8digits(bytes, i, mantissa)
-        i += block[0]
-        mantissa = block[1]
-        if block[0] == 8:
-            block = _try_parse_8digits(bytes, i, mantissa)
-            i += block[0]
-            mantissa = block[1]
-        while i < len(bytes) and _is_decimal_digit(bytes[i]):
-            mantissa = mantissa * 10 + UInt64(bytes[i] - 48)
-            i += 1
-        fractional_digits = i - fractional_start
-        exponent = -fractional_digits
-
-    var digits = integer_digits + fractional_digits
-    if digits == 0:
-        return (False, _ScannedNumber(False, 0, 0, False))
-
-    # number.rs::parse_scientific, with strict full consumption rather than its
-    # prefix-accepting public parse contract.
-    var explicit = 0
-    if i < len(bytes) and (bytes[i] == 101 or bytes[i] == 69):
-        i += 1
-        var explicit_negative = False
-        if i < len(bytes) and (bytes[i] == 45 or bytes[i] == 43):
-            explicit_negative = bytes[i] == 45
-            i += 1
-        var exp_digits = 0
-        while i < len(bytes) and _is_decimal_digit(bytes[i]):
-            if explicit < 65536:
-                explicit = explicit * 10 + Int(bytes[i] - 48)
-            exp_digits += 1
-            i += 1
-        if exp_digits == 0:
-            return (False, _ScannedNumber(False, 0, 0, False))
-        if explicit_negative:
-            explicit = -explicit
-        exponent += explicit
-    if i != len(bytes):
-        return (False, _ScannedNumber(False, 0, 0, False))
-
-    if digits <= 19:
-        return (True, _ScannedNumber(negative, mantissa, exponent, False))
-
-    # Exact fast-float2 uncommon path.  Leading zeroes and a decimal point
-    # reduce the count before the 19-digit reparse, as in number.rs.
-    var excess = digits - 19
-    var p = digits_start
-    while p < len(bytes) and (bytes[p] == 48 or bytes[p] == 46):
-        if bytes[p] == 48:
-            excess -= 1
-        p += 1
-    if excess <= 0:
-        return (True, _ScannedNumber(negative, mantissa, exponent, False))
-
-    mantissa = 0
-    var parsed = _parse_to_19(bytes, digits_start, mantissa)
-    i = parsed[0]
-    mantissa = parsed[1]
-    if mantissa >= UInt64(1000000000000000000):
-        # int_end.offset_from(cursor): digits remaining before the decimal.
-        exponent = int_end - i
-    else:
-        if i >= len(bytes) or bytes[i] != 46:
-            return (False, _ScannedNumber(False, 0, 0, False))
-        i += 1
-        var fraction_start = i
-        parsed = _parse_to_19(bytes, i, mantissa)
-        i = parsed[0]
-        mantissa = parsed[1]
-        exponent = -(i - fraction_start)
-    exponent += explicit
-    return (True, _ScannedNumber(negative, mantissa, exponent, True))
-
-
-@always_inline
-def _float32_from_bits(bits: UInt32) -> Float32:
-    return bitcast[DType.float32](bits)
-
-
-@always_inline
-def _float32_zero(negative: Bool) -> Float32:
-    return _float32_from_bits(UInt32(0x80000000) if negative else UInt32(0))
-
-
-@always_inline
-def _float32_inf(negative: Bool) -> Float32:
-    return _float32_from_bits(
-        UInt32(0xFF800000) if negative else UInt32(0x7F800000)
-    )
-
-
-# fast-float2 float.rs fixed tables, kept addressable for its indexed lookup.
-comptime _POW10_F32: Array[Float32, 16] = [
-    1e0,
-    1e1,
-    1e2,
-    1e3,
-    1e4,
-    1e5,
-    1e6,
-    1e7,
-    1e8,
-    1e9,
-    1e10,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-]
-
-
-@always_inline
-def _pow10_f32(k: Int) -> Float32:
-    return global_constant[_POW10_F32]()[k & 15]
-
-
-comptime _INT_POW10: Array[UInt64, 16] = [
-    1,
-    10,
-    100,
-    1000,
-    10000,
-    100000,
-    1000000,
-    10000000,
-    100000000,
-    1000000000,
-    10000000000,
-    100000000000,
-    1000000000000,
-    10000000000000,
-    100000000000000,
-    1000000000000000,
-]
-
-
-@always_inline
-def _int_pow10(k: Int) -> UInt64:
-    return global_constant[_INT_POW10]()[k]
-
-
-@always_inline
-def _power(q: Int) -> Int:
-    return ((q * 217706) >> 16) + 63
-
-
-@always_inline
-def _full_multiply(a: UInt64, b: UInt64) -> _Product128:
-    return _Product128(a * b, mulhi(a, b))
-
-
-@always_inline
-def _product_approx(q: Int, w: UInt64) -> _Product128:
-    # fast-float2 binary::compute_product_approx, using the same power table
-    # shipped by the installed Mojo Lemire implementation.
-    var index = 2 * (q - SMALLEST_POWER_OF_5)
-    var first = _full_multiply(w, get_power_of_5(index))
-    var precision_mask = UInt64(0xFFFFFFFFFFFFFFFF) >> UInt64(
-        _F32_MANTISSA_BITS + 3
-    )
-    if (first.high & precision_mask) == precision_mask:
-        var second = _full_multiply(w, get_power_of_5(index + 1))
-        first.low += second.high
-        if second.high > first.low:
-            first.high += 1
-    return first^
-
-
-@always_inline
-def _make_float32(mantissa: UInt64, exponent: Int) -> Float32:
-    var bits = UInt32(mantissa & UInt64((1 << _F32_MANTISSA_BITS) - 1))
-    bits |= UInt32(exponent + 127) << 23
-    return _float32_from_bits(bits)
-
-
-@always_inline
-def _compute_float32(q: Int, input: UInt64) -> _Adjusted32:
-    # Direct translation of fast-float2 0.2.4 binary::compute_float for f32.
-    if input == 0 or q < _F32_SMALLEST_POWER_OF_TEN:
-        return _Adjusted32(0, 0)
-    if q > _F32_LARGEST_POWER_OF_TEN:
-        return _Adjusted32(0, _F32_INFINITY_POWER)
-    var lz = Int(count_leading_zeros(input))
-    var w = input << UInt64(lz)
-    var product = _product_approx(q, w)
-    if product.low == UInt64(0xFFFFFFFFFFFFFFFF) and (q < -27 or q > 55):
-        return _Adjusted32(0, -1)
-    var upper = Int(product.high >> 63)
-    var shift = upper + 64 - _F32_MANTISSA_BITS - 3
-    var mantissa = product.high >> UInt64(shift)
-    var power2 = _power(q) + upper - lz - _F32_MIN_EXPONENT
-    if power2 <= 0:
-        if -power2 + 1 >= 64:
-            return _Adjusted32(0, 0)
-        mantissa >>= UInt64(-power2 + 1)
-        mantissa += mantissa & 1
-        mantissa >>= 1
-        power2 = 1 if mantissa >= UInt64(1 << _F32_MANTISSA_BITS) else 0
-        return _Adjusted32(mantissa, power2)
-    if (
-        product.low <= 1
-        and q >= -17
-        and q <= 10
-        and (mantissa & 3) == 1
-        and (mantissa << UInt64(shift)) == product.high
+    var negative = start == 1 and bytes[0] == 45
+    while start + 1 < integer_end and bytes[start] == 48:
+        start += 1
+    var value = Float32(0)
+    if integer_end == scanned[0]:
+        var normalized = String("0") + text[byte=start:]
+        value = _parse_json(normalized)
+    elif (
+        integer_end < len(bytes)
+        and bytes[integer_end] == 46
+        and exponent_start == integer_end + 1
     ):
-        mantissa &= ~UInt64(1)
-    mantissa += mantissa & 1
-    mantissa >>= 1
-    if mantissa >= UInt64(2 << _F32_MANTISSA_BITS):
-        mantissa = UInt64(1 << _F32_MANTISSA_BITS)
-        power2 += 1
-    mantissa &= ~UInt64(1 << _F32_MANTISSA_BITS)
-    if power2 >= _F32_INFINITY_POWER:
-        return _Adjusted32(0, _F32_INFINITY_POWER)
-    return _Adjusted32(mantissa, power2)
-
-
-@always_inline
-def _try_fast_float32(
-    mantissa: UInt64, exponent: Int, negative: Bool, many_digits: Bool
-) -> Tuple[Bool, Float32]:
-    # number.rs::Number::try_fast_path for Float32: one guarded attempt,
-    # including the source checked-multiply disguised path.
-    if (
-        many_digits
-        or mantissa > _F32_MAX_EXACT_INTEGER
-        or exponent < -10
-        or exponent > 17
-    ):
-        return (False, Float32(0))
-    var value = Float32(mantissa)
-    if exponent <= 10:
-        if exponent < 0:
-            value /= _pow10_f32(-exponent)
-        else:
-            value *= _pow10_f32(exponent)
+        var normalized = (
+            String(text[byte=start:integer_end]) + text[byte=exponent_start:]
+        )
+        value = _parse_json(normalized)
     else:
-        var product = UInt128(mantissa) * UInt128(_int_pow10(exponent - 10))
-        if product > UInt128(_F32_MAX_EXACT_INTEGER):
-            return (False, Float32(0))
-        value = Float32(UInt64(product)) * _pow10_f32(10)
-    return (True, -value if negative else value)
-
-
-comptime _SIMPLE_SHIFTS: SIMD[DType.uint8, 32] = SIMD[DType.uint8, 32](
-    0,
-    3,
-    6,
-    9,
-    13,
-    16,
-    19,
-    23,
-    26,
-    29,
-    33,
-    36,
-    39,
-    43,
-    46,
-    49,
-    53,
-    56,
-    59,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-)
-
-
-@always_inline
-def _shift_amount(n: Int) -> Int:
-    # simple.rs::{POWERS,MAX_SHIFT}: table for 0..18, otherwise 60.
-    if n < 19:
-        return Int(global_constant[_SIMPLE_SHIFTS]()[n])
-    return 60
-
-
-def _long_float32(text: StringSlice) raises -> Float32:
-    # Direct simple::parse_long_mantissa control flow. CsvDecimal owns the
-    # matching fast-float2 batched decimal shifts and fixed shift metadata.
-    var negative = text.as_bytes()[0] == 45
-    var d = parse_csv_decimal(text)
-    if d.num_digits == 0 or d.decimal_point < -324:
-        return _float32_zero(negative)
-    if d.decimal_point >= 310:
-        return _float32_inf(negative)
-    var exp2 = 0
-    while d.decimal_point > 0:
-        var shift = _shift_amount(d.decimal_point)
-        d.right_shift(shift)
-        if d.decimal_point < -2047:
-            return _float32_zero(negative)
-        exp2 += shift
-    while d.decimal_point <= 0:
-        var shift = _shift_amount(-d.decimal_point)
-        if d.decimal_point == 0:
-            if d.digits[0] >= 5:
-                break
-            shift = 2 if d.digits[0] <= 1 else 1
-        d.left_shift(shift)
-        if d.decimal_point > 2047:
-            return _float32_inf(negative)
-        exp2 -= shift
-    exp2 -= 1
-    while _F32_MIN_EXPONENT + 1 > exp2:
-        var shift = min(_F32_MIN_EXPONENT + 1 - exp2, 60)
-        d.right_shift(shift)
-        exp2 += shift
-    if exp2 - _F32_MIN_EXPONENT >= _F32_INFINITY_POWER:
-        return _float32_inf(negative)
-    d.left_shift(_F32_MANTISSA_BITS + 1)
-    var mantissa = d.round()
-    if mantissa >= UInt64(1 << (_F32_MANTISSA_BITS + 1)):
-        d.right_shift(1)
-        exp2 += 1
-        mantissa = d.round()
-        if exp2 - _F32_MIN_EXPONENT >= _F32_INFINITY_POWER:
-            return _float32_inf(negative)
-    var power2 = exp2 - _F32_MIN_EXPONENT
-    if mantissa < UInt64(1 << _F32_MANTISSA_BITS):
-        power2 -= 1
-    mantissa &= UInt64((1 << _F32_MANTISSA_BITS) - 1)
-    var value = _make_float32(mantissa, power2 - 127)
+        value = _parse_json(text[byte=start:])
     return -value if negative else value
 
 
 def parse_csv_float32(text: StringSlice) raises -> Float32:
-    """Strict CSV Float32 without a Float64 or standard-parser fallback."""
-    var scanned = _scan_csv_number(text)
-    if not scanned[0]:
-        var special = _scan_special(text)
-        if special[0] == 1:
-            return _float32_from_bits(
-                UInt32(0xFFC00000) if special[1] else UInt32(0x7FC00000)
-            )
-        if special[0] == 2:
-            return _float32_inf(special[1])
-        raise Error("invalid floating-point value")
-    var number = _ScannedNumber(
-        scanned[1].negative,
-        scanned[1].mantissa,
-        scanned[1].exponent,
-        scanned[1].many_digits,
-    )
-    var fast = _try_fast_float32(
-        number.mantissa, number.exponent, number.negative, number.many_digits
-    )
-    if fast[0]:
-        return fast[1]
-    var adjusted = _compute_float32(number.exponent, number.mantissa)
-    var needs_long = adjusted.power2 < 0
-    if number.many_digits:
-        var next = _compute_float32(number.exponent, number.mantissa + 1)
-        needs_long = (
-            needs_long
-            or adjusted.mantissa != next.mantissa
-            or adjusted.power2 != next.power2
-        )
-    if needs_long:
-        return _long_float32(text)
-    var value = _make_float32(adjusted.mantissa, adjusted.power2 - 127)
-    return -value if number.negative else value
+    """Parse a bounded CSV field at Float32 precision, preserving IEEE bits."""
+    var bytes = text.as_bytes()
+    var start = 0
+    var end = len(bytes)
+    var negative = False
+    if end and (bytes[0] == 43 or bytes[0] == 45):
+        negative = bytes[0] == 45
+        start = 1
+    if start < end and _digit(bytes[start]):
+        # These CSV spellings can become JSON by borrowing a smaller span.
+        # Neither a temporary String nor an expected parser failure is needed.
+        while (
+            start + 1 < end and bytes[start] == 48 and _digit(bytes[start + 1])
+        ):
+            start += 1
+        if bytes[end - 1] == 46:
+            for byte in bytes[start : end - 1]:
+                if not _digit(byte):
+                    return _adapt_csv_float32(text)
+            end -= 1
+        var parser = Parser(text[byte=start:end])
+        try:
+            var value = parser.expect_float[DType.float32]()
+            if not parser.has_more():
+                return -value if negative else value
+        except err:
+            if _overflow(err):
+                # An overflowing prefix must not hide malformed trailing data.
+                _ = _scan(text)
+                return bitcast[DType.float32](
+                    UInt32(0xFF800000) if negative else UInt32(0x7F800000)
+                )
+    return _adapt_csv_float32(text)
 
 
 def parse_csv_float64(text: StringSlice) raises -> Float64:
-    """Validate CSV numeric syntax and delegate conversion to Float64."""
-    if not _scan_csv_number(text)[0] and not _scan_special(text)[0]:
-        raise Error("invalid floating-point value")
+    """Validate CSV syntax and retain the standard Float64 conversion policy."""
+    if not _special(text)[0]:
+        _ = _scan(text)
     return Float64(text)
