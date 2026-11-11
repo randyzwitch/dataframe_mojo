@@ -1,5 +1,6 @@
 """Bounded reuse of immutable compiled patterns across expression bindings."""
-from std.ffi import _get_global, external_call
+from std.ffi import _get_global
+from std.utils.lock import BlockingSpinLock
 from std.memory import Allocation, Layout, Pointer, alloc, dealloc
 
 from dataframe.regex import Regex
@@ -9,64 +10,51 @@ comptime _CAPACITY = 32
 
 struct _PatternCache(Deinitable, Movable):
     var entries: List[Regex]
-    var mutex: List[UInt64]
-    var ready: Bool
+    var lock: BlockingSpinLock
 
     def __init__(out self):
         self.entries = List[Regex](capacity=_CAPACITY)
-        # Aligned storage for pthread_mutex_t on the supported hosts.
-        self.mutex = List[UInt64](length=16, fill=0)
-        self.ready = False
-        self.ready = (
-            external_call["pthread_mutex_init", Int32](self._mutex(), 0) == 0
-        )
+        self.lock = BlockingSpinLock()
 
-    def __deinit__(deinit self):
-        if self.ready:
-            _ = external_call["pthread_mutex_destroy", Int32](self._mutex())
-
-    def _mutex(self) -> Int:
-        return Int(self.mutex.unsafe_ptr())
-
-    def _lookup(mut self, pattern: String) -> Optional[Regex]:
-        # Called under the mutex. Most-recent entries are at the end.
-        var at = len(self.entries) - 1
+    @staticmethod
+    def _lookup(mut entries: List[Regex], pattern: String) -> Optional[Regex]:
+        # Called under the lock. Most-recent entries are at the end.
+        var at = len(entries) - 1
         while at >= 0:
-            if self.entries[at]._compiled[].pattern == pattern:
-                var result = self.entries[at].copy()
-                if at + 1 != len(self.entries):
-                    var entry = self.entries.pop(at)
-                    self.entries.append(entry^)
+            if entries[at]._compiled[].pattern == pattern:
+                var result = entries[at].copy()
+                if at + 1 != len(entries):
+                    var entry = entries.pop(at)
+                    entries.append(entry^)
                 return result^
             at -= 1
         return None
 
     def compile(mut self, pattern: String) raises -> Regex:
-        if not self.ready:
-            return Regex(pattern)
-        _ = external_call["pthread_mutex_lock", Int32](self._mutex())
-        var cached = self._lookup(pattern)
-        _ = external_call["pthread_mutex_unlock", Int32](self._mutex())
+        var cached: Optional[Regex] = None
+        # Lookup/insertion cannot raise. Keep explicit acquisition pairs:
+        # BlockingScopedLock adds measurable overhead to contended hot hits.
+        var owner = Int(Pointer(to=cached))
+        self.lock.lock(owner)
+        cached = Self._lookup(self.entries, pattern)
+        _ = self.lock.unlock(owner)
         if cached:
             return cached.take()
-        # Construction can raise and takes much longer than a lookup. Keep
-        # it outside the lock, including on invalid-pattern paths.
+        # Parsing may raise and stays outside the lock.
         var compiled = Regex(pattern)
-        _ = external_call["pthread_mutex_lock", Int32](self._mutex())
-        # Another caller may have finished constructing the same pattern.
-        cached = self._lookup(pattern)
-        if cached:
-            _ = external_call["pthread_mutex_unlock", Int32](self._mutex())
-            return cached.take()
-        var result = compiled.copy()
         var evicted: Optional[Regex] = None
-        if len(self.entries) == _CAPACITY:
-            evicted = self.entries.pop(0)
-        self.entries.append(compiled^)
-        _ = external_call["pthread_mutex_unlock", Int32](self._mutex())
-        # Drop potentially large evicted programs after unlocking.
+        # Another caller may have cached this pattern while parsing.
+        self.lock.lock(owner)
+        cached = Self._lookup(self.entries, pattern)
+        if not cached:
+            cached = compiled.copy()
+            if len(self.entries) == _CAPACITY:
+                evicted = self.entries.pop(0)
+            self.entries.append(compiled^)
+        _ = self.lock.unlock(owner)
+        # Destruction of evicted programs stays outside the lock.
         _ = evicted^
-        return result^
+        return cached.take()
 
 
 def _init_cache() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
