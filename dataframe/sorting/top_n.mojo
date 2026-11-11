@@ -9,8 +9,7 @@ from std.collections import BinaryHeap, Optional
 from std.utils import Variant
 from std.sys import size_of
 from std.atomic import Atomic
-from std.ffi import external_call
-from std.memory import Pointer, unsafe_memcpy
+from std.memory import OwnedPointer, Pointer, unsafe_memcpy
 
 from dataframe.sorting.algorithms import Rec, SortKeys, pdqsort_branchless
 from dataframe.sorting.sort_key import KeyBlock
@@ -47,13 +46,19 @@ struct _KeyArena(Movable):
         return at
 
 
-# Cell layout of a TopNBoundary, in 64-bit words.
-comptime _LOCK = 0
-comptime _VERSION = 1
-comptime _WORDS = 2
-comptime _BLOB = 6
-comptime _CAPACITY = 7
-comptime _CELL_WORDS = 8
+struct _BoundaryCell(Movable):
+    """Stable shared state; its variable bytes have one standard owner."""
+
+    var lock: Atomic[Int64]
+    var version: Atomic[Int64]
+    var record: Rec
+    var bytes: List[UInt8]
+
+    def __init__(out self):
+        self.lock = Atomic[Int64](0)
+        self.version = Atomic[Int64](0)
+        self.record = Rec(0)
+        self.bytes = List[UInt8]()
 
 
 struct TopNBoundary(ImplicitlyCopyable, Movable):
@@ -68,7 +73,8 @@ struct TopNBoundary(ImplicitlyCopyable, Movable):
 
     @staticmethod
     def new() -> TopNBoundary:
-        return TopNBoundary(external_call["calloc", Int](_CELL_WORDS, 8))
+        var owner = OwnedPointer(_BoundaryCell())
+        return TopNBoundary(Int(owner^.unsafe_take_allocation().unsafe_leak()))
 
     @staticmethod
     def none() -> TopNBoundary:
@@ -77,38 +83,34 @@ struct TopNBoundary(ImplicitlyCopyable, Movable):
     def free(self):
         if self.address == 0:
             return
-        var blob = self._word(_BLOB)[]
-        if blob != 0:
-            _ = external_call["free", NoneType](Int(blob))
-        _ = external_call["free", NoneType](self.address)
+        var owner = OwnedPointer(
+            unsafe_from_raw_pointer=Pointer[_BoundaryCell, MutUntrackedOrigin](
+                unsafe_from_address=self.address
+            )
+        )
+        _ = owner^
 
     @always_inline
-    def _word(self, k: Int) -> Pointer[UInt64, MutAnyOrigin]:
-        return Pointer[UInt64, MutAnyOrigin](
-            unsafe_from_address=self.address + 8 * k
-        )
-
-    @always_inline
-    def _atomic(self, k: Int) -> Pointer[Atomic[Int64], MutAnyOrigin]:
-        return Pointer[Atomic[Int64], MutAnyOrigin](
-            unsafe_from_address=self.address + 8 * k
-        )
+    def _cell(self) -> ref[MutAnyOrigin] _BoundaryCell:
+        return Pointer[_BoundaryCell, MutAnyOrigin](
+            unsafe_from_address=self.address
+        )[]
 
     def _lock(self):
         while True:
             var free = Int64(0)
-            if self._atomic(_LOCK)[].compare_exchange(free, Int64(1)):
+            if self._cell().lock.compare_exchange(free, Int64(1)):
                 return
 
     def _try_lock(self) -> Bool:
         var free = Int64(0)
-        return self._atomic(_LOCK)[].compare_exchange(free, Int64(1))
+        return self._cell().lock.compare_exchange(free, Int64(1))
 
     def _unlock(self):
-        self._atomic(_LOCK)[].store(0)
+        self._cell().lock.store(0)
 
     def version(self) -> Int64:
-        return self._atomic(_VERSION)[].load()
+        return self._cell().version.load()
 
     def publish[W: Int, VAR: Bool](self, rec: Rec) -> Bool:
         """UpdateValue: take `rec` when there is no boundary yet or it is
@@ -117,36 +119,26 @@ struct TopNBoundary(ImplicitlyCopyable, Movable):
             return False
         comptime K = SortKeys[W, VAR]
         self._lock()
-        if self.version() != 0:
-            var current = Rec(0)
-            comptime for k in range(K.R):
-                current[k] = self._word(_WORDS + k)[]
-            if not K.less(rec, current):
-                self._unlock()
-                return False
+        ref cell = self._cell()
+        if self.version() != 0 and not K.less(rec, cell.record):
+            self._unlock()
+            return False
         var stored = rec
         comptime if VAR:
             var size = Int(rec[1])
-            if Int(self._word(_CAPACITY)[]) < size:
-                var old = self._word(_BLOB)[]
-                if old != 0:
-                    _ = external_call["free", NoneType](Int(old))
-                self._word(_BLOB)[] = UInt64(
-                    external_call["malloc", Int](max(size, 64))
-                )
-                self._word(_CAPACITY)[] = UInt64(max(size, 64))
-            var blob = Int(self._word(_BLOB)[])
+            if len(cell.bytes) < size:
+                cell.bytes = List[UInt8](unsafe_uninit_length=max(size, 64))
+            var blob = cell.bytes.unsafe_ptr()
             unsafe_memcpy(
-                dest=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=blob),
+                dest=blob,
                 src=Pointer[UInt8, MutAnyOrigin](
                     unsafe_from_address=Int(rec[2])
                 ),
                 count=size,
             )
-            stored[2] = UInt64(blob)
-        comptime for k in range(K.R):
-            self._word(_WORDS + k)[] = stored[k]
-        _ = self._atomic(_VERSION)[].fetch_add(1)
+            stored[2] = UInt64(Int(blob))
+        cell.record = stored
+        _ = self._cell().version.fetch_add(1)
         self._unlock()
         return True
 
@@ -170,10 +162,8 @@ struct _BoundaryView(Movable):
             return
         if not shared._try_lock():
             return
-        comptime K = SortKeys[W, VAR]
         self.version = shared.version()
-        comptime for k in range(K.R):
-            self.rec[k] = shared._word(_WORDS + k)[]
+        self.rec = shared._cell().record
         comptime if VAR:
             var size = Int(self.rec[1])
             if len(self.blob) < size:
@@ -182,9 +172,7 @@ struct _BoundaryView(Movable):
                 dest=Pointer[UInt8, MutAnyOrigin](
                     unsafe_from_address=Int(self.blob.unsafe_ptr())
                 ),
-                src=Pointer[UInt8, MutAnyOrigin](
-                    unsafe_from_address=Int(shared._word(_BLOB)[])
-                ),
+                src=shared._cell().bytes.unsafe_ptr(),
                 count=size,
             )
             self.rec[2] = UInt64(Int(self.blob.unsafe_ptr()))
