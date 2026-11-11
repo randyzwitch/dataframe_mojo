@@ -22,7 +22,6 @@ from ..parallel import Pool
 from .arrow import (
     ArrowArray,
     ArrowSchema,
-    _c_string,
     _release_imported,
     _read_c_string,
     _import_arrow_with_pool,
@@ -55,7 +54,7 @@ comptime _Scan = def(Int, Int32, Int, Int32, Int64, Int64, Int, Int) thin abi(
 
 
 def _open_scan(
-    path: String,
+    var path: String,
     columns: List[String],
     projected: Bool,
     memory_map: Bool,
@@ -65,17 +64,15 @@ def _open_scan(
     _path(path)
     var library = _load_library()
     var entry = _Library._symbol(library.handle, "dfq_scan_ipc")
-    var filename = _c_string(path)
-    var names = List[List[UInt8]]()
-    for name in columns:
-        names.append(_c_string(name))
-    var addresses = List[Int]()
+    var filename = path.as_c_string_span()
+    var addresses = List[Int](capacity=len(columns))
+    var names = columns.copy()
     for i in range(len(names)):
-        addresses.append(Int(names[i].unsafe_ptr()))
+        addresses.append(Int(names[i].as_c_string_span().ptr()))
     var stream = _ArrowArrayStream()
     var error = 0
     var status = Pointer(to=entry).unsafe_bitcast[_Scan]()[](
-        Int(filename.unsafe_ptr()),
+        Int(filename.ptr()),
         Int32(memory_map),
         Int(addresses.unsafe_ptr()),
         Int32(len(columns) if projected else -1),
@@ -84,9 +81,9 @@ def _open_scan(
         Int(Pointer(to=stream)),
         Int(Pointer(to=error)),
     )
-    _ = addresses^
+    _ = path^
     _ = names^
-    _ = filename^
+    _ = addresses^
     if status != 0:
         _release_stream(stream)
         _raise_backend_error(library, error, "scan_ipc")
@@ -303,7 +300,7 @@ def _collect(mut stream: _ArrowArrayStream) raises -> DataFrame:
 
 def _read_call(
     entry: Int,
-    path: String,
+    var path: String,
     stream_format: Bool,
     memory_map: Bool,
     columns: List[String],
@@ -312,15 +309,13 @@ def _read_call(
     mut stream: _ArrowArrayStream,
     mut error: Int,
 ) -> Int32:
-    var filename = _c_string(path)
-    var names = List[List[UInt8]]()
-    for name in columns:
-        names.append(_c_string(name))
-    var addresses = List[Int]()
+    var filename = path.as_c_string_span()
+    var addresses = List[Int](capacity=len(columns))
+    var names = columns.copy()
     for i in range(len(names)):
-        addresses.append(Int(names[i].unsafe_ptr()))
+        addresses.append(Int(names[i].as_c_string_span().ptr()))
     var status = Pointer(to=entry).unsafe_bitcast[_Read]()[](
-        Int(filename.unsafe_ptr()),
+        Int(filename.ptr()),
         Int32(stream_format),
         Int32(memory_map),
         Int(addresses.unsafe_ptr()),
@@ -330,8 +325,8 @@ def _read_call(
         Int(Pointer(to=error)),
     )
     _ = addresses^
+    _ = path^
     _ = names^
-    _ = filename^
     return status
 
 
@@ -433,21 +428,21 @@ def read_ipc_stream(
 
 def _schema_call(
     entry: Int,
-    path: String,
+    var path: String,
     stream: Bool,
     mut array: ArrowArray,
     mut schema: ArrowSchema,
     mut error: Int,
 ) -> Int32:
-    var filename = _c_string(path)
+    var filename = path.as_c_string_span()
     var status = Pointer(to=entry).unsafe_bitcast[_Schema]()[](
-        Int(filename.unsafe_ptr()),
+        Int(filename.ptr()),
         Int32(stream),
         Int(Pointer(to=array)),
         Int(Pointer(to=schema)),
         Int(Pointer(to=error)),
     )
-    _ = filename^
+    _ = path^
     return status
 
 
@@ -481,25 +476,25 @@ def _schema_frame(path: String, stream: Bool = False) raises -> DataFrame:
 
 def _open_writer(
     entry: Int,
-    path: String,
-    compression: String,
+    var path: String,
+    var compression: String,
     stream: Bool,
     mut schema: ArrowSchema,
     mut handle: Int,
     mut error: Int,
 ) -> Int32:
-    var filename = _c_string(path)
-    var codec = _c_string(compression)
+    var filename = path.as_c_string_span()
+    var codec = compression.as_c_string_span()
     var status = Pointer(to=entry).unsafe_bitcast[_Open]()[](
-        Int(filename.unsafe_ptr()),
+        Int(filename.ptr()),
         Int(Pointer(to=schema)),
-        Int(codec.unsafe_ptr()),
+        Int(codec.ptr()),
         Int32(stream),
         Int(Pointer(to=handle)),
         Int(Pointer(to=error)),
     )
-    _ = codec^
-    _ = filename^
+    _ = path^
+    _ = compression^
     return status
 
 

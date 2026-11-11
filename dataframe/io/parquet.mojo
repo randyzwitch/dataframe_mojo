@@ -59,7 +59,6 @@ from ..parallel import Job, Pool, run_jobs
 from .arrow import (
     ArrowArray,
     ArrowSchema,
-    _c_string,
     _read_c_string,
     import_arrow,
     _import_arrow_with_pool,
@@ -230,25 +229,25 @@ comptime _WriteFn = def(Int, Int, Int, Int, Int64, Int) thin abi("C") -> Int32
 
 def _call_writer(
     writer: Int,
-    path: String,
-    compression: String,
+    var path: String,
+    var compression: String,
     row_group_size: Int,
     mut array: ArrowArray,
     mut schema: ArrowSchema,
     mut error: Int,
 ) -> Int32:
-    var c_path = _c_string(path)
-    var c_compression = _c_string(compression)
+    var c_path = path.as_c_string_span()
+    var c_compression = compression.as_c_string_span()
     var status = Pointer(to=writer).unsafe_bitcast[_WriteFn]()[](
-        Int(c_path.unsafe_ptr()),
+        Int(c_path.ptr()),
         Int(Pointer(to=array)),
         Int(Pointer(to=schema)),
-        Int(c_compression.unsafe_ptr()),
+        Int(c_compression.ptr()),
         Int64(row_group_size),
         Int(Pointer(to=error)),
     )
-    _ = c_path^
-    _ = c_compression^
+    _ = path^
+    _ = compression^
     return status
 
 
@@ -540,20 +539,12 @@ def _open_parquet_stream(
     owns the entire output, but Arrow decoding buffers are row-group bounded.
     """
     var library = _load_library()
-    var c_path = _c_string(path)
-    var c_columns = List[List[UInt8]](capacity=len(columns))
-    for name in columns:
-        c_columns.append(_c_string(name))
-    var column_pointers = List[Int](capacity=len(c_columns))
-    for i in range(len(c_columns)):
-        column_pointers.append(Int(c_columns[i].unsafe_ptr()))
     var stream = _ArrowArrayStream()
     var error = 0
     var status = _call_reader(
         library,
-        c_path,
-        c_columns,
-        column_pointers,
+        path,
+        columns,
         row_groups,
         group_count,
         use_threads,
@@ -694,27 +685,25 @@ def _strings_with_codes(var frames: List[DataFrame]) raises -> List[DataFrame]:
 
 def _statistics_with_dfparquet(path: String) raises -> DataFrame:
     var library = _load_library()
-    var c_path = _c_string(path)
     var array = ArrowArray()
     var schema = ArrowSchema()
     var error = 0
-    var status = _call_statistics(library, c_path, array, schema, error)
+    var status = _call_statistics(library, path, array, schema, error)
     if status != 0:
         _raise_backend_error(library, error, "parquet_row_group_statistics")
     return import_arrow(array, schema)
 
 
-# The C entry points are called from helpers whose argument buffers are
-# borrowed parameters, so they outlive the call; as locals their last use
-# would be the argument expression, and Mojo may free them before the
-# callee runs.
+# Native readers resolve paths and selected names during the call. Borrow
+# their NUL-terminated storage from local String owners, letting the stdlib
+# reuse or terminate their COW storage. Keep owners through the native call.
+# Arrow schema strings retain separate owners.
 
 
 def _call_reader(
     library: _Library,
-    c_path: List[UInt8],
-    c_columns: List[List[UInt8]],
-    column_pointers: List[Int],
+    var path: String,
+    columns: List[String],
     row_groups: List[Int32],
     group_count: Int,
     use_threads: Bool,
@@ -722,8 +711,10 @@ def _call_reader(
     mut error: Int,
     dictionaries: Bool = False,
 ) raises -> Int32:
-    if len(c_columns) != len(column_pointers):
-        raise Error("read_parquet: column pointer table is inconsistent")
+    var column_pointers = List[Int](capacity=len(columns))
+    var names = columns.copy()
+    for i in range(len(names)):
+        column_pointers.append(Int(names[i].as_c_string_span().ptr()))
     var columns_address = (
         Int(column_pointers.unsafe_ptr()) if len(column_pointers) > 0 else 0
     )
@@ -731,8 +722,8 @@ def _call_reader(
         Int(row_groups.unsafe_ptr()) if len(row_groups) > 0 else 0
     )
     var entry = library.read_dict if dictionaries else library.read
-    return Pointer(to=entry).unsafe_bitcast[_ReadFn]()[](
-        Int(c_path.unsafe_ptr()),
+    var status = Pointer(to=entry).unsafe_bitcast[_ReadFn]()[](
+        Int(path.as_c_string_span().ptr()),
         Int32(1) if use_threads else Int32(0),
         columns_address,
         Int32(len(column_pointers)),
@@ -742,20 +733,30 @@ def _call_reader(
         Int(Pointer(to=error)),
     )
 
+    _ = column_pointers^
+    _ = path^
+    _ = names^
+    return status
+
 
 def _call_statistics(
     library: _Library,
-    c_path: List[UInt8],
+    var path: String,
     mut array: ArrowArray,
     mut schema: ArrowSchema,
     mut error: Int,
 ) raises -> Int32:
-    return Pointer(to=library.statistics).unsafe_bitcast[_StatisticsFn]()[](
-        Int(c_path.unsafe_ptr()),
+    var status = Pointer(to=library.statistics).unsafe_bitcast[
+        _StatisticsFn
+    ]()[](
+        Int(path.as_c_string_span().ptr()),
         Int(Pointer(to=array)),
         Int(Pointer(to=schema)),
         Int(Pointer(to=error)),
     )
+
+    _ = path^
+    return status
 
 
 struct _ParquetBatches(Movable):
