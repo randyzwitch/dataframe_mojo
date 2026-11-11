@@ -113,8 +113,11 @@ null token does not protect it when that token is configured as null.
 Integers use the pinned `atoi_simd` algorithm, with exact destination-width
 checks and no floating-point intermediate. Signed fields accept `+` and `-`;
 unsigned fields reject all negative spellings, including `-0`. Floats use the
-pinned fast-float algorithm, preserving Float32/Float64 rounding and accepting
-its NaN/infinity spellings and overflow behavior. Numeric builders strip
+EmberJSON's Mojo Float32 parser and the standard Float64 constructor. Float32
+conversion preserves target-precision rounding, including halfway and subnormal
+values. A CSV syntax adapter accepts leading `+`, leading zeroes, `.5`, `1.`,
+case-insensitive NaN/infinity spellings, and overflow to signed infinity.
+Numeric builders strip
 leading ASCII spaces and tabs; String content is preserved after CSV unquoting.
 Booleans recognize case-insensitive `true` and `false`.
 

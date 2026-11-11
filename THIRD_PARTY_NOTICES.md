@@ -332,7 +332,8 @@ The generator is `scripts/regex_property_tables.py`.
 
 ## EmberJSON and EmberSerde
 
-JSON token validation, string decoding, and quoting use Brian Grenier's
+JSON token validation, string decoding, quoting, and CSV Float32 conversion
+use Brian Grenier's
 [EmberJSON](https://github.com/bgreni/EmberJson) and its
 [EmberSerde](https://github.com/bgreni/EmberSerde) dependency, both licensed
 under Apache-2.0. Their license texts remain in the upstream repositories
