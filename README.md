@@ -38,7 +38,10 @@ in `pixi.toml` allows, so each tag targets one Mojo version. `v0.3.0` targets
 
 ## Run
 
-With [Pixi 0.84.2](https://pixi.sh) installed, from this directory:
+With [Pixi 0.84.2](https://pixi.sh) installed, run these commands from this
+directory. Pixi fetches and builds
+[unicode_mojo](https://github.com/randyzwitch/unicode_mojo) from the Git revision
+pinned in `pixi.toml`.
 
 ```bash
 pixi run -e native build-dfparquet # native dependency for interchange tests
@@ -369,6 +372,11 @@ and its [EmberSerde dependency](https://github.com/randyzwitch/EmberSerde/tree/c
 using their own package manifests. These revisions carry the compiler
 compatibility fixes and pin the same Mojo compiler as this project. The dataframe packages resolve these dependencies from the
 installed environment.
+Normalization and alphabetic properties now come from the standalone
+[unicode_mojo](https://github.com/randyzwitch/unicode_mojo) package, resolved
+through Pixi at a pinned Git revision. Its
+algorithms, generated tables, data generator and full Unicode conformance
+corpus live there; dataframe retains its storage and execution adapters.
 Tagged releases attach the packages and a generated [API reference](docs/api.md) (`pixi run docs`). See the
 [testing guide](docs/testing.md), the [stability policy](docs/stability.md), and the
 [pandas/Polars migration guide](docs/migration.md).

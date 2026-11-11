@@ -2,6 +2,17 @@
 
 This project does not vendor Polars or fast-float2 packages. Some CSV algorithms are direct translations of their source. Long-string hash block mixing is adapted from DuckDB.
 
+## unicode_mojo
+
+Unicode normalization and Alphabetic properties are supplied by the standalone
+[unicode_mojo](https://github.com/randyzwitch/unicode_mojo) dependency, resolved
+through Pixi at a pinned Git revision. Its code was extracted from this
+MIT-licensed project. Unicode 17.0
+normalization data and Unicode 15.0 Alphabetic data retain their existing
+versions. The package includes the Unicode License v3 and source provenance in
+its `THIRD_PARTY_NOTICES.md`; its generated tables and conformance corpus are
+no longer vendored in dataframe.
+
 ## Polars
 
 Copyright (c) 2025 Ritchie Vink

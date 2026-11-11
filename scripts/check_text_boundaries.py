@@ -19,8 +19,6 @@ def check():
     for path in sorted((ROOT / 'dataframe/text').rglob('*.mojo')):
         name = module_name(path)
         for dependency in imports(path):
-            if name in {'dataframe.text.unicode.alphabetic', 'dataframe.text.unicode.normalization_tables'} and dependency.startswith('dataframe'):
-                failures.append(f'{name} imports above generated Unicode data: {dependency}')
             if dependency in {'dataframe', 'dataframe.execution', 'dataframe.binding'} or dependency.startswith((
                 'dataframe.execution.', 'dataframe.binding.', 'dataframe.frame',
                 'dataframe.lazy', 'dataframe.planning', 'dataframe.optimizer',

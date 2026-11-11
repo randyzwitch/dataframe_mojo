@@ -307,9 +307,9 @@ The text gate rejects query/expression evaluation, providers and file readers
 or writers. The strict number parser retains one existing shared primitive,
 `io.csv_numeric._pow10_f64`, so CSV conversion and legacy cast conversion keep
 their distinct numerical behavior. Expression operation tags and Series/dtype
-representations remain data inputs. JSON value/path/decode helpers and general
-Unicode normalization/alphabetic tables are unchanged in this extraction and
-can be organized in focused follow-ups.
+representations remain data inputs. JSON value/path/decode helpers reside in
+`json/`; general Unicode normalization and alphabetic data come from the
+standalone `unicode_mojo` dependency.
 
 Everything imports the text modules directly; the old root-level compatibility
 modules were removed. This is an ownership extraction: error timing, regex caching and
@@ -332,14 +332,19 @@ null/empty rules, and error timing. No parser or wire format changes here.
 
 ## General Unicode data and normalization
 
-`text/unicode/` owns alphabetic properties, normalization and its generated
-tables. The normalization-table generator's default output follows that owner;
-table content and generation logic are unchanged. The original three root
-modules remain import-compatible re-exports, and engine imports use canonical
-modules. Regex Unicode property tables remain with the matching engine.
+The standalone `unicode_mojo` package owns normalization algorithms, static
+tables, the data generator, the full Unicode 17 conformance corpus, and Unicode
+15 Alphabetic ranges. It imports only the Mojo standard library. Pixi resolves
+the [public repository](https://github.com/randyzwitch/unicode_mojo) at the Git
+revision pinned in the workspace and package dependencies.
 
-The text boundary gate also checks the Unicode subtree and legacy aliases.
-Alphabetic and normalization tables cannot import engine layers. Normalization
-retains its reusable per-row scratch behavior and exact composition,
-decomposition, combining-class and UTF-8 handling. Existing Unicode version
-provenance and vendor-license references remain intact.
+`text/unicode/normalization.mojo` adapts borrowed row spans to the package's
+reusable normalizer. Dataframe owns null handling, chunks, Arrow layouts,
+unchanged-buffer reuse and the output builder. Title casing consumes the
+package's Alphabetic ranges while retaining its existing casing rules.
+Regex Unicode property tables remain with the matching engine.
+
+The text boundary gate still checks the dataframe adapter and legacy aliases.
+The dependency's standalone tests cover algorithms and Unicode data; dataframe
+integration tests cover storage and execution behavior. Both Unicode versions
+and their observable string semantics are preserved.
