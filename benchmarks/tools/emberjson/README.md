@@ -71,6 +71,23 @@ is not a correctness-equivalent replacement for Float32 conversion.
 These are retained integration findings and proposed work, not submitted upstream
 issues or claims that fixes have already been implemented.
 
+## JSON adapter reproduction
+
+`json_operations.mojo` retains the focused workload used for the original JSON
+migration: 20,000 four-field objects with an escaped string, typed decoding, and
+simple JSONPath extraction. It reports seven timed rounds after warmup, with
+row-count and extracted-byte checks. Build the same source against commit
+`6944d0508bb31ff7f17b3827dc357f543beb9c85` (before the JSON migration) and the
+candidate with `-I /path/to/worktree`, then alternate the resulting executables.
+The input and schema are in the program; timings are per operation, not whole
+queries. This probe imports dataframe_mojo because it measures the adapter.
+
+For width scaling and canonicalization, also retain the existing
+`benchmarks/bench_json_value.mojo`. Correctness cases for raw Int128/decimal spans,
+invalid skipped subtrees, Unicode, duplicate keys, and bounded structural indexes
+live in `tests/kernel_equivalence/test_json_reader.mojo`. Those contracts describe
+the capabilities needed from a public upstream source-span cursor.
+
 ## Independent exact-rounding corpus
 
 ```sh
