@@ -153,7 +153,12 @@ struct JsonArrayRows(Movable):
                 raise Error("Expected JSON array comma or closing bracket")
             self.reader.pos += 1
             self.reader.space()
-        _ = self.reader.scan(store=True, unique_keys=False)
+        try:
+            _ = self.reader.scan(store=True, unique_keys=False)
+        except e:
+            raise Error(
+                "JSON table row " + String(self.rows + 1) + ": " + String(e)
+            )
         if self.reader.nodes[0].kind != 123:
             raise Error("JSON table rows must contain objects")
         self.rows += 1

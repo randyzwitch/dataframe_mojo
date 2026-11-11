@@ -1,0 +1,282 @@
+diff --git a/emberjson/_deserialize/_parser_helper.mojo b/emberjson/_deserialize/_parser_helper.mojo
+index ed44190..5716670 100644
+--- a/emberjson/_deserialize/_parser_helper.mojo
++++ b/emberjson/_deserialize/_parser_helper.mojo
+@@ -1,3 +1,4 @@
++# Modified for dataframe_mojo: Mojo 1.3 nightly API compatibility.
+ from emberjson.utils import (
+     BytePtr,
+     CheckedPointer,
+@@ -450,8 +451,7 @@ def copy_to_string[
+     """
+     var length = ptr_dist(start, end)
+ 
+-    @__parameter
+-    def decode_escaped() raises DeserializationError -> String:
++    def decode_escaped() raises DeserializationError {imm length, imm start, imm end, imm first_escape} -> String:
+         # This will usually slightly overallocate if the string contains
+         # escaped unicode
+         var dest = List[UInt8](capacity=length)
+diff --git a/emberjson/_deserialize/parser.mojo b/emberjson/_deserialize/parser.mojo
+index 394cf96..599afbf 100644
+--- a/emberjson/_deserialize/parser.mojo
++++ b/emberjson/_deserialize/parser.mojo
+@@ -1,3 +1,4 @@
++# Modified for dataframe_mojo: Mojo 1.3 nightly API compatibility.
+ from emberjson.utils import (
+     CheckedPointer,
+     BytePtr,
+@@ -1141,10 +1142,9 @@ def minify(s: String, out out_str: String) raises:
+     var end = ptr.unsafe_offset(s_len)
+ 
+     @always_inline
+-    @__parameter
+     def _load_chunk(
+         p: type_of(ptr), cond: Bool
+-    ) -> SIMD[DType.uint8, SIMD8_WIDTH]:
++    ) {imm ptr, imm end} -> SIMD[DType.uint8, SIMD8_WIDTH]:
+         if cond:
+             return ptr.unsafe_load[width=SIMD8_WIDTH]()
+         else:
+diff --git a/emberjson/_deserialize/slow_float_parse.mojo b/emberjson/_deserialize/slow_float_parse.mojo
+index f8d29b0..4634c31 100644
+--- a/emberjson/_deserialize/slow_float_parse.mojo
++++ b/emberjson/_deserialize/slow_float_parse.mojo
+@@ -1,3 +1,4 @@
++# Modified for dataframe_mojo: Mojo 1.3 nightly API compatibility.
+ from ._parser_helper import (
+     `-`,
+     `+`,
+@@ -297,9 +298,8 @@ def parse_decimal(
+         0, 0, False, p[] == `-`, StackArray[Byte, MAX_DIGITS](fill=0)
+     )
+ 
+-    @__parameter
+     @always_inline
+-    def consume_digits() raises DeserializationError:
++    def consume_digits() raises DeserializationError {mut p, mut answer}:
+         while p.dist() > 0 and isdigit(p[]):
+             if answer.num_digits < MAX_DIGITS:
+                 answer.digits[answer.num_digits] = p[] - `0`
+diff --git a/emberjson/_deserialize/tape_indexed.mojo b/emberjson/_deserialize/tape_indexed.mojo
+index 086626b..bfba500 100644
+--- a/emberjson/_deserialize/tape_indexed.mojo
++++ b/emberjson/_deserialize/tape_indexed.mojo
+@@ -1,3 +1,4 @@
++# Modified for dataframe_mojo: Mojo 1.3 nightly API compatibility.
+ """Index-driven tape builder: simdjson's stage 2 over our stage-1 index.
+ 
+ A port of simdjson's stage-2 document walker (Langdale & Lemire,
+@@ -266,15 +267,13 @@ def _walk_tape_from_index[
+     var stack = Array[_Scope, options.max_depth](uninitialized=True)
+     var depth = 0
+ 
+-    @__parameter
+     @always_inline
+-    def advance(out off: Int):
++    def advance(out off: Int) {mut idx}:
+         off = Int(idx[])
+         idx = idx.unsafe_offset(1)
+ 
+-    @__parameter
+     @always_inline
+-    def visit_string(off: Int, out arena_off: Int) raises DeserializationError:
++    def visit_string(off: Int, out arena_off: Int) raises DeserializationError {mut idx, imm base, imm p, mut sink}:
+         """The string opening at `off`: its closing quote is the next
+         structural (escaped quotes are masked out of the index)."""
+         var close = Int(idx[])
+@@ -296,9 +295,8 @@ def _walk_tape_from_index[
+             )
+         sink.tape.append(_pack_word(TapeTag.STRING, UInt64(arena_off)))
+ 
+-    @__parameter
+     @always_inline
+-    def visit_primitive(b: Byte, off: Int) raises DeserializationError:
++    def visit_primitive(b: Byte, off: Int) raises DeserializationError {mut visit_string, mut p, mut sink, imm base}:
+         if b == `"`:
+             _ = visit_string(off)
+         elif is_numerical_component(b):
+@@ -328,9 +326,8 @@ def _walk_tape_from_index[
+         else:
+             raise invalid_value(b)
+ 
+-    @__parameter
+     @always_inline
+-    def emit_empty(open_tag: Byte, close_tag: Byte) raises DeserializationError:
++    def emit_empty(open_tag: Byte, close_tag: Byte) raises DeserializationError {imm depth, mut sink}:
+         # An empty container never pushes a `_Scope` (there is nothing to
+         # recurse into), but it is still one level deeper than its parent,
+         # so it must be checked against the same limit as `push_scope` —
+@@ -347,9 +344,8 @@ def _walk_tape_from_index[
+         sink.tape.append(_pack_word(close_tag, UInt64(open_idx)))
+         sink.tape[open_idx] = _pack_container_open(open_tag, len(sink.tape), 0)
+ 
+-    @__parameter
+     @always_inline
+-    def push_scope(is_object: Bool) raises DeserializationError:
++    def push_scope(is_object: Bool) raises DeserializationError {mut depth, mut sink, mut stack}:
+         if unlikely(depth >= options.max_depth):
+             raise too_deep()
+         var dup_base: UInt32 = 0
+@@ -361,9 +357,8 @@ def _walk_tape_from_index[
+         sink.tape.append(0)  # patched at scope end
+         depth += 1
+ 
+-    @__parameter
+     @always_inline
+-    def visit_key(off: Int) raises DeserializationError:
++    def visit_key(off: Int) raises DeserializationError {mut visit_string, mut sink, imm stack, imm depth}:
+         var arena_off = visit_string(off)
+         comptime if strict_dups:
+             _push_and_check_key(
+diff --git a/emberjson/_index/indexer.mojo b/emberjson/_index/indexer.mojo
+index fdf73d7..f5569ba 100644
+--- a/emberjson/_index/indexer.mojo
++++ b/emberjson/_index/indexer.mojo
+@@ -1,3 +1,4 @@
++# Modified for dataframe_mojo: Mojo 1.3 nightly API compatibility.
+ """Stage-1 indexer: the chunk loop that emits structural character positions.
+ 
+ Ported from simdjson. `structural_index` walks the input 64 bytes
+@@ -181,9 +182,8 @@ def _structural_index[
+ 
+     var write_pos = 0
+ 
+-    @__parameter
+     @always_inline("nodebug")
+-    def emit(base_idx: UInt32, bits: UInt64):
++    def emit(base_idx: UInt32, bits: UInt64) {mut write_pos, imm out_ptr}:
+         """Writes the offset of each set bit into `positions`.
+ 
+         Four unconditional slots, then pairs (simdjson #2869: typical
+@@ -396,9 +396,8 @@ def _structural_index_x86[
+         global_constant[_BIT_OFFSETS]().unsafe_ptr().unsafe_bitcast[UInt8]()
+     )
+ 
+-    @__parameter
+     @always_inline("nodebug")
+-    def emit(base_idx: UInt32, bits: UInt64):
++    def emit(base_idx: UInt32, bits: UInt64) {imm offsets, mut out}:
+         var base = SIMD[DType.uint32, 8](base_idx)
+         comptime for j in range(8):
+             var byte = Int((bits >> UInt64(8 * j)) & 0xFF)
+@@ -408,9 +407,8 @@ def _structural_index_x86[
+             )
+             out = out.unsafe_offset(Int(pop_count(UInt8(byte))))
+ 
+-    @__parameter
+     @always_inline("nodebug")
+-    def step(input: SimdInput, base_idx: UInt32):
++    def step(input: SimdInput, base_idx: UInt32) {mut escape_scanner, mut string_scanner, mut backslashes, mut prev_structurals, mut prev_scalar_carry, mut emit}:
+         var block = classify(input)
+         var backslash = input.eq(UInt8(0x5C))
+         var all_quotes = input.eq(UInt8(0x22))
+diff --git a/emberjson/array.mojo b/emberjson/array.mojo
+index c61b93b..06885e5 100644
+--- a/emberjson/array.mojo
++++ b/emberjson/array.mojo
+@@ -1,3 +1,4 @@
++# Modified for dataframe_mojo: Mojo 1.3 nightly API compatibility.
+ from .value import Value
+ from .traits import JsonValue
+ from std.python import PythonObject, Python
+@@ -173,8 +174,10 @@ struct Array(JsonValue, Sized):
+     def to_list(self, out l: List[Value]):
+         l = self._data.copy()
+ 
+-    def to_python_object(self) raises -> PythonObject:
++    comptime ConversionToPythonErrorType = Error
++
++    def to_python_object(var self) raises -> PythonObject:
+         var l = Python.list()
+         for ref item in self._data:
+-            l.append(item.to_python_object())
++            l.append(item.copy().to_python_object())
+         return l
+diff --git a/emberjson/lazy.mojo b/emberjson/lazy.mojo
+index eeacca3..cbf9e0f 100644
+--- a/emberjson/lazy.mojo
++++ b/emberjson/lazy.mojo
+@@ -1,6 +1,7 @@
++# Modified for dataframe_mojo: Mojo 1.3 nightly API compatibility.
+ from ._serde.deserializer import from_json_bytes
+ from .value import Value
+-from std.hashlib import Hasher
++from std.hash import Hasher
+ 
+ # The free function `serialize` is aliased below because `Lazy` declares a
+ # method of the same name.
+diff --git a/emberjson/object.mojo b/emberjson/object.mojo
+index 7dcf38e..ea83dc4 100644
+--- a/emberjson/object.mojo
++++ b/emberjson/object.mojo
+@@ -1,3 +1,4 @@
++# Modified for dataframe_mojo: Mojo 1.3 nightly API compatibility.
+ from .value import Value
+ from std.collections import Dict, List
+ from std.sys.intrinsics import unlikely
+@@ -6,7 +7,7 @@ from ._deserialize import Parser
+ from ._deserialize._errors import duplicate_key, expected_value
+ from .utils import write_escaped_string
+ from std.python import PythonObject, Python
+-from std.hashlib import hash
++from std.hash import hash
+ 
+ from emberserde.serialize import Serializer
+ from emberserde.deserialize import Deserializer, SelfDescribingDeserializer
+@@ -446,8 +447,10 @@ struct Object(JsonValue, Sized):
+         for item in self.items():
+             d[item.key] = item.value.copy()
+ 
+-    def to_python_object(self) raises -> PythonObject:
++    comptime ConversionToPythonErrorType = Error
++
++    def to_python_object(var self) raises -> PythonObject:
+         var d = Python.dict()
+         for item in self.items():
+-            d[PythonObject(item.key)] = item.value.to_python_object()
++            d[PythonObject(item.key)] = item.value.copy().to_python_object()
+         return d
+diff --git a/emberjson/value.mojo b/emberjson/value.mojo
+index ef22fd8..059e9f0 100644
+--- a/emberjson/value.mojo
++++ b/emberjson/value.mojo
+@@ -1,3 +1,4 @@
++# Modified for dataframe_mojo: Mojo 1.3 nightly API compatibility.
+ from .object import Object
+ from .array import Array
+ from .utils import (
+@@ -61,7 +62,9 @@ struct Null(JsonValue, TrivialRegisterPassable):
+     def write_repr_to(self, mut writer: Some[Writer]):
+         writer.write("Null()")
+ 
+-    def to_python_object(self) raises -> PythonObject:
++    comptime ConversionToPythonErrorType = Error
++
++    def to_python_object(var self) raises -> PythonObject:
+         return {}
+ 
+     def serialize(self, mut s: Some[Serializer]) raises SerializationError:
+@@ -477,7 +480,9 @@ struct Value(JsonValue, Sized):
+         # (`EmberJsonDeserializer`) declares `comptime Value = Value`.
+         return rebind_var[Self](d.deserialize_any())
+ 
+-    def to_python_object(self) raises -> PythonObject:
++    comptime ConversionToPythonErrorType = Error
++
++    def to_python_object(var self) raises -> PythonObject:
+         if self.is_int():
+             return PythonObject(self.int())
+         elif self.is_uint():
+@@ -491,9 +496,9 @@ struct Value(JsonValue, Sized):
+         elif self.is_null():
+             return PythonObject()
+         elif self.is_object():
+-            return self.object().to_python_object()
++            return self.object().copy().to_python_object()
+         elif self.is_array():
+-            return self.array().to_python_object()
++            return self.array().copy().to_python_object()
+         else:
+             abort("Unreachable: to_python_object")
+ 

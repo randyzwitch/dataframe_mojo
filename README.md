@@ -362,6 +362,11 @@ macOS arm64 `dist/` holds `dataframe.mojoc`, `dataframe_provider.mojoc` and
 `dataframe_metal.mojoc`; on Linux it holds `dataframe.mojoc` and the CPU-only
 `dataframe_provider.mojoc`, since Metal cannot run there. There is one artifact
 per platform. Put the directory on the import path (`mojo run -I dist app.mojo`).
+Both platforms also include `emberjson.mojoc` and `emberserde.mojoc`, which
+provide JSON parsing and string serialization. Keep these dependencies beside
+the dataframe packages. `pixi install` builds pinned upstream revisions using
+the same compiler; [the dependency recipes](packages/emberjson/recipe.yaml) pin the sources and
+apply temporary compiler compatibility patches.
 Tagged releases attach the packages and a generated [API reference](docs/api.md) (`pixi run docs`). See the
 [testing guide](docs/testing.md), the [stability policy](docs/stability.md), and the
 [pandas/Polars migration guide](docs/migration.md).

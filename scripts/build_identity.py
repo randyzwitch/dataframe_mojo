@@ -10,6 +10,13 @@ def cpu_build_id(root: Path, compiler: str, flags: tuple[str, ...] = ()) -> str:
             continue
         digest.update(str(source.relative_to(root)).encode() + b"\0")
         digest.update(source.read_bytes() + b"\0")
+    # Source dependency revisions and compatibility patches can change
+    # without changing their package versions in pixi.lock.
+    for source in sorted((root / "packages").rglob("*")):
+        if source.suffix not in {".toml", ".yaml", ".patch"}:
+            continue
+        digest.update(source.relative_to(root).as_posix().encode() + b"\0")
+        digest.update(source.read_bytes() + b"\0")
     digest.update((root / "pixi.lock").read_bytes())
     digest.update(compiler.encode() + b"\0")
     for flag in flags:

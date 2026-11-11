@@ -1,0 +1,29 @@
+# Compile the upstream source with the same compiler as dataframe_mojo.
+# Update this pin with pixi.toml; .mojoc files are compiler-version specific.
+# The patch only adapts removed Mojo APIs. Drop it once the pinned upstream
+# revision supports our compiler; the JSON grammar stays upstream-owned.
+package:
+  name: emberjson
+  version: 0.5.0
+source:
+  git: https://github.com/bgreni/EmberJson.git
+  rev: e7feca8ebbdf2a338f586fed737bf8d01e6cad05
+  patches:
+    - mojo-nightly.patch
+build:
+  number: 0
+  script:
+    - mkdir -p "$PREFIX/lib/mojo"
+    - mojo precompile -I "$PREFIX/lib/mojo" emberjson -o "$PREFIX/lib/mojo/emberjson.mojoc"
+requirements:
+  host:
+    - mojo-compiler ==1.3.0.dev2026111005
+    - emberserde
+  run:
+    - mojo-compiler ==1.3.0.dev2026111005
+    - emberserde ==0.2.0
+about:
+  homepage: https://github.com/bgreni/EmberJson
+  license: Apache-2.0
+  license_file: LICENSE
+  summary: emberjson pinned for dataframe_mojo's compiler

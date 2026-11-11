@@ -6,60 +6,13 @@ are rejected, so metadata cannot have ambiguous interpretations.
 
 from dataframe.json.reader import JsonNode, JsonReader, json_bytes
 from std.memory import ArcPointer
+from emberjson.utils import write_escaped_string
 
 
 def json_quote(text: String) -> String:
-    var out = String('"')
-    for c in text.codepoints():
-        var s = String(c)
-        if s == '"' or s == "\\":
-            out += "\\" + s
-        elif s == "\n":
-            out += "\\n"
-        elif s == "\r":
-            out += "\\r"
-        elif s == "\t":
-            out += "\\t"
-        elif s == "\b":
-            out += "\\b"
-        elif s == "\f":
-            out += "\\f"
-        elif s.as_bytes()[0] < 32:
-            var b = Int(s.as_bytes()[0])
-            var hex = String("0123456789abcdef")
-            out += (
-                "\\u00" + String(hex[byte=b // 16]) + String(hex[byte=b % 16])
-            )
-        else:
-            out += s
-    return out + '"'
-
-
-def _space(text: String, mut pos: Int):
-    var reader = JsonReader(json_bytes(text), pos)
-    reader.space()
-    pos = reader.pos
-
-
-def _hex4(text: String, mut pos: Int) raises -> Int:
-    var reader = JsonReader(json_bytes(text), pos)
-    var value = reader.hex4()
-    pos = reader.pos
-    return value
-
-
-def _string(text: String, mut pos: Int) raises -> String:
-    var reader = JsonReader(json_bytes(text), pos)
-    _ = reader.scan_string()
-    var value = reader.string_at(pos)
-    pos = reader.pos
-    return value^
-
-
-def _scan(text: String, mut pos: Int, depth: Int = 0) raises:
-    var reader = JsonReader(json_bytes(text), pos)
-    _ = reader.scan(depth)
-    pos = reader.pos
+    var out = String()
+    write_escaped_string(text, out)
+    return out^
 
 
 struct _JsonObject(Copyable, Movable):
@@ -79,10 +32,7 @@ struct _JsonIndex(Movable):
 
     def __init__(out self, text: String) raises:
         var reader = JsonReader(json_bytes(text))
-        _ = reader.scan(store=True)
-        reader.space()
-        if reader.pos != text.byte_length():
-            raise Error("Trailing JSON content")
+        reader.parse(json_bytes(text), max_depth=64, unique_keys=True)
         self.objects = Dict[Int, _JsonObject]()
         for index in range(len(reader.nodes)):
             if reader.nodes[index].kind != 123:

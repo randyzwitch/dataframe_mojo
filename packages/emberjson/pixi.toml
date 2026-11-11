@@ -1,0 +1,15 @@
+[package]
+name = "emberjson"
+version = "0.5.0"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "==0.4.8.20261110.0854.c095f6f", channels = ["https://prefix.dev/pixi-build-backends", "conda-forge"] }
+
+[package.build.config]
+extra-input-globs = ["*.patch"]
+
+[package.host-dependencies]
+emberserde = { path = "../emberserde" }
+
+[package.run-dependencies]
+emberserde = { path = "../emberserde" }

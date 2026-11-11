@@ -1,13 +1,22 @@
-"""Shared strict JSON byte reader and optional flat value tape.
+"""EmberJSON cursor adapter retaining source spans for typed column decoding.
 
-The caller keeps the source bytes alive. Scanning can validate a value without
-allocating a tape (metadata), or reuse one tape across column rows. Strings
-are validated without constructing per-character or unselected value objects.
+EmberJSON validates tokens, strings, and container separators. This adapter
+indexes their original byte spans so Int128, decimal conversion, duplicate-key
+policy, and JSONPath continue to use the exact input spelling. Callers own the
+source bytes; the reusable node list never owns or converts scalar values.
 """
-from dataframe.text.utf8 import append_codepoint
 from std.memory import Pointer
+from std.collections import Set
+from emberjson import ParseOptions, is_valid_utf8
+from emberjson._deserialize import Parser
+from emberjson._deserialize._parser_helper import decode_codepoint
+from emberjson._serde.deserializer import EmberJsonCursor
+from dataframe.text.utf8 import append_codepoint
 
 comptime JsonBytes = Span[UInt8, ImmutAnyOrigin]
+comptime _Options = ParseOptions(max_depth=1025)
+comptime _Cursor = EmberJsonCursor[ImmutAnyOrigin, _Options]
+comptime _Parser = Parser[ImmutAnyOrigin, _Options]
 
 
 @always_inline
@@ -53,246 +62,162 @@ struct JsonReader(Movable):
 
     @always_inline
     def byte(self, at: Int) -> Int:
-        return Int(
-            Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=self.address)[
-                unsafe_offset=at
-            ]
-        )
+        return Int(self.span().unsafe_ptr()[unsafe_offset=at])
 
-    def space(mut self):
-        while self.pos < self.size:
-            var b = self.byte(self.pos)
-            if b != 32 and b != 9 and b != 10 and b != 13:
-                break
-            self.pos += 1
-
-    def hex4(mut self) raises -> Int:
-        var value = 0
-        for _ in range(4):
-            if self.pos >= self.size:
-                raise Error("Truncated JSON Unicode escape")
-            var b = self.byte(self.pos)
-            self.pos += 1
-            var digit = b - 48 if b >= 48 and b <= 57 else (
-                b - 87 if b >= 97
-                and b <= 102 else (b - 55 if b >= 65 and b <= 70 else -1)
-            )
-            if digit < 0:
-                raise Error("Invalid JSON Unicode escape")
-            value = value * 16 + digit
-        return value
+    def space(mut self) raises:
+        var parser = _Parser(self.span()[self.pos :])
+        parser.skip_whitespace()
+        self.pos = self.size - parser.bytes_remaining()
 
     def escaped_codepoint(mut self) raises -> Int:
-        var cp = self.hex4()
-        if cp >= 0xD800 and cp <= 0xDBFF:
-            if (
-                self.pos + 2 > self.size
-                or self.byte(self.pos) != 92
-                or self.byte(self.pos + 1) != 117
-            ):
-                raise Error("Missing JSON low surrogate")
-            self.pos += 2
-            var low = self.hex4()
-            if low < 0xDC00 or low > 0xDFFF:
-                raise Error("Invalid JSON low surrogate")
-            return 0x10000 + (cp - 0xD800) * 1024 + low - 0xDC00
-        if cp >= 0xDC00 and cp <= 0xDFFF:
-            raise Error("Unexpected JSON low surrogate")
-        return cp
-
-    def scan_string(mut self) raises -> Bool:
-        if self.pos >= self.size or self.byte(self.pos) != 34:
-            raise Error("Expected JSON string")
-        self.pos += 1
-        var escaped = False
-        while self.pos < self.size:
-            var b = self.byte(self.pos)
-            self.pos += 1
-            if b == 34:
-                return escaped
-            if b < 32:
-                raise Error("Unescaped control character in JSON string")
-            if b == 92:
-                escaped = True
-                if self.pos >= self.size:
-                    break
-                b = self.byte(self.pos)
-                self.pos += 1
-                if b == 117:
-                    _ = self.escaped_codepoint()
-                elif (
-                    b != 34
-                    and b != 92
-                    and b != 47
-                    and b != 98
-                    and b != 102
-                    and b != 110
-                    and b != 114
-                    and b != 116
-                ):
-                    raise Error("Invalid JSON escape")
-            elif b >= 128:
-                var extra = 1 if b >= 194 and b <= 223 else (
-                    2 if b >= 224
-                    and b <= 239 else (3 if b >= 240 and b <= 244 else -1)
-                )
-                if extra < 0 or self.pos + extra > self.size:
-                    raise Error("Invalid UTF-8 in JSON string")
-                var first = self.byte(self.pos)
-                if (
-                    (b == 224 and first < 160)
-                    or (b == 237 and first >= 160)
-                    or (b == 240 and first < 144)
-                    or (b == 244 and first >= 144)
-                ):
-                    raise Error("Invalid UTF-8 in JSON string")
-                for _ in range(extra):
-                    var next = self.byte(self.pos)
-                    self.pos += 1
-                    if next < 128 or next > 191:
-                        raise Error("Invalid UTF-8 in JSON string")
-        raise Error("Unterminated JSON string")
+        var pointer = self.span().unsafe_ptr().unsafe_offset(self.pos)
+        var end = self.span().unsafe_ptr().unsafe_offset(self.size)
+        var value = decode_codepoint(pointer, end)
+        self.pos = Int(pointer) - self.address
+        return Int(value)
 
     def scan_number(mut self) raises:
-        var start = self.pos
-        if self.byte(self.pos) == 45:
-            self.pos += 1
-        if self.pos >= self.size:
-            raise Error("Invalid JSON number")
-        var b = self.byte(self.pos)
-        if b == 48:
-            self.pos += 1
-        elif b >= 49 and b <= 57:
-            while (
-                self.pos < self.size
-                and self.byte(self.pos) >= 48
-                and self.byte(self.pos) <= 57
-            ):
-                self.pos += 1
-        else:
-            raise Error("Invalid JSON value")
-        if self.pos < self.size and self.byte(self.pos) == 46:
-            self.pos += 1
-            var digits = self.pos
-            while (
-                self.pos < self.size
-                and self.byte(self.pos) >= 48
-                and self.byte(self.pos) <= 57
-            ):
-                self.pos += 1
-            if self.pos == digits:
-                raise Error("Invalid JSON fraction")
-        if self.pos < self.size and (
-            self.byte(self.pos) == 101 or self.byte(self.pos) == 69
-        ):
-            self.pos += 1
-            if self.pos < self.size and (
-                self.byte(self.pos) == 43 or self.byte(self.pos) == 45
-            ):
-                self.pos += 1
-            var digits = self.pos
-            while (
-                self.pos < self.size
-                and self.byte(self.pos) >= 48
-                and self.byte(self.pos) <= 57
-            ):
-                self.pos += 1
-            if self.pos == digits:
-                raise Error("Invalid JSON exponent")
-        if self.pos == start:
-            raise Error("Invalid JSON value")
+        var parser = _Parser(self.span()[self.pos :])
+        _ = parser.expect_float_bytes()
+        self.pos += parser.size - parser.bytes_remaining()
 
-    def scan(
+    def _walk[
+        store: Bool, unique_keys: Bool
+    ](
         mut self,
-        depth: Int = 0,
-        store: Bool = False,
-        unique_keys: Bool = True,
+        mut cursor: _Cursor,
+        base: Int,
+        depth: Int,
         key_start: Int = -1,
         key_end: Int = -1,
         key_escaped: Bool = False,
     ) raises -> Int:
         if depth > self.max_depth:
             raise Error("JSON nesting exceeds " + String(self.max_depth))
-        self.space()
-        if self.pos >= self.size:
-            raise Error("Expected JSON value")
-        var start = self.pos
-        var b = self.byte(start)
+        var kind = Int(cursor.peek())
+        var start = base + cursor.peek_off()
         var index = len(self.nodes)
         if store:
             self.nodes.append(
                 JsonNode(
-                    b, start, start, index + 1, key_start, key_end, key_escaped
+                    kind,
+                    start,
+                    start,
+                    index + 1,
+                    key_start,
+                    key_end,
+                    key_escaped,
                 )
             )
-        if b == 34:
-            _ = self.scan_string()
-        elif b == 123 or b == 91:
-            var object = b == 123
-            var close = 125 if object else 93
-            self.pos += 1
-            self.space()
-            var keys = Dict[String, Bool]()
-            if self.pos < self.size and self.byte(self.pos) == close:
-                self.pos += 1
-            else:
-                while True:
-                    var ks = -1
-                    var ke = -1
-                    var escaped = False
-                    if object:
-                        ks = self.pos
-                        escaped = self.scan_string()
-                        ke = self.pos
-                        if unique_keys:
-                            var name = self.string_at(ks)
-                            if name in keys:
-                                raise Error("Duplicate JSON key: " + name)
-                            keys[name] = True
-                        self.space()
-                        if self.pos >= self.size or self.byte(self.pos) != 58:
-                            raise Error("Expected JSON colon")
-                        self.pos += 1
-                    _ = self.scan(
-                        depth + 1, store, unique_keys, ks, ke, escaped
-                    )
-                    self.space()
-                    if self.pos >= self.size:
-                        raise Error("Unterminated JSON container")
-                    b = self.byte(self.pos)
-                    self.pos += 1
-                    if b == close:
+        var end = start
+        if kind == 123 or kind == 91:
+            var object = kind == 123
+            var close = UInt8(125 if object else 93)
+            cursor.expect_open(UInt8(kind))
+            var first = True
+            var keys = Set[String]()
+            while True:
+                var ks = -1
+                var ke = -1
+                var escaped = False
+                if object:
+                    var key = cursor.next_field_key(first)
+                    if key[0] < 0:
                         break
-                    if b != 44:
-                        raise Error("Expected JSON comma")
-                    self.space()
-        elif b == 110 or b == 116 or b == 102:
-            var literal = StringSlice("null") if b == 110 else (
-                StringSlice("true") if b == 116 else StringSlice("false")
-            )
-            if self.pos + literal.byte_length() > self.size:
-                raise Error("Invalid JSON literal")
-            for byte in literal.as_bytes():
-                if self.byte(self.pos) != Int(byte):
-                    raise Error("Invalid JSON literal")
-                self.pos += 1
+                    ks = base + key[0]
+                    ke = base + key[1] + 1
+                    escaped = not cursor.plain(key[0] + 1, key[1])
+                    if unique_keys:
+                        var name = cursor.decode_string(key[0], key[1])
+                        if name in keys:
+                            raise Error("Duplicate JSON key: " + name)
+                        keys.add(name^)
+                    else:
+                        cursor.check_string(key[0], key[1])
+                elif not cursor.list_next(first, close):
+                    break
+                _ = self._walk[store, unique_keys](
+                    cursor,
+                    base,
+                    depth + 1,
+                    ks,
+                    ke,
+                    escaped,
+                )
+            end = base + cursor.peek_off() + 1
+            cursor.expect(close, close)
+        elif kind == 34:
+            var value = cursor.take_string_span()
+            cursor.check_string(value[0], value[1])
+            end = base + value[1] + 1
         else:
-            self.scan_number()
+            cursor.take_scalar()
+            if kind == 110:
+                cursor.p.expect_null()
+            elif kind == 116 or kind == 102:
+                _ = cursor.p.expect_bool()
+            else:
+                _ = cursor.p.expect_float_bytes()
+            end = base + cursor.p.size - cursor.p.bytes_remaining()
+            cursor.check_token_end()
         if store:
-            self.nodes[index].end = self.pos
+            self.nodes[index].end = end
             self.nodes[index].after = len(self.nodes)
+        self.pos = end
         return index
 
-    def parse(mut self, data: Span[UInt8, _], max_depth: Int = 1024) raises:
+    def _read[
+        store: Bool, unique_keys: Bool
+    ](mut self, bytes: JsonBytes, base: Int, depth: Int) raises -> Int:
+        # The upstream structural index stores byte offsets in UInt32 and
+        # rounds its last block to 64 bytes. Reject overflow before reading.
+        if len(bytes) > Int(UInt32.MAX) - 64:
+            raise Error("JSON value exceeds EmberJSON's 32-bit index")
+        if not is_valid_utf8(StringSlice(unsafe_from_utf8=bytes)):
+            raise Error("Invalid UTF-8 in JSON string")
+        var cursor = _Cursor(bytes)
+        var index = self._walk[store, unique_keys](cursor, base, depth)
+        if cursor.i != cursor.n:
+            raise cursor.trailing_error()
+        return index
+
+    def scan(
+        mut self,
+        depth: Int = 0,
+        store: Bool = False,
+        unique_keys: Bool = True,
+    ) raises -> Int:
+        # Frame one value before indexing it. JSON table arrays retain only
+        # one row's index, even when the mapped input contains millions of rows.
+        self.space()
+        var base = self.pos
+        var parser = _Parser(self.span()[base:])
+        var value = parser.expect_value_bytes()
+        if store:
+            if unique_keys:
+                return self._read[True, True](value, base, depth)
+            return self._read[True, False](value, base, depth)
+        if unique_keys:
+            return self._read[False, True](value, base, depth)
+        return self._read[False, False](value, base, depth)
+
+    def parse(
+        mut self,
+        data: Span[UInt8, _],
+        max_depth: Int = 1024,
+        *,
+        unique_keys: Bool = False,
+    ) raises:
         self.address = Int(data.unsafe_ptr())
         self.size = len(data)
         self.pos = 0
         self.max_depth = max_depth
         self.nodes.clear()
-        _ = self.scan(store=True, unique_keys=False)
+        if unique_keys:
+            _ = self._read[True, True](self.span(), 0, 0)
+        else:
+            _ = self._read[True, False](self.span(), 0, 0)
         self.space()
-        if self.pos != self.size:
-            raise Error("Trailing JSON content")
 
     @always_inline
     def span(self) -> JsonBytes:
@@ -304,51 +229,15 @@ struct JsonReader(Movable):
         )
 
     def slice(self, start: Int, end: Int) -> StringSlice[ImmutAnyOrigin]:
-        return StringSlice(
-            unsafe_from_utf8=JsonBytes(
-                unsafe_ptr=self.span()
-                .unsafe_ptr()
-                .unsafe_offset(start)
-                .unsafe_origin_cast[ImmutAnyOrigin](),
-                length=end - start,
-            )
-        )
+        return StringSlice(unsafe_from_utf8=self.span()[start:end])
 
     def raw(self, index: Int) -> StringSlice[ImmutAnyOrigin]:
         return self.slice(self.nodes[index].start, self.nodes[index].end)
 
     def append_string(self, start: Int, mut out: List[UInt8]) raises:
-        var reader = JsonReader(self.span(), start + 1)
-        while reader.pos < reader.size:
-            var b = reader.byte(reader.pos)
-            reader.pos += 1
-            if b == 34:
-                return
-            if b != 92:
-                out.append(UInt8(b))
-                continue
-            b = reader.byte(reader.pos)
-            reader.pos += 1
-            if b == 117:
-                _utf8(out, reader.escaped_codepoint())
-            else:
-                out.append(
-                    UInt8(
-                        8 if b
-                        == 98 else (
-                            12 if b
-                            == 102 else (
-                                10 if b
-                                == 110 else (
-                                    13 if b == 114 else (9 if b == 116 else b)
-                                )
-                            )
-                        )
-                    )
-                )
-        raise Error("Unterminated JSON string")
+        var value = self.string_at(start)
+        out.extend(value.as_bytes())
 
     def string_at(self, start: Int) raises -> String:
-        var bytes = List[UInt8]()
-        self.append_string(start, bytes)
-        return String(unsafe_from_utf8=bytes)
+        var parser = _Parser(self.span()[start:])
+        return parser.expect_string()

@@ -328,3 +328,17 @@ property and alias tables in
 The source is dual licensed under MIT or Apache-2.0; license texts are in
 `scripts/vendor/regex-LICENSE-MIT` and `scripts/vendor/regex-LICENSE-APACHE`.
 The generator is `scripts/regex_property_tables.py`.
+
+
+## EmberJSON and EmberSerde
+
+JSON token validation, string decoding, and quoting use Brian Grenier's
+[EmberJSON](https://github.com/bgreni/EmberJson) and its
+[EmberSerde](https://github.com/bgreni/EmberSerde) dependency, both licensed
+under Apache-2.0. The license is included in
+`scripts/vendor/ember-LICENSE-APACHE` and in standalone package output.
+
+The recipes under `packages/` pin upstream commits and the Mojo compiler.
+`mojo-nightly.patch` files adapt removed compiler APIs (capture declarations,
+parameter construction, hashing, and move initialization); modified upstream
+files carry a notice. The upstream source is fetched at build time.

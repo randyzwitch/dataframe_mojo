@@ -1,0 +1,101 @@
+diff --git a/emberserde/deserialize/impls.mojo b/emberserde/deserialize/impls.mojo
+index 84dc6ca..245c0a5 100644
+--- a/emberserde/deserialize/impls.mojo
++++ b/emberserde/deserialize/impls.mojo
+@@ -1,3 +1,4 @@
++# Modified for dataframe_mojo: Mojo 1.3 nightly API compatibility.
+ import emberserde.deserialize
+ from std.builtin.rebind import downcast, rebind_var
+ from std.collections import Set, Deque, LinkedList, Counter
+@@ -422,12 +423,12 @@ __extension Tuple(Deserializable):
+         mut d: Some[Deserializer],
+     ) raises DeserializationError -> Self:
+         var state = d.begin_tuple[Self.__len__()]()
++        comptime assert conforms_to(Self, Base)
+         comptime assert Self.Ts.all_conforms_to[
+             Defaultable
+         ](), "Tuple deserialize requires Defaultable elements"
+         var result = Self()
+ 
+-        @__parameter
+         def dispose[idx: Int](var elt: Self.Ts[idx]):
+             _ = rebind_var[downcast[Self.Ts[idx], Base]](elt^)
+ 
+@@ -443,7 +444,7 @@ __extension Tuple(Deserializable):
+ 
+             state.end()
+         except e:
+-            result^.deinit_with[dispose]()
++            result^.deinit_with(dispose)
+             _prepend_index(e, filled)
+             raise e^
+ 
+diff --git a/emberserde/validate.mojo b/emberserde/validate.mojo
+index 8ca5d7f..6463d03 100644
+--- a/emberserde/validate.mojo
++++ b/emberserde/validate.mojo
+@@ -1,3 +1,4 @@
++# Modified for dataframe_mojo: Mojo 1.3 nightly API compatibility.
+ from std.builtin.rebind import downcast
+ 
+ from .field import TypedAnnotation
+@@ -255,16 +256,15 @@ struct AnyOf[*Ts: FieldCheck](FieldCheck):
+         var *checks: *Self.Ts,
+         msg: StaticString = "Value not in options",
+     ):
++        self.msg = msg
+         __mlir_op.`lit.ownership.mark_initialized`(
+             __get_mvalue_as_litref(self.checks)
+         )
+ 
+-        @__parameter
+-        def put[idx: Int](var elt: Self.Ts[idx]):
++        def put[idx: Int](var elt: Self.Ts[idx]) {mut self}:
+             Pointer(to=self.checks[idx]).unsafe_write(elt^)
+ 
+-        checks^.consume_elements[put]()
+-        self.msg = msg
++        checks^.consume_elements(put)
+ 
+     def check[U: AnyType](self, value: U) -> Bool:
+         comptime for k in range(Self.Ts.length):
+@@ -286,16 +286,15 @@ struct OneOf[*Ts: FieldCheck](FieldCheck):
+         var *checks: *Self.Ts,
+         msg: StaticString = "Value must match exactly one option",
+     ):
++        self.msg = msg
+         __mlir_op.`lit.ownership.mark_initialized`(
+             __get_mvalue_as_litref(self.checks)
+         )
+ 
+-        @__parameter
+-        def put[idx: Int](var elt: Self.Ts[idx]):
++        def put[idx: Int](var elt: Self.Ts[idx]) {mut self}:
+             Pointer(to=self.checks[idx]).unsafe_write(elt^)
+ 
+-        checks^.consume_elements[put]()
+-        self.msg = msg
++        checks^.consume_elements(put)
+ 
+     def check[U: AnyType](self, value: U) -> Bool:
+         var n = 0
+@@ -318,16 +317,15 @@ struct NoneOf[*Ts: FieldCheck](FieldCheck):
+         var *checks: *Self.Ts,
+         msg: StaticString = "Value matched a rejected validator",
+     ):
++        self.msg = msg
+         __mlir_op.`lit.ownership.mark_initialized`(
+             __get_mvalue_as_litref(self.checks)
+         )
+ 
+-        @__parameter
+-        def put[idx: Int](var elt: Self.Ts[idx]):
++        def put[idx: Int](var elt: Self.Ts[idx]) {mut self}:
+             Pointer(to=self.checks[idx]).unsafe_write(elt^)
+ 
+-        checks^.consume_elements[put]()
+-        self.msg = msg
++        checks^.consume_elements(put)
+ 
+     def check[U: AnyType](self, value: U) -> Bool:
+         comptime for k in range(Self.Ts.length):

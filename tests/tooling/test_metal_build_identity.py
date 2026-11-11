@@ -20,6 +20,10 @@ class MetalBuildIdentityTests(unittest.TestCase):
                 'comptime ID = "generated"\n'
             )
         (root / "pixi.lock").write_text("compiler and SDK pins\n")
+        dependency = root / "packages/emberjson"
+        dependency.mkdir(parents=True)
+        (dependency / "recipe.yaml").write_text("source: pinned upstream\n")
+        (dependency / "mojo-nightly.patch").write_text("compiler compatibility\n")
 
     def test_reproducible_across_checkout_paths(self):
         with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
@@ -41,6 +45,8 @@ class MetalBuildIdentityTests(unittest.TestCase):
                 "dataframe_metal/core.mojo",
                 "dataframe_provider/core.mojo",
                 "pixi.lock",
+                "packages/emberjson/recipe.yaml",
+                "packages/emberjson/mojo-nightly.patch",
             ):
                 with self.subTest(source=relative):
                     path = root / relative
@@ -92,6 +98,15 @@ class MetalBuildIdentityTests(unittest.TestCase):
                 root / "dataframe_metal/_build_identity.mojo"
             ).read_bytes()
             stamps = []
+            dependencies = root / "installed"
+            dependencies.mkdir()
+            for package in build_package.JSON_PACKAGES:
+                (dependencies / f"{package}.mojoc").write_bytes(
+                    package.encode()
+                )
+            license_file = root / "scripts/vendor/ember-LICENSE-APACHE"
+            license_file.parent.mkdir(parents=True)
+            license_file.write_text("Apache-2.0 test license")
 
             def output(command, **kwargs):
                 if command[:2] == ["mojo", "--version"]:
@@ -116,6 +131,8 @@ class MetalBuildIdentityTests(unittest.TestCase):
                 build_package.subprocess, "check_output", side_effect=output
             ), patch.object(
                 build_package.subprocess, "run", side_effect=compile_package
+            ), patch.object(
+                build_package, "dependency_directory", return_value=dependencies
             ):
                 build_package.build(root / "dist", "metal")
             cpu = cpu_build_id(root, "Mojo sdk1")
@@ -128,6 +145,16 @@ class MetalBuildIdentityTests(unittest.TestCase):
                 f"dataframe-mojo-metal-v2;cpu={cpu};metal={metal}",
             )
             self.assertEqual(metadata["metal_build_id"], metal)
+            for package in build_package.JSON_PACKAGES:
+                filename = f"{package}.mojoc"
+                self.assertEqual(
+                    (root / "dist" / filename).read_bytes(), package.encode()
+                )
+                self.assertIn(filename, metadata["packages"])
+            self.assertEqual(
+                (root / "dist/ember-LICENSE-APACHE").read_text(),
+                license_file.read_text(),
+            )
             self.assertEqual(
                 (root / "dataframe/_build_identity.mojo").read_bytes(),
                 source_cpu,
