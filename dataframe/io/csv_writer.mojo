@@ -1,8 +1,8 @@
 """Incremental CSV output using the established CSV cell formatter."""
-from std.ffi import external_call
+from std.collections import Optional
+from std.io import FileHandle
 from dataframe.categorical import decode
 from dataframe.frame import DataFrame
-from .arrow import _c_string
 from .csv import _CsvWriter, _reject_nested
 from .parquet_writer import (
     _AtomicOutput,
@@ -14,11 +14,12 @@ from .parquet_writer import (
 
 struct _CsvFileWriter(Movable):
     var output: _AtomicOutput
-    var file: Int
+    var file: Optional[FileHandle]
     var writer: _CsvWriter
     var schema: DataFrame
     var buffer: String
     var buffer_size: Int
+    var pending: String
 
     def __init__(
         out self,
@@ -49,42 +50,46 @@ struct _CsvFileWriter(Movable):
         self.buffer = self.writer.header(
             self.schema
         ) if has_header else String()
-        self.file = 0
+        self.pending = String()
+        self.file = None
         self.output = _AtomicOutput(path)
-        var filename = _c_string(self.output.temporary)
-        var mode = _c_string("wb")
-        self.file = external_call["fopen", Int](
-            filename.unsafe_ptr(), mode.unsafe_ptr()
-        )
-        _ = filename^
-        _ = mode^
-        if self.file == 0:
+        try:
+            self.file = open(self.output.temporary, "w")
+        except:
             raise Error(
                 "cannot open CSV temporary output: " + self.output.temporary
             )
 
-    def __deinit__(deinit self):
-        if self.file != 0:
-            _ = external_call["fclose", Int32](self.file)
-
     def _flush(mut self) raises:
         if self.buffer.byte_length() == 0:
             return
-        var bytes = _c_string(self.buffer)
-        var count = self.buffer.byte_length()
-        var written = external_call["fwrite", UInt](
-            bytes.unsafe_ptr(),
-            UInt(1),
-            UInt(count),
-            self.file,
-        )
-        _ = bytes^
-        if written != UInt(count):
+        # C stdio previously coalesced tiny formatter buffers. Retain a
+        # small-write staging buffer with a 4 KiB flush threshold. Normal
+        # chunks borrow their existing bytes with no extra allocation.
+        if self.buffer.byte_length() < 4096:
+            self.pending += self.buffer
+            self.buffer = String()
+            if self.pending.byte_length() >= 4096:
+                self._flush_pending()
+            return
+        self._flush_pending()
+        try:
+            self.file.value().write_all(self.buffer.as_bytes())
+        except:
             raise Error("cannot write CSV temporary output")
         self.buffer = String()
 
+    def _flush_pending(mut self) raises:
+        if self.pending.byte_length() == 0:
+            return
+        try:
+            self.file.value().write_all(self.pending.as_bytes())
+        except:
+            raise Error("cannot write CSV temporary output")
+        self.pending = String()
+
     def append(mut self, frame: DataFrame) raises:
-        if self.file == 0:
+        if not self.file:
             raise Error("CSV writer is closed")
         _check_schema(self.schema, frame)
         var data = frame.copy()
@@ -97,11 +102,13 @@ struct _CsvFileWriter(Movable):
                 self._flush()
 
     def finish(mut self) raises:
-        if self.file == 0:
+        if not self.file:
             raise Error("CSV writer is closed")
         self._flush()
-        var file = self.file
-        self.file = 0
-        if external_call["fclose", Int32](file) != 0:
+        self._flush_pending()
+        var file = self.file.take()
+        try:
+            file^.close()
+        except:
             raise Error("cannot close CSV temporary output")
         self.output.publish()
