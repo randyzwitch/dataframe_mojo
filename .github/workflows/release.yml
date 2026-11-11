@@ -54,8 +54,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             dist/dataframe.mojoc dist/dataframe_provider.mojoc \
-            dist/emberjson.mojoc dist/emberserde.mojoc \
-            dist/ember-LICENSE-APACHE \
             dist/cpu-build.json dist/provider.json \
             docs/api.md LICENSE THIRD_PARTY_NOTICES.md \
             scripts/vendor/regex-LICENSE-MIT scripts/vendor/regex-LICENSE-APACHE \

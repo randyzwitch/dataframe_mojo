@@ -6,7 +6,8 @@ holds `dataframe.mojoc`, `dataframe_provider.mojoc` (re-exporting the Metal
 provider) and `dataframe_metal.mojoc`. Elsewhere Metal cannot run, so it holds
 `dataframe.mojoc` and `dataframe_provider.mojoc` with the CPU-only provider.
 `--provider cpu|metal` overrides the choice for testing. Use the output
-directory as the import path (`-I dist`).
+directory as the import path (`-I dist`) in the Pixi environment, where
+the declared dependencies are installed.
 """
 import argparse
 import hashlib
@@ -20,15 +21,6 @@ from build_identity import cpu_build_id, identity_source
 from metal_build_identity import metal_build_id, metal_identity_source
 
 ROOT = Path(__file__).resolve().parents[1]
-JSON_PACKAGES = ("emberjson", "emberserde")
-
-
-def dependency_directory() -> Path:
-    """Installed packages beside the compiler selected on PATH."""
-    compiler = shutil.which("mojo")
-    if compiler is None:
-        raise RuntimeError("mojo is not installed; run pixi install first")
-    return Path(compiler).absolute().parent.parent / "lib/mojo"
 
 
 def default_provider() -> str:
@@ -53,12 +45,6 @@ def build(output: Path, provider: str) -> None:
             stage / "dataframe_provider",
         )
         packages = ["dataframe", "dataframe_provider"]
-        dependencies = dependency_directory()
-        for package in JSON_PACKAGES:
-            shutil.copyfile(
-                dependencies / f"{package}.mojoc",
-                stage / f"{package}.mojoc",
-            )
         if provider == "metal":
             shutil.copytree(ROOT / "dataframe_metal", stage / "dataframe_metal")
             (stage / "dataframe_metal/_build_identity.mojo").write_text(
@@ -82,7 +68,6 @@ def build(output: Path, provider: str) -> None:
                 check=True,
             )
         # Publish only after every package compiles.
-        packages.extend(JSON_PACKAGES)
         for package in packages:
             shutil.copyfile(
                 stage / f"{package}.mojoc", output / f"{package}.mojoc.tmp"
@@ -90,10 +75,6 @@ def build(output: Path, provider: str) -> None:
             (output / f"{package}.mojoc.tmp").replace(
                 output / f"{package}.mojoc"
             )
-        shutil.copyfile(
-            ROOT / "scripts/vendor/ember-LICENSE-APACHE",
-            output / "ember-LICENSE-APACHE",
-        )
     (output / "cpu-build.json").write_text(
         json.dumps({"cpu_build_id": identity, "mojo": compiler}, indent=2)
         + "\n"

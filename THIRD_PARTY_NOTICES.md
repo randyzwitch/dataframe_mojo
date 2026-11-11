@@ -335,8 +335,8 @@ The generator is `scripts/regex_property_tables.py`.
 JSON token validation, string decoding, and quoting use Brian Grenier's
 [EmberJSON](https://github.com/bgreni/EmberJson) and its
 [EmberSerde](https://github.com/bgreni/EmberSerde) dependency, both licensed
-under Apache-2.0. The license is included in
-`scripts/vendor/ember-LICENSE-APACHE` and in standalone package output.
+under Apache-2.0. Their upstream licenses are included in the dependency
+packages built and installed by Pixi.
 
 The recipes under `packages/` pin upstream commits and the Mojo compiler.
 `mojo-nightly.patch` files adapt removed compiler APIs (capture declarations,
