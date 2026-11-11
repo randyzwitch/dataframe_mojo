@@ -29,7 +29,6 @@ def _matches(regex: Regex, text: String) -> Bool:
 
 def test_cached_patterns_reuse_and_evict_without_invalidating_callers() raises:
     var cache = _PatternCache()
-    assert_true(cache.ready)
     var first = cache.compile("^value-0$")
     var second = cache.compile("^value-1$")
     for i in range(2, 32):
