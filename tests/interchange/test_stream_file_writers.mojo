@@ -2,6 +2,7 @@
 # contract-group: io.sinks
 from std.os import getenv
 from std.os.path import exists
+from std.io import RawFileDescriptor
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
@@ -13,6 +14,7 @@ from dataframe import (
     parquet_row_group_statistics,
 )
 from dataframe.io.sinks import FileSink
+from dataframe.io.csv_writer import _CsvFileWriter
 
 
 def _path(name: String) -> String:
@@ -110,6 +112,75 @@ def test_abandoned_writer_removes_only_owned_temporary() raises:
     with assert_raises():
         _ = FileSink(_source(), path, "csv", separator="bad")
     assert_equal(_text(path), "original")
+
+
+def test_csv_byte_writes_preserve_nuls_unicode_and_reject_closed_writers() raises:
+    var source = DataFrame(
+        [Series("s", StringColumn(["a\x00b", "é🙂", 'comma,quote"']))]
+    )
+    for size in [1, 7, 65536]:
+        var path = _path("bytes-" + String(size) + ".csv")
+        var writer = _CsvFileWriter(source.clear(), path, buffer_size=size)
+        writer.append(source)
+        writer.finish()
+        assert_equal(_text(path), 's\na\x00b\né🙂\n"comma,quote"""\n')
+        with assert_raises(contains="CSV writer is closed"):
+            writer.append(source)
+        with assert_raises(contains="CSV writer is closed"):
+            writer.finish()
+
+
+def test_csv_write_error_preserves_destination_and_cleans_temporary() raises:
+    var source = _source()
+    var path = _path("write-error.csv")
+    with open(path, "w") as file:
+        file.write("original")
+    var writer = _CsvFileWriter(source.clear(), path, buffer_size=1)
+    var temporary = writer.output.temporary
+    # A read-only descriptor fails writes on every supported host. The
+    # standard write operation must raise, allowing owned state to unwind.
+    writer.file.take().close()
+    writer.file = open(temporary, "r")
+    with assert_raises(contains="cannot write CSV temporary output"):
+        writer.append(source)
+        writer.finish()
+    assert_equal(_text(path), "original")
+    _ = writer^
+    assert_true(not exists(temporary))
+
+
+def test_csv_small_large_small_writes_keep_byte_order() raises:
+    var large = String("x") * 8192
+    var source = DataFrame(
+        [Series("s", StringColumn(["first", large, "last"]))]
+    )
+    var path = _path("mixed-buffers.csv")
+    var writer = _CsvFileWriter(source.clear(), path, buffer_size=1)
+    writer.append(source)
+    writer.finish()
+    assert_equal(_text(path), "s\nfirst\n" + large + "\nlast\n")
+
+
+def test_csv_close_error_does_not_publish_or_leave_an_open_writer() raises:
+    var source = _source()
+    var path = _path("close-error.csv")
+    with open(path, "w") as file:
+        file.write("original")
+    var writer = _CsvFileWriter(source.clear(), path, buffer_size=1)
+    var temporary = writer.output.temporary
+    writer.append(source)
+    writer._flush()
+    writer._flush_pending()
+    # Inject a close failure after the final write, without opening another
+    # descriptor between this close and finish's checked close.
+    RawFileDescriptor(writer.file.value()).close()
+    with assert_raises(contains="cannot close CSV temporary output"):
+        writer.finish()
+    with assert_raises(contains="CSV writer is closed"):
+        writer.append(source)
+    assert_equal(_text(path), "original")
+    _ = writer^
+    assert_true(not exists(temporary))
 
 
 def test_incremental_parquet_groups_span_batch_boundaries_and_empty_schema() raises:
