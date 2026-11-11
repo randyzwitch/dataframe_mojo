@@ -5,7 +5,9 @@ cannot improve it; replace the boundary when a better candidate arrives.
 Sorting the retained keys produces the requested prefix. Keys include
 null placement and, when stable ordering is requested, input row ids.
 """
-from std.collections import Optional
+from std.collections import BinaryHeap, Optional
+from std.utils import Variant
+from std.sys import size_of
 from std.atomic import Atomic
 from std.ffi import external_call
 from std.memory import Pointer, unsafe_memcpy
@@ -189,30 +191,96 @@ struct _BoundaryView(Movable):
         shared._unlock()
 
 
+struct _HeapRecord[W: Int, VAR: Bool](Comparable, Copyable, Movable):
+    """A packed normalized key with the same ordering as its sort span."""
+
+    comptime R = SortKeys[Self.W, Self.VAR].R
+    var words: Array[UInt64, Self.R]
+
+    def __init__(out self, rec: Rec):
+        self.words = Array[UInt64, Self.R](fill=0)
+        comptime for i in range(Self.R):
+            self.words[i] = rec[i]
+
+    def record(self) -> Rec:
+        var rec = Rec(0)
+        comptime for i in range(Self.R):
+            rec[i] = self.words[i]
+        return rec
+
+    def __lt__(self, other: Self) -> Bool:
+        return SortKeys[Self.W, Self.VAR].less(self.record(), other.record())
+
+    def __le__(self, other: Self) -> Bool:
+        return not other < self
+
+    def __gt__(self, other: Self) -> Bool:
+        return other < self
+
+    def __ge__(self, other: Self) -> Bool:
+        return not self < other
+
+    def __eq__(self, other: Self) -> Bool:
+        return not self < other and not other < self
+
+    def __ne__(self, other: Self) -> Bool:
+        return not self == other
+
+
+comptime _RecordHeaps = Variant[
+    BinaryHeap[_HeapRecord[1, False]],
+    BinaryHeap[_HeapRecord[2, False]],
+    BinaryHeap[_HeapRecord[3, False]],
+    BinaryHeap[_HeapRecord[1, True]],
+]
+
+
 struct TopNHeap(Movable):
     """TopNHeap: a max-heap of the best `heap_size` key records seen (the
     worst on top). The record layout is a parameter of each method."""
 
     var heap_size: Int
-    var records: List[UInt64]
+    var records: _RecordHeaps
     var size: Int
     var arena: _KeyArena
     var view: _BoundaryView
     # Entries added since the keys were last compacted (heap_data's size).
     var added: Int
 
-    def __init__(out self, heap_size: Int, record_words: Int):
+    def __init__(
+        out self, heap_size: Int, record_words: Int, *, variable: Bool = False
+    ):
         self.heap_size = heap_size
-        self.records = List[UInt64](
-            length=max(1, (heap_size + 1) * record_words), fill=0
-        )
+        if variable:
+            self.records = _RecordHeaps(
+                BinaryHeap[_HeapRecord[1, True]](capacity=heap_size)
+            )
+        elif record_words == 2:
+            self.records = _RecordHeaps(
+                BinaryHeap[_HeapRecord[1, False]](capacity=heap_size)
+            )
+        elif record_words == 3:
+            self.records = _RecordHeaps(
+                BinaryHeap[_HeapRecord[2, False]](capacity=heap_size)
+            )
+        else:
+            self.records = _RecordHeaps(
+                BinaryHeap[_HeapRecord[3, False]](capacity=heap_size)
+            )
         self.size = 0
         self.arena = _KeyArena()
         self.view = _BoundaryView()
         self.added = 0
 
+    @always_inline
     def keys[W: Int, VAR: Bool](self) -> SortKeys[W, VAR]:
-        return SortKeys[W, VAR](Int(self.records.unsafe_ptr()))
+        # The standard heap owns these records. This single storage adapter
+        # exposes them for payload renumbering, arena compaction, and final
+        # sorting; none of those operations changes key order before finalize.
+        comptime Entry = _HeapRecord[1 if VAR else W, VAR]
+        comptime assert size_of[Entry]() == SortKeys[W, VAR].R * 8
+        ref heap = self.records[BinaryHeap[Entry]]
+        return SortKeys[W, VAR](Int(heap._data.unsafe_ptr()))
 
     def reduce_threshold(self) -> Int:
         """ReduceThreshold."""
@@ -239,53 +307,19 @@ struct TopNHeap(Movable):
             return False
         return self.entry_should_be_added[W, VAR](rec)
 
-    def _sift_up[W: Int, VAR: Bool](self, i_in: Int):
-        comptime K = SortKeys[W, VAR]
-        var k = self.keys[W, VAR]()
-        var i = i_in
-        var value = k.get(i)
-        while i > 0:
-            var parent = (i - 1) // 2
-            var p = k.get(parent)
-            if not K.less(p, value):
-                break
-            k.put(i, p)
-            i = parent
-        k.put(i, value)
-
-    def _sift_down[W: Int, VAR: Bool](self, i_in: Int):
-        comptime K = SortKeys[W, VAR]
-        var k = self.keys[W, VAR]()
-        var i = i_in
-        var value = k.get(i)
-        while True:
-            var child = 2 * i + 1
-            if child >= self.size:
-                break
-            var c = k.get(child)
-            if child + 1 < self.size:
-                var right = k.get(child + 1)
-                if K.less(c, right):
-                    child += 1
-                    c = right
-            if not K.less(value, c):
-                break
-            k.put(i, c)
-            i = child
-        k.put(i, value)
-
     def add[W: Int, VAR: Bool](mut self, var rec: Rec):
-        """AddEntryToHeap: replace the worst entry once full."""
+        """Keep a candidate using the standard heap's push/pop operations."""
+        if self.heap_size == 0:
+            return
         comptime if VAR:
             rec[2] = UInt64(self.arena.add(Int(rec[2]), Int(rec[1])))
         self.added += 1
-        if self.size >= self.heap_size:
-            self.keys[W, VAR]().put(0, rec)
-            self._sift_down[W, VAR](0)
-            return
-        self.keys[W, VAR]().put(self.size, rec)
-        self.size += 1
-        self._sift_up[W, VAR](self.size - 1)
+        comptime Entry = _HeapRecord[1 if VAR else W, VAR]
+        ref heap = self.records[BinaryHeap[Entry]]
+        if len(heap) >= self.heap_size:
+            _ = heap.pop()
+        heap.push(Entry(rec))
+        self.size = len(heap)
 
     def sink[W: Int, VAR: Bool](mut self, block: KeyBlock):
         """Every record of a chunk that can enter, with its own row as the

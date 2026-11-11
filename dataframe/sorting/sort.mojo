@@ -315,7 +315,9 @@ struct _TopNJob[W: Int, VAR: Bool](Job):
         self.layout = layout
         self.lo = lo
         self.hi = hi
-        self.heap = TopNHeap(limit, SortKeys[Self.W, Self.VAR].R)
+        self.heap = TopNHeap(
+            limit, SortKeys[Self.W, Self.VAR].R, variable=Self.VAR
+        )
         self.boundary = boundary
 
     def run(mut self) raises:
@@ -381,7 +383,7 @@ def _top_rows[
     var order = List[Int]()
     if len(jobs) == 0:
         return order^
-    var heap = TopNHeap(limit, SortKeys[W, VAR].R)
+    var heap = TopNHeap(limit, SortKeys[W, VAR].R, variable=VAR)
     for j in range(len(jobs)):
         heap.combine[W, VAR](jobs[j].heap)
     heap.finalize[W, VAR]()

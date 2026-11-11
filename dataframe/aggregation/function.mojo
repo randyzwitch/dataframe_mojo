@@ -1415,32 +1415,38 @@ def _update_states(
 
 
 @always_inline
-def _keep_top(
+def _retain_top_rows(
     state: Pointer[UInt64, MutAnyOrigin], k: Int, key: UInt64, row: UInt64
 ):
-    """A (key, row) pair into a top-rows state (count, then pairs sorted
-    first best) when it is among its k first: smaller keys, then earlier
-    rows, come first, as ordinal rank orders them."""
+    """Retain the best k pairs in relocatable inline aggregate storage.
+
+    At most TOP_ROWS_INLINE pairs live here. Owning a heap in this raw state
+    would require destruction and relocation hooks, so sort its bounded span.
+    """
+    if k <= 0:
+        return
     var count = Int(state[])
     if count == k:
         var last_key = state[unsafe_offset=2 * k - 1]
         var last_row = state[unsafe_offset=2 * k]
-        if key > last_key or (key == last_key and row > last_row):
+        if key > last_key or (key == last_key and row >= last_row):
             return
         count -= 1
-    else:
-        state[] = UInt64(count + 1)
-    var at = count
-    while at > 0:
-        var before_key = state[unsafe_offset=2 * at - 1]
-        var before_row = state[unsafe_offset=2 * at]
-        if before_key < key or (before_key == key and before_row < row):
-            break
-        state[unsafe_offset=2 * at + 1] = before_key
-        state[unsafe_offset=2 * at + 2] = before_row
-        at -= 1
-    state[unsafe_offset=2 * at + 1] = key
-    state[unsafe_offset=2 * at + 2] = row
+    state[unsafe_offset=2 * count + 1] = key
+    state[unsafe_offset=2 * count + 2] = row
+    count += 1
+    state[] = UInt64(count)
+    var pairs = Span(
+        unsafe_ptr=Pointer[Array[UInt64, 2], MutAnyOrigin](
+            unsafe_from_address=Int(state.unsafe_offset(1))
+        ),
+        length=count,
+    )
+
+    def less(a: Array[UInt64, 2], b: Array[UInt64, 2]) -> Bool:
+        return a[0] < b[0] or (a[0] == b[0] and a[1] < b[1])
+
+    sort(pairs, less)
 
 
 def _update_top_rows[
@@ -1464,7 +1470,7 @@ def _update_top_rows[
         var i = sel.get_index(start + k)
         if nulls and not validity.row_is_valid_unsafe(i):
             continue
-        _keep_top(
+        _retain_top_rows(
             _words_at(rows[unsafe_offset=k] + base),
             slot.k,
             _key[D](values[unsafe_offset=i], slot.descending),
@@ -1555,7 +1561,7 @@ def combine(slots: List[AggregateFunction], into: Int, other: Int) raises:
                 unsafe_from_address=into + 8 * w
             )
             for p in range(held):
-                _keep_top(
+                _retain_top_rows(
                     into_state,
                     slots[s].k,
                     b[unsafe_offset=w + 1 + 2 * p],
