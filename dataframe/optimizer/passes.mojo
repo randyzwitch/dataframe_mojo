@@ -62,9 +62,9 @@ from dataframe.planning.graph import (
     plan_reorder,
     plan_share_copy_schemas,
     plan_subplan_classes,
-    plan_topological,
 )
 from dataframe.planning.model import (
+    PlanNode,
     AGG,
     ASOF,
     CONCAT,
@@ -123,7 +123,6 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
     plan_fold_casts(plan)
     plan_unique_as_aggregate(plan)
     plan_lower_right_joins(plan)
-    plan_split_filters(plan)
     plan_filter_shared_subplans(plan)
     # Memoize derived schemas across predicate and projection pushdown. These
     # passes retain output shape; invalidate memo entries for nodes that are
@@ -131,7 +130,6 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
     plan._schema_memo = Optional(ArcPointer(Dict[Int, DataFrame]()))
     try:
         plan_push_predicates(plan)
-        plan_merge_filters(plan)
         plan_push_slices(plan)
         plan_fuse_top_k(plan)
         plan_eliminate_common_subexpressions(plan)
@@ -443,96 +441,444 @@ def plan_filter_shared_subplans(mut self: QueryContext):
             self._nodes.append(_filter_node(left=copies[c], exprs=[any.copy()]))
             self._nodes[run[0]].left = len(self._nodes) - 1
     if len(self._nodes) > count:
-        plan_split_filters(self, count)
-        plan_reorder(self)
-
-
-def plan_split_filters(mut self: QueryContext, first: Int = 0):
-    """A row-local filter on `a & b` becomes a filter on b over one on
-    a, so predicate pushdown moves each part as far as it can go; a
-    filter on an OR of ANDs also gets the single-input filters it
-    implies (`_implied_filters`). `_merge_filters` rejoins the parts
-    that end up together. Only nodes from `first` on are split."""
-    var count = len(self._nodes)
-    var added = False
-    for i in range(first, count):
-        if self._nodes[i].kind != FILTER:
-            continue
-        if not _row_local(self._nodes[i].exprs) or not _cannot_raise(
-            self._nodes[i].exprs
-        ):
-            continue
-        var parts = _boolean_parts(self._nodes[i].exprs[0], AND)
-        var extra = List[Expr]()
-        for part in parts:
-            for implied in _implied_filters(part):
-                extra.append(implied.copy())
-        if len(parts) + len(extra) < 2:
-            continue
-        var below = self._nodes[i].left
-        for implied in extra:
-            self._nodes.append(_filter_node(left=below, exprs=[implied.copy()]))
-            below = len(self._nodes) - 1
-        for k in range(len(parts) - 1, 0, -1):
-            self._nodes.append(
-                _filter_node(left=below, exprs=[parts[k].copy()])
-            )
-            below = len(self._nodes) - 1
-        self._nodes[i].left = below
-        self._nodes[i].exprs = [parts[0].copy()]
-        added = True
-    if added:
-        plan_reorder(self)
-
-
-def plan_merge_filters(mut self: QueryContext):
-    """Join a row-local filter directly over another into one filter
-    on both predicates, lower first, so a scan below sees them all (CSV
-    range filters, Parquet row-group pruning)."""
-    # Walk children before parents. Fold a run of compatible filters into its
-    # top node, stopping at operator kinds or error boundaries that prevent
-    # merging, then renumber the rewritten plan.
-    var changed = False
-    for i in range(len(self._nodes)):
-        while True:
-            ref node = self._nodes[i]
-            if node.kind != FILTER or node.left < 0:
-                break
-            ref below = self._nodes[node.left]
-            if below.kind != FILTER:
-                break
-            if not (_row_local(node.exprs) and _row_local(below.exprs)):
-                break
-            # Merging evaluates the upper predicate on rows removed by the
-            # lower filter. Preserve its boundary when evaluation can fail.
-            if not _cannot_raise(node.exprs):
-                break
-            # A reader's pinned filters merge with each other, never
-            # with the shared subplan's own.
-            if _pinned(node) != _pinned(below):
-                break
-            var merged = below.exprs[0] & node.exprs[0]
-            var child = below.left
-            self._nodes[i].exprs = [merged^]
-            self._nodes[i].left = child
-            plan_forget_schema(self, i)
-            changed = True
-    if changed:
         plan_reorder(self)
 
 
 def plan_push_predicates(mut self: QueryContext) raises:
-    """Swap each filter below operators that cannot change its result."""
+    """DuckDB's FilterPushdown (optimizer/filter_pushdown.cpp and
+    optimizer/pushdown/) in one top-down pass: each filter's conjuncts
+    join the set carried down the plan, each operator passes on the
+    ones that cannot change its result and the rest land above it as
+    one filter. The plan is renumbered once at the end."""
     var owned = plan_remember_schemas(self)
     try:
-        plan_push_predicates_now(self)
-        plan_drop_constant_filters(self)
+        var root = plan_pushdown(self, len(self._nodes) - 1, List[Expr]())
+        plan_reorder(self, root)
     except e:
         if owned:
             self._schema_memo = None
         raise e^
     if owned:
         self._schema_memo = None
+
+
+def plan_movable(node: PlanNode) -> Bool:
+    """Whether a filter's predicate may join the pushed set: row-local,
+    unable to raise and not pinned above a shared subplan. Any other
+    filter stays where it is and the set stops above it."""
+    return (
+        node.kind == FILTER
+        and not _pinned(node)
+        and _row_local(node.exprs)
+        and _cannot_raise(node.exprs)
+    )
+
+
+def _literal(predicate: Expr) -> Int:
+    """1 for a literal true, 0 for a literal false, else -1."""
+    ref nodes = predicate._nodes
+    if len(nodes) != 1 or nodes[0].op != LIT_BOOL:
+        return -1
+    return 1 if nodes[0].integer != 0 else 0
+
+
+def plan_add_filter(mut filters: List[Expr], predicate: Expr) -> Bool:
+    """FilterPushdown::AddFilter: split `predicate` into its conjuncts,
+    with the single-input filters an OR of ANDs implies
+    (`_implied_filters`), and add them to `filters`. A true conjunct
+    keeps every row and goes. False when a conjunct is false: no row
+    passes (FilterResult::UNSATISFIABLE)."""
+    var unsatisfiable = False
+    for part in _boolean_parts(predicate, AND):
+        var value = _literal(part)
+        if value == 1:
+            continue
+        if value == 0:
+            unsatisfiable = True
+        filters.append(part.copy())
+        for implied in _implied_filters(part):
+            filters.append(implied.copy())
+    return not unsatisfiable
+
+
+def plan_add_conjunct(mut filters: List[Expr], predicate: Expr) -> Bool:
+    """Add one conjunct already split by `plan_add_filter` (rewritten
+    through a projection, or carried to the other join input): a true
+    one goes, a false one makes the set unsatisfiable."""
+    var value = _literal(predicate)
+    if value != 1:
+        filters.append(predicate.copy())
+    return value != 0
+
+
+def plan_empty_result(mut self: QueryContext, index: Int) raises -> Bool:
+    """LogicalEmptyResult: the subtree at `index` becomes an empty frame
+    with its columns, when skipping it cannot suppress an evaluation
+    error (`plan_can_discard`)."""
+    if not plan_can_discard(self, index):
+        return False
+    var empty = self._execute(index, True)
+    self._frames.append(empty^)
+    self._schemas.append(Optional[CsvSchema]())
+    self._nodes[index] = _frame_scan_node(slot=len(self._frames) - 1)
+    return True
+
+
+def plan_final_filters(
+    mut self: QueryContext, index: Int, filters: List[Expr]
+) -> Int:
+    """FilterPushdown::PushFinalFilters: the filters that stop at
+    `index`, as one filter above it."""
+    if len(filters) == 0:
+        return index
+    var predicate = filters[0].copy()
+    for k in range(1, len(filters)):
+        predicate = predicate & filters[k]
+    self._nodes.append(_filter_node(left=index, exprs=[predicate^]))
+    return len(self._nodes) - 1
+
+
+def plan_finish_pushdown(
+    mut self: QueryContext, index: Int, filters: List[Expr]
+) raises -> Int:
+    """FilterPushdown::FinishPushdown: each input starts a pushdown of
+    its own and the filters stop above `index`."""
+    var left = self._nodes[index].left
+    var right = self._nodes[index].right
+    if left >= 0:
+        var new_left = plan_pushdown(self, left, List[Expr]())
+        self._nodes[index].left = new_left
+    if right >= 0:
+        var new_right = plan_pushdown(self, right, List[Expr]())
+        self._nodes[index].right = new_right
+    return plan_final_filters(self, index, filters)
+
+
+def plan_pushdown(
+    mut self: QueryContext, index: Int, var filters: List[Expr]
+) raises -> Int:
+    """FilterPushdown::Rewrite: push `filters`, read by the parent of
+    `index`, into the subtree at `index`; returns the subtree's new
+    root. Every filter in `filters` is row-local and cannot raise. One
+    reading columns through a selector stays above `index`: below, the
+    selector could match other columns."""
+    var fixed = List[Expr]()
+    for k in range(len(filters) - 1, -1, -1):
+        if not _references(filters[k]):
+            fixed.append(filters.pop(k))
+    if len(fixed) > 0:
+        var root = plan_pushdown(self, index, filters^)
+        return plan_final_filters(self, root, fixed)
+    var kind = self._nodes[index].kind
+    if kind == FILTER:
+        return plan_pushdown_filter(self, index, filters^)
+    if kind == SELECT or kind == WITH_COLUMNS:
+        return plan_pushdown_projection(self, index, filters^)
+    if kind == DROP or kind == SORT:
+        # A drop removes no row and a filter above it reads none of
+        # the dropped columns; a stable sort keeps the surviving rows'
+        # relative order (LOGICAL_ORDER_BY pushes straight through).
+        var new_left = plan_pushdown(self, self._nodes[index].left, filters^)
+        self._nodes[index].left = new_left
+        return index
+    if kind == CONCAT:
+        return plan_pushdown_set_operation(self, index, filters^)
+    if kind == AGG or kind == PIVOT:
+        return plan_pushdown_aggregate(self, index, filters^)
+    if kind == JOIN:
+        var how = self._nodes[index].how
+        if how == JOIN_INNER or how == JOIN_LEFT:
+            return plan_pushdown_join(self, index, filters^)
+        if how == JOIN_SEMI or how == JOIN_ANTI:
+            return plan_pushdown_semi_anti_join(self, index, filters^)
+    return plan_finish_pushdown(self, index, filters)
+
+
+def plan_pushdown_filter(
+    mut self: QueryContext, index: Int, var filters: List[Expr]
+) raises -> Int:
+    """FilterPushdown::PushdownFilter: a movable filter's conjuncts join
+    the set and the filter goes. A filter that cannot move (pinned,
+    not row-local, or able to raise on rows the set would remove) stays
+    a boundary: the set stops above it. A row-local one there takes the
+    set into its own predicate, after its own, so a scan below sees
+    them together."""
+    var left = self._nodes[index].left
+    if plan_movable(self._nodes[index]):
+        if not plan_add_filter(filters, self._nodes[index].exprs[0]):
+            if plan_empty_result(self, left):
+                return plan_final_filters(self, left, List[Expr]())
+        return plan_pushdown(self, left, filters^)
+    left = plan_pushdown(self, left, List[Expr]())
+    self._nodes[index].left = left
+    var pinned = _pinned(self._nodes[index])
+    var local = _row_local(self._nodes[index].exprs)
+    # A reader's pinned filters merge with each other, never with the
+    # shared subplan's own (`plan_filter_shared_subplans`).
+    if (
+        pinned
+        and local
+        and _cannot_raise(self._nodes[index].exprs)
+        and _pinned(self._nodes[left])
+        and _row_local(self._nodes[left].exprs)
+    ):
+        var merged = self._nodes[left].exprs[0] & self._nodes[index].exprs[0]
+        self._nodes[index].exprs = [merged^]
+        self._nodes[index].left = self._nodes[left].left
+        plan_forget_schema(self, index)
+    if len(filters) > 0 and not pinned and local:
+        var merged = self._nodes[index].exprs[0].copy()
+        for f in filters:
+            merged = merged & f
+        self._nodes[index].exprs = [merged^]
+        return index
+    return plan_final_filters(self, index, filters)
+
+
+def plan_pushdown_projection(
+    mut self: QueryContext, index: Int, var filters: List[Expr]
+) raises -> Int:
+    """FilterPushdown::PushdownProjection: a filter reading only columns
+    the projection passes through or sets to a constant is rewritten
+    over its input and moves below it. One reading a computed column
+    stays above (DuckDB's PRESERVE_COMPUTED_EXPRESSIONS, without the
+    split projection). A window or aggregate over the input depends on
+    which rows are there (TPC-DS q47 ranked months after `d_year = 1999`
+    was pushed below the rank), and a select of literals alone sets
+    the row count: nothing passes either."""
+    var exprs = self._nodes[index].exprs.copy()
+    var select = self._nodes[index].kind == SELECT
+    if (
+        not _cannot_raise(exprs)
+        or not _row_local(exprs)
+        or (select and not _reads_input(exprs))
+    ):
+        return plan_finish_pushdown(self, index, filters)
+    var below = List[Expr]()
+    var remain = List[Expr]()
+    var unsatisfiable = False
+    for f in filters:
+        var reads = _references(f)
+        var passes = True
+        for name in reads.value():
+            var at = _produced_at(exprs, name)
+            if at < 0:
+                if select:
+                    passes = False
+                continue
+            if not _plain_or_constant(exprs[at]):
+                passes = False
+        if not passes:
+            remain.append(f.copy())
+            continue
+        var rewritten = _fold_constants(_through_projection(f, exprs))
+        if not plan_add_conjunct(below, rewritten):
+            unsatisfiable = True
+    if unsatisfiable and plan_empty_result(self, index):
+        return plan_final_filters(self, index, remain)
+    var new_left = plan_pushdown(self, self._nodes[index].left, below^)
+    self._nodes[index].left = new_left
+    return plan_final_filters(self, index, remain)
+
+
+def plan_pushdown_set_operation(
+    mut self: QueryContext, index: Int, var filters: List[Expr]
+) raises -> Int:
+    """FilterPushdown::PushdownSetOperation: both inputs of a vertical
+    concat supply the same names and types, so every filter applies to
+    each, as both engines push predicates into every branch of a UNION
+    ALL."""
+    var left = self._nodes[index].left
+    var right = self._nodes[index].right
+    var copies = filters.copy()
+    var new_left = plan_pushdown(self, left, filters^)
+    self._nodes[index].left = new_left
+    var new_right = plan_pushdown(self, right, copies^)
+    self._nodes[index].right = new_right
+    return index
+
+
+def plan_pushdown_aggregate(
+    mut self: QueryContext, index: Int, var filters: List[Expr]
+) raises -> Int:
+    """FilterPushdown::PushdownAggregate: a filter reading only group
+    keys removes whole groups, so it moves below the aggregate and the
+    kept groups' values and first-occurrence order stay as they were.
+    A pivot's index columns are its keys when it keeps one value per
+    cell (min, max, first, last, count, len). Filters on aggregates,
+    and every filter over an aggregate without keys, stay above."""
+    var keys = List[String]()
+    ref node = self._nodes[index]
+    if node.kind == AGG:
+        if _cannot_raise(node.exprs):
+            keys = node.names.copy()
+    elif node.text in ["min", "max", "first", "last", "count", "len"]:
+        keys = List[String](node.pivot_columns()[: node.pivot_index_count()])
+    var below = List[Expr]()
+    var remain = List[Expr]()
+    for f in filters:
+        var reads = _references(f)
+        if len(keys) > 0 and _covers(keys, reads.value()):
+            below.append(f.copy())
+        else:
+            remain.append(f.copy())
+    var new_left = plan_pushdown(self, self._nodes[index].left, below^)
+    self._nodes[index].left = new_left
+    return plan_final_filters(self, index, remain)
+
+
+def plan_join_sides(
+    self: QueryContext, index: Int
+) raises -> Tuple[List[String], List[String]]:
+    """The names a filter above the join can read from each input.
+    Coalesced right keys are not in the join output, so no filter above
+    can mean them."""
+    ref node = self._nodes[index]
+    var left_cols = plan_columns_of(self, node.left)
+    var right_cols = List[String]()
+    for c in plan_columns_of(self, node.right):
+        if not (node.coalesce and c in node.right_keys):
+            right_cols.append(c)
+    return (left_cols^, right_cols^)
+
+
+def plan_pushdown_join(
+    mut self: QueryContext, index: Int, var filters: List[Expr]
+) raises -> Int:
+    """FilterPushdown::PushdownInnerJoin and PushdownLeftJoin: a filter
+    on one input's columns moves into it (a left join's right input
+    keeps its filters out, its unmatched rows are null there). A filter
+    on a left join's right columns that rejects nulls rejects every
+    unmatched row, so the join is inner (FilterRemovesNull). A filter
+    on one input's join keys also holds for the other input's keys,
+    as the FilterCombiner's equivalence sets derive. Filters on both
+    inputs stay above."""
+    var sides = plan_join_sides(self, index)
+    ref left_cols = sides[0]
+    ref right_cols = sides[1]
+    if self._nodes[index].how == JOIN_LEFT:
+        for f in filters:
+            if plan_left_join_to_inner(self, f, index, left_cols, right_cols):
+                break
+    var inner = self._nodes[index].how == JOIN_INNER
+    var left_below = List[Expr]()
+    var right_below = List[Expr]()
+    var remain = List[Expr]()
+    for f in filters:
+        var reads = _references(f)
+        if _covers(left_cols, reads.value()):
+            var copy = plan_transfer_key_filter(self, f, index, False)
+            if copy:
+                _ = plan_add_conjunct(right_below, copy.value())
+            left_below.append(f.copy())
+        elif inner and _covers_exclusive(right_cols, left_cols, reads.value()):
+            var copy = plan_transfer_key_filter(self, f, index, True)
+            if copy:
+                _ = plan_add_conjunct(left_below, copy.value())
+            right_below.append(f.copy())
+        else:
+            remain.append(f.copy())
+    var left = self._nodes[index].left
+    var right = self._nodes[index].right
+    var new_left = plan_pushdown(self, left, left_below^)
+    self._nodes[index].left = new_left
+    var new_right = plan_pushdown(self, right, right_below^)
+    self._nodes[index].right = new_right
+    return plan_final_filters(self, index, remain)
+
+
+def plan_pushdown_semi_anti_join(
+    mut self: QueryContext, index: Int, var filters: List[Expr]
+) raises -> Int:
+    """FilterPushdown::PushdownSemiAntiJoin: a semi or anti join's output
+    is its left input's rows, so every filter on them moves into the
+    left input; the right input starts a pushdown of its own, with any
+    filter on the left join keys carried over to the right keys."""
+    var sides = plan_join_sides(self, index)
+    ref left_cols = sides[0]
+    var left_below = List[Expr]()
+    var right_below = List[Expr]()
+    var remain = List[Expr]()
+    for f in filters:
+        var reads = _references(f)
+        if not _covers(left_cols, reads.value()):
+            remain.append(f.copy())
+            continue
+        var copy = plan_transfer_key_filter(self, f, index, False)
+        if copy:
+            _ = plan_add_conjunct(right_below, copy.value())
+        left_below.append(f.copy())
+    var left = self._nodes[index].left
+    var right = self._nodes[index].right
+    var new_left = plan_pushdown(self, left, left_below^)
+    self._nodes[index].left = new_left
+    var new_right = plan_pushdown(self, right, right_below^)
+    self._nodes[index].right = new_right
+    return plan_final_filters(self, index, remain)
+
+
+def plan_left_join_to_inner(
+    mut self: QueryContext,
+    predicate: Expr,
+    join: Int,
+    left_cols: List[String],
+    right_cols: List[String],
+) raises -> Bool:
+    """FilterRemovesNull: convert a left join to an inner join when a
+    filter above it reads only right-side columns and rejects a row
+    whose right-side columns are all null. Those are exactly the extra
+    unmatched rows supplied by the left join."""
+    var reads = _references(predicate)
+    if not reads:
+        return False
+    if not _covers_exclusive(right_cols, left_cols, reads.value()):
+        return False
+    var schema = self._execute(self._nodes[join].right, True)
+    var nulls = List[Series]()
+    var names = List[String]()
+    for name in reads.value():
+        if name in names:
+            continue
+        names.append(name)
+        nulls.append(Series.full_null(name, schema.column(name).dtype(), 1))
+    if DataFrame(nulls^).filter(predicate).height() > 0:
+        return False
+    self._nodes[join].how = JOIN_INNER
+    self._nodes[join].text = "inner"
+    trace_path("lazy.left_join_to_inner")
+    return True
+
+
+def plan_transfer_key_filter(
+    self: QueryContext, predicate: Expr, join: Int, right_side: Bool
+) -> Optional[Expr]:
+    """A filter moving into one input of an equi-join that reads only
+    that input's join keys also holds for the other input's keys:
+    a row there whose key fails it matches no row the filter keeps.
+    So the predicate in the other input's key names filters that input
+    too. TPC-DS q78's `ss_sold_year = 2000`, above two left joins on
+    the year, then also narrows the web and catalog totals."""
+    ref node = self._nodes[join]
+    if len(node.names) != len(node.right_keys) or len(node.names) == 0:
+        return None
+    var keys = node.right_keys.copy() if right_side else node.names.copy()
+    var other = node.names.copy() if right_side else node.right_keys.copy()
+    var copy = predicate.copy()
+    for k in range(len(copy._nodes)):
+        ref item = copy._nodes[k]
+        if item.op == SELECTOR:
+            return None
+        if item.op != COL:
+            continue
+        var at = -1
+        for j in range(len(keys)):
+            if keys[j] == item.text:
+                at = j
+                break
+        if at < 0:
+            return None
+        copy._nodes[k].text = other[at]
+    return copy^
 
 
 def plan_can_discard(self: QueryContext, index: Int) -> Bool:
@@ -556,401 +902,6 @@ def plan_can_discard(self: QueryContext, index: Int) -> Bool:
         pending.append(node.left)
         pending.append(node.right)
     return True
-
-
-def plan_drop_constant_filters(mut self: QueryContext) raises:
-    """A filter folded to true (`_fold_constants`) keeps every row
-    and goes; one folded to false keeps none, and it and its input
-    become an empty frame with the same columns only when skipping the
-    input cannot suppress an evaluation error."""
-    var parents = plan_parents(self)
-    var changed = False
-    for i in range(len(self._nodes)):
-        ref node = self._nodes[i]
-        if node.kind != FILTER or _pinned(node):
-            continue
-        ref nodes = node.exprs[0]._nodes
-        if len(nodes) != 1 or nodes[0].op != LIT_BOOL:
-            continue
-        if nodes[0].integer != 0:
-            var parent = parents[i]
-            if parent < 0:
-                continue
-            var input = node.left
-            if self._nodes[parent].left == i:
-                self._nodes[parent].left = input
-            if self._nodes[parent].right == i:
-                self._nodes[parent].right = input
-            parents[input] = parent
-        else:
-            if not plan_can_discard(self, node.left):
-                continue
-            var empty = self._execute(i, True)
-            self._frames.append(empty^)
-            self._schemas.append(Optional[CsvSchema]())
-            self._nodes[i] = _frame_scan_node(slot=len(self._frames) - 1)
-        changed = True
-    if changed:
-        plan_reorder(self)
-
-
-def plan_push_predicates_now(mut self: QueryContext) raises:
-    # Filters are visited in children-before-parents order and moved
-    # in place: a filter keeps its input's columns, so no other node's
-    # schema changes and only the moved filters' are forgotten. The
-    # plan is renumbered once at the end.
-    var root = len(self._nodes) - 1
-    var moved = False
-    var changed = True
-    # Filters found unable to move. A filter's verdict depends on its
-    # input and the run of filters under it, never on its parent, and
-    # a move changes no node's columns: after one, only the filters
-    # around the old and new place are asked again (`_unstick`).
-    var stuck = List[Bool](length=len(self._nodes), fill=False)
-    # Each node's parent, kept up to date as filters move rather than
-    # found again by a walk of the plan per move.
-    var parents = plan_parents(self)
-    while changed:
-        changed = False
-        for i in plan_topological(self, root):
-            if self._nodes[i].kind != FILTER:
-                continue
-            if i < len(stuck) and stuck[i]:
-                continue
-            var child = self._nodes[i].left
-            _ = plan_left_join_to_inner(self, i, child)
-            var side = plan_passes(self, i, child)
-            if side >= 0:
-                # The filter moves as far as it goes, and the walk goes
-                # on with the filters after it: no move below a filter
-                # changes where an earlier one can go, and the filters
-                # a move unsticks are asked again on the next walk.
-                while side >= 0:
-                    if i == root:
-                        root = child
-                    var before = len(self._nodes)
-                    ref below = self._nodes[child]
-                    if below.kind == SELECT or below.kind == WITH_COLUMNS:
-                        self._nodes[i].exprs = [
-                            _fold_constants(
-                                _through_projection(
-                                    self._nodes[i].exprs[0], below.exprs
-                                )
-                            )
-                        ]
-                    elif below.kind == JOIN:
-                        plan_transfer_key_filter(self, i, child, side == 1)
-                    elif below.kind == CONCAT:
-                        # A copy filters the second input; the filter
-                        # itself moves above the first.
-                        self._nodes.append(
-                            _filter_node(
-                                left=below.right,
-                                exprs=self._nodes[i].exprs.copy(),
-                            )
-                        )
-                        self._nodes[child].right = len(self._nodes) - 1
-                    # A filter added above one input of `child`.
-                    for added in range(before, len(self._nodes)):
-                        parents.append(child)
-                        parents[self._nodes[added].left] = added
-                    plan_unstick(self, i, child, stuck, parents)
-                    plan_swap_in_place(self, i, child, side == 1, parents)
-                    child = self._nodes[i].left
-                    side = plan_passes(self, i, child)
-                changed = True
-                moved = True
-                continue
-            # Over another row-local filter that is stuck where this one
-            # could go further (a filter on an AND split into parts,
-            # one on the keys of a group_by, one on its aggregates):
-            # trade places, so this one moves on next time round.
-            if not _row_local(self._nodes[i].exprs) or not _cannot_raise(
-                self._nodes[i].exprs
-            ):
-                continue
-            # The operator under the run of row-local filters below.
-            var under = child
-            while (
-                under >= 0
-                and self._nodes[under].kind == FILTER
-                and _row_local(self._nodes[under].exprs)
-                and _cannot_raise(self._nodes[under].exprs)
-            ):
-                under = self._nodes[under].left
-            # Push each filter through as many semantically safe operators as
-            # possible, including eligible join inputs.
-            if (
-                under != child
-                and under >= 0
-                and plan_passes(self, child, under) < 0
-                and plan_passes(self, i, under) >= 0
-            ):
-                if i == root:
-                    root = child
-                plan_unstick(self, i, child, stuck, parents)
-                plan_swap_in_place(self, i, child, False, parents)
-                changed = True
-                moved = True
-                continue
-            if i < len(stuck):
-                stuck[i] = True
-    if moved:
-        plan_reorder(self, root)
-
-
-def plan_unstick(
-    self: QueryContext, filter: Int, child: Int, mut stuck: List[Bool]
-):
-    plan_unstick(self, filter, child, stuck, plan_parents(self))
-
-
-def plan_unstick(
-    self: QueryContext,
-    filter: Int,
-    child: Int,
-    mut stuck: List[Bool],
-    parents: List[Int],
-):
-    """Before `filter` moves below `child`: forget the verdicts it can
-    change, those of `filter` and `child` and of the run of filters
-    ending at `filter`'s parent, whose input or run below changes."""
-    for node in [filter, child]:
-        if node >= 0 and node < len(stuck):
-            stuck[node] = False
-    var above = parents[filter]
-    while above >= 0 and self._nodes[above].kind == FILTER:
-        if above < len(stuck):
-            stuck[above] = False
-        above = parents[above]
-
-
-def plan_passes(self: QueryContext, filter: Int, child: Int) raises -> Int:
-    """Whether the filter at `filter` can move below the node at
-    `child` without changing its result: -1 when not, else the side of
-    `child` it moves into (0 left or only input, 1 right)."""
-    var reads = _references(self._nodes[filter].exprs[0])
-    if (
-        not reads
-        or child < 0
-        or _pinned(self._nodes[filter])
-        or not _cannot_raise(self._nodes[filter].exprs)
-    ):
-        return -1
-    ref below = self._nodes[child]
-    if below.kind == WITH_COLUMNS or below.kind == SELECT:
-        if not _cannot_raise(below.exprs):
-            return -1
-        # A window or aggregate over the input (a rank, a sum over a
-        # partition) depends on which rows are there: filtering first
-        # changes its values even for rows the filter keeps (TPC-DS
-        # q47 ranked months after `d_year = 1999` was pushed below the
-        # rank, so every rank shifted by one). A select of those, or of
-        # literals alone, also changes the row count.
-        if not _row_local(below.exprs) or not _row_local(
-            self._nodes[filter].exprs
-        ):
-            return -1
-        if below.kind == SELECT and not _reads_input(below.exprs):
-            return -1
-        # Rewrite pushed predicates in the projection's input terms: replace
-        # aliases and substitute eligible projected expressions before moving
-        # the filter below the projection.
-        for name in reads.value():
-            var at = _produced_at(below.exprs, name)
-            if at < 0:
-                if below.kind == SELECT:
-                    return -1
-                continue
-            if not _plain_or_constant(below.exprs[at]):
-                return -1
-        return 0
-    if below.kind == CONCAT and _row_local(self._nodes[filter].exprs):
-        # Both inputs supply the same names and types, so the filter
-        # applies to each (`_push_into_concat`), as both engines push
-        # predicates into every branch of a UNION ALL.
-        return 0
-    if (
-        below.kind == AGG
-        and _cannot_raise(below.exprs)
-        and len(below.names) > 0
-        and _row_local(self._nodes[filter].exprs)
-        and _covers(below.names, reads.value())
-    ):
-        # A filter depending only on group keys removes whole groups, so
-        # pushing it below aggregation preserves retained values and first-
-        # occurrence order.
-        return 0
-    if (
-        below.kind == PIVOT
-        and below.text in ["min", "max", "first", "last", "count", "len"]
-        and _row_local(self._nodes[filter].exprs)
-        and _covers(
-            List[String](below.pivot_columns()[: below.pivot_index_count()]),
-            reads.value(),
-        )
-    ):
-        # As for a group_by's keys: each output row is one index key,
-        # so a filter on index columns keeps the same rows before it.
-        return 0
-    if below.kind == SORT and _row_local(self._nodes[filter].exprs):
-        # Stable sorting and a row-local filter commute: the surviving
-        # rows retain the same relative sort order.
-        return 0
-    if below.kind == JOIN and (
-        below.how == JOIN_INNER
-        or below.how == JOIN_LEFT
-        or below.how == JOIN_SEMI
-        or below.how == JOIN_ANTI
-    ):
-        var left_cols = plan_columns_of(self, below.left)
-        var right_cols = List[String]()
-        for c in plan_columns_of(self, below.right):
-            # Coalesced right keys are not in the join output, so no
-            # filter above can mean them.
-            if not (below.coalesce and c in below.right_keys):
-                right_cols.append(c)
-        if _covers(left_cols, reads.value()):
-            return 0
-        if below.how == JOIN_INNER and _covers_exclusive(
-            right_cols, left_cols, reads.value()
-        ):
-            return 1
-    return -1
-
-
-def plan_left_join_to_inner(
-    mut self: QueryContext, filter: Int, join: Int
-) raises -> Bool:
-    """Convert a left join to an inner join when the filter above it rejects
-    every row with null right-side columns. Those are exactly the extra
-    unmatched rows supplied by the left join; the filter can then move into
-    eligible join inputs without changing the result."""
-    ref node = self._nodes[join]
-    if node.kind != JOIN or node.how != JOIN_LEFT:
-        return False
-    if not _row_local(self._nodes[filter].exprs) or not _cannot_raise(
-        self._nodes[filter].exprs
-    ):
-        return False
-    var predicate = self._nodes[filter].exprs[0].copy()
-    var reads = _references(predicate)
-    if not reads:
-        return False
-    var left_cols = plan_columns_of(self, node.left)
-    var right_cols = List[String]()
-    for c in plan_columns_of(self, node.right):
-        if not (node.coalesce and c in node.right_keys):
-            right_cols.append(c)
-    if not _covers_exclusive(right_cols, left_cols, reads.value()):
-        return False
-    var right = node.right
-    var schema = self._execute(right, True)
-    var nulls = List[Series]()
-    var names = List[String]()
-    for name in reads.value():
-        if name in names:
-            continue
-        names.append(name)
-        nulls.append(Series.full_null(name, schema.column(name).dtype(), 1))
-    if DataFrame(nulls^).filter(predicate).height() > 0:
-        return False
-    self._nodes[join].how = JOIN_INNER
-    self._nodes[join].text = "inner"
-    trace_path("lazy.left_join_to_inner")
-    return True
-
-
-def plan_transfer_key_filter(
-    mut self: QueryContext, filter: Int, join: Int, right_side: Bool
-):
-    """A filter moving into one input of an equi-join that reads only
-    that input's join keys also holds for the other input's keys:
-    a row there whose key fails it matches no row the filter keeps.
-    So a copy in the other input's key names filters that input too:
-    join keys in both inputs belong to the same equivalence set.
-    TPC-DS q78's `ss_sold_year = 2000`, above two left joins
-    on the year, then also narrows the web and catalog totals."""
-    ref node = self._nodes[join]
-    if len(node.names) != len(node.right_keys) or len(node.names) == 0:
-        return
-    if not _row_local(self._nodes[filter].exprs) or not _cannot_raise(
-        self._nodes[filter].exprs
-    ):
-        return
-    var keys = node.right_keys.copy() if right_side else node.names.copy()
-    var other = node.names.copy() if right_side else node.right_keys.copy()
-    var predicate = self._nodes[filter].exprs[0].copy()
-    for k in range(len(predicate._nodes)):
-        ref item = predicate._nodes[k]
-        if item.op == SELECTOR:
-            return
-        if item.op != COL:
-            continue
-        var at = -1
-        for j in range(len(keys)):
-            if keys[j] == item.text:
-                at = j
-                break
-        if at < 0:
-            return
-        predicate._nodes[k].text = other[at]
-    var target = node.left if right_side else node.right
-    self._nodes.append(_filter_node(left=target, exprs=[predicate^]))
-    if right_side:
-        self._nodes[join].left = len(self._nodes) - 1
-    else:
-        self._nodes[join].right = len(self._nodes) - 1
-
-
-def plan_swap_down(
-    mut self: QueryContext, filter: Int, child: Int, right_side: Bool
-):
-    """Move filter from above child to directly above child's input."""
-    plan_swap_in_place(self, filter, child, right_side)
-    plan_reorder(self)
-
-
-def plan_swap_in_place(
-    mut self: QueryContext, filter: Int, child: Int, right_side: Bool
-):
-    var parents = plan_parents(self)
-    plan_swap_in_place(self, filter, child, right_side, parents)
-
-
-def plan_swap_in_place(
-    mut self: QueryContext,
-    filter: Int,
-    child: Int,
-    right_side: Bool,
-    mut parents: List[Int],
-):
-    """Move a filter through a child while preserving the child's and its
-    ancestors' output names. Rewrite input references before reconnecting
-    nodes so moving the filter does not leave stale column bindings."""
-    var parent = parents[filter]
-    var target = (
-        self._nodes[child].right if right_side else self._nodes[child].left
-    )
-    self._nodes[filter].left = target
-    if right_side:
-        self._nodes[child].right = filter
-    else:
-        self._nodes[child].left = filter
-    if parent >= 0:
-        if self._nodes[parent].left == filter:
-            self._nodes[parent].left = child
-        else:
-            self._nodes[parent].right = child
-    if target >= 0:
-        parents[target] = filter
-    parents[filter] = child
-    parents[child] = parent
-    if self._schema_memo:
-        try:
-            _ = self._schema_memo.value()[].pop(filter)
-        except:
-            pass
 
 
 def plan_push_slices(mut self: QueryContext) raises:
@@ -989,7 +940,7 @@ def plan_push_slices(mut self: QueryContext) raises:
             if (
                 below.kind == SELECT or below.kind == WITH_COLUMNS
             ) and preserves_rows:
-                plan_swap_down(self, i, node.left, False)
+                plan_swap_down(self, i, node.left)
                 changed = True
                 break
     var pushed = False
@@ -1039,6 +990,22 @@ def plan_push_slices(mut self: QueryContext) raises:
             self._nodes[node.left].set_scan_row_limit(node.slice_length())
     if pushed:
         plan_reorder(self)
+
+
+def plan_swap_down(mut self: QueryContext, upper: Int, child: Int):
+    """Move the single-input node `upper` from above `child` to directly
+    above `child`'s input, then renumber."""
+    var parents = plan_parents(self)
+    var parent = parents[upper]
+    self._nodes[upper].left = self._nodes[child].left
+    self._nodes[child].left = upper
+    if parent >= 0:
+        if self._nodes[parent].left == upper:
+            self._nodes[parent].left = child
+        else:
+            self._nodes[parent].right = child
+    plan_forget_schema(self, upper)
+    plan_reorder(self)
 
 
 def plan_slice_over_ipc(self: QueryContext, index: Int) -> Bool:
