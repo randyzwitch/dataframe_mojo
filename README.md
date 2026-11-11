@@ -372,11 +372,12 @@ and its [EmberSerde dependency](https://github.com/randyzwitch/EmberSerde/tree/c
 using their own package manifests. These revisions carry the compiler
 compatibility fixes and pin the same Mojo compiler as this project. The dataframe packages resolve these dependencies from the
 installed environment.
-Normalization and alphabetic properties now come from the standalone
+Normalization, Unicode properties, case folding, title casing, and UTF-8
+primitives come from the standalone
 [unicode_mojo](https://github.com/randyzwitch/unicode_mojo) package, resolved
-through Pixi at a pinned Git revision. Its
-algorithms, generated tables, data generator and full Unicode conformance
-corpus live there; dataframe retains its storage and execution adapters.
+through Pixi at a pinned Git revision. Its algorithms, generated tables,
+generators, and conformance fixtures live there; dataframe retains storage,
+execution adapters, and the regex parser and matching engines.
 Tagged releases attach the packages and a generated [API reference](docs/api.md) (`pixi run docs`). See the
 [testing guide](docs/testing.md), the [stability policy](docs/stability.md), and the
 [pandas/Polars migration guide](docs/migration.md).

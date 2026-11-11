@@ -4,14 +4,16 @@ This project does not vendor Polars or fast-float2 packages. Some CSV algorithms
 
 ## unicode_mojo
 
-Unicode normalization and Alphabetic properties are supplied by the standalone
+Unicode normalization, properties, simple folding, title casing, and UTF-8
+primitives are supplied by the standalone
 [unicode_mojo](https://github.com/randyzwitch/unicode_mojo) dependency, resolved
 through Pixi at a pinned Git revision. Its code was extracted from this
-MIT-licensed project. Unicode 17.0
-normalization data and Unicode 15.0 Alphabetic data retain their existing
-versions. The package includes the Unicode License v3 and source provenance in
-its `THIRD_PARTY_NOTICES.md`; its generated tables and conformance corpus are
-no longer vendored in dataframe.
+MIT-licensed project. Unicode 17.0 normalization, Unicode 15.0 Alphabetic,
+Unicode 16.0 property lookup, and the frozen Polars 1.44.2 regex class/folding
+snapshot retain their existing behavior. The package includes the Unicode
+License v3, Rust regex notices, and source provenance in its
+`THIRD_PARTY_NOTICES.md`; its generated tables, generators, and conformance
+fixtures are no longer vendored in dataframe.
 
 ## Polars
 
@@ -333,12 +335,12 @@ Software.
 
 ## Rust regex Unicode property data
 
-`dataframe/regex/property_tables.mojo` is generated from the Unicode 16.0
-property and alias tables in
+The `unicode_mojo` dependency supplies the Unicode 16.0 property and alias
+tables derived from
 [`regex-syntax` 1.12.2](https://github.com/rust-lang/regex/tree/1.12.2/regex-syntax/src/unicode_tables).
-The source is dual licensed under MIT or Apache-2.0; license texts are in
-`scripts/vendor/regex-LICENSE-MIT` and `scripts/vendor/regex-LICENSE-APACHE`.
-The generator is `scripts/regex_property_tables.py`.
+The source is dual licensed under MIT or Apache-2.0. Its generator and both
+upstream license texts now live in `unicode_mojo/scripts/`; the dependency's
+compiled package includes its license bundle.
 
 
 ## EmberJSON and EmberSerde

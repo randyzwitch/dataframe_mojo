@@ -675,7 +675,7 @@ def test_onepass_unicode_predicates_match_independent_vm() raises:
 
 
 def test_unicode_class_directories_and_budget() raises:
-    from dataframe.regex.charclass import class_contains
+    from unicode_mojo.ranges import contains
     from dataframe.regex.class_lookup import build_unicode_membership
     from dataframe.regex.program import compile_program
     from dataframe.regex.syntax import LOOK_UNICODE_WORD, parse
@@ -733,12 +733,12 @@ def test_unicode_class_directories_and_budget() raises:
                 for cls in range(len(program.class_ranges)):
                     assert_equal(
                         program.class_has(cls, cp),
-                        class_contains(program.class_ranges[cls], cp),
+                        contains(program.class_ranges[cls], cp),
                         pattern,
                     )
                 assert_equal(
                     program.is_word(cp),
-                    class_contains(program.word, cp),
+                    contains(program.word, cp),
                     pattern,
                 )
 
@@ -1024,7 +1024,7 @@ def test_literal_candidate_masks_preserve_lane_and_slice_bounds() raises:
 
 
 def test_two_byte_class_membership_matches_canonical_ranges() raises:
-    from dataframe.regex.charclass import class_contains
+    from unicode_mojo.ranges import contains
 
     var patterns: List[String] = [
         "(\\w+)",
@@ -1045,14 +1045,14 @@ def test_two_byte_class_membership_matches_canonical_ranges() raises:
             for cp in range(0x840):
                 assert_equal(
                     program.class_has(cls, UInt32(cp)),
-                    class_contains(ranges, UInt32(cp)),
+                    contains(ranges, UInt32(cp)),
                     pattern,
                 )
             var wider: List[UInt32] = [0xD7FF, 0xE000, 0x10000, 0x10FFFF]
             for cp in wider:
                 assert_equal(
                     program.class_has(cls, cp),
-                    class_contains(ranges, cp),
+                    contains(ranges, cp),
                     pattern,
                 )
 
@@ -1104,7 +1104,7 @@ def test_repeated_classes_preserve_alphabet_and_word_context() raises:
 
 
 def test_unicode_range_and_alphabet_searches_match_linear_scans() raises:
-    from dataframe.regex.charclass import class_contains
+    from unicode_mojo.ranges import contains
 
     var patterns: List[String] = [
         "(\\w+)(\\d+)([^a-z])",
@@ -1128,7 +1128,7 @@ def test_unicode_range_and_alphabet_searches_match_linear_scans() raises:
         points.append(0x10FFFF)
         for cp in points:
             assert_equal(
-                program.is_word(cp), class_contains(program.word, cp), pattern
+                program.is_word(cp), contains(program.word, cp), pattern
             )
             var interval = 0
             for k in range(1, len(program.boundaries)):
@@ -1145,5 +1145,5 @@ def test_unicode_range_and_alphabet_searches_match_linear_scans() raises:
                     if ranges[k] <= cp and cp <= ranges[k + 1]:
                         expected = True
                         break
-                assert_equal(class_contains(ranges, cp), expected)
-    assert_false(class_contains(List[UInt32](), 0))
+                assert_equal(contains(ranges, cp), expected)
+    assert_false(contains(List[UInt32](), 0))

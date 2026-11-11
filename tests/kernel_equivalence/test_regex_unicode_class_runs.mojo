@@ -2,7 +2,7 @@
 # contract-group: kernel.regex
 from std.testing import assert_equal, assert_true
 from dataframe.regex import Matcher, Regex
-from dataframe.regex.charclass import class_contains
+from unicode_mojo.ranges import contains
 from dataframe.regex.class_batch import class_batch
 from dataframe.regex.class_lookup import build_unicode_membership
 from dataframe.regex.pikevm import decode, previous_start
@@ -28,7 +28,7 @@ def _check_packets[
             cp[k] = points[(begin + k) % len(points)]
         var accepted = class_batch[width, lanes](program, id, cp)
         for k in range(lanes):
-            var expected = class_contains(ranges, cp[k])
+            var expected = contains(ranges, cp[k])
             assert_true(not accepted[k] or expected)
             if width == 2 or root == 1 or (root >> 62) != 0:
                 assert_equal(accepted[k], expected)
@@ -94,9 +94,7 @@ def _check_consumed[
     while at < stop:
         var packed = decode(text, at)
         assert_equal(packed & 7, width)
-        assert_true(
-            class_contains(program.class_ranges[0], UInt32(packed >> 3))
-        )
+        assert_true(contains(program.class_ranges[0], UInt32(packed >> 3)))
         at += width
     assert_equal(at, stop)
     stop = _scan_class_width[width, True](program, 0, text, len(text), 0)
@@ -107,9 +105,7 @@ def _check_consumed[
         var packed = decode(text, prev)
         assert_equal(at - prev, width)
         assert_equal(packed & 7, width)
-        assert_true(
-            class_contains(program.class_ranges[0], UInt32(packed >> 3))
-        )
+        assert_true(contains(program.class_ranges[0], UInt32(packed >> 3)))
         at = prev
     assert_equal(at, stop)
 
