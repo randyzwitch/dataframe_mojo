@@ -92,10 +92,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", required=True, type=Path)
     parser.add_argument("--candidate", required=True, type=Path)
+    parser.add_argument("--compiler", default="mojo")
     parser.add_argument("--baseline-revision", required=True)
     parser.add_argument("--candidate-revision", required=True)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
+    compiler_version = subprocess.run(
+        [args.compiler, "--version"], text=True, capture_output=True, check=True
+    ).stdout.strip()
     args.output.mkdir(parents=True, exist_ok=True)
     root = args.output / "fixtures"
     hashes = fixtures(root)
@@ -176,6 +180,7 @@ def main():
     report = dict(
         platform=platform.platform(),
         cpu=platform.processor(),
+        compiler_version=compiler_version,
         baseline_revision=args.baseline_revision,
         candidate_revision=args.candidate_revision,
         binary_sha256=binaries,
