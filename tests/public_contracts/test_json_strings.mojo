@@ -371,6 +371,153 @@ def test_json_path_layouts_first_null_duplicate_order_and_invalid_rows() raises:
                 )
 
 
+def test_jsonpath_float_rounding_text_and_invalid_rows_across_layouts() raises:
+    var values: List[String] = [
+        "41900288798.355793",
+        "-41900288798.355793",
+        "[41900288798.355793]",
+        '{"x":41900288798.355793}',
+        "-0",
+        "-0.0",
+        "-1e-10000",
+        "5e-324",
+        "1.7976931348623157e308",
+        "18446744073709551615",
+        "18446744073709551616",
+        "1e400",
+        '{"x":1,"ignored":1e400}',
+        "1e400x",
+        "null",
+    ]
+    var expected = DataFrame(
+        [
+            Series(
+                "v",
+                Column[String](
+                    [
+                        "41900288798.3558",
+                        "-41900288798.3558",
+                        "[41900288798.3558]",
+                        '{"x":41900288798.3558}',
+                        "-0.0",
+                        "-0.0",
+                        "-0.0",
+                        "5e-324",
+                        "1.7976931348623157e+308",
+                        "18446744073709551615",
+                        "1.8446744073709552e+19",
+                        "",
+                        "",
+                        "",
+                        "",
+                    ],
+                    [
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        False,
+                        False,
+                        False,
+                        False,
+                    ],
+                ),
+            )
+        ]
+    )
+    var expr = col("s").str().json_path_match("$").alias("v")
+    for layout in range(4):
+        var source = _source(
+            values, List[Bool](length=len(values), fill=True), layout
+        )
+        assert_frame(source.select(expr), expected)
+        for streaming in [False, True]:
+            assert_frame(
+                source.lazy()
+                .select(expr)
+                .collect(streaming=streaming, batch_size=1),
+                expected,
+            )
+
+
+def test_jsonpath_filters_share_float_rounding_for_literals_and_nested_values() raises:
+    var values: List[String] = [
+        '{"x":41900288798.355793,"y":41900288798.3558,"id":1}',
+        '{"x":41900288798.35579,"y":41900288798.3558,"id":2}',
+        '{"x":-0.0,"y":0.0,"id":3}',
+        '{"x":[41900288798.355793],"y":[41900288798.3558],"id":4}',
+        '{"x":{"v":41900288798.355793},"y":{"v":41900288798.3558},"id":5}',
+        '{"x":1e400,"y":1,"id":6}',
+    ]
+    var exprs: List[Expr] = [
+        col("s")
+        .str()
+        .json_path_match("$[?(@.x == 41900288798.355793)].id")
+        .alias("literal"),
+        col("s").str().json_path_match("$[?(@.x == $.y)].id").alias("equal"),
+        col("s")
+        .str()
+        .json_path_match("$[?(@.x > 41900288798.35579)].id")
+        .alias("greater"),
+    ]
+    var expected = DataFrame(
+        [
+            Series(
+                "literal",
+                Column[String](
+                    ["1", "", "", "", "", ""],
+                    [True, False, False, False, False, False],
+                ),
+            ),
+            Series(
+                "equal",
+                Column[String](
+                    ["1", "", "3", "4", "5", ""],
+                    [True, False, True, True, True, False],
+                ),
+            ),
+            Series(
+                "greater",
+                Column[String](
+                    ["1", "", "", "", "", ""],
+                    [True, False, False, False, False, False],
+                ),
+            ),
+        ]
+    )
+    for layout in range(4):
+        var source = _source(
+            values, List[Bool](length=len(values), fill=True), layout
+        )
+        assert_frame(source.select_exprs(exprs), expected)
+        for streaming in [False, True]:
+            assert_frame(
+                source.lazy()
+                .select_exprs(exprs)
+                .collect(streaming=streaming, batch_size=1),
+                expected,
+            )
+    for rows in [0, 2]:
+        var source = _source(
+            List[String](length=rows, fill="ignored"),
+            List[Bool](length=rows, fill=False),
+            0,
+        )
+        with assert_raises(contains="JSONPath"):
+            _ = (
+                source.lazy()
+                .select(col("s").str().json_path_match("$[?(@ == 1e400)]"))
+                .collect_schema()
+            )
+
+
 def test_json_arguments_validate_on_empty_and_all_null_inputs() raises:
     for rows in [0, 2]:
         var values = List[String](length=rows, fill="invalid payload")

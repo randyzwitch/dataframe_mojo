@@ -538,8 +538,15 @@ Unicode scalar value.
 fields, array indices (including negative ones), wildcards, recursive descent,
 name/index unions, slices with positive steps, and comparison filters with
 `&&`, `||`, `@` and `$` references. Paths visit selections in order and return the first match. Duplicate object keys
-keep their last value. Strings are returned unquoted; numbers, Booleans and
-containers use compact JSON spelling. A first match of JSON null ends the
+keep their last value. Floating-point values and filter literals use EmberJSON's
+Float64 conversion. This replaces the earlier `serde_json` default rounding:
+`41900288798.355793` now extracts as `41900288798.3558`, rather than
+`41900288798.35579`. Last digits and filter matches near rounding boundaries
+can change. Signed zero is retained; overflowing numbers make the document
+invalid, and overflowing filter literals raise.
+
+Strings are returned unquoted; numbers, Booleans and containers use compact
+JSON spelling. A first match of JSON null ends the
 search and returns null. Unsupported syntax, including regular-expression
 filters, raises before rows are evaluated. Zero or negative slice steps
 raise. A reusable shared parser validates the whole input row, even when
@@ -549,9 +556,7 @@ batches are concatenated once per child level, avoiding repeated copies of
 earlier batches. Categorical children share one dictionary mapping for the
 whole concatenation.
 Wildcard paths inside predicates are also supported and checked against
-an independent Python JSON selection reference. JSONPath converts numbers
-by rounding the decimal significand before applying its exponent; typed
-decoding uses a separate correctly rounded conversion.
+an independent Python JSON selection reference.
 
 #### Regular expressions
 

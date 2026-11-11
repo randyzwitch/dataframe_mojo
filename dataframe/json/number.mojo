@@ -1,8 +1,17 @@
 """JSON numeric validation and distinct decode/JSONPath text formatting."""
 from std.memory import bitcast
+from emberjson import Parser
 from dataframe.json.reader import JsonReader
 from dataframe.text.parse import parse_float64, parse_integer
-from dataframe.json.path_number import parse_jsonpath_float
+
+
+def parse_json_float(text: StringSlice) raises -> Float64:
+    """Convert a validated JSON number using EmberJSON's Float64 rounding."""
+    var parser = Parser(text)
+    var value = parser.expect_float[DType.float64]()
+    if parser.has_more():
+        raise Error("Invalid JSON number")
+    return value
 
 
 @always_inline
@@ -43,9 +52,9 @@ def validate_json_numbers(reader: JsonReader, wide: Bool = True) raises:
             raise Error("Invalid JSON integer outside 128-bit range")
         if fraction or (not wide and raw.byte_length() > 20):
             try:
-                var value = parse_float64(
+                var value = parse_float64(raw) if wide else parse_json_float(
                     raw
-                ) if wide else parse_jsonpath_float(raw)
+                )
                 if value != value or abs(value) == Float64("inf"):
                     raise Error("nonfinite value")
             except e:
@@ -137,5 +146,5 @@ def json_number_text(
             except:
                 pass
     return float_text(
-        parse_float64(text) if wide else parse_jsonpath_float(text), not wide
+        parse_float64(text) if wide else parse_json_float(text), not wide
     )

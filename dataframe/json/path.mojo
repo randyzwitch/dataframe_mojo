@@ -1,8 +1,10 @@
 """Compiled JSONPath selectors and predicates over the shared JSON tape."""
 from dataframe.json.reader import JsonReader, json_bytes, _utf8
-from dataframe.json.number import is_json_number, json_number_text
-from dataframe.text.parse import parse_float64
-from dataframe.json.path_number import parse_jsonpath_float
+from dataframe.json.number import (
+    is_json_number,
+    json_number_text,
+    parse_json_float,
+)
 
 # Selector kinds: field,index,wildcard,index union,name union,slice,filter.
 @fieldwise_init
@@ -295,7 +297,11 @@ struct _Parser(Movable):
             var reader = JsonReader(json_bytes(self.text), start)
             reader.scan_number()
             self.at = reader.pos
-            var number = parse_float64(reader.slice(start, self.at))
+            var number = Float64(0)
+            try:
+                number = parse_json_float(reader.slice(start, self.at))
+            except e:
+                raise Error("Invalid JSONPath number: " + String(e))
             if number != number or abs(number) == Float64("inf"):
                 raise Error("Invalid JSONPath number")
             return self.add(_expr(0, number=number))
@@ -784,9 +790,7 @@ def _float(
 ) raises -> Float64:
     return program.expressions[
         value.index
-    ].number if value.kind == 2 else parse_jsonpath_float(
-        reader.raw(value.index)
-    )
+    ].number if value.kind == 2 else parse_json_float(reader.raw(value.index))
 
 
 def _string(
@@ -815,7 +819,7 @@ def _equal(reader: JsonReader, a: Int, b: Int) raises -> Bool:
     var x = reader.nodes[a].kind
     var y = reader.nodes[b].kind
     if is_json_number(x) and is_json_number(y):
-        return parse_jsonpath_float(reader.raw(a)) == parse_jsonpath_float(
+        return parse_json_float(reader.raw(a)) == parse_json_float(
             reader.raw(b)
         )
     if x != y:
