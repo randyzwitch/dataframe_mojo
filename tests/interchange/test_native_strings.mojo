@@ -1,6 +1,6 @@
 """Native calls retain short, heap-backed, and newly terminated strings."""
 # contract-group: io.native_strings
-from std.os import getenv
+from std.os import getenv, mkdir, symlink
 from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import (
     Column,
@@ -16,7 +16,7 @@ from dataframe import (
     write_ipc_stream,
     write_parquet,
 )
-from dataframe.io.file_sources import _matches, _symlink, resolve_paths
+from dataframe.io.file_sources import _matches, resolve_paths
 from dataframe.io.parquet import parquet_row_group_statistics
 
 
@@ -64,13 +64,25 @@ def test_file_source_native_calls_validate_nuls_and_match_utf8() raises:
     assert_true(_matches("*.csv", "é.csv"))
     assert_true(_matches("a?", "ab"))
     assert_true(not _matches("a?", "abc"))
-    assert_true(not _symlink("tests/fixtures/dataset_sources/é.csv"))
     for invalid in ["\x00", "valid\x00ignored"]:
         with assert_raises(contains="must not contain NUL"):
             _ = _matches(invalid, "valid")
         with assert_raises(contains="must not contain NUL"):
             _ = _matches("*", invalid)
         with assert_raises(contains="must not contain NUL"):
-            _ = _symlink(invalid)
-        with assert_raises(contains="must not contain NUL"):
             _ = resolve_paths([invalid])
+
+
+def test_recursive_globs_skip_directory_symlinks_and_cycles() raises:
+    var root = getenv("COVERAGE_TEST_TMP") + "/symlink-sources"
+    mkdir(root)
+    mkdir(root + "/real")
+    with open(root + "/real/é.csv", "w") as file:
+        file.write("x\n1\n")
+    symlink("real", root + "/alias")
+    symlink("..", root + "/real/cycle")
+    symlink("missing", root + "/broken")
+    assert_equal(
+        resolve_paths([root + "/**/*.csv"]),
+        List[String]([root + "/real/é.csv"]),
+    )
