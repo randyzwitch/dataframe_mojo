@@ -1,18 +1,11 @@
 """Bounded cardinality hints for placement, never for the exact GPU answer."""
+from dataframe.hash_bits import _splitmix64 as _mix
 from std.bit import next_power_of_two
 from std.memory import bitcast
 from dataframe import DataFrame, DataType
 from .distinct_plan import DistinctPlan
 from .accelerator.gpu.distinct_value import distinct_canonical
 from .ordered_plan import ordered_tag
-
-
-@always_inline
-def _mix(value: UInt64) -> UInt64:
-    var x = value
-    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9
-    x = (x ^ (x >> 27)) * 0x94D049BB133111EB
-    return x ^ (x >> 31)
 
 
 def cardinality_key(plan: DistinctPlan, frame: DataFrame) raises -> String:

@@ -16,6 +16,7 @@ their input order, so first-occurrence order within a bucket is preserved.
 Every parallel encode scatters first to make each partition contiguous;
 no sample chooses whether it pays.
 """
+from dataframe.hash_bits import _splitmix64 as _mix
 from std.memory import Pointer, bitcast
 from std.sys import size_of
 from std.sys.intrinsics import prefetch
@@ -39,14 +40,6 @@ comptime _NULL_KEY = UInt64(0x9E3779B97F4A7C15)
 # scatter folds the 256 slots into its bucket count.
 comptime _SLOTS = 256
 comptime _SLOT_SHIFT = 56
-
-
-def _mix(value: UInt64) -> UInt64:
-    """splitmix64's finalizer: spreads low-entropy keys across all bits."""
-    var z = value
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EB
-    return z ^ (z >> 31)
 
 
 def _combine(seed: UInt64, key: UInt64) -> UInt64:
