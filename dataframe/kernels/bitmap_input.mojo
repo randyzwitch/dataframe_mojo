@@ -1,4 +1,5 @@
 """Owned physical bitmap windows without materializing source payloads."""
+from dataframe.storage.bitmap import _bitmap_word, _bitmap_bytes
 from dataframe.series import Series, Storage, FixedElements
 from dataframe.storage.buffer import _Buffer
 from dataframe.storage.column import Column
@@ -18,42 +19,10 @@ def _bitmap_byte(
     var mask = UInt8((UInt16(1) << UInt16(count)) - 1)
     if len(bits) == 0:
         return empty & mask
-    var byte = offset // 8
-    var shift = UInt8(offset % 8)
-    var value = bits[byte] >> shift
     if scalar:
-        return mask if value & 1 != 0 else UInt8(0)
-    if shift != 0 and byte + 1 < len(bits):
-        value |= bits[byte + 1] << (UInt8(8) - shift)
-    return value & mask
-
-
-@always_inline
-def _bitmap_bytes[
-    W: Int
-](bits: Span[UInt8, _], offset: Int, scalar: Bool, empty: UInt8) -> SIMD[
-    DType.uint8, W
-]:
-    """Read W packed bytes for 8*W rows within one physical window."""
-    comptime assert W > 0
-    assert offset >= 0
-    if len(bits) == 0:
-        return SIMD[DType.uint8, W](empty)
-    var byte = offset // 8
-    var shift = UInt8(offset % 8)
-    assert byte < len(bits)
-    if scalar:
-        var present = (bits[byte] >> shift) & 1 != 0
-        return SIMD[DType.uint8, W](UInt8(255) if present else UInt8(0))
-    assert W <= len(bits) - byte
-    var low = bits.unsafe_ptr().unsafe_load[width=W](byte)
-    if shift == 0:
-        return low
-    # Nonzero bit alignment needs one extra physical byte. Both overlapping
-    # W-byte loads stay inside the bitmap; no padded allocation is assumed.
-    assert W < len(bits) - byte
-    var high = bits.unsafe_ptr().unsafe_load[width=W](byte + 1)
-    return (low >> shift) | (high << (UInt8(8) - shift))
+        var value = _bitmap_word[DType.uint8](bits, offset, 1)
+        return mask if value != 0 else UInt8(0)
+    return _bitmap_word[DType.uint8](bits, offset, count)
 
 
 @always_inline

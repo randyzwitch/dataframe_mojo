@@ -16,6 +16,7 @@ probes do not read vectors yet: a morsel's chunks are collected for them
 (`_Collector`), each column kept as a range or a row list over the column
 it reads, and gathered through it only when the probe reads a frame.
 """
+from dataframe.storage.bitmap import _bitmap_word
 from dataframe.storage.buffer import _Buffer, _BufferData
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
@@ -2441,24 +2442,16 @@ def _rows_in_vectors(
 def _bits_at(address: Int, count: Int, bit: Int, n: Int) -> UInt64:
     """`n` (at most 64) bits of a `count`-byte bitmap from `bit` on, bit
     0 lowest; bits past the bitmap read as zero."""
-    var bytes = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=address)
-    var byte = bit >> 3
-    var shift = bit & 7
-    var low = UInt64(0)
-    if byte + 8 <= count:
-        low = Pointer[UInt64, MutAnyOrigin](
-            unsafe_from_address=address + byte
-        )[]
-    else:
-        for b in range(8):
-            if byte + b < count:
-                low |= UInt64(bytes[unsafe_offset=byte + b]) << UInt64(8 * b)
-    var word = low >> UInt64(shift)
-    if shift > 0 and byte + 8 < count:
-        word |= UInt64(bytes[unsafe_offset=byte + 8]) << UInt64(64 - shift)
-    if n < 64:
-        word &= (UInt64(1) << UInt64(n)) - 1
-    return word
+    return _bitmap_word[DType.uint64](
+        Span(
+            unsafe_ptr=Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=address
+            ),
+            length=count,
+        ),
+        bit,
+        n,
+    )
 
 
 def _or_bits_at(address: Int, count: Int, bit: Int, word: UInt64):

@@ -8,6 +8,7 @@ buffers that are never mutated while shared.
 Both buffers use the bitmap helpers in `column.mojo`, so windows at any
 offset append, slice, and compact correctly.
 """
+from dataframe.storage.bitmap import _bitmap_word
 from dataframe.storage.buffer import _Buffer, _BufferData
 from std.bit import pop_count
 from std.memory import ArcPointer, Pointer, bitcast
@@ -289,42 +290,9 @@ def _bits64(bits: Span[UInt8, _], bit: Int, length: Int) -> UInt64:
     """64 bits of an LSB-first bitmap starting at bit `bit`; bits past
     `length` (the bitmap's last valid bit, exclusive) read as 0. An empty
     bitmap is all ones (Arrow's absent validity)."""
-    if len(bits) == 0:
-        var left = length - bit
-        return _FULL if left >= 64 else (UInt64(1) << UInt64(max(left, 0))) - 1
-    var byte = bit >> 3
-    var shift = UInt64(bit & 7)
-    if byte + 9 <= len(bits):
-        # Room for all nine bytes: one unaligned eight-byte load and the
-        # ninth byte's spill, not a bounds-checked read per byte (the
-        # filter's compaction reads every morsel word's validity here).
-        var at = bits.unsafe_ptr().unsafe_offset(byte)
-        var loaded = bitcast[DType.uint64, 1](at.unsafe_load[width=8]())
-        var spill = UInt64(at.unsafe_offset(8)[])
-        var fast = loaded >> shift
-        if shift > 0:
-            fast |= spill << (64 - shift)
-        var remaining = length - bit
-        if remaining < 64:
-            fast &= (UInt64(1) << UInt64(max(remaining, 0))) - 1
-        return fast
-    var word = UInt64(0)
-    var last = min(byte + 9, len(bits))
-    var k = 0
-    var value = UInt64(0)
-    for b in range(byte, last):
-        if k < 8:
-            word |= UInt64(bits[b]) << UInt64(8 * k)
-        else:
-            value = UInt64(bits[b])
-        k += 1
-    word >>= shift
-    if shift > 0 and k == 9:
-        word |= value << (64 - shift)
-    var left = length - bit
-    if left < 64:
-        word &= (UInt64(1) << UInt64(max(left, 0))) - 1
-    return word
+    return _bitmap_word[DType.uint64](
+        bits, bit, min(64, max(0, length - bit)), _FULL
+    )
 
 
 def true_count(mask: BoolColumn) -> Int:

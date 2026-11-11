@@ -1,4 +1,5 @@
 """Global Boolean and validity counts over packed bitmap words."""
+from dataframe.storage.bitmap import _bitmap_word
 from std.bit import pop_count
 from std.memory import Pointer
 from max.gpu import global_idx, thread_idx, block_idx
@@ -12,19 +13,11 @@ def bitmap_word(
     data: Bytes, offset: UInt32, row: UInt32, rows: UInt32
 ) -> UInt32:
     """Up to 32 logical bits, without reading past the last bitmap byte."""
-    var first = offset + row
-    var byte = Int(first >> 3)
-    var shift = first & 7
-    var end = Int((offset + rows + 7) >> 3)
-    var word = UInt32(0)
-    comptime for k in range(4):
-        if byte + k < end:
-            word |= UInt32(data[unsafe_offset=byte + k]) << UInt32(k * 8)
-    word >>= shift
-    if shift and byte + 4 < end:
-        word |= UInt32(data[unsafe_offset=byte + 4]) << (32 - shift)
-    var mask = UInt32.MAX >> (32 - min(UInt32(32), rows - row))
-    return word & mask
+    return _bitmap_word[DType.uint32](
+        Span(unsafe_ptr=data, length=Int((offset + rows + 7) >> 3)),
+        Int(offset + row),
+        Int(min(UInt32(32), rows - row)),
+    )
 
 
 def logical_word_partials(
