@@ -328,3 +328,20 @@ property and alias tables in
 The source is dual licensed under MIT or Apache-2.0; license texts are in
 `scripts/vendor/regex-LICENSE-MIT` and `scripts/vendor/regex-LICENSE-APACHE`.
 The generator is `scripts/regex_property_tables.py`.
+
+
+## EmberJSON and EmberSerde
+
+JSON token validation, string decoding, and quoting use Brian Grenier's
+[EmberJSON](https://github.com/bgreni/EmberJson) and its
+[EmberSerde](https://github.com/bgreni/EmberSerde) dependency, both licensed
+under Apache-2.0. Their license texts remain in the upstream repositories
+and are retained in the forks.
+
+The Pixi manifest pins a revision of the
+[EmberJSON fork](https://github.com/randyzwitch/EmberJson/tree/compat/dataframe-nightly),
+which pins the [EmberSerde fork](https://github.com/randyzwitch/EmberSerde/tree/compat/dataframe-nightly).
+Those forks carry compiler API compatibility changes and notices on the
+modified source files. Pixi resolves and builds their committed sources from
+their own manifests. This repository carries no dependency source patches or
+build recipes.

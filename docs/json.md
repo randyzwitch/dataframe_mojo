@@ -2,8 +2,9 @@
 
 `read_ndjson(path)` reads one UTF-8 object per nonblank line.
 `read_json(path)` reads an array of objects. Both return a `DataFrame` and
-reuse the parser used by the string JSON expressions. They need no Python
-or external JSON library at runtime.
+reuse the parser used by the string JSON expressions. JSON parsing, string
+decoding, and quoting use EmberJSON's Mojo API, installed through Pixi.
+Dataframe schema inference and typed column construction remain in this library.
 
 ```mojo
 from dataframe import DataType, col, read_ndjson, scan_ndjson, write_ndjson

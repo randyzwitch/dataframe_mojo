@@ -35,6 +35,37 @@ def test_json_tape_preserves_source_offsets_and_subtree_boundaries() raises:
     _ = again^
 
 
+def test_json_source_spans_keep_wide_numbers_and_validate_every_token() raises:
+    var text = String(
+        ' {"wide":170141183460469231731687303715884105727,'
+        '"unsigned":340282366920938463463374607431768211455,'
+        '"fraction":-0.0012300e+12,"escaped":"\\u0000\\uD83D\\uDE00"} '
+    )
+    var reader = JsonReader(json_bytes(text))
+    reader.parse(json_bytes(text))
+    assert_equal(
+        String(reader.raw(1)), "170141183460469231731687303715884105727"
+    )
+    assert_equal(
+        String(reader.raw(2)), "340282366920938463463374607431768211455"
+    )
+    assert_equal(String(reader.raw(3)), "-0.0012300e+12")
+    assert_equal(reader.string_at(reader.nodes[4].start), "\x00😀")
+    for invalid in [
+        String('{"selected":1,"ignored":[12x]}'),
+        String('{"selected":1,"ignored":{"x":truefalse}}'),
+        String('{"selected":1,"ignored":"\\uD800"}'),
+        String('{"a":"x"true}'),
+        String('{"unterminated:1}'),
+    ]:
+        with assert_raises():
+            reader.parse(json_bytes(invalid))
+        reader = JsonReader(json_bytes(invalid))
+        with assert_raises():
+            _ = reader.scan()
+    _ = text^
+
+
 def test_shared_json_reader_keeps_metadata_duplicate_policy_and_canonicalization() raises:
     var value = JsonValue(
         ' {"b":[true,null,{"escaped":"a\\n\\u00e9"}],"a":1.20e2} '
@@ -98,6 +129,22 @@ def test_shared_json_reader_rejects_invalid_tokens_and_unicode() raises:
     var malformed = String(unsafe_from_utf8=malformed_bytes)
     with assert_raises(contains="UTF-8"):
         _ = JsonValue(malformed)
+    var reader = JsonReader(json_bytes(malformed))
+    with assert_raises(contains="UTF-8"):
+        _ = reader.scan()
+
+
+def test_json_index_overflow_is_rejected_before_accessing_input() raises:
+    var empty = String("")
+    var reader = JsonReader(json_bytes(empty))
+    # This view intentionally describes inaccessible bytes. The adapter must
+    # reject the unsupported size before UTF-8 validation or indexing reads it.
+    var oversized = Span(
+        unsafe_ptr=json_bytes(empty).unsafe_ptr(), length=Int(UInt32.MAX)
+    )
+    with assert_raises(contains="32-bit index"):
+        reader.parse(oversized)
+    _ = empty^
 
 
 def _detached_json_child() raises -> JsonValue:

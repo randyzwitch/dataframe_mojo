@@ -38,7 +38,7 @@ in `pixi.toml` allows, so each tag targets one Mojo version. `v0.3.0` targets
 
 ## Run
 
-With [Pixi](https://pixi.sh) installed, from this directory:
+With [Pixi 0.84.2](https://pixi.sh) installed, from this directory:
 
 ```bash
 pixi run -e native build-dfparquet # native dependency for interchange tests
@@ -361,7 +361,14 @@ adapter. Build input columns in memory for this first version.
 macOS arm64 `dist/` holds `dataframe.mojoc`, `dataframe_provider.mojoc` and
 `dataframe_metal.mojoc`; on Linux it holds `dataframe.mojoc` and the CPU-only
 `dataframe_provider.mojoc`, since Metal cannot run there. There is one artifact
-per platform. Put the directory on the import path (`mojo run -I dist app.mojo`).
+per platform. After `pixi install`, use the packages in that environment with
+`pixi run mojo run -I dist app.mojo`.
+EmberJSON and its EmberSerde dependency are installed through Pixi. Pixi
+resolves the pinned [EmberJSON fork](https://github.com/randyzwitch/EmberJson/tree/compat/dataframe-nightly)
+and its [EmberSerde dependency](https://github.com/randyzwitch/EmberSerde/tree/compat/dataframe-nightly),
+using their own package manifests. These revisions carry the compiler
+compatibility fixes and pin the same Mojo compiler as this project. The dataframe packages resolve these dependencies from the
+installed environment.
 Tagged releases attach the packages and a generated [API reference](docs/api.md) (`pixi run docs`). See the
 [testing guide](docs/testing.md), the [stability policy](docs/stability.md), and the
 [pandas/Polars migration guide](docs/migration.md).

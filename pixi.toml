@@ -10,6 +10,8 @@ channels = [
 ]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 preview = ["pixi-build"]
+# Source-dependency identities in pixi.lock must match the CI resolver.
+requires-pixi = "==0.84.2"
 
 # Installable as a Mojo package straight from GitHub. Consumers add, for
 # example:
@@ -40,14 +42,17 @@ name = "dataframe"
 path = "dataframe"
 
 [package.host-dependencies]
+emberjson = { git = "https://github.com/randyzwitch/EmberJson.git", rev = "3c0d0db82eece81274cbd30732c77908e1a88e24" }
 mojo = "==1.3.0.dev2026111005"
 max-core = "==26.8.0.dev2026111005"
 
 [package.run-dependencies]
+emberjson = { git = "https://github.com/randyzwitch/EmberJson.git", rev = "3c0d0db82eece81274cbd30732c77908e1a88e24" }
 mojo = "==1.3.0.dev2026111005"
 max-core = "==26.8.0.dev2026111005"
 
 [dependencies]
+emberjson = { git = "https://github.com/randyzwitch/EmberJson.git", rev = "3c0d0db82eece81274cbd30732c77908e1a88e24" }
 # What CI runs, matching the package's host and run dependencies above.
 mojo = "==1.3.0.dev2026111005"
 # Mojo's GPU APIs live in max-core. Package/doc compilation resolves these

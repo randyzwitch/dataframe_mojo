@@ -6,7 +6,8 @@ holds `dataframe.mojoc`, `dataframe_provider.mojoc` (re-exporting the Metal
 provider) and `dataframe_metal.mojoc`. Elsewhere Metal cannot run, so it holds
 `dataframe.mojoc` and `dataframe_provider.mojoc` with the CPU-only provider.
 `--provider cpu|metal` overrides the choice for testing. Use the output
-directory as the import path (`-I dist`).
+directory as the import path (`-I dist`) in the Pixi environment, where
+the declared dependencies are installed.
 """
 import argparse
 import hashlib
@@ -96,6 +97,7 @@ def build(output: Path, provider: str) -> None:
                 "scripts/build_package.py",
                 "scripts/build_identity.py",
                 "scripts/metal_build_identity.py",
+                "packages",
                 "pixi.lock",
             ],
             text=True,
