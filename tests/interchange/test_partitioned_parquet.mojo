@@ -1,6 +1,6 @@
 """Hive directory writes preserve scalar keys, row order, and atomic roots."""
 # contract-group: io.parquet.partitioned
-from std.os import getenv, listdir, mkdir
+from std.os import getenv, listdir, mkdir, remove
 from std.os.path import exists, isdir
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, StringColumn, read_parquet
@@ -170,3 +170,30 @@ def test_failed_directory_publication_cleans_only_owned_staging_paths() raises:
     assert_equal(len(listdir(root)), 1)
     with open(root + "/keep", "r") as file:
         assert_equal(file.read(), "original")
+
+
+def _abandon_staging_pair(root: String) raises -> List[String]:
+    var first = _DatasetOutput(root)
+    var second = _DatasetOutput(root)
+    assert_true(first.temporary != second.temporary)
+    assert_true(first.temporary.startswith(root + ".dataframe-"))
+    assert_true(second.temporary.startswith(root + ".dataframe-"))
+    var missing = first.file_path(["a=one", "b=two"])
+    var present = first.file_path(["a=three"])
+    with open(missing, "w") as file:
+        file.write("removed before cleanup")
+    remove(missing)
+    with open(present, "w") as file:
+        file.write("still needs cleanup")
+    var paths: List[String] = [first.temporary, second.temporary]
+    _ = first^
+    _ = second^
+    return paths^
+
+
+def test_staging_directories_are_exclusive_and_cleanup_continues_after_missing_files() raises:
+    var root = _root("exclusive-é")
+    var paths = _abandon_staging_pair(root)
+    assert_true(not exists(root))
+    for path in paths:
+        assert_true(not exists(path))

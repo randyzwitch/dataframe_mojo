@@ -1,8 +1,9 @@
 """Atomic eager Hive-partitioned Parquet datasets, retaining partition fields."""
 from std.collections import Dict
 from std.ffi import external_call
-from std.os import listdir, mkdir
-from std.os.path import exists, isdir
+from std.os import listdir, mkdir, remove, rmdir
+from std.tempfile import mkdtemp
+from std.os.path import basename, dirname, exists, isdir
 from dataframe.categorical import decode
 from dataframe.frame import DataFrame
 from dataframe.kernels.hashing import encode_rows
@@ -11,8 +12,6 @@ from dataframe.time.temporal import zone_of
 from .arrow import (
     ArrowArray,
     ArrowSchema,
-    _c_string,
-    _read_c_string,
     _release_imported,
     export_arrow,
 )
@@ -47,24 +46,33 @@ struct _DatasetOutput(Movable):
         self.directories = List[String]()
         self.files = List[String]()
         self.pending = False
-        var pattern = _c_string(destination + ".dataframe-XXXXXX")
-        var address = external_call["mkdtemp", Int](pattern.unsafe_ptr())
-        if address == 0:
+        var parent = dirname(destination)
+        if parent == "":
+            parent = "."
+        try:
+            self.temporary = mkdtemp(
+                prefix=basename(destination) + ".dataframe-", dir=parent
+            )
+        except:
             raise Error("cannot create staging directory beside " + destination)
-        self.temporary = _read_c_string(address)
-        _ = pattern^
         self.pending = True
 
     def __deinit__(deinit self):
         if self.pending:
-            for k in range(len(self.files)):
-                var path = self.files[k].as_c_string_span()
-                _ = external_call["unlink", Int32](path.ptr())
+            for file in self.files:
+                try:
+                    remove(file)
+                except:
+                    pass
             for k in range(len(self.directories) - 1, -1, -1):
-                var path = self.directories[k].as_c_string_span()
-                _ = external_call["rmdir", Int32](path.ptr())
-            var root = self.temporary.as_c_string_span()
-            _ = external_call["rmdir", Int32](root.ptr())
+                try:
+                    rmdir(self.directories[k])
+                except:
+                    pass
+            try:
+                rmdir(self.temporary)
+            except:
+                pass
 
     def file_path(mut self, components: List[String]) raises -> String:
         var directory = self.temporary

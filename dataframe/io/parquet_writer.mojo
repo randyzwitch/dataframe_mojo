@@ -1,6 +1,7 @@
 """Incremental Parquet ownership and atomic local output publication."""
 from std.ffi import external_call
 from std.memory import Pointer
+from std.os import remove
 from dataframe.frame import DataFrame
 from .arrow import (
     ArrowArray,
@@ -52,6 +53,8 @@ struct _AtomicOutput(Movable):
         self.destination = destination
         self.temporary = ""
         self.pending = False
+        # NamedTemporaryFile currently checks existence before an ordinary
+        # open. Keep mkstemp's exclusive creation for atomic publication.
         var pattern = _c_string(destination + ".dataframe-XXXXXX")
         var fd = external_call["mkstemp", Int32](pattern.unsafe_ptr())
         if fd < 0:
@@ -65,8 +68,10 @@ struct _AtomicOutput(Movable):
 
     def __deinit__(deinit self):
         if self.pending:
-            var path = self.temporary.as_c_string_span()
-            _ = external_call["unlink", Int32](path.ptr())
+            try:
+                remove(self.temporary)
+            except:
+                pass
 
     def publish(mut self) raises:
         var source = self.temporary.as_c_string_span()
