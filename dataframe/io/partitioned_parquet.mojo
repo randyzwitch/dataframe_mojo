@@ -57,14 +57,14 @@ struct _DatasetOutput(Movable):
 
     def __deinit__(deinit self):
         if self.pending:
-            for file in self.files:
-                var path = _c_string(file)
-                _ = external_call["unlink", Int32](path.unsafe_ptr())
+            for k in range(len(self.files)):
+                var path = self.files[k].as_c_string_span()
+                _ = external_call["unlink", Int32](path.ptr())
             for k in range(len(self.directories) - 1, -1, -1):
-                var path = _c_string(self.directories[k])
-                _ = external_call["rmdir", Int32](path.unsafe_ptr())
-            var root = _c_string(self.temporary)
-            _ = external_call["rmdir", Int32](root.unsafe_ptr())
+                var path = self.directories[k].as_c_string_span()
+                _ = external_call["rmdir", Int32](path.ptr())
+            var root = self.temporary.as_c_string_span()
+            _ = external_call["rmdir", Int32](root.ptr())
 
     def file_path(mut self, components: List[String]) raises -> String:
         var directory = self.temporary
@@ -80,13 +80,11 @@ struct _DatasetOutput(Movable):
 
     def publish(mut self) raises:
         _empty_destination(self.destination)
-        var source = _c_string(self.temporary)
-        var destination = _c_string(self.destination)
+        var source = self.temporary.as_c_string_span()
+        var destination = self.destination.as_c_string_span()
         var status = external_call["rename", Int32](
-            source.unsafe_ptr(), destination.unsafe_ptr()
+            source.ptr(), destination.ptr()
         )
-        _ = source^
-        _ = destination^
         if status != 0:
             raise Error(
                 "cannot publish partitioned Parquet directory: "

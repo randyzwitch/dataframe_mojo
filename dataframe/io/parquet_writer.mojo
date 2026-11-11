@@ -65,18 +65,13 @@ struct _AtomicOutput(Movable):
 
     def __deinit__(deinit self):
         if self.pending:
-            var path = _c_string(self.temporary)
-            _ = external_call["unlink", Int32](path.unsafe_ptr())
+            var path = self.temporary.as_c_string_span()
+            _ = external_call["unlink", Int32](path.ptr())
 
     def publish(mut self) raises:
-        var source = _c_string(self.temporary)
-        var destination = _c_string(self.destination)
-        if (
-            external_call["rename", Int32](
-                source.unsafe_ptr(), destination.unsafe_ptr()
-            )
-            != 0
-        ):
+        var source = self.temporary.as_c_string_span()
+        var destination = self.destination.as_c_string_span()
+        if external_call["rename", Int32](source.ptr(), destination.ptr()) != 0:
             raise Error("cannot replace output: " + self.destination)
         self.pending = False
 
@@ -89,25 +84,25 @@ comptime _Abort = def(Int) thin abi("C") -> None
 
 def _open_writer(
     entry: Int,
-    path: String,
-    compression: String,
+    var path: String,
+    var compression: String,
     row_group_size: Int,
     mut schema: ArrowSchema,
     mut handle: Int,
     mut error: Int,
 ) -> Int32:
-    var filename = _c_string(path)
-    var codec = _c_string(compression)
+    var filename = path.as_c_string_span()
+    var codec = compression.as_c_string_span()
     var status = Pointer(to=entry).unsafe_bitcast[_Open]()[](
-        Int(filename.unsafe_ptr()),
+        Int(filename.ptr()),
         Int(Pointer(to=schema)),
-        Int(codec.unsafe_ptr()),
+        Int(codec.ptr()),
         Int64(row_group_size),
         Int(Pointer(to=handle)),
         Int(Pointer(to=error)),
     )
-    _ = filename^
-    _ = codec^
+    _ = path^
+    _ = compression^
     return status
 
 

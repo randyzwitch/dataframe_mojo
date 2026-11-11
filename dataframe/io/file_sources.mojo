@@ -5,14 +5,9 @@ from std.os import listdir
 from std.os.path import exists, isdir
 
 
-def _c_path(value: String) raises -> List[UInt8]:
-    var bytes = List[UInt8](capacity=value.byte_length() + 1)
-    for byte in value.as_bytes():
-        if byte == 0:
-            raise Error("File source paths must not contain NUL")
-        bytes.append(byte)
-    bytes.append(0)
-    return bytes^
+def _validate_c_path(value: String) raises:
+    if "\x00" in value:
+        raise Error("File source paths must not contain NUL")
 
 
 def has_pattern(path: String) -> Bool:
@@ -20,28 +15,34 @@ def has_pattern(path: String) -> Bool:
     return "*" in path or "?" in path or "[" in path or "\\" in path
 
 
-def _matches(pattern: String, name: String) raises -> Bool:
-    var wanted = _c_path(pattern)
-    var candidate = _c_path(name)
-    return (
-        external_call["fnmatch", Int32](
-            wanted.unsafe_ptr(), candidate.unsafe_ptr(), Int32(0)
-        )
+def _matches(var pattern: String, var name: String) raises -> Bool:
+    _validate_c_path(pattern)
+    _validate_c_path(name)
+    var wanted = pattern.as_c_string_span()
+    var candidate = name.as_c_string_span()
+    var result = (
+        external_call["fnmatch", Int32](wanted.ptr(), candidate.ptr(), Int32(0))
         == 0
     )
 
+    _ = pattern^
+    _ = name^
+    return result
 
-def _symlink(path: String) raises -> Bool:
+
+def _symlink(var path: String) raises -> Bool:
     # A one-byte read identifies a symlink without depending on the host's
     # stat layout. Recursive ** does not traverse directory symlinks.
-    var source = _c_path(path)
+    _validate_c_path(path)
+    var source = path.as_c_string_span()
     var byte = UInt8(0)
-    return (
-        external_call["readlink", Int](
-            source.unsafe_ptr(), Pointer(to=byte), Int(1)
-        )
+    var result = (
+        external_call["readlink", Int](source.ptr(), Pointer(to=byte), Int(1))
         >= 0
     )
+
+    _ = path^
+    return result
 
 
 def _join(parent: String, name: String) -> String:
@@ -98,7 +99,7 @@ def resolve_paths(
         raise Error("File sources require at least one path")
     var paths = List[String]()
     for source in sources:
-        _ = _c_path(source)
+        _validate_c_path(source)
         if source == "":
             raise Error("File sources require nonempty paths")
         if not glob or not has_pattern(source):
