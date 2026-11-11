@@ -1,4 +1,4 @@
-"""Independent Polars/Python first-match JSONPath corpus and invalid inputs."""
+"""Polars selections, Python Float64 rounding, and invalid JSONPath inputs."""
 # contract-group: kernel.jsonpath
 from std.collections import Optional
 from std.testing import assert_equal, assert_true
@@ -51,6 +51,7 @@ def test_jsonpath_matches_independent_polars_corpus() raises:
     var cases = 0
     var by_query = Dict[String, Int]()
     var reference_cases = 0
+    var numeric_cases = 0
     for line in corpus.split("\n"):
         if line.byte_length() == 0 or line.startswith("#"):
             continue
@@ -67,6 +68,8 @@ def test_jsonpath_matches_independent_polars_corpus() raises:
         if len(fields) > 3 and fields[3] == "PYTHON_REFERENCE_UPSTREAM_PANIC":
             assert_equal(query, "$[?(@.a[*] > 1)]")
             reference_cases += 1
+        if len(fields) > 3 and fields[3] == "POLARS_SELECTION_PYTHON_FLOAT64":
+            numeric_cases += 1
         var matches = threw == expected_error
         if matches and not threw:
             if fields[2] == "NULL":
@@ -93,7 +96,9 @@ def test_jsonpath_matches_independent_polars_corpus() raises:
         cases += 1
     print("JSONPATH_CORPUS", cases, "cases", failures, "mismatches")
     print("UPSTREAM_PANIC_REFERENCE_CASES", reference_cases)
+    print("PYTHON_FLOAT64_REFERENCE_CASES", numeric_cases)
     for query in by_query:
         print("QUERY_MISMATCHES", query, by_query[query])
     assert_true(cases > 1500)
+    assert_true(numeric_cases > 0)
     assert_equal(failures, 0)

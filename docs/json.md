@@ -5,6 +5,8 @@
 reuse the parser used by the string JSON expressions. JSON parsing, string
 decoding, and quoting use EmberJSON's Mojo API, installed through Pixi.
 Dataframe schema inference and typed column construction remain in this library.
+JSONPath floating-point conversion also uses EmberJSON; see the
+[numeric rounding and filter behavior](expressions.md#strings).
 
 ```mojo
 from dataframe import DataType, col, read_ndjson, scan_ndjson, write_ndjson
