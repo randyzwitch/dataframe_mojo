@@ -56,6 +56,10 @@ from std.collections import Optional
 from std.math import log
 from std.ffi import external_call
 from std.memory import (
+    Allocation,
+    Layout,
+    alloc,
+    dealloc,
     ArcPointer,
     Pointer,
     bitcast,
@@ -520,15 +524,15 @@ def _worker_memory(workers: Int) -> Int:
 
 @fieldwise_init
 struct _Cursor(Copyable, Movable):
-    """The next morsel, shared by every worker (an atomic in C memory)."""
+    """The next morsel, shared by every worker (an atomic in stable heap storage)."""
 
     var address: Int
 
     @staticmethod
     def new() -> _Cursor:
-        return _Cursor(
-            external_call["calloc", Int](1, size_of[Atomic[Int64]]())
-        )
+        var pointer = alloc(Layout[Atomic[Int64]](length=1)).unsafe_leak()
+        pointer.unsafe_write(Atomic[Int64](0))
+        return _Cursor(Int(pointer))
 
     def take(self) -> Int:
         return Int(
@@ -538,7 +542,14 @@ struct _Cursor(Copyable, Movable):
         )
 
     def free(self):
-        _ = external_call["free", NoneType](self.address)
+        dealloc(
+            Allocation[Atomic[Int64]](
+                unsafe_owned_ptr=Pointer[Atomic[Int64], MutUntrackedOrigin](
+                    unsafe_from_address=self.address
+                ),
+                layout=Layout[Atomic[Int64]](length=1),
+            )
+        )
 
 
 struct _SinkBits(Movable):

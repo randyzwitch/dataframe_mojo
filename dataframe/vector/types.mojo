@@ -13,8 +13,7 @@ and selection buffers a step wrote, and the constants of a bound
 expression. Copying a vector is copying a few words.
 """
 from std.bit import byte_swap
-from std.memory import Pointer, unsafe_memcpy, unsafe_memcmp
-from std.ffi import external_call
+from std.memory import Layout, Pointer, alloc, unsafe_memcpy, unsafe_memcmp
 
 # Maximum rows per execution chunk; bounds scratch storage and loop batches.
 comptime STANDARD_VECTOR_SIZE = 2048
@@ -475,11 +474,13 @@ struct Vector(Copyable, ImplicitlyCopyable, Movable):
 # A process-wide byte with every bit clear: the validity of a null
 # constant (ConstantVector::SetNull), shared by every such vector.
 def _null_byte_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
-    var address = external_call["calloc", Int](1, 8)
-    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=address)
+    var pointer = alloc(Layout[UInt64](length=1)).unsafe_leak()
+    pointer.unsafe_write(0)
+    return pointer.unsafe_bitcast[NoneType]()
 
 
 def _null_byte_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
+    # Immutable process-wide constants may still be borrowed during teardown.
     pass
 
 
@@ -494,8 +495,12 @@ def _NULL_BYTE_ADDRESS() -> Int:
 
 # ConstantVector::ZeroSelectionVector: every row reads entry 0.
 def _zero_sel_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
-    var address = external_call["calloc", Int](STANDARD_VECTOR_SIZE, 4)
-    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=address)
+    var pointer = alloc(
+        Layout[UInt32](length=STANDARD_VECTOR_SIZE)
+    ).unsafe_leak()
+    for row in range(STANDARD_VECTOR_SIZE):
+        pointer.unsafe_offset(row).unsafe_write(0)
+    return pointer.unsafe_bitcast[NoneType]()
 
 
 def zero_selection() -> SelectionVector:

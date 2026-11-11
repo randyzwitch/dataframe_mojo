@@ -34,7 +34,7 @@ to the operation that creates it and never becomes process-wide. See #103.
 """
 from std.atomic import Atomic
 from std.ffi import _get_global, external_call
-from std.memory import Pointer
+from std.memory import Layout, OwnedPointer, Pointer, alloc
 from std.os import getenv
 from std.time import perf_counter_ns
 from std.sys import CompilationTarget, num_physical_cores, size_of
@@ -101,8 +101,9 @@ def _pool_spin_limit(participants: Int) -> Int:
 
 
 def _budget_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
-    var address = external_call["calloc", Int](1, size_of[Atomic[Int64]]())
-    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=address)
+    var pointer = alloc(Layout[Atomic[Int64]](length=1)).unsafe_leak()
+    pointer.unsafe_write(Atomic[Int64](0))
+    return pointer.unsafe_bitcast[NoneType]()
 
 
 def _budget_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
@@ -511,9 +512,10 @@ struct Pool(Movable):
     var address: Int
     # Thread ids, kept beside the pool so `release` can join them.
     var _ids: List[UInt64]
-    # (shared address, participant index) pairs, one per worker, on the C
-    # heap so a worker's argument stays valid however the pool is moved.
-    var _args: Int
+    # Own the state and argument pairs until every worker has been joined.
+    # Their heap addresses remain stable when the pool is moved.
+    var _shared: Optional[OwnedPointer[_Shared]]
+    var _args: List[Int]
     # While a crew runs (`Crew`), the pool starts no threads: its rounds go
     # to the crew, at most this many threads at once (0: not on a crew).
     var _on_crew: Int
@@ -526,7 +528,8 @@ struct Pool(Movable):
         low clock), and a produced round starts the threads then."""
         self.address = 0
         self._ids = List[UInt64]()
-        self._args = 0
+        self._shared = None
+        self._args = List[Int]()
         self._on_crew = 0
         if workers <= 1:
             return
@@ -536,18 +539,12 @@ struct Pool(Movable):
         self._start(workers)
 
     def _start(mut self, workers: Int):
-        var address = external_call["malloc", Int](size_of[_Shared]())
-        if address == 0:
-            return
+        var storage = OwnedPointer(_Shared())
+        var pointer = storage.ptr()
+        var address = Int(pointer)
+        var arguments = List[Int](length=2 * (workers - 1), fill=0)
+        var args = Int(arguments.unsafe_ptr())
         var pair_bytes = 2 * size_of[Int]()
-        var args = external_call["malloc", Int]((workers - 1) * pair_bytes)
-        if args == 0:
-            _ = external_call["free", NoneType](address)
-            return
-        var pointer = Pointer[_Shared, MutAnyOrigin](
-            unsafe_from_address=address
-        )
-        pointer.unsafe_write(_Shared())
         ref shared = pointer[]
         shared.spin_limit = _pool_spin_limit(workers)
         _ = external_call["pthread_mutex_init", Int32](shared._mutex(), 0)
@@ -576,7 +573,8 @@ struct Pool(Movable):
         # first round, which cannot begin until this returns.
         shared.threads = started
         self.address = address
-        self._args = args
+        self._shared = storage^
+        self._args = arguments^
         self._ids = threads^
 
     def workers(self) -> Int:
@@ -682,11 +680,9 @@ struct Pool(Movable):
             _ = external_call["pthread_join", Int32](self._ids[t], 0)
         _ = external_call["pthread_mutex_destroy", Int32](shared._mutex())
         _ = external_call["pthread_cond_destroy", Int32](shared._cond())
-        _ = external_call["free", NoneType](self.address)
-        if self._args != 0:
-            _ = external_call["free", NoneType](self._args)
-            self._args = 0
         self.address = 0
+        self._shared = None
+        self._args = List[Int]()
 
     def __deinit__(deinit self):
         """A pool that goes out of scope still joins its workers, so a raise
@@ -793,6 +789,8 @@ struct _Crew(Movable):
     var cond: Array[UInt8, _SYNC_BYTES]
     var stopping: Atomic[Int64]
     var postings: Int
+    var _postings: List[Atomic[Int64]]
+    var _thread_ids: List[UInt64]
     var threads: Int
     # Threads are created by the first `run_jobs` that posts work (0 not
     # yet, 1 being created, 2 created), so an operation with nothing to run
@@ -803,14 +801,20 @@ struct _Crew(Movable):
     # How long a thread looks for work before parking (`_CREW_SPIN_NS`).
     var spin_ns: Int
 
-    def __init__(out self, postings: Int, ids: Int, wanted: Int):
+    def __init__(out self, wanted: Int):
         self.mutex = Array[UInt8, _SYNC_BYTES](fill=0)
         self.cond = Array[UInt8, _SYNC_BYTES](fill=0)
         self.stopping = Atomic[Int64](0)
-        self.postings = postings
+        self._postings = List[Atomic[Int64]](unsafe_uninit_length=2 * _POSTINGS)
+        for slot in range(2 * _POSTINGS):
+            self._postings.unsafe_ptr().unsafe_offset(slot).unsafe_write(
+                Atomic[Int64](0)
+            )
+        self._thread_ids = List[UInt64](length=max(wanted, 1), fill=0)
+        self.postings = Int(self._postings.unsafe_ptr())
         self.threads = 0
         self.spawned = Atomic[Int64](0)
-        self.ids = ids
+        self.ids = Int(self._thread_ids.unsafe_ptr())
         self.wanted = wanted
         # The crew's threads and the operation's own.
         self.spin_ns = 0 if wanted + 1 > _performance_core_count() else (
@@ -1061,8 +1065,9 @@ def _crew_worker(address: Int) abi("C") -> Int:
 
 
 def _crew_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
-    var address = external_call["calloc", Int](1, size_of[Atomic[Int64]]())
-    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=address)
+    var pointer = alloc(Layout[Atomic[Int64]](length=1)).unsafe_leak()
+    pointer.unsafe_write(Atomic[Int64](0))
+    return pointer.unsafe_bitcast[NoneType]()
 
 
 def _crew_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
@@ -1078,8 +1083,9 @@ def _current_crew() -> ref[MutAnyOrigin] Atomic[Int64]:
 
 
 def _parked_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
-    var address = external_call["calloc", Int](1, size_of[Atomic[Int64]]())
-    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=address)
+    var pointer = alloc(Layout[Atomic[Int64]](length=1)).unsafe_leak()
+    pointer.unsafe_write(Atomic[Int64](0))
+    return pointer.unsafe_bitcast[NoneType]()
 
 
 def _parked_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
@@ -1110,9 +1116,14 @@ def _stop_crew(address: Int):
     var ids = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=state.ids)
     for t in range(state.threads):
         _ = external_call["pthread_join", Int32](ids[unsafe_offset=t], 0)
-    _ = external_call["free", NoneType](state.ids)
-    _ = external_call["free", NoneType](state.postings)
-    _ = external_call["free", NoneType](address)
+    _ = external_call["pthread_mutex_destroy", Int32](state._mutex())
+    _ = external_call["pthread_cond_destroy", Int32](state._cond())
+    var owner = OwnedPointer(
+        unsafe_from_raw_pointer=Pointer[_Crew, MutUntrackedOrigin](
+            unsafe_from_address=address
+        )
+    )
+    _ = owner^
 
 
 struct Crew(Movable):
@@ -1150,15 +1161,9 @@ struct Crew(Movable):
             else:
                 _stop_crew(Int(parked))
         if address == 0:
-            address = external_call["malloc", Int](size_of[_Crew]())
-            var postings = external_call["calloc", Int](_POSTINGS, 16)
-            var ids = external_call["calloc", Int](max(helpers, 1), 8)
-            if address == 0 or postings == 0 or ids == 0:
-                return crew^
-            var pointer = Pointer[_Crew, MutAnyOrigin](
-                unsafe_from_address=address
-            )
-            pointer.unsafe_write(_Crew(postings, ids, helpers))
+            var owner = OwnedPointer(_Crew(helpers))
+            var pointer = owner^.unsafe_take_allocation().unsafe_leak()
+            address = Int(pointer)
             ref state = pointer[]
             _ = external_call["pthread_mutex_init", Int32](state._mutex(), 0)
             _ = external_call["pthread_cond_init", Int32](state._cond(), 0)

@@ -21,8 +21,11 @@ from dataframe.storage.buffer import _Buffer, _BufferData
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
 from std.os import getenv
-from std.ffi import external_call
 from std.memory import (
+    Allocation,
+    Layout,
+    alloc,
+    dealloc,
     ArcPointer,
     Pointer,
     bitcast,
@@ -1796,16 +1799,16 @@ def _steps_over_frame(
 @fieldwise_init
 struct _Cursor(Copyable, Movable):
     """The source's next morsel offset, shared by every worker: an atomic
-    in C-allocated memory, as the thread budget of `parallel` keeps its
+    in stable heap storage, as the thread budget of `parallel` keeps its
     counters."""
 
     var address: Int
 
     @staticmethod
     def new() -> _Cursor:
-        return _Cursor(
-            external_call["calloc", Int](1, size_of[Atomic[Int64]]())
-        )
+        var pointer = alloc(Layout[Atomic[Int64]](length=1)).unsafe_leak()
+        pointer.unsafe_write(Atomic[Int64](0))
+        return _Cursor(Int(pointer))
 
     def take(self, rows: Int) -> Int:
         return Int(
@@ -1815,7 +1818,14 @@ struct _Cursor(Copyable, Movable):
         )
 
     def free(self):
-        _ = external_call["free", NoneType](self.address)
+        dealloc(
+            Allocation[Atomic[Int64]](
+                unsafe_owned_ptr=Pointer[Atomic[Int64], MutUntrackedOrigin](
+                    unsafe_from_address=self.address
+                ),
+                layout=Layout[Atomic[Int64]](length=1),
+            )
+        )
 
 
 struct _ReduceSinkLayout(Copyable, Movable):
