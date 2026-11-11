@@ -724,6 +724,92 @@ def test_decode_and_to_integer_strict_or_null() raises:
         )
 
 
+def _radix_literal(value: Int128, base: Int) -> String:
+    """Independent integer-to-text oracle, including values outside Int64."""
+    var magnitude = -value if value < 0 else value
+    var digits = String("0123456789abcdefghijklmnopqrstuvwxyz")
+    var text = String()
+    while magnitude:
+        var digit = Int(magnitude % Int128(base))
+        text = String(digits[byte=digit]) + text
+        magnitude //= Int128(base)
+    if not text:
+        text = "0"
+    return "-" + text if value < 0 else text^
+
+
+def test_to_integer_all_radices_preserve_bounds_grammar_nulls_and_layouts() raises:
+    var integers: List[Int64] = [
+        Int64.MIN,
+        Int64.MIN + 1,
+        -257,
+        -1,
+        0,
+        1,
+        255,
+        Int64.MAX - 1,
+        Int64.MAX,
+    ]
+    for base in range(2, 37):
+        var texts = List[String]()
+        var expected = List[Int64]()
+        var present = List[Bool]()
+        for value in integers:
+            texts.append(_radix_literal(Int128(value), base))
+            expected.append(value)
+            present.append(True)
+        for text in ["-0", "+0001", _radix_literal(255, base).upper()]:
+            texts.append(text)
+            present.append(True)
+        expected.extend([0, 1, 255])
+        var invalid = List[String](
+            [
+                _radix_literal(Int128(Int64.MIN) - 1, base),
+                _radix_literal(Int128(Int64.MAX) + 1, base),
+                "",
+                "+",
+                "-",
+                "1_0",
+                " 1",
+                "1 ",
+                "1\x00",
+                "１",
+            ]
+        )
+        if base == 2:
+            invalid.append("0b11")
+        elif base == 8:
+            invalid.append("0o7")
+        elif base == 16:
+            invalid.append("0x1f")
+        for text in invalid:
+            texts.append(text)
+            expected.append(0)
+            present.append(False)
+        var valid = List[Bool](length=len(texts), fill=True)
+        texts.append("invalid null payload")
+        valid.append(False)
+        expected.append(0)
+        present.append(False)
+        var want = DataFrame(
+            [Series("s", Column[Int64](expected.copy(), present.copy()))]
+        )
+        for layout in range(4):
+            var source = _source(texts, valid, layout)
+            var expression = col("s").str().to_integer(base=base, strict=False)
+            assert_frame(source.select(expression), want)
+            assert_frame(source.lazy().select(expression).collect(), want)
+            with assert_raises(contains="strict integer parsing failed"):
+                _ = source.select(col("s").str().to_integer(base=base))
+        # A null payload alone never makes strict conversion fail.
+        assert_true(
+            _source(["poison"], [False], 3)
+            .select(col("s").str().to_integer(base=base))
+            .item()
+            .is_null()
+        )
+
+
 def test_concat_str_ignore_nulls_and_str_join() raises:
     var frame = DataFrame(
         [
