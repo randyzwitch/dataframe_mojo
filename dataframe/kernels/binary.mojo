@@ -1,4 +1,9 @@
 """Batch kernels: operation/dtype dispatch occurs outside element loops."""
+from dataframe.checked import (
+    add as _int64_add,
+    sub as _int64_sub,
+    mul as _int64_mul,
+)
 from dataframe.storage.bitmap import _bitmap_word
 from dataframe.storage.buffer import _Buffer, _BufferData
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
@@ -105,29 +110,15 @@ comptime INT64_MAX = Int64(9223372036854775807)
 
 
 def checked_add(a: Int64, b: Int64) raises -> Int64:
-    """Raise before signed 64-bit overflow; never silently promote to float."""
-    if (b > 0 and a > INT64_MAX - b) or (b < 0 and a < INT64_MIN - b):
-        raise Error("Int64 sum overflow")
-    return a + b
+    return _int64_add["Int64 sum overflow"](a, b)
 
 
 def _checked_sub(a: Int64, b: Int64) raises -> Int64:
-    if (b > 0 and a < INT64_MIN + b) or (b < 0 and a > INT64_MAX + b):
-        raise Error("Int64 subtraction overflow")
-    return a - b
+    return _int64_sub["Int64 subtraction overflow"](a, b)
 
 
 def _checked_mul(a: Int64, b: Int64) raises -> Int64:
-    var negative = (a < 0) != (b < 0)
-    var ua = UInt64(-(a + 1)) + 1 if a < 0 else UInt64(a)
-    var ub = UInt64(-(b + 1)) + 1 if b < 0 else UInt64(b)
-    var limit = UInt64(9223372036854775807) + UInt64(negative)
-    if ub != 0 and ua > limit // ub:
-        raise Error("Int64 multiplication overflow")
-    var magnitude = ua * ub
-    if negative and magnitude > 0:
-        return -Int64(magnitude - 1) - 1
-    return Int64(magnitude)
+    return _int64_mul["Int64 multiplication overflow"](a, b)
 
 
 def _checked_pow(base: Int64, exponent: Int64) raises -> Int64:
