@@ -249,6 +249,71 @@ def test_projections_equal_the_eager_columns() raises:
                 _ = compiled^
 
 
+def test_unicode_slices_keep_literal_answers_in_flat_and_selected_vectors() raises:
+    var long_text = String("é") * 16 + "\x00end"
+    var source = DataFrame(
+        [
+            Series(
+                "s",
+                StringColumn(
+                    [
+                        "prefix",
+                        "aé中😀\x00z",
+                        long_text,
+                        "",
+                        "e\u0301x",
+                        "ignored",
+                    ],
+                    [True, True, True, True, True, False],
+                ),
+            )
+        ]
+    )
+    var expressions: List[Expr] = [
+        col("s").str().slice(1, 2).alias("p"),
+        col("s").str().slice(-3).alias("p"),
+        col("s").str().slice(-100).alias("p"),
+        col("s").str().slice(100).alias("p"),
+    ]
+    var answers = List[List[String]]()
+    answers.append(["re", "é中", "éé", "", "\u0301x", ""])
+    answers.append(["fix", "😀\x00z", "end", "", "e\u0301x", ""])
+    answers.append(["prefix", "aé中😀\x00z", long_text, "", "e\u0301x", ""])
+    answers.append(["", "", "", "", "", ""])
+    for offset in [0, 1]:
+        for keep_every in [1, 2]:
+            var arena = ColumnArena()
+            var chunk = chunk_of(
+                source, arena, offset, source.height() - offset, keep_every
+            )
+            for case_index in range(len(expressions)):
+                var compiled = VectorExpression(
+                    expressions[case_index], source.clear()._columns
+                )
+                var out = DataChunk(1)
+                out.count = chunk.count
+                compiled.write(chunk, arena, out, 0)
+                var got = to_series(out, 0, arena, "p", DataType.STRING)
+                var expected = DataFrame(
+                    [
+                        Series(
+                            "p",
+                            StringColumn(
+                                answers[case_index],
+                                [True, True, True, True, True, False],
+                            ),
+                        )
+                    ]
+                )
+                assert_frame(
+                    DataFrame([got^]),
+                    expected_rows(
+                        expected, offset, source.height() - offset, keep_every
+                    ),
+                )
+                _ = compiled^
+
+
 def test_a_dropped_rows_error_is_not_raised() raises:
     # A decimal product past its precision on rows the selection drops.
     var values = List[Int64]()

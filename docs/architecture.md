@@ -353,6 +353,7 @@ Length, slice, reverse, trim, padding, and empty-pattern count adapters consume
 the shared text primitives. Dataframe retains string-view ownership, nulls,
 padding/sign rules, and the existing ASCII-whitespace default for empty strip
 arguments; the shared trim set requires an explicit character set.
+Vector expression slices and display truncation use those same shared routines.
 The regex parser, NFA/DFA engines, compiled class directories, and vectorized
 matching remain in dataframe; they consume the package's properties, simple
 folding, and range operations through direct imports.
