@@ -13,7 +13,7 @@ and selection buffers a step wrote, and the constants of a bound
 expression. Copying a vector is copying a few words.
 """
 from std.bit import byte_swap
-from std.memory import Pointer, unsafe_memcpy
+from std.memory import Pointer, unsafe_memcpy, unsafe_memcmp
 from std.ffi import external_call
 
 # Maximum rows per execution chunk; bounds scratch storage and loop batches.
@@ -295,9 +295,13 @@ def string_equals(a: Int, b: Int) -> Bool:
         return left.rest == right.rest
     var length = Int(left.length)
     return (
-        external_call["memcmp", Int32](
-            Int(left.rest) + STRING_PREFIX_BYTES,
-            Int(right.rest) + STRING_PREFIX_BYTES,
+        unsafe_memcmp(
+            Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=Int(left.rest) + STRING_PREFIX_BYTES
+            ),
+            Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=Int(right.rest) + STRING_PREFIX_BYTES
+            ),
             length - STRING_PREFIX_BYTES,
         )
         == 0
@@ -320,9 +324,13 @@ def string_compare(a: Int, b: Int) -> Int:
     var right_length = Int(right.length)
     var shared = min(left_length, right_length)
     if shared > STRING_PREFIX_BYTES:
-        var compared = external_call["memcmp", Int32](
-            string_data(a) + STRING_PREFIX_BYTES,
-            string_data(b) + STRING_PREFIX_BYTES,
+        var compared = unsafe_memcmp(
+            Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=string_data(a) + STRING_PREFIX_BYTES
+            ),
+            Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=string_data(b) + STRING_PREFIX_BYTES
+            ),
             shared - STRING_PREFIX_BYTES,
         )
         if compared != 0:

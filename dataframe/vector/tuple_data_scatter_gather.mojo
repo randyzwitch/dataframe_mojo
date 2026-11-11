@@ -9,8 +9,7 @@ Nested output is assembled in buffers for each level, then exposed through
 an at-rest column that the chunk's vector can read. String views retain
 the collection's owners so referenced bytes outlive the output vectors.
 """
-from std.ffi import external_call
-from std.memory import Pointer, unsafe_memcpy
+from std.memory import Pointer, unsafe_memcpy, unsafe_memset
 from std.sys import size_of
 
 from dataframe.dtype import DataType
@@ -99,7 +98,9 @@ def _bytes(address: Int) -> Pointer[UInt8, MutAnyOrigin]:
 
 @always_inline
 def _fill_ones(address: Int, count: Int):
-    _ = external_call["memset", Int](address, Int32(255), count)
+    unsafe_memset(
+        Pointer[UInt8, MutAnyOrigin](unsafe_from_address=address), 255, count
+    )
 
 
 @always_inline

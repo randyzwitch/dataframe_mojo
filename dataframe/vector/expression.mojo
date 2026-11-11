@@ -8,7 +8,7 @@ null behavior and checked-expression errors.
 """
 from std.bit import count_trailing_zeros, pop_count
 from std.math import ceil, floor
-from std.memory import Pointer, unsafe_memcpy
+from std.memory import Pointer, unsafe_memcpy, unsafe_memcmp
 
 from std.ffi import external_call
 from std.sys import stderr
@@ -1579,13 +1579,28 @@ struct VectorExpression(Copyable, Movable):
                 if op == STR_STARTS_WITH:
                     found = (
                         n == 0
-                        or external_call["memcmp", Int32](bytes, probe, n) == 0
+                        or unsafe_memcmp(
+                            Pointer[UInt8, ImmutAnyOrigin](
+                                unsafe_from_address=bytes
+                            ),
+                            Pointer[UInt8, ImmutAnyOrigin](
+                                unsafe_from_address=probe
+                            ),
+                            n,
+                        )
+                        == 0
                     )
                 elif op == STR_ENDS_WITH:
                     found = (
                         n == 0
-                        or external_call["memcmp", Int32](
-                            bytes + length - n, probe, n
+                        or unsafe_memcmp(
+                            Pointer[UInt8, ImmutAnyOrigin](
+                                unsafe_from_address=bytes + length - n
+                            ),
+                            Pointer[UInt8, ImmutAnyOrigin](
+                                unsafe_from_address=probe
+                            ),
+                            n,
                         )
                         == 0
                     )
@@ -2686,8 +2701,12 @@ def _like_match(data: Int, length: Int, segments: List[String]) -> Bool:
     if n == 1:
         return head == length and (
             head == 0
-            or external_call["memcmp", Int32](
-                data, Int(segments[0].unsafe_ptr()), head
+            or unsafe_memcmp(
+                Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=data),
+                Pointer[UInt8, ImmutAnyOrigin](
+                    unsafe_from_address=Int(segments[0].unsafe_ptr())
+                ),
+                head,
             )
             == 0
         )
@@ -2695,15 +2714,25 @@ def _like_match(data: Int, length: Int, segments: List[String]) -> Bool:
     if head + tail > length:
         return False
     if head > 0 and (
-        external_call["memcmp", Int32](
-            data, Int(segments[0].unsafe_ptr()), head
+        unsafe_memcmp(
+            Pointer[UInt8, ImmutAnyOrigin](unsafe_from_address=data),
+            Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=Int(segments[0].unsafe_ptr())
+            ),
+            head,
         )
         != 0
     ):
         return False
     if tail > 0 and (
-        external_call["memcmp", Int32](
-            data + length - tail, Int(segments[n - 1].unsafe_ptr()), tail
+        unsafe_memcmp(
+            Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=data + length - tail
+            ),
+            Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=Int(segments[n - 1].unsafe_ptr())
+            ),
+            tail,
         )
         != 0
     ):
