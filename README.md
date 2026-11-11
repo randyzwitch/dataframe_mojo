@@ -38,7 +38,7 @@ in `pixi.toml` allows, so each tag targets one Mojo version. `v0.3.0` targets
 
 ## Run
 
-With [Pixi](https://pixi.sh) installed, from this directory:
+With [Pixi 0.84.2](https://pixi.sh) installed, from this directory:
 
 ```bash
 pixi run -e native build-dfparquet # native dependency for interchange tests

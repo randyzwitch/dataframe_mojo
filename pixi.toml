@@ -10,6 +10,8 @@ channels = [
 ]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 preview = ["pixi-build"]
+# Source-dependency identities in pixi.lock must match the CI resolver.
+requires-pixi = "==0.84.2"
 
 # Installable as a Mojo package straight from GitHub. Consumers add, for
 # example:
