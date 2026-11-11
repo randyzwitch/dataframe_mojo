@@ -15,6 +15,8 @@ conda package or `TZDIR`. Instants after a file's last transition follow its
 POSIX TZ footer rule, as the RFC requires. Leap-second ("right/") files are
 not supported.
 """
+from dataframe.storage.endian import read_scalar
+from std.sys import Endian
 from std.os import getenv
 
 from dataframe.time.calendar import (
@@ -314,12 +316,10 @@ def _be(data: List[UInt8], at: Int, width: Int) raises -> Int64:
     """A signed big-endian integer of 4 or 8 bytes."""
     if at + width > len(data):
         raise Error("truncated time zone file")
-    var value = UInt64(0)
-    for i in range(width):
-        value = (value << 8) | UInt64(data[at + i])
+    var bytes = Span(data)[at : at + width]
     if width == 4:
-        return Int64(Int32(UInt32(value)))
-    return Int64(value)
+        return Int64(read_scalar[DType.int32, Endian.big](bytes, 0))
+    return read_scalar[DType.int64, Endian.big](bytes, 0)
 
 
 def _parse_tzif(name: String, data: List[UInt8]) raises -> TimeZone:

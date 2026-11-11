@@ -1,5 +1,6 @@
 """RFC 7946 GeoJSON ingestion into WKB geometry and attribute columns."""
-from std.memory import Pointer
+from std.memory import bitcast
+from std.sys import Endian
 from dataframe.json.value import JsonValue
 from dataframe.storage.column import Column
 from ..series import Series
@@ -9,15 +10,11 @@ from dataframe.text.parse import parse_integer
 
 
 def _uint(mut out: List[UInt8], value: Int):
-    for i in range(4):
-        out.append(UInt8((value >> (8 * i)) & 255))
+    out.extend(UInt32(value).as_bytes[endian=Endian.little]())
 
 
 def _double(mut out: List[UInt8], value: Float64):
-    var copy = value
-    var bits = Pointer(to=copy).unsafe_bitcast[UInt64]()[]
-    for i in range(8):
-        out.append(UInt8((bits >> UInt64(8 * i)) & 255))
+    out.extend(bitcast[DType.uint64](value).as_bytes[endian=Endian.little]())
 
 
 def _dimensions(coords: JsonValue, level: Int) raises -> Int:

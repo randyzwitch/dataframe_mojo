@@ -152,23 +152,21 @@ def _reclaim[T: Movable](address: Int) -> T:
     return value^
 
 
-def _c_string(text: String) -> List[UInt8]:
-    var bytes = List[UInt8](capacity=text.byte_length() + 1)
-    bytes.extend(text.as_bytes())
-    bytes.append(0)
+def _c_string(var text: String) -> List[UInt8]:
+    # Own the terminator with the bytes for callbacks and writable C APIs.
+    var bytes = List[UInt8]()
+    bytes.extend(text.as_c_string_span().as_bytes_with_nul())
     return bytes^
 
 
 def _read_c_string(address: Int) -> String:
     if address == 0:
         return ""
-    var length = 0
-    while _at[UInt8](address + length)[] != 0:
-        length += 1
-    var bytes = List[UInt8](capacity=length)
-    for i in range(length):
-        bytes.append(_at[UInt8](address + i)[])
-    return String(unsafe_from_utf8=bytes)
+    return String(
+        unsafe_from_utf8_ptr=Pointer[UInt8, ImmutAnyOrigin](
+            unsafe_from_address=address
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

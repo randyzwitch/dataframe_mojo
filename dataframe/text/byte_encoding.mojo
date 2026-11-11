@@ -1,15 +1,12 @@
-"""Shared row-wise hex and canonical padded base64 codecs."""
+"""Row adapters for hex and standard-library base64 codecs."""
+from std.base64 import b64encode, b64decode, b16decode
 
 comptime _HEX = "0123456789abcdef"
-comptime _BASE64 = (
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-)
 
 
 def encode_bytes(row: Span[UInt8, _], hex: Bool, mut out: List[UInt8]):
     """Append one byte span as hex/base64 without materializing a column."""
     var hex_digits = StringSlice(_HEX).as_bytes()
-    var alphabet = StringSlice(_BASE64).as_bytes()
     var data = row.unsafe_ptr()
     if hex:
         for b in range(len(row)):
@@ -17,19 +14,8 @@ def encode_bytes(row: Span[UInt8, _], hex: Bool, mut out: List[UInt8]):
             out.append(hex_digits[byte >> 4])
             out.append(hex_digits[byte & 15])
     else:
-        var b = 0
-        while b < len(row):
-            var left = len(row) - b
-            var word = Int(data[unsafe_offset=b]) << 16
-            if left > 1:
-                word |= Int(data[unsafe_offset=b + 1]) << 8
-            if left > 2:
-                word |= Int(data[unsafe_offset=b + 2])
-            out.append(alphabet[(word >> 18) & 63])
-            out.append(alphabet[(word >> 12) & 63])
-            out.append(alphabet[(word >> 6) & 63] if left > 1 else 61)
-            out.append(alphabet[word & 63] if left > 2 else 61)
-            b += 3
+        var encoded = b64encode(row)
+        out.extend(encoded.as_bytes())
 
 
 @always_inline
@@ -43,67 +29,36 @@ def digit(byte: UInt8) -> Int:
     return 99
 
 
-@always_inline
-def _sextet(byte: UInt8) -> Int:
-    """A base64 character's value, or -1."""
-    if byte >= 65 and byte <= 90:
-        return Int(byte) - 65
-    if byte >= 97 and byte <= 122:
-        return Int(byte) - 71
-    if byte >= 48 and byte <= 57:
-        return Int(byte) + 4
-    if byte == 43:
-        return 62
-    if byte == 47:
-        return 63
-    return -1
-
-
 def decode_bytes(row: Span[UInt8, _], hex: Bool, mut out: List[UInt8]) -> Bool:
-    """Append the bytes a row encodes; False (with `out` partly written) if
-    the row is not valid hex (an even number of digits) or canonical padded
-    base64."""
-    var size = len(row)
-    var data = row.unsafe_ptr()
-    if hex:
-        if size % 2 != 0:
-            return False
-        for b in range(0, size, 2):
-            var high = digit(data[unsafe_offset=b])
-            var low = digit(data[unsafe_offset=b + 1])
-            if high > 15 or low > 15:
-                return False
-            out.append(UInt8(high * 16 + low))
-        return True
-    if size % 4 != 0:
-        return False
-    for b in range(0, size, 4):
-        var last = b + 4 == size
-        var values = SIMD[DType.int32, 4](0)
-        var padding = 0
-        for j in range(4):
-            var byte = data[unsafe_offset=b + j]
-            if byte == 61 and last and j >= 2:
-                padding += 1
-                continue
-            if padding > 0:
-                return False
-            var value = _sextet(byte)
-            if value < 0:
-                return False
-            values[j] = Int32(value)
-        var word = Int(
-            (values[0] << 18) | (values[1] << 12) | (values[2] << 6) | values[3]
-        )
-        out.append(UInt8((word >> 16) & 255))
-        if padding == 2:
-            if (word & 0xFFFF) != 0:
-                return False
-        elif padding == 1:
-            if (word & 0xFF) != 0:
-                return False
-            out.append(UInt8((word >> 8) & 255))
+    """Append decoded bytes; return False for invalid input.
+
+    Base64 follows the standard library, including whitespace and nonzero
+    padding bits. Padding must still be a final suffix of at most two '='
+    bytes. Hex accepts either case and requires pairs of digits.
+    """
+    try:
+        var text = String(StringSpan(from_utf8=row))
+        if hex:
+            for byte in row:
+                if byte >= 128:
+                    return False
+            var upper = text.upper()
+            out.extend(b16decode(upper))
         else:
-            out.append(UInt8((word >> 8) & 255))
-            out.append(UInt8(word & 255))
-    return True
+            # The standard decoder stops at the first padded quartet and
+            # also accepts '=' in its first two positions. Validate the
+            # padding shape so malformed rows cannot silently lose bytes.
+            var padding = 0
+            for byte in row:
+                if byte == 32 or (byte >= 9 and byte <= 13):
+                    continue
+                if byte == 61:
+                    padding += 1
+                    if padding > 2:
+                        return False
+                elif padding:
+                    return False
+            out.extend(b64decode(text))
+        return True
+    except:
+        return False

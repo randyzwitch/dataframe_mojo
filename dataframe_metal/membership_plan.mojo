@@ -41,7 +41,6 @@ def float_key(raw: UInt32) -> UInt64:
 
 def _canonical(values: List[UInt64]) -> Optional[List[UInt64]]:
     # This is metadata canonicalization, bounded by distinct candidates.
-    # Eight byte-radix passes avoid quadratic insertion of long IN lists.
     var seen = Dict[UInt64, Bool]()
     var keys = List[UInt64]()
     for value in values:
@@ -50,24 +49,7 @@ def _canonical(values: List[UInt64]) -> Optional[List[UInt64]]:
                 return None
             seen[value] = True
             keys.append(value)
-    var scratch = List[UInt64](length=len(keys), fill=0)
-    for byte in range(8):
-        var counts = List[Int](length=256, fill=0)
-        var shift = UInt64(byte * 8)
-        for value in keys:
-            counts[Int((value >> shift) & 255)] += 1
-        var total = 0
-        for i in range(256):
-            var count = counts[i]
-            counts[i] = total
-            total += count
-        for value in keys:
-            var digit = Int((value >> shift) & 255)
-            scratch[counts[digit]] = value
-            counts[digit] += 1
-        var previous = keys^
-        keys = scratch^
-        scratch = previous^
+    sort(keys)
     return keys^
 
 

@@ -1,13 +1,13 @@
 """Internal comparison of owned Arrow C field metadata (arbitrary bytes)."""
+from dataframe.storage.endian import read_scalar
+from std.sys import Endian
 from std.memory import ArcPointer
 
 
 def _length(data: List[UInt8], mut at: Int) -> Int:
-    var result = 0
-    for i in range(4):
-        result |= Int(data[at + i]) << (8 * i)
+    var result = read_scalar[DType.uint32, Endian.little](Span(data), at)
     at += 4
-    return result
+    return Int(result)
 
 
 def _entries(data: List[UInt8]) -> List[List[UInt8]]:
@@ -89,8 +89,9 @@ def _without_extensions(
         count += 1
     if count == 0:
         return None
+    var bytes = UInt32(count).as_bytes[endian=Endian.little]()
     for i in range(4):
-        result[i] = UInt8((count >> (8 * i)) & 255)
+        result[i] = bytes[i]
     return ArcPointer(result^)
 
 
@@ -99,7 +100,8 @@ def _append_metadata(mut target: List[UInt8], extra: List[UInt8]):
     var count = _length(target, pos)
     pos = 0
     count += _length(extra, pos)
+    var bytes = UInt32(count).as_bytes[endian=Endian.little]()
     for i in range(4):
-        target[i] = UInt8((count >> (8 * i)) & 255)
+        target[i] = bytes[i]
     for i in range(4, len(extra)):
         target.append(extra[i])

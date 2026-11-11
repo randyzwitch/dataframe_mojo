@@ -1,5 +1,8 @@
 """Checked binary and character decoding for the shapefile components."""
-from std.memory import Pointer
+from dataframe.storage.endian import read_scalar
+from std.memory import bitcast
+from std.sys import Endian
+from dataframe.text.utf8 import append_codepoint
 
 
 def read_bytes(path: String) raises -> List[UInt8]:
@@ -16,30 +19,32 @@ def uint(
     data: List[UInt8], at: Int, size: Int, big: Bool = False
 ) raises -> Int:
     require(data, at, size)
-    var result = 0
-    for i in range(size):
-        result |= Int(data[at + i]) << (8 * (size - i - 1 if big else i))
-    return result
+    if size == 2:
+        return Int(
+            read_scalar[DType.uint16, Endian.big](Span(data), at)
+        ) if big else (
+            Int(read_scalar[DType.uint16, Endian.little](Span(data), at))
+        )
+    if size == 4:
+        return Int(
+            read_scalar[DType.uint32, Endian.big](Span(data), at)
+        ) if big else (
+            Int(read_scalar[DType.uint32, Endian.little](Span(data), at))
+        )
+    raise Error("Unsupported shapefile integer width")
 
 
 def number(data: List[UInt8], at: Int) raises -> Float64:
     require(data, at, 8)
-    var bits = UInt64(0)
-    for i in range(8):
-        bits |= UInt64(data[at + i]) << UInt64(8 * i)
-    return Pointer(to=bits).unsafe_bitcast[Float64]()[]
+    return read_scalar[DType.float64, Endian.little](Span(data), at)
 
 
 def put_uint(mut out: List[UInt8], value: Int):
-    for i in range(4):
-        out.append(UInt8((value >> (8 * i)) & 255))
+    out.extend(UInt32(value).as_bytes[endian=Endian.little]())
 
 
 def put_number(mut out: List[UInt8], value: Float64):
-    var copy = value
-    var bits = Pointer(to=copy).unsafe_bitcast[UInt64]()[]
-    for i in range(8):
-        out.append(UInt8((bits >> UInt64(8 * i)) & 255))
+    out.extend(bitcast[DType.uint64](value).as_bytes[endian=Endian.little]())
 
 
 def encoding_name(encoding: String) raises -> String:
@@ -111,13 +116,5 @@ def text(
             value = cp[value - 128]
             if value < 0:
                 raise Error("Undefined Windows-1252 byte at " + String(at + i))
-        if value < 128:
-            bytes.append(UInt8(value))
-        elif value < 2048:
-            bytes.append(UInt8(192 | (value >> 6)))
-            bytes.append(UInt8(128 | (value & 63)))
-        else:
-            bytes.append(UInt8(224 | (value >> 12)))
-            bytes.append(UInt8(128 | ((value >> 6) & 63)))
-            bytes.append(UInt8(128 | (value & 63)))
+        append_codepoint(bytes, value)
     return String(StringSlice(from_utf8=Span(bytes)))

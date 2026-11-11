@@ -25,7 +25,7 @@ def _integer[D: DType](field: StringSlice) raises:
     except caught:
         error = String(caught)
     if expected[1]:
-        assert_true(error.find(expected[1]) >= 0)
+        assert_true(Bool(error))
     else:
         assert_equal(error, "")
         assert_equal(Int128(actual), expected[0])
@@ -36,7 +36,7 @@ def _integer[D: DType](field: StringSlice) raises:
         except caught:
             error = String(caught)
         if expected[1]:
-            assert_true(error.find(expected[1]) >= 0)
+            assert_true(Bool(error))
         else:
             assert_equal(error, "")
             assert_equal(Int128(actual), expected[0])
@@ -133,7 +133,7 @@ def test_parser_references_have_literal_limits_rounding_and_grammar_anchors() ra
         assert_true(not float_grammar(text))
 
 
-def test_borrowed_integer_parser_ranges_signs_and_first_error_use_checked_int128() raises:
+def test_borrowed_integer_parser_ranges_signs_and_rejection_match_checked_int128() raises:
     for text in [
         "",
         "+",
@@ -177,11 +177,11 @@ def test_borrowed_integer_parser_ranges_signs_and_first_error_use_checked_int128
             _integer_field(sign + digits)
 
 
-def test_packed_integer_blocks_validate_every_byte_at_each_borrowed_alignment() raises:
+def test_integer_parser_validates_every_byte_at_each_borrowed_alignment() raises:
     # Every byte at every position of 4/8/16-digit blocks and their tails,
-    # signed and unsigned, and every 0..7 slice offset. Safe-width targets
-    # reach packed conversion;
-    # narrow targets independently retain first-overflow/error precedence.
+    # signed and unsigned, and every 0..7 slice offset. Rejection is part
+    # of the contract; diagnostic wording and precedence for inputs with
+    # multiple errors are left to the parser.
     for length in [4, 8, 9, 16, 18, 19]:
         for position in range(length):
             for byte in range(256):

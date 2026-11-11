@@ -1,4 +1,6 @@
 """Bounded ISO WKB traversal shared by storage validation and geometry accessors."""
+from dataframe.storage.endian import read_scalar
+from std.sys import Endian
 from std.memory import bitcast
 from std.math import inf
 
@@ -86,11 +88,11 @@ def _wkb_float(
     data: Span[UInt8, ImmutAnyOrigin], mut pos: Int, little: Bool
 ) -> Float64:
     # The caller bounds-checks the complete coordinate sequence first.
-    var bits = UInt64(0)
-    for i in range(8):
-        bits |= UInt64(data[pos + i]) << UInt64(8 * (i if little else 7 - i))
+    var bytes = data[pos : pos + 8]
     pos += 8
-    return bitcast[DType.float64](bits)
+    return read_scalar[DType.float64, Endian.little](bytes, 0) if little else (
+        read_scalar[DType.float64, Endian.big](bytes, 0)
+    )
 
 
 def _wkb_uint(
@@ -98,11 +100,11 @@ def _wkb_uint(
 ) raises -> Int:
     if len(data) - pos < 4:
         raise Error("Truncated WKB integer")
-    var result = 0
-    for i in range(4):
-        result |= Int(data[pos + i]) << (8 * (i if little else 3 - i))
+    var bytes = data[pos : pos + 4]
     pos += 4
-    return result
+    return Int(
+        read_scalar[DType.uint32, Endian.little](bytes, 0)
+    ) if little else (Int(read_scalar[DType.uint32, Endian.big](bytes, 0)))
 
 
 def _wkb_coords(

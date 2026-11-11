@@ -641,7 +641,7 @@ def test_decode_and_to_integer_strict_or_null() raises:
         .int64(),
         1295,
     )
-    # Decoding: hex in either case, canonical padded base64; invalid text
+    # Decoding: hex in either case, standard-library padded base64; invalid text
     # raises when strict and is null otherwise.
     var hex = DataFrame(
         [Series("s", Column[String](["4A4b", "4", "zz", ""]))]
@@ -658,7 +658,20 @@ def test_decode_and_to_integer_strict_or_null() raises:
             Series(
                 "s",
                 Column[String](
-                    ["YWI=", "YWI", "YR==", "", "Y===", "YQ==", "YW I="]
+                    [
+                        "YWI=",
+                        "YWI",
+                        "YR==",
+                        "",
+                        "Y===",
+                        "YQ==",
+                        "YW I=",
+                        "=WI=",
+                        "Y=I=",
+                        "YW=I",
+                        "YQ==YWI=",
+                        "YQ==!!!!",
+                    ]
                 ),
             )
         ]
@@ -671,8 +684,21 @@ def test_decode_and_to_integer_strict_or_null() raises:
             [
                 _strings(
                     "s",
-                    ["ab", "", "", "", "", "a", ""],
-                    [True, False, False, True, False, True, False],
+                    ["ab", "", "a", "", "", "a", "ab", "", "", "", "", ""],
+                    [
+                        True,
+                        False,
+                        True,
+                        True,
+                        False,
+                        True,
+                        True,
+                        False,
+                        False,
+                        False,
+                        False,
+                        False,
+                    ],
                 )
             ]
         ),

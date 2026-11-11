@@ -11,6 +11,7 @@ are copied, as `slice_strings` does; other string results are appended to one
 each code point past ASCII). `contains_any` and `replace_many` match every
 pattern in one pass with an Aho-Corasick automaton over byte classes.
 """
+from std.collections.string import Codepoint
 from dataframe.storage.buffer import _Buffer
 from dataframe.text.byte_encoding import (
     encode_bytes,
@@ -324,14 +325,10 @@ def _strip_into[
 def _codepoint_value[
     origin: Origin
 ](data: Pointer[UInt8, origin], at: Int, width: Int) -> UInt32:
-    """The code point whose UTF-8 encoding of `width` bytes starts at `at`."""
-    var lead = UInt32(data[unsafe_offset=at])
-    if width == 1:
-        return lead
-    var value = lead & (UInt32(0x7F) >> UInt32(width))
-    for b in range(1, width):
-        value = (value << 6) | (UInt32(data[unsafe_offset=at + b]) & 0x3F)
-    return value
+    var scalar, _ = Codepoint.unsafe_decode_utf8_codepoint(
+        Span(unsafe_ptr=data.unsafe_offset(at), length=width)
+    )
+    return scalar.to_u32()
 
 
 @always_inline
