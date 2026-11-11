@@ -9,7 +9,8 @@ Nested output is assembled in buffers for each level, then exposed through
 an at-rest column that the chunk's vector can read. String views retain
 the collection's owners so referenced bytes outlive the output vectors.
 """
-from std.memory import Pointer, unsafe_memcpy, unsafe_memset
+from std.collections import Dict
+from std.memory import ArcPointer, Pointer, unsafe_memcpy, unsafe_memset
 from std.sys import size_of
 
 from dataframe.dtype import DataType
@@ -17,7 +18,9 @@ from dataframe.series import Series
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.storage.nested import ListColumn, StructColumn
-from dataframe.storage.string import StringBuilder
+from dataframe.storage.buffer import _Buffer
+from dataframe.storage.string import StringBuilder, StringColumn
+from dataframe.storage.string_view import StringView, StringViewStorage
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
@@ -776,6 +779,87 @@ def gather_column(
     result.data[out_column] = flat_over(arena, handle, 0)
 
 
+struct TupleDataHeaps(Copyable, Movable):
+    """A collection's heap blocks in address order, each a buffer that
+    keeps its block alive. A string column gathered from the rows
+    references their strings in place: string_t's pointer becomes the
+    block and offset of a Utf8View descriptor, and the column holds the
+    blocks, as DuckDB's result vector holds a reference to the heap."""
+
+    var starts: List[Int]
+    var ends: List[Int]
+    var buffers: List[_Buffer[UInt8]]
+    var bytes: Int
+
+    def __init__(out self):
+        self.starts = List[Int]()
+        self.ends = List[Int]()
+        self.buffers = List[_Buffer[UInt8]]()
+        self.bytes = 0
+
+    def __init__(out self, blocks: List[ArcPointer[List[UInt8]]]):
+        """The heaps `blocks`, put in address order."""
+        self.starts = List[Int](capacity=len(blocks))
+        self.ends = List[Int](capacity=len(blocks))
+        self.buffers = List[_Buffer[UInt8]](capacity=len(blocks))
+        self.bytes = 0
+        var at = Dict[Int, Int]()
+        for b in range(len(blocks)):
+            var address = Int(blocks[b][].unsafe_ptr())
+            at[address] = b
+            self.starts.append(address)
+        sort(self.starts)
+        for b in range(len(self.starts)):
+            ref block = blocks[at.get(self.starts[b], 0)]
+            self.ends.append(self.starts[b] + len(block[]))
+            self.buffers.append(_Buffer[UInt8](block))
+            self.bytes += len(block[])
+
+    @always_inline
+    def find(self, address: Int, hint: Int) -> Int:
+        """The block holding `address`; `hint`, the last one found, is
+        checked first (rows gathered in order share blocks)."""
+        if self.starts[hint] <= address and address < self.ends[hint]:
+            return hint
+        var low = 0
+        var high = len(self.starts) - 1
+        while low < high:
+            var mid = (low + high + 1) >> 1
+            if self.starts[mid] <= address:
+                low = mid
+            else:
+                high = mid - 1
+        return low
+
+
+def _views_over_heaps(
+    heaps: TupleDataHeaps,
+    var views: List[StringView],
+    count: Int,
+    var bits: List[UInt8],
+) -> StringColumn:
+    """The `count` gathered string_t values in `views` as Utf8View
+    descriptors, in place: an inlined string is already one, a longer
+    one's pointer becomes its heap block and offset. `bits`: the validity,
+    empty when every row is valid."""
+    var at = Int(views.unsafe_ptr())
+    var hint = 0
+    for i in range(count):
+        var entry = at + 16 * i
+        if _load[DType.uint32](entry) > UInt32(STRING_INLINE_BYTES):
+            var address = Int(_load[DType.uint64](entry + 8))
+            hint = heaps.find(address, hint)
+            _store[DType.uint32](entry + 8, UInt32(hint))
+            _store[DType.uint32](
+                entry + 12, UInt32(address - heaps.starts[hint])
+            )
+    return StringColumn(
+        StringViewStorage(
+            views^, heaps.buffers.copy(), bits^, count, heaps.bytes
+        )
+    )
+
+
 def gather_rows_series(
     layout: TupleDataLayout,
     rows: Int,
@@ -783,11 +867,13 @@ def gather_rows_series(
     column_id: Int,
     var name: String,
     dtype: DataType,
+    heaps: TupleDataHeaps,
 ) raises -> Series:
     """The `count` rows of column `column_id` at the row pointers at `rows`,
     a new at-rest column typed `dtype` of `count` rows (GatherRHS for an
     operator reading columns rather than vectors; no 2,048 limit, the row
-    pointers are the only limit)."""
+    pointers are the only limit). A string column references `heaps`, the
+    collection's heap blocks, without copying its bytes."""
     ref top = layout.nodes[][0]
     var physical = top.physicals[column_id]
     if physical == PHYSICAL_LIST or physical == PHYSICAL_STRUCT:
@@ -809,7 +895,7 @@ def gather_rows_series(
     var bits_at = Int(bits.unsafe_ptr())
     var valid_of = bits_at if top.can_have_null else 0
     if physical == PHYSICAL_VARCHAR:
-        var buffer = List[UInt8](unsafe_uninit_length=16 * max(count, 1))
+        var views = List[StringView](unsafe_uninit_length=max(count, 1))
         _gather_fixed_dispatch(
             physical,
             rows,
@@ -818,35 +904,16 @@ def gather_rows_series(
             top.offsets[column_id],
             column_id,
             top.can_have_null,
-            Int(buffer.unsafe_ptr()),
+            Int(views.unsafe_ptr()),
             valid_of,
             SelectionVector(),
         )
-        var builder = StringBuilder(count)
-        var at = Int(buffer.unsafe_ptr())
-        for i in range(count):
-            if not _bit_valid(bits_at, i):
-                builder.append_null()
-                continue
-            var entry = at + 16 * i
-            var length = Int(
-                Pointer[StringT, MutAnyOrigin](
-                    unsafe_from_address=entry
-                )[].length
-            )
-            builder.append(
-                StringSlice[ImmutAnyOrigin](
-                    unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
-                        unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
-                            unsafe_from_address=string_data(entry)
-                        ),
-                        length=length,
-                    )
-                )
-            )
-        _ = buffer^
-        _ = bits^
-        return _typed(Series(name^, builder^.finish()), dtype)
+        if not _any_invalid(bits_at, count):
+            bits = List[UInt8]()
+        return _typed(
+            Series(name^, _views_over_heaps(heaps, views^, count, bits^)),
+            dtype,
+        )
     if physical == PHYSICAL_BOOL:
         var buffer = List[UInt8](unsafe_uninit_length=max(count, 1))
         _gather_fixed_dispatch(
@@ -893,18 +960,7 @@ def gather_rows_series(
                 SelectionVector(),
             )
             if top.can_have_null:
-                var any_null = False
-                var at = bits.unsafe_ptr()
-                for b in range(count // 8):
-                    if at[unsafe_offset=b] != 255:
-                        any_null = True
-                        break
-                if not any_null:
-                    for i in range(count & ~7, count):
-                        if not _bit_valid(bits_at, i):
-                            any_null = True
-                            break
-                if any_null:
+                if _any_invalid(bits_at, count):
                     return _typed(
                         Series(
                             name^,
@@ -916,6 +972,18 @@ def gather_rows_series(
     raise Error("tuple data: no gather for this column type")
 
 
+def _any_invalid(bits: Int, count: Int) -> Bool:
+    """Whether any of the first `count` bits at `bits` is clear."""
+    var at = _bytes(bits)
+    for b in range(count // 8):
+        if at[unsafe_offset=b] != 255:
+            return True
+    for i in range(count & ~7, count):
+        if not _bit_valid(bits, i):
+            return True
+    return False
+
+
 def gather_rows_slots(
     layout: TupleDataLayout,
     rows: Int,
@@ -925,12 +993,13 @@ def gather_rows_slots(
     column_id: Int,
     var name: String,
     dtype: DataType,
+    heaps: TupleDataHeaps,
 ) raises -> Series:
     """Column `column_id` of the `count` rows at the pointers at `rows` as
     a column of `size` values, the row at pointer i at slot `slots[i]`
     (FullScanHashTable's Gather through `sel_build`). The other slots'
-    values are not written; a reader reads only filled
-    slots."""
+    values are not written (a string's are empty); a reader reads only
+    filled slots. Strings reference `heaps` (`gather_rows_series`)."""
     ref top = layout.nodes[][0]
     var physical = top.physicals[column_id]
     var target_sel = SelectionVector(slots)
@@ -939,6 +1008,32 @@ def gather_rows_slots(
     var bits_at = Int(bits.unsafe_ptr())
     var valid_of = bits_at if top.can_have_null else 0
     var any_null = False
+    if physical == PHYSICAL_VARCHAR:
+        var views = List[StringView](
+            length=max(size, 1), fill=StringView(0, 0, 0, 0)
+        )
+        _gather_fixed_dispatch(
+            physical,
+            rows,
+            SelectionVector(),
+            count,
+            top.offsets[column_id],
+            column_id,
+            top.can_have_null,
+            Int(views.unsafe_ptr()),
+            valid_of,
+            target_sel,
+        )
+        for i in range(count):
+            if not _bit_valid(bits_at, Int(slot_at[unsafe_offset=i])):
+                any_null = True
+                break
+        if not any_null:
+            bits = List[UInt8]()
+        return _typed(
+            Series(name^, _views_over_heaps(heaps, views^, size, bits^)),
+            dtype,
+        )
     if physical == PHYSICAL_BOOL:
         var buffer = List[UInt8](unsafe_uninit_length=max(size, 1))
         _gather_fixed_dispatch(

@@ -70,6 +70,7 @@ from dataframe.vector.tuple_data_layout import (
     physical_of_dtype,
 )
 from dataframe.vector.tuple_data_scatter_gather import (
+    TupleDataHeaps,
     gather_rows_series,
     gather_rows_slots,
 )
@@ -488,6 +489,8 @@ struct _TableData(Movable):
     var aux_next: List[UInt64]
     # All zeros: a row with every column null (its validity bits clear).
     var null_row: List[UInt8]
+    # The rows' heap blocks, which gathered string columns reference.
+    var heaps: TupleDataHeaps
 
     def __init__(
         out self, var keys: List[Series], layout: TupleDataLayout
@@ -503,6 +506,7 @@ struct _TableData(Movable):
         self.slot_rows = List[UInt64]()
         self.aux_next = List[UInt64]()
         self.null_row = List[UInt8](length=layout.row_width(), fill=0)
+        self.heaps = TupleDataHeaps()
 
 
 struct _SinkJob(Job):
@@ -969,8 +973,6 @@ struct JoinHashTable(Copyable, Movable):
     var output_columns: List[Int]
     var output_names: List[String]
     var output_types: List[DataType]
-    # Output columns a plan replaced after the build.
-    var frame_only: List[String]
     # Whether a probe emits `data.dictionary` (perfect or dictionary
     # emission) rather than gathering from the rows.
     var use_dictionary: Bool
@@ -1041,7 +1043,6 @@ struct JoinHashTable(Copyable, Movable):
         self.output_columns = output_columns.copy()
         self.output_names = output_names.copy()
         self.output_types = output_types.copy()
-        self.frame_only = List[String]()
         self.use_dictionary = False
         self.rows_stored = 0
         self.count = len(unchunked[0]) if len(unchunked) > 0 else 0
@@ -1109,13 +1110,18 @@ struct JoinHashTable(Copyable, Movable):
                 first_segment += len(sink.partitions[p].segments)
         segment_starts.append(first_segment)
         self.data[].collection = sink.get_unpartitioned()
+        self.data[].heaps = self.data[].collection.heaps()
         self.rows_stored = self.data[].collection.count()
         if self.inserted == 0:
             return
         ref rows = self.data[].collection
-        if perfect and not keys_only and len(unchunked) == 1:
-            # PerfectHashJoinExecutor::BuildPerfectHashTable, else (a
-            # repeated key, a wide range) the hash table.
+        var nested = False
+        for column in payload_columns:
+            nested = nested or column.dtype().is_nested()
+        if perfect and not keys_only and len(unchunked) == 1 and not nested:
+            # PerfectHashJoinExecutor::BuildPerfectHashTable (which bails
+            # out on nested build columns), else (a repeated key, a wide
+            # range) the hash table.
             var filled_rows = List[UInt64]()
             var filled_slots = List[UInt32]()
             var slots = _perfect_slots(
@@ -1228,17 +1234,46 @@ struct JoinHashTable(Copyable, Movable):
         var out = List[Series](capacity=len(self.output_columns))
         for c in range(len(self.output_columns)):
             out.append(
-                gather_rows_series(
-                    self.row_layout,
-                    Int(rows.unsafe_ptr()),
-                    len(rows),
-                    self.output_columns[c],
-                    self.output_names[c],
-                    self.output_types[c],
+                self.gather(
+                    c, Int(rows.unsafe_ptr()), len(rows), self.output_names[c]
                 )
             )
         self.data[].dictionary = out^
         self.use_dictionary = True
+
+    def gather(
+        self, output: Int, rows: Int, count: Int, var name: String
+    ) raises -> Series:
+        """Output column `output` of the `count` rows at the pointers at
+        `rows` (GatherRHS), named `name`; strings reference the rows'
+        heap."""
+        return self.gather_field(
+            self.output_columns[output],
+            rows,
+            count,
+            name^,
+            self.output_types[output],
+        )
+
+    def gather_field(
+        self,
+        column: Int,
+        rows: Int,
+        count: Int,
+        var name: String,
+        dtype: DataType,
+    ) raises -> Series:
+        """Row layout column `column` (a key, or a payload column) of the
+        `count` rows at the pointers at `rows`, typed `dtype`."""
+        return gather_rows_series(
+            self.row_layout,
+            rows,
+            count,
+            column,
+            name^,
+            dtype,
+            self.data[].heaps,
+        )
 
     def _gather_slots(
         mut self,
@@ -1262,6 +1297,7 @@ struct JoinHashTable(Copyable, Movable):
                     self.output_columns[c],
                     self.output_names[c],
                     self.output_types[c],
+                    self.data[].heaps,
                 )
             )
         self.data[].dictionary = out^
@@ -1306,14 +1342,6 @@ struct JoinHashTable(Copyable, Movable):
             return -1
         return Int(_load32(Int(pointer) + self.layout.index_offset))
 
-    def mark_frame_only(mut self, names: List[String]):
-        """Output columns `names` are read from the build frame by row
-        number (a plan replaced them after the build: a late-coded or
-        packed group key)."""
-        for name in names:
-            if name not in self.frame_only:
-                self.frame_only.append(name)
-
     def keys(self) -> List[Series]:
         return self.data[].keys.copy()
 
@@ -1337,21 +1365,15 @@ struct JoinHashTable(Copyable, Movable):
 
     def output_index(self, name: String) -> Int:
         """The output column `name`'s place among the outputs gathered from
-        the rows, -1 when it is read from the build frame instead."""
+        the rows, -1 when the join does not output it."""
         for c in range(len(self.output_names)):
             if self.output_names[c] == name:
-                if name in self.frame_only:
-                    return -1
                 return c
         return -1
 
     def use_salt(self) -> Bool:
         """JoinHashTable::UseSalt."""
         return self.capacity > USE_SALT_THRESHOLD
-
-    def build_row(self, pointer: UInt64) -> Int:
-        """The build row of the row at `pointer`."""
-        return Int(_load32(Int(pointer) + self.layout.index_offset))
 
     def scan_chunk(
         self, chunk: Int, want: UInt8, mut rows: List[UInt64]
