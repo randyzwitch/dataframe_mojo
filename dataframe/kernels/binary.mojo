@@ -110,6 +110,7 @@ comptime INT64_MAX = Int64(9223372036854775807)
 
 
 def checked_add(a: Int64, b: Int64) raises -> Int64:
+    """Raise before signed 64-bit overflow; never silently promote to float."""
     return _int64_add["Int64 sum overflow"](a, b)
 
 
