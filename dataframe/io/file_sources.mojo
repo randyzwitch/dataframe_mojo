@@ -1,8 +1,7 @@
 """Deterministic local dataset path expansion shared by file readers."""
 from std.ffi import external_call
-from std.memory import Pointer
 from std.os import listdir
-from std.os.path import exists, isdir
+from std.os.path import exists, isdir, islink
 
 
 def _validate_c_path(value: String) raises:
@@ -30,21 +29,6 @@ def _matches(var pattern: String, var name: String) raises -> Bool:
     return result
 
 
-def _symlink(var path: String) raises -> Bool:
-    # A one-byte read identifies a symlink without depending on the host's
-    # stat layout. Recursive ** does not traverse directory symlinks.
-    _validate_c_path(path)
-    var source = path.as_c_string_span()
-    var byte = UInt8(0)
-    var result = (
-        external_call["readlink", Int](source.ptr(), Pointer(to=byte), Int(1))
-        >= 0
-    )
-
-    _ = path^
-    return result
-
-
 def _join(parent: String, name: String) -> String:
     return (
         name if parent == "" else parent + ("" if parent == "/" else "/") + name
@@ -69,7 +53,7 @@ def _expand(
                 continue
             var child = _join(parent, name)
             if isdir(child):
-                if not _symlink(child):
+                if not islink(child):
                     _expand(child, parts, at, out)
             elif at + 1 == len(parts):
                 _expand(child, parts, at + 1, out)

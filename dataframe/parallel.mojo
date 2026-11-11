@@ -37,7 +37,7 @@ from std.ffi import _get_global, external_call
 from std.memory import Layout, OwnedPointer, Pointer, alloc
 from std.os import getenv
 from std.time import perf_counter_ns
-from std.sys import CompilationTarget, num_physical_cores, size_of
+from std.sys import num_performance_cores, num_physical_cores, size_of
 
 # Threadripper 3970X and M1, 4/8/16-worker sweeps: 16k helps 100k-row
 # expressions on M1 but makes cheap counts 5-7x slower and oversubscribed
@@ -63,31 +63,9 @@ comptime _SYNC_BYTES = 128
 comptime _SPIN_LIMIT = 2_000_000
 
 
-def _read_performance_core_count(
-    name: List[UInt8], mut count: Int32, mut size: Int
-) -> Int32:
-    comptime if CompilationTarget.is_macos():
-        return external_call["sysctlbyname", Int32](
-            name.unsafe_ptr(), Pointer(to=count), Pointer(to=size), 0, 0
-        )
-    else:
-        return -1
-
-
 def _performance_core_count() -> Int:
     """Physical cores, using the performance cluster on heterogeneous Macs."""
-    var cores = num_physical_cores()
-    comptime if CompilationTarget.is_macos():
-        # On heterogeneous Apple Silicon, count performance cores rather
-        # than all cores. Fall back to the physical count on older systems.
-        var name = List[UInt8]()
-        name.extend(String("hw.perflevel0.physicalcpu").as_bytes())
-        name.append(0)
-        var count = Int32(0)
-        var size = size_of[Int32]()
-        if _read_performance_core_count(name, count, size) == 0 and count > 0:
-            cores = min(cores, Int(count))
-    return max(1, cores)
+    return max(1, num_performance_cores())
 
 
 def _pool_spin_limit(participants: Int) -> Int:
