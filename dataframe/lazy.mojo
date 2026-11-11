@@ -76,7 +76,6 @@ from dataframe.planning.properties import (
     _counts_distinct,
     _covers,
     _covers_exclusive,
-    _distinct_inputs,
     _expr_signature,
     _field,
     _field_list,
@@ -121,14 +120,7 @@ from dataframe.planning.scans import (
     _scan_options,
 )
 from dataframe.planning.strategies import (
-    _all_reduced,
-    _batch_shows_many_groups,
     _frame_bytes,
-    _held_group_bound,
-    _held_groups,
-    _judge_held,
-    _key_text_bytes,
-    _many_groups,
     _stream_collect_bytes,
     _stream_split_groups,
 )
