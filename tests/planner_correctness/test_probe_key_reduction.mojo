@@ -268,28 +268,20 @@ def test_an_aggregate_probing_a_filtered_build_takes_the_build_keys() raises:
 def test_a_renamed_probing_aggregate_and_a_left_join_keep_their_results() raises:
     # A semi join probing with the order key renamed above the aggregate
     # takes the build's keys; a left join above the same aggregate keeps
-    # every group, so it is left alone. The build is filtered twice so its
+    # every group, so it is left alone. The build is a few orders, so its
     # estimate keeps it the build side (sides are chosen before filters
     # are pushed, as DuckDB's optimizer orders them).
     var line = lines()
-    var supp = suppliers()
     var busy = (
         line.lazy()
         .group_by("o")
         .agg([col("late").sum().alias("t")])
         .select_exprs([col("o").alias("order"), col("t")])
     )
-    var chosen = (
-        line.lazy()
-        .join(
-            supp.lazy()
-            .filter(col("nation") == lit(Int64(2)))
-            .filter(col("sk") < lit(Int64(90))),
-            left_on=["s"],
-            right_on=["sk"],
-        )
-        .select_exprs([col("o")])
-    )
+    var orders = List[Int64]()
+    for k in range(40):
+        orders.append(Int64(k * 701))
+    var chosen = DataFrame([Series("o", Column[Int64](orders^))]).lazy()
     var semi = (
         busy.join(chosen, left_on=["order"], right_on=["o"], how="semi")
         .group_by("t")
