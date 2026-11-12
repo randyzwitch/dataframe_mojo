@@ -2,7 +2,7 @@
 from dataframe.storage.endian import read_scalar
 from std.memory import bitcast
 from std.sys import Endian
-from dataframe.text.utf8 import append_codepoint
+from unicode_mojo.utf8 import unsafe_append_codepoint
 
 
 def read_bytes(path: String) raises -> List[UInt8]:
@@ -116,5 +116,5 @@ def text(
             value = cp[value - 128]
             if value < 0:
                 raise Error("Undefined Windows-1252 byte at " + String(at + i))
-        append_codepoint(bytes, value)
+        unsafe_append_codepoint(bytes, value)
     return String(StringSlice(from_utf8=Span(bytes)))

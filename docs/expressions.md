@@ -514,11 +514,14 @@ views. Changed chunks use a shared output builder and reuse decomposition
 scratch across rows. Canonical ordering uses bounded insertion for short
 combining runs and stable counting sort for long runs. Tables and all 20,034
 conformance vectors come from the official Unicode 17.0 data under the
-[Unicode License v3](../scripts/vendor/unicode-LICENSE). Regenerate them with
-`pixi run python3 scripts/normalization_tables.py --ucd DIRECTORY`, where
-`DIRECTORY` contains the versioned `UnicodeData.txt`,
-`DerivedNormalizationProps.txt`, and `NormalizationTest.txt` from
-<https://www.unicode.org/Public/17.0.0/ucd/>.
+[Unicode License v3](https://github.com/randyzwitch/unicode_mojo/blob/main/scripts/vendor/unicode-LICENSE). The standalone
+`unicode_mojo` dependency owns the normalization algorithms, generated tables,
+data generator, conformance corpus, and Unicode 15.0 Alphabetic ranges.
+Run its `pixi run conformance` task for the full Unicode corpus. In that
+package, `pixi run python3 scripts/normalization_tables.py --ucd DIRECTORY
+--check` verifies deterministic regeneration from the three pinned Unicode
+17.0 input files. Dataframe retains layout, null, execution, and buffer-reuse
+integration tests.
 
 `json_decode` requires its output dtype before execution, for example
 `col("json").str().json_decode(DataType.struct(["id", "tags"],
