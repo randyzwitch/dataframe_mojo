@@ -1,6 +1,7 @@
 """String kernels over code points. Nulls propagate; payloads of null rows
 are never read."""
 from dataframe.text.bytes import _Bytes
+from unicode_mojo.transform import slice_codepoints
 from dataframe.storage.boolean import BoolColumn
 from dataframe.regex import Regex, escape
 from dataframe.storage.string import StringColumn, StringBuilder
@@ -43,29 +44,6 @@ from dataframe.text.predicates import (
     string_like,
     string_starts_with,
 )
-
-
-def _codepoints(text: String) -> List[String]:
-    var parts = List[String]()
-    for codepoint in text.codepoints():
-        parts.append(String(codepoint))
-    return parts^
-
-
-def _join(parts: List[String], start: Int, end: Int) -> String:
-    var out = String()
-    for i in range(start, end):
-        out += parts[i]
-    return out^
-
-
-def _slice(text: String, offset: Int, length: Int) -> String:
-    var parts = _codepoints(text)
-    var n = len(parts)
-    var start = offset if offset >= 0 else max(n + offset, 0)
-    start = min(start, n)
-    var end = n if length < 0 else min(start + length, n)
-    return _join(parts, start, end)
 
 
 def string_op(
@@ -181,7 +159,9 @@ def string_op(
         elif op == STR_LOWER:
             out.append(text.lower())
         elif op == STR_SLICE:
-            out.append(_slice(text, Int(node.integer), node.min_count))
+            out.append(
+                slice_codepoints(text, Int(node.integer), node.min_count)
+            )
         else:
             raise Error("Unsupported string operation")
     return Series("", out^.finish())

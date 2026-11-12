@@ -9,6 +9,7 @@ null behavior and checked-expression errors.
 from std.bit import count_trailing_zeros, pop_count
 from std.math import ceil, floor
 from std.memory import Pointer, unsafe_memcpy, unsafe_memcmp
+from unicode_mojo.transform import codepoint_slice_bounds
 
 from std.sys import stderr
 from std.os import getenv
@@ -1845,9 +1846,8 @@ struct VectorExpression(Copyable, Movable):
     def _slice(
         mut self, index: Int, left: Int, rows: SelectionVector, count: Int
     ):
-        """Code points [offset, offset + length) of each string, as
-        `_slice` clips them, without copying: a long result points into
-        its input's bytes, a short one is inlined."""
+        """Clipped code points [offset, offset + length) without copying:
+        a long result points into its input's bytes, a short one is inlined."""
         self._copy_validity(index, left, count)
         var offset = Int(self.bound.expr._nodes[index].integer)
         var length = self.bound.expr._nodes[index].min_count
@@ -1870,16 +1870,15 @@ struct VectorExpression(Copyable, Movable):
                 )[].length
             )
             var bytes = string_data(entry)
-            var p = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bytes)
-            var start = 0
-            if offset >= 0:
-                start = _advance(p, size, 0, offset)
-            else:
-                var points = 0
-                for b in range(size):
-                    points += Int((p[unsafe_offset=b] & 0xC0) != 0x80)
-                start = _advance(p, size, 0, max(points + offset, 0))
-            var end = size if length < 0 else _advance(p, size, start, length)
+            var text = StringSpan(
+                unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
+                    unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                        unsafe_from_address=bytes
+                    ),
+                    length=size,
+                )
+            )
+            var start, end = codepoint_slice_bounds(text, offset, length)
             out[unsafe_offset=k] = StringT.make(bytes + start, end - start)
         self.formats[index] = UnifiedVectorFormat(
             SelectionVector(),
@@ -3079,22 +3078,6 @@ def _copy_rows(source: Int, target: Int, count: Int):
             src=Pointer[UInt8, MutAnyOrigin](unsafe_from_address=source),
             count=4 * count,
         )
-
-
-@always_inline
-def _advance(
-    p: Pointer[UInt8, MutAnyOrigin], size: Int, start: Int, points: Int
-) -> Int:
-    """The byte `points` UTF-8 code points after byte `start`, clipped to
-    `size`."""
-    var at = start
-    var left = points
-    while left > 0 and at < size:
-        at += 1
-        while at < size and (p[unsafe_offset=at] & 0xC0) == 0x80:
-            at += 1
-        left -= 1
-    return at
 
 
 def _pick_values[

@@ -11,7 +11,7 @@ from emberjson import ParseOptions, is_valid_utf8
 from emberjson._deserialize import Parser
 from emberjson._deserialize._parser_helper import decode_codepoint
 from emberjson._serde.deserializer import EmberJsonCursor
-from dataframe.text.utf8 import append_codepoint
+from unicode_mojo.utf8 import unsafe_append_codepoint
 
 comptime JsonBytes = Span[UInt8, ImmutAnyOrigin]
 comptime _Options = ParseOptions(max_depth=1025)
@@ -29,7 +29,7 @@ def json_bytes(text: String) -> JsonBytes:
 
 @always_inline
 def _utf8(mut out: List[UInt8], cp: Int):
-    append_codepoint(out, cp)
+    unsafe_append_codepoint(out, cp)
 
 
 @fieldwise_init

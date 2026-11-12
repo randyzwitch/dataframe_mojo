@@ -1,4 +1,6 @@
-"""General Unicode alphabetic properties and normalization.
+"""Dataframe storage adapter for standalone Unicode normalization.
 
-The regex engine retains its separately generated matching property tables.
+General Unicode algorithms, property tables, case folding, and UTF-8
+primitives live in unicode_mojo. Dataframe retains its storage adapters
+and regex parser and matching engines.
 """

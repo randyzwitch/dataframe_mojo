@@ -26,13 +26,13 @@ for the requested result:
 If a DFA gives up (its cache keeps overflowing), the Pike VM answers
 instead, so every search stays linear in the haystack.
 """
-from dataframe.text.utf8 import append_codepoint
+from unicode_mojo.utf8 import unsafe_append_codepoint
 from std.memory import ArcPointer
 
 from .backtrack import Backtracker
 from .alphabet_lookup import build_alphabet_lookup
 from .onepass import CaptureTables, ascii_span, compile_onepass
-from .charclass import class_size
+from unicode_mojo.ranges import size as range_size
 from .dfa import GAVE_UP, LazyDFA, Prefilter, find_literal
 from .pikevm import PikeVM, decode, previous_start
 from .program import Program, compile_program, _compile_program
@@ -56,7 +56,7 @@ comptime _LITERAL_CAP = 256
 
 def _utf8(cp: Int) -> List[UInt8]:
     var out = List[UInt8]()
-    append_codepoint(out, cp)
+    unsafe_append_codepoint(out, cp)
     return out^
 
 
@@ -263,7 +263,7 @@ def _literal_prefixes(ast: Ast, node: Int) -> _Prefixes:
         return _Prefixes(values^, True)
     if kind == NODE_CLASS:
         ref ranges = ast.classes[ast.a[node]]
-        if class_size(ranges) == 1:
+        if range_size(ranges) == 1:
             var values = List[List[UInt8]]()
             values.append(_utf8(Int(ranges[0])))
             return _Prefixes(values^, True)
@@ -340,7 +340,7 @@ def _byte_sets(ast: Ast, node: Int) -> _Sets:
         return _Sets(out^, True)
     if kind == NODE_CLASS:
         ref ranges = ast.classes[ast.a[node]]
-        if class_size(ranges) > _SET_BYTES or len(ranges) == 0:
+        if range_size(ranges) > _SET_BYTES or len(ranges) == 0:
             return _Sets(List[List[UInt8]](), False)
         var width = -1
         var out = List[List[UInt8]]()
