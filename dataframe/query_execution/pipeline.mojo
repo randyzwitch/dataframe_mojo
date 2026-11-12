@@ -251,7 +251,8 @@ def plan_stream_execute(
     # child completions, allowing independent builds to overlap. An input
     # that is a stream itself adds its own pipelines (its builds, probe and
     # outer scans) to this schedule rather than running a schedule of its
-    # own (`MetaPipeline::CreateChildMetaPipeline`). Execution reports
+    # own: one queue then feeds every thread, where a nested schedule would
+    # run on the one thread that waits for it. Execution reports
     # serialize these tasks to attribute their measurements.
     var inputs = plan_schedule_inputs(self, index, head.cursor, batch_size)
     if len(inputs.wanted) == 0:
@@ -472,7 +473,8 @@ def _add_stream(
     input a pipeline (a stream's own pipelines when the input is one),
     then the probe depending on them, then an outer scan per right or full
     join in the probe's finish group. `build` is the join this stream's
-    result is the build side of, `type` its MetaPipeline type there."""
+    result is the build side of, `type` its kind there
+    (`META_REGULAR` or `META_JOIN_BUILD`)."""
     ref self = Pointer[QueryContext, MutAnyOrigin](unsafe_from_address=plan)[]
     var count = len(inputs.wanted)
     var at = List[Int](capacity=count)
@@ -660,8 +662,8 @@ def plan_union(
     self: QueryContext, index: Int, streaming: Bool, batch_size: Int
 ) raises -> DataFrame:
     """The union at node `index` with its children computed as pipelines of
-    one schedule (`PhysicalUnion::BuildPipelines`: every child of the
-    union is built in the same MetaPipeline, none nested in another's), or
+    one schedule (every child is a pipeline of that schedule, none
+    nested in another's, so all of them share the threads at once), or
     one after the other on this plan when an execution report is kept.
     A child a stream already ran (`plan_schedule_inputs`) is taken."""
     var children = plan_union_children(self, index)
@@ -1306,7 +1308,7 @@ def _probe_start(
     var acc = _StateAccumulator(workers, split_groups)
     # A grouping the pipeline does not run (its steps or order are the
     # batches'): the batches are collected for the eager group-by, which
-    # is the aggregate table over them (`PhysicalHashAggregate::Sink`),
+    # is the aggregate table over them,
     # and reduced into one state each time they reach the budget.
     var collecting = len(expressions) > 0 and len(keys) > 0
     var collected = List[DataFrame]()

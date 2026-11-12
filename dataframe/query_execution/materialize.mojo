@@ -327,7 +327,7 @@ def plan_schedule_inputs(
     prefetched slots. A union the probe reads (below `terminal`, the
     stream's last node) has its children scheduled the same way: the
     probe's pipeline is its union pipelines, sharing their operators and
-    sink (`PhysicalUnion::BuildPipelines`)."""
+    sink, so the union's rows never pass through a frame of their own."""
     var ahead = self._prefetched.value()
     var inputs = _StreamInputs()
     var stats = PlanStatistics()
@@ -401,8 +401,8 @@ def plan_take_prefetched(
 
 def plan_union_children(self: QueryContext, index: Int) -> List[Int]:
     """The inputs of the union at node `index`, in order, a union below it
-    contributing its own (`PhysicalUnion` holds every child of a chain of
-    unions, one union pipeline each)."""
+    contributing its own: a chain of unions is one union of all their
+    children, each child one pipeline into the same operators."""
     var children = List[Int]()
     var pending = List[Int]()
     pending.append(index)
@@ -421,8 +421,8 @@ def plan_union_children(self: QueryContext, index: Int) -> List[Int]:
 def _stack_union(frames: List[DataFrame]) raises -> DataFrame:
     """The union's child results as one frame, each child's columns in the
     first's order: their column chunks appended, nothing copied (the
-    union pipelines' sources, numbered in child order as
-    `MetaPipeline::AssignNextBatchIndex` numbers them)."""
+    union pipelines' sources, numbered in child order, which keeps the
+    union's rows in its children's order)."""
     var names = frames[0].columns()
     var parts = List[DataFrame](capacity=len(frames))
     for k in range(len(frames)):
