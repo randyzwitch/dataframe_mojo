@@ -1,8 +1,9 @@
 """Partitioned hash join storage and bounded probe output.
 
 Build rows contain validity, keys, payload columns, original row numbers,
-match flags and hashes. Long strings live in retained heap storage. Workers
-append to private radix partitions, then independent tasks assemble one
+match flags and hashes. Long strings stay in the build columns' own buffers,
+which the table keeps, or else are copied into its heap. Workers append to
+private radix partitions, then independent tasks assemble one
 pointer-table region per partition, avoiding shared inserts.
 
 Each eight-byte pointer entry packs a 16-bit hash salt and a 48-bit row
@@ -45,6 +46,7 @@ from dataframe.join_type import (
 from dataframe.kernels.partition import _hash_column
 from dataframe.parallel import (
     Job,
+    configured_workers,
     partitions,
     run_jobs,
     worker_count,
@@ -84,6 +86,7 @@ from dataframe.vector.types import (
     PHYSICAL_BOOL,
     PHYSICAL_UINT32,
     PHYSICAL_UINT64,
+    PHYSICAL_VARCHAR,
     STANDARD_VECTOR_SIZE,
     SelectionVector,
     physical_size,
@@ -536,6 +539,9 @@ struct _SinkJob(Job):
     var invalid: Int
     var found: Bool
     var rows: RadixPartitionedTupleData
+    # The buffers this sink's rows point into for strings left where they
+    # are (`_string_buffers`), which the table keeps.
+    var strings: List[_Buffer[UInt8]]
 
     def __init__(
         out self,
@@ -557,6 +563,7 @@ struct _SinkJob(Job):
         self.count = count
         self.invalid = 0
         self.found = found
+        self.strings = List[_Buffer[UInt8]]()
         self.rows = RadixPartitionedTupleData(
             self.layout,
             INITIAL_RADIX_BITS,
@@ -575,6 +582,18 @@ struct _SinkJob(Job):
             handles.append(arena.add(key))
         for column in self.payload:
             handles.append(arena.add(column))
+        # A string column whose bytes the table can keep is not copied
+        # into the rows' heap: the rows point at its bytes, and the table
+        # holds the buffers they are in.
+        var referenced = List[Bool](length=columns, fill=False)
+        for k in range(columns):
+            if self.layout.nodes[][0].physicals[k] != PHYSICAL_VARCHAR:
+                continue
+            var buffers = _string_buffers(arena.columns[handles[k]])
+            if buffers:
+                referenced[k] = True
+                for buffer in buffers.value():
+                    self.strings.append(buffer.copy())
         var chunk = DataChunk(hash_column + 1)
         var state = PartitionedTupleDataAppendState()
         self.rows.initialize_append_state(state)
@@ -615,6 +634,8 @@ struct _SinkJob(Job):
             self.rows.partitions[0].to_unified_format(
                 state.chunk_state, chunk, arena
             )
+            for k in range(columns):
+                state.chunk_state.vector_data[k].referenced = referenced[k]
             # PrepareKeys: the rows whose keys are all valid.
             var added = n
             var append_sel = SelectionVector()
@@ -641,6 +662,24 @@ struct _SinkJob(Job):
             low += n
         self.rows.flush_append_state(state)
         _ = kept^
+
+
+def _string_buffers(series: Series) -> Optional[List[_Buffer[UInt8]]]:
+    """The buffers holding every long string of `series`, when its
+    decoded string_t values point into them: an Arrow string column's
+    bytes, or a view column's data buffers when its views are its own
+    (not read through a row list). None for any other column."""
+    if not series._data.isa[StringColumn]():
+        return None
+    ref column = series._data[StringColumn]
+    if column._is_view_storage():
+        ref storage = column._view_storage.value()
+        if storage._selects():
+            return None
+        return storage._buffers[].copy()
+    var buffers = List[_Buffer[UInt8]]()
+    buffers.append(column._bytes.copy())
+    return buffers^
 
 
 struct _FinalizeJob(Job):
@@ -1069,9 +1108,18 @@ struct JoinHashTable(Copyable, Movable):
         if self.count > Int(Int32.MAX):
             raise Error("A join build exceeds 2^31 - 1 rows")
         self.data = ArcPointer(_TableData(unchunked.copy(), row_layout))
-        # Sink: each thread its share of the rows, in chunks, into its own
-        # partitioned rows.
-        var workers = worker_count(self.count)
+        # Sink: the rows are fed as vectors of STANDARD_VECTOR_SIZE, and
+        # every thread that can take at least one vector sinks a
+        # contiguous run of them into its own partitioned rows. A sink's
+        # work per row is the same whatever the table's size, so a small
+        # build spreads over the threads just as a large one does instead
+        # of leaving them idle. The runs are contiguous so that combining
+        # the threads' partitions in thread order keeps every partition's
+        # rows in build order.
+        var vectors = (
+            self.count + STANDARD_VECTOR_SIZE - 1
+        ) // STANDARD_VECTOR_SIZE
+        var workers = max(1, min(configured_workers(), vectors))
         var bounds = partitions(self.count, workers, STANDARD_VECTOR_SIZE)
         var sinks = List[_SinkJob](capacity=workers)
         for w in range(workers):
@@ -1101,9 +1149,12 @@ struct JoinHashTable(Copyable, Movable):
             + (1 if found_column >= 0 else 0),
         )
         var invalid = 0
+        var strings = List[_Buffer[UInt8]]()
         for w in range(len(sinks)):
             invalid += sinks[w].invalid
             sink.combine(sinks[w].rows)
+            for buffer in sinks[w].strings:
+                strings.append(buffer.copy())
         var sink_threads = max(len(sinks), 1)
         _ = sinks^
         self.has_null = invalid > 0
@@ -1131,6 +1182,7 @@ struct JoinHashTable(Copyable, Movable):
         segment_starts.append(first_segment)
         self.data[].collection = sink.get_unpartitioned()
         self.data[].heaps = self.data[].collection.heaps()
+        self.data[].heaps.add_buffers(strings)
         self.rows_stored = self.data[].collection.count()
         if self.inserted == 0:
             return

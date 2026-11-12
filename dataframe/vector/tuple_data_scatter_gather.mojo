@@ -199,7 +199,10 @@ def _heap_sizes(
     var source = state.vector_data[f].unified
     var sizes = _ints(state.sizes())
     if physical == PHYSICAL_VARCHAR:
-        # Only non-inlined strings are stored in the heap.
+        # Only non-inlined strings are stored in the heap, and none of a
+        # referenced vector's.
+        if state.vector_data[f].referenced:
+            return
         for i in range(append_count):
             var at = source.sel.get_index(append_sel.get_index(i))
             if source.validity.row_is_valid(at):
@@ -419,7 +422,13 @@ def _scatter(
     var source = state.vector_data[f].unified
     if physical == PHYSICAL_VARCHAR:
         _scatter_strings(
-            source, append_sel, append_count, rows, state.heaps(), offset, col
+            source,
+            append_sel,
+            append_count,
+            rows,
+            0 if state.vector_data[f].referenced else state.heaps(),
+            offset,
+            col,
         )
     elif physical == PHYSICAL_STRUCT:
         _scatter_struct(
@@ -509,7 +518,8 @@ def _scatter_strings(
 ):
     """TupleDataValueStore<string_t>: an inlined string as it stands; a
     longer one's bytes into the heap and its header and heap pointer into
-    the row. A null stores NullValue<string_t> ("\\x80", inlined)."""
+    the row. A null stores NullValue<string_t> ("\\x80", inlined).
+    `heaps` 0: the source's bytes outlive the rows, which point at them."""
     var targets = _ints(rows)
     var heap_at = _ints(heaps)
     var entry = col >> 3
@@ -526,7 +536,7 @@ def _scatter_strings(
         var value = source.data + 16 * at
         var length = Int(_load[DType.uint32](value))
         _store[DType.uint64](target, _load[DType.uint64](value))
-        if length <= STRING_INLINE_BYTES:
+        if length <= STRING_INLINE_BYTES or heaps == 0:
             _store[DType.uint64](target + 8, _load[DType.uint64](value + 8))
         else:
             var heap = heap_at[unsafe_offset=i]
@@ -846,6 +856,36 @@ struct TupleDataHeaps(Copyable, Movable):
             self.ends.append(self.starts[b] + len(block[]))
             self.buffers.append(_Buffer[UInt8](block))
             self.bytes += len(block[])
+
+    def add_buffers(mut self, extra: List[_Buffer[UInt8]]):
+        """Add `extra`, buffers that rows reference strings in (a
+        referenced vector's bytes), kept in address order; a buffer
+        already held, or an empty one, is skipped."""
+        var added = False
+        for b in range(len(extra)):
+            if len(extra[b]) == 0:
+                continue
+            var address = Int(extra[b].unsafe_ptr())
+            var held = False
+            for s in range(len(self.starts)):
+                held = held or self.starts[s] == address
+            if held:
+                continue
+            self.starts.append(address)
+            self.ends.append(address + len(extra[b]))
+            self.buffers.append(extra[b].copy())
+            self.bytes += len(extra[b])
+            added = True
+        if not added:
+            return
+        # Insertion sort by start address: few buffers.
+        for i in range(1, len(self.starts)):
+            var j = i
+            while j > 0 and self.starts[j - 1] > self.starts[j]:
+                self.starts.swap_elements(j - 1, j)
+                self.ends.swap_elements(j - 1, j)
+                self.buffers.swap_elements(j - 1, j)
+                j -= 1
 
     @always_inline
     def find(self, address: Int, hint: Int) -> Int:

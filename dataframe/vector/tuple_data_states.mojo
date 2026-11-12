@@ -33,6 +33,10 @@ struct TupleDataVectorFormat(Copyable, Movable):
     var combined: UnifiedVectorFormat
     var combined_entries: List[UInt64]
     var combined_validity: List[UInt8]
+    # A string vector whose bytes stay valid for as long as the collection
+    # is read (its owner keeps them): rows hold pointers to those bytes,
+    # and nothing of it is copied into the heap.
+    var referenced: Bool
 
     def __init__(out self, physical: Int = PHYSICAL_OPAQUE):
         self.physical = physical
@@ -46,6 +50,7 @@ struct TupleDataVectorFormat(Copyable, Movable):
         self.combined = UnifiedVectorFormat()
         self.combined_entries = List[UInt64]()
         self.combined_validity = List[UInt8]()
+        self.referenced = False
 
 
 struct TupleDataChunkState(Copyable, Movable):
