@@ -316,8 +316,9 @@ def _rows_equal(keys: List[Series], a: Int, b: Int) -> Bool:
 
 @always_inline
 def _hash_partition(hash: UInt64, parts: Int) -> Int:
-    """The partition of `parts` a row hash falls in, from the hash's top
-    bits (polars_utils::hashing::hash_to_partition, a multiply-high)."""
+    """The partition of `parts` a row hash falls in: the high word of
+    hash * parts, which maps hashes evenly onto [0, parts) from their top
+    bits with one multiply and no division."""
     return Int((UInt128(hash) * UInt128(parts)) >> 64)
 
 
@@ -470,7 +471,7 @@ def _number_partitions[
 
 
 struct _PartitionNumberJob(Job):
-    """Partition `part` of `parts` (Polars group_by_threaded_slice): scan
+    """Partition `part` of `parts`: scan
     every row's hash and number only the rows whose hash falls in this
     partition, in one thread-local dictionary, so no two tasks ever see
     the same key and nothing is merged afterwards. The local numbers are
@@ -631,11 +632,11 @@ def partition_ids(
 ) raises -> Int:
     """Each row's partition index (ids, by input row) and the partition
     count, with no sort and no rows moved, for aggregates over whole
-    partitions: the group tuples of a window's group-by (Polars
-    group_by_threaded_slice). Rows are hashed in parallel; then one task
-    per thread (polars _set_partition_size) numbers the rows whose hash
-    falls in its partition, and row ranges turn the local numbers into
-    global ones in row order."""
+    partitions. Rows are hashed in parallel; then one task per thread
+    numbers the rows whose hash falls in its partition. Equal keys have
+    equal hashes, so each key is numbered by exactly one task and no
+    tables are merged. Row ranges then turn the local numbers into global
+    ones in row order."""
     ids = huge_uninit[Int](height)
     if height == 0:
         return 0
