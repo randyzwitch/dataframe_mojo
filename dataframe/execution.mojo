@@ -3329,7 +3329,8 @@ struct WindowLayouts(Movable):
     var id_keys: List[String]
     var ids: List[List[Int]]
     var counts: List[Int]
-    var groups: List[ArcPointer[GroupRows]]
+    # Made from the ids when first needed, if not made with them.
+    var groups: List[Optional[ArcPointer[GroupRows]]]
     # Key columns made contiguous once for every window that reads them.
     var flat_names: List[String]
     var flat: List[Series]
@@ -3340,7 +3341,7 @@ struct WindowLayouts(Movable):
         self.id_keys = List[String]()
         self.ids = List[List[Int]]()
         self.counts = List[Int]()
-        self.groups = List[ArcPointer[GroupRows]]()
+        self.groups = List[Optional[ArcPointer[GroupRows]]]()
         self.flat_names = List[String]()
         self.flat = List[Series]()
 
@@ -3441,6 +3442,10 @@ def _over_constant[
         cache[].counts.append(count)
         cache[].groups.append(ArcPointer(groups^))
         at = len(cache[].id_keys) - 1
+    if not cache[].groups[at]:
+        cache[].groups[at] = ArcPointer(
+            group_rows_from_ids(cache[].ids[at], cache[].counts[at])
+        )
     var values = evaluate[width](
         local,
         inputs,
@@ -3452,7 +3457,9 @@ def _over_constant[
         group_rows=cache[].groups[at],
     )
     var workers = worker_count(height)
-    var set = write_by_groups(values, cache[].groups[at][], height, workers)
+    var set = write_by_groups(
+        values, cache[].groups[at].value()[], height, workers
+    )
     var result: Series
     if set:
         result = set.take()
@@ -3615,18 +3622,11 @@ struct _OverJob(Job):
                 starts[unsafe_offset=g + 1] - self.lo,
             ):
                 ids[unsafe_offset=k] = g - self.first
-        # Each partition's rows are one run of the hash group's rows.
-        var offsets = List[Int](capacity=self.last - self.first + 1)
-        for g in range(self.first, self.last + 1):
-            offsets.append(starts[unsafe_offset=g] - self.lo)
-        var row_list = List[Int](capacity=rows)
-        for k in range(rows):
-            row_list.append(k)
         var known = WindowLayouts()
         known.id_keys.append(self.keys)
         known.ids.append(groups.copy())
         known.counts.append(self.last - self.first)
-        known.groups.append(ArcPointer(GroupRows(offsets^, row_list^)))
+        known.groups.append(None)
         self.result = evaluate(
             self.inner,
             part,
@@ -3636,7 +3636,6 @@ struct _OverJob(Job):
             groups=groups,
             group_count=self.last - self.first,
             layouts=Int(Pointer(to=known)),
-            group_rows=known.groups[0],
         )
         _ = known^
 
