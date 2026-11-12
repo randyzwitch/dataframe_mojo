@@ -387,8 +387,7 @@ struct PushedJoinFilter(Copyable, Movable):
 @fieldwise_init
 struct PlannedJoinFilter(Copyable, Movable):
     """A join whose build's keys filter the input of an aggregate below
-    its probe side, decided before anything runs (`JoinFilterPushdown
-    Optimizer`): the join's plan node, which of its keys reach a group
+    its probe side, decided before anything runs: the join's plan node, which of its keys reach a group
     key (`positions`) and that key's name in the aggregate (`grouped`).
     The build publishes the filters when it finishes."""
 

@@ -381,9 +381,10 @@ def _stream_head(
     var sided = plan_build_probe_sides(self, cursor, batch_size)
     if sided:
         return _HeadOutcome(sided.take())
-    # Then join filters through an aggregate the stream starts from
-    # (DuckDB's JOIN_FILTER_PUSHDOWN runs after BUILD_SIDE_PROBE_SIDE):
-    # the aggregate's pipeline waits for those builds (`_add_stream`).
+    # Then join filters through an aggregate the stream starts from, on
+    # the sides just chosen (a filter only flows from a build into its
+    # probe side, so sides come first): the aggregate's pipeline waits
+    # for those builds (`_add_stream`).
     var through = plan_push_filters_through_aggregate(self, cursor)
     if through:
         return _HeadOutcome(through.take())
@@ -497,8 +498,8 @@ def _add_stream(
         )
     if self._pushed_filters:
         # The aggregate the probe reads waits for the builds whose keys
-        # filter its input (`AddRecursiveDependencies`: the probe side's
-        # child pipelines depend on the join's build).
+        # filter its input: it can start only once their keys are known,
+        # and reading fewer rows into the aggregate is the point.
         ref pushed = self._pushed_filters.value()[]
         var source = -1
         for k in range(count):
@@ -801,7 +802,7 @@ struct _StreamProbe(Movable):
                 ] = _ReadyIndex(self.keys[k], self.hows[k], built.take())
         if len(self.through) > 0:
             # The builds above finished: their keys filter this aggregate's
-            # input (DuckDB's dynamic join filters).
+            # input, published at run time rather than planned from data.
             var filters = List[PushedJoinFilter]()
             for t in self.through:
                 filters.extend(
@@ -2182,7 +2183,7 @@ def plan_push_filters_through_aggregate(
     self: QueryContext, top: Int
 ) raises -> Optional[QueryContext]:
     """Plan join-key filters below an aggregate through its grouping keys
-    (`JoinFilterPushdownOptimizer`, after build sides are chosen). A
+    (after build sides are chosen). A
     filter on group keys removes whole groups, preserving every retained
     group's aggregate values. Nothing runs here: each join's build is a
     pipeline of the stream's schedule, and the aggregate's pipeline

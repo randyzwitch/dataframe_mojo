@@ -270,7 +270,7 @@ def test_a_renamed_probing_aggregate_and_a_left_join_keep_their_results() raises
     # takes the build's keys; a left join above the same aggregate keeps
     # every group, so it is left alone. The build is a few orders, so its
     # estimate keeps it the build side (sides are chosen before filters
-    # are pushed, as DuckDB's optimizer orders them).
+    # are pushed, since a filter flows from a build into its probe).
     var line = lines()
     var busy = (
         line.lazy()
