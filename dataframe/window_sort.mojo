@@ -317,8 +317,9 @@ def _rows_equal(keys: List[Series], a: Int, b: Int) -> Bool:
 
 @always_inline
 def _hash_partition(hash: UInt64, parts: Int) -> Int:
-    """The partition of `parts` a row hash falls in, from the hash's top
-    bits (polars_utils::hashing::hash_to_partition, a multiply-high)."""
+    """The partition of `parts` a row hash falls in: the high word of
+    hash * parts, which maps hashes evenly onto [0, parts) from their top
+    bits with one multiply and no division."""
     return Int((UInt128(hash) * UInt128(parts)) >> 64)
 
 
@@ -471,7 +472,7 @@ def _number_partitions[
 
 
 struct _PartitionNumberJob(Job):
-    """Partition `part` of `parts` (Polars group_by_threaded_slice): scan
+    """Partition `part` of `parts`: scan
     every row's hash and number only the rows whose hash falls in this
     partition, in one thread-local dictionary, so no two tasks ever see
     the same key and nothing is merged afterwards. Keeps the partition's
@@ -629,11 +630,12 @@ def partition_groups(
 ) raises -> Int:
     """The groups of the partition keys' rows, with no sort and no rows
     moved, for aggregates over whole partitions: each group's rows
-    (`groups`, Polars GroupsIdx) and each row's group (`ids`, by input
-    row). Returns the group count. Rows are hashed in parallel; then one
-    task per thread (polars _set_partition_size) numbers the rows whose
-    hash falls in its partition (group_by_threaded_slice), and each
-    partition writes its groups' row lists and its rows' numbers."""
+    (`groups`) and each row's group (`ids`, by input row). Returns the
+    group count. Rows are hashed in parallel; then one task per thread
+    numbers the rows whose hash falls in its partition. Equal keys have
+    equal hashes, so each key is numbered by exactly one task and no
+    tables are merged. Each partition then writes its groups' row lists
+    and its rows' numbers."""
     ids = huge_uninit[Int](height)
     if height == 0:
         groups = GroupRows(List[Int](length=1, fill=0), List[Int]())

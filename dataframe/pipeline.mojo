@@ -113,6 +113,7 @@ from dataframe.table_filter import (
     column_domain,
 )
 from dataframe.table_scan import ScanFilterInfo
+from dataframe.io.scan_source import ScanSource
 from dataframe.aggregation.state import (
     _StreamReduction,
     chunks_frame,
@@ -550,6 +551,7 @@ def _zoned_bounds(part: Series) -> Tuple[Bool, Int64, Int64]:
 
 def _join_filters(
     frame: DataFrame,
+    probe_rows: Int,
     steps: List[Step],
     joins: List[DataFrame],
     indexes: List[Optional[JoinHashTable]],
@@ -587,7 +589,7 @@ def _join_filters(
                         at,
                         len(step.names),
                         table.inserted,
-                        frame.height(),
+                        probe_rows,
                         table.build_filtered,
                         scan,
                     )
@@ -624,7 +626,7 @@ def _join_filters(
             -1,
             p.equalities,
             p.build_count,
-            frame.height(),
+            probe_rows,
             p.build_filtered,
             scan,
         )
@@ -1977,6 +1979,9 @@ struct _PipelineJob(Job):
     var unmatched_probe: ArcPointer[DataFrame]
     # The steps over data chunks, with this worker's vectors and arena.
     var runner: _ChunkRunner
+    # A file source's shared scan state: its batches are the morsels,
+    # and `frame` and `ranges` are unused.
+    var source: Optional[ArcPointer[ScanSource]]
 
     def __init__(
         out self,
@@ -2002,6 +2007,7 @@ struct _PipelineJob(Job):
         self.runner = _ChunkRunner(
             steps, schemas, joins, indexes, True, templates
         )
+        self.source = None
         self.join_filters = join_filters.copy()
         self.join_stats = List[SelectivityStats](
             length=len(join_filters),
@@ -2093,6 +2099,9 @@ struct _PipelineJob(Job):
         return (True, rows^)
 
     def run(mut self) raises:
+        if self.source and self.first_step == 0 and self.unmatched_step < 0:
+            self._run_source()
+            return
         var count = len(self.ranges[]) // 2
         var cursor = _Cursor(self.cursor)
         while True:
@@ -2125,38 +2134,66 @@ struct _PipelineJob(Job):
                 var source = _Columns.of_frame(self.runner.arena, morsel)
                 self._sink_from(source^, k, offset)
                 continue
-            self.runner.counts[0] += length
-            var vectors = Optional[List[Int]]()
-            # A top-N taking chunks checks each vector as it is read.
-            if self.top_filter.info and not self._chunk_top():
-                # The TopN's dynamic filter against the scan's vector
-                # statistics (CheckZonemapSegments): vectors it rules out
-                # are not read.
-                vectors = _vectors_kept(
-                    self.top_filter.info.value()[], offset, length
-                )
-                if vectors and len(vectors.value()) == 0:
-                    trace_path("pipeline.top_dynamic_skip")
-                    continue
-            var keyed = self._join_rows(morsel, offset, length)
-            if not keyed[0]:
-                continue
-            var rows = keyed[1].copy()
-            if vectors:
-                rows = _rows_in_vectors(rows, vectors.value(), length)
-            var source = _Columns.of_frame(self.runner.arena, morsel)
-            if rows:
-                if len(rows.value()) == 0:
-                    continue
-                source = source.through(rows.value())
-            else:
-                self.runner.scan_offset = offset
-            if self._chunk_top():
-                self._top_chunks(source^, rows, k, offset, 0)
-                self.runner.scan_offset = -1
-                continue
-            _ = self.runner.run(source^, 0)
+            self._morsel(morsel, k, offset, length)
+
+    def _run_source(mut self) raises:
+        """Batches from the file source until it is done
+        (`TableScanFunction` with its global state): each is taken under
+        the source's lock and decoded on this thread, then runs as a
+        morsel numbered by its place in the file."""
+        while True:
+            var next = self.source.value()[].take()
+            if not next:
+                break
+            var batch = next.take()
+            var k = batch.number
+            var morsel = batch^.into_frame()
+            var length = morsel.height()
+            self.runner.begin_sink(k, 0, length)
+            self.runner.begin_morsel()
+            self._morsel(morsel, k, 0, length)
+        self.counts = self.runner.counts.copy()
+        if self.finishes:
+            self.runner.release_sink()
+            self.runner.release_local()
+
+    def _morsel(
+        mut self, morsel: DataFrame, k: Int, offset: Int, length: Int
+    ) raises:
+        """Morsel `k` (source rows [offset, offset + length)) from the
+        source's step through every step into the sink."""
+        self.runner.counts[0] += length
+        var vectors = Optional[List[Int]]()
+        # A top-N taking chunks checks each vector as it is read.
+        if self.top_filter.info and not self._chunk_top():
+            # The TopN's dynamic filter against the scan's vector
+            # statistics (CheckZonemapSegments): vectors it rules out
+            # are not read.
+            vectors = _vectors_kept(
+                self.top_filter.info.value()[], offset, length
+            )
+            if vectors and len(vectors.value()) == 0:
+                trace_path("pipeline.top_dynamic_skip")
+                return
+        var keyed = self._join_rows(morsel, offset, length)
+        if not keyed[0]:
+            return
+        var rows = keyed[1].copy()
+        if vectors:
+            rows = _rows_in_vectors(rows, vectors.value(), length)
+        var source = _Columns.of_frame(self.runner.arena, morsel)
+        if rows:
+            if len(rows.value()) == 0:
+                return
+            source = source.through(rows.value())
+        else:
+            self.runner.scan_offset = offset
+        if self._chunk_top():
+            self._top_chunks(source^, rows, k, offset, 0)
             self.runner.scan_offset = -1
+            return
+        _ = self.runner.run(source^, 0)
+        self.runner.scan_offset = -1
 
     def _sink_from(mut self, var columns: _Columns, k: Int, offset: Int) raises:
         """An outer join's unmatched build rows (or a morsel of them past
@@ -2866,6 +2903,8 @@ struct PipelineRun(Movable):
     var next_round: Int
     var next_morsel: Int
     var round_cursor: Optional[_Cursor]
+    # The file source the workers scan, when not `frame`.
+    var source: Optional[ArcPointer[ScanSource]]
 
     def __init__(
         out self,
@@ -2936,6 +2975,7 @@ struct PipelineRun(Movable):
         self.next_round = 0
         self.next_morsel = len(self.jobs[0].ranges[]) // 2
         self.round_cursor = None
+        self.source = None
 
     def tasks(self) -> Int:
         return len(self.jobs)
@@ -2953,6 +2993,9 @@ struct PipelineRun(Movable):
         join output. Scheduling places this scan after probe completion so
         match flags are final."""
         self.end_round()
+        if self.source and self.next_round == 0:
+            # The morsels the source's batches were numbered as.
+            self.next_morsel = self.source.value()[].batches()
         while self.next_round < len(self.outer_steps):
             var j = self.outer_steps[self.next_round]
             var last = self.outer_steps[len(self.outer_steps) - 1]
@@ -2999,6 +3042,11 @@ struct PipelineRun(Movable):
         self.end_round()
         self.cursor.free()
         self.boundary.free()
+        if self.source:
+            try:
+                self.source.value()[].finish()
+            except:
+                pass
 
 
 def begin_pipeline(
@@ -3023,10 +3071,15 @@ def begin_pipeline(
     table: Bool,
     finish_steps: List[Step],
     pushed: List[PushedJoinFilter],
+    source: Optional[ArcPointer[ScanSource]] = None,
+    source_rows: Int = -1,
 ) raises -> PipelineRun:
     """`run_pipeline` up to its workers' jobs, not yet run: its execute
     stage is the jobs, as `Pipeline::Schedule` makes one task per thread;
-    `finish_pipeline` is its finish, after the rounds of `begin_round`."""
+    `finish_pipeline` is its finish, after the rounds of `begin_round`.
+    With a file `source`, `frame` holds its columns but no row: the
+    workers take the source's batches as their morsels, and
+    `source_rows` is its estimated height."""
     trace_path("pipeline.run")
     # Every step's input columns and the output, typed once, and the
     # row-local steps compiled once for every worker. A late-materialized
@@ -3098,7 +3151,10 @@ def begin_pipeline(
             # Bounded source key statistics can select direct-address
             # aggregation. Use those bounds only when every grouping key has a
             # compatible estimate.
-            var stats = _key_statistics(frame, steps, keys)
+            # A file source's statistics are not known before its scan.
+            var stats = List[Series]()
+            if not source:
+                stats = _key_statistics(frame, steps, keys)
             if len(stats) == len(keys):
                 made.use_perfect_hash(stats)
             layout.append(made^)
@@ -3196,7 +3252,13 @@ def begin_pipeline(
     top_filter.row_ids = top_row_ids
     var join_scan_filters = TableFilterSet()
     var join_filters = _join_filters(
-        frame, steps, joins[], indexes[], pushed, join_scan_filters
+        frame,
+        source_rows if source else frame.height(),
+        steps,
+        joins[],
+        indexes[],
+        pushed,
+        join_scan_filters,
     )
     if len(join_filters) > 0:
         trace_path("pipeline.join_filter")
@@ -3204,10 +3266,10 @@ def begin_pipeline(
         if f.bloom:
             trace_path("pipeline.join_bloom")
             break
-    for f in join_scan_filters.filters:
-        _ensure_zones(frame.column(f.column))
     var join_scan = Optional[ArcPointer[ScanFilterInfo]]()
-    if join_scan_filters.has_filters():
+    if join_scan_filters.has_filters() and not source:
+        for f in join_scan_filters.filters:
+            _ensure_zones(frame.column(f.column))
         join_scan = ArcPointer(
             ScanFilterInfo(join_scan_filters, frame._columns)
         )
@@ -3222,6 +3284,9 @@ def begin_pipeline(
     # One job per morsel at most: a tiny source (PDS-H q2's five-row
     # region frame) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
+    if source:
+        # A file's batches are not known ahead: every worker scans.
+        job_count = max(1, workers)
     # The source's table filters with their answers per vector, found once
     # for every worker's chunk loop.
     var scan = Optional[ScanFilterInfo]()
@@ -3343,7 +3408,9 @@ def begin_pipeline(
         if step.kind == STEP_JOIN and join_emits_build_rows(step.how):
             for w in range(len(jobs)):
                 jobs[w].finishes = False
-    return PipelineRun(
+    for w in range(len(jobs)):
+        jobs[w].source = source
+    var run = PipelineRun(
         jobs^,
         cursor.copy(),
         boundary,
@@ -3373,6 +3440,8 @@ def begin_pipeline(
         ungrouped^,
         finish_steps.copy(),
     )
+    run.source = source
+    return run^
 
 
 def _finish_pipeline(
