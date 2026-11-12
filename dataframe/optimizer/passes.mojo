@@ -445,11 +445,19 @@ def plan_filter_shared_subplans(mut self: QueryContext):
 
 
 def plan_push_predicates(mut self: QueryContext) raises:
-    """DuckDB's FilterPushdown (optimizer/filter_pushdown.cpp and
-    optimizer/pushdown/) in one top-down pass: each filter's conjuncts
-    join the set carried down the plan, each operator passes on the
-    ones that cannot change its result and the rest land above it as
-    one filter. The plan is renumbered once at the end."""
+    """Move filters as close to the data as they can go, in one
+    top-down pass. A filter removes rows; the earlier rows are removed,
+    the less work every operator above does on rows that would be
+    thrown away. A filter can move below an operator only when doing so
+    keeps the same result: the operator must produce, for the rows the
+    filter keeps, the same rows it would have produced from all of
+    them.
+
+    Each filter is split into its AND-ed parts (conjuncts), since each
+    part can move on its own. The parts collect into a set carried down
+    the plan. At each operator, the parts that cannot change its result
+    continue below it; the rest are combined into one filter just above
+    it. The plan is renumbered once at the end."""
     var owned = plan_remember_schemas(self)
     try:
         var root = plan_pushdown(self, len(self._nodes) - 1, List[Expr]())
@@ -483,11 +491,11 @@ def _literal(predicate: Expr) -> Int:
 
 
 def plan_add_filter(mut filters: List[Expr], predicate: Expr) -> Bool:
-    """FilterPushdown::AddFilter: split `predicate` into its conjuncts,
-    with the single-input filters an OR of ANDs implies
-    (`_implied_filters`), and add them to `filters`. A true conjunct
-    keeps every row and goes. False when a conjunct is false: no row
-    passes (FilterResult::UNSATISFIABLE)."""
+    """Split `predicate` into its AND-ed parts and add them to
+    `filters`, along with any single-input filter an OR of ANDs implies
+    (`_implied_filters`). A literal-true part keeps every row, so it is
+    dropped. Returns False when a part is literal false: then no row
+    can pass."""
     var unsatisfiable = False
     for part in _boolean_parts(predicate, AND):
         var value = _literal(part)
@@ -512,9 +520,10 @@ def plan_add_conjunct(mut filters: List[Expr], predicate: Expr) -> Bool:
 
 
 def plan_empty_result(mut self: QueryContext, index: Int) raises -> Bool:
-    """LogicalEmptyResult: the subtree at `index` becomes an empty frame
-    with its columns, when skipping it cannot suppress an evaluation
-    error (`plan_can_discard`)."""
+    """Replace the subtree at `index` with an empty frame of the same
+    columns, since a filter that rejects every row makes its work
+    pointless. Only done when skipping the subtree cannot hide an error
+    it would have raised (`plan_can_discard`)."""
     if not plan_can_discard(self, index):
         return False
     var empty = self._execute(index, True)
@@ -527,8 +536,8 @@ def plan_empty_result(mut self: QueryContext, index: Int) raises -> Bool:
 def plan_final_filters(
     mut self: QueryContext, index: Int, filters: List[Expr]
 ) -> Int:
-    """FilterPushdown::PushFinalFilters: the filters that stop at
-    `index`, as one filter above it."""
+    """Combine the filters that cannot move below `index` into one
+    filter placed just above it."""
     if len(filters) == 0:
         return index
     var predicate = filters[0].copy()
@@ -541,8 +550,9 @@ def plan_final_filters(
 def plan_finish_pushdown(
     mut self: QueryContext, index: Int, filters: List[Expr]
 ) raises -> Int:
-    """FilterPushdown::FinishPushdown: each input starts a pushdown of
-    its own and the filters stop above `index`."""
+    """For an operator no filter may pass: each input gets a fresh,
+    empty pushdown of its own (filters inside it can still move down),
+    and the carried filters stop above `index`."""
     var left = self._nodes[index].left
     var right = self._nodes[index].right
     if left >= 0:
@@ -557,9 +567,9 @@ def plan_finish_pushdown(
 def plan_pushdown(
     mut self: QueryContext, index: Int, var filters: List[Expr]
 ) raises -> Int:
-    """FilterPushdown::Rewrite: push `filters`, read by the parent of
-    `index`, into the subtree at `index`; returns the subtree's new
-    root. Every filter in `filters` is row-local and cannot raise. One
+    """Push `filters`, which applied to the output of `index`, into the
+    subtree at `index`; returns the subtree's new root. Every filter
+    in `filters` is row-local and cannot raise. One
     reading columns through a selector stays above `index`: below, the
     selector could match other columns."""
     var fixed = List[Expr]()
@@ -600,8 +610,8 @@ def plan_pushdown(
 def plan_pushdown_filter(
     mut self: QueryContext, index: Int, var filters: List[Expr]
 ) raises -> Int:
-    """FilterPushdown::PushdownFilter: a movable filter's conjuncts join
-    the set and the filter goes. A filter that cannot move (pinned,
+    """A filter that may move adds its parts to the carried set and is
+    removed from the plan. A filter that cannot move (pinned,
     not row-local, or able to raise on rows the set would remove) stays
     a boundary: the set stops above it. A row-local one there takes the
     set into its own predicate, after its own, so a scan below sees
@@ -641,14 +651,15 @@ def plan_pushdown_filter(
 def plan_pushdown_projection(
     mut self: QueryContext, index: Int, var filters: List[Expr]
 ) raises -> Int:
-    """FilterPushdown::PushdownProjection: a filter reading only columns
-    the projection passes through or sets to a constant is rewritten
-    over its input and moves below it. One reading a computed column
-    stays above (DuckDB's PRESERVE_COMPUTED_EXPRESSIONS, without the
-    split projection). A window or aggregate over the input depends on
-    which rows are there (TPC-DS q47 ranked months after `d_year = 1999`
-    was pushed below the rank), and a select of literals alone sets
-    the row count: nothing passes either."""
+    """A projection computes each output row from the same input row,
+    so a filter reading only columns it passes through unchanged, or
+    sets to a constant, can be rewritten in terms of the input and
+    applied before it. A filter reading a computed column stays above,
+    so the computation isn't repeated. Nothing moves below a projection
+    containing a window or aggregate: those read other rows, so
+    removing rows first changes their values (a rank computed over all
+    years differs from one computed over one year). Nothing moves below
+    a select of literals alone either, since it sets the row count."""
     var exprs = self._nodes[index].exprs.copy()
     var select = self._nodes[index].kind == SELECT
     if (
@@ -687,10 +698,9 @@ def plan_pushdown_projection(
 def plan_pushdown_set_operation(
     mut self: QueryContext, index: Int, var filters: List[Expr]
 ) raises -> Int:
-    """FilterPushdown::PushdownSetOperation: both inputs of a vertical
-    concat supply the same names and types, so every filter applies to
-    each, as both engines push predicates into every branch of a UNION
-    ALL."""
+    """A vertical concat's output rows are its inputs' rows, and both
+    inputs have the same names and types, so filtering the result is
+    the same as filtering each input: every filter goes into both."""
     var left = self._nodes[index].left
     var right = self._nodes[index].right
     var copies = filters.copy()
@@ -704,8 +714,8 @@ def plan_pushdown_set_operation(
 def plan_pushdown_aggregate(
     mut self: QueryContext, index: Int, var filters: List[Expr]
 ) raises -> Int:
-    """FilterPushdown::PushdownAggregate: a filter reading only group
-    keys removes whole groups, so it moves below the aggregate and the
+    """A filter reading only group keys removes whole groups, so it
+    moves below the aggregate and the
     kept groups' values and first-occurrence order stay as they were.
     A pivot's index columns are its keys when it keeps one value per
     cell (min, max, first, last, count, len). Filters on aggregates,
@@ -748,14 +758,16 @@ def plan_join_sides(
 def plan_pushdown_join(
     mut self: QueryContext, index: Int, var filters: List[Expr]
 ) raises -> Int:
-    """FilterPushdown::PushdownInnerJoin and PushdownLeftJoin: a filter
-    on one input's columns moves into it (a left join's right input
-    keeps its filters out, its unmatched rows are null there). A filter
-    on a left join's right columns that rejects nulls rejects every
-    unmatched row, so the join is inner (FilterRemovesNull). A filter
-    on one input's join keys also holds for the other input's keys,
-    as the FilterCombiner's equivalence sets derive. Filters on both
-    inputs stay above."""
+    """A join row comes from one row of each input, so a filter reading
+    only one input's columns can be applied to that input first. For a
+    left join, filters on the right input's columns stay above: if the
+    right input were filtered first, a left row whose match the filter
+    rejects would come out with nulls instead of being removed. If
+    such a filter rejects nulls, it removes every unmatched row anyway,
+    so the left join becomes an inner join (`plan_left_join_to_inner`)
+    and the filter can move. A filter on one input's join keys also
+    holds for the other input's keys, since joined rows have equal
+    keys. Filters reading both inputs stay above."""
     var sides = plan_join_sides(self, index)
     ref left_cols = sides[0]
     ref right_cols = sides[1]
@@ -793,8 +805,8 @@ def plan_pushdown_join(
 def plan_pushdown_semi_anti_join(
     mut self: QueryContext, index: Int, var filters: List[Expr]
 ) raises -> Int:
-    """FilterPushdown::PushdownSemiAntiJoin: a semi or anti join's output
-    is its left input's rows, so every filter on them moves into the
+    """A semi or anti join's output is a subset of its left input's
+    rows, so every filter on them moves into the
     left input; the right input starts a pushdown of its own, with any
     filter on the left join keys carried over to the right keys."""
     var sides = plan_join_sides(self, index)
@@ -827,9 +839,9 @@ def plan_left_join_to_inner(
     left_cols: List[String],
     right_cols: List[String],
 ) raises -> Bool:
-    """FilterRemovesNull: convert a left join to an inner join when a
-    filter above it reads only right-side columns and rejects a row
-    whose right-side columns are all null. Those are exactly the extra
+    """Convert a left join to an inner join when a filter above it
+    reads only right-side columns and rejects a row whose right-side
+    columns are all null. Those are exactly the extra
     unmatched rows supplied by the left join."""
     var reads = _references(predicate)
     if not reads:
@@ -859,8 +871,8 @@ def plan_transfer_key_filter(
     that input's join keys also holds for the other input's keys:
     a row there whose key fails it matches no row the filter keeps.
     So the predicate in the other input's key names filters that input
-    too. TPC-DS q78's `ss_sold_year = 2000`, above two left joins on
-    the year, then also narrows the web and catalog totals."""
+    too. For example, `year = 2000` above a join on `year` can also
+    filter the other input's year column before the join."""
     ref node = self._nodes[join]
     if len(node.names) != len(node.right_keys) or len(node.names) == 0:
         return None
