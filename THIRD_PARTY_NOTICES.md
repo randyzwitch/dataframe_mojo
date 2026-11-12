@@ -15,6 +15,16 @@ License v3, Rust regex notices, and source provenance in its
 `THIRD_PARTY_NOTICES.md`; its generated tables, generators, and conformance
 fixtures are no longer vendored in dataframe.
 
+## regex_mojo
+
+Regex compilation, matching, replacement templates, and the compiled-pattern
+cache are supplied by the standalone
+[regex_mojo](https://github.com/randyzwitch/regex_mojo) dependency, resolved
+through Pixi at a pinned Git revision. Its MIT-licensed code, engine tests,
+frozen Polars behavior corpus, and corpus generator were extracted from this
+project. It consumes Unicode data through `unicode_mojo`. Dataframe retains
+column/null handling and expression integration tests.
+
 ## Polars
 
 Copyright (c) 2025 Ritchie Vink

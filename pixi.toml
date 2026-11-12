@@ -42,18 +42,21 @@ name = "dataframe"
 path = "dataframe"
 
 [package.host-dependencies]
+regex_mojo = { git = "https://github.com/randyzwitch/regex_mojo.git", rev = "b7b68bc64ce861fa79d5c316d4b600d8cf8a3d4d" }
 unicode_mojo = { git = "https://github.com/randyzwitch/unicode_mojo.git", rev = "2bcb4f34961960ff2ecac169bb7d48c276fcc85e" }
 emberjson = { git = "https://github.com/randyzwitch/EmberJson.git", rev = "3c0d0db82eece81274cbd30732c77908e1a88e24" }
 mojo = "==1.3.0.dev2026111005"
 max-core = "==26.8.0.dev2026111005"
 
 [package.run-dependencies]
+regex_mojo = { git = "https://github.com/randyzwitch/regex_mojo.git", rev = "b7b68bc64ce861fa79d5c316d4b600d8cf8a3d4d" }
 unicode_mojo = { git = "https://github.com/randyzwitch/unicode_mojo.git", rev = "2bcb4f34961960ff2ecac169bb7d48c276fcc85e" }
 emberjson = { git = "https://github.com/randyzwitch/EmberJson.git", rev = "3c0d0db82eece81274cbd30732c77908e1a88e24" }
 mojo = "==1.3.0.dev2026111005"
 max-core = "==26.8.0.dev2026111005"
 
 [dependencies]
+regex_mojo = { git = "https://github.com/randyzwitch/regex_mojo.git", rev = "b7b68bc64ce861fa79d5c316d4b600d8cf8a3d4d" }
 unicode_mojo = { git = "https://github.com/randyzwitch/unicode_mojo.git", rev = "2bcb4f34961960ff2ecac169bb7d48c276fcc85e" }
 emberjson = { git = "https://github.com/randyzwitch/EmberJson.git", rev = "3c0d0db82eece81274cbd30732c77908e1a88e24" }
 # What CI runs, matching the package's host and run dependencies above.
