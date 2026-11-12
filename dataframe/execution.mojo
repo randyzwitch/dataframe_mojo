@@ -3118,8 +3118,7 @@ from dataframe.kernels.gather import take_parallel
 from .parallel import configured_workers
 from .window_sort import (
     WindowLayout,
-    rank_from_layout,
-    rank_order_keys,
+    rank_window,
     partition_ids,
     window_layout,
 )
@@ -3276,19 +3275,12 @@ def _over_rank(
             value = column.copy()
     if value.dtype().is_categorical():
         value = decode(value)
-    var keys = List[Series]()
-    var descending = List[Bool]()
-    var nulls_last = List[Bool]()
-    rank_order_keys(value, rank.min_count == 1, keys, descending, nulls_last)
-    var layout = window_layout(
+    var result = rank_window(
         _partition_keys(node, columns, cache_address),
-        keys,
-        descending,
-        nulls_last,
-        height,
-        stable=rank.text == "ordinal",
+        value,
+        rank.min_count == 1,
+        rank.text,
     )
-    var result = rank_from_layout(layout, value, rank.text)
     result._name = argument_expr._name
     return result^
 
