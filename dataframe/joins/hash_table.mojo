@@ -500,7 +500,7 @@ struct _TableData(Movable):
     var null_row: List[UInt8]
     # The rows' heap blocks, which gathered string columns reference.
     var heaps: TupleDataHeaps
-    # The finalize tasks not yet run (HashJoinFinalizeEvent's tasks).
+    # The finalize tasks not yet run, one per build sink thread.
     var pending: List[_FinalizeJob]
 
     def __init__(
@@ -1231,20 +1231,20 @@ struct JoinHashTable(Copyable, Movable):
         self.finish_finalize()
 
     def finalize_tasks(self) -> Int:
-        """The finalize tasks left to run (HashJoinFinalizeEvent::GetTasks:
-        one per build sink thread, each filling a run of partitions'
-        regions of the pointer table)."""
+        """The finalize tasks left to run: one per build sink thread, each
+        filling a run of partitions' regions of the pointer table, so the
+        tasks never write the same entries and need no atomics."""
         return len(self.data[].pending)
 
     def finalize_task(self, task: Int) raises:
-        """Run finalize task `task` (HashJoinFinalizeTask); tasks run at
-        the same time, each on its own regions."""
+        """Run finalize task `task`; tasks run at the same time, each on
+        its own regions."""
         self.data[].pending[task].run()
 
     def finish_finalize(mut self) raises:
-        """After the last finalize task (HashJoinFinalizeEvent::
-        FinishEvent): whether any chain is longer than one, then
-        dictionary emission's arrays when it applies."""
+        """After the last finalize task, once the whole pointer table is
+        filled: whether any chain is longer than one, then dictionary
+        emission's arrays when it applies."""
         if len(self.data[].pending) == 0:
             return
         for t in range(len(self.data[].pending)):

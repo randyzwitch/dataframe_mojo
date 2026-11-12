@@ -219,7 +219,7 @@ def test_a_finish_group_runs_after_the_base_executes_and_before_it_finishes() ra
 
 def test_finalize_tasks_run_before_the_finish_event_finishes() raises:
     """Pipeline 0's Finalize inserts four tasks (a join build's finalize
-    event): each runs after Finalize, the event's FinishEvent after all of
+    event): each runs after Finalize, the serial finish step after all of
     them, and pipeline 1, which reads 0's sink, executes only after."""
     var clock = ArcPointer(Clock())
     var pipelines = List[Recorded]()

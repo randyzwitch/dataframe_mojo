@@ -25,9 +25,10 @@ says how many tasks its execute event makes when that event schedules
 (`Pipeline::Schedule`): a stream's probe makes one per morsel worker. A
 thread with no task queued runs the jobs that running tasks post to the
 crew (`_Crew._help`): a build side's own plan still runs inside its one
-execute task. A finish event whose sink's Finalize has parallel work (a
-join build's `HashJoinFinalizeEvent`) adds that work's tasks to the
-queue, and finishes after the last of them. The workers themselves are posted so that only idle crew
+execute task. A finish event whose sink's Finalize has parallel work (filling a join
+build's pointer table) adds that work's tasks to the queue, and finishes
+after the last of them, so the work spreads over every thread while
+nothing reads the sink early. The workers themselves are posted so that only idle crew
 threads join them (`_UNHELPABLE`).
 """
 from std.atomic import Atomic
@@ -96,9 +97,10 @@ trait SchedulablePipeline(Deinitable, Movable):
         return 0
 
     def finalize_tasks(mut self) raises -> Int:
-        """After `finalize`: the tasks of the event the sink's Finalize
-        inserts before the finish event's parents (`Event::InsertEvent`,
-        a join build's `HashJoinFinalizeEvent`); 0 for none."""
+        """After `finalize`: how many tasks the sink's finalize work
+        splits into, all of which must run before the finish event's
+        parents may start (a join build filling its pointer table); 0 for
+        none."""
         return 0
 
     def finalize_task(mut self, task: Int) raises:
@@ -106,7 +108,7 @@ trait SchedulablePipeline(Deinitable, Movable):
         pass
 
     def finish_finalize(mut self) raises:
-        """That event's `FinishEvent`, after its last task."""
+        """The serial step after the last of those tasks."""
         pass
 
 
@@ -396,8 +398,9 @@ struct _Executor[P: SchedulablePipeline](Movable):
             _ = self.completed_pipelines.fetch_add(1)
 
     def _finish_task(mut self, event: Int):
-        """`Event::FinishTask`: the event's last task finishes it. A
-        finish event with finalize tasks runs their `FinishEvent` first."""
+        """Count a finished task; the event's last task finishes it. A
+        finish event with finalize tasks first runs their serial finish
+        step (`finish_finalize`)."""
         var base = Int(self.finished_tasks.unsafe_ptr())
         var done = Int(_counter(base, event).fetch_add(1)) + 1
         if done == self.total_tasks[event]:
@@ -410,9 +413,9 @@ struct _Executor[P: SchedulablePipeline](Movable):
             self._finish(event)
 
     def _insert_finalize_tasks(mut self, event: Int) raises:
-        """After a finish event's Finalize: the tasks of the event it
-        inserts (`Event::InsertEvent`), as more tasks of the finish event,
-        task t + 1 running `finalize_task(t)`. The finish event finishes,
+        """After a finish event's Finalize: the tasks its finalize work
+        adds, as more tasks of the finish event, task t + 1 running
+        `finalize_task(t)`. The finish event finishes,
         and its parents' dependencies complete, only after them."""
         ref pipeline = self._pipelines()[self.pipeline[event]]
         var tasks = pipeline.finalize_tasks()
