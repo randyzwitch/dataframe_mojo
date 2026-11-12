@@ -3096,6 +3096,15 @@ struct _GroupReduceJob[width: Int](Job):
         var pair = is_pair_reduction(self.node.op)
         var offsets = self.groups[].offsets.unsafe_ptr()
         var all_rows = self.groups[].rows.unsafe_ptr()
+        if not pair and reducer.sum_group_rows(
+            self.values,
+            Int(offsets),
+            Int(all_rows),
+            self.first,
+            self.last,
+        ):
+            self.result = reducer.finish()
+            return
         var g = self.first
         var start = offsets[unsafe_offset=self.first]
         var end = offsets[unsafe_offset=self.last]
