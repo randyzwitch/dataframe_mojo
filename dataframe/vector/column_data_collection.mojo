@@ -17,6 +17,7 @@ from dataframe.vector.sink import Sink
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
     PHYSICAL_VARCHAR,
+    FLAT_VECTOR,
     SEQUENCE_VECTOR,
     UnifiedVectorFormat,
     physical_of,
@@ -40,6 +41,9 @@ comptime RAW_STORAGE = [
 comptime _COPY_NONE = 0
 comptime _COPY_RAW = 1
 comptime _COPY_VALUES = 2
+# A window of a column the collection's rows already are, in order: kept
+# as a reference to its buffers, not copied.
+comptime _COPY_WINDOW = 3
 # The fixed widths a selected copy moves as one typed value.
 comptime _COPY_WIDTHS = [
     DType.uint8,
@@ -172,6 +176,10 @@ struct ColumnDataCollection(Movable):
     var raw_bits: List[List[UInt8]]
     var raw_physical: List[Int]
     var values: List[List[Series]]
+    # Per column in `_COPY_WINDOW`, the column its rows are a window of,
+    # from row `starts`.
+    var windows: List[Series]
+    var starts: List[Int]
     var count: Int
     # The rows the collection is expected to take: raw storage is sized
     # for them once.
@@ -186,8 +194,11 @@ struct ColumnDataCollection(Movable):
         self.raw_bits = List[List[UInt8]](length=width, fill=List[UInt8]())
         self.raw_physical = List[Int](length=width, fill=0)
         self.values = List[List[Series]](capacity=width)
+        self.windows = List[Series](capacity=width)
         for c in range(width):
             self.values.append([schema._columns[c].copy()])
+            self.windows.append(schema._columns[c].copy())
+        self.starts = List[Int](length=width, fill=0)
         self.count = 0
 
     def append(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
@@ -200,6 +211,32 @@ struct ColumnDataCollection(Movable):
             var mode = self.modes[c]
             var size = physical_size(v.physical)
             var dtype = self.schema._columns[c].dtype()
+            # A flat vector over a stored column is a window of it. While
+            # every chunk's vector continues the same window (consecutive
+            # rows of one column, as a scan's chunks over a column that no
+            # step changed are), the collected rows are that window, so
+            # they are referenced rather than copied: columns are
+            # immutable, and the reference keeps their buffers alive.
+            if v.vector_type == FLAT_VECTOR and v.source >= 0:
+                ref column = arena.columns[v.source]
+                if mode == _COPY_NONE and self.count == 0:
+                    if column.dtype() == dtype:
+                        self.modes[c] = _COPY_WINDOW
+                        self.windows[c] = column.copy()
+                        self.starts[c] = v.source_offset
+                        continue
+                elif (
+                    mode == _COPY_WINDOW
+                    and v.source_offset == self.starts[c] + self.count
+                    and column._shares_buffers_with(self.windows[c])
+                ):
+                    continue
+            if mode == _COPY_WINDOW:
+                # The window so far as values, then this chunk's.
+                self.values[c] = [self._window(c)]
+                self.windows[c] = self.schema._columns[c].copy()
+                self.modes[c] = _COPY_VALUES
+                mode = _COPY_VALUES
             var raw = (
                 v.vector_type != SEQUENCE_VECTOR
                 and v.physical != PHYSICAL_BOOL
@@ -236,6 +273,14 @@ struct ColumnDataCollection(Movable):
             )
         self.count += n
 
+    def _window(self, c: Int) raises -> Series:
+        """Column `c`'s rows so far, a window of the column they are in."""
+        return (
+            self.windows[c]
+            .slice(self.starts[c], self.count)
+            .renamed(self.schema._columns[c].name())
+        )
+
     def _raw_column(self, c: Int) raises -> Series:
         return raw_series(
             self.raw[c],
@@ -250,6 +295,8 @@ struct ColumnDataCollection(Movable):
         for c in range(len(self.modes)):
             if self.modes[c] == _COPY_RAW:
                 columns.append(self._raw_column(c))
+            elif self.modes[c] == _COPY_WINDOW:
+                columns.append(self._window(c))
             else:
                 ref pieces = self.values[c]
                 if len(pieces) == 1:
@@ -354,4 +401,9 @@ def materialize_finish(
     var parts = List[DataFrame](capacity=len(jobs))
     for k in range(len(jobs)):
         parts.append(jobs[k].frame.copy())
-    return concat(parts)
+    # Batches whose columns are consecutive windows of one stored column
+    # (a column no step changed) join back into one window of it.
+    var whole = concat(parts)
+    for c in range(whole.width()):
+        whole._columns[c] = whole._columns[c].joined_windows()
+    return whole^
