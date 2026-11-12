@@ -185,7 +185,6 @@ from dataframe.vector.data_chunk import (
     flat_over,
     to_series,
 )
-from dataframe.vector.tuple_data_scatter_gather import gather_rows_series
 from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
@@ -1177,10 +1176,6 @@ struct _ChunkRunner(Movable):
     var held: Int
     # Per join step, the arena handles of its build's columns.
     var builds: List[List[Int]]
-    # Retain source build frames for String and nested output columns. Their
-    # dictionary views read payloads by row number without copying variable-
-    # size bytes into the join rows.
-    var frame_builds: List[List[Int]]
     # Whether this worker's arena holds the builds' columns yet.
     var bound: Bool
     var source: DataChunk
@@ -1238,7 +1233,6 @@ struct _ChunkRunner(Movable):
         self.compiled = List[Optional[_VectorStep]](length=n, fill=None)
         self.arena = ColumnArena()
         self.builds = List[List[Int]]()
-        self.frame_builds = List[List[Int]]()
         self.bound = False
         self.held = 0
         self.source = DataChunk()
@@ -1263,26 +1257,25 @@ struct _ChunkRunner(Movable):
         if not self.bound:
             self.bound = True
             self.builds = List[List[Int]](capacity=len(self.steps[]))
-            self.frame_builds = List[List[Int]](capacity=len(self.steps[]))
             for step in self.steps[]:
                 var handles = List[Int]()
-                var frame_handles = List[Int]()
                 if step.kind == STEP_JOIN:
                     if (
                         self.indexes[][step.join]
                         and self.indexes[][step.join].value().use_dictionary
                     ):
                         # The table's dictionary columns (perfect or
-                        # dictionary emission), one per output column.
-                        ref dictionary = (
-                            self.indexes[][step.join].value().data[].dictionary
-                        )
+                        # dictionary emission), one per output column,
+                        # decoded once by the table.
+                        ref table = self.indexes[][step.join].value()
+                        ref dictionary = table.data[].dictionary
                         for c in range(len(dictionary)):
-                            handles.append(self.arena.add(dictionary[c]))
-                    for column in self.joins[][step.join]._columns:
-                        frame_handles.append(self.arena.add(column))
+                            handles.append(
+                                self.arena.add_decoded(
+                                    dictionary[c], table.dictionary_values(c)
+                                )
+                            )
                 self.builds.append(handles^)
-                self.frame_builds.append(frame_handles^)
             self.held = self.arena.mark()
         self.arena.truncate(self.held)
 
@@ -1615,33 +1608,17 @@ struct _ChunkRunner(Movable):
         for key in step.right_keys:
             right_keys.append(right._index(key))
         # The build side's output columns, in the join's output order:
-        # from the rows (GatherRHS), the table's dictionaries (a perfect
-        # join or dictionary emission), or, for a column a plan replaced
-        # after the build, the build frame by each row's number.
+        # gathered from the matched rows, or the table's dictionaries (a
+        # perfect join or dictionary emission).
         var list = -1
-        var frame_list = -1
-        var has_unmatched = how == JOIN_LEFT or how == JOIN_FULL
         for i in range(right.width()):
             if step.coalesce and i in right_keys:
                 continue
             ref column = right._columns[i]
             var t = table.output_index(column.name())
-            if t < 0 and not has_unmatched:
-                # Read by row number through the build frame (no bytes
-                # copied, a string_t gather's cost; a column a plan
-                # replaced after the build).
-                if frame_list < 0:
-                    frame_list = len(result.row_lists)
-                    var numbers = List[UInt32](capacity=len(pointers))
-                    for r in range(len(pointers)):
-                        numbers.append(
-                            UInt32(table.build_side_row(pointers[r]))
-                        )
-                    result.row_lists.append(numbers^)
-                result.handles.append(self.frame_builds[s][i])
-                result.starts.append(0)
-                result.lists.append(frame_list)
-            elif t >= 0 and table.use_dictionary:
+            if t < 0:
+                raise Error("pipeline join: a build column is not in the rows")
+            if table.use_dictionary:
                 if list < 0:
                     list = len(result.row_lists)
                     result.row_lists.append(dictionary_rows.copy())
@@ -1650,35 +1627,20 @@ struct _ChunkRunner(Movable):
                 result.lists.append(list)
             else:
                 result.handles.append(
-                    self.arena.add(_build_series(table, column, pointers))
+                    self.arena.add(
+                        table.gather(
+                            t,
+                            Int(pointers.unsafe_ptr()),
+                            len(pointers),
+                            column.name(),
+                        )
+                    )
                 )
                 result.starts.append(0)
                 result.lists.append(-1)
         if result.width() != output.width():
             raise Error("pipeline join: output columns differ from its schema")
         return result^
-
-
-def _build_series(
-    table: JoinHashTable, column: Series, pointers: List[UInt64]
-) raises -> Series:
-    """Build column `column` at the rows `pointers` (GatherRHS), or, for a
-    column a plan replaced after the build, through each row's number
-    from the build frame (`JoinHashTable.mark_frame_only`)."""
-    var t = table.output_index(column.name())
-    if t >= 0:
-        return gather_rows_series(
-            table.row_layout,
-            Int(pointers.unsafe_ptr()),
-            len(pointers),
-            table.output_columns[t],
-            column.name(),
-            table.output_types[t],
-        )
-    var rows = List[Int](capacity=len(pointers))
-    for r in range(len(pointers)):
-        rows.append(table.build_side_row(pointers[r]))
-    return take_parallel([column.copy()], rows^, 1, or_null=True)[0].copy()
 
 
 def _sink_chunk[
@@ -2170,11 +2132,10 @@ struct _PipelineJob(Job):
                             key = k
                 if key >= 0:
                     columns.append(
-                        gather_rows_series(
-                            table.row_layout,
+                        table.gather_field(
+                            key,
                             Int(pointers.unsafe_ptr()),
                             n,
-                            key,
                             column.name(),
                             column.dtype(),
                         )
@@ -2189,7 +2150,14 @@ struct _PipelineJob(Job):
         for i in range(right.width()):
             if not right_semi and step.coalesce and i in right_keys:
                 continue
-            columns.append(_build_series(table, right._columns[i], pointers))
+            var t = table.output_index(right._columns[i].name())
+            if t < 0:
+                raise Error("pipeline join: a build column is not in the rows")
+            columns.append(
+                table.gather(
+                    t, Int(pointers.unsafe_ptr()), n, right._columns[i].name()
+                )
+            )
         for c in range(len(columns)):
             columns[c] = columns[c].renamed(schema._columns[c].name())
         return DataFrame(columns^, height=n)
