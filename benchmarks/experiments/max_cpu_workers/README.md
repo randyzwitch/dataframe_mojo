@@ -29,8 +29,15 @@ Across two runs of the stable-sort workload, the median million-row,
 eight-worker sort was 32.03 ms versus 39.55 ms on the M1 and 32.88 ms versus
 33.95 ms on Linux. These are diagnostic measurements, not controlled
 performance claims: other compilation was active on the hosts. Smaller sorts
-sometimes favored the adapter. A migration needs isolated representative
-measurements before replacing a known warm-pool design.
+sometimes favored the adapter.
+
+After stopping compiler activity on the M1, two further runs in alternating
+order (`mac-r3` and `mac-r4`) gave million-row medians of 26.24 ms for the
+current pool and 31.76 ms for the adapter at eight workers, a 21.0% increase.
+At two workers the medians were 51.15 versus 50.97 ms; at four they were 29.30
+versus 29.68 ms. This confirms the eight-worker regression for this workload
+without the earlier compiler contention. It does not establish a universal
+ranking of the dispatchers.
 
 The query dependency scheduler cannot be discarded. Its workers can wait for
 other tasks, and the crew's helpable/unhelpable distinction and schedule stamps
@@ -44,6 +51,17 @@ The regression test in
 `tests/execution_modes/test_worker_float_environment.mojo` now checks positive
 and negative Float32/Float64 subnormals through serial, eager, crew, static-pool
 and dynamic-pool paths, with repeated rounds at thread budgets 1, 2 and 4.
+It passes on both machines. The final `execution.lifecycle` contract run with
+the retained runtime passes all 31 tests (six storage and 25 execution),
+including the new regression.
+
+The adjacent `../max_metal_reductions.mojo` audit separately exercises the
+unchanged Metal exact Float32 state and MAX block reductions. It passed on the
+M1 with this pin at the default optimization level, covering cancellation that
+retains subnormal contributions, null counts, nonfinite flags, and Int64 sums
+above 2^53. It avoids query planning; a combined four-query-contract compile
+was stopped after high memory use, and its optimization-level-0 retry was
+killed with exit 137. No full Metal query-suite result is claimed here.
 
 ## Reproduce
 
