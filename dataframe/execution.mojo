@@ -162,9 +162,11 @@ from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from dataframe.kernels.group_rows import (
     GroupRows,
+    group_ids,
     group_rows_from_ids,
     write_by_groups,
 )
+from dataframe.storage.allocation import huge_uninit
 from std.collections import Optional
 from std.memory import ArcPointer, Pointer
 from std.math import isnan
@@ -2943,7 +2945,7 @@ def _reduce[
         # The row count, or a popcount of the validity bitmap: less work
         # than starting a thread.
         workers = 1
-    if workers <= 1:
+    if workers <= 1 and (not grouped or len(groups) == height):
         var reducer = _new_reducer(bound, node, group_count)
         if _direct_grouped_count(
             reducer, bound, columns, node, 0, height, grouped, groups
@@ -3324,13 +3326,12 @@ struct WindowLayouts(Movable):
 
     var keys: List[String]
     var layouts: List[WindowLayout]
-    # Partition ids, counts and each partition's rows, by partition keys,
-    # for constant aggregates.
+    # Each partition's rows, by partition keys, for constant aggregates,
+    # and each row's partition number, empty until a consumer that reads
+    # partitions row by row needs it.
     var id_keys: List[String]
+    var groups: List[ArcPointer[GroupRows]]
     var ids: List[List[Int]]
-    var counts: List[Int]
-    # Made from the ids when first needed, if not made with them.
-    var groups: List[Optional[ArcPointer[GroupRows]]]
     # Key columns made contiguous once for every window that reads them.
     var flat_names: List[String]
     var flat: List[Series]
@@ -3339,9 +3340,8 @@ struct WindowLayouts(Movable):
         self.keys = List[String]()
         self.layouts = List[WindowLayout]()
         self.id_keys = List[String]()
+        self.groups = List[ArcPointer[GroupRows]]()
         self.ids = List[List[Int]]()
-        self.counts = List[Int]()
-        self.groups = List[Optional[ArcPointer[GroupRows]]]()
         self.flat_names = List[String]()
         self.flat = List[Series]()
 
@@ -3429,41 +3429,33 @@ def _over_constant[
             at = k
     if at < 0:
         var keys = _partition_keys(node, columns, cache_address)
-        var ids = List[Int]()
-        var groups = GroupRows()
-        var count = 1
+        var made: GroupRows
         if len(keys) == 0:
-            ids = List[Int](length=height, fill=0)
-            groups = group_rows_from_ids(ids, 1)
+            made = group_rows_from_ids(List[Int](length=height, fill=0), 1)
         else:
-            count = partition_groups(keys, height, ids, groups)
+            made = partition_groups(keys, height)
         cache[].id_keys.append(node.text2)
-        cache[].ids.append(ids^)
-        cache[].counts.append(count)
-        cache[].groups.append(ArcPointer(groups^))
+        cache[].groups.append(ArcPointer(made^))
+        cache[].ids.append(List[Int]())
         at = len(cache[].id_keys) - 1
-    if not cache[].groups[at]:
-        cache[].groups[at] = ArcPointer(
-            group_rows_from_ids(cache[].ids[at], cache[].counts[at])
-        )
+    var groups = cache[].groups[at]
     var values = evaluate[width](
         local,
         inputs,
         height,
         batch_size=batch_size,
         grouped=True,
-        groups=cache[].ids[at],
-        group_count=cache[].counts[at],
-        group_rows=cache[].groups[at],
+        group_count=groups[].count(),
+        group_rows=groups,
     )
     var workers = worker_count(height)
-    var set = write_by_groups(
-        values, cache[].groups[at].value()[], height, workers
-    )
+    var set = write_by_groups(values, groups[], height, workers)
     var result: Series
     if set:
         result = set.take()
     else:
+        if len(cache[].ids[at]) != height:
+            cache[].ids[at] = group_ids(groups[], height, workers)
         result = take_parallel(
             [values^], cache[].ids[at].copy(), configured_workers()
         )[0].copy()
@@ -3613,29 +3605,29 @@ struct _OverJob(Job):
         var part = List[Series](capacity=len(self.columns))
         for column in self.columns:
             part.append(column.copy() if whole else column.slice(self.lo, rows))
-        # The group's partitions, numbered from 0 in layout order.
-        var groups = List[Int](unsafe_uninit_length=rows)
-        var ids = groups.unsafe_ptr()
-        for g in range(self.first, self.last):
-            for k in range(
-                starts[unsafe_offset=g] - self.lo,
-                starts[unsafe_offset=g + 1] - self.lo,
-            ):
-                ids[unsafe_offset=k] = g - self.first
+        # The group's partitions, numbered from 0 in layout order: each
+        # holds one run of the gathered rows.
+        var offsets = List[Int](capacity=self.last - self.first + 1)
+        for g in range(self.first, self.last + 1):
+            offsets.append(starts[unsafe_offset=g] - self.lo)
+        var members = huge_uninit[Int](rows)
+        var at = members.unsafe_ptr()
+        for k in range(rows):
+            at[unsafe_offset=k] = k
+        var groups = ArcPointer(GroupRows(offsets^, members^))
         var known = WindowLayouts()
         known.id_keys.append(self.keys)
-        known.ids.append(groups.copy())
-        known.counts.append(self.last - self.first)
-        known.groups.append(None)
+        known.groups.append(groups)
+        known.ids.append(List[Int]())
         self.result = evaluate(
             self.inner,
             part,
             rows,
             batch_size=self.batch_size,
             grouped=True,
-            groups=groups,
             group_count=self.last - self.first,
             layouts=Int(Pointer(to=known)),
+            group_rows=groups,
         )
         _ = known^
 
@@ -4332,6 +4324,40 @@ def _sequence_grouped[
 
 # Eight lanes amortize expression-step dispatch across two AVX2 vectors and
 # align fused comparisons with their packed output byte.
+def _reads_group_ids(bound: BoundExpr) -> Bool:
+    """Whether evaluating the expression grouped walks the groups row by
+    row (windows, sequences, implode, distinct tables), which needs each
+    row's group number."""
+    for node in bound.expr._nodes:
+        if (
+            is_sequence(node.op)
+            or is_window(node.op)
+            or node.op == IMPLODE
+            or (node.op == OVER and (node.integer & OVER_EXPLODE) != 0)
+            or _distinct_in_table(bound, node)
+        ):
+            return True
+    return False
+
+
+def _to_group_rows(
+    state: Series,
+    groups: List[Int],
+    group_rows: Optional[ArcPointer[GroupRows]],
+    height: Int,
+) raises -> Series:
+    """One value per group, spread to the `height` rows of its group: by
+    each row's group when given, else written to each group's rows."""
+    if len(groups) == height:
+        return state.take(groups)
+    var rows = group_rows.value()
+    var workers = worker_count(height)
+    var written = write_by_groups(state, rows[], height, workers)
+    if written:
+        return written.take()
+    return state.take(group_ids(rows[], height, workers))
+
+
 def evaluate[
     width: Int = 8
 ](
@@ -4349,9 +4375,12 @@ def evaluate[
     """Evaluate a bound expression; temporary vectors are bounded by batch_size.
 
     `layouts`, when not 0, is the address of a `WindowLayouts` that every
-    `over()` of one frame shares. `group_rows`, when grouped, may give each
-    group's rows (else they are made from `groups` when a reduction needs
-    them).
+    `over()` of one frame shares. When grouped, the groups come as each
+    row's group (`groups`), as each group's rows (`group_rows`), or both.
+    Reductions and their write back to rows read group rows; the steps
+    that walk groups row by row (windows, sequences, implode, distinct
+    tables) read group numbers by row, which are made from the group rows
+    only when such a step is present.
 
     Reductions, window operations, and over() partitions are computed first,
     in node order, and then read per batch. Full output and
@@ -4362,7 +4391,23 @@ def evaluate[
     """
     if batch_size <= 0:
         raise Error("batch_size must be positive")
-    if grouped and (len(groups) != height or group_count < 0):
+    if grouped and len(groups) != height:
+        if not group_rows or group_rows.value()[].count() != group_count:
+            raise Error("Invalid group mapping")
+        if _reads_group_ids(bound):
+            var rows = group_rows.value()
+            return evaluate[width](
+                bound,
+                columns,
+                height,
+                batch_size=batch_size,
+                grouped=True,
+                groups=group_ids(rows[], height, worker_count(height)),
+                group_count=group_count,
+                layouts=layouts,
+                group_rows=group_rows,
+            )
+    if grouped and group_count < 0:
         raise Error("Invalid group mapping")
     var count = len(bound.expr._nodes)
     var root = count - 1
@@ -4451,14 +4496,18 @@ def evaluate[
             var counts = List[Int64](
                 length=group_count if grouped else 1, fill=0
             )
-            if grouped:
+            if grouped and len(groups) == height:
                 for group in groups:
                     counts[group] += 1
+            elif grouped:
+                ref offsets = known_rows.value()[].offsets
+                for g in range(group_count):
+                    counts[g] = Int64(offsets[g + 1] - offsets[g])
             else:
                 counts[0] = Int64(height)
             var state = Series("", Column[Int64](counts^))
             if row_mode:
-                state = state.take(groups)
+                state = _to_group_rows(state, groups, known_rows, height)
             states[node_index] = state^
         elif node.op == IMPLODE:
             var state = _implode[width](
@@ -4505,7 +4554,7 @@ def evaluate[
                 known_rows,
             )
             if row_mode:
-                state = state.take(groups)
+                state = _to_group_rows(state, groups, known_rows, height)
             states[node_index] = state^
         elif is_window(node.op):
             var input = _full[width](
