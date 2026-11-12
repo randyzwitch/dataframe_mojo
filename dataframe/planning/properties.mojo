@@ -534,22 +534,6 @@ def _order_free_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
     return True
 
 
-def _distinct_inputs(expressions: List[Expr]) -> Optional[List[String]]:
-    """The columns `n_unique` reductions read, or None when one reads an
-    expression rather than a column."""
-    var names = List[String]()
-    for expression in expressions:
-        ref nodes = expression._nodes
-        for node in nodes:
-            if node.op != N_UNIQUE:
-                continue
-            if node.left < 0 or nodes[node.left].op != COL:
-                return None
-            if nodes[node.left].text not in names:
-                names.append(nodes[node.left].text)
-    return names^
-
-
 def _partitioned_order_free(exprs: List[Expr]) -> Bool:
     """Whether every row's values come out the same whatever order the rows
     arrive in: row-local steps, and aggregates (over partitions, `over`, or
