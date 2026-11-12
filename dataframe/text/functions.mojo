@@ -11,7 +11,7 @@ are copied, as `slice_strings` does; other string results are appended to one
 each code point past ASCII). `contains_any` and `replace_many` match every
 pattern in one pass with an Aho-Corasick automaton over byte classes.
 """
-from std.collections.string import Codepoint, atol
+from std.collections.string import atol
 from dataframe.storage.buffer import _Buffer
 from dataframe.text.byte_encoding import (
     encode_bytes,
@@ -54,7 +54,8 @@ from dataframe.storage.string_view import StringView, StringViewStorage
 from dataframe.json.decode import decode_json
 from dataframe.json.strings import json_path_match
 from dataframe.text.unicode.normalization import normalize_series
-from dataframe.text.unicode.alphabetic import alphabetic_ranges, is_alphabetic
+from unicode_mojo.casing import AlphabeticTitleCaser
+from unicode_mojo.utf8 import unsafe_codepoint_width, count_codepoints
 
 comptime _Row = Span[UInt8, ImmutAnyOrigin]
 
@@ -321,27 +322,6 @@ def _strip_into[
         parts.put(row, b0, b1, origin[0], origin[1])
 
 
-@always_inline
-def _codepoint_value[
-    origin: Origin
-](data: Pointer[UInt8, origin], at: Int, width: Int) -> UInt32:
-    var scalar, _ = Codepoint.unsafe_decode_utf8_codepoint(
-        Span(unsafe_ptr=data.unsafe_offset(at), length=width)
-    )
-    return scalar.to_u32()
-
-
-@always_inline
-def _codepoint_width(lead: UInt8) -> Int:
-    if lead < 0x80:
-        return 1
-    if lead < 0xE0:
-        return 2
-    if lead < 0xF0:
-        return 3
-    return 4
-
-
 def _split_fields(
     column: StringColumn,
     by: String,
@@ -402,7 +382,9 @@ def _split_into[
         if m == 0:
             var singles = count - 1 if remainder else count
             while k < singles and at < size:
-                var width = _codepoint_width(row.unsafe_ptr()[unsafe_offset=at])
+                var width = unsafe_codepoint_width(
+                    row.unsafe_ptr()[unsafe_offset=at]
+                )
                 parts[k].put(row, at, at + width, origin[0], origin[1])
                 at += width
                 k += 1
@@ -459,10 +441,7 @@ def _find_or_count(
             continue
         var matches = 0
         if len(needle) == 0:
-            matches = 1
-            for b in range(len(row)):
-                if (row.unsafe_ptr()[unsafe_offset=b] & 0xC0) != 0x80:
-                    matches += 1
+            matches = 1 + count_codepoints(StringSpan(unsafe_from_utf8=row))
         else:
             var at = _find_bytes(row, needle, 0)
             while at >= 0:
@@ -694,7 +673,7 @@ def _replace_many(
             elif found.start >= size:
                 break
             else:
-                at = found.start + _codepoint_width(
+                at = found.start + unsafe_codepoint_width(
                     data[unsafe_offset=found.start]
                 )
         out._bytes.extend(
@@ -797,133 +776,20 @@ def _to_integer(column: StringColumn, base: Int, strict: Bool) raises -> Series:
 # Case ---------------------------------------------------------------------
 
 
-@always_inline
-def _ascii_row(row: _Row) -> Bool:
-    var data = row.unsafe_ptr()
-    var size = len(row)
-    var b = 0
-    while b + 8 <= size:
-        if (
-            data.unsafe_offset(b).unsafe_bitcast[UInt64]().unsafe_load()
-            & 0x8080808080808080
-        ) != 0:
-            return False
-        b += 8
-    while b < size:
-        if data[unsafe_offset=b] >= 0x80:
-            return False
-        b += 1
-    return True
-
-
-def _ends_word(row: _Row, at: Int, width: Int, ranges: List[UInt32]) -> Bool:
-    """Whether the code point at `at` follows an alphabetic one and is not
-    followed by one, checking adjacent code points without skipping
-    case-ignorable characters."""
-    var data = row.unsafe_ptr()
-    if at == 0:
-        return False
-    var before = at - 1
-    while before > 0 and (data[unsafe_offset=before] & 0xC0) == 0x80:
-        before -= 1
-    if not is_alphabetic(
-        ranges,
-        _codepoint_value(
-            data, before, _codepoint_width(data[unsafe_offset=before])
-        ),
-    ):
-        return False
-    var after = at + width
-    if after >= len(row):
-        return True
-    return not is_alphabetic(
-        ranges,
-        _codepoint_value(
-            data, after, _codepoint_width(data[unsafe_offset=after])
-        ),
-    )
-
-
 def _titlecase(column: StringColumn) raises -> Series:
-    """The row is lowercased, then each character that follows a
-    non-alphabetic one (or starts the row) is uppercased. ASCII is
-    done byte by byte; other code points go through the Unicode case maps
-    of `String.lower` and `String.upper` (full mappings: "ß" uppercases to
-    "SS")."""
+    """Adapt complete non-null rows to the reusable alphabetic title caser."""
     var n = len(column)
     var rows = _Bytes(column)
     var nulls = column.null_count() > 0
     var out = StringBuilder(n, column._value_bytes())
-    var ranges = alphabetic_ranges()
+    var caser = AlphabeticTitleCaser()
     for i in range(n):
         if nulls and not column._valid(i):
             out.append_null()
             continue
-        var row = rows.get(i)
-        if _ascii_row(row):
-            var upper = True
-            for b in range(len(row)):
-                var byte = row.unsafe_ptr()[unsafe_offset=b]
-                var lower = byte | 32 if byte >= 65 and byte <= 90 else byte
-                var letter = lower >= 97 and lower <= 122
-                out._bytes.append(lower - 32 if upper and letter else lower)
-                upper = not letter
-            _end_row(out)
-            continue
-        var data = row.unsafe_ptr()
-        var size = len(row)
-        var upper = True
-        var b = 0
-        while b < size:
-            var width = _codepoint_width(data[unsafe_offset=b])
-            var value = _codepoint_value(data, b, width)
-            if value < 128:
-                var lower = UInt8(
-                    value | 32
-                ) if value >= 65 and value <= 90 else UInt8(value)
-                var letter = lower >= 97 and lower <= 122
-                out._bytes.append(lower - 32 if upper and letter else lower)
-                upper = not letter
-                b += width
-                continue
-            # Lowercase the code point (final sigma: a capital
-            # sigma ending a word becomes ς), then uppercase what follows
-            # a character that is not alphabetic.
-            var lowered: String
-            if value == 0x3A3:
-                lowered = "ς" if _ends_word(row, b, width, ranges) else "σ"
-            else:
-                lowered = String(
-                    StringSlice(
-                        unsafe_from_utf8=_Row(
-                            unsafe_ptr=data.unsafe_offset(b), length=width
-                        )
-                    )
-                ).lower()
-            var low = lowered.unsafe_ptr()
-            var at = 0
-            while at < lowered.byte_length():
-                var part = _codepoint_width(low[unsafe_offset=at])
-                var point = _codepoint_value(low, at, part)
-                var text = _Row(
-                    unsafe_ptr=low.unsafe_offset(at)
-                    .unsafe_mut_cast[False]()
-                    .unsafe_origin_cast[ImmutAnyOrigin](),
-                    length=part,
-                )
-                if upper:
-                    out._bytes.extend(
-                        String(StringSlice(unsafe_from_utf8=text))
-                        .upper()
-                        .as_bytes()
-                    )
-                else:
-                    out._bytes.extend(text)
-                upper = not is_alphabetic(ranges, point)
-                at += part
-            # Read only through `low` above; keep it alive until here.
-            _ = lowered^
-            b += width
+        caser.titlecase_into(
+            StringSpan(unsafe_from_utf8=rows.get(i)), out._bytes
+        )
         _end_row(out)
     return Series("", out^.finish())
 
@@ -1119,7 +985,7 @@ def _replace_many_chunks(
                 elif found.start >= size:
                     break
                 else:
-                    at = found.start + _codepoint_width(
+                    at = found.start + unsafe_codepoint_width(
                         data[unsafe_offset=found.start]
                     )
             out._bytes.extend(

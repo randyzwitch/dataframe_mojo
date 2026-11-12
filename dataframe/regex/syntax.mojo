@@ -6,21 +6,23 @@ are rejected: the engine has no backtracking, so every search stays linear
 in the haystack. Nodes live in parallel lists and refer to their children
 by index, so the tree has no recursive types.
 """
-from .charclass import (
-    CaseFolds,
+from .charclass import ascii_class
+from unicode_mojo.casefold import CaseFolds
+from unicode_mojo.ranges import (
     MAX_CODEPOINT,
-    ascii_class,
     canonical,
-    class_contains,
+    contains,
     difference,
-    digit_class,
     intersect,
     negate,
-    space_class,
     symmetric_difference,
     union,
-    word_class,
-    property_class,
+)
+from unicode_mojo.properties import (
+    digit_ranges,
+    space_ranges,
+    word_ranges,
+    property_ranges,
 )
 
 comptime NODE_EMPTY = 0
@@ -247,9 +249,9 @@ struct _Parser(Movable):
         if self.flags & _FLAG_ASCII:
             var out = ranges.copy()
             for cp in range(65, 91):
-                if class_contains(ranges, UInt32(cp)):
+                if contains(ranges, UInt32(cp)):
                     out.extend([UInt32(cp + 32), UInt32(cp + 32)])
-                if class_contains(ranges, UInt32(cp + 32)):
+                if contains(ranges, UInt32(cp + 32)):
                     out.extend([UInt32(cp), UInt32(cp)])
             return canonical(out)
         if len(self.folds) == 0:
@@ -593,8 +595,8 @@ struct _Parser(Movable):
                     == 119 else "space"
                 )
             else:
-                ranges = digit_class() if lower == 100 else (
-                    word_class() if lower == 119 else space_class()
+                ranges = digit_ranges() if lower == 100 else (
+                    word_ranges() if lower == 119 else space_ranges()
                 )
             result.ranges = negate(ranges) if c < 97 else ranges^
             self.check_ascii(result.ranges)
@@ -638,7 +640,7 @@ struct _Parser(Movable):
                 name = name.replace("!=", "=")
             else:
                 name = name.replace(":", "=")
-            var ranges = property_class(name)
+            var ranges = property_ranges(name)
             if self.flags & _FLAG_CASE:
                 ranges = self.fold(ranges)
             var result = _Escape(_ESC_CLASS)

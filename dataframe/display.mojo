@@ -7,16 +7,14 @@ from .decimal import format_decimal
 from dataframe.storage.string import StringColumn, escape_bytes
 from .series import Series
 from dataframe.geo.wkb import _wkb_display
+from unicode_mojo.utf8 import count_codepoints
+from unicode_mojo.transform import slice_codepoints
 
 comptime ELLIPSIS = "…"
 
 
 def short_dtype(dtype: DataType) -> String:
     return dtype.short_name()
-
-
-def _codepoints(text: String) -> Int:
-    return len(text.codepoints())
 
 
 def _needs_quotes(text: String) -> Bool:
@@ -44,16 +42,9 @@ def _escape(text: String) -> String:
 
 
 def _truncate(text: String, max_length: Int) -> String:
-    if max_length <= 0 or _codepoints(text) <= max_length:
+    if max_length <= 0 or count_codepoints(text) <= max_length:
         return text
-    var result = String()
-    var count = 0
-    for codepoint in text.codepoints():
-        if count >= max_length - 1:
-            break
-        result += String(codepoint)
-        count += 1
-    return result + ELLIPSIS
+    return slice_codepoints(text, 0, max_length - 1) + ELLIPSIS
 
 
 def format_string(text: String, max_length: Int) -> String:
@@ -151,7 +142,7 @@ def _visible(count: Int, limit: Int) -> List[Int]:
 
 
 def _pad(text: String, width: Int) -> String:
-    var padding = width - _codepoints(text)
+    var padding = width - count_codepoints(text)
     if padding <= 0:
         return text
     return text + String(" ") * padding
@@ -208,7 +199,7 @@ def render_frame(
                     )
         var width = 3
         for cell in column_cells:
-            width = max(width, _codepoints(cell))
+            width = max(width, count_codepoints(cell))
         widths.append(width)
         cells.append(column_cells^)
     out += _rule(widths, "┌", "┬", "┐", "─") + "\n"
@@ -265,7 +256,7 @@ def render_glimpse(
     var out = String("Rows: ", height, "\nColumns: ", len(columns))
     var name_width = 0
     for column in columns:
-        name_width = max(name_width, _codepoints(column.name()))
+        name_width = max(name_width, count_codepoints(column.name()))
     for column in columns:
         var line = (
             "$ "
@@ -274,17 +265,17 @@ def render_glimpse(
             + short_dtype(column.dtype())
             + ">"
         )
-        var prefix = _codepoints(line)
+        var prefix = count_codepoints(line)
         for r in range(len(column)):
             var cell = format_cell(column, r, max_string_length)
             var separator = " " if r == 0 else ", "
             if (
                 max_width > 0
-                and prefix + _codepoints(separator + cell) + 3 > max_width
+                and prefix + count_codepoints(separator + cell) + 3 > max_width
             ):
                 line += ", " + ELLIPSIS if r > 0 else " " + ELLIPSIS
                 break
             line += separator + cell
-            prefix += _codepoints(separator + cell)
+            prefix += count_codepoints(separator + cell)
         out += "\n" + line
     return out^

@@ -5,7 +5,7 @@ Above it, a class either holds one or two intervals directly or indexes a
 plane/page directory. Uniform pages answer immediately; other pages narrow
 the binary search to the intervals intersecting 256 code points.
 """
-from .charclass import MAX_CODEPOINT, class_contains, class_contains_bounds
+from unicode_mojo.ranges import MAX_CODEPOINT, contains, contains_bounds
 
 comptime _SINGLE: UInt64 = UInt64(1) << 62
 comptime _PAIR: UInt64 = UInt64(2) << 62
@@ -148,7 +148,7 @@ def unicode_class_has(
             p[unsafe_offset=at + 1], cp
         )
     if kind == 0:
-        return class_contains(ranges, cp)
+        return contains(ranges, cp)
     if cp > MAX_CODEPOINT:
         return False
     var plane = Int(cp >> 16)
@@ -166,4 +166,4 @@ def unicode_class_has(
         return info == 1
     var first = Int(info >> 8) - 1
     var after = first + Int(info & 255) + 1
-    return class_contains_bounds(ranges, cp, first, after)
+    return contains_bounds(ranges, cp, first, after)

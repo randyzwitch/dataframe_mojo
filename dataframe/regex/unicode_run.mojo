@@ -1,7 +1,7 @@
 """Scan fixed-width UTF8 batches proved by Unicode class membership."""
 from std.bit import count_leading_zeros, count_trailing_zeros
 from std.memory import pack_bits
-from .charclass import MAX_CODEPOINT
+from unicode_mojo.ranges import MAX_CODEPOINT
 from .pikevm import previous_start
 from .program import OP_CHAR, OP_CLASS, Program
 from .class_batch import class_batch, find_interval, _contains
