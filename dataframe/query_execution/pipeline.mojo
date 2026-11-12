@@ -16,7 +16,7 @@ from dataframe.planning.cost.eligibility import (
     pipeline_eligibility,
     consider_inline_table,
 )
-from dataframe.planning.cost.model import trace_decision
+from dataframe.planning.cost.model import PipelineEligibility, trace_decision
 
 from dataframe.categorical import (
     decode,
@@ -53,10 +53,6 @@ from dataframe.kernels.hashing import (
 from dataframe.io.csv import (
     CsvSchema,
 )
-from dataframe.io.csv_reader import (
-    _CsvBatches,
-    _DecodeJob,
-)
 from dataframe.io.csv_types import (
     _map_file,
 )
@@ -66,8 +62,9 @@ from dataframe.io.ipc import (
 from dataframe.io.json_batches import (
     _NdjsonBatches,
 )
-from dataframe.io.json_parallel import (
-    _DecodeJob as _JsonDecodeJob,
+from dataframe.io.scan_source import (
+    ScanBatch,
+    ScanSource,
 )
 from dataframe.io.parquet import (
     _ParquetBatches,
@@ -163,7 +160,6 @@ from dataframe.planning.physical import (
     plan_build_probe_sides,
 )
 from dataframe.planning.properties import (
-    _distinct_inputs,
     _is_scan,
     _same_names,
     _set_members,
@@ -184,9 +180,7 @@ from dataframe.planning.scans import (
     _scan_options,
 )
 from dataframe.planning.cost.sampling import (
-    _all_reduced,
     _retain_frame,
-    _judge_held,
     _stream_collect_bytes,
     _stream_split_groups,
 )
@@ -203,7 +197,6 @@ from dataframe.query_execution.stream_state import (
     _StateAccumulator,
     _StreamJob,
     _apply_operation,
-    _coalesced,
     _steps_of,
 )
 from dataframe.planning.cost.eligibility import (
@@ -788,11 +781,14 @@ def _probe_start(
         cursor = node.left
     if cursor < 0 or cursor == index and not _is_scan(self._nodes[cursor].kind):
         return _ProbeStart(None)
-    if cursor == index and self._nodes[cursor].kind == SCAN_FRAME:
-        # The frame itself, with nothing to apply: batches would only
+    if cursor == index and (
+        self._nodes[cursor].kind == SCAN_FRAME or sink == 0
+    ):
+        # The source itself, with nothing to apply: batches would only
         # copy it into chunks that the eager step above rechunks
         # again (ClickBench q16 over 10M in-memory rows, 275 -> 181
-        # ms).
+        # ms); a file is read whole by its parallel reader. Only a file
+        # sink streams it.
         return _ProbeStart(None)
     if (
         len(expressions) == 0
@@ -812,9 +808,13 @@ def _probe_start(
         return _ProbeStart(None)
     operations.reverse()
     operation_nodes.reverse()
+    ref source = self._nodes[cursor]
+    # A file source's scan state (`ScanSource`), opened once, and its
+    # columns, which the pipeline's steps are typed from.
+    var file_scan = Optional[ArcPointer[ScanSource]]()
+    var source_columns = Optional[DataFrame]()
     var distinct = _counts_distinct(expressions)
     var eligibility = pipeline_eligibility(
-        self._nodes[cursor].kind,
         top,
         limit,
         skip,
@@ -826,11 +826,33 @@ def _probe_start(
         ordered,
         expressions,
     )
+    if eligibility.allowed and source.kind != SCAN_FRAME:
+        var opened = _open_scan_source(self, cursor, operations, batch_size)
+        if not opened:
+            return _ProbeStart(None)
+        var state = opened.take()
+        source_columns = state.schema()
+        if not source_columns:
+            # No batch at all: the eager scan makes the empty result.
+            state.finish()
+            return _ProbeStart(None)
+        file_scan = ArcPointer(state^)
+        for column in source_columns.value()._columns:
+            if column.dtype().is_categorical():
+                # Each batch may carry its own dictionary (Arrow
+                # dictionary deltas), which steps compiled once against
+                # the first batch's columns would not read: the batches
+                # are evaluated one by one.
+                eligibility = PipelineEligibility(False, "batch_dictionaries")
+                source_columns = None
+                break
     var inline_table_eligible = False
     if consider_inline_table(
         eligibility, len(keys), len(expressions), ordered, distinct
     ):
-        var empty = self._frames[self._nodes[cursor].source_slot()].clear()
+        var empty = source_columns.value().copy() if source_columns else (
+            self._frames[source.source_slot()].clear()
+        )
         var empty_joins = ArcPointer(joins.copy())
         var empty_indexes = ArcPointer(indexes.copy())
         for operation in operations:
@@ -859,91 +881,14 @@ def _probe_start(
         operation_nodes.append(top_node)
     var shared_joins = ArcPointer(joins^)
     var shared_indexes = ArcPointer(indexes^)
-    ref source = self._nodes[cursor]
-    var csv = List[_CsvBatches]()
-    var dataset = List[_DatasetBatches]()
-    var parquet = List[_ParquetBatches]()
-    var ipc = List[_IpcBatches]()
-    var ndjson = List[_NdjsonBatches]()
     var input = DataFrame(List[Series](), height=0)
-    if source.has_dataset():
-        var columns = Optional[List[String]]()
-        if source.dataset_projected:
-            columns = source.scan_projection().copy()
-        var scan = _CsvScanOptions.defaults()
-        if source.kind == SCAN_CSV:
-            scan = _scan_options(source)
-        var predicate = Optional[Expr]()
-        # A source limit precedes these operations. Pruning a file here
-        # would change which rows an earlier head selects.
-        if (
-            source.scan_row_limit() < 0
-            and len(operations)
-            and operations[0].kind == FILTER
-        ):
-            predicate = operations[0].exprs[0].copy()
-        source._record_execution()
-        dataset.append(
-            _DatasetBatches(
-                source.dataset_spec(),
-                source.kind == SCAN_PARQUET,
-                schema=self._schemas[source.source_slot()],
-                scan=scan,
-                columns=columns,
-                limit=source.scan_row_limit(),
-                batch_size=batch_size,
-                predicate=predicate,
-            )
-        )
-    elif source.kind == SCAN_CSV:
-        var opened = _open_csv_batches(
-            source.text,
-            self._schemas[source.source_slot()],
-            source.names,
-            source.scan_row_limit(),
-            batch_size,
-            _scan_options(source),
-        )
-        if not opened:
-            return _ProbeStart(None)
-        csv.append(opened.take())
-    elif source.kind == SCAN_PARQUET:
-        var groups = Optional[List[Int]]()
-        if len(operations) and operations[0].kind == FILTER:
-            groups = _pruned_row_groups(
-                parquet_row_group_statistics(source.text),
-                operations[0].exprs[0],
-            )
-        parquet.append(
-            _ParquetBatches(source.text, source.names, groups, batch_size)
-        )
-    elif source.kind == SCAN_NDJSON:
-        source._record_execution()
-        ndjson.append(
-            _NdjsonBatches(
-                source.text,
-                source.json_schema,
-                Int(source.ndjson_infer_schema_length()),
-                source.ndjson_ignore_errors(),
-                source.names,
-                source.scan_row_limit(),
-                batch_size,
-            )
-        )
-    elif source.kind == SCAN_IPC:
-        source._record_execution()
-        ipc.append(
-            _IpcBatches(
-                source.text,
-                source.names,
-                source.ipc_has_projection(),
-                source.ipc_memory_map(),
-                Int(source.ipc_row_offset()),
-                source.scan_row_limit(),
-                batch_size,
-            )
-        )
-    elif source.kind == SCAN_FRAME:
+    if source.kind != SCAN_FRAME:
+        if not file_scan:
+            var opened = _open_scan_source(self, cursor, operations, batch_size)
+            if not opened:
+                return _ProbeStart(None)
+            file_scan = ArcPointer(opened.take())
+    else:
         source._record_execution()
         input = self._frames[source.source_slot()].copy()
         if len(source.names):
@@ -964,8 +909,6 @@ def _probe_start(
                 trace_path("filter.table_filters")
                 input = scanned.value().frame.copy()
                 operations[0].exprs = [conjunction(scanned.value().remaining)]
-    else:
-        input = self._execute(cursor, False, True, batch_size)
     trace_decision(decision)
     if decision.is_eager():
         return _ProbeStart(None)
@@ -997,36 +940,15 @@ def _probe_start(
     # on separate workers and interleaved by first occurrence at the end.
     var split_groups = _stream_split_groups()
     var acc = _StateAccumulator(workers, split_groups)
-    # Update each group's state in place instead of merging per-batch states
-    # through an additional key index. Repeated indexing adds work
-    # proportional to the groups in every batch.
-    var collecting = False
+    # A grouping the pipeline does not run (its steps or order are the
+    # batches'): the batches are collected for the eager group-by, which
+    # is the aggregate table over them (`PhysicalHashAggregate::Sink`),
+    # and reduced into one state each time they reach the budget.
+    var collecting = len(expressions) > 0 and len(keys) > 0
     var collected = List[DataFrame]()
     var collected_memory = RetainedBuffers()
     var collected_rows = 0
     var collect_budget = _stream_collect_bytes()
-    # The decision waits for a batch with enough rows to judge: an
-    # input sorted by date yields empty batches first where a filter
-    # keeps a later year. Until then the batches' frames are kept
-    # beside their states, to be collected or dropped.
-    var undecided = len(expressions) > 0 and len(keys) > 0
-    # The columns distinct counts read, judged with the keys: a batch's
-    # state holds each group's set of values, so its size is the
-    # distinct (key, value) pairs, not the groups. One that reads an
-    # expression collects (its values are assumed many).
-    var distinct_inputs = _distinct_inputs(expressions)
-    if undecided and not distinct_inputs:
-        collecting = True
-        undecided = False
-    var held = List[DataFrame]()
-    # Each held batch's state, when its job built one (a batch under
-    # 8 * split_groups rows: a few ms at most, in parallel, and used
-    # if the stream keeps batch states); a longer batch whose first
-    # rows show many groups keeps its frame only, since its state
-    # would be the expensive one to drop (TPC-DS q39: 10 ms for 95K
-    # rows), and is reduced in a replay round if needed after all.
-    var held_states = List[List[_StreamReduction]]()
-    var held_rows = 0
     var projection = List[String]()
     if len(expressions) and len(keys):
         var wanted = List[String]()
@@ -1056,7 +978,10 @@ def _probe_start(
     # A TopN pushes a dynamic filter into the scan when its first sort
     # column is read from the source as it is: no join, and no operation
     # that writes a column of that name.
-    var top_scan_key = top > 0 and len(shared_joins[]) == 0
+    # A file's batches have no statistics before they are read.
+    var top_scan_key = (
+        top > 0 and len(shared_joins[]) == 0 and source.kind == SCAN_FRAME
+    )
     if top_scan_key:
         for operation in operations:
             if operation.kind == WITH_COLUMNS or operation.kind == SELECT:
@@ -1105,15 +1030,7 @@ def _probe_start(
     # ungrouped reduce sink run as a thread-owned pipeline (#538): each
     # worker takes morsels from a shared cursor and runs every step on
     # them; nothing is held, judged or merged on the main thread.
-    if (
-        sink == 0
-        and len(dataset) == 0
-        and decision.uses_pipeline()
-        and len(csv) == 0
-        and len(parquet) == 0
-        and len(ipc) == 0
-        and len(ndjson) == 0
-    ):
+    if sink == 0 and decision.uses_pipeline():
         var began = Int(perf_counter_ns())
         var piped_counts = List[Int]()
         # A top-k's TOP_K node was appended to the operations for the
@@ -1127,7 +1044,9 @@ def _probe_start(
         # projections on a table scan runs on the columns its order and
         # filters read plus the row id; the other columns are fetched for
         # its rows afterwards.
-        var pipe_input = input.copy()
+        var pipe_input = source_columns.value().copy() if source_columns else (
+            input.copy()
+        )
         var late_operations = Optional[List[PlanNode]]()
         if (
             top > 0
@@ -1206,6 +1125,8 @@ def _probe_start(
             table=decision.uses_aggregate_table(),
             finish_steps=_steps_of(finish_operations),
             pushed=pushed,
+            source=file_scan,
+            source_rows=_source_rows(self, cursor) if file_scan else 0,
         )
         return _ProbeStart(
             _PipedProbe(
@@ -1233,59 +1154,18 @@ def _probe_start(
             )
         )
     var per_round = workers
-    # Batches held while undecided, to reduce in the next round once
-    # the stream decides not to collect.
-    var replay = List[DataFrame]()
-    while not ended or len(replay) > 0:
+    while not ended:
         var jobs = List[_StreamJob]()
-        for frame in replay:
-            var job = _StreamJob(
-                frame.copy(),
-                List[PlanNode](),
-                shared_joins,
-                shared_indexes,
-                expressions,
-                keys,
-            )
-            job.bits = acc.bits
-            job.counting = counting
-            job.replay = True
-            jobs.append(job^)
-        replay = List[DataFrame]()
-        for _ in range(per_round if not ended else 0):
+        for _ in range(per_round):
             var frame = DataFrame(List[Series](), height=0)
-            var decode = List[_DecodeJob]()
-            var json_decode = List[_JsonDecodeJob]()
-            if len(dataset):
-                var next = dataset[0].next()
+            var batch = List[ScanBatch]()
+            if file_scan:
+                # The job decodes a byte range itself.
+                var next = file_scan.value()[].take()
                 if not next:
                     ended = True
                     break
-                frame = next.take()
-            elif len(csv):
-                var next = csv[0].next()
-                if not next:
-                    ended = True
-                    break
-                decode.append(next.take())
-            elif len(parquet):
-                var next = parquet[0].next()
-                if not next:
-                    ended = True
-                    break
-                frame = next.take()
-            elif len(ndjson):
-                var next = ndjson[0].next()
-                if not next:
-                    ended = True
-                    break
-                json_decode.append(next.take())
-            elif len(ipc):
-                var next = ipc[0].next()
-                if not next:
-                    ended = True
-                    break
-                frame = next.take()
+                batch.append(next.take())
             else:
                 if emitted and offset >= input.height():
                     ended = True
@@ -1301,19 +1181,14 @@ def _probe_start(
                 expressions,
                 keys,
             )
-            job.decode = decode^
-            job.json_decode = json_decode^
+            job.scan = batch^
             job.bits = acc.bits
-            job.split_groups = split_groups
             job.counting = counting
             job.collect_only = collecting
-            job.keep_frame = undecided
             job.projection = projection.copy()
             jobs.append(job^)
-        if len(jobs) == 0 and not (undecided and len(held) > 0):
+        if len(jobs) == 0:
             break
-        # A round can find the input ended with batches still held: it
-        # runs no jobs but still judges them below.
         if len(jobs) > 0:
             if not pool_ready:
                 pool = Pool(min(len(jobs), workers))
@@ -1322,8 +1197,6 @@ def _probe_start(
         if counting:
             for i in range(len(jobs)):
                 ref counts = jobs[i].counts
-                if jobs[i].replay:
-                    continue
                 if len(counts) > 0:
                     fed_rows += counts[0]
                 elif len(expressions):
@@ -1342,72 +1215,6 @@ def _probe_start(
                 _retain_frame(jobs[i].frame, collected_memory)
                 collected_rows += jobs[i].rows
                 collected.append(jobs[i].frame.copy())
-            elif len(expressions) and undecided:
-                held.append(jobs[i].frame.copy())
-                held_states.append(jobs[i].take_reduced())
-                held_rows += jobs[i].rows
-                # Judged on a sample of the rows held so far, once
-                # there are twice `split_groups` of them: a selective
-                # join before the group-by leaves a few hundred rows a
-                # batch (TPC-DS q39: 500 of 32K), and one batch alone
-                # never decides. The sample stays small: encoding it
-                # is on the main thread, 1 ms for 8K rows.
-                if held_rows >= 2 * split_groups:
-                    undecided = False
-                    # Many groups, at least one row in eight
-                    # starting one: then most rows would go
-                    # through the index on merge. TPC-DS q39
-                    # (three rows a group) and q65 gain 35-40%,
-                    # PDS-H q16 (one in four) 35%; PDS-H q13 (one
-                    # in ten) pays 7% either way.
-                    if _judge_held(
-                        held,
-                        held_states,
-                        keys,
-                        held_rows,
-                        split_groups,
-                        distinct_inputs.value(),
-                    ):
-                        # Many groups: collect every batch held so
-                        # far and from here on; the states built
-                        # for them are dropped.
-                        collecting = True
-                        for frame in held:
-                            var kept = frame.select(projection) if len(
-                                projection
-                            ) else frame.copy()
-                            _retain_frame(kept, collected_memory)
-                            collected_rows += kept.height()
-                            collected.append(kept^)
-                        held = List[DataFrame]()
-                        held_states = List[List[_StreamReduction]]()
-                        acc.rows_seen = collected_rows
-                        for j in range(i + 1, len(jobs)):
-                            var kept = (
-                                jobs[j]
-                                .frame.select(projection) if len(
-                                    projection
-                                ) else jobs[j]
-                                .frame.copy()
-                            )
-                            _retain_frame(kept, collected_memory)
-                            collected_rows += jobs[j].rows
-                            collected.append(kept^)
-                        break
-                    # Few groups, or keys too long to collect: the
-                    # states, from the held batches and those of
-                    # this round still to come, all in input order.
-                    for j in range(i + 1, len(jobs)):
-                        held.append(jobs[j].frame.copy())
-                        held_states.append(jobs[j].take_reduced())
-                    if _all_reduced(held_states):
-                        for h in range(len(held)):
-                            acc.absorb(held_states.pop(0), held[h].height())
-                    else:
-                        replay = _coalesced(held, 2 * split_groups)
-                    held = List[DataFrame]()
-                    held_states = List[List[_StreamReduction]]()
-                    break
             elif len(expressions):
                 acc.absorb(jobs[i].take_reduced(), jobs[i].rows)
             elif top >= 0:
@@ -1468,48 +1275,17 @@ def _probe_start(
                 acc.pending_groups[0] += part.group_count()
                 acc.pending[0].append(part^)
         acc.merge(False)
-        if len(csv):
-            csv[0].discard()
+        if file_scan:
+            # Every job of the round has decoded its byte range.
+            file_scan.value()[].discard()
         if limit == 0 and top < 0:
             ended = True
-        if ended and undecided and len(held) > 0:
-            # The input ran out first: the same judgement on what was
-            # held. Many groups among few rows collect too (TPC-DS
-            # q7: 5K groups in 7.7K rows), where splitting the states
-            # into hash parts cost more than one eager group-by.
-            undecided = False
-            if _judge_held(
-                held,
-                held_states,
-                keys,
-                held_rows,
-                split_groups,
-                distinct_inputs.value(),
-            ):
-                collecting = True
-                for frame in held:
-                    var kept = frame.select(projection) if len(
-                        projection
-                    ) else frame.copy()
-                    _retain_frame(kept, collected_memory)
-                    collected_rows += kept.height()
-                    collected.append(kept^)
-                acc.rows_seen = collected_rows
-            elif _all_reduced(held_states):
-                for h in range(len(held)):
-                    acc.absorb(held_states.pop(0), held[h].height())
-            else:
-                replay = _coalesced(held, 2 * split_groups)
-            held = List[DataFrame]()
-            held_states = List[List[_StreamReduction]]()
     pool.release()
-    if len(csv):
-        csv[0].finish()
-    if len(dataset):
-        dataset[0].finish()
-    # NDJSON jobs borrow mapped addresses; retain the source through
-    # the final worker join, even after an early head or an error.
-    _ = ndjson^
+    if file_scan:
+        file_scan.value()[].finish()
+    # Byte ranges borrow mapped addresses; retain the source through the
+    # final worker join, even after an early head or an error.
+    _ = file_scan^
     var result = Optional[DataFrame]()
     if collecting and len(acc.states) == 0:
         trace_path("lazy.collect_group_by")
@@ -1596,6 +1372,102 @@ def _probe_start(
                 wall_ns=stream_wall,
             )
     return _ProbeStart(result^)
+
+
+def _source_rows(self: QueryContext, cursor: Int) raises -> Int:
+    """The scan's estimated rows (its probe side's cardinality for join
+    filters), as the planner's statistics give them."""
+    var stats = PlanStatistics()
+    return plan_cardinality(self, stats, cursor)
+
+
+def _open_scan_source(
+    self: QueryContext,
+    cursor: Int,
+    operations: List[PlanNode],
+    batch_size: Int,
+) raises -> Optional[ScanSource]:
+    """The file scan at `cursor` opened as a pipeline source, its batches
+    `batch_size` rows; `operations` are the steps over it, the first of
+    which, a filter, prunes Parquet row groups and dataset files. None
+    when a CSV file cannot be mapped (the eager read takes it)."""
+    ref source = self._nodes[cursor]
+    if source.has_dataset():
+        var columns = Optional[List[String]]()
+        if source.dataset_projected:
+            columns = source.scan_projection().copy()
+        var scan = _CsvScanOptions.defaults()
+        if source.kind == SCAN_CSV:
+            scan = _scan_options(source)
+        var predicate = Optional[Expr]()
+        # A source limit precedes these operations. Pruning a file here
+        # would change which rows an earlier head selects.
+        if (
+            source.scan_row_limit() < 0
+            and len(operations)
+            and operations[0].kind == FILTER
+        ):
+            predicate = operations[0].exprs[0].copy()
+        source._record_execution()
+        return ScanSource.of(
+            _DatasetBatches(
+                source.dataset_spec(),
+                source.kind == SCAN_PARQUET,
+                schema=self._schemas[source.source_slot()],
+                scan=scan,
+                columns=columns,
+                limit=source.scan_row_limit(),
+                batch_size=batch_size,
+                predicate=predicate,
+            )
+        )
+    if source.kind == SCAN_CSV:
+        var opened = _open_csv_batches(
+            source.text,
+            self._schemas[source.source_slot()],
+            source.names,
+            source.scan_row_limit(),
+            batch_size,
+            _scan_options(source),
+        )
+        if not opened:
+            return None
+        return ScanSource.of(opened.take())
+    if source.kind == SCAN_PARQUET:
+        var groups = Optional[List[Int]]()
+        if len(operations) and operations[0].kind == FILTER:
+            groups = _pruned_row_groups(
+                parquet_row_group_statistics(source.text),
+                operations[0].exprs[0],
+            )
+        return ScanSource.of(
+            _ParquetBatches(source.text, source.names, groups, batch_size)
+        )
+    if source.kind == SCAN_NDJSON:
+        source._record_execution()
+        return ScanSource.of(
+            _NdjsonBatches(
+                source.text,
+                source.json_schema,
+                Int(source.ndjson_infer_schema_length()),
+                source.ndjson_ignore_errors(),
+                source.names,
+                source.scan_row_limit(),
+                batch_size,
+            )
+        )
+    source._record_execution()
+    return ScanSource.of(
+        _IpcBatches(
+            source.text,
+            source.names,
+            source.ipc_has_projection(),
+            source.ipc_memory_map(),
+            Int(source.ipc_row_offset()),
+            source.scan_row_limit(),
+            batch_size,
+        )
+    )
 
 
 def _probe_finish(

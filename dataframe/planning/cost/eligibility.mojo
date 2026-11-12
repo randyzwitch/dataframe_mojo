@@ -49,7 +49,6 @@ from dataframe.planning.model import (
     FILTER,
     JOIN,
     PlanNode,
-    SCAN_FRAME,
     SELECT,
     WITH_COLUMNS,
 )
@@ -103,7 +102,6 @@ def _pipeline_steps(
 
 
 def pipeline_eligibility(
-    source_kind: Int,
     top: Int,
     limit: Int,
     skip: Int,
@@ -115,9 +113,9 @@ def pipeline_eligibility(
     ordered: Bool,
     expressions: List[Expr],
 ) -> PipelineEligibility:
-    """Apply the original pipeline guards in their original short-circuit order."""
-    if source_kind != SCAN_FRAME:
-        return PipelineEligibility(False, "source_requires_batches")
+    """Apply the original pipeline guards in their original short-circuit
+    order. Any scan is a pipeline's source: an in-memory frame's morsels,
+    or a file's batches (`ScanSource`)."""
     if not (top < 0 and limit < 0 and skip == 0 or top > 0):
         return PipelineEligibility(False, "ordered_slice_requires_batches")
     if not _pipeline_steps(operations, indexes):

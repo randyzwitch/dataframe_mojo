@@ -16,11 +16,8 @@ from dataframe.frame import (
 from dataframe.aggregation.expressions import (
     _row_local,
 )
-from dataframe.io.csv_reader import (
-    _DecodeJob,
-)
-from dataframe.io.json_parallel import (
-    _DecodeJob as _JsonDecodeJob,
+from dataframe.io.scan_source import (
+    ScanBatch,
 )
 from dataframe.joins.hash_table import (
     JoinHashTable,
@@ -53,12 +50,7 @@ from dataframe.planning.model import (
     WITH_COLUMNS,
 )
 from dataframe.planning.properties import (
-    _distinct_inputs,
-    _joined,
     _references,
-)
-from dataframe.planning.strategies import (
-    _batch_shows_many_groups,
 )
 from dataframe.series import (
     Series,
@@ -76,35 +68,6 @@ from std.memory import (
 from std.time import (
     perf_counter_ns,
 )
-
-
-def _coalesced(held: List[DataFrame], rows: Int) raises -> List[DataFrame]:
-    """The held batches, in order, with runs of batches shorter than
-    `rows` joined into batches of at least that many (the last may be
-    shorter): one reduction job and one state each, where a job per batch
-    of a few hundred rows cost 90 us of fixed work and left as many states
-    to merge (TPC-DS q46: 33 batches of 330 rows). A batch already that
-    long is left alone."""
-    var out = List[DataFrame]()
-    var parts = List[DataFrame]()
-    var count = 0
-    for frame in held:
-        if frame.height() >= rows:
-            if len(parts) > 0:
-                out.append(_joined(parts))
-                parts = List[DataFrame]()
-                count = 0
-            out.append(frame.copy())
-            continue
-        parts.append(frame.copy())
-        count += frame.height()
-        if count >= rows:
-            out.append(_joined(parts))
-            parts = List[DataFrame]()
-            count = 0
-    if len(parts) > 0:
-        out.append(_joined(parts))
-    return out^
 
 
 def _stream_split_bits(workers: Int) -> Int:
@@ -231,8 +194,8 @@ def _merge_parts(
 
 
 struct _StreamJob(Job):
-    var decode: List[_DecodeJob]
-    var json_decode: List[_JsonDecodeJob]
+    # A file's batch, decoded by the job.
+    var scan: List[ScanBatch]
     var frame: DataFrame
     var operations: List[PlanNode]
     var joins: ArcPointer[List[DataFrame]]
@@ -251,20 +214,10 @@ struct _StreamJob(Job):
     var counts: List[Int]
     # With `counting`, nanoseconds each operation took on this batch.
     var times: List[Int]
-    # A grouped reduction keeps its batch (projected to the columns the
-    # reduction reads) and builds no state while the stream has not yet
-    # decided whether to collect batches for one eager group-by: a state
-    # built then would be dropped if it does, and is built in a `replay`
-    # job (no operations, the kept frame as input) if it does not.
-    # `collect_only` keeps the frame and skips the reduction for good.
-    var keep_frame: Bool
+    # A grouped reduction's batch is collected for the eager group-by:
+    # the job keeps its frame (projected to the columns the reduction
+    # reads) and builds no state.
     var collect_only: Bool
-    var replay: Bool
-    # With `keep_frame`, a batch of fewer than 8 * split_groups rows
-    # builds its state regardless; a longer one judges its first
-    # 2 * split_groups rows and builds it only when they show few groups
-    # (see the stream's `held_states`).
-    var split_groups: Int
     var projection: List[String]
 
     def __init__(
@@ -276,8 +229,7 @@ struct _StreamJob(Job):
         expressions: List[Expr],
         keys: List[String],
     ):
-        self.decode = List[_DecodeJob]()
-        self.json_decode = List[_JsonDecodeJob]()
+        self.scan = List[ScanBatch]()
         self.frame = frame^
         self.operations = operations.copy()
         self.joins = joins.copy()
@@ -290,33 +242,8 @@ struct _StreamJob(Job):
         self.counting = False
         self.counts = List[Int]()
         self.times = List[Int]()
-        self.keep_frame = False
         self.collect_only = False
-        self.replay = False
-        self.split_groups = 0
         self.projection = List[String]()
-
-    def _shows_many(self) raises -> Bool:
-        """Whether this batch's own rows show a many-group stream, so it
-        keeps only its frame. A distinct count's state is its (key,
-        value) pairs, judged on them at any batch length (PDS-H q16's
-        swapped join gave 9.7K-row batches, each building sets of nearly
-        a pair a row that the stream then dropped); otherwise a batch of
-        8 * split_groups rows or more judges its groups."""
-        var distinct = _distinct_inputs(self.expressions)
-        if distinct and len(distinct.value()) > 0:
-            for name in distinct.value():
-                var pair = self.keys.copy()
-                if name not in pair:
-                    pair.append(name)
-                if _batch_shows_many_groups(
-                    self.frame, pair, self.split_groups
-                ):
-                    return True
-            return False
-        return self.frame.height() >= 8 * self.split_groups and (
-            _batch_shows_many_groups(self.frame, self.keys, self.split_groups)
-        )
 
     def take_reduced(mut self) -> List[_StreamReduction]:
         var out = self.reduced^
@@ -324,12 +251,8 @@ struct _StreamJob(Job):
         return out^
 
     def run(mut self) raises:
-        if len(self.decode):
-            self.decode[0].run()
-            self.frame = self.decode.pop().into_frame()
-        if len(self.json_decode):
-            self.json_decode[0].run()
-            self.frame = self.json_decode.pop().into_frame()
+        if len(self.scan):
+            self.frame = self.scan.pop().into_frame()
         if self.counting:
             self.counts = List[Int](length=2 * len(self.operations), fill=0)
             self.times = List[Int](length=len(self.operations) + 1, fill=0)
@@ -340,12 +263,7 @@ struct _StreamJob(Job):
                 self.counts[2 * k] = self.frame.height()
                 began = Int(perf_counter_ns())
             var keeps = _filter_keeps(
-                self.operations,
-                k,
-                self.expressions.copy() if not self.keep_frame else List[
-                    Expr
-                ](),
-                self.keys,
+                self.operations, k, self.expressions, self.keys
             )
             if keeps:
                 self.frame = self.frame.filter(
@@ -359,11 +277,9 @@ struct _StreamJob(Job):
                 self.counts[2 * k + 1] = self.frame.height()
                 self.times[k] += Int(perf_counter_ns()) - began
             k += 1
-        if self.keep_frame and len(self.projection):
-            self.frame = self.frame.select(self.projection)
-        if self.collect_only or (self.keep_frame and self._shows_many()):
+        if self.collect_only:
             self.rows = self.frame.height()
-            if self.collect_only and len(self.projection):
+            if len(self.projection):
                 self.frame = self.frame.select(self.projection)
             return
         if len(self.expressions):
@@ -380,8 +296,7 @@ struct _StreamJob(Job):
                 self.reduced = reduction.split(self.bits)
             else:
                 self.reduced.append(reduction^)
-            if not self.keep_frame:
-                self.frame = self.frame.clear()
+            self.frame = self.frame.clear()
 
 
 def _filter_keeps(

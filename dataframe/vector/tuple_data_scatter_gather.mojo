@@ -1017,7 +1017,8 @@ def gather_rows_slots(
     a column of `size` values, the row at pointer i at entry `slots[i]`
     (scattered through a selection, so no row is moved twice). The other
     entries' values are not written (a string's are empty); a reader
-    reads only filled entries. Strings reference `heaps` (`gather_rows_series`), and
+    reads only filled entries. Strings reference `heaps`
+    (`gather_rows_series`), and
     `decoded` is set to their string_t values as gathered (the vector
     layout, its other slots unwritten)."""
     ref top = layout.nodes[][0]
