@@ -220,7 +220,9 @@ struct ColumnDataCollection(Movable):
             if v.vector_type == FLAT_VECTOR and v.source >= 0:
                 ref column = arena.columns[v.source]
                 if mode == _COPY_NONE and self.count == 0:
-                    if column.dtype() == dtype:
+                    # A categorical's codes mean what its own dictionary
+                    # says; one recoded by a step is copied as values.
+                    if column.dtype() == dtype and not dtype.is_categorical():
                         self.modes[c] = _COPY_WINDOW
                         self.windows[c] = column.copy()
                         self.starts[c] = v.source_offset
@@ -301,6 +303,13 @@ struct ColumnDataCollection(Movable):
                 ref pieces = self.values[c]
                 if len(pieces) == 1:
                     columns.append(pieces[0].copy())
+                elif self.schema._columns[c].dtype().is_categorical():
+                    # Pieces may each carry their own dictionary: they
+                    # are moved onto the union of them as they join.
+                    var frames = List[DataFrame](capacity=len(pieces))
+                    for piece in pieces:
+                        frames.append(DataFrame([piece.copy()]))
+                    columns.append(concat(frames)._columns[0].rechunk())
                 else:
                     columns.append(Series._from_chunks(pieces).rechunk())
         return DataFrame(columns^, height=self.count)
@@ -405,5 +414,5 @@ def materialize_finish(
     # (a column no step changed) join back into one window of it.
     var whole = concat(parts)
     for c in range(whole.width()):
-        whole._columns[c] = whole._columns[c].joined_windows()
+        whole._columns[c] = whole._columns[c]._joined_windows()
     return whole^

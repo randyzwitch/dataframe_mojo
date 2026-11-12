@@ -329,7 +329,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         """Number of physical Arrow arrays backing this series."""
         return len(self._chunked.value()[].arrays) if self.is_chunked() else 1
 
-    def joined_windows(self) -> Self:
+    def _joined_windows(self) -> Self:
         """The same rows with each run of adjacent windows of one column's
         buffers (as consecutive pieces of a column cut into morsels are)
         made one array: fewer chunks, nothing copied."""
