@@ -572,6 +572,9 @@ def plan_pushdown(
     var kind = self._nodes[index].kind
     if kind == FILTER:
         return plan_pushdown_filter(self, index, filters^)
+    if len(filters) == 0:
+        # Nothing to place: each operator only rewrites its inputs.
+        return plan_finish_pushdown(self, index, filters)
     if kind == SELECT or kind == WITH_COLUMNS:
         return plan_pushdown_projection(self, index, filters^)
     if kind == DROP or kind == SORT:
