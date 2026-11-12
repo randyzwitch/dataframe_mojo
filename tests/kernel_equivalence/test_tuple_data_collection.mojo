@@ -272,7 +272,7 @@ def _assert_columns(got: List[Series], expected: List[Series]) raises:
         assert_true(got[c].equals(expected[c]), expected[c].name())
 
 
-def test_layout_offsets_follow_duckdb() raises:
+def test_layout_offsets_pack_validity_heap_size_and_values() raises:
     # [validity 1][heap size 8][int32 4][string_t 16]
     var types = List[DataType]()
     types.append(DataType.INT32)
@@ -423,7 +423,7 @@ def test_gather_through_row_pointers() raises:
 
 
 def test_boolean_payload_through_row_pointers() raises:
-    # GatherRHS for a Boolean column: `false` stays false, null stays
+    # Gathering a Boolean column from the rows: `false` stays false, null stays
     # null, with and without nulls in the column.
     var n = 3 * STANDARD_VECTOR_SIZE
     var plain_values = List[Bool](capacity=n)

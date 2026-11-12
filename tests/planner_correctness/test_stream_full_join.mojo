@@ -50,8 +50,7 @@ def _count_if(condition: Expr) -> Expr:
 def test_a_full_join_under_an_aggregation_emits_unmatched_build_rows_last() raises:
     # 12K left rows over 5K key values and 8K right rows over 9K values (a
     # step of 7), so rows match once or several times or not at all on
-    # either side, as TPC-DS q97 counts its store-only, catalog-only and
-    # shared customer-item pairs.
+    # either side: left-only, right-only and shared pairs all occur.
     var left = _side("l", 12_000, 5_000, 1, 97)
     var right = _side("r", 8_000, 9_000, 7, 89)
     var left_seen = col("l_a").is_not_null()

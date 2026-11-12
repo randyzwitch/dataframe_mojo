@@ -1,5 +1,5 @@
 """A top-N over a stored table reads its row groups in statistics order
-and drops those that cannot reach the limit (RowGroupPruner); the rows
+and drops those that cannot reach the limit; the rows
 match a sort of the same rows without statistics."""
 # contract-group: kernel.order_keys
 from std.testing import assert_equal, assert_true
