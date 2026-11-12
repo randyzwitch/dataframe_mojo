@@ -88,8 +88,8 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
     var residence: Optional[ArcPointer[_DeviceResidence]]
     # Set on a buffer that another storage reads through a row list
     # (`_Buffer.selecting`): kept here, behind the buffer's one pointer,
-    # because a wider column made every copy slower (TPC-DS q36 9% with
-    # it held in the string storage itself).
+    # rather than in the string storage itself, because columns are copied
+    # often and every extra field widens every copy.
     var selection: Optional[ArcPointer[_RowSelection]]
     # The address of a heap `ArcPointer[_StatsRecord]`, 0 until statistics
     # are published (once; `publish_statistics`).

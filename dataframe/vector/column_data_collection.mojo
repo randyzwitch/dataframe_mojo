@@ -261,8 +261,7 @@ struct ColumnDataCollection(Movable):
 
 struct MaterializeSink(Sink):
     """One worker's materialize sink state: a collection per batch index,
-    the morsel the rows come from (BatchedDataCollection::Append), so the
-    finish puts every worker's rows back in source order."""
+    the morsel the rows come from, so the finish puts every worker's rows back in source order."""
 
     var schema: DataFrame
     var capacity: Int
@@ -296,8 +295,9 @@ struct MaterializeSink(Sink):
         pass
 
     def combine(var self, mut combined: List[MaterializeSink]) raises:
-        """The worker's batches into the global state, every worker's
-        (BatchedDataCollection::Merge: no batch is on two workers)."""
+        """The worker's batches into the global state, every worker's.
+        A morsel goes to one worker, so no batch is on two workers and
+        merging needs no row-level work."""
         combined.append(self^)
 
 

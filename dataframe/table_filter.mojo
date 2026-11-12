@@ -4,10 +4,11 @@ A table filter reads one column. It is a small tree of filter
 kinds (a comparison with a constant, IN, IS NULL, IS NOT NULL, AND and OR
 of filters on the same column, and a dynamic filter whose constant an
 operator sets while the query runs) that `check_statistics` answers against
-a column's `BaseStatistics`, as `ExpressionFilter::CheckExpressionStatistics`
-does: whether the filter keeps every row of a vector, none, or some. Each
-filter also keeps the predicate part it came from, the expression the scan
-evaluates on rows the statistics did not rule out (`ToExpression`).
+a column's `BaseStatistics`: whether the filter keeps every row of a
+vector, none, or some. A vector answered "none" is never read, and one
+answered "every" needs no row test. Each filter also keeps the predicate
+part it came from, the expression the scan evaluates on rows the
+statistics did not rule out.
 
 Constants are taken into the column's own domain once, when the filter is
 made (`table_filters`): the integer a decimal, date or integer column
@@ -85,7 +86,7 @@ struct FilterConstants(Copyable, Movable):
     """Constants in a column's domain: `domain` is NUMERIC_STATS (the
     integers the column stores), FLOAT_STATS or STRING_STATS. `integral`
     marks an integer column, whose whole range a list of values can cover
-    (`NumericStats::ConstantsCoverRange`)."""
+    (an IN list naming every value in [min, max] keeps every row)."""
 
     var domain: Int
     var integral: Bool
@@ -306,8 +307,7 @@ def _unlock(data: ArcPointer[DynamicFilterData]):
 def set_dynamic_value(
     data: ArcPointer[DynamicFilterData], op: Int, value: Series
 ) raises -> Bool:
-    """Set the comparison and constant (`DynamicFilterData::SetValue`);
-    false when the column cannot hold the value exactly, which leaves the
+    """Set the comparison and constant; false when the column cannot hold the value exactly, which leaves the
     filter as it was."""
     var converted = constant_in_domain(_dynamic(data).column, value)
     if not converted:
@@ -323,8 +323,8 @@ def set_dynamic_value(
 def _dynamic_check(
     data: ArcPointer[DynamicFilterData], stats: BaseStatistics
 ) -> Int:
-    """`DynamicFilterScalarFun::FilterPrune` with
-    `DynamicFilterData::CheckStatistics`."""
+    """What the statistics prove about the dynamic filter's current
+    comparison; nothing until an operator has set its constant."""
     if _dynamic(data).initialized.load() == 0:
         return NO_PRUNING_POSSIBLE
     # The constant is read in place under the lock rather than copied out:
@@ -496,12 +496,12 @@ def _check_node(
 
 
 def check_statistics(filter: TableFilter, stats: BaseStatistics) -> Int:
-    """`ExpressionFilter::CheckStatistics`: whether the filter keeps every
-    row the statistics describe, none, or some (a FilterPropagateResult)."""
+    """Whether the filter keeps every row the statistics describe, none,
+    or some (one of the FILTER_* / NO_PRUNING_POSSIBLE answers)."""
     return _check_node(filter.nodes, len(filter.nodes) - 1, stats)
 
 
-# --- making filters from predicate parts (FilterCombiner) -----------------
+# --- making filters from predicate parts -----------------------------------
 
 
 def _comparison(op: Int) -> Int:
@@ -681,8 +681,8 @@ def _build(
 
 def table_filters(parts: List[Expr], columns: List[Series]) -> TableFilterSet:
     """The parts of a conjunction that are filters on one column of
-    `columns`, as table filters (`FilterCombiner::GenerateTableScanFilters`);
-    other parts stay with the expression evaluated over the scan's rows."""
+    `columns`, as table filters, which statistics can answer before rows
+    are read; other parts stay with the expression evaluated over the scan's rows."""
     var set = TableFilterSet()
     for p in range(len(parts)):
         var builder = _Builder()

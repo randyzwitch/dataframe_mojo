@@ -81,9 +81,8 @@ struct _MergedCache(Movable):
     """The contiguous array a chunked series rechunks into, made once.
 
     Parquet tables arrive in row-group chunks, and joins, kernels and
-    gathers each rechunk the same key or value column: PDS-H q2 spent a
-    fifth of its time merging the same chunks again. The chunks never
-    change, so the first merge is kept. `state` is 0 (empty), 1 (one caller
+    gathers each rechunk the same key or value column, each a full copy.
+    The chunks never change, so the first merge is kept and reused. `state` is 0 (empty), 1 (one caller
     is filling it) or 2 (ready); a caller that loses the race to fill it
     merges its own copy without storing it."""
 

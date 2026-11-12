@@ -41,7 +41,13 @@ from dataframe.vector.types import (
     physical_of,
 )
 
-# ClusteredAggr's constants (clustered_aggregate.hpp).
+# Clustering pays only when runs are long: a run shorter than 6 rows saves
+# less than its bookkeeping costs. Up to 32 hot groups are gathered into
+# their own regions per chunk; a chunk needs 128 rows for its sample to
+# say anything; 2,048-slot tables (16 KB each, in L1) find each row's
+# run. A slot word packs the group id, the run's index and its cursor,
+# so a slot is one load. The sizes are empirical choices; the bit split
+# follows from them.
 comptime RUNLENGTH_THRESHOLD = 6
 comptime HOTKEYS_LOG2 = 5
 comptime MAX_HOTKEYS = 1 << HOTKEYS_LOG2
@@ -63,11 +69,11 @@ comptime _GRP_MASK = UInt64((1 << SLOT_GRP_BITS) - 1)
 
 
 def cluster_update(op: Int, kind: Int) -> Bool:
-    """Whether reduction `op` with state `kind` supports run updates: count_star and
-    count, sum (`IntegerSumOperation`, `SumToHugeintOperation`,
-    `NumericSumOperation`, the decimal sums over them), numeric min and max
-    (`NumericMinMaxBase`), first and last. avg, the variances, quantiles
-    and string min/max have none."""
+    """Whether reduction `op` with state `kind` supports run updates:
+    count_star and count, sum (integer, widened, float, and the decimal
+    sums over them), numeric min and max, first and last: reductions
+    where a run's rows fold into one value that then merges into the
+    state. avg, the variances, quantiles and string min/max have none."""
     if op == LEN:
         return kind == _K_LEN
     if op == COUNT:
@@ -206,7 +212,7 @@ struct ClusteredAggrState(Movable):
         self.ready = False
 
     def initialize(mut self):
-        """`ClusteredAggrState::Initialize`: two cursor slices of
+        """Allocate the clustering scratch once: two cursor slices of
         MAX_HOTKEYS / 2 hot regions and one sequential region of half a
         vector each, two hash tables, a vector of runs."""
         self.arena = List[UInt32](
@@ -226,7 +232,9 @@ struct ClusteredAggrState(Movable):
     def try_build(mut self, group_ids: Int, count: Int) -> Bool:
         """Cluster `count` rows (at most a vector) by their group ids, the
         UInt64 words at address `group_ids` (only their low SLOT_GID_BITS
-        bits read), or back off (`ClusteredAggrState::TryBuild`)."""
+        bits read), or back off: after a chunk that does not cluster,
+        skip a doubling number of chunks before trying again, so input
+        without runs pays for few failed attempts."""
         if not self.ready:
             return False
         if self.skipped > 0:
@@ -243,7 +251,7 @@ struct ClusteredAggrState(Movable):
         self.backoff = min(Int.MAX // 2, self.backoff) * 2
         return False
 
-    # ClusteredAggr::TryClustered's lambdas.
+    # Steps of `_try_clustered`.
 
     @always_inline
     def _finish_run(mut self, mut st: _SlotTab, s: UInt64) -> Int:
@@ -362,8 +370,9 @@ struct ClusteredAggrState(Movable):
     def _try_clustered(
         mut self, group_ids: Pointer[UInt64, MutAnyOrigin], count: Int
     ) -> Bool:
-        """`ClusteredAggr::TryClustered`: the chunk's runs, and whether at
-        least 80% of its rows are in runs of RUNLENGTH_THRESHOLD or more."""
+        """The chunk's runs, and whether at least 80% of its rows are in
+        runs of RUNLENGTH_THRESHOLD or more: below that, the scattered
+        remainder costs more than clustering saves."""
         self.tuples_in_large = 0
         var slice2 = _SLICE_HALF_VECS * _HALF_VEC
         var st1 = _SlotTab(0, 0, _MAX_HOT_PER_CURSOR * _HALF_VEC, 0)
@@ -460,8 +469,8 @@ def update_clustered(
     first: Int,
     scratch: Int,
 ) raises:
-    """`RowOperations::UpdateStatesClustered` for the reductions with a
-    run kernel (`kernels`): each run of the chunk's `count` rows folded
+    """Update the states of the reductions with a run kernel
+    (`kernels`): each run of the chunk's `count` rows folded
     into its group's state (at `runs.rows[r]`, states from word
     `states_at`) once, from a local copy of the state. `first` is the source row of the chunk's first, and `scratch`
     the value states' three vectors of words."""

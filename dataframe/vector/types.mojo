@@ -1,11 +1,6 @@
 """Execution vector types, selection vectors, validity
 masks, 16-byte strings and the unified format kernels read through.
 
-Ported from duckdb-2.0 `common/vector_size.hpp`, `common/enums/
-vector_type.hpp`, `common/types/selection_vector.hpp`, `common/types/
-validity_mask.hpp`, `common/types/string_type.hpp`, `common/types/
-vector.hpp` and `common/vector/unified_vector_format.hpp`.
-
 A `Vector` here is a plain value: addresses and counts, no reference
 counts. Vectors borrow their buffers from three owners that outlive every vector of a pipeline
 run: the at-rest columns (`ColumnArena`), the `DataChunk` whose caches
@@ -18,8 +13,8 @@ from std.memory import Layout, Pointer, alloc, unsafe_memcpy, unsafe_memcmp
 # Maximum rows per execution chunk; bounds scratch storage and loop batches.
 comptime STANDARD_VECTOR_SIZE = 2048
 
-# VectorType (common/enums/vector_type.hpp), same numbering. FSST and
-# shredded vectors have no counterpart here; at-rest Arrow strings and
+# How a vector's rows map to its data. FSST and shredded vectors have no
+# counterpart here; at-rest Arrow strings and
 # packed booleans play FSST's role (decoded when a kernel reads them, see
 # `Vector.encoded`).
 comptime FLAT_VECTOR = 0
@@ -28,10 +23,9 @@ comptime CONSTANT_VECTOR = 2
 comptime DICTIONARY_VECTOR = 3
 comptime SEQUENCE_VECTOR = 4
 
-# PhysicalType: how a vector's values are laid out in memory
-# (common/types.hpp PhysicalType). OPAQUE stands for the nested and other
-# types no vector kernel reads yet: such a vector is only passed along and
-# read through its at-rest column.
+# How a vector's values are laid out in memory. OPAQUE stands for the
+# nested and other types no vector kernel reads yet: such a vector is only
+# passed along and read through its at-rest column.
 comptime PHYSICAL_BOOL = 1
 comptime PHYSICAL_UINT8 = 2
 comptime PHYSICAL_INT8 = 3
@@ -217,9 +211,10 @@ def set_all_valid(bits: Int, count: Int):
         at[unsafe_offset=b] = 255
 
 
-# string_t (common/types/string_type.hpp): 16 bytes, the length then
-# either the bytes themselves (at most 12, zero padded) or their first four
-# bytes and a pointer to all of them.
+# A string record: 16 bytes, the length then either the bytes themselves
+# (at most 12, zero padded) or their first four bytes and a pointer to all
+# of them. Short strings need no second memory access, and the prefix
+# settles most comparisons of long ones without following the pointer.
 comptime STRING_INLINE_BYTES = 12
 comptime STRING_PREFIX_BYTES = 4
 
@@ -283,9 +278,9 @@ def string_data(entry: Int) -> Int:
 
 @always_inline
 def string_equals(a: Int, b: Int) -> Bool:
-    """Whether the string_t values at addresses `a` and `b` are equal
-    (StringComparisonOperators::Equals): length and prefix in one 8-byte
-    compare, then the inlined bytes or the pointed-at ones."""
+    """Whether the string records at addresses `a` and `b` are equal:
+    length and prefix in one 8-byte compare, then the inlined bytes or
+    the pointed-at ones."""
     var left = Pointer[StringT, MutAnyOrigin](unsafe_from_address=a)[]
     var right = Pointer[StringT, MutAnyOrigin](unsafe_from_address=b)[]
     if left.length != right.length or left.prefix != right.prefix:
@@ -381,7 +376,8 @@ struct Vector(Copyable, ImplicitlyCopyable, Movable):
     - CONSTANT: `data` holds the one value; every row reads it.
     - DICTIONARY: row i is child row `sel.get_index(i)`; `data` and
       `validity` are the child's (`dictionary_size` rows). The child is
-      always flat (Vector::Slice merges a dictionary of a dictionary).
+      always flat: slicing a dictionary merges the two selections, so
+      a read never follows more than one indirection.
     - SEQUENCE: row i is `sequence_start + i * sequence_increment`.
 
     `source` names the at-rest column (`ColumnArena`) the values were
@@ -427,7 +423,7 @@ struct Vector(Copyable, ImplicitlyCopyable, Movable):
     @staticmethod
     def constant(physical: Int, data: Int, valid: Bool) -> Vector:
         """A constant vector of the value at `data` (null when not
-        `valid`, ConstantVector::SetNull)."""
+        `valid`)."""
         var result = Vector()
         result.vector_type = CONSTANT_VECTOR
         result.physical = physical
@@ -438,7 +434,8 @@ struct Vector(Copyable, ImplicitlyCopyable, Movable):
 
     @staticmethod
     def sequence(start: Int64, increment: Int64) -> Vector:
-        """Vector::Sequence: row i is start + i * increment (BIGINT)."""
+        """A sequence vector: row i is start + i * increment (BIGINT),
+        stored as two numbers instead of a row each."""
         var result = Vector()
         result.vector_type = SEQUENCE_VECTOR
         result.physical = PHYSICAL_INT64
@@ -472,7 +469,7 @@ struct Vector(Copyable, ImplicitlyCopyable, Movable):
 
 
 # A process-wide byte with every bit clear: the validity of a null
-# constant (ConstantVector::SetNull), shared by every such vector.
+# constant, shared by every such vector.
 def _null_byte_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
     var pointer = alloc(Layout[UInt64](length=1)).unsafe_leak()
     pointer.unsafe_write(0)
@@ -493,7 +490,8 @@ def _NULL_BYTE_ADDRESS() -> Int:
     return Int(address.value())
 
 
-# ConstantVector::ZeroSelectionVector: every row reads entry 0.
+# A selection in which every row reads entry 0: a constant read through
+# the same code path as a dictionary.
 def _zero_sel_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
     var pointer = alloc(
         Layout[UInt32](length=STANDARD_VECTOR_SIZE)

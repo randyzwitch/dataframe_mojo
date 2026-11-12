@@ -254,7 +254,8 @@ def _before_header(
 def _prelude(
     bytes: Span[UInt8, ImmutAnyOrigin], options: CsvOptions, has_header: Bool
 ) -> Tuple[Int, Int]:
-    """Port streaming.rs SkipEmpty/SkipRowsBeforeHeader/SkipHeader.
+    """Skip the prelude: leading empty lines (with a header), ``skip_rows``
+    records, then the header.
 
     ``skip_rows`` counts valid CSV records, never comments.  It therefore
     uses the quote-aware field iterator, whereas comment detection occurs

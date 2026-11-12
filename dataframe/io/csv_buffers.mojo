@@ -77,7 +77,8 @@ struct _BoolBuffer(Copyable):
 
 
 struct _Utf8Buffer[categorical: Bool = False](Movable):
-    """builder.rs Utf8Field: encoding, quote byte, and scratch owned by builder."""
+    """A string column's buffer: encoding, quote byte, and scratch owned by
+    the builder."""
 
     var builder: StringViewBuilder
     var codes: _NumericBuffer[DType.uint32]

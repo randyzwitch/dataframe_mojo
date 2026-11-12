@@ -50,7 +50,7 @@ comptime _STRING = 3
 
 
 def _retrieve(stats: BaseStatistics, use_max: Bool) -> _StatValue:
-    """`RowGroupReorderer::RetrieveStat`: the minimum or maximum, or none
+    """The minimum or maximum, or none
     when the statistics hold no min/max."""
     if not stats.has_min_max:
         return _StatValue.none()
@@ -301,7 +301,8 @@ def _offset_prunable(
 
 
 def _exact(stats: BaseStatistics) -> Bool:
-    """`MinMaxIsExact`: string statistics may hold a truncated prefix.
+    """Whether the bounds are values of the rows: string statistics may
+    hold a truncated prefix.
     Numeric and float min/max are values of the rows (a vector holding NaN
     has none)."""
     if stats.stats_type == STRING_STATS:
@@ -316,7 +317,11 @@ def _offset_after_pruning(
     nulls_last: Bool,
     row_offset: Int,
 ) -> _OffsetPruning:
-    """`RowGroupReorderer::GetOffsetAfterPruning`."""
+    """How much of the limit's offset whole row groups cover: groups
+    whose bounds prove every row sorts before the rest are skipped and
+    their row counts taken off the offset, since those rows would only
+    be read to be discarded. Statistics that are missing or inexact
+    stop the pruning, as nothing is then proven."""
     var remainder = row_offset
     var leading = 0
     var maybe_null = False

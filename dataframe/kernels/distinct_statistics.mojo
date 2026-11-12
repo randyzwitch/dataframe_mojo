@@ -20,13 +20,19 @@ from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.series import Series
 from dataframe.storage.string import StringColumn
 
-# Registers of the sketch, 2^P (`HyperLogLog::P`, `M`, `Q`).
+# A HyperLogLog sketch of 2^P = 64 registers, indexed by P hash bits; the
+# other Q = 64 - P bits give the leading-zero count. 64 one-byte registers
+# give about 13% standard error (1.04 / sqrt(64)), enough to tell a join
+# key's distinct count apart by orders of magnitude, at 64 bytes a column.
+# _ALPHA is the sketch's standard bias correction.
 comptime _P = 6
 comptime _M = 64
 comptime _Q = 58
 comptime _ALPHA = 0.721347520444481703680
-# Bounded execution-vector size and sampled share of each vector
-# (`STANDARD_VECTOR_SIZE`, `INTEGRAL_SAMPLE_RATE`, `BASE_SAMPLE_RATE`).
+# Rows per vector, and how many of each vector's rows are hashed: 30% of
+# integer rows, 10% of others, whose hashing costs more. A sample keeps
+# the sketch cheap to build at load time; the rates are empirical
+# choices.
 comptime _VECTOR = 2048
 comptime _INTEGRAL_SAMPLE = 614
 comptime _BASE_SAMPLE = 204

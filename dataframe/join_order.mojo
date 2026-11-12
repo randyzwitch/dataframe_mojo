@@ -175,8 +175,10 @@ def _add_rule(mut op: JoinOperator, trigger: Int, requirement: Int):
 
 
 def build_conflicts(mut ops: List[JoinOperator]):
-    """Conflict rules and total eligibility sets for every operator
-    (`JoinOrderConflictDetector::Build`). Equality keys never match
+    """Conflict rules and total eligibility sets for every operator: the
+    relations that must already be joined before the operator can be
+    applied without changing the result, which matters for outer, semi
+    and anti joins that do not reorder freely. Equality keys never match
     nulls, so a join reading a shared input's column rejects its nulls."""
     for o in range(len(ops)):
         var op = ops[o].copy()
@@ -277,8 +279,9 @@ struct JoinGraph(Movable):
     # Whether each edge's (then filter's) total domain is a distinct count
     # rather than table rows.
     var counted: List[Bool]
-    # Edges joining two relations on two or more equivalence classes
-    # (`RelationPairEqualitySummary::HasDirectCompositeEquality`).
+    # Edges joining two relations on two or more equivalence classes: a
+    # composite key, whose columns are often correlated, so multiplying
+    # their selectivities would underestimate the join's rows.
     var composite: List[Bool]
     var ops: List[JoinOperator]
     # The right relations of semi and anti joins, then of left joins.

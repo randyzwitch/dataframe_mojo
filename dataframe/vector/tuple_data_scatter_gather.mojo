@@ -146,8 +146,8 @@ def compute_heap_sizes(
     append_sel: SelectionVector,
     append_count: Int,
 ):
-    """TupleDataCollection::ComputeHeapSizes: each appended row's heap
-    bytes, into `state.heap_sizes`."""
+    """Each appended row's heap bytes (known before any is written, so
+    the heap is allocated once), into `state.heap_sizes`."""
     var sizes = _ints(state.sizes())
     for i in range(append_count):
         sizes[unsafe_offset=i] = 0
@@ -345,7 +345,7 @@ def scatter(
     append_sel: SelectionVector,
     append_count: Int,
 ):
-    """TupleDataCollection::Scatter: the appended rows' values into the
+    """The appended rows' values into the
     rows at `state.row_locations`, their heap data at the heap pointers."""
     var rows = _ints(state.rows())
     ref top = layout.nodes[][0]
@@ -729,7 +729,7 @@ def gather_column(
     target_sel: SelectionVector,
     mut arena: ColumnArena,
 ) raises:
-    """TupleDataCollection::Gather of one column: the rows `scan_sel`
+    """One column of the rows `scan_sel`
     picks from the row pointers at `rows` into vector `out_column` of
     `result`, at the positions `target_sel` gives."""
     ref top = layout.nodes[][0]
@@ -1157,8 +1157,7 @@ def _gather_fixed_loop[
 
 struct _GatherNode(Copyable, Movable):
     """The vector a nested column's level is gathered into: values (or
-    list entries), a validity mask, and for a list the child's size
-    (ListVector::GetListSize)."""
+    list entries), a validity mask, and for a list the child's size."""
 
     var dtype: DataType
     var physical: Int
@@ -1186,7 +1185,8 @@ struct _GatherNode(Copyable, Movable):
         self.children = List[Int]()
 
     def reserve(mut self, count: Int):
-        """ListVector::Reserve: room for `count` rows, new rows valid."""
+        """Room for `count` rows, new rows valid; capacity at least
+        doubles, so repeated appends cost amortized constant time."""
         if count <= self.capacity:
             return
         var capacity = max(count, 2 * self.capacity)

@@ -641,8 +641,8 @@ struct TableSink(Sink):
 
     def combine(var self, mut combined: List[TableSink]) raises:
         """This worker's table into the global state, every worker's
-        partitioned rows (`RadixPartitionedHashTable::Combine`): the finish
-        merges them partition by partition."""
+        partitioned rows: the finish merges them partition by partition,
+        each partition on its own thread with no locking."""
         combined.append(self^)
 
     def take_table(deinit self) -> AggregateSink:

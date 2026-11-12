@@ -720,9 +720,9 @@ def _helper_entry[J: Job](address: Int) abi("C") -> Int:
 # --- crew: helper threads for the run_jobs calls of one operation -------
 #
 # `run_jobs` starts threads for each call and joins them before returning,
-# about 15-35 us a thread. A query makes hundreds of calls, most of them two
-# jobs inside a stream's batch (TPC-DS q96: 363 calls, 737 jobs in a 6 ms
-# query), so starting threads was a large share of short queries. A crew is
+# about 15-35 us a thread. A query can make hundreds of calls, most of them
+# a few jobs inside a stream's batch, so for a query of a few milliseconds
+# starting threads would be a large share of its time. A crew is
 # a set of threads started once for an operation -- `LazyFrame.collect` --
 # that every `run_jobs` call inside it posts its jobs to instead. When the
 # operation ends it is parked for the next one (`Crew.release`). A call
@@ -742,9 +742,10 @@ comptime _CLOSED = Int64(1) << 31
 # including the task of that schedule the waiting caller is running.
 comptime _UNHELPABLE = Int64(1)
 # How long a crew thread looks for work before parking. A thread that sleeps
-# wakes on a core the CPU governor (schedutil) has clocked down, and ran a
-# group-by's jobs 1.5x slower than a thread started fresh (PDS-H q1); one
-# kept busy between stages stays at full clock. Gaps inside a query are
+# wakes on a core the CPU governor (schedutil) has clocked down, and runs
+# its next jobs slower than a thread started fresh (we measured a
+# group-by's jobs 1.5x slower); one kept busy between stages stays at full
+# clock. Gaps inside a query are
 # mostly serial stretches of a few milliseconds, so 50 ms covers them; the
 # crew is joined when the operation ends, so no thread spins past it. A crew
 # larger than the performance cores parks at once instead, as a `Pool` does

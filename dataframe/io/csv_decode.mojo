@@ -193,7 +193,9 @@ def decode_chunk(
             staged.append(cells^)
             staged_counts.append(0)
 
-    # parser.rs treats any projection as implicit ragged truncation.
+    # A projection never reads fields past its last selected column, so
+    # extra fields on a row are tolerated (as with truncate_ragged_lines)
+    # rather than checked.
     var partial_projection = selected != len(schema)
     var staged_decode = selected > 1
     var offset = 0
@@ -329,8 +331,8 @@ def decode_chunk(
         var record_offset = offset
         # `offset` is initially zero and thereafter is `record_offset +
         # fields.consumed()`, where SplitFields proves consumed <= len(input).
-        # This is parser.rs' trusted cursor advance, rather than a checked
-        # slice reconstruction for every record.
+        # So the cursor advances without a bounds check, rather than with a
+        # checked slice reconstruction for every record.
         var input = Span[UInt8, ImmutAnyOrigin](
             unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(record_offset),
             length=len(bytes) - record_offset,
@@ -338,8 +340,8 @@ def decode_chunk(
         var fields = CsvSplitFields(separator, quote, quoting)
         var source_index = 0
         # `selected > 0` above, and projection/buffers both have this exact
-        # length. These mirror parser.rs' projection iterator and unchecked
-        # builder indexing inside its processed_fields < projection.len proof.
+        # length, and `processed < selected` holds inside the loop, so
+        # projection and buffers are indexed without bounds checks.
         var next_selected = projection.unsafe_ptr()[]
         var processed = 0
         var complete = False
@@ -350,14 +352,15 @@ def decode_chunk(
             var field = next.value().copy()
             var consumed = fields.consumed()
             if source_index == next_selected:
-                # parser.rs removes CR directly before Builder::add.
+                # A selected field's trailing CR is trimmed before it is
+                # stored, however SplitFields terminated it, so CRLF files
+                # read like LF files. This includes an unterminated final
+                # record at EOF.
                 var raw = field._unsafe_bytes(input)
-                # parse_lines trims a selected field's trailing CR before
-                # Builder::add regardless of how SplitFields terminated it.
-                # This includes an unterminated final record at EOF.
                 if len(raw) > 0 and raw[len(raw) - 1] == 13:
                     raw = raw[0 : len(raw) - 1]
-                # parser.rs matches compiled null tokens before Builder::add.
+                # Null tokens are matched before the field is stored, on
+                # the unquoted bytes.
                 var is_null = False
                 if len(options.null_values) != 0:
                     var null_candidate = raw
@@ -393,8 +396,9 @@ def decode_chunk(
                 if field.terminator == 10:
                     complete = True
                 else:
-                    # Exact parse_lines branch: a full projection may reject
-                    # remaining source fields; partial projection skips them.
+                    # A full projection rejects remaining source fields
+                    # unless ragged lines are allowed; a partial projection
+                    # skips them.
                     if (
                         not partial_projection
                         and not options.truncate_ragged_lines
@@ -416,7 +420,7 @@ def decode_chunk(
 
         if not complete:
             break
-        # parser.rs fills unvisited projected buffers with null for short rows.
+        # A short row fills its missing projected columns with null.
         while processed < selected:
             _append_cell(
                 bytes,

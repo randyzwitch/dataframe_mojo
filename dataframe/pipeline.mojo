@@ -672,7 +672,8 @@ struct _Columns(Copyable, Movable):
     def through(self, rows: List[Int]) -> _Columns:
         """Every column read at its rows `rows` (positions among this one's
         `height`), the dictionaries merged: a row list over a row list is
-        one row list over the column (SelectionVector::Slice). Columns
+        one row list over the column, so a read follows one indirection.
+        Columns
         sharing a list, or a start, share the merged list."""
         var result = _Columns()
         result.height = len(rows)
@@ -2385,7 +2386,8 @@ def _top_flags(flags: List[Bool], maintain_order: Bool) -> List[Bool]:
 @fieldwise_init
 struct _TopScanFilter(Copyable, Movable):
     """A TopN's dynamic filter on its first sort column, pushed into the
-    scan (`TopN::PushdownDynamicFilters`): `info` checks it against the
+    scan, so the scan skips rows (and whole vectors, by statistics) that
+    cannot enter the heap: `info` checks it against the
     source's statistics, `dynamic` is the shared constant the sinks set,
     `op` its comparison."""
 
@@ -2863,8 +2865,8 @@ def _finish_with_steps(
 
 struct PipelineRun(Movable):
     """A morsel pipeline between `begin_pipeline` and `finish_pipeline`:
-    its workers' jobs (the execute tasks `Pipeline::Schedule` makes, one
-    per thread) and what its finish reads. Lives on one thread at each
+    its workers' jobs (the execute tasks, one per thread) and what its
+    finish reads. Lives on one thread at each
     stage but its execute, where each task has its own job."""
 
     var jobs: List[_PipelineJob]
@@ -3075,7 +3077,7 @@ def begin_pipeline(
     source_rows: Int = -1,
 ) raises -> PipelineRun:
     """`run_pipeline` up to its workers' jobs, not yet run: its execute
-    stage is the jobs, as `Pipeline::Schedule` makes one task per thread;
+    stage is the jobs, one task per thread;
     `finish_pipeline` is its finish, after the rounds of `begin_round`.
     With a file `source`, `frame` holds its columns but no row: the
     workers take the source's batches as their morsels, and
@@ -3281,8 +3283,8 @@ def begin_pipeline(
             and indexes[][step.join]
         ):
             indexes[][step.join].value().reset_found()
-    # One job per morsel at most: a tiny source (PDS-H q2's five-row
-    # region frame) runs on the caller, with no crew dispatch to wait on.
+    # At most one job per two morsels: a tiny source (three morsels or
+    # fewer) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
     if source:
         # A file's batches are not known ahead: every worker scans.
@@ -3329,7 +3331,7 @@ def begin_pipeline(
         for w in range(len(jobs)):
             jobs[w].runner.ungrouped_layout.append(ungrouped[0])
     # The aggregate table (one grouping): each worker's table takes the
-    # last step's chunks (`PhysicalHashAggregate::Sink`).
+    # last step's chunks, so workers never share a table while sinking.
     if len(layout) > 0 and len(sets) == 0:
         var empty = schemas[][len(steps)].copy()
         var empty_keys = List[Series](capacity=len(keys))

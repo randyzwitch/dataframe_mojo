@@ -1143,8 +1143,8 @@ struct Expr(Copyable):
             return self.str()._op(STR_IS_IN, strings)
         # Typed integer literals of one dtype: one node that tests each row
         # against the list in a single pass, instead of an equality, a
-        # null fill and an OR per value (TPC-DS q82 filters 11.7M
-        # inventory rows on four item keys: 18 -> 6 ms).
+        # null fill and an OR per value, each of which would write a
+        # full-length intermediate column.
         var integers = String()
         var kind = Optional[String]()
         var any_integer = False

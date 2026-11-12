@@ -37,9 +37,10 @@ comptime _DATETIME_UTC = 128
 struct CsvInference(Copyable):
     """Inferred schema plus the first content-record offset.
 
-    ``data_offset`` is exactly the byte position left by streaming.rs after
-    SkipEmpty, SkipRowsBeforeHeader, and SkipHeader.  ``record_start`` counts
-    physical records through that prelude for decoder diagnostics.
+    ``data_offset`` is the byte position after the prelude: leading empty
+    lines (with a header), ``skip_rows`` records, and the header.
+    ``record_start`` counts physical records through that prelude for
+    decoder diagnostics.
     """
 
     var schema: CsvSchema
@@ -94,8 +95,8 @@ def _empty_record(
 
 
 def _trim_cr(bytes: Span[UInt8, ImmutAnyOrigin]) -> Span[UInt8, ImmutAnyOrigin]:
-    # streaming.rs hands schema inference records without LF and with a
-    # possible CR. Our record ranges include LF, so normalize to that input.
+    # Inference reads a record without its line ending; our record ranges
+    # include the LF and possibly a CR, so drop both.
     var end = len(bytes)
     if end > 0 and bytes[end - 1] == 10:
         end -= 1
@@ -107,8 +108,9 @@ def _trim_cr(bytes: Span[UInt8, ImmutAnyOrigin]) -> Span[UInt8, ImmutAnyOrigin]:
 def _unwrapped(
     raw: Span[UInt8, ImmutAnyOrigin], needs_escaping: Bool
 ) -> Span[UInt8, ImmutAnyOrigin]:
-    # Exact infer_headers/infer_types_from_line behavior: remove wrappers for
-    # inference, but retain doubled quotes rather than unescaping them.
+    # Remove the quotes around a field for inference, but keep doubled
+    # quotes rather than unescaping them: inference only needs the field's
+    # shape, and header names keep the text as written.
     if needs_escaping and len(raw) >= 2:
         return raw[1 : len(raw) - 1]
     return raw
@@ -276,8 +278,9 @@ def _header_names(
             break
         var field = next.value().copy()
         var raw = _unwrapped(field.bytes(trimmed), field.needs_escaping)
-        # infer_headers uses String::from_utf8_lossy independently of the
-        # configured body encoding.
+        # Header names are decoded as lossy UTF-8 whatever the body's
+        # configured encoding, so an invalid byte in a header never fails
+        # the read.
         var original = String(from_utf8_lossy=raw)
         var count = counts[original] if original in counts else 0
         var name = original.copy()
@@ -341,7 +344,7 @@ def infer_csv_schema(
     ):
         start = 3
 
-    # streaming.rs State::SkipEmpty is entered only with a header.
+    # Leading empty lines are skipped only when the file has a header.
     if has_header:
         while start < len(bytes):
             var end = _record_end(bytes, start, options)
@@ -350,7 +353,8 @@ def infer_csv_schema(
             start = end
             record += 1
 
-    # State::SkipRowsBeforeHeader. Comments never reduce skip_rows.
+    # Then skip_rows records before the header. Comments never reduce
+    # skip_rows.
     var remaining = options.skip_rows
     while start < len(bytes):
         if _comment_at(bytes, start, options.comment_prefix):

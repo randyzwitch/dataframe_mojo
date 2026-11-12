@@ -445,16 +445,15 @@ comptime _ENTRY_BYTES_PER_ROW = 3 * 8
 
 
 def build_size(frame: DataFrame) -> Float64:
-    """The bytes a hash table built on `frame` holds
-    (BuildProbeSideOptimizer::GetBuildSize): its row width
-    (`build_row_width`) times its rows."""
+    """The bytes a hash table built on `frame` holds: its row width
+    (`build_row_width`) times its rows. The smaller table is the cheaper
+    side to build, as it is more likely to stay in cache."""
     return max(Float64(build_row_width(frame)) * Float64(frame.height()), 8.0)
 
 
 def build_row_width(frame: DataFrame) -> Int:
-    """The bytes a row of `frame`'s columns takes in a hash table
-    (BuildProbeSideOptimizer::GetBuildSize): its row width (validity
-    bytes, each column's width, the hash) with penalties for strings,
+    """The bytes a row of `frame`'s columns takes in a hash table: its
+    row width (validity bytes, each column's width, the hash) with penalties for strings,
     nested columns and every column, and the pointer table's share. Only
     the columns' types are read, so an empty frame of a plan's schema
     gives the width its rows will have."""

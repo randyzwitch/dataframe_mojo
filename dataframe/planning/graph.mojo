@@ -224,9 +224,9 @@ def plan_ends_in_breaker(self: QueryContext, index: Int) -> Bool:
     unique, a sort or a row-order operator such as tail), or row-local
     steps over one: it is computed in full before any of its rows stream
     on. A selection that reads its whole input (aggregates over all
-    rows, or windows) is one too:
-    TPC-DS q28's six one-row bands, cross joined, ran one after
-    another."""
+    rows, or windows) is one too, so several such inputs of one join
+    are computed as separate inputs that can run at the same time,
+    rather than one after another."""
     var at = index
     while at >= 0:
         ref node = self._nodes[at]
@@ -535,8 +535,8 @@ def plan_projection_visits(self: QueryContext) -> Tuple[List[Int], List[Int]]:
     so the copies stay alike and `_share_subplans` still runs them
     once: a node comes after every node above it, by height, and the
     copies of one subplan, all of one height, come after all their
-    readers. Pruned per reader, TPC-DS q4's year totals ran six
-    times."""
+    readers. Pruned per reader, the copies would differ and each would
+    run on its own."""
     var count = len(self._nodes)
     var order = List[Int](capacity=count)
     var copy_of = List[Int](length=count, fill=-1)
@@ -1540,9 +1540,10 @@ def plan_share_copy_schemas(
 
 
 def plan_is_filtering(self: QueryContext, index: Int) -> Bool:
-    """Whether the subplan at `index` filters its tables
-    (JoinFilterPushdownOptimizer::IsFiltering): a filter, a top-N, or a
-    scan with predicates of its own, anywhere below."""
+    """Whether the subplan at `index` filters its tables: a filter, a
+    top-N, or a scan with predicates of its own, anywhere below. Such a
+    side likely holds only part of its key domain, so filtering the
+    other side by its keys can remove rows."""
     if index < 0:
         return False
     ref node = self._nodes[index]

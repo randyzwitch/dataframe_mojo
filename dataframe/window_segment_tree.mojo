@@ -34,14 +34,16 @@ from dataframe.storage.string import StringColumn
 from dataframe.vector.data_chunk import ColumnArena, DataChunk, flat_over
 from dataframe.vector.types import SelectionVector, UnifiedVectorFormat
 
-# window_segment_tree.cpp: TREE_FANOUT needs to cleanly divide
-# STANDARD_VECTOR_SIZE.
+# Each tree entry combines 16 entries of the level below. A wider fanout
+# makes the tree shallower but a frame's ends combine up to fanout - 1
+# entries per level; 16 balances the two (an empirical choice). It must
+# divide STANDARD_VECTOR_SIZE so a vector of leaves fills whole entries.
 comptime TREE_FANOUT = 16
 comptime STANDARD_VECTOR_SIZE = 2048
 
 
 struct WindowSegmentTree(Movable):
-    """WindowSegmentTreeGlobalState: the states of the tree's upper levels
+    """The states of the tree's upper levels
     over `leaf_count` rows, and the slots they are made of."""
 
     var slots: List[AggregateFunction]
@@ -364,9 +366,8 @@ struct _BuildJob(Job):
 
 
 struct _EvaluateJob(Job):
-    """The frames of rows [lo, hi) into their states, a vector at a time
-    (WindowSegmentTreeLocalState::Evaluate), each state zeroed first on
-    this worker."""
+    """The frames of rows [lo, hi) into their states, a vector at a
+    time, each state zeroed first on this worker."""
 
     var tree: Int
     var begins: Int
@@ -456,7 +457,7 @@ def _workers(items: Int) -> Int:
 
 
 def _build(mut tree: WindowSegmentTree) raises:
-    """Every level, bottom up (WindowSegmentTreeLocalState::Finalize):
+    """Every level, bottom up, since each level combines the one below:
     the entries of a level in parallel ranges, all done before the next."""
     var address = Int(Pointer(to=tree))
     for level in range(len(tree.levels_flat_start)):
@@ -497,8 +498,9 @@ struct FrameResults(Movable):
 
 
 def frame_states_supported(spec: ReducerSpec, input: Series) -> Bool:
-    """WindowSegmentTree::CanAggregate: whether `input`'s aggregate has a
-    state held inline, combined without its rows."""
+    """Whether `input`'s aggregate has a state held inline and combined
+    without its rows, which a tree entry needs: an entry stands for many
+    rows."""
     return _slot_kind(spec, input) >= 0
 
 

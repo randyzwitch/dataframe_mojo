@@ -302,8 +302,8 @@ def true_count(mask: BoolColumn) -> Int:
     ):
         # Byte-aligned: whole 64-bit words of values (ANDed with the
         # validity words when there are nulls), then the tail's bytes and
-        # bits. The bit-assembly path below cost ClickBench q19 a fifth of
-        # its time on a mask with a validity bitmap.
+        # bits. This handles 64 values per step, where the bit-assembly
+        # path below handles one.
         var data = mask._data[].unsafe_ptr().unsafe_offset(mask._offset // 8)
         var nulls = len(mask._bits[]) > 0
         var bits = mask._bits[].unsafe_ptr().unsafe_offset(mask._offset // 8)

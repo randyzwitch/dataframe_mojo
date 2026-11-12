@@ -63,10 +63,13 @@ from dataframe.table_filter import (
     table_filters,
 )
 
-# RelationStatisticsHelper::DEFAULT_SELECTIVITY: the rows a filter keeps
-# when nothing measures it.
+# The share of rows a filter keeps when nothing measures it: a guess,
+# low enough that a filtered input looks smaller than an unfiltered one
+# (filters usually remove most rows) without assuming it is tiny. An
+# empirical choice.
 comptime DEFAULT_SELECTIVITY = 0.2
-# DistinctCountSource.
+# Where a distinct count came from: the row count or the min/max span
+# (upper bounds), or a sketch of the values (an estimate).
 comptime COUNT_CARDINALITY = 0
 comptime COUNT_MIN_MAX = 1
 comptime COUNT_HLL = 2
@@ -241,7 +244,7 @@ def plan_cardinality(
     self: QueryContext, mut stats: PlanStatistics, index: Int
 ) raises -> Int:
     """Rows node `index` yields, estimated from statistics before anything
-    runs (`RelationStatisticsHelper::ExtractOperatorStats`); -1 when an
+    runs; -1 when an
     input has none (a file scan, an operator with no estimate)."""
     if index < 0:
         return -1
@@ -345,8 +348,8 @@ def _cardinality(
 
 
 def _total_domain(a: DistinctCount, b: DistinctCount) -> Int:
-    """`DomainEstimate::GetDistinctCount` over a key pair: the larger
-    reliable count, else the larger bounds count, else the smaller
+    """The distinct keys two joined columns can share, for estimating
+    the join's rows: the larger reliable count, else the larger bounds count, else the smaller
     fallback count; 1 when neither side has one."""
     var reliable = -1
     var bounded = -1

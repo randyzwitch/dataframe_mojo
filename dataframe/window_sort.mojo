@@ -22,10 +22,11 @@ from dataframe.kernels.binary import validity
 from dataframe.kernels.gather import take_parallel
 from dataframe.sorting.sort_key import STANDARD_VECTOR_SIZE
 
-# hashed_sort.cpp, HashedSortGlobalSinkState::Rehash: partitions start at
-# 4 radix bits and grow by 2 while the average hash group holds more than
-# DEFAULT_ROW_GROUP_SIZE rows, up to max_bits (8 for any thread memory
-# above 512 MB: thread_pages >> max_bits > 1).
+# Partitions start at 4 radix bits and grow by 2 while the average hash
+# group holds more than DEFAULT_ROW_GROUP_SIZE rows, so each group is
+# about one morsel of sorting work and the groups spread over the
+# threads. At most 8 bits (256 groups): more groups add per-group
+# overhead without adding parallelism. Empirical choices.
 comptime _START_BITS = 4
 comptime _MAX_BITS = 8
 comptime DEFAULT_ROW_GROUP_SIZE = 122880
@@ -829,7 +830,8 @@ struct _GroupSortJob(Job):
             firsts,
         )
         if partitions_here == 1 and count == self.partition_keys:
-            # PartitionKeyTracker::CanBypass: one key and no order keys.
+            # One partition here and no order keys: every row is a peer
+            # of every other, so the rows stay in input order unsorted.
             for k in range(n):
                 order[unsafe_offset=self.lo + k] = rows[
                     unsafe_offset=self.lo + k
@@ -1165,8 +1167,7 @@ def rank_order_keys(
 
 struct _RankScanJob(Job):
     """Ranks over sorted positions [lo, hi) from the partition and peer
-    boundaries (WindowPeerLocalState::NextRank, and the peer end for max
-    and average). The first pass summarizes the range; the second writes
+    boundaries (and the peer end for max and average). The first pass summarizes the range; the second writes
     ranks from the state carried in from the ranges before it."""
 
     var flags: Int

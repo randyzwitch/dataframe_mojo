@@ -349,8 +349,8 @@ def _days(value: Int64, dtype: DataType) -> Int64:
 struct Truncation(Copyable):
     """`truncate(every)` for one column, its interval parsed once:
     calendar months, or a fixed step in the column's ticks from an origin.
-    Parsing per value took half the time in ClickBench q42, a minute
-    truncation of 560K timestamps."""
+    Parsing the interval string once instead of per value leaves only
+    integer arithmetic in the row loop."""
 
     var dtype: DataType
     var months: Int64
@@ -903,8 +903,8 @@ def dt_op(
     var values = List[Int64](length=n, fill=0)
     # Intervals parsed once, when some observed value is valid: an all-null
     # or fully masked column raises no interval error, as before. The
-    # loop below is single-threaded over every row (10M in ClickBench
-    # q18), so it checks nothing more per row.
+    # loop below is single-threaded over every row, so it checks nothing
+    # more per row.
     var parse = False
     if op == DT_TRUNCATE or op == DT_OFFSET_BY or op == DT_ROUND:
         for i in range(n):
@@ -1015,7 +1015,7 @@ def dt_op(
             values[i] = 0
         else:
             # Time-of-day fields need no calendar: the ticks within the
-            # day (ClickBench q18 takes the minute of 10M timestamps).
+            # day, one remainder per value.
             var within = v % (
                 NANOS_PER_DAY if dtype.is_time() else ticks_per_day(dtype)
             )

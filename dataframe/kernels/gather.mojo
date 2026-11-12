@@ -732,9 +732,9 @@ struct _GatherJob(Job):
                 # The output starts uninitialized (see `_allocate`), so a
                 # null-extended slot is written too, as zero.
                 # Indices through a pointer and the flags decided once:
-                # a bounds check and two field reads per row kept the
-                # loop from overlapping its scattered loads (PDS-H q2's
-                # 159K-row gather of three columns, 3 ms on three workers).
+                # a bounds check and two field reads per row keep the
+                # CPU from overlapping the loop's scattered loads, whose
+                # cache misses are the cost of a gather.
                 var positions = rows.unsafe_ptr()
                 if self.skip_validity and not self.or_null:
                     for k in range(self.start, self.end):

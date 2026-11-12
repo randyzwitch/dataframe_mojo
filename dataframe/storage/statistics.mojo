@@ -13,7 +13,7 @@ comparison with constants keeps every row, none, or some. A scan can
 skip a region only when these bounds prove no row can match.
 """
 
-# FilterPropagateResult (`enums/filter_propagate_result.hpp`).
+# What statistics prove about a filter over a stretch of rows.
 comptime NO_PRUNING_POSSIBLE = 0
 comptime FILTER_ALWAYS_TRUE = 1
 comptime FILTER_ALWAYS_FALSE = 2
@@ -36,10 +36,12 @@ comptime NUMERIC_STATS = 1
 comptime FLOAT_STATS = 2
 comptime STRING_STATS = 3
 
-# StringStatsData::CURRENT_MAX_STRING_MINMAX_SIZE.
+# Bytes of a string bound kept: the inline capacity of a 16-byte string
+# record, so a bound never needs a separate allocation. Longer values
+# keep a truncated prefix, which still bounds them.
 comptime MAX_STRING_MINMAX_SIZE = 12
-# Rows per vector (STANDARD_VECTOR_SIZE) and vectors per row group
-# (DEFAULT_ROW_GROUP_SIZE 122,880 / 2,048).
+# Rows per vector and vectors per row group (122,880 / 2,048), the units
+# the scan reads in and so the units a zone map can skip.
 comptime STATISTICS_VECTOR_SIZE = 2048
 comptime ROW_GROUP_VECTORS = 60
 
@@ -88,7 +90,7 @@ struct BaseStatistics(Copyable, ImplicitlyCopyable, Movable):
 
     @staticmethod
     def unknown() -> Self:
-        """Statistics that rule nothing out (`BaseStatistics::CreateUnknown`)."""
+        """Statistics that rule nothing out."""
         return Self(
             BASE_STATS,
             True,
@@ -130,7 +132,7 @@ struct BaseStatistics(Copyable, ImplicitlyCopyable, Movable):
         return self.has_no_null
 
     def merge(mut self, other: Self):
-        """`BaseStatistics::Merge`: statistics covering both stretches."""
+        """Statistics covering both stretches."""
         if other.stats_type == BASE_STATS and self.stats_type != BASE_STATS:
             self = Self.unknown()
             return
@@ -172,8 +174,8 @@ struct BaseStatistics(Copyable, ImplicitlyCopyable, Movable):
             self.float_min = min(self.float_min, other.float_min)
             self.float_max = max(self.float_max, other.float_max)
         else:
-            # A truncated bound compares as its prefix (`StringStats::Merge`
-            # keeps the smaller min and the larger max with their types).
+            # A truncated bound compares as its prefix; keep the smaller
+            # min and the larger max, each with its exact/truncated mark.
             if (
                 _compare_prefixes(
                     other.str_min,
@@ -204,7 +206,7 @@ def _compare_prefixes(
     a: SIMD[DType.uint8, 16], a_size: Int, b: SIMD[DType.uint8, 16], b_size: Int
 ) -> Int:
     """Bytewise comparison of two stored prefixes, the shorter first on a
-    tie (`Comparator::Operation` on string_t)."""
+    tie, as strings order."""
     for i in range(min(a_size, b_size)):
         if a[i] != b[i]:
             return -1 if a[i] < b[i] else 1
@@ -216,8 +218,8 @@ def _compare_prefixes(
 def compare_string_stats(
     input: Span[UInt8, _], bound: SIMD[DType.uint8, 16], size: Int, exact: Bool
 ) -> Int:
-    """`StringStats::CompareStringStats`: a constant against a stored bound;
-    a truncated bound is compared over its own length only."""
+    """A constant against a stored bound; a truncated bound is compared
+    over its own length only, since the bytes after it are unknown."""
     var length = len(input)
     if not exact and length > size:
         length = size
@@ -275,9 +277,9 @@ def _range_answer[
 def check_numeric_zonemap(
     stats: BaseStatistics, op: Int, constants: List[Int128]
 ) -> Int:
-    """`NumericStats::CheckZonemap` over integer-domain constants: ALWAYS_TRUE
-    as soon as one constant keeps every row, ALWAYS_FALSE when none keeps
-    any."""
+    """What [min, max] proves about `op` over integer-domain constants:
+    ALWAYS_TRUE as soon as one constant keeps every row, ALWAYS_FALSE
+    when none keeps any."""
     if not stats.has_min_max or stats.stats_type != NUMERIC_STATS:
         return NO_PRUNING_POSSIBLE
     for constant in constants:
@@ -329,7 +331,7 @@ def check_float_zonemap(
 def constants_cover_range(
     stats: BaseStatistics, constants: List[Int128]
 ) -> Bool:
-    """`NumericStats::ConstantsCoverRange`: whether an integer column's
+    """Whether an integer column's
     whole [min, max] range is listed, so an IN list keeps every row."""
     if not stats.has_min_max or stats.stats_type != NUMERIC_STATS:
         return False
@@ -355,8 +357,8 @@ def constants_cover_range(
 def _string_answer(
     stats: BaseStatistics, op: Int, constant: Span[UInt8, _]
 ) -> Int:
-    """`StringStats::CheckZonemap` for one constant (min, min_type, max,
-    max_type)."""
+    """What the string bounds prove about `op` with one constant (min,
+    min_type, max, max_type)."""
     var min_value = stats.str_min
     var min_size = stats.str_min_size
     var min_exact = stats.min_exact
@@ -413,7 +415,7 @@ def _string_answer(
 def check_string_zonemap(
     stats: BaseStatistics, op: Int, constants: List[List[UInt8]]
 ) -> Int:
-    """`StringStats::CheckZonemap` over several constants."""
+    """What the string bounds prove about `op` over several constants."""
     if stats.stats_type != STRING_STATS:
         return NO_PRUNING_POSSIBLE
     for constant in constants:

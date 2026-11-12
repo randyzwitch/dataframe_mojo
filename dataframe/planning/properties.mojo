@@ -277,9 +277,8 @@ def _aggregate_schema(
 ) raises -> Optional[DataFrame]:
     """A group_by's result on a zero-row `input`: its key columns, then
     each aggregation's name and type bound from its expression. Running
-    one on no rows
-    sets up a whole grouping for nothing (TPC-DS q4: 170 us a group_by,
-    each planned several times). None without keys (a global aggregation
+    one on no rows sets up a whole grouping (hash tables, threads) for
+    nothing, and the planner asks for schemas often. None without keys (a global aggregation
     has one row), for keys or results of nested or categorical type, and
     for anything the aggregation would reject, which the caller then
     runs."""
@@ -309,8 +308,7 @@ def _join_schema(
     derived from the input columns without executing the join. The schema
     contains the left columns, followed by non-coalesced right columns; a
     right name that collides with a left name receives the suffix.
-    Running one on no
-    rows prepares a hash join for nothing (TPC-DS q4: 60 us a join). None
+    Running one on no rows prepares a hash join for nothing. None
     for other join types, keys of differing, nested or categorical types,
     and output names that still collide, which the caller then runs to
     raise or handle as it does."""

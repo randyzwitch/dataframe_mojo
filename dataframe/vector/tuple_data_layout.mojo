@@ -39,7 +39,7 @@ comptime _FIXED_STORAGE = [
 
 @always_inline
 def validity_bytes(count: Int) -> Int:
-    """ValidityBytes::SizeInBytes: one bit a value, rounded up to bytes."""
+    """One bit a value, rounded up to bytes."""
     return (count + 7) // 8
 
 
@@ -123,7 +123,7 @@ struct TupleDataLayout(Copyable, Movable):
         can_have_null: Bool = True,
         aggregate_sizes: List[Int] = List[Int](),
     ) raises:
-        """TupleDataLayout::Initialize(types, aggregates, validity_type):
+        """The row layout of `types`, then aggregate states:
         `aggregate_sizes` are the payload sizes of the aggregate states
         that follow the columns (each a multiple of 8)."""
         var nodes = List[TupleDataLayoutNode]()

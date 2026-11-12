@@ -31,12 +31,12 @@ from dataframe.sorting.sort_key import (
     has_row_key,
 )
 
-# topn_optimizer.cpp, TopN::CanOptimize: a limit over this many rows and
-# over 0.7% of the input sorts the whole input instead.
+# A limit over this many rows and over 0.7% of the input sorts the whole
+# input instead: a top-N heap tests every row and does log N work for each
+# that enters, and with a large N many rows enter, so the parallel full
+# sort is cheaper. Both are empirical choices.
 comptime _TOPN_LARGE_LIMIT = 5000
 comptime _TOPN_INPUT_SHARE = 0.007
-# physical_top_n.cpp, TopNHeap: SMALL_HEAP_THRESHOLD is not needed (it
-# chooses how payload is copied; rows are the payload here).
 
 
 def _sink_threads(rows: Int, threads: Int) -> Int:

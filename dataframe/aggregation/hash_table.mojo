@@ -800,8 +800,8 @@ def _vector_key(
     leading: Bool,
 ) raises:
     """A chunk's `count` rows of one key vector: each row's hash (combined
-    into the hashes of the keys before unless `leading`, as
-    VectorOperations::CombineHash) and key words, a null row setting `bit`
+    into the hashes of the keys before unless `leading`, so a row's hash
+    covers every key) and key words, a null row setting `bit`
     in its null word. A row's hash is the one the partitioner's
     `_hash_column` gives the same value in a column."""
     ref format = key.format
@@ -1598,11 +1598,11 @@ struct AggregateSink(Movable):
         count: Int,
         columns: List[Series] = List[Series](),
     ) raises:
-        """A data chunk's `count` rows (at most a batch) into the table
-        (`GroupedAggregateHashTable::AddChunk`): each row's group from the
+        """A data chunk's `count` rows (at most a batch) into the table:
+        each row's group from the
         group chunk's vectors `keys`, then the payload chunk's vectors
         `inputs` (a row count reads none) update the rows' states where
-        they are (`UpdateStates`). `hold` are the columns the keys' and
+        they are. `hold` are the columns the keys' and
         inputs' strings point into, held until the finish; `first` is the
         source row of the chunk's first.
 
@@ -1672,11 +1672,12 @@ struct AggregateSink(Movable):
         count: Int,
         columns: List[Series],
     ) raises -> Bool:
-        """`GroupedAggregateHashTable::UpdateAggregatesClustered`: the
-        chunk's rows clustered by the group ids at `gids` (0 for none) and
+        """The chunk's rows clustered by the group ids at `gids` (0 for none) and
         its states updated run by run; False, with nothing updated, when
         lookups are skipped or the chunk does not cluster. A run's state
-        row is its first row's group."""
+        row is its first row's group. Rows of one group often arrive
+        together (sorted or clustered input), and a run is folded into its
+        state with one lookup instead of one per row."""
         if gids == 0 or self.skip or not self._clustered_ready():
             return False
         if not self.clustered.try_build(gids, count):
@@ -1697,9 +1698,8 @@ struct AggregateSink(Movable):
         count: Int,
         columns: List[Series],
     ) raises -> Bool:
-        """`PerfectAggregateHashTable::AddChunkClustered`: the chunk's rows
-        clustered by their slots (in `groups`), each run's slot marked set
-        (with its first row) and its row found once (`InitializeStates`),
+        """The chunk's rows clustered by their slots (in `groups`), each
+        run's slot marked set (with its first row) and its row found once,
         the rows' addresses made only when some reduction still scatters,
         then the states updated run by run. False, with nothing updated,
         when the chunk does not cluster."""
@@ -1736,9 +1736,8 @@ struct AggregateSink(Movable):
         count: Int,
         columns: List[Series],
     ) raises:
-        """`RowOperations::UpdateStatesClustered`: the reductions with a run
-        kernel fold the chunk's runs; the others scatter through the rows'
-        addresses in `groups`."""
+        """The reductions with a run kernel fold the chunk's runs; the
+        others scatter through the rows' addresses in `groups`."""
         update_clustered(
             self.slots,
             self.kernels,
@@ -1777,7 +1776,7 @@ struct AggregateSink(Movable):
         columns: List[Series],
     ) raises:
         """The chunk's states, by the address of each row's group in
-        `groups` (`UpdateStates`)."""
+        `groups`."""
         _update_states(
             self.slots,
             inputs,
@@ -1800,8 +1799,9 @@ struct AggregateSink(Movable):
     def _perfect_groups(
         mut self, keys: List[KeyVector], first: Int, count: Int
     ) raises:
-        """`PerfectAggregateHashTable::AddChunk`'s group ids: each row's
-        slot from its keys' bits (`ComputeGroupLocation`) into `groups`.
+        """The perfect table's group ids: each row's slot from its keys'
+        bits (each key's offset from its minimum, the keys' bits side by
+        side) into `groups`, with no hashing or key comparison.
         Each path checks them against the table's size (statistics that do
         not hold for the data raise)."""
         # The locations are computed into the address vector itself, each
@@ -3039,9 +3039,9 @@ def _finalize_distinct(
 
 struct _PerfectScanJob(Job):
     """A range of a perfect hash table's group slots, [lo, hi): every
-    worker's rows of those slots combined into the first worker's
-    (`PerfectAggregateHashTable::Combine`), then the occupied slots read out
-    in slot order, each key rebuilt from the slot's bits (`Scan`)."""
+    worker's rows of those slots combined into the first worker's, then
+    the occupied slots read out in slot order, each key rebuilt from the
+    slot's bits."""
 
     var sinks: Int
     var held: Int

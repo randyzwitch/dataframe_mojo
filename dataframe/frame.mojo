@@ -2254,16 +2254,18 @@ struct DataFrame(Copyable, Sized, Writable):
         self, parts: List[Expr], batch_size: Int
     ) raises -> BoolColumn:
         """The mask of the AND of row-local `parts`, each evaluated only on
-        rows kept by earlier parts: ClickBench q37 compared all 10M titles
-        with "" although its counter and date parts keep few rows.
+        rows kept by earlier parts, so a costly part (a string comparison)
+        never runs on rows a cheap part already rejected.
 
         Parts reading only numbers run before parts reading strings, and
         otherwise in written order. Narrowing gathers the columns later
-        parts read, which pays when a part keeps at most an eighth of its
-        rows, or half when a string comparison is still to come. Past that
-        the remaining parts run together on the same rows and the masks
-        combine: PDS-H q6's year of lineitem dates keeps a seventh, and its
-        cheap numeric parts were 36% slower on gathered rows.
+        parts read, a copy that pays only when the later parts then do
+        much less work: when a part keeps at most an eighth of its rows,
+        or half when a string comparison, far costlier per row than the
+        gather, is still to come. Past that the remaining parts run
+        together on the same rows and the masks combine, since cheap
+        numeric parts cost less than the gather would. The fractions are
+        empirical choices.
 
         Parts comparing a numeric column with a constant go first, all of
         them in one pass (`fused_comparisons`), as if they were one part.
@@ -2588,15 +2590,14 @@ struct DataFrame(Copyable, Sized, Writable):
         ):
             # Distinct whole rows in any order are a group_by on every
             # column with no aggregates, which encodes on every worker
-            # (307K rows, 23K distinct: 3.5 ms against 10 through one
-            # dictionary; TPC-DS q35 takes three such uniques).
+            # instead of building one dictionary on one thread.
             return self.group_by(self.columns()).agg(List[Expr]())
         if keep == "any" or keep == "first":
             # Each key's first row is its id's representative. One worker
             # numbers ids by first occurrence, so those rows are already in
             # input order; bucketed ids are not, and the rows are put back
             # in input order by marking them. No counts or second pass over
-            # the ids (TPC-DS q35: three 80K-307K-row uniques).
+            # the ids.
             var encoded = self._subset_row_keys(subset)
             ref firsts = encoded.representatives
             var ordered = True

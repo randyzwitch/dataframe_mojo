@@ -66,8 +66,7 @@ def _group_segments(
     length: Int,
     mut segments: _Segments,
 ):
-    """A window's answers per row group (`RowGroup::CheckZonemap`), table
-    rows from `start`."""
+    """A window's answers per row group, table rows from `start`."""
     ref record = found.record[]
     var v = found.first
     while v < found.last:
@@ -168,11 +167,11 @@ def _sweep(
 def prune_scan(
     filters: TableFilterSet, columns: List[Series], height: Int
 ) raises -> Optional[ScanPruning]:
-    """The row groups of a table the filters' statistics do not rule out
-    (`RowGroup::CheckZonemap`): a row group is read when any of its
-    vectors may hold a row every filter keeps. None when no filtered
-    column has statistics. Skipping single vectors inside a row group
-    (`CheckZonemapSegments`) is the chunk loop's (`zonemap_rows`)."""
+    """The row groups of a table the filters' statistics do not rule out:
+    a row group is read when any of its vectors may hold a row every
+    filter keeps. None when no filtered column has statistics. Skipping
+    single vectors inside a row group is the chunk loop's
+    (`zonemap_rows`)."""
     var all = List[_Segments]()
     var any = False
     for filter in filters.filters:

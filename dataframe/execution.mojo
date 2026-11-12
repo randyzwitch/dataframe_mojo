@@ -1375,9 +1375,10 @@ def _conditional[
     if not grouped and _every_row(mask) and _null_otherwise(bound, index):
         # `when(c).then(x)` with null other rows: the branch's values under
         # a validity that adds the predicate, as a streamed reduction's
-        # input already took (`_feed`), rather than chosen row by row. The
-        # aggregate table's inputs are evaluated whole: TPC-DS q2's seven
-        # weekday sums spent 18% in `choose` and its masks. A mask that
+        # input already took (`_feed`), rather than chosen row by row:
+        # the values are reused as they are and only the validity is
+        # computed. The aggregate table's inputs are evaluated whole. A
+        # mask that
         # observes every row restricts nothing: the branch an enclosing
         # scalar `when` takes passes down a one-row true mask.
         return _masked_branch[width](
@@ -1914,8 +1915,8 @@ comptime _SUM_BLOCK = 1 << 30
 struct _ColumnStats(Copyable, Movable):
     """The sum, count, min and max of one column's valid rows [start,
     end), kept for the expressions of one batch that read the same
-    column (`_shifted_int_sum`: ClickBench q29's ninety sums of one
-    column plus a constant take one pass instead of ninety)."""
+    column (`_shifted_int_sum`: many sums of one column plus different
+    constants take one pass instead of one each)."""
 
     var column: Int
     var start: Int
@@ -1941,9 +1942,9 @@ def _shifted_int_sum(
     Exact in integers. The materialized form raises when a row's result
     leaves the expression's type, so the same pass takes the column's
     min and max and the shortcut is declined when either would; the
-    ordinary path then raises as before. ClickBench q29 sums a 16-bit
-    column plus a constant ninety times: a pass that wrote each sum's
-    input and read it back cost 0.8 ms a sum, this reads it once."""
+    ordinary path then raises as before. Materializing `col + c` would
+    write a full column and read it back for each sum; this reads the
+    column once, however many such sums share it."""
     if node.op != SUM and node.op != MEAN:
         return False
     ref inner = bound.expr._nodes[node.left]
@@ -2624,8 +2625,8 @@ def direct_reductions(
     """Whether every expression is one reduction that runs as one scan of
     its column (`_direct_scan`, or the `sum(col op c)` shape), writing no
     temporary: such a batch can be as long as the input allows, where one
-    that materializes per-batch values must fit them in cache (TPC-DS q9's
-    fifteen conditional sums: 25 ms at 64K rows a batch, 34 at 90K)."""
+    that materializes per-batch values must fit them in cache, or every
+    temporary is written to memory and read back."""
     for expression in expressions:
         var bound = bind(expression, columns)
         var root = len(bound.expr._nodes) - 1
@@ -2730,10 +2731,9 @@ def _coded_compare[
     dictionary codes: the literal is compared with every dictionary value
     once and each row takes its value's answer by code, in one pass over
     the window's codes. None when the node is not of that shape or the
-    dictionary is not small next to the rows (TPC-DS q59 compares
-    d_day_name with seven day names over 10M joined rows, in the 4K-row
-    batches of a streamed reduction, so the per-batch cost has to stay
-    near the cost of the row loop itself)."""
+    dictionary is not small next to the rows: comparing every dictionary
+    value costs work per batch, and in the small batches of a streamed
+    reduction it must stay near the cost of the row loop itself."""
     ref node = bound.expr._nodes[index]
     ref left = bound.expr._nodes[node.left]
     ref right = bound.expr._nodes[node.right]
@@ -2832,8 +2832,8 @@ def _on_dictionary[
     """A row-wise expression over a categorical, evaluated on each
     dictionary value and on null, then gathered by every row's code. A
     String column with dictionary codes beside it is read as that
-    categorical (TPC-DS q59 compares d_day_name with seven day names over
-    10M joined rows; the bytes were compared per row)."""
+    categorical: each distinct value is evaluated once instead of once
+    per row, and a row reads its answer by code."""
     var coded = columns[source].copy()
     if coded.dtype() == DataType.STRING:
         var as_codes = coded._dictionary_codes()
@@ -3085,8 +3085,7 @@ def _full[
 ) raises -> Series:
     """Materialize a row-valued node over every row, batch by batch; a
     column, or a window or over() already computed for every row, as it
-    is (TPC-DS q51's running maxima copied 611K rows in 1,024-row batches
-    into each window's input and out of its result)."""
+    is: copying it batch by batch would only move every row twice."""
     var whole = _whole(bound, columns, states, index, height, grouped)
     if whole:
         return whole.take()
@@ -4463,9 +4462,8 @@ def _whole_masked_branch[
     """`when(c).then(x)` with null other rows over every row, when `x` is a
     whole numeric column: reuse `x`'s values with a validity mask that
     includes the predicate, rather than copying values batch by batch
-    into a new column (TPC-DS q2's seven weekday
-    sums copied their input seven times a morsel, 14% of the query). Only
-    the predicate is evaluated in batches. None otherwise."""
+    into a new column, a copy of the input for every such expression.
+    Only the predicate is evaluated in batches. None otherwise."""
     ref node = bound.expr._nodes[index]
     if (
         node.left < 0

@@ -903,8 +903,7 @@ struct VectorExpression(Copyable, Movable):
                 self.ints[i] = Int64(self.decimals[i])
 
     def _can_throw(self, index: Int) -> Bool:
-        """Whether evaluating node `index`'s subtree may raise
-        (Expression::CanThrow): arithmetic and casts check overflow, and the
+        """Whether evaluating node `index`'s subtree may raise: arithmetic and casts check overflow, and the
         at-rest evaluator may raise for anything; comparisons, logic, null
         tests and IN lists never do, and a constant was computed when
         compiling."""
@@ -1105,8 +1104,7 @@ struct VectorExpression(Copyable, Movable):
         """The entries of node `index`'s unified format the computed rows
         read, as the address of `count` UInt32 indices, or 0 when computed
         row k reads entry k: the format's selection composed with the
-        rows' when both are set (SelectionVector::Slice), else whichever
-        is."""
+        rows' when both are set, else whichever is."""
         var own = self.formats[index].sel
         var through = self.by_chunk_row[index] and rows.is_set()
         if not through:
@@ -2284,8 +2282,7 @@ struct VectorExpression(Copyable, Movable):
         count: Int,
         target: SelectionVector,
     ) raises -> Int:
-        """ExpressionExecutor::Select for a Boolean expression: the chunk
-        rows among `rows` it is true (and not null) for, written to
+        """For a Boolean expression: the chunk rows among `rows` it is true (and not null) for, written to
         `target` in order; how many."""
         if not self.ready:
             self._allocate()
@@ -2303,16 +2300,18 @@ struct VectorExpression(Copyable, Movable):
         target: SelectionVector,
         false_target: Int = 0,
     ) raises -> Int:
-        """ExpressionExecutor::Select for node `index`: the rows among
+        """For node `index`: the rows among
         `rows` it is true for into `target` in row order, and when
         `false_target` is set the others there.
 
-        AND (SelectAnd) runs each child on the rows the ones before kept;
-        an AND of a lower and an upper bound on one column runs as one
-        BETWEEN pass. OR (SelectOr) runs each child on the rows the ones
-        before rejected, appends each child's true rows, then sorts them
-        (SelectionVector::Sort). Both run their children in the order the
-        node's AdaptiveFilter keeps, timed per call. A comparison of a column with a constant
+        AND runs each child on the rows the ones before kept, so later
+        children see fewer rows; an AND of a lower and an upper bound on
+        one column runs as one BETWEEN pass. OR runs each child on the
+        rows the ones before rejected, appends each child's true rows,
+        then sorts them back into row order. Both run their children in
+        the order the node's AdaptiveFilter keeps, timed per call, so the
+        cheapest, most selective child tends to run first. A comparison
+        of a column with a constant
         selects over the column's vector; anything else is evaluated in
         lanes and its true rows kept."""
         if count == 0:
@@ -2617,7 +2616,7 @@ struct VectorExpression(Copyable, Movable):
         column: Int,
     ) raises:
         """The expression over every row of `input`, as column `column` of
-        `output`: a column it reads as it is (Vector::Reference), a
+        `output`: a column it reads as it is, with no copy, a
         constant as a constant vector, anything computed into `output`'s
         cache for that column."""
         var root = self.root

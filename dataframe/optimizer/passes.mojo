@@ -344,9 +344,9 @@ def plan_filter_shared_subplans(mut self: QueryContext):
     filter above it. The retained result then contains every row any reader
     needs while discarding rows none can observe."""
     # Copies need two aggregates or joins alike in their keys, expression
-    # count and subtree size at least; most plans have none, and
-    # subplan classes are not worth finding for them (ClickBench q29's
-    # ninety sums, TPC-DS q41's two small distincts).
+    # count and subtree size at least. This one pass over the nodes finds
+    # whether any such pair exists; most plans have none, and for them
+    # the costlier search for subplan classes is skipped.
     var subtree = List[Int](capacity=len(self._nodes))
     var shapes = Dict[String, Int]()
     var alike = False

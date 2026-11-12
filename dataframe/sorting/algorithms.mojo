@@ -6,15 +6,16 @@ Ported from DuckDB's third_party sources over this package's key records
 common/sorting/buffered_merge.hpp, and the in-place MSD radix sort of
 ska_sort.hpp (Malte Skarupke, with DuckDB's changes: radix passes over the
 first key word only, skippable bytes, and a vergesort over the full
-comparison for a bucket whose first word is equal). Constants are theirs:
-pdqsort's insertion threshold 24, ninther threshold 128, block 64;
-vergesort's minimum 128; ska_sort's comparison threshold 128 and American
-flag threshold 1024.
+comparison for a bucket whose first word is equal). The constants are the
+original authors' empirically tuned values: pdqsort's insertion threshold
+24, ninther threshold 128, block 64; vergesort's minimum 128; ska_sort's
+comparison threshold 128 and American flag threshold 1024.
 
-`sorted_run.cpp` sorts a run with `vergesort(fallback = ska_sort)`, and
-`sorted_run_merger.cpp` merges a partition with
-`vergesort(fallback = pdqsort_branchless)`; `vergesort` takes the choice as
-`RADIX`.
+vergesort finds the input's existing sorted runs in linear time and sorts
+only the stretches between them with its fallback. A run of unsorted rows
+falls back to the radix sort, which beats comparison sorts on many
+fixed-width keys; a merge partition, a few already sorted pieces, falls
+back to `pdqsort_branchless`. `vergesort` takes the choice as `RADIX`.
 """
 from std.bit import byte_swap, log2_floor
 from std.memory import Pointer, unsafe_memcmp
@@ -33,8 +34,8 @@ comptime _AMERICAN_FLAG_SORT_THRESHOLD = 1024
 
 
 struct SortKeys[W: Int, VAR: Bool](ImplicitlyCopyable, Movable):
-    """Key records at `base`, `R` words each (sort_key.hpp's SortKey with
-    a payload). Fixed: `W` key words, then the payload (the row id).
+    """Key records at `base`, `R` words each (a normalized key with a
+    payload). Fixed: `W` key words, then the payload (the row id).
     Variable (`VAR`): the key's first 8 bytes, its byte size, the address
     of the whole key, then the payload. Key words are stored so that
     unsigned word order is the key bytes' order."""

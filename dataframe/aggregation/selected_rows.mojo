@@ -173,8 +173,8 @@ def _distinct_counts[
     """Distinct values per group: the bucket's values are laid out by group
     (a counting sort on the group number), then each group's segment is
     counted on its own. A set of (group, value) pairs for the whole bucket
-    held 2n slots, so most of its probes missed the cache (PDS-H q21 counts
-    suppliers for 1.5M orders); segments are short and stay in cache, and
+    holds 2n slots, so with many groups most of its probes miss the
+    cache; segments are short and stay in cache, and
     when a group's rows are adjacent the layout is written in sequence.
     A null counts once per group unless ignore_nulls is set."""
     var values = column._ptr()
@@ -285,9 +285,9 @@ def _quantiles[
 ) raises -> Series:
     """Each group's quantile of its non-null values, as `quantile_in` takes
     it. The values go into one buffer in group order (a count per group,
-    then a cursor per group), where a list per group grew by appends and
-    was copied again for selection: H2O q6 takes medians over 10,000
-    groups of 1,000 rows."""
+    then a cursor per group), rather than a list per group that grows by
+    appends and is copied again for selection: one allocation instead
+    of one per group, and no second copy."""
     var nulls = column.null_count() > 0
     var values = column._ptr()
     var starts = List[Int](length=group_count + 1, fill=0)

@@ -83,37 +83,52 @@ from dataframe.vector.types import (
     physical_size,
 )
 
-# ht_entry_t (execution/ht_entry.hpp): the upper 16 bits are the salt, the
-# lower 48 the row's address.
+# A table entry is one 64-bit word: the upper 16 bits are the salt (bits
+# of the key's hash), the lower 48 the row's address. User-space
+# addresses fit in 48 bits, so the salt rides along for free and most
+# non-matching entries are rejected without reading the row.
 comptime SALT_MASK = UInt64(0xFFFF000000000000)
 comptime POINTER_MASK = UInt64(0x0000FFFFFFFFFFFF)
-# JoinHashTable::USE_SALT_THRESHOLD: salts are compared on probes only once
-# the table no longer fits the CPU cache.
+# Salts are compared on probes only once the table no longer fits the
+# CPU cache: in cache, reading the row to compare the key is cheap, and
+# the salt test is extra work. 8,192 entries are 64 KB, about a core's L2
+# share; the value is an empirical choice.
 comptime USE_SALT_THRESHOLD = 8192
-# JoinHashTable::DEFAULT_LOAD_FACTOR and MINIMUM_CAPACITY.
+# The table has twice as many slots as rows, so at most half are full
+# and linear-probing chains stay short. Small builds still get 16,384
+# slots (128 KB): the memory is trivial and the chains are shorter.
+# Both are empirical choices.
 comptime DEFAULT_LOAD_FACTOR = 2.0
 comptime MINIMUM_CAPACITY = 16384
-# HashJoinGlobalSinkState::initial_radix_bits (num_threads < 100).
+# Each sink thread splits its rows into 16 partitions by hash: enough to
+# finalize partitions in parallel, few enough that every partition's
+# write position stays in cache. An empirical choice.
 comptime INITIAL_RADIX_BITS = 4
 # Hash and prefetch BLOCK_SIZE probe keys together once the table exceeds
 # MIN_PREFETCH_BUCKETS; smaller tables are expected to remain in cache.
 comptime BLOCK_SIZE = 256
 comptime MIN_PREFETCH_BUCKETS = 32768
-# PerfectHashJoinExecutor::CanDoPerfectHashJoin MAX_BUILD_SIZE: the widest
-# key range a perfect hash join addresses directly.
+# The widest key range a perfect hash join addresses directly: one slot
+# per key value, so a wider range costs memory for keys that may not
+# exist. Bounds the slot array at about 8 MB; an empirical choice.
 comptime PERFECT_MAX_BUILD_SIZE = 1048576
-# DictionaryEmissionActivation (join_hashtable.cpp).
+# Dictionary emission gathers every build row's output once, then emits
+# probe results as row numbers into it. That one gather pays off only
+# when the probe side is much larger than the build side (100 times, and
+# at least 262,144 rows) and the gathered columns are small enough (8 MB)
+# to stay in cache while probe results index them. Empirical choices.
 comptime _DICT_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 comptime _DICT_MIN_PROBE_ROWS = 262144
 comptime _DICT_PROBE_BUILD_RATIO = 100
 
 # How a key field compares: by its bytes, as a float (every NaN equal,
-# -0.0 equal to 0.0), or as a string_t.
+# -0.0 equal to 0.0), or as a 16-byte string record.
 comptime _FIX = 0
 comptime _F32 = 1
 comptime _F64 = 2
 comptime _TEXT = 3
-# A string_t's inline capacity (common/types/string_type.hpp INLINE_LENGTH).
+# A 16-byte string record's inline capacity: 16 bytes less the 4-byte
+# length.
 comptime _INLINE = 12
 
 
@@ -506,10 +521,10 @@ struct _TableData(Movable):
 
 
 struct _SinkJob(Job):
-    """One HashJoinSink thread: build rows [start, start + count) chunk by
-    chunk into its own RadixPartitionedTupleData (PhysicalHashJoin::Sink
-    and JoinHashTable::Build): the keys and the build row referenced, the
-    hash computed, the rows with a null key left out (PrepareKeys)."""
+    """One build thread: build rows [start, start + count) chunk by
+    chunk into its own RadixPartitionedTupleData, so threads never
+    contend: the keys and the build row referenced, the hash computed,
+    the rows with a null key left out (a null key never matches)."""
 
     var keys: List[Series]
     var payload: List[Series]
@@ -881,7 +896,8 @@ def _perfect_heads(
     heads: Int,
 ):
     """Each probe row's build row plus one (0 for none), looked up by `key -
-    base` (PerfectHashJoinExecutor::ProbePerfectHashTable)."""
+    base`: the key's offset in the build range is its slot, so there is
+    no hashing and no key comparison."""
     var valid = _validity(key)
     var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid[0])
     var set = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=slot_bits)
@@ -1114,8 +1130,9 @@ struct JoinHashTable(Copyable, Movable):
             return
         ref rows = self.data[].collection
         if perfect and not keys_only and len(unchunked) == 1:
-            # PerfectHashJoinExecutor::BuildPerfectHashTable, else (a
-            # repeated key, a wide range) the hash table.
+            # Slots addressed by key value when every key is unique in a
+            # narrow range, else (a repeated key, a wide range) the hash
+            # table.
             var filled_rows = List[UInt64]()
             var filled_slots = List[UInt32]()
             var slots = _perfect_slots(
@@ -1206,7 +1223,8 @@ struct JoinHashTable(Copyable, Movable):
             self._build_dictionary_arrays()
 
     def _can_use_dictionary_emission(self, probe_cardinality: Int) -> Bool:
-        """JoinHashTable::CanUseDictionaryEmission."""
+        """Whether to gather the build side once and emit probe results
+        as row numbers into it (see `_DICT_MAX_PAYLOAD_BYTES`)."""
         if len(self.output_columns) == 0 or self.rows_stored == 0:
             return False
         if probe_cardinality < _DICT_MIN_PROBE_ROWS:
@@ -1268,7 +1286,7 @@ struct JoinHashTable(Copyable, Movable):
         self.use_dictionary = True
 
     def _build_dictionary_arrays(mut self) raises:
-        """JoinHashTable::BuildDictionaryArrays: every output column into a
+        """Gather every output column into a
         dictionary over the rows in collection order (one extra null row
         last for a left join's unmatched probe rows), each row's number
         stored where its next pointer was, and the next pointers kept in
@@ -1346,7 +1364,7 @@ struct JoinHashTable(Copyable, Movable):
         return -1
 
     def use_salt(self) -> Bool:
-        """JoinHashTable::UseSalt."""
+        """Whether probes compare salts (see `USE_SALT_THRESHOLD`)."""
         return self.capacity > USE_SALT_THRESHOLD
 
     def build_row(self, pointer: UInt64) -> Int:
@@ -1463,7 +1481,8 @@ struct ScanStructure(Movable):
 
     def probe(mut self, keys: List[Series], start: Int, count: Int) raises:
         """Probe rows [start, start + count) of the unchunked `keys` (at
-        most STANDARD_VECTOR_SIZE rows): JoinHashTable::Probe."""
+        most STANDARD_VECTOR_SIZE rows): each row's first candidate
+        entry, followed by `next` to find its matches."""
         self.count = count
         self.row = 0
         self.cursor = 0
@@ -1474,7 +1493,7 @@ struct ScanStructure(Movable):
         for i in range(count):
             heads[unsafe_offset=i] = 0
         if self.table.perfect:
-            # ProbePerfectHashTable: the key's slot holds its build row,
+            # The key's slot holds its build row,
             # emitted by `next` with no chain to walk.
             _perfect_heads(
                 keys[0],

@@ -19,20 +19,24 @@ from dataframe.vector.types import (
     SelectionVector,
 )
 
-# RadixPartitioning::MAX_RADIX_BITS.
+# At most 4,096 partitions: beyond that, each partition's write position
+# no longer stays in cache while rows are scattered, and the partitions
+# get too small to be worth a task each. An empirical choice.
 comptime MAX_RADIX_BITS = 12
 
 
 @always_inline
 def number_of_partitions(radix_bits: Int) -> Int:
-    """RadixPartitioning::NumberOfPartitions."""
+    """The partitions `radix_bits` hash bits address."""
     return 1 << radix_bits
 
 
 @always_inline
 def radix_partition(hash: UInt64, radix_bits: Int) -> Int:
-    """RadixPartitioning::ApplyMask: the `radix_bits` bits of `hash` below
-    its 16 salt bits (Shift = 48 - radix_bits)."""
+    """The `radix_bits` bits of `hash` just below its 16 salt bits (shift
+    48 - radix_bits): the bits a hash table indexes by are the low ones
+    and the salt the top 16, so partition bits taken here stay
+    independent of both."""
     var shift = UInt64(48 - radix_bits)
     var mask = (UInt64(1) << UInt64(radix_bits)) - 1
     return Int((hash >> shift) & mask)
