@@ -1,4 +1,8 @@
-"""Worker dispatch must preserve subnormal inputs and results."""
+"""Worker dispatch must preserve subnormal inputs and results.
+
+Changing the thread runtime must not turn small nonzero values into zero by
+enabling flush-to-zero arithmetic inside worker callbacks.
+"""
 # contract-group: execution.lifecycle
 from std.memory import bitcast
 from std.testing import assert_equal
