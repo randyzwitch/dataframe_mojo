@@ -1201,7 +1201,7 @@ def _probe_start(
     var acc = _StateAccumulator(workers, split_groups)
     # A grouping the pipeline does not run (its steps or order are the
     # batches'): the batches are collected for the eager group-by, which
-    # is the aggregate table over them (`PhysicalHashAggregate::Sink`),
+    # is the aggregate table over them,
     # and reduced into one state each time they reach the budget.
     var collecting = len(expressions) > 0 and len(keys) > 0
     var collected = List[DataFrame]()
