@@ -337,6 +337,8 @@ tables, the data generator, the full Unicode 17 conformance corpus, and Unicode
 15 Alphabetic ranges. It also owns Unicode 16 property lookup and aliases,
 the frozen regex character classes and simple folding orbits, code-point range
 operations, alphabetic title casing, and shared UTF-8 append/width primitives.
+Code-point counting, boundary traversal, slice bounds, reversal, and reusable
+character-set trimming also live in that package.
 It imports only the Mojo standard library. Pixi resolves
 the [public repository](https://github.com/randyzwitch/unicode_mojo) at the Git
 revision pinned in the workspace and package dependencies.
@@ -347,6 +349,11 @@ unchanged-buffer reuse and the output builder. Title casing passes borrowed
 row spans and the shared output buffer to the package's reusable title caser.
 Its existing Alphabetic word rule and adjacent-neighbor final-sigma rule are
 preserved. JSON and shapefile text decoders use the package's UTF-8 encoder.
+Length, slice, reverse, trim, padding, and empty-pattern count adapters consume
+the shared text primitives. Dataframe retains string-view ownership, nulls,
+padding/sign rules, and the existing ASCII-whitespace default for empty strip
+arguments; the shared trim set requires an explicit character set.
+Vector expression slices and display truncation use those same shared routines.
 The regex parser, NFA/DFA engines, compiled class directories, and vectorized
 matching remain in dataframe; they consume the package's properties, simple
 folding, and range operations through direct imports.
