@@ -298,9 +298,9 @@ def plan_collect_shared(
 
 
 struct _StreamInputs(Movable):
-    """The pipelines of a stream's computed inputs, not yet run."""
+    """A stream's computed inputs and the joins they are built for, not
+    yet scheduled."""
 
-    var jobs: List[_SubplanPipeline]
     var metas: List[MetaPipeline]
     var wanted: List[Int]
     var keys: List[List[String]]
@@ -311,7 +311,6 @@ struct _StreamInputs(Movable):
     def __init__(out self):
         self.coalesces = List[Bool]()
         self.probe_estimates = List[Int]()
-        self.jobs = List[_SubplanPipeline]()
         self.metas = List[MetaPipeline]()
         self.wanted = List[Int]()
         self.keys = List[List[String]]()
@@ -383,19 +382,6 @@ def plan_schedule_inputs(
         inputs.coalesces.append(True)
         inputs.probe_estimates.append(-1)
         inputs.metas.append(MetaPipeline(META_REGULAR))
-    for k in range(len(inputs.wanted)):
-        inputs.jobs.append(
-            _SubplanPipeline(
-                self.copy(),
-                inputs.wanted[k],
-                True,
-                batch_size,
-                inputs.keys[k],
-                inputs.hows[k],
-                inputs.coalesces[k],
-                inputs.probe_estimates[k],
-            )
-        )
     return inputs^
 
 
