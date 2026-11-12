@@ -15,6 +15,7 @@ from dataframe.join_type import (
     JOIN_SEMI,
     join_emits_build_rows,
 )
+from dataframe.parallel import configured_workers
 from dataframe.scheduler import (
     SchedulablePipeline,
 )
@@ -40,11 +41,14 @@ def finish_build(
     how: Int,
     coalesce: Bool = True,
     probe_estimate: Int = -1,
+    defer_finalize: Bool = False,
 ) raises -> Optional[JoinHashTable]:
     """Finish a join build by retaining its columns and constructing its key
     index. Return no index for absent or unsupported keys. Semi/anti joins
     need no build payload because they emit only the preserved side.
-    probe_estimate describes the expected probe cardinality."""
+    probe_estimate describes the expected probe cardinality.
+    `defer_finalize`: the caller's finish event runs the table's finalize
+    tasks (`JoinHashTable.finalize_tasks`)."""
     for column in built._columns:
         if column.is_chunked():
             built = built.rechunk()
@@ -97,6 +101,7 @@ def finish_build(
         keys_only=keys_only_join(how),
         probe_estimate=probe_estimate,
         propagate=join_emits_build_rows(how),
+        defer_finalize=defer_finalize,
     )
 
 
@@ -170,4 +175,20 @@ struct _SubplanPipeline(SchedulablePipeline):
                 self.how,
                 self.coalesce,
                 self.probe_estimate,
+                defer_finalize=True,
             )
+
+    def max_finalize_tasks(self) -> Int:
+        return configured_workers() if len(self.keys) > 0 else 0
+
+    def finalize_tasks(mut self) raises -> Int:
+        if not self.built:
+            return 0
+        return self.built.value().finalize_tasks()
+
+    def finalize_task(mut self, task: Int) raises:
+        self.built.value().finalize_task(task)
+
+    def finish_finalize(mut self) raises:
+        if self.built:
+            self.built.value().finish_finalize()

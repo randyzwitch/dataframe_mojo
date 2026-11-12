@@ -191,7 +191,8 @@ def _builds_on_left(
     if (
         node.sides_fixed
         or len(node.names) == 0
-        or node.how not in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI]
+        or node.how
+        not in [JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_SEMI, JOIN_ANTI]
     ):
         return False
     var lhs = plan_side_estimate(self, stats, node.left)
@@ -207,15 +208,20 @@ def _builds_on_left(
     var left_cost = max(Float64(left_width) * Float64(lhs), 8.0)
     var right_cost = max(Float64(right_width) * Float64(rhs), 8.0)
     var swap = False
-    # JoinFilterPushdownUtil::JoinTypeIsSupported: inner and semi joins
-    # filter their probe (a left join keeps every probe row, an anti
-    # join's filter would need inverting); flipped, an inner, right and
-    # right semi join do.
-    if node.how == JOIN_INNER or node.how == JOIN_SEMI:
+    # A filter built from the build side's keys may drop probe rows only
+    # when an unmatched probe row produces no output: inner, semi and right
+    # joins (a left join keeps every probe row, an anti join's filter would
+    # need inverting). Flipped, an inner, right and right semi join can,
+    # a left join (a flipped right join) cannot.
+    if (
+        node.how == JOIN_INNER
+        or node.how == JOIN_SEMI
+        or node.how == JOIN_RIGHT
+    ):
         right_cost /= _filter_build_bonus(
             self, node.left, node.names, node.right, rhs
         )
-    if node.how != JOIN_ANTI:
+    if node.how != JOIN_ANTI and node.how != JOIN_RIGHT:
         left_cost /= _filter_build_bonus(
             self, node.right, node.right_keys, node.left, lhs
         )
@@ -345,6 +351,54 @@ def _flip_left_join(
     return True
 
 
+def _flip_right_join(
+    mut plan: QueryContext, at: Int, batch_size: Int
+) raises -> Bool:
+    """Flip the right join at `at` into a left join with the inputs
+    swapped, which gives the same rows: its right input probes, keeping
+    every row, and its left builds, under a selection that restores the
+    join's columns and their order. False, with nothing changed, when the
+    sides share a column name, a key repeats, or the key types differ or
+    need the general join (categorical, nested)."""
+    var node = plan._nodes[at].copy()
+    for keys in [node.names.copy(), node.right_keys.copy()]:
+        for i in range(len(keys)):
+            for j in range(i):
+                if keys[i] == keys[j]:
+                    return False
+    var left = plan._execute(node.left, True, False, batch_size)
+    var right = plan._execute(node.right, True, False, batch_size)
+    var left_names = left.columns()
+    for name in right.columns():
+        if name in left_names:
+            return False
+    for i in range(len(node.names)):
+        var ltype = left.column(node.names[i]).dtype()
+        var rtype = right.column(node.right_keys[i]).dtype()
+        if (
+            ltype != rtype
+            or ltype.is_categorical()
+            or ltype.is_nested()
+            or ltype.is_struct()
+        ):
+            return False
+    var exprs = List[Expr]()
+    for name in plan._execute(at, True, False, batch_size).columns():
+        exprs.append(col(name))
+    var join = node.copy()
+    join.left = node.right
+    join.right = node.left
+    join.names = node.right_keys.copy()
+    join.right_keys = node.names.copy()
+    join.how = JOIN_LEFT
+    join.text = "left"
+    join.sides_fixed = True
+    plan._nodes.append(join^)
+    plan._nodes[at] = _select_node(left=len(plan._nodes) - 1, exprs=exprs)
+    trace_path("lazy.swap_right_join_sides")
+    return True
+
+
 def _flip_semi_join(
     mut plan: QueryContext, at: Int, batch_size: Int
 ) raises -> Bool:
@@ -408,6 +462,9 @@ def plan_build_probe_sides(
                 changed = True
         elif how == JOIN_LEFT:
             if _flip_left_join(plan, at, batch_size):
+                changed = True
+        elif how == JOIN_RIGHT:
+            if _flip_right_join(plan, at, batch_size):
                 changed = True
         elif _flip_semi_join(plan, at, batch_size):
             changed = True
