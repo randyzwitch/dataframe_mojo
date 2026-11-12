@@ -793,8 +793,8 @@ struct _GroupSortJob(Job):
     var order: Int
     var flags: Int
     var stable: Bool
-    # Ranks evaluated over the task's rows once they are sorted (the
-    # GETDATA stage of the same hash groups, no barrier between).
+    # Ranks evaluated over the task's rows as soon as they are sorted, by
+    # the same task: no other group's work has to finish first.
     var rank: _RankOut
 
     def __init__(
@@ -1409,9 +1409,10 @@ def rank_window(
     ranks peers in input order.
 
     Ranks are computed in sorted order and written straight to their
-    rows. With partition keys, each hash group task ranks its own rows
-    right after sorting them (a WindowHashGroup's SORT, MASK and GETDATA
-    stages run by one task, with no barrier between groups). One
+    rows. With partition keys, each hash group task sorts its rows, marks
+    their partition and peer boundaries and ranks them in one go: a hash
+    group holds whole partitions, so its ranks depend on no other group
+    and no thread waits for the others. One
     partition is ranked in parallel ranges of the full sort, each starting
     from the state its predecessors carry in."""
     var code = rank_method(method)
