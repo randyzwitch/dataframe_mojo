@@ -6,7 +6,6 @@ from std.sys import stderr
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, LazyFrame, Series, col
 from dataframe.lazy import (
-    _many_groups,
     _stream_split_groups,
     _stream_collect_bytes,
 )
@@ -274,20 +273,11 @@ def test_group_strategy_scalar_models_anchor_distinct_classes_and_median() raise
     assert_true(not model.last_valid)
 
 
-def test_group_decision_density_boundaries_and_scoped_environment_restore() raises:
+def test_group_settings_and_scoped_environment_restore() raises:
     var captured = StrategyTrace()
     print("literal trace anchor", file=stderr)
     assert_equal(captured.text(), "literal trace anchor\n")
     _ = captured^
-    # Literal threshold anchors distinguish exact-sample density from a
-    # smaller sample's extrapolation. These are actual strategy eligibility.
-    assert_equal(_many_groups(31, 64, 64, 32), False)
-    assert_equal(_many_groups(32, 64, 64, 32), True)
-    assert_equal(_many_groups(32, 256, 256, 32), True)
-    assert_equal(_many_groups(32, 257, 257, 32), False)
-    assert_equal(_many_groups(8, 64, 1024, 32), True)
-    assert_equal(_many_groups(7, 64, 1024, 32), False)
-    assert_equal(_many_groups(8, 65, 1024, 32), False)
     var previous = getenv(
         "DATAFRAME_TEST_GROUP_ENV", "\x00missing group setting"
     )
@@ -453,7 +443,7 @@ def test_collect_threshold_counts_long_payloads_beyond_row_width_estimates() rai
     _ = split^
 
 
-def test_selective_joins_decide_from_held_rows_at_end_and_keep_few_group_states() raises:
+def test_selective_joins_collect_their_rows_for_the_eager_group_by() raises:
     var split = ScopedEnvironment("DATAFRAME_STREAM_SPLIT_GROUPS", "32")
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "1")
     var budget = ScopedEnvironment(
@@ -463,9 +453,8 @@ def test_selective_joins_decide_from_held_rows_at_end_and_keep_few_group_states(
     for groups in [7, 32]:
         var observed = StrategyTrace()
         var raw = _source(4096, groups, 128, 1)
-        # One row per128 survives; only32rows reach the reducer, below
-        # the64-row decision threshold. The first kept row is127: initial
-        # join-grown64-row batches can therefore be empty.
+        # One row per 128 survives; only 32 rows reach the reducer. The
+        # first kept row is 127: initial batches can therefore be empty.
         for batch in [16, 127, 128, 257]:
             for ordered in [False, True]:
                 var actual = _plan(raw, ordered).collect(
@@ -481,10 +470,9 @@ def test_selective_joins_decide_from_held_rows_at_end_and_keep_few_group_states(
         _assert_groups(profiled[0], 4096, groups, True, 128, 1)
         _assert_profile(profiled[1], 32, groups)
         var paths = observed.text()
-        assert_equal(
-            "dataframe-path: lazy.collect_group_by\n" in paths,
-            groups == 32,
-        )
+        # The ordered grouping over a join runs on the batches, which
+        # collect their rows for one eager group-by.
+        assert_true("dataframe-path: lazy.collect_group_by\n" in paths)
         assert_equal(
             "dataframe-path: lazy.collect_group_by_bounded\n" in paths,
             False,
