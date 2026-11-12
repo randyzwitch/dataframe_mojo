@@ -85,8 +85,10 @@ binaries in alternating order on an otherwise idle machine. Do not apply the
 prototype to a production checkout. All benchmark results are checked outside
 the timed sections; sorting checks the complete permutation and stable ties.
 
-Raw samples are retained in the adjacent `.txt` files. Pool columns are
+Raw samples are retained in the [measurement commit](https://github.com/randyzwitch/dataframe_mojo/tree/5fd07456b6cc677504254fcee250aafa77345cb9/benchmarks/experiments/max_cpu_workers),
+following the repository rule that result dumps stay out of the current tree.
+Pool columns are
 `workers claim loops jobs fresh_pool repetition nanoseconds_per_round`.
 Sort columns are `rows workers repetition nanoseconds`. Sort samples exclude
 the first warmup. `base` denotes the unchanged implementation; `next` denotes
-the preserved pool patch. `r2`/`r3` are repeat process runs.
+the preserved pool patch. `r2`/`r3`/`r4` are repeat process runs.
