@@ -208,10 +208,11 @@ def _builds_on_left(
     var left_cost = max(Float64(left_width) * Float64(lhs), 8.0)
     var right_cost = max(Float64(right_width) * Float64(rhs), 8.0)
     var swap = False
-    # JoinFilterPushdownUtil::JoinTypeIsSupported: inner, semi and right
-    # joins filter their probe (a left join keeps every probe row, an anti
-    # join's filter would need inverting); flipped, an inner, right and
-    # right semi join do, a left join (a flipped right join) does not.
+    # A filter built from the build side's keys may drop probe rows only
+    # when an unmatched probe row produces no output: inner, semi and right
+    # joins (a left join keeps every probe row, an anti join's filter would
+    # need inverting). Flipped, an inner, right and right semi join can,
+    # a left join (a flipped right join) cannot.
     if (
         node.how == JOIN_INNER
         or node.how == JOIN_SEMI
@@ -353,12 +354,12 @@ def _flip_left_join(
 def _flip_right_join(
     mut plan: QueryContext, at: Int, batch_size: Int
 ) raises -> Bool:
-    """Flip the right join at `at` into a left join (`FlipChildren` with
-    `InverseJoinType`): its right input probes, keeping every row, and
-    its left builds, under a selection that restores the join's columns
-    and their order. False, with nothing changed, when the sides share a
-    column name, a key repeats, or the key types differ or need the
-    general join (categorical, nested)."""
+    """Flip the right join at `at` into a left join with the inputs
+    swapped, which gives the same rows: its right input probes, keeping
+    every row, and its left builds, under a selection that restores the
+    join's columns and their order. False, with nothing changed, when the
+    sides share a column name, a key repeats, or the key types differ or
+    need the general join (categorical, nested)."""
     var node = plan._nodes[at].copy()
     for keys in [node.names.copy(), node.right_keys.copy()]:
         for i in range(len(keys)):
