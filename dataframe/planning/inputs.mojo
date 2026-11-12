@@ -34,13 +34,6 @@ from std.memory import (
 )
 
 
-def _in_rows(dtype: DataType) -> Bool:
-    """Whether a build column's output is gathered from the rows
-    (`GatherRHS`); a string or nested column is read from the build frame
-    by row number instead."""
-    return not dtype.is_nested() and dtype.physical() != DataType.STRING
-
-
 def finish_build(
     mut built: DataFrame,
     keys: List[String],
@@ -78,10 +71,9 @@ def finish_build(
             if keys[k] == column.name():
                 key_at = k
         if key_at < 0:
-            # Keep String and nested columns in the build frame and read them
-            # by original row number, so probing does not copy variable-size
-            # payload bytes into row storage.
-            if emits and _in_rows(column.dtype()):
+            # A payload column: in the rows, strings and nested values in
+            # their heap.
+            if emits:
                 payload.append(column.copy())
                 output_columns.append(len(keys) + len(payload) - 1)
                 output_names.append(column.name())
@@ -91,8 +83,6 @@ def finish_build(
         if not emits:
             continue
         if coalesce and how != JOIN_RIGHT_SEMI and how != JOIN_RIGHT_ANTI:
-            continue
-        if not _in_rows(column.dtype()):
             continue
         output_columns.append(key_at)
         output_names.append(column.name())

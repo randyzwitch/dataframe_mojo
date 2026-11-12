@@ -118,29 +118,20 @@ from dataframe.optimizer.expressions import (
 )
 from dataframe.optimizer.passes import (
     plan_align_union_inputs,
-    plan_drop_constant_filters,
     plan_eliminate_common_subexpressions,
     plan_filter_shared_subplans,
     plan_fold_casts,
     plan_fuse_top_k,
     plan_join_input_columns,
-    plan_merge_filters,
     plan_narrow_join_inputs,
     plan_optimized,
-    plan_passes,
     plan_prune_outputs,
     plan_push_predicates,
-    plan_push_predicates_now,
     plan_push_projections,
     plan_prepare_dataset_projections,
     plan_push_slices,
     plan_slice_over_ipc,
-    plan_split_filters,
-    plan_swap_down,
-    plan_swap_in_place,
-    plan_transfer_key_filter,
     plan_unique_as_aggregate,
-    plan_unstick,
 )
 from dataframe.parallel import (
     Crew,
@@ -2193,12 +2184,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _filter_shared_subplans(mut self):
         plan_filter_shared_subplans(self._plan)
 
-    def _split_filters(mut self, first: Int = 0):
-        plan_split_filters(self._plan, first=first)
-
-    def _merge_filters(mut self):
-        plan_merge_filters(self._plan)
-
     def _order_joins(mut self, streaming: Bool, batch_size: Int) raises:
         plan_order_joins(self._plan, streaming=streaming, batch_size=batch_size)
 
@@ -2283,35 +2268,6 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _push_predicates(mut self) raises:
         plan_push_predicates(self._plan)
-
-    def _drop_constant_filters(mut self) raises:
-        plan_drop_constant_filters(self._plan)
-
-    def _push_predicates_now(mut self) raises:
-        plan_push_predicates_now(self._plan)
-
-    def _unstick(self, filter: Int, child: Int, mut stuck: List[Bool]):
-        plan_unstick(self._plan, filter, child, stuck)
-
-    def _passes(self, filter: Int, child: Int) raises -> Int:
-        return plan_passes(self._plan, filter=filter, child=child)
-
-    def _transfer_key_filter(
-        mut self, filter: Int, join: Int, right_side: Bool
-    ):
-        plan_transfer_key_filter(
-            self._plan, filter=filter, join=join, right_side=right_side
-        )
-
-    def _swap_down(mut self, filter: Int, child: Int, right_side: Bool):
-        plan_swap_down(
-            self._plan, filter=filter, child=child, right_side=right_side
-        )
-
-    def _swap_in_place(mut self, filter: Int, child: Int, right_side: Bool):
-        plan_swap_in_place(
-            self._plan, filter=filter, child=child, right_side=right_side
-        )
 
     def _reorder(mut self, root: Int = -1):
         plan_reorder(self._plan, root=root)
