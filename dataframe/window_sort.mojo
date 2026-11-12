@@ -13,6 +13,7 @@ from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
 from dataframe.dtype import NUMERIC_DTYPES
+from dataframe.kernels.group_rows import GroupRows
 from dataframe.kernels.partition import Partitioner, _same_value
 from dataframe.aggregation.reducer import float_key
 from dataframe.parallel import Job, configured_workers, partitions, run_jobs
@@ -473,40 +474,36 @@ struct _PartitionNumberJob(Job):
     """Partition `part` of `parts` (Polars group_by_threaded_slice): scan
     every row's hash and number only the rows whose hash falls in this
     partition, in one thread-local dictionary, so no two tasks ever see
-    the same key and nothing is merged afterwards. The local numbers are
-    kept in row order, with where each row range starts among them."""
+    the same key and nothing is merged afterwards. Keeps the partition's
+    rows in row order with their local numbers (Polars pushes each row to
+    its group's index vector)."""
 
     var keys: List[Series]
     var hashes: Int
-    # Row range bounds (address, `range_count` + 1 entries).
-    var ranges: Int
-    var range_count: Int
+    var height: Int
     var parts: Int
     var part: Int
-    # Output: the partition's rows' local numbers in row order, the index
-    # in them where each row range starts (`range_count` + 1 entries), and
-    # the partition's count.
+    # Output: the partition's rows, ascending, their local numbers, and the
+    # partition's count.
+    var rows: List[Int]
     var locals: List[Int]
-    var marks: List[Int]
     var count: Int
 
     def __init__(
         out self,
         keys: List[Series],
         hashes: Int,
-        ranges: Int,
-        range_count: Int,
+        height: Int,
         parts: Int,
         part: Int,
     ):
         self.keys = keys.copy()
         self.hashes = hashes
-        self.ranges = ranges
-        self.range_count = range_count
+        self.height = height
         self.parts = parts
         self.part = part
+        self.rows = List[Int]()
         self.locals = List[Int]()
-        self.marks = List[Int]()
         self.count = 0
 
     def run(mut self) raises:
@@ -528,85 +525,86 @@ struct _PartitionNumberJob(Job):
         var hashes = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=self.hashes
         )
-        var ranges = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ranges)
         var keys = self.keys.copy()
         var numbering = _Numbering[D, GENERIC](column)
+        var rows = List[Int]()
         var locals = List[Int]()
-        var marks = List[Int](capacity=self.range_count + 1)
         var parts = self.parts
         var part = self.part
-        for r in range(self.range_count):
-            marks.append(len(locals))
-            for k in range(
-                ranges[unsafe_offset=r], ranges[unsafe_offset=r + 1]
-            ):
-                var hash = hashes[unsafe_offset=k]
-                if _hash_partition(hash, parts) == part:
-                    var id = numbering.number(keys, column, k, hash)
-                    locals.append(id)
-        marks.append(len(locals))
+        for k in range(self.height):
+            var hash = hashes[unsafe_offset=k]
+            if _hash_partition(hash, parts) == part:
+                locals.append(numbering.number(keys, column, k, hash))
+                rows.append(k)
         self.count = len(numbering.first_rows)
+        self.rows = rows^
         self.locals = locals^
-        self.marks = marks^
 
 
-struct _RowNumberJob(Job):
-    """One row range [lo, hi): each row's global partition number, its
-    partition's base plus its local number, read in row order from that
-    partition's local numbers, so every write is sequential."""
+struct _GroupRowsJob(Job):
+    """One hash partition's groups, numbered from `base`: count each
+    group's rows, then write every row into its group's list (rows from
+    `row_base` in the shared array) and its group number into `ids`, in
+    row order, so each list stays ascending (finish_group_order without
+    sorting: window groups need no order)."""
 
-    var hashes: Int
-    var lo: Int
-    var hi: Int
-    var parts: Int
-    # Each partition's local numbers (addresses), where this range starts
-    # in them, and each partition's first global number.
+    var rows: Int
     var locals: Int
-    var starts: Int
-    var bases: Int
+    var entries: Int
+    var count: Int
+    var base: Int
+    var row_base: Int
+    var offsets: Int
+    var all_rows: Int
     var ids: Int
 
     def __init__(
         out self,
-        hashes: Int,
-        lo: Int,
-        hi: Int,
-        parts: Int,
+        rows: Int,
         locals: Int,
-        starts: Int,
-        bases: Int,
+        entries: Int,
+        count: Int,
+        base: Int,
+        row_base: Int,
+        offsets: Int,
+        all_rows: Int,
         ids: Int,
     ):
-        self.hashes = hashes
-        self.lo = lo
-        self.hi = hi
-        self.parts = parts
+        self.rows = rows
         self.locals = locals
-        self.starts = starts
-        self.bases = bases
+        self.entries = entries
+        self.count = count
+        self.base = base
+        self.row_base = row_base
+        self.offsets = offsets
+        self.all_rows = all_rows
         self.ids = ids
 
     def run(mut self) raises:
-        var hashes = Pointer[UInt64, MutAnyOrigin](
-            unsafe_from_address=self.hashes
-        )
+        var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.rows)
         var locals = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.locals)
-        var starts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.starts)
-        var bases = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.bases)
+        var offsets = Pointer[Int, MutAnyOrigin](
+            unsafe_from_address=self.offsets
+        )
+        var all_rows = Pointer[Int, MutAnyOrigin](
+            unsafe_from_address=self.all_rows
+        )
         var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ids)
-        var parts = self.parts
-        var cursors = List[Int](capacity=parts)
-        for p in range(parts):
-            cursors.append(starts[unsafe_offset=p])
-        for k in range(self.lo, self.hi):
-            var p = _hash_partition(hashes[unsafe_offset=k], parts)
-            var local = Pointer[Int, MutAnyOrigin](
-                unsafe_from_address=locals[unsafe_offset=p]
-            )
-            ids[unsafe_offset=k] = (
-                bases[unsafe_offset=p] + local[unsafe_offset=cursors[p]]
-            )
-            cursors[p] += 1
+        var cursors = List[Int](length=self.count + 1, fill=0)
+        var at = cursors.unsafe_ptr()
+        for e in range(self.entries):
+            at[unsafe_offset=locals[unsafe_offset=e] + 1] += 1
+        at[unsafe_offset=0] = self.row_base
+        for g in range(self.count):
+            at[unsafe_offset=g + 1] += at[unsafe_offset=g]
+        for g in range(self.count):
+            offsets[unsafe_offset=self.base + g] = at[unsafe_offset=g]
+        for e in range(self.entries):
+            var local = locals[unsafe_offset=e]
+            var row = rows[unsafe_offset=e]
+            all_rows[unsafe_offset=at[unsafe_offset=local]] = row
+            at[unsafe_offset=local] += 1
+            ids[unsafe_offset=row] = self.base + local
 
 
 def _task_cuts(bounds: List[Int], height: Int) -> List[Int]:
@@ -626,79 +624,66 @@ def _task_cuts(bounds: List[Int], height: Int) -> List[Int]:
     return cuts^
 
 
-def partition_ids(
-    keys: List[Series], height: Int, mut ids: List[Int]
+def partition_groups(
+    keys: List[Series], height: Int, mut ids: List[Int], mut groups: GroupRows
 ) raises -> Int:
-    """Each row's partition index (ids, by input row) and the partition
-    count, with no sort and no rows moved, for aggregates over whole
-    partitions: the group tuples of a window's group-by (Polars
-    group_by_threaded_slice). Rows are hashed in parallel; then one task
-    per thread (polars _set_partition_size) numbers the rows whose hash
-    falls in its partition, and row ranges turn the local numbers into
-    global ones in row order."""
+    """The groups of the partition keys' rows, with no sort and no rows
+    moved, for aggregates over whole partitions: each group's rows
+    (`groups`, Polars GroupsIdx) and each row's group (`ids`, by input
+    row). Returns the group count. Rows are hashed in parallel; then one
+    task per thread (polars _set_partition_size) numbers the rows whose
+    hash falls in its partition (group_by_threaded_slice), and each
+    partition writes its groups' row lists and its rows' numbers."""
     ids = huge_uninit[Int](height)
     if height == 0:
+        groups = GroupRows(List[Int](length=1, fill=0), List[Int]())
         return 0
     var workers = configured_workers()
     var partitioner = Partitioner(keys, workers)
     var hashes = Int(partitioner.hashes.unsafe_ptr())
-    var ranges = partitions(height, workers, STANDARD_VECTOR_SIZE)
-    var range_count = len(ranges) - 1
     var parts = workers
     var jobs = List[_PartitionNumberJob](capacity=parts)
     for p in range(parts):
         jobs.append(
-            _PartitionNumberJob(
-                partitioner.keys,
-                hashes,
-                Int(ranges.unsafe_ptr()),
-                range_count,
-                parts,
-                p,
-            )
+            _PartitionNumberJob(partitioner.keys, hashes, height, parts, p)
         )
     if parts == 1:
         jobs[0].run()
     else:
         run_jobs(jobs)
-    var bases = List[Int](capacity=parts)
-    var locals = List[Int](capacity=parts)
     var total = 0
     for p in range(parts):
-        bases.append(total)
         total += jobs[p].count
-        locals.append(Int(jobs[p].locals.unsafe_ptr()))
-    # Where each row range starts in every partition's local numbers.
-    var starts = List[Int](capacity=range_count * parts)
-    for r in range(range_count):
-        for p in range(parts):
-            starts.append(jobs[p].marks[r])
-    var fill = List[_RowNumberJob](capacity=range_count)
-    for r in range(range_count):
-        if ranges[r + 1] > ranges[r]:
-            fill.append(
-                _RowNumberJob(
-                    hashes,
-                    ranges[r],
-                    ranges[r + 1],
-                    parts,
-                    Int(locals.unsafe_ptr()),
-                    Int(starts.unsafe_ptr()) + r * parts * size_of[Int](),
-                    Int(bases.unsafe_ptr()),
-                    Int(ids.unsafe_ptr()),
-                )
+    var offsets = List[Int](unsafe_uninit_length=total + 1)
+    offsets[total] = height
+    var rows = huge_uninit[Int](height)
+    var fill = List[_GroupRowsJob](capacity=parts)
+    var base = 0
+    var row_base = 0
+    for p in range(parts):
+        fill.append(
+            _GroupRowsJob(
+                Int(jobs[p].rows.unsafe_ptr()),
+                Int(jobs[p].locals.unsafe_ptr()),
+                len(jobs[p].rows),
+                jobs[p].count,
+                base,
+                row_base,
+                Int(offsets.unsafe_ptr()),
+                Int(rows.unsafe_ptr()),
+                Int(ids.unsafe_ptr()),
             )
-    if len(fill) == 1:
+        )
+        base += jobs[p].count
+        row_base += len(jobs[p].rows)
+    if parts == 1:
         fill[0].run()
     else:
         run_jobs(fill)
     # Jobs read these by address: keep them alive until here.
     _ = jobs^
-    _ = starts^
-    _ = locals^
-    _ = bases^
-    _ = ranges^
     _ = partitioner^
+    groups = GroupRows(offsets^, rows^)
     return total
 
 
