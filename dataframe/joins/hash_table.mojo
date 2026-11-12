@@ -57,7 +57,12 @@ from dataframe.storage.column import Column, _validity_at
 from dataframe.storage.string import StringColumn
 from dataframe.storage.string_view import StringView, _mapped
 from dataframe.trace import trace_path
-from dataframe.vector.data_chunk import ColumnArena, DataChunk, flat_over
+from dataframe.vector.data_chunk import (
+    ColumnArena,
+    DataChunk,
+    decode_values,
+    flat_over,
+)
 from dataframe.vector.partitioned_tuple_data import (
     PartitionedTupleDataAppendState,
     RadixPartitionedTupleData,
@@ -485,6 +490,10 @@ struct _TableData(Movable):
     # Keep next pointers separate when dictionary emission replaces row links
     # with row numbers.
     var dictionary: List[Series]
+    # Per dictionary column, its values decoded to their vector layout once
+    # (`decode_values`; empty for a fixed-width column), which every
+    # probing worker reads.
+    var decoded: List[List[UInt8]]
     var slot_rows: List[UInt64]
     var aux_next: List[UInt64]
     # All zeros: a row with every column null (its validity bits clear).
@@ -503,6 +512,7 @@ struct _TableData(Movable):
         self.bases = List[UInt64]()
         self.masks = List[UInt64]()
         self.dictionary = List[Series]()
+        self.decoded = List[List[UInt8]]()
         self.slot_rows = List[UInt64]()
         self.aux_next = List[UInt64]()
         self.null_row = List[UInt8](length=layout.row_width(), fill=0)
@@ -1238,8 +1248,30 @@ struct JoinHashTable(Copyable, Movable):
                     c, Int(rows.unsafe_ptr()), len(rows), self.output_names[c]
                 )
             )
-        self.data[].dictionary = out^
+        self._set_dictionary(out^)
+
+    def _set_dictionary(
+        mut self,
+        var columns: List[Series],
+        var decoded: List[List[UInt8]] = List[List[UInt8]](),
+    ):
+        """The probe emits `columns`, each decoded once here unless
+        `decoded` holds its values decoded already."""
+        for c in range(len(decoded), len(columns)):
+            decoded.append(List[UInt8]())
+        for c in range(len(columns)):
+            if len(decoded[c]) == 0:
+                decoded[c] = decode_values(columns[c])
+        self.data[].decoded = decoded^
+        self.data[].dictionary = columns^
         self.use_dictionary = True
+
+    def dictionary_values(self, column: Int) -> Int:
+        """The address of dictionary column `column`'s decoded values, 0 for
+        a fixed-width column."""
+        if len(self.data[].decoded[column]) == 0:
+            return 0
+        return Int(self.data[].decoded[column].unsafe_ptr())
 
     def gather(
         self, output: Int, rows: Int, count: Int, var name: String
@@ -1286,7 +1318,9 @@ struct JoinHashTable(Copyable, Movable):
         (FullScanHashTable; the probe reads only slots whose bit is
         set)."""
         var out = List[Series](capacity=len(self.output_columns))
+        var decoded = List[List[UInt8]](capacity=len(self.output_columns))
         for c in range(len(self.output_columns)):
+            decoded.append(List[UInt8]())
             out.append(
                 gather_rows_slots(
                     self.row_layout,
@@ -1298,10 +1332,10 @@ struct JoinHashTable(Copyable, Movable):
                     self.output_names[c],
                     self.output_types[c],
                     self.data[].heaps,
+                    decoded[c],
                 )
             )
-        self.data[].dictionary = out^
-        self.use_dictionary = True
+        self._set_dictionary(out^, decoded^)
 
     def _build_dictionary_arrays(mut self) raises:
         """JoinHashTable::BuildDictionaryArrays: every output column into a

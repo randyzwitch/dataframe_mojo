@@ -842,10 +842,26 @@ def _views_over_heaps(
     descriptors, in place: an inlined string is already one, a longer
     one's pointer becomes its heap block and offset. `bits`: the validity,
     empty when every row is valid."""
+    return _views_at(heaps, views^, count, 0, len(views), bits^)
+
+
+def _views_at(
+    heaps: TupleDataHeaps,
+    var views: List[StringView],
+    count: Int,
+    slots: Int,
+    size: Int,
+    var bits: List[UInt8],
+) -> StringColumn:
+    """`_views_over_heaps` for the `count` entries at the positions
+    `slots` lists (0: the first `count`) of `size` views."""
     var at = Int(views.unsafe_ptr())
+    var slot_at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=slots)
     var hint = 0
     for i in range(count):
-        var entry = at + 16 * i
+        var entry = at + 16 * (
+            Int(slot_at[unsafe_offset=i]) if slots != 0 else i
+        )
         if _load[DType.uint32](entry) > UInt32(STRING_INLINE_BYTES):
             var address = Int(_load[DType.uint64](entry + 8))
             hint = heaps.find(address, hint)
@@ -855,7 +871,7 @@ def _views_over_heaps(
             )
     return StringColumn(
         StringViewStorage(
-            views^, heaps.buffers.copy(), bits^, count, heaps.bytes
+            views^, heaps.buffers.copy(), bits^, size, heaps.bytes
         )
     )
 
@@ -994,12 +1010,15 @@ def gather_rows_slots(
     var name: String,
     dtype: DataType,
     heaps: TupleDataHeaps,
+    mut decoded: List[UInt8],
 ) raises -> Series:
     """Column `column_id` of the `count` rows at the pointers at `rows` as
     a column of `size` values, the row at pointer i at slot `slots[i]`
     (FullScanHashTable's Gather through `sel_build`). The other slots'
     values are not written (a string's are empty); a reader reads only
-    filled slots. Strings reference `heaps` (`gather_rows_series`)."""
+    filled slots. Strings reference `heaps` (`gather_rows_series`), and
+    `decoded` is set to their string_t values as gathered (the vector
+    layout, its other slots unwritten)."""
     ref top = layout.nodes[][0]
     var physical = top.physicals[column_id]
     var target_sel = SelectionVector(slots)
@@ -1009,9 +1028,7 @@ def gather_rows_slots(
     var valid_of = bits_at if top.can_have_null else 0
     var any_null = False
     if physical == PHYSICAL_VARCHAR:
-        var views = List[StringView](
-            length=max(size, 1), fill=StringView(0, 0, 0, 0)
-        )
+        decoded = List[UInt8](unsafe_uninit_length=16 * max(size, 1))
         _gather_fixed_dispatch(
             physical,
             rows,
@@ -1020,18 +1037,24 @@ def gather_rows_slots(
             top.offsets[column_id],
             column_id,
             top.can_have_null,
-            Int(views.unsafe_ptr()),
+            Int(decoded.unsafe_ptr()),
             valid_of,
             target_sel,
         )
+        # The filled slots' string_t become views; the others stay empty.
+        var views = List[StringView](
+            length=max(size, 1), fill=StringView(0, 0, 0, 0)
+        )
+        var source = Int(decoded.unsafe_ptr())
+        var target = Int(views.unsafe_ptr())
         for i in range(count):
-            if not _bit_valid(bits_at, Int(slot_at[unsafe_offset=i])):
-                any_null = True
-                break
+            var slot = Int(slot_at[unsafe_offset=i])
+            _copy(target + 16 * slot, source + 16 * slot, 16)
+            any_null = any_null or not _bit_valid(bits_at, slot)
         if not any_null:
             bits = List[UInt8]()
         return _typed(
-            Series(name^, _views_over_heaps(heaps, views^, size, bits^)),
+            Series(name^, _views_at(heaps, views^, count, slots, size, bits^)),
             dtype,
         )
     if physical == PHYSICAL_BOOL:

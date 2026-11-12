@@ -1309,12 +1309,16 @@ struct _ChunkRunner(Movable):
                         and self.indexes[][step.join].value().use_dictionary
                     ):
                         # The table's dictionary columns (perfect or
-                        # dictionary emission), one per output column.
-                        ref dictionary = (
-                            self.indexes[][step.join].value().data[].dictionary
-                        )
+                        # dictionary emission), one per output column,
+                        # decoded once by the table.
+                        ref table = self.indexes[][step.join].value()
+                        ref dictionary = table.data[].dictionary
                         for c in range(len(dictionary)):
-                            handles.append(self.arena.add(dictionary[c]))
+                            handles.append(
+                                self.arena.add_decoded(
+                                    dictionary[c], table.dictionary_values(c)
+                                )
+                            )
                 self.builds.append(handles^)
             self.held = self.arena.mark()
         self.arena.truncate(self.held)
