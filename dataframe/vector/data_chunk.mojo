@@ -563,7 +563,13 @@ def _decode_strings(column: StringColumn) -> List[UInt8]:
     var target = Pointer[StringT, MutAnyOrigin](
         unsafe_from_address=Int(out.unsafe_ptr())
     )
-    var nulls = column.null_count() > 0
+    # Validity read through the bitmap's address: a method call on the
+    # column would copy the whole column struct for every row.
+    var validity = ValidityMask()
+    if column.null_count() > 0:
+        validity = ValidityMask(
+            Int(column._bits[].unsafe_ptr()), column._offset
+        )
     if (
         column._is_view_storage()
         and not column._view_storage.value()._selects()
@@ -571,8 +577,12 @@ def _decode_strings(column: StringColumn) -> List[UInt8]:
         ref storage = column._view_storage.value()
         var views = storage._views[].unsafe_ptr().unsafe_offset(column._offset)
         ref buffers = storage._buffers[]
+        var bases = List[Int](capacity=len(buffers))
+        for b in range(len(buffers)):
+            bases.append(Int(buffers[b][].unsafe_ptr()))
+        var base_at = bases.unsafe_ptr()
         for i in range(n):
-            if nulls and not column._valid(i):
+            if not validity.row_is_valid(i):
                 target[unsafe_offset=i] = StringT(0, 0, 0)
                 continue
             var view = views[unsafe_offset=i].copy()
@@ -583,12 +593,13 @@ def _decode_strings(column: StringColumn) -> List[UInt8]:
                     UInt64(view.buffer_index) | (UInt64(view.offset) << 32),
                 )
             else:
-                var address = Int(
-                    buffers[Int(view.buffer_index)][].unsafe_ptr()
-                ) + Int(view.offset)
+                var address = base_at[
+                    unsafe_offset=Int(view.buffer_index)
+                ] + Int(view.offset)
                 target[unsafe_offset=i] = StringT(
                     view.length, view.prefix, UInt64(address)
                 )
+        _ = bases^
         return out^
     if not column._is_view_storage():
         var offsets = (
@@ -596,7 +607,7 @@ def _decode_strings(column: StringColumn) -> List[UInt8]:
         )
         var base = Int(column._base())
         for i in range(n):
-            if nulls and not column._valid(i):
+            if not validity.row_is_valid(i):
                 target[unsafe_offset=i] = StringT(0, 0, 0)
                 continue
             var start = Int(offsets[unsafe_offset=i])
@@ -604,7 +615,7 @@ def _decode_strings(column: StringColumn) -> List[UInt8]:
             target[unsafe_offset=i] = StringT.make(base + start, length)
         return out^
     for i in range(n):
-        if nulls and not column._valid(i):
+        if not validity.row_is_valid(i):
             target[unsafe_offset=i] = StringT(0, 0, 0)
             continue
         var text = column._get(i)
