@@ -813,7 +813,7 @@ def _perfect_slots(
     mut bits: List[UInt8],
     mut slot_rows: List[UInt64],
     mut filled_rows: List[UInt64],
-    mut filled_slots: List[UInt32],
+    mut filled_builds: List[UInt32],
 ) raises -> Optional[Tuple[UInt64, Int]]:
     """Build a direct-address table for bounded unique integer keys. Reserve
     max - min + 1 slots, clear only the validity bitmap, and read a slot
@@ -858,7 +858,7 @@ def _perfect_slots(
                 slot_rows = List[UInt64](unsafe_uninit_length=size)
                 var pointers = slot_rows.unsafe_ptr()
                 filled_rows = List[UInt64](capacity=inserted)
-                filled_slots = List[UInt32](capacity=inserted)
+                filled_builds = List[UInt32](capacity=inserted)
                 var state = TupleDataChunkState()
                 for s in range(len(rows.segments)):
                     ref segment = rows.segments[s]
@@ -882,7 +882,7 @@ def _perfect_slots(
                             )
                             pointers[unsafe_offset=slot] = UInt64(row)
                             filled_rows.append(UInt64(row))
-                            filled_slots.append(UInt32(slot))
+                            filled_builds.append(table[unsafe_offset=slot])
                 return (base, Int(span))
     return None
 
@@ -1144,7 +1144,7 @@ struct JoinHashTable(Copyable, Movable):
             # slot array holds fixed-width values or string_t only), and a
             # repeated key or a wide range falls back to the hash table.
             var filled_rows = List[UInt64]()
-            var filled_slots = List[UInt32]()
+            var filled_builds = List[UInt32]()
             var slots = _perfect_slots(
                 unchunked[0],
                 self.inserted,
@@ -1155,20 +1155,21 @@ struct JoinHashTable(Copyable, Movable):
                 self.data[].slot_bits,
                 self.data[].slot_rows,
                 filled_rows,
-                filled_slots,
+                filled_builds,
             )
             if slots:
                 trace_path("join.perfect_hash")
                 self.perfect = True
                 self.perfect_base = slots.value()[0]
                 self.perfect_span = slots.value()[1]
-                # FullScanHashTable: only the rows in the table gathered,
-                # each to its key's slot; every output column a dictionary
-                # over the slots.
+                # Every output column a dictionary over the build rows,
+                # each row in the table gathered to its build row number,
+                # which its key's slot holds. Sized by the build rows, not
+                # the key range: a sparse range (few rows over a wide span)
+                # would otherwise allocate and touch memory for every
+                # empty slot, for each column.
                 if len(self.output_columns) > 0:
-                    self._gather_slots(
-                        filled_rows, filled_slots, Int(self.perfect_span) + 1
-                    )
+                    self._gather_slots(filled_rows, filled_builds, self.count)
                 return
             # A repeated key: the hash table instead.
             self.data[].slots = List[UInt32]()
@@ -1347,10 +1348,9 @@ struct JoinHashTable(Copyable, Movable):
         slots: List[UInt32],
         size: Int,
     ) raises:
-        """Every output column as a column of `size` slots, the row at
-        `rows[i]` at slot `slots[i]`, the other slots unwritten
-        (FullScanHashTable; the probe reads only slots whose bit is
-        set)."""
+        """Every output column as a column of `size` entries, the row at
+        `rows[i]` at entry `slots[i]`, the other entries unwritten (no
+        probe emits them)."""
         var out = List[Series](capacity=len(self.output_columns))
         var decoded = List[List[UInt8]](capacity=len(self.output_columns))
         for c in range(len(self.output_columns)):
@@ -1789,7 +1789,6 @@ struct ScanStructure(Movable):
         var aux = self.table.data[].aux_next.unsafe_ptr()
         var slot_rows = self.table.data[].slot_rows.unsafe_ptr()
         var slots = self.table.data[].slots.unsafe_ptr()
-        var dictionary = self.table.use_dictionary
         var index_offset = self.table.layout.index_offset
         var next_offset = self.table.layout.pointer_offset
         var found_offset = self.table.layout.found_offset
@@ -1849,10 +1848,9 @@ struct ScanStructure(Movable):
                 if h != 0 or outer_rows:
                     out_probe[unsafe_offset=out] = Int32(i)
                     var slot = Int(h) - 1
-                    out_build[unsafe_offset=out] = -1 if h == 0 else (
-                        Int32(slot) if dictionary else Int32(
-                            slots[unsafe_offset=slot]
-                        )
+                    # The slot's build row: also its dictionary entry.
+                    out_build[unsafe_offset=out] = -1 if h == 0 else Int32(
+                        slots[unsafe_offset=slot]
                     )
                     if h != 0:
                         out_row[unsafe_offset=out] = slot_rows[
