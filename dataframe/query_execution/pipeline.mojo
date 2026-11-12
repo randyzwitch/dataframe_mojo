@@ -139,6 +139,7 @@ from dataframe.planning.graph import (
 )
 from dataframe.planning.model import (
     AGG,
+    CONCAT,
     DROP,
     EXPLODE,
     FILTER,
@@ -185,6 +186,7 @@ from dataframe.planning.cost.sampling import (
     _stream_split_groups,
 )
 from dataframe.query_execution.materialize import (
+    plan_union,
     plan_schedule_inputs,
 )
 from dataframe.query_execution.operators import (
@@ -327,7 +329,7 @@ def plan_stream_execute(
     # Schedule computed inputs as child pipelines. The probe depends on all
     # child completions, allowing independent builds to overlap. Execution
     # reports serialize these tasks to attribute their measurements.
-    var inputs = plan_schedule_inputs(self, cursor, batch_size)
+    var inputs = plan_schedule_inputs(self, index, cursor, batch_size)
     if len(inputs.wanted) == 0:
         return _stream_probe(self, index, batch_size, sink, head^)
     trace_path("stream.scheduled_inputs")
@@ -672,6 +674,18 @@ def _probe_start(
             first = step.left
         else:
             break
+    if first >= 0 and first != index and self._nodes[first].kind == CONCAT:
+        # The union's children, run as pipelines of this stream's schedule
+        # when it has one (`plan_schedule_inputs`): their results are the
+        # union pipelines' sources, one chunk each, into this stream's
+        # operators and sink.
+        var plan = self.copy()
+        plan._frames.append(plan_union(self, first, True, batch_size))
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
+        return _ProbeStart(
+            _stream_after_materialization(plan, index, batch_size, sink)
+        )
     if first >= 0 and first != index and not _is_scan(self._nodes[first].kind):
         # Run row-local steps during each worker's aggregate scan. Discard
         # rejected groups before assembling a frame, avoiding an additional
@@ -959,7 +973,7 @@ def _probe_start(
     var acc = _StateAccumulator(workers, split_groups)
     # A grouping the pipeline does not run (its steps or order are the
     # batches'): the batches are collected for the eager group-by, which
-    # is the aggregate table over them (`PhysicalHashAggregate::Sink`),
+    # is the aggregate table over them,
     # and reduced into one state each time they reach the budget.
     var collecting = len(expressions) > 0 and len(keys) > 0
     var collected = List[DataFrame]()
