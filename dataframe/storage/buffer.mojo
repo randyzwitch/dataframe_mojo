@@ -87,9 +87,9 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
     # 0 and host reads go through the residence's one-time copy.
     var residence: Optional[ArcPointer[_DeviceResidence]]
     # Set on a buffer that another storage reads through a row list
-    # (`_Buffer.selecting`): kept here, behind the buffer's one pointer,
-    # rather than in the string storage itself, because columns are copied
-    # often and every extra field widens every copy.
+    # (`_Buffer.selecting`): kept here, behind the buffer's one pointer, rather
+    # than in the string storage itself, because columns are copied often and
+    # every extra field widens every copy.
     var selection: Optional[ArcPointer[_RowSelection]]
     # The address of a heap `ArcPointer[_StatsRecord]`, 0 until statistics
     # are published (once; `publish_statistics`).

@@ -203,7 +203,8 @@ def _comment_at(
 def _empty_record(
     bytes: Span[UInt8, ImmutAnyOrigin], start: Int, end: Int
 ) -> Bool:
-    """The SkipEmpty state accepts an empty line and a single CR line."""
+    """Whether a line is empty for prelude skipping: an empty line or a single
+    CR line."""
     var length = end - start
     if length > 0 and bytes[end - 1] == 10:
         length -= 1
@@ -226,7 +227,7 @@ def _before_header(
     ):
         start = 3
 
-    # `SkipEmpty` exists only when a header is requested.
+    # Leading empty lines are skipped only when a header is requested.
     if has_header:
         while start < len(bytes):
             var end = _line_end(bytes, start, options)
@@ -235,8 +236,8 @@ def _before_header(
             start = end
             record += 1
 
-    # `SkipRowsBeforeHeader`: comments are discarded but do not consume a
-    # skipped record. The next non-comment is the header (or data without one).
+    # Comments are discarded but do not consume a skipped record. The next
+    # non-comment is the header (or data without one).
     var remaining = options.skip_rows
     while start < len(bytes):
         if _comment_at(bytes, start, options.comment_prefix):

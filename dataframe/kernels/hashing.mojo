@@ -250,9 +250,9 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
         ref column = chunk._data[StringColumn]
         if column._is_view_storage():
             var storage = column._view_storage_unchecked()
-            # A row equal to the one before reuses its code, as on the
-            # offsets path: a column of one repeated label costs one
-            # compare a row instead of a hash lookup.
+            # A row equal to the one before reuses its code, as on the offsets
+            # path: a column of one repeated label costs one compare a row
+            # instead of a hash lookup.
             var last_key = UInt128(0)
             var last_code = -1
             for i in range(len(column)):
@@ -374,10 +374,10 @@ def encode_string_rows_parallel(
 ) raises -> RowKeys:
     """Encode contiguous string row ranges in parallel, then merge local ids.
 
-    The merge numbers each range's distinct values with the string encoder
-    and renumbers the ranges on every worker (`encode_rows_parallel`), so
-    with many distinct values the merge is spread over the workers rather
-    than done on one thread, and no value is copied into a `String`.
+    The merge numbers each range's distinct values with the string encoder and
+    renumbers the ranges on every worker (`encode_rows_parallel`), so with many
+    distinct values the merge is spread over the workers rather than done on one
+    thread, and no value is copied into a `String`.
     """
     return encode_rows_parallel([series.copy()], nulls_equal, workers)
 
@@ -541,12 +541,12 @@ def _encode_dense_parts[
 ]:
     """Ids by direct lookup when an integer key's values span few enough
     integers (`_dense_span_limit`), avoiding a hash-table probe and a
-    renumbering pass per row. Values and ids go through pointers, and a
-    column without nulls reads no validity, since this loop is the whole
-    per-row cost of a group-by on a small integer key. The key may arrive
-    as several chunks (a Parquet scan's row groups, or a worker's range
-    across two of them); they are read in place rather than copied into
-    one buffer first, which would add a full pass over the key."""
+    renumbering pass per row. Values and ids go through pointers, and a column
+    without nulls reads no validity, since this loop is the whole per-row cost
+    of a group-by on a small integer key. The key may arrive as several chunks
+    (a Parquet scan's row groups, or a worker's range across two of them); they
+    are read in place rather than copied into one buffer first, which would add
+    a full pass over the key."""
     var n = 0
     for part in parts:
         n += len(part)
@@ -657,12 +657,12 @@ def _encode_categorical_parts[
 ](
     parts: List[Column[UInt32]], domain: Int, nulls_equal: Bool
 ) raises -> RowKeys:
-    """Ids by direct lookup on a categorical's codes, which already lie in
-    [0, dictionary size): no hash and no range scan, as `_encode_dense_int64`
-    does for small Int64 domains. The key may arrive as several chunks (a
-    Parquet scan's row groups), read in place. The codes' range is known
-    from the dictionary, so unlike the generic dense encoder there is no
-    range scan, which with nulls costs a validity read per row."""
+    """Ids by direct lookup on a categorical's codes, which already lie in [0,
+    dictionary size): no hash and no range scan, as `_encode_dense_int64` does
+    for small Int64 domains. The key may arrive as several chunks (a Parquet
+    scan's row groups), read in place. The codes' range is known from the
+    dictionary, so unlike the generic dense encoder there is no range scan,
+    which with nulls costs a validity read per row."""
     var n = 0
     for part in parts:
         n += len(part)
@@ -838,10 +838,9 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
             ids[i] = renumber[code]
         return RowKeys(ids^, representatives^)
 
-    # Column codes fold into one 64-bit key per row, so several columns
-    # cost one numbering pass rather than one table per column, as
-    # ClickHouse packs fixed-width keys into one integer
-    # (AggregationMethodKeysFixed). A stage is numbered, and its packed keys
+    # Column codes fold into one 64-bit key per row, so several columns cost one
+    # numbering pass rather than one table per column, and a 64-bit key hashes
+    # and compares in one instruction. A stage is numbered, and its packed keys
     # replaced by dense ids, before the key outgrows 64 bits, or before it
     # leaves the direct-array range while still inside it, so that
     # low-cardinality prefixes compress through a direct array first.

@@ -37,10 +37,9 @@ comptime _DATETIME_UTC = 128
 struct CsvInference(Copyable):
     """Inferred schema plus the first content-record offset.
 
-    ``data_offset`` is the byte position after the prelude: leading empty
-    lines (with a header), ``skip_rows`` records, and the header.
-    ``record_start`` counts physical records through that prelude for
-    decoder diagnostics.
+    ``data_offset`` is the byte position after the prelude: leading empty lines
+    (with a header), ``skip_rows`` records, and the header. ``record_start``
+    counts physical records through that prelude for decoder diagnostics.
     """
 
     var schema: CsvSchema
@@ -108,9 +107,9 @@ def _trim_cr(bytes: Span[UInt8, ImmutAnyOrigin]) -> Span[UInt8, ImmutAnyOrigin]:
 def _unwrapped(
     raw: Span[UInt8, ImmutAnyOrigin], needs_escaping: Bool
 ) -> Span[UInt8, ImmutAnyOrigin]:
-    # Remove the quotes around a field for inference, but keep doubled
-    # quotes rather than unescaping them: inference only needs the field's
-    # shape, and header names keep the text as written.
+    # Remove the quotes around a field for inference, but keep doubled quotes
+    # rather than unescaping them: inference only needs the field's shape, and
+    # header names keep the text as written.
     if needs_escaping and len(raw) >= 2:
         return raw[1 : len(raw) - 1]
     return raw
@@ -278,9 +277,8 @@ def _header_names(
             break
         var field = next.value().copy()
         var raw = _unwrapped(field.bytes(trimmed), field.needs_escaping)
-        # Header names are decoded as lossy UTF-8 whatever the body's
-        # configured encoding, so an invalid byte in a header never fails
-        # the read.
+        # Header names are decoded as lossy UTF-8 whatever the body's configured
+        # encoding, so an invalid byte in a header never fails the read.
         var original = String(from_utf8_lossy=raw)
         var count = counts[original] if original in counts else 0
         var name = original.copy()
@@ -353,8 +351,7 @@ def infer_csv_schema(
             start = end
             record += 1
 
-    # Then skip_rows records before the header. Comments never reduce
-    # skip_rows.
+    # Then skip_rows records before the header. Comments never reduce skip_rows.
     var remaining = options.skip_rows
     while start < len(bytes):
         if _comment_at(bytes, start, options.comment_prefix):

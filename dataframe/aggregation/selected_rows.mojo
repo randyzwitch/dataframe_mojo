@@ -170,13 +170,13 @@ def _distinct_counts[
     group_count: Int,
     ignore_nulls: Bool,
 ) raises -> Series:
-    """Distinct values per group: the bucket's values are laid out by group
-    (a counting sort on the group number), then each group's segment is
-    counted on its own. A set of (group, value) pairs for the whole bucket
-    holds 2n slots, so with many groups most of its probes miss the
-    cache; segments are short and stay in cache, and
-    when a group's rows are adjacent the layout is written in sequence.
-    A null counts once per group unless ignore_nulls is set."""
+    """Distinct values per group: the bucket's values are laid out by group (a
+    counting sort on the group number), then each group's segment is counted on
+    its own. A set of (group, value) pairs for the whole bucket holds 2n slots,
+    so with many groups most of its probes miss the cache; segments are short
+    and stay in cache, and when a group's rows are adjacent the layout is
+    written in sequence. A null counts once per group unless ignore_nulls is
+    set."""
     var values = column._ptr()
     var nulls = column.null_count() > 0
     var counts = List[Int64](length=group_count, fill=0)
@@ -283,11 +283,11 @@ def _quantiles[
     q: Float64,
     method: String,
 ) raises -> Series:
-    """Each group's quantile of its non-null values, as `quantile_in` takes
-    it. The values go into one buffer in group order (a count per group,
-    then a cursor per group), rather than a list per group that grows by
-    appends and is copied again for selection: one allocation instead
-    of one per group, and no second copy."""
+    """Each group's quantile of its non-null values, as `quantile_in` takes it.
+    The values go into one buffer in group order (a count per group, then a
+    cursor per group), rather than a list per group that grows by appends and is
+    copied again for selection: one allocation instead of one per group, and no
+    second copy."""
     var nulls = column.null_count() > 0
     var values = column._ptr()
     var starts = List[Int](length=group_count + 1, fill=0)

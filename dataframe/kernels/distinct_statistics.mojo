@@ -20,19 +20,18 @@ from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.series import Series
 from dataframe.storage.string import StringColumn
 
-# A HyperLogLog sketch of 2^P = 64 registers, indexed by P hash bits; the
-# other Q = 64 - P bits give the leading-zero count. 64 one-byte registers
-# give about 13% standard error (1.04 / sqrt(64)), enough to tell a join
-# key's distinct count apart by orders of magnitude, at 64 bytes a column.
-# _ALPHA is the sketch's standard bias correction.
+# A HyperLogLog sketch of 2^P = 64 registers, indexed by P hash bits; the other
+# Q = 64 - P bits give the leading-zero count. 64 one-byte registers give about
+# 13% standard error (1.04 / sqrt(64)), enough to tell a join key's distinct
+# count apart by orders of magnitude, at 64 bytes a column. _ALPHA is the
+# sketch's standard bias correction.
 comptime _P = 6
 comptime _M = 64
 comptime _Q = 58
 comptime _ALPHA = 0.721347520444481703680
-# Rows per vector, and how many of each vector's rows are hashed: 30% of
-# integer rows, 10% of others, whose hashing costs more. A sample keeps
-# the sketch cheap to build at load time; the rates are empirical
-# choices.
+# Rows per vector, and how many of each vector's rows are hashed: 30% of integer
+# rows, 10% of others, whose hashing costs more. A sample keeps the sketch cheap
+# to build at load time; the rates are empirical choices.
 comptime _VECTOR = 2048
 comptime _INTEGRAL_SAMPLE = 614
 comptime _BASE_SAMPLE = 204
@@ -174,12 +173,14 @@ def _integral(series: Series) -> Bool:
 
 
 def distinct_estimate(series: Series) raises -> Int:
-    """The column's distinct-count estimate after appending its rows,
-    or -1 for a type without statistics (Boolean,
-    nested). Every 2,048 rows of each chunk give their first 614 rows
-    (integers) or 204 (anything else) to the sketch; nulls count as
-    sampled rows but are not hashed. The estimate is `u + u^3 (n - s) /
-    s^3` for u distinct among s sampled of n rows (`GetCount`)."""
+    """The column's distinct-count estimate after appending its rows, or -1 for
+    a type without statistics (Boolean, nested). Every 2,048 rows of each chunk
+    give their first 614 rows (integers) or 204 (anything else) to the sketch;
+    nulls count as sampled rows but are not hashed. The estimate is `u + u^3 (n
+    - s) / s^3` for u distinct among s sampled of n rows: the unsampled rows add
+    values in proportion to (u / s)^3, near 1 when nearly every sampled value
+    was distinct (likely a near-unique column) and near 0 when few were (the
+    sample has likely seen most values). An empirical estimator."""
     if series._data.isa[BoolColumn]() or series.dtype().is_nested():
         return -1
     var take = _INTEGRAL_SAMPLE if _integral(series) else _BASE_SAMPLE

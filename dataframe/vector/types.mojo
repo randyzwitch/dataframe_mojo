@@ -14,18 +14,17 @@ from std.memory import Layout, Pointer, alloc, unsafe_memcpy, unsafe_memcmp
 comptime STANDARD_VECTOR_SIZE = 2048
 
 # How a vector's rows map to its data. FSST and shredded vectors have no
-# counterpart here; at-rest Arrow strings and
-# packed booleans play FSST's role (decoded when a kernel reads them, see
-# `Vector.encoded`).
+# counterpart here; at-rest Arrow strings and packed booleans play FSST's role
+# (decoded when a kernel reads them, see `Vector.encoded`).
 comptime FLAT_VECTOR = 0
 comptime FSST_VECTOR = 1
 comptime CONSTANT_VECTOR = 2
 comptime DICTIONARY_VECTOR = 3
 comptime SEQUENCE_VECTOR = 4
 
-# How a vector's values are laid out in memory. OPAQUE stands for the
-# nested and other types no vector kernel reads yet: such a vector is only
-# passed along and read through its at-rest column.
+# How a vector's values are laid out in memory. OPAQUE stands for the nested and
+# other types no vector kernel reads yet: such a vector is only passed along and
+# read through its at-rest column.
 comptime PHYSICAL_BOOL = 1
 comptime PHYSICAL_UINT8 = 2
 comptime PHYSICAL_INT8 = 3
@@ -48,7 +47,7 @@ comptime PHYSICAL_OPAQUE = 254
 
 
 def physical_size(physical: Int) -> Int:
-    """Bytes a value takes in a flat vector (GetTypeIdSize)."""
+    """Bytes a value takes in a flat vector."""
     if (
         physical == PHYSICAL_BOOL
         or physical == PHYSICAL_UINT8
@@ -211,10 +210,10 @@ def set_all_valid(bits: Int, count: Int):
         at[unsafe_offset=b] = 255
 
 
-# A string record: 16 bytes, the length then either the bytes themselves
-# (at most 12, zero padded) or their first four bytes and a pointer to all
-# of them. Short strings need no second memory access, and the prefix
-# settles most comparisons of long ones without following the pointer.
+# A string record: 16 bytes, the length then either the bytes themselves (at
+# most 12, zero padded) or their first four bytes and a pointer to all of them.
+# Short strings need no second memory access, and the prefix settles most
+# comparisons of long ones without following the pointer.
 comptime STRING_INLINE_BYTES = 12
 comptime STRING_PREFIX_BYTES = 4
 
@@ -268,8 +267,8 @@ def _load_u32(address: Int) -> UInt32:
 
 @always_inline
 def string_data(entry: Int) -> Int:
-    """The address of the bytes of the string_t stored at `entry`
-    (string_t::GetData)."""
+    """The address of the bytes of the string record stored at `entry`: its
+    inline bytes, or the pointer it holds."""
     var s = Pointer[StringT, MutAnyOrigin](unsafe_from_address=entry)[]
     if s.is_inlined():
         return entry + 4
@@ -278,9 +277,9 @@ def string_data(entry: Int) -> Int:
 
 @always_inline
 def string_equals(a: Int, b: Int) -> Bool:
-    """Whether the string records at addresses `a` and `b` are equal:
-    length and prefix in one 8-byte compare, then the inlined bytes or
-    the pointed-at ones."""
+    """Whether the string records at addresses `a` and `b` are equal: length and
+    prefix in one 8-byte compare, then the inlined bytes or the pointed-at
+    ones."""
     var left = Pointer[StringT, MutAnyOrigin](unsafe_from_address=a)[]
     var right = Pointer[StringT, MutAnyOrigin](unsafe_from_address=b)[]
     if left.length != right.length or left.prefix != right.prefix:
@@ -304,10 +303,9 @@ def string_equals(a: Int, b: Int) -> Bool:
 
 @always_inline
 def string_compare(a: Int, b: Int) -> Int:
-    """Negative, zero or positive as the string_t at `a` sorts before, with
-    or after the one at `b`, by bytes (StringComparisonOperators::
-    GreaterThan's memcmp order): the prefixes first, byte-swapped so a
-    word compare is a byte compare."""
+    """Negative, zero or positive as the string record at `a` sorts before, with
+    or after the one at `b`, by bytes (memcmp order): the prefixes first,
+    byte-swapped so a word compare is a byte compare."""
     var left = Pointer[StringT, MutAnyOrigin](unsafe_from_address=a)[]
     var right = Pointer[StringT, MutAnyOrigin](unsafe_from_address=b)[]
     if left.prefix != right.prefix:
@@ -375,9 +373,9 @@ struct Vector(Copyable, ImplicitlyCopyable, Movable):
     - FLAT: `data` is row 0 of the values.
     - CONSTANT: `data` holds the one value; every row reads it.
     - DICTIONARY: row i is child row `sel.get_index(i)`; `data` and
-      `validity` are the child's (`dictionary_size` rows). The child is
-      always flat: slicing a dictionary merges the two selections, so
-      a read never follows more than one indirection.
+      `validity` are the child's (`dictionary_size` rows). The child is always
+      flat: slicing a dictionary merges the two selections, so a read never
+      follows more than one indirection.
     - SEQUENCE: row i is `sequence_start + i * sequence_increment`.
 
     `source` names the at-rest column (`ColumnArena`) the values were
@@ -422,8 +420,7 @@ struct Vector(Copyable, ImplicitlyCopyable, Movable):
 
     @staticmethod
     def constant(physical: Int, data: Int, valid: Bool) -> Vector:
-        """A constant vector of the value at `data` (null when not
-        `valid`)."""
+        """A constant vector of the value at `data` (null when not `valid`)."""
         var result = Vector()
         result.vector_type = CONSTANT_VECTOR
         result.physical = physical
@@ -434,8 +431,8 @@ struct Vector(Copyable, ImplicitlyCopyable, Movable):
 
     @staticmethod
     def sequence(start: Int64, increment: Int64) -> Vector:
-        """A sequence vector: row i is start + i * increment (BIGINT),
-        stored as two numbers instead of a row each."""
+        """A sequence vector: row i is start + i * increment (BIGINT), stored as
+        two numbers instead of a row each."""
         var result = Vector()
         result.vector_type = SEQUENCE_VECTOR
         result.physical = PHYSICAL_INT64
@@ -468,8 +465,8 @@ struct Vector(Copyable, ImplicitlyCopyable, Movable):
         return row
 
 
-# A process-wide byte with every bit clear: the validity of a null
-# constant, shared by every such vector.
+# A process-wide byte with every bit clear: the validity of a null constant,
+# shared by every such vector.
 def _null_byte_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
     var pointer = alloc(Layout[UInt64](length=1)).unsafe_leak()
     pointer.unsafe_write(0)
@@ -490,8 +487,8 @@ def _NULL_BYTE_ADDRESS() -> Int:
     return Int(address.value())
 
 
-# A selection in which every row reads entry 0: a constant read through
-# the same code path as a dictionary.
+# A selection in which every row reads entry 0: a constant read through the same
+# code path as a dictionary.
 def _zero_sel_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
     var pointer = alloc(
         Layout[UInt32](length=STANDARD_VECTOR_SIZE)

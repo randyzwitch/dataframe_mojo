@@ -738,10 +738,10 @@ struct _KeyView(Copyable, Movable):
         if key._data.isa[StringColumn]():
             ref strings = key._data[StringColumn]
             if strings._is_view_storage():
-                # Arrow binary views: 16 bytes a row, the length and the
-                # first four bytes in the first word, and the rest of a
-                # value through 12 bytes (zero padded) or the buffer index
-                # and offset of a longer one in the second.
+                # Arrow binary views: 16 bytes a row, the length and the first
+                # four bytes in the first word, and the rest of a value through
+                # 12 bytes (zero padded) or the buffer index and offset of a
+                # longer one in the second.
                 ref storage = strings._view_storage.value()
                 self.kind = _KEY_VIEW
                 var map = storage._row_map(strings._offset)
@@ -1006,8 +1006,8 @@ def encode_bucket(
                     var b = Int(offsets.unsafe_offset(other)[])
                     same = length == Int(offsets.unsafe_offset(other + 1)[]) - b
                     # Eight bytes at a time: comparing long strings (URLs
-                    # average about 70 bytes) a byte at a time takes eight
-                    # times the loop iterations.
+                    # average about 70 bytes) a byte at a time takes eight times
+                    # the loop iterations.
                     var i = 0
                     while same and i + 8 <= length:
                         same = (

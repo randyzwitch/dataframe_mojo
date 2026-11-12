@@ -2,14 +2,13 @@
 IPC or NDJSON file (or a dataset of them) handed out in source order to
 whichever thread asks next.
 
-A file scan is the source of a pipeline: shared state hands each thread
-the next piece of the file under a lock, and the thread decodes that
-piece itself, so decoding runs on every thread while only the cheap cut
-is serialized. `ScanSource` is that shared state over this library's
-batch readers: `take` cuts the
-next batch under the lock (a CSV or NDJSON byte range, or an imported Arrow
-batch), and `ScanBatch.into_frame` decodes a byte range on the calling
-thread, outside the lock."""
+A file scan is the source of a pipeline: shared state hands each thread the next
+piece of the file under a lock, and the thread decodes that piece itself, so
+decoding runs on every thread while only the cheap cut is serialized.
+`ScanSource` is that shared state over this library's batch readers: `take` cuts
+the next batch under the lock (a CSV or NDJSON byte range, or an imported Arrow
+batch), and `ScanBatch.into_frame` decodes a byte range on the calling thread,
+outside the lock."""
 from std.collections import Optional
 from std.memory import Pointer
 from std.utils.lock import BlockingSpinLock

@@ -14,8 +14,8 @@ from dataframe.vector.types import (
 
 
 struct TupleDataVectorFormat(Copyable, Movable):
-    """One vector's unified format, its selection
-    before a list slice, and the buffers this entry owns."""
+    """One vector's unified format, its selection before a list slice, and the
+    buffers this entry owns."""
 
     var physical: Int
     var unified: UnifiedVectorFormat
@@ -25,11 +25,11 @@ struct TupleDataVectorFormat(Copyable, Movable):
     var entries: List[UInt64]
     # Elements in a list's child.
     var list_size: Int
-    # For a list in a list: the outer selection composed with the inner
-    # one, so the inner child is read through a single selection.
+    # For a list in a list: the outer selection composed with the inner one, so
+    # the inner child is read through a single selection.
     var sliced_sel: List[UInt32]
-    # A list in a list's child entries, combined per
-    # appended row, and their validity.
+    # A list in a list's child entries, combined per appended row, and their
+    # validity.
     var has_combined: Bool
     var combined: UnifiedVectorFormat
     var combined_entries: List[UInt64]

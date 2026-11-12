@@ -83,40 +83,40 @@ from dataframe.vector.types import (
     physical_size,
 )
 
-# A table entry is one 64-bit word: the upper 16 bits are the salt (bits
-# of the key's hash), the lower 48 the row's address. User-space
-# addresses fit in 48 bits, so the salt rides along for free and most
-# non-matching entries are rejected without reading the row.
+# A table entry is one 64-bit word: the upper 16 bits are the salt (bits of the
+# key's hash), the lower 48 the row's address. User-space addresses fit in 48
+# bits, so the salt rides along for free and most non-matching entries are
+# rejected without reading the row.
 comptime SALT_MASK = UInt64(0xFFFF000000000000)
 comptime POINTER_MASK = UInt64(0x0000FFFFFFFFFFFF)
-# Salts are compared on probes only once the table no longer fits the
-# CPU cache: in cache, reading the row to compare the key is cheap, and
-# the salt test is extra work. 8,192 entries are 64 KB, about a core's L2
-# share; the value is an empirical choice.
+# Salts are compared on probes only once the table no longer fits the CPU cache:
+# in cache, reading the row to compare the key is cheap, and the salt test is
+# extra work. 8,192 entries are 64 KB, about a core's L2 share; the value is an
+# empirical choice.
 comptime USE_SALT_THRESHOLD = 8192
-# The table has twice as many slots as rows, so at most half are full
-# and linear-probing chains stay short. Small builds still get 16,384
-# slots (128 KB): the memory is trivial and the chains are shorter.
-# Both are empirical choices.
+# The table has twice as many slots as rows, so at most half are full and
+# linear-probing chains stay short. Small builds still get 16,384 slots (128
+# KB): the memory is trivial and the chains are shorter. Both are empirical
+# choices.
 comptime DEFAULT_LOAD_FACTOR = 2.0
 comptime MINIMUM_CAPACITY = 16384
 # Each sink thread splits its rows into 16 partitions by hash: enough to
-# finalize partitions in parallel, few enough that every partition's
-# write position stays in cache. An empirical choice.
+# finalize partitions in parallel, few enough that every partition's write
+# position stays in cache. An empirical choice.
 comptime INITIAL_RADIX_BITS = 4
 # Hash and prefetch BLOCK_SIZE probe keys together once the table exceeds
 # MIN_PREFETCH_BUCKETS; smaller tables are expected to remain in cache.
 comptime BLOCK_SIZE = 256
 comptime MIN_PREFETCH_BUCKETS = 32768
-# The widest key range a perfect hash join addresses directly: one slot
-# per key value, so a wider range costs memory for keys that may not
-# exist. Bounds the slot array at about 8 MB; an empirical choice.
+# The widest key range a perfect hash join addresses directly: one slot per key
+# value, so a wider range costs memory for keys that may not exist. Bounds the
+# slot array at about 8 MB; an empirical choice.
 comptime PERFECT_MAX_BUILD_SIZE = 1048576
-# Dictionary emission gathers every build row's output once, then emits
-# probe results as row numbers into it. That one gather pays off only
-# when the probe side is much larger than the build side (100 times, and
-# at least 262,144 rows) and the gathered columns are small enough (8 MB)
-# to stay in cache while probe results index them. Empirical choices.
+# Dictionary emission gathers every build row's output once, then emits probe
+# results as row numbers into it. That one gather pays off only when the probe
+# side is much larger than the build side (100 times, and at least 262,144 rows)
+# and the gathered columns are small enough (8 MB) to stay in cache while probe
+# results index them. Empirical choices.
 comptime _DICT_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 comptime _DICT_MIN_PROBE_ROWS = 262144
 comptime _DICT_PROBE_BUILD_RATIO = 100
@@ -127,8 +127,7 @@ comptime _FIX = 0
 comptime _F32 = 1
 comptime _F64 = 2
 comptime _TEXT = 3
-# A 16-byte string record's inline capacity: 16 bytes less the 4-byte
-# length.
+# A 16-byte string record's inline capacity: 16 bytes less the 4-byte length.
 comptime _INLINE = 12
 
 
@@ -342,8 +341,8 @@ def _write_native(
 
 @fieldwise_init
 struct KeyLayout(Copyable, Movable):
-    """Where a join row's columns are, and
-    how its key fields compare (RowMatcher's per-column functions)."""
+    """Where a join row's columns are, and how its key fields compare (one
+    comparison kind per column)."""
 
     var kinds: List[Int]
     # Each key field's offset from the first key field, and its width.
@@ -450,9 +449,8 @@ def _same_keys(
     a: Int,
     b: Int,
 ) -> Bool:
-    """Whether the key fields at `a` and `b` are equal (RowMatcher's
-    equality over every key column). `kinds`, `offsets` and `widths`
-    address the layout's lists."""
+    """Whether the key fields at `a` and `b` are equal, over every key column.
+    `kinds`, `offsets` and `widths` address the layout's lists."""
     if plain:
         return _same_bytes(a, b, key_bytes)
     var kind = Pointer[Int, MutAnyOrigin](unsafe_from_address=kinds)
@@ -485,10 +483,9 @@ struct _TableData(Movable):
     var collection: TupleDataCollection
     var entries: List[UInt64]
     var keys: List[Series]
-    # A perfect hash join's table (PerfectHashJoinExecutor's
-    # `perfect_hash_table` and `bitmap_build_idx`): per key slot its build
-    # row (the payload stand-in, unset where the slot's bit is clear) and
-    # one bit per slot, set when a build row has the slot's key.
+    # A perfect hash join's table: per key slot its build row (the payload
+    # stand-in, unset where the slot's bit is clear) and one bit per slot, set
+    # when a build row has the slot's key.
     var slots: List[UInt32]
     var slot_bits: List[UInt8]
     # Each partition's region of `entries` (one region unless the table
@@ -521,10 +518,10 @@ struct _TableData(Movable):
 
 
 struct _SinkJob(Job):
-    """One build thread: build rows [start, start + count) chunk by
-    chunk into its own RadixPartitionedTupleData, so threads never
-    contend: the keys and the build row referenced, the hash computed,
-    the rows with a null key left out (a null key never matches)."""
+    """One build thread: build rows [start, start + count) chunk by chunk into
+    its own RadixPartitionedTupleData, so threads never contend: the keys and
+    the build row referenced, the hash computed, the rows with a null key left
+    out (a null key never matches)."""
 
     var keys: List[Series]
     var payload: List[Series]
@@ -613,7 +610,8 @@ struct _SinkJob(Job):
             self.rows.partitions[0].to_unified_format(
                 state.chunk_state, chunk, arena
             )
-            # PrepareKeys: the rows whose keys are all valid.
+            # The rows whose keys are all valid: a null key never matches, so
+            # its row is not stored.
             var added = n
             var append_sel = SelectionVector()
             for k in range(fields):
@@ -659,10 +657,9 @@ struct _FinalizeJob(Job):
 
 
 struct _InsertJob(Copyable, Job):
-    """A HashJoinFinalizeTask for one partition's region of the pointer
-    table (at `base`, with `bitmask`): zero it, then insert the rows of
-    the partition's chunks, last row first, so
-    each chain lists its rows in build order."""
+    """The finish task for one partition's region of the pointer table (at
+    `base`, with `bitmask`): zero it, then insert the rows of the partition's
+    chunks, last row first, so each chain lists its rows in build order."""
 
     var layout: KeyLayout
     var collection: Int
@@ -763,8 +760,8 @@ struct _InsertJob(Copyable, Job):
 
     @always_inline
     def _insert(mut self, region: Int, row: Int):
-        """InsertHashesLoop<false>: the row joins the chain of its keys, or
-        starts one in the first empty entry."""
+        """The row joins the chain of its keys, or starts one in the first empty
+        entry (linear probing)."""
         var table = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=region)
         var next = row + self.layout.pointer_offset
         var hash = _load64(next)
@@ -896,8 +893,8 @@ def _perfect_heads(
     heads: Int,
 ):
     """Each probe row's build row plus one (0 for none), looked up by `key -
-    base`: the key's offset in the build range is its slot, so there is
-    no hashing and no key comparison."""
+    base`: the key's offset in the build range is its slot, so there is no
+    hashing and no key comparison."""
     var valid = _validity(key)
     var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid[0])
     var set = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=slot_bits)
@@ -977,8 +974,8 @@ struct JoinHashTable(Copyable, Movable):
     var chains_longer_than_one: Bool
     # Whether a build key is null (a mark join's unknown results).
     var has_null: Bool
-    # Whether the build's subplan filters its tables (JoinFilterPushdownInfo
-    # `build_side_has_filter`), which the join's bloom filter rule reads.
+    # Whether the build's subplan filters its tables, which the join's bloom
+    # filter rule reads.
     var build_filtered: Bool
     # The row layout, and the output columns gathered from it.
     var row_layout: TupleDataLayout
@@ -1006,18 +1003,18 @@ struct JoinHashTable(Copyable, Movable):
         probe_estimate: Int = -1,
         propagate: Bool = True,
     ) raises:
-        """Build and finalize the table over `keys` (one column per
-        equality condition, all of one length). `payload`: the build
-        side's other columns, stored in the rows; none for the eager
-        join, which keeps only each row's build row. `output_columns`
-        (row layout columns: a key, or a payload column),
-        `output_names` and `output_types` are the build side's
-        output columns, gathered from the rows. `perfect`: the join is an
-        inner join, which may run as a perfect hash join. `keys_only`: the
-        join is a semi, anti or mark join (`keys_only_join`), which keeps
-        one row per key. `probe_estimate`: the probe side's estimated
-        rows (dictionary emission; -1 when unknown). `propagate`: the join
-        reads the rows' found flags (`PropagatesBuildSide`)."""
+        """Build and finalize the table over `keys` (one column per equality
+        condition, all of one length). `payload`: the build side's other
+        columns, stored in the rows; none for the eager join, which keeps only
+        each row's build row. `output_columns` (row layout columns: a key, or a
+        payload column), `output_names` and `output_types` are the build side's
+        output columns, gathered from the rows. `perfect`: the join is an inner
+        join, which may run as a perfect hash join. `keys_only`: the join is a
+        semi, anti or mark join (`keys_only_join`), which keeps one row per key.
+        `probe_estimate`: the probe side's estimated rows (dictionary emission;
+        -1 when unknown). `propagate`: the join reads the rows' found flags
+        (right, full, right semi and right anti joins, which emit build rows by
+        whether they matched)."""
         var unchunked = List[Series](capacity=len(keys))
         for key in keys:
             if key.dtype().is_nested():
@@ -1025,7 +1022,7 @@ struct JoinHashTable(Copyable, Movable):
                     "list and struct columns cannot be join keys: " + key.name()
                 )
             unchunked.append(key.rechunk() if key.is_chunked() else key.copy())
-        # BuildJoinLayout: [keys, payload, build row, hash].
+        # The row layout: [keys, payload, build row, hash].
         var payload_columns = List[Series]()
         if payload:
             for column in payload.value():
@@ -1130,9 +1127,8 @@ struct JoinHashTable(Copyable, Movable):
             return
         ref rows = self.data[].collection
         if perfect and not keys_only and len(unchunked) == 1:
-            # Slots addressed by key value when every key is unique in a
-            # narrow range, else (a repeated key, a wide range) the hash
-            # table.
+            # Slots addressed by key value when every key is unique in a narrow
+            # range, else (a repeated key, a wide range) the hash table.
             var filled_rows = List[UInt64]()
             var filled_slots = List[UInt32]()
             var slots = _perfect_slots(
@@ -1152,9 +1148,8 @@ struct JoinHashTable(Copyable, Movable):
                 self.perfect = True
                 self.perfect_base = slots.value()[0]
                 self.perfect_span = slots.value()[1]
-                # FullScanHashTable: only the rows in the table gathered,
-                # each to its key's slot; every output column a dictionary
-                # over the slots.
+                # Only the rows in the table gathered, each to its key's slot;
+                # every output column a dictionary over the slots.
                 if len(self.output_columns) > 0:
                     self._gather_slots(
                         filled_rows, filled_slots, Int(self.perfect_span) + 1
@@ -1223,8 +1218,8 @@ struct JoinHashTable(Copyable, Movable):
             self._build_dictionary_arrays()
 
     def _can_use_dictionary_emission(self, probe_cardinality: Int) -> Bool:
-        """Whether to gather the build side once and emit probe results
-        as row numbers into it (see `_DICT_MAX_PAYLOAD_BYTES`)."""
+        """Whether to gather the build side once and emit probe results as row
+        numbers into it (see `_DICT_MAX_PAYLOAD_BYTES`)."""
         if len(self.output_columns) == 0 or self.rows_stored == 0:
             return False
         if probe_cardinality < _DICT_MIN_PROBE_ROWS:
@@ -1264,10 +1259,9 @@ struct JoinHashTable(Copyable, Movable):
         slots: List[UInt32],
         size: Int,
     ) raises:
-        """Every output column as a column of `size` slots, the row at
-        `rows[i]` at slot `slots[i]`, the other slots unwritten
-        (FullScanHashTable; the probe reads only slots whose bit is
-        set)."""
+        """Every output column as a column of `size` slots, the row at `rows[i]`
+        at slot `slots[i]`, the other slots unwritten (the probe reads only
+        slots whose bit is set)."""
         var out = List[Series](capacity=len(self.output_columns))
         for c in range(len(self.output_columns)):
             out.append(
@@ -1286,11 +1280,11 @@ struct JoinHashTable(Copyable, Movable):
         self.use_dictionary = True
 
     def _build_dictionary_arrays(mut self) raises:
-        """Gather every output column into a
-        dictionary over the rows in collection order (one extra null row
-        last for a left join's unmatched probe rows), each row's number
-        stored where its next pointer was, and the next pointers kept in
-        `aux_next` (a chain ends at the extra slot)."""
+        """Gather every output column into a dictionary over the rows in
+        collection order (one extra null row last for a left join's unmatched
+        probe rows), each row's number stored where its next pointer was, and
+        the next pointers kept in `aux_next` (a chain ends at the extra
+        slot)."""
         var pointers = List[UInt64](capacity=self.rows_stored + 1)
         var state = TupleDataChunkState()
         ref rows = self.data[].collection
@@ -1374,9 +1368,9 @@ struct JoinHashTable(Copyable, Movable):
     def scan_chunk(
         self, chunk: Int, want: UInt8, mut rows: List[UInt64]
     ) raises:
-        """ScanFullOuter over one chunk of the rows (each worker takes its
-        own): append the pointers of the rows whose found flag is `want`
-        (0: no probe matched them; 1: a right-semi join's matches)."""
+        """Scan one chunk of the rows for their found flags (each worker takes
+        its own): append the pointers of the rows whose found flag is `want` (0:
+        no probe matched them; 1: a right-semi join's matches)."""
         var state = TupleDataChunkState()
         var found_offset = self.layout.found_offset
         var count = self.data[].collection.fetch_chunk(state, chunk, False)
@@ -1407,12 +1401,11 @@ struct ScanStructure(Movable):
     """One thread's probe of a JoinHashTable, a chunk of at most
     STANDARD_VECTOR_SIZE probe rows at a time.
 
-    `probe` hashes the chunk's keys and finds each row's chain
-    (`GetRowPointers`); `next` then emits the join's rows for the chunk,
-    at most STANDARD_VECTOR_SIZE per call, into `probe_rows` (the chunk's
-    row, from 0) and `build_rows` (the build row, -1 for none), until it
-    returns 0. A mark join emits every probe row, its result in `marks`
-    (1 matched, 0 not, 2 unknown)."""
+    `probe` hashes the chunk's keys and finds each row's chain; `next` then
+    emits the join's rows for the chunk, at most STANDARD_VECTOR_SIZE per call,
+    into `probe_rows` (the chunk's row, from 0) and `build_rows` (the build row,
+    -1 for none), until it returns 0. A mark join emits every probe row, its
+    result in `marks` (1 matched, 0 not, 2 unknown)."""
 
     var table: JoinHashTable
     var how: Int
@@ -1480,9 +1473,9 @@ struct ScanStructure(Movable):
         )
 
     def probe(mut self, keys: List[Series], start: Int, count: Int) raises:
-        """Probe rows [start, start + count) of the unchunked `keys` (at
-        most STANDARD_VECTOR_SIZE rows): each row's first candidate
-        entry, followed by `next` to find its matches."""
+        """Probe rows [start, start + count) of the unchunked `keys` (at most
+        STANDARD_VECTOR_SIZE rows): each row's first candidate entry, followed
+        by `next` to find its matches."""
         self.count = count
         self.row = 0
         self.cursor = 0
@@ -1493,8 +1486,8 @@ struct ScanStructure(Movable):
         for i in range(count):
             heads[unsafe_offset=i] = 0
         if self.table.perfect:
-            # The key's slot holds its build row,
-            # emitted by `next` with no chain to walk.
+            # The key's slot holds its build row, emitted by `next` with no
+            # chain to walk.
             _perfect_heads(
                 keys[0],
                 start,
@@ -1531,7 +1524,7 @@ struct ScanStructure(Movable):
             )
         if self.table.inserted == 0:
             return
-        # PrepareKeys: rows with a null key match nothing.
+        # Rows with a null key match nothing.
         var todo = self.todo.unsafe_ptr()
         var pending = 0
         for i in range(count):
@@ -1540,8 +1533,8 @@ struct ScanStructure(Movable):
         self._row_pointers(pending)
 
     def _row_pointers(mut self, var pending: Int):
-        """GetRowPointers: each pending row's chain, by linear probing to an
-        empty entry or one whose salt matches and whose keys are equal."""
+        """Each pending row's chain, by linear probing to an empty entry or one
+        whose salt matches and whose keys are equal."""
         var table = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=self.table.entries_address()
         )
@@ -1617,7 +1610,7 @@ struct ScanStructure(Movable):
         # stay cached.
         var fetch = self.table.capacity >= MIN_PREFETCH_BUCKETS
         while pending > 0:
-            # ProbeForPointers: walk to an empty entry or a salt match.
+            # Walk to an empty entry or a salt match.
             var candidates = 0
             for block in range(0, pending, BLOCK_SIZE):
                 var block_end = min(block + BLOCK_SIZE, pending)
@@ -1644,7 +1637,8 @@ struct ScanStructure(Movable):
                             compare[unsafe_offset=candidates] = Int32(i)
                             candidates += 1
                             if fetch:
-                                # The candidate's row, for RowMatcher.
+                                # The candidate's row, for the key comparison
+                                # below.
                                 prefetch(
                                     Pointer[UInt64, MutAnyOrigin](
                                         unsafe_from_address=Int(head)
@@ -1654,8 +1648,8 @@ struct ScanStructure(Movable):
                             break
                         offset = base + ((offset - base + 1) & mask)
                     offsets[unsafe_offset=i] = offset
-            # RowMatcher: compare the candidates' keys; a mismatch goes on
-            # probing from the next entry.
+            # Compare the candidates' keys; a mismatch goes on probing from the
+            # next entry.
             var misses = 0
             if plain and key_bytes == 8:
                 for c in range(candidates):
@@ -1728,7 +1722,8 @@ struct ScanStructure(Movable):
             or self.how == JOIN_ANTI
             or self.how == JOIN_MARK
         ):
-            # NextSemiJoin / NextAntiJoin / NextMarkJoin: one pass.
+            # Semi, anti and mark joins: one pass, since a row's output depends
+            # only on whether it matched.
             var keep = self.how == JOIN_SEMI
             var unknown = self.table.has_null
             var valid = self.valid.unsafe_ptr()
@@ -1751,8 +1746,8 @@ struct ScanStructure(Movable):
             self.finished = True
             return out
         if self.how == JOIN_RIGHT_SEMI or self.how == JOIN_RIGHT_ANTI:
-            # NextRightSemiOrAntiJoin: flag every row of each matched chain;
-            # a chain whose head is flagged was flagged whole before.
+            # Right semi and anti joins: flag every row of each matched chain; a
+            # chain whose head is flagged was flagged whole before.
             for i in range(self.count):
                 var p = heads[unsafe_offset=i]
                 if p == 0:
@@ -1792,7 +1787,7 @@ struct ScanStructure(Movable):
                     out += 1
             self.finished = True
             return out
-        # NextInnerJoin / NextLeftJoin, one probe row's chain at a time.
+        # Inner and left joins, one probe row's chain at a time.
         var outer = self.how == JOIN_LEFT or self.how == JOIN_FULL
         var flag = self.propagate
         while self.row < self.count:
@@ -1822,8 +1817,8 @@ struct ScanStructure(Movable):
                     _store8(Int(p) + found_offset, 1)
                 out += 1
                 if dict_emission:
-                    # GetNextPointer: the row number sits where the next
-                    # pointer was, the next pointer in `aux_next`.
+                    # The row number sits where the next pointer was, the next
+                    # pointer in `aux_next`.
                     var number = _load64(Int(p) + next_offset)
                     out_build[unsafe_offset=out - 1] = Int32(number)
                     p = aux[unsafe_offset=Int(number)]

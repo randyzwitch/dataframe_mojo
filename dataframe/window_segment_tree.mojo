@@ -34,17 +34,17 @@ from dataframe.storage.string import StringColumn
 from dataframe.vector.data_chunk import ColumnArena, DataChunk, flat_over
 from dataframe.vector.types import SelectionVector, UnifiedVectorFormat
 
-# Each tree entry combines 16 entries of the level below. A wider fanout
-# makes the tree shallower but a frame's ends combine up to fanout - 1
-# entries per level; 16 balances the two (an empirical choice). It must
-# divide STANDARD_VECTOR_SIZE so a vector of leaves fills whole entries.
+# Each tree entry combines 16 entries of the level below. A wider fanout makes
+# the tree shallower but a frame's ends combine up to fanout - 1 entries per
+# level; 16 balances the two (an empirical choice). It must divide
+# STANDARD_VECTOR_SIZE so a vector of leaves fills whole entries.
 comptime TREE_FANOUT = 16
 comptime STANDARD_VECTOR_SIZE = 2048
 
 
 struct WindowSegmentTree(Movable):
-    """The states of the tree's upper levels
-    over `leaf_count` rows, and the slots they are made of."""
+    """The states of the tree's upper levels over `leaf_count` rows, and the
+    slots they are made of."""
 
     var slots: List[AggregateFunction]
     var stride: Int
@@ -99,8 +99,8 @@ struct WindowSegmentTree(Movable):
 
 
 struct _TreePart(Movable):
-    """WindowSegmentTreePart: a worker's vectors of pending updates and
-    combines, each flushed a STANDARD_VECTOR_SIZE at a time."""
+    """A worker's vectors of pending updates and combines, each flushed a
+    STANDARD_VECTOR_SIZE at a time."""
 
     var slots: List[AggregateFunction]
     var inputs: List[UnifiedVectorFormat]
@@ -366,8 +366,8 @@ struct _BuildJob(Job):
 
 
 struct _EvaluateJob(Job):
-    """The frames of rows [lo, hi) into their states, a vector at a
-    time, each state zeroed first on this worker."""
+    """The frames of rows [lo, hi) into their states, a vector at a time, each
+    state zeroed first on this worker."""
 
     var tree: Int
     var begins: Int
@@ -377,9 +377,9 @@ struct _EvaluateJob(Job):
     var step: Int
     var lo: Int
     var hi: Int
-    # WindowNaiveAggregator: each frame's rows folded into its state in
-    # order, frames short of `needed` valid values (per `running_valid`,
-    # the valid rows before each row) left empty.
+    # Each frame's rows folded into its state in order, frames short of `needed`
+    # valid values (per `running_valid`, the valid rows before each row) left
+    # empty.
     var naive: Bool
     var needed: Int
     var running_valid: Int
@@ -457,8 +457,8 @@ def _workers(items: Int) -> Int:
 
 
 def _build(mut tree: WindowSegmentTree) raises:
-    """Every level, bottom up, since each level combines the one below:
-    the entries of a level in parallel ranges, all done before the next."""
+    """Every level, bottom up, since each level combines the one below: the
+    entries of a level in parallel ranges, all done before the next."""
     var address = Int(Pointer(to=tree))
     for level in range(len(tree.levels_flat_start)):
         var level_size = tree.level_size(level)
@@ -498,9 +498,8 @@ struct FrameResults(Movable):
 
 
 def frame_states_supported(spec: ReducerSpec, input: Series) -> Bool:
-    """Whether `input`'s aggregate has a state held inline and combined
-    without its rows, which a tree entry needs: an entry stands for many
-    rows."""
+    """Whether `input`'s aggregate has a state held inline and combined without
+    its rows, which a tree entry needs: an entry stands for many rows."""
     return _slot_kind(spec, input) >= 0
 
 

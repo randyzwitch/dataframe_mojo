@@ -1,9 +1,10 @@
 """Chunk-local CSV decoding.
 
-``decode_chunk`` receives record-aligned, header-free input from read_impl.
-It holds only projected _CsvColumnBuffer instances, forwards borrowed SplitFields
-spans to typed buffers, and delegates omitted tails to a quote-aware skip rule. Prelude removal and global n_rows bounds
-belong to orchestration, never to an individual chunk.
+``decode_chunk`` receives record-aligned, header-free input from read_impl. It
+holds only projected _CsvColumnBuffer instances, forwards borrowed
+CsvSplitFields spans to typed buffers, and delegates omitted tails to a
+quote-aware skip rule. Prelude removal and global n_rows bounds belong to
+orchestration, never to an individual chunk.
 """
 from std.bit import count_trailing_zeros
 from .csv_bits import _mask64
@@ -193,9 +194,9 @@ def decode_chunk(
             staged.append(cells^)
             staged_counts.append(0)
 
-    # A projection never reads fields past its last selected column, so
-    # extra fields on a row are tolerated (as with truncate_ragged_lines)
-    # rather than checked.
+    # A projection never reads fields past its last selected column, so extra
+    # fields on a row are tolerated (as with truncate_ragged_lines) rather than
+    # checked.
     var partial_projection = selected != len(schema)
     var staged_decode = selected > 1
     var offset = 0
@@ -352,15 +353,14 @@ def decode_chunk(
             var field = next.value().copy()
             var consumed = fields.consumed()
             if source_index == next_selected:
-                # A selected field's trailing CR is trimmed before it is
-                # stored, however SplitFields terminated it, so CRLF files
-                # read like LF files. This includes an unterminated final
-                # record at EOF.
+                # A selected field's trailing CR is trimmed before it is stored,
+                # however SplitFields terminated it, so CRLF files read like LF
+                # files. This includes an unterminated final record at EOF.
                 var raw = field._unsafe_bytes(input)
                 if len(raw) > 0 and raw[len(raw) - 1] == 13:
                     raw = raw[0 : len(raw) - 1]
-                # Null tokens are matched before the field is stored, on
-                # the unquoted bytes.
+                # Null tokens are matched before the field is stored, on the
+                # unquoted bytes.
                 var is_null = False
                 if len(options.null_values) != 0:
                     var null_candidate = raw
@@ -396,9 +396,8 @@ def decode_chunk(
                 if field.terminator == 10:
                     complete = True
                 else:
-                    # A full projection rejects remaining source fields
-                    # unless ragged lines are allowed; a partial projection
-                    # skips them.
+                    # A full projection rejects remaining source fields unless
+                    # ragged lines are allowed; a partial projection skips them.
                     if (
                         not partial_projection
                         and not options.truncate_ragged_lines

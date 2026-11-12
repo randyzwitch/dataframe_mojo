@@ -50,8 +50,8 @@ def _load_prefix_little_endian(bytes: Span[UInt8, ImmutAnyOrigin]) -> UInt32:
 
 @always_inline
 def _inline_view(bytes: Span[UInt8, ImmutAnyOrigin]) -> StringView:
-    """A view holding a short value's bytes inline, the unused tail
-    zeroed so two equal values have equal views."""
+    """A view holding a short value's bytes inline, the unused tail zeroed so
+    two equal values have equal views."""
     var length = len(bytes)
     assert length <= STRING_VIEW_INLINE_BYTES
     var view = StringView(UInt32(length), 0, 0, 0)
@@ -69,8 +69,8 @@ def _inline_view(bytes: Span[UInt8, ImmutAnyOrigin]) -> StringView:
 def _external_view(
     bytes: Span[UInt8, ImmutAnyOrigin], buffer_index: UInt32, offset: UInt32
 ) -> StringView:
-    """A view of a long value: its length, prefix, and where its bytes
-    are in the buffers."""
+    """A view of a long value: its length, prefix, and where its bytes are in
+    the buffers."""
     assert len(bytes) > STRING_VIEW_INLINE_BYTES
     return StringView(
         UInt32(len(bytes)),
@@ -416,8 +416,8 @@ struct StringViewStorage(Copyable, Sized):
                     out_bits[unsafe_offset=k >> 3] |= UInt8(1) << UInt8(k & 7)
             gathered._bits = _Buffer(bits^)
             return gathered^
-        # Each view is 16 bytes copied as four words into a buffer sized
-        # once, with no per-view append bookkeeping or growth checks.
+        # Each view is 16 bytes copied as four words into a buffer sized once,
+        # with no per-view append bookkeeping or growth checks.
         var views = huge_uninit[StringView](count)
         var target = views.unsafe_ptr().unsafe_bitcast[SIMD[DType.uint32, 4]]()
         var source = source_views.unsafe_bitcast[SIMD[DType.uint32, 4]]()
@@ -614,9 +614,9 @@ struct StringViewStorage(Copyable, Sized):
 
 
 struct StringViewBuilder(Movable):
-    """Builds views one value at a time: short values inline, long ones
-    appended to the in-progress block, which is sealed into a buffer when
-    full so finished buffers never move."""
+    """Builds views one value at a time: short values inline, long ones appended
+    to the in-progress block, which is sealed into a buffer when full so
+    finished buffers never move."""
 
     var _views: List[StringView]
     var _completed_buffers: List[_Buffer[UInt8]]

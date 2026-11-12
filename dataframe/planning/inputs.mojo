@@ -35,9 +35,8 @@ from std.memory import (
 
 
 def _in_rows(dtype: DataType) -> Bool:
-    """Whether a build column's output is gathered from the rows
-    (`GatherRHS`); a string or nested column is read from the build frame
-    by row number instead."""
+    """Whether a build column's output is gathered from the rows; a string or
+    nested column is read from the build frame by row number instead."""
     return not dtype.is_nested() and dtype.physical() != DataType.STRING
 
 

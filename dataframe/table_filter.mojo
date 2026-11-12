@@ -1,14 +1,13 @@
 """Filters pushed into a table scan.
 
-A table filter reads one column. It is a small tree of filter
-kinds (a comparison with a constant, IN, IS NULL, IS NOT NULL, AND and OR
-of filters on the same column, and a dynamic filter whose constant an
-operator sets while the query runs) that `check_statistics` answers against
-a column's `BaseStatistics`: whether the filter keeps every row of a
-vector, none, or some. A vector answered "none" is never read, and one
-answered "every" needs no row test. Each filter also keeps the predicate
-part it came from, the expression the scan evaluates on rows the
-statistics did not rule out.
+A table filter reads one column. It is a small tree of filter kinds (a
+comparison with a constant, IN, IS NULL, IS NOT NULL, AND and OR of filters on
+the same column, and a dynamic filter whose constant an operator sets while the
+query runs) that `check_statistics` answers against a column's `BaseStatistics`:
+whether the filter keeps every row of a vector, none, or some. A vector answered
+"none" is never read, and one answered "every" needs no row test. Each filter
+also keeps the predicate part it came from, the expression the scan evaluates on
+rows the statistics did not rule out.
 
 Constants are taken into the column's own domain once, when the filter is
 made (`table_filters`): the integer a decimal, date or integer column
@@ -83,10 +82,10 @@ comptime DYNAMIC_FILTER = 6
 
 @fieldwise_init
 struct FilterConstants(Copyable, Movable):
-    """Constants in a column's domain: `domain` is NUMERIC_STATS (the
-    integers the column stores), FLOAT_STATS or STRING_STATS. `integral`
-    marks an integer column, whose whole range a list of values can cover
-    (an IN list naming every value in [min, max] keeps every row)."""
+    """Constants in a column's domain: `domain` is NUMERIC_STATS (the integers
+    the column stores), FLOAT_STATS or STRING_STATS. `integral` marks an integer
+    column, whose whole range a list of values can cover (an IN list naming
+    every value in [min, max] keeps every row)."""
 
     var domain: Int
     var integral: Bool
@@ -261,12 +260,11 @@ def constant_in_domain(
 
 
 struct DynamicFilterData(Movable):
-    """A comparison whose constant an operator sets and tightens while the
-    query runs (`DynamicFilterData`): a TopN's boundary, a join build's key
-    range. Shared by the scan that checks it and the operator that sets it.
-    Until it is set it rules nothing out. A dynamic filter is optional: the
-    operator that set it still checks every row it receives, so the scan
-    only uses it to skip vectors."""
+    """A comparison whose constant an operator sets and tightens while the query
+    runs: a TopN's boundary, a join build's key range. Shared by the scan that
+    checks it and the operator that sets it. Until it is set it rules nothing
+    out. A dynamic filter is optional: the operator that set it still checks
+    every row it receives, so the scan only uses it to skip vectors."""
 
     var lock: Atomic[Int64]
     var initialized: Atomic[Int64]
@@ -307,8 +305,8 @@ def _unlock(data: ArcPointer[DynamicFilterData]):
 def set_dynamic_value(
     data: ArcPointer[DynamicFilterData], op: Int, value: Series
 ) raises -> Bool:
-    """Set the comparison and constant; false when the column cannot hold the value exactly, which leaves the
-    filter as it was."""
+    """Set the comparison and constant; false when the column cannot hold the
+    value exactly, which leaves the filter as it was."""
     var converted = constant_in_domain(_dynamic(data).column, value)
     if not converted:
         return False
@@ -323,8 +321,8 @@ def set_dynamic_value(
 def _dynamic_check(
     data: ArcPointer[DynamicFilterData], stats: BaseStatistics
 ) -> Int:
-    """What the statistics prove about the dynamic filter's current
-    comparison; nothing until an operator has set its constant."""
+    """What the statistics prove about the dynamic filter's current comparison;
+    nothing until an operator has set its constant."""
     if _dynamic(data).initialized.load() == 0:
         return NO_PRUNING_POSSIBLE
     # The constant is read in place under the lock rather than copied out:
@@ -384,9 +382,9 @@ struct TableFilterSet(Copyable, Movable):
     def push_dynamic(
         mut self, column: String, data: ArcPointer[DynamicFilterData]
     ):
-        """Add a dynamic filter on `column` (step 8's TopN boundary, step
-        5's join filters): an optional filter the scan checks against each
-        vector's statistics."""
+        """Add a dynamic filter on `column` (a TopN boundary, a join's key
+        filters): an optional filter the scan checks against each vector's
+        statistics."""
         var nodes = List[FilterNode]()
         nodes.append(
             FilterNode(
@@ -401,8 +399,8 @@ struct TableFilterSet(Copyable, Movable):
 
 
 def _zonemap(stats: BaseStatistics, op: Int, constants: FilterConstants) -> Int:
-    """`CheckZonemapAgainstConstants`: the numeric or string zone map, when
-    the statistics are in the constants' domain."""
+    """The numeric or string zone map, when the statistics are in the constants'
+    domain."""
     if stats.stats_type != constants.domain:
         return NO_PRUNING_POSSIBLE
     if constants.domain == NUMERIC_STATS:
@@ -415,7 +413,7 @@ def _zonemap(stats: BaseStatistics, op: Int, constants: FilterConstants) -> Int:
 def _check_comparison(
     stats: BaseStatistics, op: Int, constants: FilterConstants
 ) -> Int:
-    """`CheckComparisonStatistics` with a non-null constant."""
+    """What the statistics prove about a comparison with a non-null constant."""
     if not stats.can_have_no_null():
         return (
             FILTER_ALWAYS_TRUE if op
@@ -430,7 +428,7 @@ def _check_comparison(
 
 
 def _check_in(stats: BaseStatistics, constants: FilterConstants) -> Int:
-    """`CheckInOperatorStatistics`."""
+    """What the statistics prove about an IN list."""
     if constants.count() == 0:
         return FILTER_ALWAYS_FALSE
     if not stats.can_have_no_null():
@@ -471,7 +469,8 @@ def _check_node(
     if node.kind == DYNAMIC_FILTER:
         return _dynamic_check(node.dynamic.value(), stats)
     if node.kind == CONJUNCTION_AND:
-        # `CheckConjunctionStatistics`, AND.
+        # AND: always true only when every child is, always false when any child
+        # is.
         var result = FILTER_ALWAYS_TRUE
         for child in node.children:
             var answer = _check_node(nodes, child, stats)
@@ -496,8 +495,8 @@ def _check_node(
 
 
 def check_statistics(filter: TableFilter, stats: BaseStatistics) -> Int:
-    """Whether the filter keeps every row the statistics describe, none,
-    or some (one of the FILTER_* / NO_PRUNING_POSSIBLE answers)."""
+    """Whether the filter keeps every row the statistics describe, none, or some
+    (one of the FILTER_* / NO_PRUNING_POSSIBLE answers)."""
     return _check_node(filter.nodes, len(filter.nodes) - 1, stats)
 
 
@@ -680,9 +679,9 @@ def _build(
 
 
 def table_filters(parts: List[Expr], columns: List[Series]) -> TableFilterSet:
-    """The parts of a conjunction that are filters on one column of
-    `columns`, as table filters, which statistics can answer before rows
-    are read; other parts stay with the expression evaluated over the scan's rows."""
+    """The parts of a conjunction that are filters on one column of `columns`,
+    as table filters, which statistics can answer before rows are read; other
+    parts stay with the expression evaluated over the scan's rows."""
     var set = TableFilterSet()
     for p in range(len(parts)):
         var builder = _Builder()

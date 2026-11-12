@@ -77,8 +77,8 @@ struct _BoolBuffer(Copyable):
 
 
 struct _Utf8Buffer[categorical: Bool = False](Movable):
-    """A string column's buffer: encoding, quote byte, and scratch owned by
-    the builder."""
+    """A string column's buffer: encoding, quote byte, and scratch owned by the
+    builder."""
 
     var builder: StringViewBuilder
     var codes: _NumericBuffer[DType.uint32]
@@ -303,8 +303,8 @@ struct _CsvColumnBuffer(Movable):
             else:
                 raise Error("invalid Boolean CSV value")
             return
-        # PrimitiveChunkedBuilder strips leading SP/TAB; temporal builders
-        # consume their quoted contents without whitespace trimming.
+        # Numeric fields have leading spaces and tabs stripped; temporal fields
+        # are parsed from their quoted contents without trimming.
         var start = 0
         while (
             not self.field.dtype.is_temporal()

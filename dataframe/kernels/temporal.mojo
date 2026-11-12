@@ -347,10 +347,10 @@ def _days(value: Int64, dtype: DataType) -> Int64:
 
 @fieldwise_init
 struct Truncation(Copyable):
-    """`truncate(every)` for one column, its interval parsed once:
-    calendar months, or a fixed step in the column's ticks from an origin.
-    Parsing the interval string once instead of per value leaves only
-    integer arithmetic in the row loop."""
+    """`truncate(every)` for one column, its interval parsed once: calendar
+    months, or a fixed step in the column's ticks from an origin. Parsing the
+    interval string once instead of per value leaves only integer arithmetic in
+    the row loop."""
 
     var dtype: DataType
     var months: Int64
@@ -719,7 +719,7 @@ def _packed_temporal(
 ) raises -> Series:
     var packed = input.struct_column()
     # Materialize chunked children once, then keep typed buffer windows.
-    # Validity and payload reads in the row loop do not box AnyValues.
+    # Validity and payload reads in the row loop do not box values.
     var fields = List[Column[Int64]]()
     var names = packed.field_names()
     for i in range(packed.field_count()):
@@ -901,10 +901,9 @@ def dt_op(
         return Series("", out^.finish())
     var valid = List[Bool](length=n, fill=False)
     var values = List[Int64](length=n, fill=0)
-    # Intervals parsed once, when some observed value is valid: an all-null
-    # or fully masked column raises no interval error, as before. The
-    # loop below is single-threaded over every row, so it checks nothing
-    # more per row.
+    # Intervals parsed once, when some observed value is valid: an all-null or
+    # fully masked column raises no interval error, as before. The loop below is
+    # single-threaded over every row, so it checks nothing more per row.
     var parse = False
     if op == DT_TRUNCATE or op == DT_OFFSET_BY or op == DT_ROUND:
         for i in range(n):
@@ -1014,8 +1013,8 @@ def dt_op(
         elif dtype.is_date():
             values[i] = 0
         else:
-            # Time-of-day fields need no calendar: the ticks within the
-            # day, one remainder per value.
+            # Time-of-day fields need no calendar: the ticks within the day, one
+            # remainder per value.
             var within = v % (
                 NANOS_PER_DAY if dtype.is_time() else ticks_per_day(dtype)
             )

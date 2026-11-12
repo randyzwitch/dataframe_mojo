@@ -730,11 +730,10 @@ struct _GatherJob(Job):
                 # Callers validate indices or construct them from source row positions.
                 var input = column._ptr()
                 # The output starts uninitialized (see `_allocate`), so a
-                # null-extended slot is written too, as zero.
-                # Indices through a pointer and the flags decided once:
-                # a bounds check and two field reads per row keep the
-                # CPU from overlapping the loop's scattered loads, whose
-                # cache misses are the cost of a gather.
+                # null-extended slot is written too, as zero. Indices through a
+                # pointer and the flags decided once: a bounds check and two
+                # field reads per row keep the CPU from overlapping the loop's
+                # scattered loads, whose cache misses are the cost of a gather.
                 var positions = rows.unsafe_ptr()
                 if self.skip_validity and not self.or_null:
                     for k in range(self.start, self.end):

@@ -104,11 +104,11 @@ def plan_joins_below(self: QueryContext, index: Int) -> Bool:
 # Penalize building a standalone relation against an already-streaming join by
 # 15% to account for the opportunity to keep those join rows in flight.
 comptime _PREFER_RIGHT_DEEP_PENALTY = 0.15
-# A build side that filters earns its runtime filter's bonus only against
-# a probe scan of at least a million rows and 64 times its own rows: below
-# that, the rows the filter can skip do not repay building it, and a
-# build with many keys filters little. A semi join's filtering left builds
-# for a right scan three times both sides. Empirical choices.
+# A build side that filters earns its runtime filter's bonus only against a
+# probe scan of at least a million rows and 64 times its own rows: below that,
+# the rows the filter can skip do not repay building it, and a build with many
+# keys filters little. A semi join's filtering left builds for a right scan
+# three times both sides. Empirical choices.
 comptime _MIN_FILTER_TARGET_CARDINALITY = 1000000
 comptime _MAX_BUILD_TO_TARGET_RATIO = 64
 comptime _SEMI_JOIN_FILTER_TARGET_RATIO = 3
@@ -127,8 +127,8 @@ def _filter_target_rows(
     self: QueryContext, side: Int, keys: List[String]
 ) raises -> Int:
     """The most rows of a table scan under `side` that a runtime filter on
-    `keys` would reach: the scans supplying the keys, whatever filters
-    later reduce."""
+    `keys` would reach: the scans supplying the keys, whatever filters later
+    reduce."""
     var most = 0
     for key in keys:
         var found = plan_provider_scan(self, side, key)
@@ -148,8 +148,9 @@ def _filter_build_bonus(
     build_rows: Int,
 ) raises -> Float64:
     """How much cheaper building on `build` is for the runtime filter it
-    publishes into the probe side's scans: the target scan's rows over the build's, when the build filters its
-    tables and the scan is large next to it; else 1."""
+    publishes into the probe side's scans: the target scan's rows over the
+    build's, when the build filters its tables and the scan is large next to it;
+    else 1."""
     if not plan_is_filtering(self, build):
         return 1.0
     var target = _filter_target_rows(self, probe, probe_keys)
@@ -161,8 +162,8 @@ def _filter_build_bonus(
 
 
 def _child_joins(self: QueryContext, index: Int) -> Int:
-    """The joins in the subplan at `index`: both inputs
-    of a join, the first input of anything else."""
+    """The joins in the subplan at `index`: both inputs of a join, the first
+    input of anything else."""
     if index < 0:
         return 0
     ref node = self._nodes[index]
@@ -176,14 +177,13 @@ def _child_joins(self: QueryContext, index: Int) -> Int:
 def _builds_on_left(
     self: QueryContext, mut stats: PlanStatistics, at: Int, batch_size: Int
 ) raises -> Bool:
-    """Whether the join at `at` should build on its left input
-    rather than its right: each side's hash table bytes (`build_size`
-    over its schema and estimated rows), the right's
-    divided by its runtime filter bonus where the join type publishes
-    one, the left's where the flipped type does (an anti join's RIGHT_ANTI
-    does not), and the right's 15% dearer when it holds no join and the
-    left does; the left builds when the right costs more, or for a semi
-    join whose filtering left would filter a right scan three times both
+    """Whether the join at `at` should build on its left input rather than its
+    right: each side's hash table bytes (`build_size` over its schema and
+    estimated rows), the right's divided by its runtime filter bonus where the
+    join type publishes one, the left's where the flipped type does (an anti
+    join's RIGHT_ANTI does not), and the right's 15% dearer when it holds no
+    join and the left does; the left builds when the right costs more, or for a
+    semi join whose filtering left would filter a right scan three times both
     sides' rows. False when a side has no estimate."""
     ref node = self._nodes[at]
     if (
@@ -205,9 +205,9 @@ def _builds_on_left(
     var left_cost = max(Float64(left_width) * Float64(lhs), 8.0)
     var right_cost = max(Float64(right_width) * Float64(rhs), 8.0)
     var swap = False
-    # Inner and semi joins filter their probe (a left join keeps every probe row, an anti
-    # join's filter would need inverting); flipped, an inner, right and
-    # right semi join do.
+    # Inner and semi joins filter their probe (a left join keeps every probe
+    # row, an anti join's filter would need inverting); flipped, an inner, right
+    # and right semi join do.
     if node.how == JOIN_INNER or node.how == JOIN_SEMI:
         right_cost /= _filter_build_bonus(
             self, node.left, node.names, node.right, rhs
@@ -237,11 +237,10 @@ def _builds_on_left(
 def _flip_inner_join(
     mut plan: QueryContext, at: Int, batch_size: Int
 ) raises -> Bool:
-    """Flip the inner join at `at`: its right input
-    probes and its left builds, under a selection that restores the
-    join's columns, their order, names and key types. False, with
-    nothing changed, when a name the sides share other than as a key
-    would be renamed by the join, or a right key repeats."""
+    """Flip the inner join at `at`: its right input probes and its left builds,
+    under a selection that restores the join's columns, their order, names and
+    key types. False, with nothing changed, when a name the sides share other
+    than as a key would be renamed by the join, or a right key repeats."""
     var node = plan._nodes[at].copy()
     if not node.coalesce:
         return False
@@ -290,12 +289,11 @@ def _flip_inner_join(
 def _flip_left_join(
     mut plan: QueryContext, at: Int, batch_size: Int
 ) raises -> Bool:
-    """Flip the left join at `at` into a right join (`FlipChildren` with
-    `InverseJoinType`): its right input probes and its left builds, the
-    build rows no probe row matched coming out last, under a selection that restores the
-    join's columns: the left's, then the right's other than its keys.
-    False, with nothing changed, when the sides share a column name, a
-    key repeats, or the key types differ or need the general join
+    """Flip the left join at `at` into a right join: its right input probes and
+    its left builds, the build rows no probe row matched coming out last, under
+    a selection that restores the join's columns: the left's, then the right's
+    other than its keys. False, with nothing changed, when the sides share a
+    column name, a key repeats, or the key types differ or need the general join
     (categorical, nested)."""
     var node = plan._nodes[at].copy()
     if not node.coalesce:
@@ -512,8 +510,8 @@ def plan_cost_order_joins(
             unique = unique and linked == holders
         if not unique:
             continue
-        # Each join as an operator: its inputs'
-        # relations and the relations its keys read.
+        # Each join as an operator: its inputs' relations and the relations its
+        # keys read.
         var ops = List[JoinOperator]()
         var known = True
         for j in range(len(joins)):
@@ -606,9 +604,9 @@ def plan_cost_order_joins(
                 if name in twins:
                     for t in twins[name]:
                         mask |= 1 << t
-            # One reading a left join's right columns runs after that
-            # join: below it, the filter would see rows the left join has
-            # not yet null-extended.
+            # One reading a left join's right columns runs after that join:
+            # below it, the filter would see rows the left join has not yet
+            # null-extended.
             for op in ops:
                 if op.kind == OPERATOR_LEFT and mask & op.right_relations != 0:
                     mask |= op.syntactic
@@ -659,9 +657,9 @@ def plan_cost_order_joins(
                 var compare = _comparison_edge(part, provider)
                 if compare:
                     compares.append(compare.take())
-        # Each compared column's distinct count by its source, for the
-        # sets' total domains: reliable counts,
-        # counts from integer bounds, and fallback rows.
+        # Each compared column's distinct count by its source, for the sets'
+        # total domains: reliable counts, counts from integer bounds, and
+        # fallback rows.
         var compared = List[Tuple[Int, String]]()
         for e in edges:
             for i in range(len(e.a_keys)):

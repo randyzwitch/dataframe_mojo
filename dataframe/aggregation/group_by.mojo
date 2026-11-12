@@ -349,8 +349,8 @@ struct GroupBy(Copyable):
             return self.agg(prepared, batch_size=batch_size)
         # String keys that carry their source's dictionary codes (a Parquet
         # scan) group by the codes, as categorical keys do, and come back as
-        # strings: integer codes hash and compare far faster than the
-        # strings, and the strings are read once per group, not per row.
+        # strings: integer codes hash and compare far faster than the strings,
+        # and the strings are read once per group, not per row.
         var coded = self._coded_keys()
         if coded:
             var result = coded.value().agg(expressions, batch_size=batch_size)

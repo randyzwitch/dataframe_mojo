@@ -30,24 +30,24 @@ comptime COMPARE_GREATERTHANOREQUALTO = 5
 comptime COMPARE_DISTINCT_FROM = 6
 comptime COMPARE_NOT_DISTINCT_FROM = 7
 
-# StatisticsType: what the bounds hold.
+# What the bounds hold.
 comptime BASE_STATS = 0
 comptime NUMERIC_STATS = 1
 comptime FLOAT_STATS = 2
 comptime STRING_STATS = 3
 
-# Bytes of a string bound kept: the inline capacity of a 16-byte string
-# record, so a bound never needs a separate allocation. Longer values
-# keep a truncated prefix, which still bounds them.
+# Bytes of a string bound kept: the inline capacity of a 16-byte string record,
+# so a bound never needs a separate allocation. Longer values keep a truncated
+# prefix, which still bounds them.
 comptime MAX_STRING_MINMAX_SIZE = 12
-# Rows per vector and vectors per row group (122,880 / 2,048), the units
-# the scan reads in and so the units a zone map can skip.
+# Rows per vector and vectors per row group (122,880 / 2,048), the units the
+# scan reads in and so the units a zone map can skip.
 comptime STATISTICS_VECTOR_SIZE = 2048
 comptime ROW_GROUP_VECTORS = 60
 
 
 def flip_comparison(op: Int) -> Int:
-    """`FlipComparisonExpression`: the comparison with its sides swapped."""
+    """The comparison with its sides swapped."""
     if op == COMPARE_LESSTHAN:
         return COMPARE_GREATERTHAN
     if op == COMPARE_GREATERTHAN:
@@ -114,8 +114,7 @@ struct BaseStatistics(Copyable, ImplicitlyCopyable, Movable):
 
     @staticmethod
     def empty(stats_type: Int) -> Self:
-        """Statistics of no rows (`CreateEmpty`): merging into them yields the
-        other side."""
+        """Statistics of no rows: merging into them yields the other side."""
         var result = Self.unknown()
         result.stats_type = stats_type
         result.has_null = False
@@ -174,8 +173,8 @@ struct BaseStatistics(Copyable, ImplicitlyCopyable, Movable):
             self.float_min = min(self.float_min, other.float_min)
             self.float_max = max(self.float_max, other.float_max)
         else:
-            # A truncated bound compares as its prefix; keep the smaller
-            # min and the larger max, each with its exact/truncated mark.
+            # A truncated bound compares as its prefix; keep the smaller min and
+            # the larger max, each with its exact/truncated mark.
             if (
                 _compare_prefixes(
                     other.str_min,
@@ -205,8 +204,8 @@ struct BaseStatistics(Copyable, ImplicitlyCopyable, Movable):
 def _compare_prefixes(
     a: SIMD[DType.uint8, 16], a_size: Int, b: SIMD[DType.uint8, 16], b_size: Int
 ) -> Int:
-    """Bytewise comparison of two stored prefixes, the shorter first on a
-    tie, as strings order."""
+    """Bytewise comparison of two stored prefixes, the shorter first on a tie,
+    as strings order."""
     for i in range(min(a_size, b_size)):
         if a[i] != b[i]:
             return -1 if a[i] < b[i] else 1
@@ -218,8 +217,8 @@ def _compare_prefixes(
 def compare_string_stats(
     input: Span[UInt8, _], bound: SIMD[DType.uint8, 16], size: Int, exact: Bool
 ) -> Int:
-    """A constant against a stored bound; a truncated bound is compared
-    over its own length only, since the bytes after it are unknown."""
+    """A constant against a stored bound; a truncated bound is compared over its
+    own length only, since the bytes after it are unknown."""
     var length = len(input)
     if not exact and length > size:
         length = size
@@ -234,7 +233,7 @@ def compare_string_stats(
 def _range_answer[
     T: Comparable & ImplicitlyCopyable
 ](op: Int, min_value: T, max_value: T, constant: T) -> Int:
-    """`CheckZonemapTemplated` for one constant."""
+    """What [min_value, max_value] proves about `op` with one constant."""
     if op == COMPARE_EQUAL or op == COMPARE_NOT_DISTINCT_FROM:
         if constant == min_value and constant == max_value:
             return FILTER_ALWAYS_TRUE
@@ -278,8 +277,8 @@ def check_numeric_zonemap(
     stats: BaseStatistics, op: Int, constants: List[Int128]
 ) -> Int:
     """What [min, max] proves about `op` over integer-domain constants:
-    ALWAYS_TRUE as soon as one constant keeps every row, ALWAYS_FALSE
-    when none keeps any."""
+    ALWAYS_TRUE as soon as one constant keeps every row, ALWAYS_FALSE when none
+    keeps any."""
     if not stats.has_min_max or stats.stats_type != NUMERIC_STATS:
         return NO_PRUNING_POSSIBLE
     for constant in constants:
@@ -331,8 +330,8 @@ def check_float_zonemap(
 def constants_cover_range(
     stats: BaseStatistics, constants: List[Int128]
 ) -> Bool:
-    """Whether an integer column's
-    whole [min, max] range is listed, so an IN list keeps every row."""
+    """Whether an integer column's whole [min, max] range is listed, so an IN
+    list keeps every row."""
     if not stats.has_min_max or stats.stats_type != NUMERIC_STATS:
         return False
     var low = stats.int_min
@@ -357,8 +356,8 @@ def constants_cover_range(
 def _string_answer(
     stats: BaseStatistics, op: Int, constant: Span[UInt8, _]
 ) -> Int:
-    """What the string bounds prove about `op` with one constant (min,
-    min_type, max, max_type)."""
+    """What the string bounds prove about `op` with one constant (min, min_type,
+    max, max_type)."""
     var min_value = stats.str_min
     var min_size = stats.str_min_size
     var min_exact = stats.min_exact

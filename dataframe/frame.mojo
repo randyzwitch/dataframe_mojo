@@ -2253,19 +2253,18 @@ struct DataFrame(Copyable, Sized, Writable):
     def _selective_mask(
         self, parts: List[Expr], batch_size: Int
     ) raises -> BoolColumn:
-        """The mask of the AND of row-local `parts`, each evaluated only on
-        rows kept by earlier parts, so a costly part (a string comparison)
-        never runs on rows a cheap part already rejected.
+        """The mask of the AND of row-local `parts`, each evaluated only on rows
+        kept by earlier parts, so a costly part (a string comparison) never runs
+        on rows a cheap part already rejected.
 
         Parts reading only numbers run before parts reading strings, and
-        otherwise in written order. Narrowing gathers the columns later
-        parts read, a copy that pays only when the later parts then do
-        much less work: when a part keeps at most an eighth of its rows,
-        or half when a string comparison, far costlier per row than the
-        gather, is still to come. Past that the remaining parts run
-        together on the same rows and the masks combine, since cheap
-        numeric parts cost less than the gather would. The fractions are
-        empirical choices.
+        otherwise in written order. Narrowing gathers the columns later parts
+        read, a copy that pays only when the later parts then do much less work:
+        when a part keeps at most an eighth of its rows, or half when a string
+        comparison, far costlier per row than the gather, is still to come. Past
+        that the remaining parts run together on the same rows and the masks
+        combine, since cheap numeric parts cost less than the gather would. The
+        fractions are empirical choices.
 
         Parts comparing a numeric column with a constant go first, all of
         them in one pass (`fused_comparisons`), as if they were one part.
@@ -2588,16 +2587,16 @@ struct DataFrame(Copyable, Sized, Writable):
             and whole_rows
             and worker_count(self._height) > 1
         ):
-            # Distinct whole rows in any order are a group_by on every
-            # column with no aggregates, which encodes on every worker
-            # instead of building one dictionary on one thread.
+            # Distinct whole rows in any order are a group_by on every column
+            # with no aggregates, which encodes on every worker instead of
+            # building one dictionary on one thread.
             return self.group_by(self.columns()).agg(List[Expr]())
         if keep == "any" or keep == "first":
             # Each key's first row is its id's representative. One worker
             # numbers ids by first occurrence, so those rows are already in
-            # input order; bucketed ids are not, and the rows are put back
-            # in input order by marking them. No counts or second pass over
-            # the ids.
+            # input order; bucketed ids are not, and the rows are put back in
+            # input order by marking them. No counts or second pass over the
+            # ids.
             var encoded = self._subset_row_keys(subset)
             ref firsts = encoded.representatives
             var ordered = True

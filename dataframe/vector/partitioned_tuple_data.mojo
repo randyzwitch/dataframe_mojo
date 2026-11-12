@@ -19,9 +19,9 @@ from dataframe.vector.types import (
     SelectionVector,
 )
 
-# At most 4,096 partitions: beyond that, each partition's write position
-# no longer stays in cache while rows are scattered, and the partitions
-# get too small to be worth a task each. An empirical choice.
+# At most 4,096 partitions: beyond that, each partition's write position no
+# longer stays in cache while rows are scattered, and the partitions get too
+# small to be worth a task each. An empirical choice.
 comptime MAX_RADIX_BITS = 12
 
 
@@ -33,10 +33,9 @@ def number_of_partitions(radix_bits: Int) -> Int:
 
 @always_inline
 def radix_partition(hash: UInt64, radix_bits: Int) -> Int:
-    """The `radix_bits` bits of `hash` just below its 16 salt bits (shift
-    48 - radix_bits): the bits a hash table indexes by are the low ones
-    and the salt the top 16, so partition bits taken here stay
-    independent of both."""
+    """The `radix_bits` bits of `hash` just below its 16 salt bits (shift 48 -
+    radix_bits): the bits a hash table indexes by are the low ones and the salt
+    the top 16, so partition bits taken here stay independent of both."""
     var shift = UInt64(48 - radix_bits)
     var mask = (UInt64(1) << UInt64(radix_bits)) - 1
     return Int((hash >> shift) & mask)
@@ -103,8 +102,8 @@ struct RadixPartitionedTupleData(Movable):
     def initialize_append_state(
         self, mut state: PartitionedTupleDataAppendState
     ) raises:
-        """InitializeAppendStateInternal: one chunk state over every
-        column, and a count and offset per partition."""
+        """One chunk state over every column, and a count and offset per
+        partition."""
         self.partitions[0].initialize_chunk_state(
             state.chunk_state, List[Int]()
         )
@@ -119,12 +118,11 @@ struct RadixPartitionedTupleData(Movable):
         append_sel: SelectionVector,
         append_count: Int,
     ):
-        """AppendUnified: rows `append_sel` picks of `chunk` (already in
-        `state.chunk_state`'s unified formats), each into its partition."""
+        """Rows `append_sel` picks of `chunk` (already in `state.chunk_state`'s
+        unified formats), each into its partition."""
         if append_count == 0:
             return
-        # ComputePartitionIndices: from the hash column, through the
-        # append selection.
+        # From the hash column, through the append selection.
         var indices = state.partition_indices.unsafe_ptr()
         var hashes = state.chunk_state.vector_data[self.hash_col_idx].unified
         var hash_data = hashes.values[DType.uint64]()
@@ -133,8 +131,8 @@ struct RadixPartitionedTupleData(Movable):
             indices[unsafe_offset=i] = Int32(
                 radix_partition(hash_data[unsafe_offset=at], self.radix_bits)
             )
-        # BuildPartitionSel: each partition's count, its first place, and
-        # one selection listing its rows together, in their order.
+        # Each partition's count, its first place, and one selection listing its
+        # rows together, in their order.
         var parts = len(self.partitions)
         var counts = state.counts.unsafe_ptr()
         var offsets = state.offsets.unsafe_ptr()
@@ -167,8 +165,8 @@ struct RadixPartitionedTupleData(Movable):
         # The heap sizes of the whole chunk, in partition order.
         if not self.layout.all_constant():
             compute_heap_sizes(state.chunk_state, partition_sel, append_count)
-        # BuildBufferSpace: room for each partition's rows, their pointers
-        # at its place in the chunk state.
+        # Room for each partition's rows, their pointers at its place in the
+        # chunk state.
         var start = 0
         for p in range(parts):
             var length = counts[unsafe_offset=p]
@@ -184,7 +182,7 @@ struct RadixPartitionedTupleData(Movable):
         self._count += append_count
 
     def flush_append_state(self, mut state: PartitionedTupleDataAppendState):
-        """FlushAppendState: no pins to release here."""
+        """No pins to release here."""
         pass
 
     def combine(mut self, mut other: RadixPartitionedTupleData) raises:
@@ -201,14 +199,14 @@ struct RadixPartitionedTupleData(Movable):
         other._data_size = 0
 
     def get_sizes_and_counts(self, mut sizes: List[Int], mut counts: List[Int]):
-        """GetSizesAndCounts: each partition's bytes and rows, added."""
+        """Each partition's bytes and rows, added."""
         for p in range(len(self.partitions)):
             sizes[p] += self.partitions[p].size_in_bytes()
             counts[p] += self.partitions[p].count()
 
     def get_unpartitioned(mut self) raises -> TupleDataCollection:
-        """GetUnpartitioned: every partition's rows in one collection, in
-        partition order; the partitions are left empty."""
+        """Every partition's rows in one collection, in partition order; the
+        partitions are left empty."""
         var result = TupleDataCollection(self.layout)
         for p in range(len(self.partitions)):
             result.combine(self.partitions[p])

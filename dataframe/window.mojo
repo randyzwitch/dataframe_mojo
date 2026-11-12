@@ -551,13 +551,13 @@ def _cum_prod(input: Series, ids: List[Int], reverse: Bool) raises -> Series:
 def _running(
     op: Int, input: Series, ids: List[Int], reverse: Bool
 ) raises -> Optional[Series]:
-    """A cumulative count, sum, min or max in one pass over the rows (from
-    the last row when reversed), each partition's running value kept in a
-    flat array by partition id. The general path below collects a row list
-    per partition and, for min and max, sorts the whole column to compare
-    ranks, O(n log n) and several passes where this is one O(n) pass.
-    Int64 and Float64 input (others are widened first or keep the
-    general path). None when not handled."""
+    """A cumulative count, sum, min or max in one pass over the rows (from the
+    last row when reversed), each partition's running value kept in a flat array
+    by partition id. The general path below collects a row list per partition
+    and, for min and max, sorts the whole column to compare ranks, O(n log n)
+    and several passes where this is one O(n) pass. Int64 and Float64 input
+    (others are widened first or keep the general path). None when not
+    handled."""
     var n = len(input)
     var groups = 1
     var partitioned = len(ids) > 0

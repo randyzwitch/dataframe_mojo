@@ -300,10 +300,10 @@ def true_count(mask: BoolColumn) -> Int:
     if mask._offset % 8 == 0 and (
         len(mask._bits[]) == 0 or len(mask._bits[]) == len(mask._data[])
     ):
-        # Byte-aligned: whole 64-bit words of values (ANDed with the
-        # validity words when there are nulls), then the tail's bytes and
-        # bits. This handles 64 values per step, where the bit-assembly
-        # path below handles one.
+        # Byte-aligned: whole 64-bit words of values (ANDed with the validity
+        # words when there are nulls), then the tail's bytes and bits. This
+        # handles 64 values per step, where the bit-assembly path below handles
+        # one.
         var data = mask._data[].unsafe_ptr().unsafe_offset(mask._offset // 8)
         var nulls = len(mask._bits[]) > 0
         var bits = mask._bits[].unsafe_ptr().unsafe_offset(mask._offset // 8)

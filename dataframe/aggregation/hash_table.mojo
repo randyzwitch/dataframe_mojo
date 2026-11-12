@@ -494,7 +494,8 @@ def _grown_capacity(
         return 0
     var minimum = 2 * capacity
     var wanted = 64
-    # GetCapacityForCount: the count at a 1.5 load factor, a power of two.
+    # Room for the count at a 1.5 load factor (two thirds full keeps probe
+    # chains short), as a power of two so a hash masks to a slot.
     while 2 * wanted < 3 * distinct:
         wanted *= 2
     var next = max(wanted, minimum)
@@ -799,11 +800,11 @@ def _vector_key(
     bit: UInt64,
     leading: Bool,
 ) raises:
-    """A chunk's `count` rows of one key vector: each row's hash (combined
-    into the hashes of the keys before unless `leading`, so a row's hash
-    covers every key) and key words, a null row setting `bit`
-    in its null word. A row's hash is the one the partitioner's
-    `_hash_column` gives the same value in a column."""
+    """A chunk's `count` rows of one key vector: each row's hash (combined into
+    the hashes of the keys before unless `leading`, so a row's hash covers every
+    key) and key words, a null row setting `bit` in its null word. A row's hash
+    is the one the partitioner's `_hash_column` gives the same value in a
+    column."""
     ref format = key.format
     var physical = format.physical
     if physical == PHYSICAL_VARCHAR:
@@ -1556,22 +1557,23 @@ struct AggregateSink(Movable):
                 and Float64(self.cycle - self.live)
                 < _MIN_REDUCTION * Float64(self.cycle)
             ):
-                # The cycle removed almost no rows: append without
-                # lookups (`MaybeSkipLookups`).
+                # The cycle removed almost no rows (nearly every key is new):
+                # lookups only cost time, so append without them and let the
+                # finish merge the duplicates.
                 self.skip = True
                 self.skipped = 0
             var table = self.entries.unsafe_ptr()
             for e in range(self.capacity):
                 table[unsafe_offset=e] = 0
             if self.skip and self.skipped >= _LOOKUP_SAMPLE:
-                # Retry lookups (`MaybeResumeLookups`).
+                # Retry lookups, since the data may have changed.
                 self.skip = False
         self.live = 0
         self.cycle = 0
-        # With its entries gone, the rows may move (`MaybeRepartition`):
-        # the most bits for every sink once this one's rows fill half a
-        # block per partition. Jump directly to the maximum depth so rows
-        # move once rather than being recopied at every intermediate depth.
+        # With its entries gone, the rows may move cheaply: the most bits for
+        # every sink once this one's rows fill half a block per partition. Jump
+        # directly to the maximum depth so rows move once rather than being
+        # recopied at every intermediate depth.
         var bits = self.parts.bits
         if 8 * self.made * self.parts.stride > (_BLOCK_BYTES // 2) << bits:
             bits = self.radix[].raise_to(self.max_bits)
@@ -1598,26 +1600,23 @@ struct AggregateSink(Movable):
         count: Int,
         columns: List[Series] = List[Series](),
     ) raises:
-        """A data chunk's `count` rows (at most a batch) into the table:
-        each row's group from the
-        group chunk's vectors `keys`, then the payload chunk's vectors
-        `inputs` (a row count reads none) update the rows' states where
-        they are. `hold` are the columns the keys' and
-        inputs' strings point into, held until the finish; `first` is the
-        source row of the chunk's first.
+        """A data chunk's `count` rows (at most a batch) into the table: each
+        row's group from the group chunk's vectors `keys`, then the payload
+        chunk's vectors `inputs` (a row count reads none) update the rows'
+        states where they are. `hold` are the columns the keys' and inputs'
+        strings point into, held until the finish; `first` is the source row of
+        the chunk's first.
 
-        As `TryAddCompressedGroups`, keys that are all constant find their
-        one group once (`TryAddConstantGroups`), and a sole key whose
-        strings index a stored dictionary finds a group once per entry
-        (`TryAddDictionaryGroups`); otherwise every row is hashed and
-        probed (`FindOrCreateGroups`). The reductions whose states the rows
-        hold by address read their input as `columns`. Every dictionary-coded
-        key here comes from a stored
-        dictionary (an id), so that case does not arise.
+        Keys that are all constant find their one group once, and a sole key
+        whose strings index a stored dictionary finds a group once per entry
+        rather than once per row; otherwise every row is hashed and probed
+        (`_find_or_create`). The reductions whose states the rows hold by
+        address read their input as `columns`. Every dictionary-coded key here
+        comes from a stored dictionary (an id), so that case does not arise.
 
-        When every reduction is a distinct count, only the distinct tables
-        take the chunk (`CanSkipRegularSink`): the main table's groups and
-        counts all come from their finished groups."""
+        When every reduction is a distinct count, only the distinct tables take
+        the chunk: the main table's groups and counts all come from their
+        finished groups, so sinking into it too would be wasted."""
         if len(keys) == 0:
             raise Error("aggregate table: no keys")
         if count > _BATCH:
@@ -1672,12 +1671,12 @@ struct AggregateSink(Movable):
         count: Int,
         columns: List[Series],
     ) raises -> Bool:
-        """The chunk's rows clustered by the group ids at `gids` (0 for none) and
-        its states updated run by run; False, with nothing updated, when
-        lookups are skipped or the chunk does not cluster. A run's state
-        row is its first row's group. Rows of one group often arrive
-        together (sorted or clustered input), and a run is folded into its
-        state with one lookup instead of one per row."""
+        """The chunk's rows clustered by the group ids at `gids` (0 for none)
+        and its states updated run by run; False, with nothing updated, when
+        lookups are skipped or the chunk does not cluster. A run's state row is
+        its first row's group. Rows of one group often arrive together (sorted
+        or clustered input), and a run is folded into its state with one lookup
+        instead of one per row."""
         if gids == 0 or self.skip or not self._clustered_ready():
             return False
         if not self.clustered.try_build(gids, count):
@@ -1698,11 +1697,11 @@ struct AggregateSink(Movable):
         count: Int,
         columns: List[Series],
     ) raises -> Bool:
-        """The chunk's rows clustered by their slots (in `groups`), each
-        run's slot marked set (with its first row) and its row found once,
-        the rows' addresses made only when some reduction still scatters,
-        then the states updated run by run. False, with nothing updated,
-        when the chunk does not cluster."""
+        """The chunk's rows clustered by their slots (in `groups`), each run's
+        slot marked set (with its first row) and its row found once, the rows'
+        addresses made only when some reduction still scatters, then the states
+        updated run by run. False, with nothing updated, when the chunk does not
+        cluster."""
         if not self._clustered_ready():
             return False
         if self.perfect.total_groups() >= MAX_GID_COUNT:
@@ -1736,8 +1735,8 @@ struct AggregateSink(Movable):
         count: Int,
         columns: List[Series],
     ) raises:
-        """The reductions with a run kernel fold the chunk's runs; the
-        others scatter through the rows' addresses in `groups`."""
+        """The reductions with a run kernel fold the chunk's runs; the others
+        scatter through the rows' addresses in `groups`."""
         update_clustered(
             self.slots,
             self.kernels,
@@ -1799,11 +1798,11 @@ struct AggregateSink(Movable):
     def _perfect_groups(
         mut self, keys: List[KeyVector], first: Int, count: Int
     ) raises:
-        """The perfect table's group ids: each row's slot from its keys'
-        bits (each key's offset from its minimum, the keys' bits side by
-        side) into `groups`, with no hashing or key comparison.
-        Each path checks them against the table's size (statistics that do
-        not hold for the data raise)."""
+        """The perfect table's group ids: each row's slot from its keys' bits
+        (each key's offset from its minimum, the keys' bits side by side) into
+        `groups`, with no hashing or key comparison. Each path checks them
+        against the table's size (statistics that do not hold for the data
+        raise)."""
         # The locations are computed into the address vector itself, each
         # then replaced by its row's address.
         var groups = self.groups.unsafe_ptr()
@@ -1928,8 +1927,8 @@ struct AggregateSink(Movable):
         first: Int,
         count: Int,
     ) raises:
-        """Each distinct count's (keys, value) pairs into its own table,
-        the value's vector read as a key where it is (`SinkDistinct`)."""
+        """Each distinct count's (keys, value) pairs into its own table, the
+        value's vector read as a key where it is."""
         for d in range(len(self.distinct_slots)):
             var pairs = keys.copy()
             pairs.append(KeyVector.of(inputs[self.distinct_slots[d]]))
@@ -1940,9 +1939,9 @@ struct AggregateSink(Movable):
     def _find_or_create(
         mut self, keys: List[KeyVector], first: Int, count: Int
     ) raises:
-        """`count` rows' groups into `groups` (`FindOrCreateGroups`): the
-        key vectors hashed and turned into key words where they are (the
-        key words being the row layout's), then probed."""
+        """`count` rows' groups into `groups`: the key vectors hashed and turned
+        into key words where they are (the key words being the row layout's),
+        then probed."""
         var word_ptrs = self._word_ptrs()
         var nulls = self.nulls.unsafe_ptr()
         var hash_ptr = self.hashes.unsafe_ptr()
@@ -1996,7 +1995,7 @@ struct AggregateSink(Movable):
         var group = group_at[]
         for k in range(1, count):
             group_at[unsafe_offset=k] = group
-        # The adaptive counters see every row (`AddInput`).
+        # The adaptive counters see every row.
         self.cycle += count - 1
 
     def _dictionary_groups(
@@ -2064,7 +2063,7 @@ struct AggregateSink(Movable):
                     unsafe_offset=i
                 ]
                 self.dictionary_groups.saw(group_at[unsafe_offset=i])
-        # The adaptive counters see every row (`AddInput`).
+        # The adaptive counters see every row.
         self.cycle += count - unique
         for k in range(count):
             group_at[unsafe_offset=k] = addresses[
@@ -2259,18 +2258,17 @@ struct AggregateSink(Movable):
     def count_group_rows(
         mut self, groups: _Groups, widths: List[Int], nulls_count: Bool
     ) raises:
-        """A distinct table's finished (keys, value) groups into this
-        table, each adding one to its group's distinct count (`only`): its
-        rows' key words read in place (the keys are the first
-        `len(widths) - 1` columns, each `widths` words; the value the last)
-        and hashed as `_hash_column` hashes the same values, so the groups
-        meet the workers' rows of the same keys at the finish. A group whose
-        value is null makes its group but adds nothing unless
-        `nulls_count`, so a group of only nulls counts 0 even when the
-        workers sank no rows into the main table (`CanSkipRegularSink`);
-        each group's first row is its pair's, so the earliest pair's row is
-        the group's. Scan distinct pairs in chunks and sink them into the
-        main table, counting each unique pair once.
+        """A distinct table's finished (keys, value) groups into this table,
+        each adding one to its group's distinct count (`only`): its rows' key
+        words read in place (the keys are the first `len(widths) - 1` columns,
+        each `widths` words; the value the last) and hashed as `_hash_column`
+        hashes the same values, so the groups meet the workers' rows of the same
+        keys at the finish. A group whose value is null makes its group but adds
+        nothing unless `nulls_count`, so a group of only nulls counts 0 even
+        when the workers sank no rows into the main table (every reduction a
+        distinct count); each group's first row is its pair's, so the earliest
+        pair's row is the group's. Scan distinct pairs in chunks and sink them
+        into the main table, counting each unique pair once.
         """
         self.in_order = False
         var keys = len(widths) - 1
@@ -2989,13 +2987,13 @@ struct _DistinctJob(Job):
 def _finalize_distinct(
     mut sinks: List[AggregateSink], layout: AggregateLayout
 ) raises:
-    """Finalize distinct counts: each reduction's tables (one per
-    worker) merged into their (keys, value) groups, whose rows are sunk
-    into new sinks of the main table, on their own threads: as many as
-    there are runs, at most one per worker (`CreateGlobalSources` and
-    `MaxThreads`), each taking every run its task scans. Those sinks join
-    `sinks`, and the main finish merges their counts into the groups. The long strings their keys point at stay in
-    the tables' held columns, which the new sinks hold too."""
+    """Finalize distinct counts: each reduction's tables (one per worker) merged
+    into their (keys, value) groups, whose rows are sunk into new sinks of the
+    main table, on their own threads: as many as there are runs, at most one per
+    worker, each taking every run its task scans. Those sinks join `sinks`, and
+    the main finish merges their counts into the groups. The long strings their
+    keys point at stay in the tables' held columns, which the new sinks hold
+    too."""
     # The workers' sinks; the new sinks join the list after them.
     var workers = len(sinks)
     for d in range(len(layout.distinct)):
@@ -3038,10 +3036,9 @@ def _finalize_distinct(
 
 
 struct _PerfectScanJob(Job):
-    """A range of a perfect hash table's group slots, [lo, hi): every
-    worker's rows of those slots combined into the first worker's, then
-    the occupied slots read out in slot order, each key rebuilt from the
-    slot's bits."""
+    """A range of a perfect hash table's group slots, [lo, hi): every worker's
+    rows of those slots combined into the first worker's, then the occupied
+    slots read out in slot order, each key rebuilt from the slot's bits."""
 
     var sinks: Int
     var held: Int
@@ -3160,12 +3157,11 @@ def _perfect_finish(
     layout: AggregateLayout,
     filter: Optional[GroupFilter],
 ) raises -> AggregateResult:
-    """The perfect hash table's finish (`PhysicalPerfectHashAggregate`'s
-    `Combine` and source): the group slots cut into ranges holding about an
-    equal share of what finishing reads (each occupied slot's rows and the
-    values of its quantile states, as `aggregate_finish` cuts partitions),
-    and each range combined and read out on its own thread, one chunk of
-    the result each, in slot order."""
+    """The perfect hash table's finish: the group slots cut into ranges holding
+    about an equal share of what finishing reads (each occupied slot's rows and
+    the values of its quantile states, as `aggregate_finish` cuts partitions),
+    and each range combined and read out on its own thread, one chunk of the
+    result each, in slot order."""
     var result = AggregateResult()
     for j in range(len(sinks)):
         sinks[j].prepare_ordered()

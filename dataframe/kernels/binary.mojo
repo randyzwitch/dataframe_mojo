@@ -505,9 +505,9 @@ def _vector_int[
     """Checked `+`, `-` or `*` in widened lanes, with one range check per
     block (#384). Nullable inputs substitute zero before arithmetic; only
     observed rows in an overflowing block are redone with scalar checks."""
-    # 8- and 16-bit values add, subtract and multiply within Int32, so
-    # their lanes are Int32: half the registers of Int64 lanes, so twice
-    # the values per instruction.
+    # 8- and 16-bit values add, subtract and multiply within Int32, so their
+    # lanes are Int32: half the registers of Int64 lanes, so twice the values
+    # per instruction.
     comptime L = DType.int32 if size_of[Scalar[D]]() <= 2 else DType.int64
     # Nullable selection and overflow masks stay in a native register.
     # Dense inputs retain the existing 16-row widening kernel.
@@ -3395,11 +3395,10 @@ def _choose_numeric[
 ](
     selected: List[Bool], then: Column[Scalar[D]], other: Column[Scalar[D]]
 ) raises -> Column[Scalar[D]]:
-    """`_choose` for a numeric type: a SIMD select over the selection
-    bytes, either branch broadcast when it holds one value, and a validity
-    bitmap only when a branch has nulls. A SIMD select picks 16 values
-    per instruction with no branch, where a per-element choice branches
-    on every row."""
+    """`_choose` for a numeric type: a SIMD select over the selection bytes,
+    either branch broadcast when it holds one value, and a validity bitmap only
+    when a branch has nulls. A SIMD select picks 16 values per instruction with
+    no branch, where a per-element choice branches on every row."""
     comptime width = 16
     var n = len(selected)
     var values = List[Scalar[D]](unsafe_uninit_length=n)

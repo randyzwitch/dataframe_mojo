@@ -154,7 +154,7 @@ struct TupleDataAllocator(Copyable, Movable):
 
     @always_inline
     def row_pointer(self, part: TupleDataChunkPart) -> Int:
-        """GetRowPointer: the first row of `part`."""
+        """The first row of `part`."""
         return (
             self.row_blocks[part.row_block_index].address()
             + part.row_block_offset
@@ -184,8 +184,8 @@ struct TupleDataSegment(Copyable, Movable):
         return self.data_size
 
     def _add_part(mut self, chunk_index: Int, part: TupleDataChunkPart):
-        """Add `part` to chunk `chunk_index`, recording the row and heap
-        blocks it uses."""
+        """Add `part` to chunk `chunk_index`, recording the row and heap blocks
+        it uses."""
         ref chunk = self.chunks[chunk_index]
         chunk.count += part.count
         chunk.row_block_ids.insert(part.row_block_index)
@@ -198,8 +198,8 @@ struct TupleDataSegment(Copyable, Movable):
         self.chunk_parts.append(part)
 
     def _merge_last_chunk_part(mut self, chunk_index: Int):
-        """The last two parts of a chunk become one when their rows (and
-        heaps) are adjacent, so a scan walks fewer, longer runs."""
+        """The last two parts of a chunk become one when their rows (and heaps)
+        are adjacent, so a scan walks fewer, longer runs."""
         ref chunk = self.chunks[chunk_index]
         if chunk.part_ids.size() < 2:
             return
@@ -233,9 +233,8 @@ struct TupleDataSegment(Copyable, Movable):
         append_offset: Int,
         append_count: Int,
     ):
-        """Room for `append_count` rows (and the
-        heap sizes in `state`), their row and heap pointers in `state` from
-        `append_offset`."""
+        """Room for `append_count` rows (and the heap sizes in `state`), their
+        row and heap pointers in `state` from `append_offset`."""
         if self._build_fast_path(state, append_offset, append_count):
             return
         state.chunk_parts.clear()
@@ -280,9 +279,9 @@ struct TupleDataSegment(Copyable, Movable):
         append_offset: Int,
         append_count: Int,
     ) -> Bool:
-        """Rows without a heap that fit the last chunk and its row block
-        extend its last part: their addresses follow from the part's end,
-        with no block or part bookkeeping."""
+        """Rows without a heap that fit the last chunk and its row block extend
+        its last part: their addresses follow from the part's end, with no block
+        or part bookkeeping."""
         if not self.allocator.layout.all_constant():
             return False
         if len(self.chunks) == 0:
@@ -314,8 +313,8 @@ struct TupleDataSegment(Copyable, Movable):
         append_offset: Int,
         append_count: Int,
     ) -> TupleDataChunkPart:
-        """A part for as many of the rows as fit the current row block
-        and one heap block."""
+        """A part for as many of the rows as fit the current row block and one
+        heap block."""
         var result = TupleDataChunkPart.empty()
         var row_width = self.allocator.layout.row_width()
         var row_blocks = len(self.allocator.row_blocks)
@@ -395,8 +394,8 @@ struct TupleDataSegment(Copyable, Movable):
         chunk_index: Int,
         init_heap: Bool,
     ) -> Int:
-        """For a scan: the row pointers (and with `init_heap` the heap pointers and sizes) of chunk
-        `chunk_index`; its row count."""
+        """For a scan: the row pointers (and with `init_heap` the heap pointers
+        and sizes) of chunk `chunk_index`; its row count."""
         ref chunk = self.chunks[chunk_index]
         state.chunk_parts.clear()
         for part_id in range(chunk.part_ids.start(), chunk.part_ids.end()):
@@ -411,8 +410,8 @@ struct TupleDataSegment(Copyable, Movable):
         init_heap_pointers: Bool,
         init_heap_sizes: Bool,
     ):
-        """Row pointers (and optionally heap pointers and sizes) for the
-        parts in `state.chunk_parts`, from row `start`."""
+        """Row pointers (and optionally heap pointers and sizes) for the parts
+        in `state.chunk_parts`, from row `start`."""
         ref layout = self.allocator.layout
         var row_width = layout.row_width()
         var all_constant = layout.all_constant()

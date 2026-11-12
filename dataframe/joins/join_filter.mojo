@@ -31,24 +31,23 @@ from dataframe.table_filter import (
     constant_in_domain,
 )
 
-# The most distinct build keys pushed to the probe scan as an IN list:
-# each list value is one more comparison per zone map and per row, so a
-# long list costs more than the rows it removes. An empirical choice.
+# The most distinct build keys pushed to the probe scan as an IN list: each list
+# value is one more comparison per zone map and per row, so a long list costs
+# more than the rows it removes. An empirical choice.
 comptime DYNAMIC_OR_FILTER_THRESHOLD = 50
-# A bloom filter pays when it removes probe rows before the join: not
-# when the build side has more keys than the probe has rows (most probe
-# rows then match), nor when an unfiltered build side is large (over 4M
-# keys, a tenth of the probe rows or more): without a filter below it, it
-# likely holds most of its key domain, so the bloom filter removes
-# little and no longer fits cache. Empirical choices.
+# A bloom filter pays when it removes probe rows before the join: not when the
+# build side has more keys than the probe has rows (most probe rows then match),
+# nor when an unfiltered build side is large (over 4M keys, a tenth of the probe
+# rows or more): without a filter below it, it likely holds most of its key
+# domain, so the bloom filter removes little and no longer fits cache. Empirical
+# choices.
 comptime BUILD_TO_PROBE_RATIO_THRESHOLD = 1.0
 comptime NON_FILTERING_RATIO_THRESHOLD = 0.1
 comptime NON_FILTERING_BUILD_SIDE_THRESHOLD = 4194304
-# A bloom filter's selectivity is measured over its first 6 vectors; when
-# it keeps half the rows or more it costs more than it saves, and it
-# pauses for 10 vectors (longer after each failed check) before
-# measuring again, since the data can change along the scan. Empirical
-# choices.
+# A bloom filter's selectivity is measured over its first 6 vectors; when it
+# keeps half the rows or more it costs more than it saves, and it pauses for 10
+# vectors (longer after each failed check) before measuring again, since the
+# data can change along the scan. Empirical choices.
 comptime BF_THRESHOLD = 0.5
 comptime BF_CHECK_N = 6
 comptime VECTOR_PAUSE = 10
@@ -56,8 +55,8 @@ comptime VECTOR_PAUSE = 10
 
 @fieldwise_init
 struct SelectivityStats(Copyable, Movable):
-    """One thread's selectivity of an optional row filter, which turns
-    the filter off while it removes too few rows to pay for itself."""
+    """One thread's selectivity of an optional row filter, which turns the
+    filter off while it removes too few rows to pay for itself."""
 
     var n_vectors_to_check: Int
     var threshold: Float64
@@ -160,8 +159,8 @@ struct _BoundsJob(Job):
 
 
 def _bounds(key: Series) raises -> Optional[Tuple[Int64, Int64]]:
-    """The least and greatest non-null value of an integer key: each
-    worker's slice's, combined (JoinFilterGlobalState's Combine)."""
+    """The least and greatest non-null value of an integer key: each worker's
+    slice's, combined."""
     var n = len(key)
     var parts = worker_count(n)
     var bounds = partitions(n, parts, 1)
@@ -241,9 +240,8 @@ def _dynamic(
 def can_use_bloom_filter(
     equalities: Int, build_count: Int, probe_rows: Int, build_filtered: Bool
 ) -> Bool:
-    """Whether a bloom filter on the build keys is likely to remove
-    enough probe rows to pay for itself (see
-    `BUILD_TO_PROBE_RATIO_THRESHOLD`)."""
+    """Whether a bloom filter on the build keys is likely to remove enough probe
+    rows to pay for itself (see `BUILD_TO_PROBE_RATIO_THRESHOLD`)."""
     if equalities != 1 or build_count == 0 or probe_rows <= 0:
         return False
     var ratio = Float64(build_count) / Float64(probe_rows)
@@ -269,9 +267,9 @@ def finalize_filters(
     build_filtered: Bool,
     mut scan: TableFilterSet,
 ) raises -> Optional[JoinFilter]:
-    """The filters a finished build gives one probe key: its statistics
-    filters go into `scan`, and the row filters it applies come back (None
-    when the key's type takes no filter)."""
+    """The filters a finished build gives one probe key: its statistics filters
+    go into `scan`, and the row filters it applies come back (None when the
+    key's type takes no filter)."""
     if key.dtype() != probe_dtype or not _row_key(key.dtype()):
         return None
     var bounds = _bounds(key)
@@ -288,8 +286,8 @@ def finalize_filters(
     var pushed_in = False
     if build_count > 1 and build_count <= DYNAMIC_OR_FILTER_THRESHOLD:
         var values = _distinct(key)
-        # Only when the values are not dense: a dense set is exactly the
-        # [min, max] range already pushed, so the list adds nothing.
+        # Only when the values are not dense: a dense set is exactly the [min,
+        # max] range already pushed, so the list adds nothing.
         if Int64(len(values)) - 1 != high - low:
             var listed = _dynamic(probe_dtype, COMPARE_EQUAL, values)
             if listed:
@@ -312,8 +310,8 @@ def finalize_filters(
 
 
 def supports_join_filters(how: Int) -> Bool:
-    """Whether a join among the pipeline's steps can filter its probe
-    side: a probe row that matches nothing makes no output row."""
+    """Whether a join among the pipeline's steps can filter its probe side: a
+    probe row that matches nothing makes no output row."""
     return (
         how == JOIN_INNER
         or how == JOIN_SEMI
@@ -383,17 +381,16 @@ def keep_rows(
 
 @fieldwise_init
 struct PushedJoinFilter(Copyable, Movable):
-    """A finished build's key for a scan below an aggregate on the join's
-    probe side. A filter on a group key passes below the aggregate, since
-    removing a group's rows removes only that group: `column` names the
-    group key
-    in the aggregate's input, which the input's pipeline follows to its
-    source column, where `finalize_filters` makes the key's filters."""
+    """A finished build's key for a scan below an aggregate on the join's probe
+    side. A filter on a group key passes below the aggregate, since removing a
+    group's rows removes only that group: `column` names the group key in the
+    aggregate's input, which the input's pipeline follows to its source column,
+    where `finalize_filters` makes the key's filters."""
 
     var column: String
     var key: Series
-    # The join's equality conditions, and its build's rows with no null
-    # key and whether the build side filters (for CanUseBloomFilter).
+    # The join's equality conditions, and its build's rows with no null key and
+    # whether the build side filters (for `can_use_bloom_filter`).
     var equalities: Int
     var build_count: Int
     var build_filtered: Bool

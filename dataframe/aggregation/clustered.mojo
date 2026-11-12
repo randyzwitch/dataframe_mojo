@@ -41,13 +41,12 @@ from dataframe.vector.types import (
     physical_of,
 )
 
-# Clustering pays only when runs are long: a run shorter than 6 rows saves
-# less than its bookkeeping costs. Up to 32 hot groups are gathered into
-# their own regions per chunk; a chunk needs 128 rows for its sample to
-# say anything; 2,048-slot tables (16 KB each, in L1) find each row's
-# run. A slot word packs the group id, the run's index and its cursor,
-# so a slot is one load. The sizes are empirical choices; the bit split
-# follows from them.
+# Clustering pays only when runs are long: a run shorter than 6 rows saves less
+# than its bookkeeping costs. Up to 32 hot groups are gathered into their own
+# regions per chunk; a chunk needs 128 rows for its sample to say anything;
+# 2,048-slot tables (16 KB each, in L1) find each row's run. A slot word packs
+# the group id, the run's index and its cursor, so a slot is one load. The sizes
+# are empirical choices; the bit split follows from them.
 comptime RUNLENGTH_THRESHOLD = 6
 comptime HOTKEYS_LOG2 = 5
 comptime MAX_HOTKEYS = 1 << HOTKEYS_LOG2
@@ -69,11 +68,11 @@ comptime _GRP_MASK = UInt64((1 << SLOT_GRP_BITS) - 1)
 
 
 def cluster_update(op: Int, kind: Int) -> Bool:
-    """Whether reduction `op` with state `kind` supports run updates:
-    count_star and count, sum (integer, widened, float, and the decimal
-    sums over them), numeric min and max, first and last: reductions
-    where a run's rows fold into one value that then merges into the
-    state. avg, the variances, quantiles and string min/max have none."""
+    """Whether reduction `op` with state `kind` supports run updates: count_star
+    and count, sum (integer, widened, float, and the decimal sums over them),
+    numeric min and max, first and last: reductions where a run's rows fold into
+    one value that then merges into the state. avg, the variances, quantiles and
+    string min/max have none."""
     if op == LEN:
         return kind == _K_LEN
     if op == COUNT:
@@ -153,10 +152,10 @@ def _slot_hash(gid: UInt64) -> Int:
 
 
 struct _SlotTab(Copyable, Movable):
-    """One cursor's hash table, arena slice and run range (`SlotTab`), as
-    offsets into the state's arrays: the table's first slot, the slice's
-    first position, the bump position of its sequential region, the
-    cursor's first run, its runs so far and those made while hashing."""
+    """One cursor's hash table, arena slice and run range, as offsets into the
+    state's arrays: the table's first slot, the slice's first position, the bump
+    position of its sequential region, the cursor's first run, its runs so far
+    and those made while hashing."""
 
     var tab: Int
     var slice: Int
@@ -175,11 +174,10 @@ struct _SlotTab(Copyable, Movable):
 
 
 struct ClusteredAggrState(Movable):
-    """A worker's clustering scratch (`ClusteredAggrState`) and the last
-    chunk's runs (its `ClusteredAggr`): run r is `counts[r]` rows of group
-    `gids[r]`, at the chunk positions `arena[starts[r]:]`, in order, and
-    `rows[r]` is its group row's address (`InitializeStates`). Empty until
-    `initialize`, when no reduction would use it."""
+    """A worker's clustering scratch and the last chunk's runs: run r is
+    `counts[r]` rows of group `gids[r]`, at the chunk positions
+    `arena[starts[r]:]`, in order, and `rows[r]` is its group row's address.
+    Empty until `initialize`, when no reduction would use it."""
 
     var arena: List[UInt32]
     var slots: List[UInt64]
@@ -213,8 +211,8 @@ struct ClusteredAggrState(Movable):
 
     def initialize(mut self):
         """Allocate the clustering scratch once: two cursor slices of
-        MAX_HOTKEYS / 2 hot regions and one sequential region of half a
-        vector each, two hash tables, a vector of runs."""
+        MAX_HOTKEYS / 2 hot regions and one sequential region of half a vector
+        each, two hash tables, a vector of runs."""
         self.arena = List[UInt32](
             unsafe_uninit_length=(MAX_HOTKEYS // 2 + 1) * _BATCH
         )
@@ -231,10 +229,10 @@ struct ClusteredAggrState(Movable):
 
     def try_build(mut self, group_ids: Int, count: Int) -> Bool:
         """Cluster `count` rows (at most a vector) by their group ids, the
-        UInt64 words at address `group_ids` (only their low SLOT_GID_BITS
-        bits read), or back off: after a chunk that does not cluster,
-        skip a doubling number of chunks before trying again, so input
-        without runs pays for few failed attempts."""
+        UInt64 words at address `group_ids` (only their low SLOT_GID_BITS bits
+        read), or back off: after a chunk that does not cluster, skip a doubling
+        number of chunks before trying again, so input without runs pays for few
+        failed attempts."""
         if not self.ready:
             return False
         if self.skipped > 0:
@@ -370,9 +368,9 @@ struct ClusteredAggrState(Movable):
     def _try_clustered(
         mut self, group_ids: Pointer[UInt64, MutAnyOrigin], count: Int
     ) -> Bool:
-        """The chunk's runs, and whether at least 80% of its rows are in
-        runs of RUNLENGTH_THRESHOLD or more: below that, the scattered
-        remainder costs more than clustering saves."""
+        """The chunk's runs, and whether at least 80% of its rows are in runs of
+        RUNLENGTH_THRESHOLD or more: below that, the scattered remainder costs
+        more than clustering saves."""
         self.tuples_in_large = 0
         var slice2 = _SLICE_HALF_VECS * _HALF_VEC
         var st1 = _SlotTab(0, 0, _MAX_HOT_PER_CURSOR * _HALF_VEC, 0)
@@ -469,11 +467,11 @@ def update_clustered(
     first: Int,
     scratch: Int,
 ) raises:
-    """Update the states of the reductions with a run kernel
-    (`kernels`): each run of the chunk's `count` rows folded
-    into its group's state (at `runs.rows[r]`, states from word
-    `states_at`) once, from a local copy of the state. `first` is the source row of the chunk's first, and `scratch`
-    the value states' three vectors of words."""
+    """Update the states of the reductions with a run kernel (`kernels`): each
+    run of the chunk's `count` rows folded into its group's state (at
+    `runs.rows[r]`, states from word `states_at`) once, from a local copy of the
+    state. `first` is the source row of the chunk's first, and `scratch` the
+    value states' three vectors of words."""
     for s in range(len(slots)):
         if not kernels[s]:
             continue
@@ -481,7 +479,7 @@ def update_clustered(
         var base = 8 * (states_at + slot.offset)
         var kind = slot.kind
         if kind == _K_LEN:
-            # count_star's `NullaryClustUpdate`.
+            # count_star: each run adds its row count.
             var rows = runs.rows.unsafe_ptr()
             var counts = runs.counts.unsafe_ptr()
             for r in range(runs.n_runs):
@@ -542,11 +540,10 @@ def _clustered_first_last(
     first: Int,
     scratch: Int,
 ) raises:
-    """first and last's cluster update (`ClusteredOp`'s early exit): only
-    a run's first (last) row can be its group's first (last) of the chunk,
-    so each run's state takes that row, null or not, as the scatter would
-    (a set first state is kept; a last state is replaced). A group's runs
-    come in row order."""
+    """first and last's cluster update: only a run's first (last) row can be its
+    group's first (last) of the chunk, so each run's state takes that row, null
+    or not, as the scatter would (a set first state is kept; a last state is
+    replaced). A group's runs come in row order."""
     var last = slot.kind == _K_LAST
     var n = runs.n_runs
     var picks = runs.picks.unsafe_ptr()
@@ -598,8 +595,7 @@ def _clustered_counts(
     base: Int,
     nulls: Bool,
 ):
-    """count's cluster update (`CountClusteredRuns`): each run's valid
-    rows."""
+    """count's cluster update: each run adds its valid rows."""
     var rows = runs.rows.unsafe_ptr()
     var counts = runs.counts.unsafe_ptr()
     if not nulls:
@@ -648,10 +644,10 @@ def _clustered_kind[
 def _clustered[
     D: DType, selected: Bool, nulls: Bool, kind: Int
 ](format: UnifiedVectorFormat, runs: ClusteredAggrState, base: Int):
-    """One state kind's cluster update over every run
-    (`ExecuteUnaryClusteredOpt`): the group's state copied into locals,
-    the run's rows folded in (a null skipped only when the vector may hold
-    one), the locals stored back."""
+    """One state kind's cluster update over every run: the group's state copied
+    into locals (registers, not memory, inside the run's loop), the run's rows
+    folded in (a null skipped only when the vector may hold one), the locals
+    stored back."""
     var values = format.values[D]()
     var sel = format.sel
     var validity = format.validity
