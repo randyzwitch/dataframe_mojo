@@ -268,7 +268,9 @@ def test_an_aggregate_probing_a_filtered_build_takes_the_build_keys() raises:
 def test_a_renamed_probing_aggregate_and_a_left_join_keep_their_results() raises:
     # A semi join probing with the order key renamed above the aggregate
     # takes the build's keys; a left join above the same aggregate keeps
-    # every group, so it is left alone.
+    # every group, so it is left alone. The build is filtered twice so its
+    # estimate keeps it the build side (sides are chosen before filters
+    # are pushed, as DuckDB's optimizer orders them).
     var line = lines()
     var supp = suppliers()
     var busy = (
@@ -280,7 +282,9 @@ def test_a_renamed_probing_aggregate_and_a_left_join_keep_their_results() raises
     var chosen = (
         line.lazy()
         .join(
-            supp.lazy().filter(col("nation") == lit(Int64(2))),
+            supp.lazy()
+            .filter(col("nation") == lit(Int64(2)))
+            .filter(col("sk") < lit(Int64(90))),
             left_on=["s"],
             right_on=["sk"],
         )

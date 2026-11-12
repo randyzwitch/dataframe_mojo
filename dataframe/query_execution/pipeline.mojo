@@ -86,6 +86,7 @@ from dataframe.join_type import (
 from dataframe.joins.join_filter import (
     PushedJoinFilter,
     PushedJoinFilters,
+    PlannedJoinFilter,
     supports_join_filters,
 )
 from dataframe.parallel import (
@@ -373,17 +374,18 @@ def _stream_head(
             top_descending.append(self._nodes[cursor].sort_descending(k))
             top_nulls_last.append(self._nodes[cursor].sort_nulls_last(k))
         cursor = self._nodes[cursor].left
-    # Join filters through an aggregate the stream starts from: the
-    # builds above it run first, and the plan with their results runs.
-    var through = plan_push_filters_through_aggregate(self, cursor, batch_size)
-    if through:
-        return _HeadOutcome(through.take())
     # Every join's build side is chosen before anything runs or is
     # scheduled, from estimates:
     # the stream then builds each join's right input as it stands.
     var sided = plan_build_probe_sides(self, cursor, batch_size)
     if sided:
         return _HeadOutcome(sided.take())
+    # Then join filters through an aggregate the stream starts from
+    # (DuckDB's JOIN_FILTER_PUSHDOWN runs after BUILD_SIDE_PROBE_SIDE):
+    # the aggregate's pipeline waits for those builds (`_add_stream`).
+    var through = plan_push_filters_through_aggregate(self, cursor)
+    if through:
+        return _HeadOutcome(through.take())
     return _HeadOutcome(
         _StreamHead(
             cursor,
@@ -491,6 +493,25 @@ def _add_stream(
                 inputs.metas[k].type,
             )
         )
+    if self._pushed_filters:
+        # The aggregate the probe reads waits for the builds whose keys
+        # filter its input (`AddRecursiveDependencies`: the probe side's
+        # child pipelines depend on the join's build).
+        ref pushed = self._pushed_filters.value()[]
+        var source = -1
+        for k in range(count):
+            if inputs.wanted[k] == pushed.node:
+                source = at[k]
+        if source >= 0 and len(schedule.pipelines[source].probe) > 0:
+            for planned in pushed.planned:
+                var right = self._nodes[planned.join].right
+                for k in range(count):
+                    if inputs.wanted[k] == right and at[k] != source:
+                        schedule.metas[source].dependencies.append(at[k])
+                        schedule.pipelines[source].probe[0].through.append(
+                            _ThroughBuild(at[k], planned.copy())
+                        )
+                        break
     var probe = len(schedule.pipelines)
     for k in range(count):
         schedule.metas[at[k]].parent = probe
@@ -551,9 +572,17 @@ def _add_input(
     pipeline that executes it."""
     if streaming and self._handoff == HANDOFF_OFF:
         var sub = self.copy()
+        # Filters pushed into this input arrive when its builds finish
+        # (`_StreamProbe.tasks`); the input plans its own below it.
+        sub._pushed_filters = None
         sub._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
         sub._prefetched_indexes = Optional(ArcPointer(Dict[Int, _ReadyIndex]()))
         var outcome = _stream_head(sub, index, batch_size, 0)
+        while len(outcome.plan) > 0:
+            # Build sides chosen (or filters pushed): the input streams on
+            # the plan that made, still in this schedule.
+            sub = outcome.plan.pop()
+            outcome = _stream_head(sub, index, batch_size, 0)
         if len(outcome.head) > 0:
             var head = outcome.head.pop()
             var owned = ArcPointer(sub^)
@@ -575,24 +604,6 @@ def _add_input(
                 type,
                 True,
             )
-        if len(outcome.plan) > 0:
-            # Some inputs materialized for it: the input runs from there.
-            schedule.metas.append(MetaPipeline(type))
-            schedule.pipelines.append(
-                _StreamPipeline(
-                    _SubplanPipeline(
-                        outcome.plan.pop(),
-                        index,
-                        True,
-                        batch_size,
-                        build.keys,
-                        build.how,
-                        build.coalesce,
-                        build.probe_estimate,
-                    )
-                )
-            )
-            return len(schedule.pipelines) - 1
     schedule.metas.append(MetaPipeline(type))
     schedule.pipelines.append(
         _StreamPipeline(
@@ -696,6 +707,15 @@ struct _StreamHead(Movable):
     var top_nulls_last: List[Bool]
 
 
+@fieldwise_init
+struct _ThroughBuild(Copyable, Movable):
+    """A build of the schedule (`pipeline`) whose keys filter the input of
+    the aggregate a probe computes (`plan_push_filters_through_aggregate`)."""
+
+    var pipeline: Int
+    var planned: PlannedJoinFilter
+
+
 struct _StreamProbe(Movable):
     """A stream's probe pipeline: runs once every input it depends on
     has completed (`Pipeline::GetDependencies`)."""
@@ -719,6 +739,9 @@ struct _StreamProbe(Movable):
     var is_input: Bool
     # The schedule's List[_StreamPipeline].
     var siblings: Int
+    # The builds whose keys filter this stream's aggregate input; the
+    # schedule runs them first.
+    var through: List[_ThroughBuild]
     var started: List[_ProbeStart]
     var result: Optional[DataFrame]
 
@@ -750,6 +773,7 @@ struct _StreamProbe(Movable):
         self.built = None
         self.is_input = is_input
         self.siblings = 0
+        self.through = List[_ThroughBuild]()
         self.started = List[_ProbeStart]()
         self.result = None
 
@@ -773,6 +797,21 @@ struct _StreamProbe(Movable):
                 plan._prefetched_indexes.value()[][
                     self.wanted[k]
                 ] = _ReadyIndex(self.keys[k], self.hows[k], built.take())
+        if len(self.through) > 0:
+            # The builds above finished: their keys filter this aggregate's
+            # input (DuckDB's dynamic join filters).
+            var filters = List[PushedJoinFilter]()
+            for t in self.through:
+                filters.extend(
+                    _published_filters(
+                        t.planned, pipelines[t.pipeline].result()
+                    )
+                )
+            plan._pushed_filters = ArcPointer(
+                PushedJoinFilters(
+                    self.index, List[PlannedJoinFilter](), filters^
+                )
+            )
         self.started.append(
             _probe_start(
                 plan, self.index, self.batch_size, self.sink, self.head.pop(0)
@@ -985,9 +1024,7 @@ def _probe_start(
         plan._frames.append(plan_union(self, first, True, batch_size))
         plan._schemas.append(Optional[CsvSchema]())
         plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
-        return _ProbeStart(
-            _stream_after_materialization(plan, index, batch_size, sink)
-        )
+        return _probe_restart(plan^, index, batch_size, sink, head^)
     if first >= 0 and first != index and not _is_scan(self._nodes[first].kind):
         # Run row-local steps during each worker's aggregate scan. Discard
         # rejected groups before assembling a frame, avoiding an additional
@@ -1006,17 +1043,13 @@ def _probe_start(
             plan._frames.append(aggregated^)
             plan._schemas.append(Optional[CsvSchema]())
             plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
-            return _ProbeStart(
-                _stream_after_materialization(plan, index, batch_size, sink)
-            )
+            return _probe_restart(plan^, index, batch_size, sink, head^)
         var computed = self._execute(first, False, True, batch_size)
         var plan = self.copy()
         plan._frames.append(computed^)
         plan._schemas.append(Optional[CsvSchema]())
         plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
-        return _ProbeStart(
-            _stream_after_materialization(plan, index, batch_size, sink)
-        )
+        return _probe_restart(plan^, index, batch_size, sink, head^)
     while cursor >= 0:
         ref node = self._nodes[cursor]
         if _stream_rows(node):
@@ -1054,9 +1087,7 @@ def _probe_start(
                     slot=len(plan._frames) - 1
                 )
                 trace_path("stream.empty_build")
-                return _ProbeStart(
-                    _stream_after_materialization(plan, index, batch_size, sink)
-                )
+                return _probe_restart(plan^, index, batch_size, sink, head^)
             # The index a prefetch made with this build, if any.
             var ready = Optional[_ReadyIndex]()
             if self._prefetched_indexes:
@@ -2042,6 +2073,25 @@ def _row_steps_above(
     return nodes^
 
 
+def _probe_restart(
+    var plan: QueryContext,
+    index: Int,
+    batch_size: Int,
+    sink: Int,
+    var head: _StreamHead,
+) raises -> _ProbeStart:
+    """The probe set up again on `plan`, where an input it reads is now a
+    frame (a union's children, the aggregate below it, an empty build):
+    the same head, its sides and filters already decided, and this
+    pipeline of the same schedule, not a new stream with a schedule of
+    its own. A declined stream runs the node on `plan`."""
+    var started = _probe_start(plan, index, batch_size, sink, head^)
+    if len(started.piped) > 0 or started.result:
+        return started^
+    plan._declined = index
+    return _ProbeStart(plan._execute(index, False, True, batch_size))
+
+
 def _stream_after_materialization(
     plan: QueryContext,
     index: Int,
@@ -2127,13 +2177,15 @@ def _keyed_rows(frame: DataFrame, keys: List[String]) raises -> Int:
 
 
 def plan_push_filters_through_aggregate(
-    self: QueryContext, top: Int, batch_size: Int
+    self: QueryContext, top: Int
 ) raises -> Optional[QueryContext]:
-    """Push safe join-key filters below an aggregate through its grouping keys.
-    A filter on group keys removes whole groups, preserving every retained
-    group's aggregate values. Prepare the build inputs first so the probe
-    filters use complete key information. Return None when no join permits
-    this transformation."""
+    """Plan join-key filters below an aggregate through its grouping keys
+    (`JoinFilterPushdownOptimizer`, after build sides are chosen). A
+    filter on group keys removes whole groups, preserving every retained
+    group's aggregate values. Nothing runs here: each join's build is a
+    pipeline of the stream's schedule, and the aggregate's pipeline
+    depends on those builds and filters by their keys
+    (`_StreamProbe.tasks`). Return None when no join permits this."""
     if self._pushed_filters:
         return None
     var first = top
@@ -2152,18 +2204,17 @@ def plan_push_filters_through_aggregate(
         or len(self._nodes[first].names) == 0
     ):
         return None
-    var plan = self.copy()
-    var pushed = List[PushedJoinFilter]()
+    var planned = List[PlannedJoinFilter]()
     var probe = top
     while probe >= 0 and probe != first:
         var j = probe
-        var node = self._nodes[j].copy()
+        ref node = self._nodes[j]
         probe = node.left
         if node.kind != JOIN or not supports_join_filters(node.how):
             continue
         if len(node.names) == 0 or len(node.names) != len(node.right_keys):
             continue
-        var keys = List[Int]()
+        var positions = List[Int]()
         var grouped = List[String]()
         var bail = False
         for k in range(len(node.names)):
@@ -2174,34 +2225,49 @@ def plan_push_filters_through_aggregate(
                 bail = True
                 break
             if found[0] == _KEY_GROUPED:
-                keys.append(k)
+                positions.append(k)
                 grouped.append(found[1])
-        if bail or len(keys) == 0:
+        if bail or len(positions) == 0:
             continue
-        var filtered = plan_is_filtering(self, node.right)
-        var built = plan._execute(node.right, False, True, batch_size)
-        var count = _keyed_rows(built, node.right_keys)
-        for i in range(len(keys)):
-            pushed.append(
-                PushedJoinFilter(
-                    grouped[i],
-                    built.column(node.right_keys[keys[i]]),
-                    len(node.names),
-                    count,
-                    filtered,
-                )
+        planned.append(
+            PlannedJoinFilter(
+                j,
+                positions^,
+                grouped^,
+                node.right_keys.copy(),
+                plan_is_filtering(self, node.right),
             )
-        plan._frames.append(built^)
-        plan._schemas.append(Optional[CsvSchema]())
-        plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
-        plan._nodes[j].right = len(plan._nodes) - 1
-    if len(pushed) == 0:
+        )
+    if len(planned) == 0:
         return None
     trace_path("stream.join_filter_through_aggregate")
     # The filters belong to this stream's read of the aggregate: a copy of
     # its node takes them, so another reader of the node reads it whole.
+    var plan = self.copy()
     plan._nodes.append(self._nodes[first].copy())
     var aggregate = len(plan._nodes) - 1
     plan._nodes[above].left = aggregate
-    plan._pushed_filters = ArcPointer(PushedJoinFilters(aggregate, pushed^))
+    plan._pushed_filters = ArcPointer(
+        PushedJoinFilters(aggregate, planned^, List[PushedJoinFilter]())
+    )
     return plan^
+
+
+def _published_filters(
+    planned: PlannedJoinFilter, built: DataFrame
+) raises -> List[PushedJoinFilter]:
+    """The filters a finished build publishes for an aggregate below its
+    join's probe side: one per key that reaches a group key."""
+    var count = _keyed_rows(built, planned.right_keys)
+    var filters = List[PushedJoinFilter]()
+    for i in range(len(planned.positions)):
+        filters.append(
+            PushedJoinFilter(
+                planned.grouped[i],
+                built.column(planned.right_keys[planned.positions[i]]),
+                len(planned.right_keys),
+                count,
+                planned.build_filtered,
+            )
+        )
+    return filters^
