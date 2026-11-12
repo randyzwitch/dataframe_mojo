@@ -248,7 +248,8 @@ def plan_stream_execute(
     # child completions, allowing independent builds to overlap. An input
     # that is a stream itself adds its own pipelines (its builds, probe and
     # outer scans) to this schedule rather than running a schedule of its
-    # own (`MetaPipeline::CreateChildMetaPipeline`). Execution reports
+    # own: one queue then feeds every thread, where a nested schedule would
+    # run on the one thread that waits for it. Execution reports
     # serialize these tasks to attribute their measurements.
     var inputs = plan_schedule_inputs(self, index, head.cursor, batch_size)
     if len(inputs.wanted) == 0:
@@ -468,7 +469,8 @@ def _add_stream(
     input a pipeline (a stream's own pipelines when the input is one),
     then the probe depending on them, then an outer scan per right or full
     join in the probe's finish group. `build` is the join this stream's
-    result is the build side of, `type` its MetaPipeline type there."""
+    result is the build side of, `type` its kind there
+    (`META_REGULAR` or `META_JOIN_BUILD`)."""
     ref self = Pointer[QueryContext, MutAnyOrigin](unsafe_from_address=plan)[]
     var count = len(inputs.wanted)
     var at = List[Int](capacity=count)
