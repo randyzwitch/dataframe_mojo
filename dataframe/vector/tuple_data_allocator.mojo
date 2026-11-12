@@ -17,25 +17,29 @@ from dataframe.vector.tuple_data_layout import (
 )
 from dataframe.vector.tuple_data_states import TupleDataChunkState
 from dataframe.vector.types import STANDARD_VECTOR_SIZE
+from std.memory import ArcPointer
 
 comptime _INVALID_INDEX = -1
 
 
 struct TupleDataBlock(Copyable, Movable):
-    """TupleDataBlock: an allocation, its capacity and the bytes used."""
+    """TupleDataBlock: an allocation, its capacity and the bytes used. The
+    allocation is shared: a column gathered from the rows references a
+    heap block's strings in place and keeps the block alive after the
+    collection is gone (the result vector's heap reference)."""
 
-    var data: List[UInt8]
+    var data: ArcPointer[List[UInt8]]
     var capacity: Int
     var size: Int
 
     def __init__(out self, capacity: Int):
-        self.data = List[UInt8](unsafe_uninit_length=capacity)
+        self.data = ArcPointer(List[UInt8](unsafe_uninit_length=capacity))
         self.capacity = capacity
         self.size = 0
 
     @always_inline
     def address(self) -> Int:
-        return Int(self.data.unsafe_ptr())
+        return Int(self.data[].unsafe_ptr())
 
     @always_inline
     def remaining_capacity(self) -> Int:
