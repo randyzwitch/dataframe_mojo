@@ -1,11 +1,13 @@
 """Each group's row list, and writing one value per group to its rows.
 
-`GroupRows` is Polars' `GroupsIdx` (polars-core frame/group_by): for every
-group the input rows it holds, in ascending order, so a grouped reduction
-runs in parallel over slices of groups (`_agg_helper_idx`, group_by
-aggregations/mod.rs) and a per-group result is written straight to the
-group's rows (`set_numeric`, polars-expr expressions/window.rs). The lists
-are kept as one array cut by offsets rather than one vector per group.
+`GroupRows` holds, for every group, the input rows it contains in
+ascending order. With the rows of each group at hand, a grouped reduction
+can split its work by group: each thread owns whole groups, so it keeps
+state only for them and no partial states are merged afterwards, however
+many groups there are. The same lists let a per-group result be written
+straight to the group's rows, with no per-row gather of the results. The
+lists are kept as one array cut by offsets rather than one list per
+group.
 """
 from std.memory import Pointer
 
@@ -36,10 +38,9 @@ struct GroupRows(Copyable, Movable):
 
     def slices(self, workers: Int) -> List[Int]:
         """Cut the groups into at most `workers` ranges of whole groups
-        holding about equal rows; returns the range bounds, by group. This
-        is how the group par_iter of `_agg_helper_idx` divides work, sized
-        by rows instead of group counts, since one big group is as much
-        work as many small ones."""
+        holding about equal rows; returns the range bounds, by group.
+        Ranges are sized by rows rather than group counts, since one big
+        group is as much work as many small ones."""
         var count = self.count()
         var bounds = List[Int]()
         bounds.append(0)
@@ -80,9 +81,9 @@ def group_rows_from_ids(ids: List[Int], count: Int) -> GroupRows:
     return GroupRows(offsets^, rows^)
 
 
-struct _SetNumericJob[D: DType](Job):
+struct _WriteNumericJob[D: DType](Job):
     """Groups [first, last): write each group's value to every one of its
-    rows, and its validity when the values have nulls (`set_numeric`)."""
+    rows, and its validity when the values have nulls."""
 
     var values: Int
     var source_bits: Int
@@ -139,8 +140,9 @@ struct _SetNumericJob[D: DType](Job):
                 ):
                     dst[unsafe_offset=rows[unsafe_offset=k]] = value
             return
-        # A bitmap shared by threads would race within a byte, so validity
-        # is written one Bool per row, as Polars writes a Vec<bool>.
+        # A bitmap shared by threads would race within a byte (two groups'
+        # rows can share one), so validity is written one Bool per row and
+        # packed afterwards.
         var bits = Pointer[UInt8, MutAnyOrigin](
             unsafe_from_address=self.source_bits
         )
@@ -157,26 +159,26 @@ struct _SetNumericJob[D: DType](Job):
                 valid[unsafe_offset=row] = ok
 
 
-def set_by_groups(
+def write_by_groups(
     values: Series, groups: GroupRows, height: Int, workers: Int
 ) raises -> Optional[Series]:
     """Spread one value per group (`values`, in group order) to the
     `height` rows the groups hold, writing each group's rows directly, in
-    parallel over slices of groups (Polars `set_by_groups`). Only
-    fixed-width numeric values are written this way; any other type gives
-    None, and the caller gathers by row instead, as Polars falls back to
-    its join mapping."""
+    parallel over slices of groups. Groups own disjoint rows, so threads
+    never write the same slot. Only fixed-width numeric values are written
+    this way; any other type gives None, and the caller gathers by row
+    instead."""
     var flat = values.rechunk() if values.is_chunked() else values.copy()
     comptime for t in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[t]
         if flat._data.isa[Column[Scalar[D]]]():
-            return _set_numeric[D](flat, groups, height, workers)
+            return _write_numeric[D](flat, groups, height, workers)
     if flat._data.isa[Column[Int128]]():
-        return _set_numeric[DType.int128](flat, groups, height, workers)
+        return _write_numeric[DType.int128](flat, groups, height, workers)
     return None
 
 
-def _set_numeric[
+def _write_numeric[
     D: DType
 ](
     values: Series, groups: GroupRows, height: Int, workers: Int
@@ -187,10 +189,10 @@ def _set_numeric[
     var valid = List[Bool](length=height if nulls else 0, fill=False)
     var source = column.copy()
     var bounds = groups.slices(workers)
-    var jobs = List[_SetNumericJob[D]](capacity=len(bounds))
+    var jobs = List[_WriteNumericJob[D]](capacity=len(bounds))
     for s in range(len(bounds) - 1):
         jobs.append(
-            _SetNumericJob[D](
+            _WriteNumericJob[D](
                 Int(source._ptr()),
                 Int(source.unsafe_validity()) if nulls else 0,
                 source.validity_offset(),

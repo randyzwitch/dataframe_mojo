@@ -163,7 +163,7 @@ from .parallel import Job, partitions, run_jobs, worker_count
 from dataframe.kernels.group_rows import (
     GroupRows,
     group_rows_from_ids,
-    set_by_groups,
+    write_by_groups,
 )
 from std.collections import Optional
 from std.memory import ArcPointer, Pointer
@@ -2922,10 +2922,10 @@ def _reduce[
 ) raises -> Series:
     """Reduce every row of `node.left`: one pass, or in parallel. Without
     groups, one worker per row partition, with states merged in partition
-    order (#6, #8). With groups, as Polars aggregates groups
-    (`_agg_helper_idx`): workers take slices of whole groups and reduce
-    each group's rows, so no state is merged and every group count runs
-    in parallel."""
+    order (#6, #8). With groups, workers take slices of whole groups and
+    reduce each group's rows: a worker keeps state only for its own
+    groups, so nothing is merged and any number of groups runs in
+    parallel."""
     var workers = worker_count(height)
     if not grouped and _direct_scan(bound, columns, node):
         # A SIMD scan saturates memory bandwidth with few workers, and each
@@ -3052,8 +3052,7 @@ def _rows_of[
 
 struct _GroupReduceJob[width: Int](Job):
     """Reduce groups [first, last): each group's rows, read in row order
-    from the whole input, into a state for these groups only (the work of
-    one `_agg_helper_idx` task)."""
+    from the whole input, into a state for these groups only."""
 
     var bound: BoundExpr
     var node: Node
@@ -3133,8 +3132,8 @@ def _reduce_groups[
     groups: ArcPointer[GroupRows],
 ) raises -> Series:
     """A grouped reduction in parallel over slices of whole groups, each
-    reading its groups' rows (Polars `_agg_helper_idx`); the slices'
-    results, in group order, are the result."""
+    reading its groups' rows; the slices hold consecutive groups, so their
+    results, concatenated, are in group order."""
     var values = _rows_of[width](
         bound, columns, states, node.left, height, batch_size, workers
     )
@@ -3407,13 +3406,13 @@ def _over_constant[
     cache_address: Int,
 ) raises -> Series:
     """For a window over a whole partition with no order key, aggregate each
-    partition once and write its result to every member row (Polars
-    window.rs with `set_by_groups`): number rows by hash partition, keeping
-    each partition's rows, with no sort and no input values gathered."""
+    partition once and write its result to every member row: number rows
+    by hash partition, keeping each partition's rows, with no sort and no
+    input values gathered."""
     var local = bind(argument_expr, inputs)
     if (node.integer & OVER_GLOBAL) != 0 or height == 0:
-        # One partition: the aggregate itself, broadcast (Polars has no
-        # group-by for an over() without keys).
+        # One partition: the ungrouped aggregate, broadcast; grouping every
+        # row into one group would only add work.
         var total = evaluate[width](
             local, inputs, height, batch_size=batch_size
         )
@@ -3453,7 +3452,7 @@ def _over_constant[
         group_rows=cache[].groups[at],
     )
     var workers = worker_count(height)
-    var set = set_by_groups(values, cache[].groups[at][], height, workers)
+    var set = write_by_groups(values, cache[].groups[at][], height, workers)
     var result: Series
     if set:
         result = set.take()
