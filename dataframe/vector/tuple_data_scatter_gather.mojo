@@ -784,7 +784,8 @@ struct TupleDataHeaps(Copyable, Movable):
     keeps its block alive. A string column gathered from the rows
     references their strings in place: string_t's pointer becomes the
     block and offset of a Utf8View descriptor, and the column holds the
-    blocks, as DuckDB's result vector holds a reference to the heap."""
+    blocks, so the bytes stay valid after the collection is gone without
+    being copied."""
 
     var starts: List[Int]
     var ends: List[Int]

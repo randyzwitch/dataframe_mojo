@@ -457,7 +457,7 @@ def test_boolean_payload_through_row_pointers() raises:
 
 
 def test_strings_reference_the_heap() raises:
-    # GatherRHS for a string column: long strings reference the rows'
+    # Gathering a string column from rows: long strings reference the rows'
     # heap blocks, which the column keeps alive after the rows are gone.
     var n = 3 * STANDARD_VECTOR_SIZE
     var columns = List[Series]()

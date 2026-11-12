@@ -1129,9 +1129,10 @@ struct JoinHashTable(Copyable, Movable):
         for column in payload_columns:
             nested = nested or column.dtype().is_nested()
         if perfect and not keys_only and len(unchunked) == 1 and not nested:
-            # PerfectHashJoinExecutor::BuildPerfectHashTable (which bails
-            # out on nested build columns), else (a repeated key, a wide
-            # range) the hash table.
+            # Unique integer keys over a narrow range index their slots
+            # directly. Nested build columns are not supported there (a
+            # slot array holds fixed-width values or string_t only), and a
+            # repeated key or a wide range falls back to the hash table.
             var filled_rows = List[UInt64]()
             var filled_slots = List[UInt32]()
             var slots = _perfect_slots(
@@ -1277,8 +1278,8 @@ struct JoinHashTable(Copyable, Movable):
         self, output: Int, rows: Int, count: Int, var name: String
     ) raises -> Series:
         """Output column `output` of the `count` rows at the pointers at
-        `rows` (GatherRHS), named `name`; strings reference the rows'
-        heap."""
+        `rows`, named `name`: the build side's values of the matched
+        rows; strings reference the rows' heap."""
         return self.gather_field(
             self.output_columns[output],
             rows,

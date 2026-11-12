@@ -1681,8 +1681,8 @@ struct _ChunkRunner(Movable):
         for key in step.right_keys:
             right_keys.append(right._index(key))
         # The build side's output columns, in the join's output order:
-        # from the rows (GatherRHS), or the table's dictionaries (a perfect
-        # join or dictionary emission).
+        # gathered from the matched rows, or the table's dictionaries (a
+        # perfect join or dictionary emission).
         var list = -1
         for i in range(right.width()):
             if step.coalesce and i in right_keys:
