@@ -112,6 +112,41 @@ def _copy(dest: Int, src: Int, count: Int):
 
 
 @always_inline
+def _move_block[W: Int](dest: Int, src: Int):
+    """Copy `W` bytes from `src` to `dest`, unaligned."""
+    var value = Pointer[SIMD[DType.uint8, W], MutAnyOrigin](
+        unsafe_from_address=src
+    ).unsafe_load[alignment=1]()
+    Pointer[SIMD[DType.uint8, W], MutAnyOrigin](
+        unsafe_from_address=dest
+    ).unsafe_store[alignment=1](value)
+
+
+@always_inline
+def _copy_string(dest: Int, src: Int, count: Int):
+    """Copy a string's `count` bytes (more than 12, the longest inlined)
+    in whole blocks. A length that is not a multiple of the block is
+    covered by one more block ending at the last byte, overlapping the
+    previous one, so no byte is copied one at a time and nothing outside
+    [src, src + count) or [dest, dest + count) is touched."""
+    if count < 16:
+        # 13 to 15 bytes: two overlapping 8-byte words.
+        _move_block[8](dest, src)
+        _move_block[8](dest + count - 8, src + count - 8)
+        return
+    if count <= 32:
+        _move_block[16](dest, src)
+        _move_block[16](dest + count - 16, src + count - 16)
+        return
+    var at = 0
+    while at + 32 <= count:
+        _move_block[32](dest + at, src + at)
+        at += 32
+    if at < count:
+        _move_block[32](dest + count - 32, src + count - 32)
+
+
+@always_inline
 def _bit_valid(bits: Int, index: Int) -> Bool:
     """Bit `index` of a validity mask written here (offset 0)."""
     return (_bytes(bits)[unsafe_offset=index >> 3] >> UInt8(index & 7)) & 1 == 1
@@ -499,7 +534,7 @@ def _scatter_strings(
             _store[DType.uint64](target + 8, _load[DType.uint64](value + 8))
         else:
             var heap = heap_at[unsafe_offset=i]
-            _copy(heap, Int(_load[DType.uint64](value + 8)), length)
+            _copy_string(heap, Int(_load[DType.uint64](value + 8)), length)
             _store[DType.uint64](target + 8, UInt64(heap))
             heap_at[unsafe_offset=i] = heap + length
 
