@@ -320,3 +320,71 @@ def test_a_small_left_of_a_left_join_builds_in_the_pipeline_and_emits_unmatched_
     )
     assert_true(counts.height() == 3000)
     assert_frame(counts, expected)
+
+
+def test_a_large_right_of_a_right_join_probes_as_a_left_join() raises:
+    # 3,000 customers (one with a null key) right-joined to 60K orders
+    # that reach only the first 1,500 customer keys: the build side
+    # optimizer flips it into a left join that builds on the customers,
+    # so the orders probe and every order is kept, matched or not.
+    var c_key = List[Int64]()
+    var c_valid = List[Bool]()
+    var c_val = List[Int64]()
+    for c in range(3000):
+        c_key.append(Int64(c))
+        c_valid.append(c != 17)
+        c_val.append(Int64(c % 11))
+    var o_cust = List[Int64]()
+    var o_id = List[Int64]()
+    for row in range(60_000):
+        o_cust.append(Int64((row * 37) % 1700))
+        o_id.append(Int64(row))
+    var customers = DataFrame(
+        [
+            Series("c_key", Column[Int64](c_key^, c_valid)),
+            ints("c_val", c_val),
+        ]
+    )
+    var orders = DataFrame([ints("o_cust", o_cust), ints("o_id", o_id)])
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var counts = (
+        customers.lazy()
+        .join(
+            orders.lazy(),
+            left_on=["c_key"],
+            right_on=["o_cust"],
+            how="right",
+        )
+        .group_by(["o_cust"])
+        .agg(
+            [
+                col("o_id").count().alias("n"),
+                col("c_val").sum().alias("v"),
+            ]
+        )
+        .collect()
+        .sort(["o_cust"])
+    )
+    var text = observed.text()
+    assert_true(
+        "dataframe-path: lazy.swap_right_join_sides\n" in text,
+        "the right join did not build on the left",
+    )
+    _ = observed^
+    _ = trace^
+    var expected = (
+        customers.join(
+            orders, left_on=["c_key"], right_on=["o_cust"], how="right"
+        )
+        .group_by(["o_cust"])
+        .agg(
+            [
+                col("o_id").count().alias("n"),
+                col("c_val").sum().alias("v"),
+            ]
+        )
+        .sort(["o_cust"])
+    )
+    assert_true(counts.height() == 1700)
+    assert_frame(counts, expected)

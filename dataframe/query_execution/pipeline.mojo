@@ -931,6 +931,23 @@ struct _StreamPipeline(SchedulablePipeline):
         elif len(self.input) > 0:
             self.input[0].finalize()
 
+    def max_finalize_tasks(self) -> Int:
+        if len(self.input) > 0:
+            return self.input[0].max_finalize_tasks()
+        return 0
+
+    def finalize_tasks(mut self) raises -> Int:
+        if len(self.input) > 0:
+            return self.input[0].finalize_tasks()
+        return 0
+
+    def finalize_task(mut self, task: Int) raises:
+        self.input[0].finalize_task(task)
+
+    def finish_finalize(mut self) raises:
+        if len(self.input) > 0:
+            self.input[0].finish_finalize()
+
 
 def _probe_start(
     self: QueryContext,
