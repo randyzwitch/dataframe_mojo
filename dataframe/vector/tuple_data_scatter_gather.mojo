@@ -114,12 +114,8 @@ def _copy(dest: Int, src: Int, count: Int):
 @always_inline
 def _move_block[W: Int](dest: Int, src: Int):
     """Copy `W` bytes from `src` to `dest`, unaligned."""
-    var value = Pointer[SIMD[DType.uint8, W], MutAnyOrigin](
-        unsafe_from_address=src
-    ).unsafe_load[alignment=1]()
-    Pointer[SIMD[DType.uint8, W], MutAnyOrigin](
-        unsafe_from_address=dest
-    ).unsafe_store[alignment=1](value)
+    var value = _bytes(src).unsafe_load[width=W, alignment=1]()
+    _bytes(dest).unsafe_store[alignment=1](value)
 
 
 @always_inline
