@@ -75,8 +75,10 @@ struct TableSinkLayout(Copyable, Movable):
     # Whether the input's state reads its vector (a row count does not).
     var reads: List[Bool]
     # Whether a state by address reads the input, as a column of the
-    # chunk's rows (`AggregateSink.sink_vectors`' `columns`).
+    # chunk's rows (`AggregateSink.sink_vectors`' `columns`), or, where
+    # `as_vectors`, as the chunk's vector.
     var as_columns: List[Bool]
+    var as_vectors: List[Bool]
 
     def __init__(out self, *, copy: Self):
         self.layout = copy.layout.copy()
@@ -89,6 +91,7 @@ struct TableSinkLayout(Copyable, Movable):
         self.physical = copy.physical.copy()
         self.reads = copy.reads.copy()
         self.as_columns = copy.as_columns.copy()
+        self.as_vectors = copy.as_vectors.copy()
 
     def __init__(
         out self,
@@ -155,6 +158,7 @@ struct TableSinkLayout(Copyable, Movable):
             self.columns.append(-1)
             self.expressions.append(VectorExpression(value, empty._columns))
         self.as_columns = _as_columns(layout, len(given))
+        self.as_vectors = _as_vectors(layout, len(given))
 
     def __init__(
         out self,
@@ -188,6 +192,7 @@ struct TableSinkLayout(Copyable, Movable):
             self.physical.append(storage_physical(inputs[i]))
             self.reads.append(reads)
         self.as_columns = _as_columns(layout, len(inputs))
+        self.as_vectors = _as_vectors(layout, len(inputs))
 
 
 def _as_columns(layout: AggregateLayout, inputs: Int) -> List[Bool]:
@@ -205,6 +210,22 @@ def _as_columns(layout: AggregateLayout, inputs: Int) -> List[Bool]:
     return columns^
 
 
+def _as_vectors(layout: AggregateLayout, inputs: Int) -> List[Bool]:
+    """Per input a state by address reads, whether that state reads it as
+    the chunk's vector (`AggregateLayout.vectors`) rather than as a
+    column."""
+    var vectors = List[Bool](length=inputs, fill=False)
+    for s in range(len(layout.slots)):
+        if not layout.slots[s].by_address() or not layout.vectors[s]:
+            continue
+        if s < inputs:
+            vectors[s] = True
+        if layout.templates[s].op == CORR or layout.templates[s].op == COV:
+            if layout.slots[s].k < inputs:
+                vectors[layout.slots[s].k] = True
+    return vectors^
+
+
 struct TableSinkInputs(Movable):
     """A worker's reader of a chunk's group chunk and aggregate input chunk: its
     own copy of the compiled input expressions and the chunk they write, and the
@@ -219,7 +240,8 @@ struct TableSinkInputs(Movable):
     var physical: List[Int]
     var reads: List[Bool]
     var as_columns: List[Bool]
-    # The inputs states by address read, as columns of the last chunk's
+    var as_vectors: List[Bool]
+    # The inputs states by address read as columns, over the last chunk's
     # rows (`read_inputs`); the others unread.
     var read: List[Series]
     var output: DataChunk
@@ -242,6 +264,7 @@ struct TableSinkInputs(Movable):
         self.physical = shared.physical.copy()
         self.reads = shared.reads.copy()
         self.as_columns = shared.as_columns.copy()
+        self.as_vectors = shared.as_vectors.copy()
         self.read = List[Series](capacity=len(self.columns))
         for _ in range(len(self.columns)):
             self.read.append(Series("", Column[Int64](List[Int64]())))
@@ -343,8 +366,8 @@ struct TableSinkInputs(Movable):
         unified format: the chunk's column, or what its
         compiled expression wrote; none for a row count. The columns
         string inputs point into join `hold` (`input_vector`). An input a
-        state by address reads is a column of the chunk's rows instead,
-        in `read`."""
+        state by address reads as a column (not `as_vectors`) is a column
+        of the chunk's rows instead, in `read`."""
         var inputs = List[UnifiedVectorFormat](capacity=len(self.columns))
         var computed = False
         for i in range(len(self.columns)):
@@ -353,6 +376,25 @@ struct TableSinkInputs(Movable):
             var dtype = self.types[i]
             if not self.reads[i]:
                 inputs.append(UnifiedVectorFormat())
+            elif self.as_vectors[i]:
+                # A state by address that reads the vector where it is,
+                # stored as its input's type is (its owner copies what it
+                # keeps, so nothing is held).
+                if at >= 0:
+                    _ = stored_vector(chunk, at, arena, physical, dtype)
+                    inputs.append(chunk.unified(at, arena))
+                elif self.expressions[i]:
+                    if not computed:
+                        self.output.reset()
+                        self.output.count = chunk.count
+                        computed = True
+                    self.expressions[i].value().write(
+                        chunk, arena, self.output, i
+                    )
+                    _ = stored_vector(self.output, i, arena, physical, dtype)
+                    inputs.append(self.output.unified(i, arena))
+                else:
+                    inputs.append(UnifiedVectorFormat())
             elif self.as_columns[i]:
                 if at >= 0:
                     self.read[i] = to_series(chunk, at, arena, "", dtype)
@@ -804,6 +846,23 @@ def input_vector(
             _numeric_physical(v.physical) and _numeric_physical(physical)
         )
     if cast:
+        var column = to_series(chunk, c, arena, "", dtype)
+        chunk.data[c] = flat_over(arena, arena.add(column), 0)
+    return chunk.data[c]
+
+
+def stored_vector(
+    mut chunk: DataChunk,
+    c: Int,
+    mut arena: ColumnArena,
+    physical: Int,
+    dtype: DataType,
+) raises -> Vector:
+    """Column `c` of `chunk` stored as its type `dtype` is (`physical`): a
+    vector of any other physical type (a column narrower than the schema
+    says) is cast first, into a column of the arena."""
+    var v = chunk.data[c]
+    if v.physical != physical:
         var column = to_series(chunk, c, arena, "", dtype)
         chunk.data[c] = flat_over(arena, arena.add(column), 0)
     return chunk.data[c]
