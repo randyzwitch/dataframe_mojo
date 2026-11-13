@@ -87,7 +87,6 @@ from dataframe.vector.tuple_data_scatter_gather import (
 )
 from dataframe.vector.tuple_data_states import TupleDataChunkState
 from dataframe.vector.types import (
-    FLAT_VECTOR,
     PHYSICAL_BOOL,
     PHYSICAL_INT16,
     PHYSICAL_INT32,
@@ -763,13 +762,12 @@ struct JoinBuildSink(Sink):
         for k in range(columns):
             var referenced = False
             if layout.row_layout.nodes[][0].physicals[k] == PHYSICAL_VARCHAR:
-                # A window of a column whose bytes the table can keep is
-                # not copied into the rows' heap: the rows point at its
-                # bytes, and the table holds the buffers they are in. A
-                # vector that selects rows of its column is copied, so a
-                # filter that keeps few rows does not keep every byte.
+                # A vector read from a column whose bytes the table can
+                # keep (a window of it, or its rows a filter kept) is not
+                # copied into the rows' heap: the rows point at its bytes,
+                # and the table holds the buffers they are in.
                 var v = self.chunk.data[k]
-                if v.source >= 0 and v.vector_type == FLAT_VECTOR:
+                if v.source >= 0:
                     var buffers = _string_buffers(arena.columns[v.source])
                     if buffers:
                         referenced = True

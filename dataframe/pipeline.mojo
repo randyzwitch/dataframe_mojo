@@ -2282,8 +2282,8 @@ struct _PipelineJob(Job):
         self.topn[0].sink(output)
 
     def _unmatched(self, chunk: Int, length: Int) raises -> DataFrame:
-        """The build rows of the hash table's row chunk `chunk` the join
-        emits after the probe, as the step's output: a
+        """The build rows of the hash table's row chunks [chunk, chunk +
+        length) the join emits after the probe, as the step's output: a
         right-semi or right-anti join's build columns, or an outer join's
         with the probe columns null, coalesced keys taken from the rows."""
         ref step = self.steps[][self.unmatched_step]
@@ -2291,7 +2291,8 @@ struct _PipelineJob(Job):
         ref right = self.joins[][step.join]
         var want = UInt8(1) if step.how == JOIN_RIGHT_SEMI else UInt8(0)
         var pointers = List[UInt64]()
-        table.scan_chunk(chunk, want, pointers)
+        for c in range(chunk, chunk + length):
+            table.scan_chunk(c, want, pointers)
         ref schema = self.runner.schemas[][self.unmatched_step + 1]
         if len(pointers) == 0:
             return schema.clear()
@@ -2994,11 +2995,18 @@ struct PipelineRun(Movable):
             var last = self.outer_steps[len(self.outer_steps) - 1]
             self.next_round += 1
             ref step = self.steps[j]
-            # One morsel per chunk of the table's rows (ScanFullOuter).
+            # The table's row chunks split into one run per worker: a
+            # table sunk by many threads holds many partly filled chunks
+            # (one set per thread and partition), and a morsel per chunk
+            # would run the steps after the join on a few rows at a time.
             var ranges = List[Int]()
-            for c in range(self.indexes[][step.join].value().chunk_count()):
+            var chunks = self.indexes[][step.join].value().chunk_count()
+            var per_worker = max(
+                (chunks + len(self.jobs) - 1) // len(self.jobs), 1
+            )
+            for c in range(0, chunks, per_worker):
                 ranges.append(c)
-                ranges.append(1)
+                ranges.append(min(per_worker, chunks - c))
             if len(ranges) == 0 and j != last:
                 continue
             var cursor = _Cursor.new()
