@@ -13,7 +13,13 @@ from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
 from dataframe.dtype import NUMERIC_DTYPES
-from dataframe.kernels.group_rows import GroupRows
+from dataframe.kernels.group_rows import (
+    GroupRows,
+    ROW_INDEX,
+    WIDE_ROW_INDEX,
+    group_rows_of,
+    wide_row_indices,
+)
 from dataframe.kernels.partition import Partitioner, _same_value
 from dataframe.aggregation.reducer import float_key
 from dataframe.parallel import Job, configured_workers, partitions, run_jobs
@@ -521,7 +527,7 @@ struct _IntGroups[D: DType](Movable):
             self.slots[to] = id
 
 
-struct _ScatterJob(Job):
+struct _ScatterJob[I: DType](Job):
     """Rows [lo, hi): find each row's hash partition, then copy the rows
     into this range's own stretch of the entry arrays (also [lo, hi)),
     grouped by partition and in row order within each. A partition's
@@ -529,10 +535,17 @@ struct _ScatterJob(Job):
     another, so each row is read and moved once, by one task, rather than
     every partition task scanning every row.
 
-    An entry is the row and a word: for one integer key, its value (the
-    row's bits inverted when the key is null), so the partition task
-    reads only the entries and never goes back to the key column; for any
-    other keys, the hash made beforehand."""
+    An entry is the row, as an `I` row index, and a word: for one integer
+    key, its value, so the partition task reads only the entries and
+    never goes back to the key column; for any other keys, the hash made
+    beforehand. A null integer key has no value to store, so its rows go
+    to one more bucket after the partitions (`parts`), whose entries need
+    no word: the bucket says the key is null. The partition is found
+    twice, once to count each bucket and once to place the row, rather
+    than kept per row: finding it again is a multiply on a value the
+    second pass reads anyway, while keeping it would write and read back
+    a scratch value per row, and the scatter is bound by memory traffic,
+    not arithmetic."""
 
     var keys: List[Series]
     var hashes: Int
@@ -541,12 +554,9 @@ struct _ScatterJob(Job):
     var parts: Int
     var entry_rows: Int
     var entry_words: Int
-    # Where each partition's entries start in the entry arrays (parts + 1
-    # values, the last `hi`).
+    # Where each bucket's entries start in the entry arrays (parts + 2
+    # values: the partitions, the null bucket, and the end `hi`).
     var starts: List[Int]
-    # Scratch for each row's partition (address of one Int a row; this
-    # task uses only its own range [lo, hi), as UInt32s).
-    var owners: Int
 
     def __init__(
         out self,
@@ -557,9 +567,7 @@ struct _ScatterJob(Job):
         parts: Int,
         entry_rows: Int,
         entry_words: Int,
-        owners: Int,
     ):
-        self.owners = owners
         self.keys = keys.copy()
         self.hashes = hashes
         self.lo = lo
@@ -578,81 +586,93 @@ struct _ScatterJob(Job):
                         var column = (
                             self.keys[0]._data[Column[Scalar[D]]].copy()
                         )
-                        self._scatter[D, False](column)
+                        if len(column._bits[]) == 0:
+                            self._scatter[D, False, False](column)
+                        else:
+                            self._scatter[D, False, True](column)
                         return
-        self._scatter[DType.int64, True](
+        self._scatter[DType.int64, True, False](
             Column[Scalar[DType.int64]](List[Int64]())
         )
 
-    def _scatter[D: DType, GENERIC: Bool](mut self, column: Column[Scalar[D]]):
+    @always_inline
+    def _bucket[
+        D: DType, GENERIC: Bool, NULLS: Bool
+    ](self, column: Column[Scalar[D]], row: Int) -> Int:
+        """Row `row`'s bucket: its hash partition, or `parts` for a null
+        integer key."""
+        comptime if GENERIC:
+            var hashes = Pointer[UInt64, MutAnyOrigin](
+                unsafe_from_address=self.hashes
+            )
+            return _hash_partition(hashes[unsafe_offset=row], self.parts)
+        else:
+            comptime if NULLS:
+                if not column._valid(row):
+                    return self.parts
+            return _hash_partition(
+                _key_hash[D](column._ptr()[unsafe_offset=row], True),
+                self.parts,
+            )
+
+    def _scatter[
+        D: DType, GENERIC: Bool, NULLS: Bool
+    ](mut self, column: Column[Scalar[D]]):
         var hashes = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=self.hashes
         )
         var values = column._ptr()
-        var bits = len(column._bits[]) != 0
-        var rows = Pointer[Int, MutAnyOrigin](
+        var rows = Pointer[Scalar[Self.I], MutAnyOrigin](
             unsafe_from_address=self.entry_rows
         )
         var words = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=self.entry_words
         )
-        var lo = self.lo
-        var n = self.hi - lo
         var parts = self.parts
-        # Each row's partition, kept so the second pass need not hash
-        # again. It goes into memory the caller fills later anyway: a
-        # fresh list for each task would cost page faults on every call.
-        var own = Pointer[UInt32, MutAnyOrigin](
-            unsafe_from_address=self.owners + lo * size_of[Int]()
-        )
-        var cursor = List[Int](length=parts + 1, fill=0)
+        var cursor = List[Int](length=parts + 2, fill=0)
         var at = cursor.unsafe_ptr()
-        for k in range(n):
-            var hash: UInt64
-            comptime if GENERIC:
-                hash = hashes[unsafe_offset=lo + k]
-            else:
-                hash = _key_hash[D](
-                    values[unsafe_offset=lo + k],
-                    not bits or column._valid(lo + k),
-                )
-            var p = _hash_partition(hash, parts)
-            own[unsafe_offset=k] = UInt32(p)
-            at[unsafe_offset=p + 1] += 1
-        at[unsafe_offset=0] = lo
-        for p in range(parts):
+        for row in range(self.lo, self.hi):
+            at[
+                unsafe_offset=self._bucket[D, GENERIC, NULLS](column, row) + 1
+            ] += 1
+        at[unsafe_offset=0] = self.lo
+        for p in range(parts + 1):
             at[unsafe_offset=p + 1] += at[unsafe_offset=p]
         self.starts = cursor.copy()
-        for k in range(n):
-            var p = Int(own[unsafe_offset=k])
+        for row in range(self.lo, self.hi):
+            var p = self._bucket[D, GENERIC, NULLS](column, row)
             var to = at[unsafe_offset=p]
             at[unsafe_offset=p] = to + 1
-            var row = lo + k
+            rows[unsafe_offset=to] = Scalar[Self.I](row)
             comptime if GENERIC:
-                rows[unsafe_offset=to] = row
                 words[unsafe_offset=to] = hashes[unsafe_offset=row]
             else:
-                rows[unsafe_offset=to] = (
-                    row if not bits or column._valid(row) else ~row
-                )
                 words[unsafe_offset=to] = values[unsafe_offset=row].cast[
                     DType.uint64
                 ]()
 
 
-struct _PartitionGroupsJob(Job):
+struct _PartitionGroupsJob[I: DType](Job):
     """Hash partition `part`: number its rows' keys in one thread-local
     dictionary, then write each group's rows, ascending, into the
     partition's own stretch of the shared row array (from `row_base`).
     Equal keys have equal hashes, so each key belongs to one partition:
     no two tasks see the same key and nothing is merged afterwards. The
     entries come from every range's stretch in range order, so rows
-    arrive ascending and every group's list stays ascending."""
+    arrive ascending and every group's list stays ascending. Partition 0
+    also takes the null-key bucket, where a null integer key's rows went
+    (a null hashes to 0, which falls in partition 0), as one group.
+
+    Each entry's group number replaces its word, which is not needed
+    again, packed as an `I` index at the front of the stretch: entry k of
+    a stretch starting at `lo` writes its number to index k - lo, which
+    never passes the words not yet read, so the two later passes over the
+    numbers read half the bytes when indices are 32 bits."""
 
     var keys: List[Series]
     var generic: Bool
     var part: Int
-    # Address of every range's `starts` (ranges x (parts + 1) values).
+    # Address of every range's `starts` (ranges x (parts + 2) values).
     var starts: Int
     var ranges: Int
     var parts: Int
@@ -662,7 +682,7 @@ struct _PartitionGroupsJob(Job):
     var all_rows: Int
     # Output: where each group's rows start (count + 1 values, the last
     # one past the partition's rows) and the group count.
-    var offsets: List[Int]
+    var offsets: List[Scalar[Self.I]]
     var count: Int
 
     def __init__(
@@ -688,8 +708,24 @@ struct _PartitionGroupsJob(Job):
         self.entry_words = entry_words
         self.row_base = row_base
         self.all_rows = all_rows
-        self.offsets = List[Int]()
+        self.offsets = List[Scalar[Self.I]]()
         self.count = 0
+
+    def _stretches(self) -> List[Int]:
+        """The entry stretches this task reads, as [lo, hi) pairs: the
+        partition's stretch of every range, then (partition 0 only) every
+        range's null-key bucket."""
+        var starts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.starts)
+        var width = self.parts + 2
+        var out = List[Int](capacity=4 * self.ranges)
+        for r in range(self.ranges):
+            out.append(starts[unsafe_offset=r * width + self.part])
+            out.append(starts[unsafe_offset=r * width + self.part + 1])
+        if self.part == 0:
+            for r in range(self.ranges):
+                out.append(starts[unsafe_offset=r * width + self.parts])
+                out.append(starts[unsafe_offset=r * width + self.parts + 1])
+        return out^
 
     def run(mut self) raises:
         if not self.generic:
@@ -697,98 +733,97 @@ struct _PartitionGroupsJob(Job):
                 comptime D = NUMERIC_DTYPES[t]
                 comptime if not D.is_floating_point():
                     if self.keys[0]._data.isa[Column[Scalar[D]]]():
-                        var column = (
-                            self.keys[0]._data[Column[Scalar[D]]].copy()
-                        )
-                        self._group[D, False](column)
+                        self._group[D, False]()
                         return
-        self._group[DType.int64, True](
-            Column[Scalar[DType.int64]](List[Int64]())
-        )
+        self._group[DType.int64, True]()
 
-    def _group[D: DType, GENERIC: Bool](mut self, column: Column[Scalar[D]]):
-        var starts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.starts)
-        var rows = Pointer[Int, MutAnyOrigin](
+    def _group[D: DType, GENERIC: Bool](mut self):
+        var rows = Pointer[Scalar[Self.I], MutAnyOrigin](
             unsafe_from_address=self.entry_rows
         )
         var words = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=self.entry_words
         )
-        var all_rows = Pointer[Int, MutAnyOrigin](
+        var all_rows = Pointer[Scalar[Self.I], MutAnyOrigin](
             unsafe_from_address=self.all_rows
         )
-        var width = self.parts + 1
-        var part = self.part
-        # Number each entry's group; the number replaces the entry's word,
-        # which is not needed again.
+        var stretches = self._stretches()
+        var pairs = len(stretches) // 2
+        # The null-key bucket's stretches follow the partition's own.
+        var own = self.ranges
+        # Number each entry's group, packed over the stretch's words.
         var count: Int
         comptime if GENERIC:
             var keys = self.keys.copy()
             var numbering = _Numbering()
-            for r in range(self.ranges):
-                var lo = starts[unsafe_offset=r * width + part]
-                var hi = starts[unsafe_offset=r * width + part + 1]
-                for k in range(lo, hi):
-                    words[unsafe_offset=k] = UInt64(
-                        numbering.number(
-                            keys,
-                            rows[unsafe_offset=k],
-                            words[unsafe_offset=k],
-                        )
+            for s in range(pairs):
+                var lo = stretches[2 * s]
+                var ids = Pointer[Scalar[Self.I], MutAnyOrigin](
+                    unsafe_from_address=self.entry_words
+                    + lo * size_of[UInt64]()
+                )
+                for k in range(lo, stretches[2 * s + 1]):
+                    var g = numbering.number(
+                        keys, Int(rows[unsafe_offset=k]), words[unsafe_offset=k]
                     )
+                    ids[unsafe_offset=k - lo] = Scalar[Self.I](g)
             count = len(numbering.first_rows)
         else:
             var table = _IntGroups[D]()
-            for r in range(self.ranges):
-                var lo = starts[unsafe_offset=r * width + part]
-                var hi = starts[unsafe_offset=r * width + part + 1]
-                for k in range(lo, hi):
-                    var row = rows[unsafe_offset=k]
-                    words[unsafe_offset=k] = UInt64(
-                        table.number(words[unsafe_offset=k].cast[D](), row >= 0)
-                    )
-                    # The row itself from here on.
-                    if row < 0:
-                        rows[unsafe_offset=k] = ~row
+            for s in range(pairs):
+                var lo = stretches[2 * s]
+                var ids = Pointer[Scalar[Self.I], MutAnyOrigin](
+                    unsafe_from_address=self.entry_words
+                    + lo * size_of[UInt64]()
+                )
+                if s < own:
+                    for k in range(lo, stretches[2 * s + 1]):
+                        ids[unsafe_offset=k - lo] = Scalar[Self.I](
+                            table.number(words[unsafe_offset=k].cast[D](), True)
+                        )
+                else:
+                    for k in range(lo, stretches[2 * s + 1]):
+                        ids[unsafe_offset=k - lo] = Scalar[Self.I](
+                            table.number(Scalar[D](0), False)
+                        )
             count = table.count()
         # A counting sort of the entries by group into the partition's
         # stretch: entries arrive in row order, so each list is ascending.
-        var cursors = List[Int](length=count + 1, fill=0)
+        var cursors = List[Scalar[Self.I]](length=count + 1, fill=0)
         var at = cursors.unsafe_ptr()
-        for r in range(self.ranges):
-            var lo = starts[unsafe_offset=r * width + part]
-            var hi = starts[unsafe_offset=r * width + part + 1]
-            for k in range(lo, hi):
-                at[unsafe_offset=Int(words[unsafe_offset=k]) + 1] += 1
-        at[unsafe_offset=0] = self.row_base
+        for s in range(pairs):
+            var lo = stretches[2 * s]
+            var ids = Pointer[Scalar[Self.I], MutAnyOrigin](
+                unsafe_from_address=self.entry_words + lo * size_of[UInt64]()
+            )
+            for k in range(stretches[2 * s + 1] - lo):
+                at[unsafe_offset=Int(ids[unsafe_offset=k]) + 1] += 1
+        at[unsafe_offset=0] = Scalar[Self.I](self.row_base)
         for g in range(count):
             at[unsafe_offset=g + 1] += at[unsafe_offset=g]
         self.offsets = cursors.copy()
-        for r in range(self.ranges):
-            var lo = starts[unsafe_offset=r * width + part]
-            var hi = starts[unsafe_offset=r * width + part + 1]
-            for k in range(lo, hi):
-                var g = Int(words[unsafe_offset=k])
-                all_rows[unsafe_offset=at[unsafe_offset=g]] = rows[
-                    unsafe_offset=k
-                ]
-                at[unsafe_offset=g] += 1
+        for s in range(pairs):
+            var lo = stretches[2 * s]
+            var ids = Pointer[Scalar[Self.I], MutAnyOrigin](
+                unsafe_from_address=self.entry_words + lo * size_of[UInt64]()
+            )
+            for k in range(lo, stretches[2 * s + 1]):
+                var g = Int(ids[unsafe_offset=k - lo])
+                var to = at[unsafe_offset=g]
+                all_rows[unsafe_offset=Int(to)] = rows[unsafe_offset=k]
+                at[unsafe_offset=g] = to + 1
         self.count = count
 
     def row_base_end(self) -> Int:
         """Where the partition's rows end in the shared row array."""
-        var starts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.starts)
-        var width = self.parts + 1
+        var stretches = self._stretches()
         var end = self.row_base
-        for r in range(self.ranges):
-            end += (
-                starts[unsafe_offset=r * width + self.part + 1]
-                - starts[unsafe_offset=r * width + self.part]
-            )
+        for s in range(len(stretches) // 2):
+            end += stretches[2 * s + 1] - stretches[2 * s]
         return end
 
 
-struct _GroupOffsetsJob(Job):
+struct _GroupOffsetsJob[I: DType](Job):
     """Copy one partition's group starts into the shared offsets, from
     its first group's number."""
 
@@ -804,8 +839,12 @@ struct _GroupOffsetsJob(Job):
     def run(mut self) raises:
         if self.count > 0:
             unsafe_memcpy(
-                dest=Pointer[Int, MutAnyOrigin](unsafe_from_address=self.dest),
-                src=Pointer[Int, MutAnyOrigin](unsafe_from_address=self.source),
+                dest=Pointer[Scalar[Self.I], MutAnyOrigin](
+                    unsafe_from_address=self.dest
+                ),
+                src=Pointer[Scalar[Self.I], MutAnyOrigin](
+                    unsafe_from_address=self.source
+                ),
                 count=self.count,
             )
 
@@ -853,9 +892,18 @@ def partition_groups(keys: List[Series], height: Int) raises -> GroupRows:
     starts. No group number is kept per row: the lists are what the
     aggregates and the write back to rows read. Groups are numbered in
     partition order, not by first row: aggregates over partitions do not
-    depend on group order."""
+    depend on group order. Row indices are 32 bits unless the input has
+    more rows than that numbers (`wide_row_indices`)."""
     if height == 0:
-        return GroupRows(List[Int](length=1, fill=0), List[Int]())
+        return GroupRows()
+    if wide_row_indices(height):
+        return _partition_groups[WIDE_ROW_INDEX](keys, height)
+    return _partition_groups[ROW_INDEX](keys, height)
+
+
+def _partition_groups[
+    I: DType
+](keys: List[Series], height: Int) raises -> GroupRows:
     var workers = configured_workers()
     var parts = workers
     var flat = List[Series](capacity=len(keys))
@@ -869,17 +917,15 @@ def partition_groups(keys: List[Series], height: Int) raises -> GroupRows:
         var partitioner = Partitioner(keys, workers)
         flat = partitioner.keys.copy()
         hashes = partitioner^.into_hashes()
-    var entry_rows = huge_uninit[Int](height)
+    var entry_rows = huge_uninit[Scalar[I]](height)
     var entry_words = huge_uninit[UInt64](height)
-    # The groups' row lists, filled by the partition tasks. Until then
-    # each scatter task keeps its rows' partitions in its own range of
-    # it, so the scatter needs no scratch memory of its own.
-    var rows = huge_uninit[Int](height)
+    # The groups' row lists, filled by the partition tasks.
+    var rows = huge_uninit[Scalar[I]](height)
     var bounds = partitions(height, workers, 1)
-    var scatter = List[_ScatterJob](capacity=workers)
+    var scatter = List[_ScatterJob[I]](capacity=workers)
     for r in range(workers):
         scatter.append(
-            _ScatterJob(
+            _ScatterJob[I](
                 flat,
                 Int(hashes.unsafe_ptr()) if generic else 0,
                 bounds[r],
@@ -887,21 +933,20 @@ def partition_groups(keys: List[Series], height: Int) raises -> GroupRows:
                 parts,
                 Int(entry_rows.unsafe_ptr()),
                 Int(entry_words.unsafe_ptr()),
-                Int(rows.unsafe_ptr()),
             )
         )
     if workers == 1:
         scatter[0].run()
     else:
         run_jobs(scatter)
-    var starts = List[Int](capacity=workers * (parts + 1))
+    var starts = List[Int](capacity=workers * (parts + 2))
     for r in range(workers):
         starts.extend(scatter[r].starts.copy())
-    var jobs = List[_PartitionGroupsJob](capacity=parts)
+    var jobs = List[_PartitionGroupsJob[I]](capacity=parts)
     var row_base = 0
     for p in range(parts):
         jobs.append(
-            _PartitionGroupsJob(
+            _PartitionGroupsJob[I](
                 flat,
                 generic,
                 p,
@@ -922,16 +967,16 @@ def partition_groups(keys: List[Series], height: Int) raises -> GroupRows:
     var total = 0
     for p in range(parts):
         total += jobs[p].count
-    var offsets = List[Int](unsafe_uninit_length=total + 1)
-    offsets[total] = height
-    var copies = List[_GroupOffsetsJob](capacity=parts)
+    var offsets = List[Scalar[I]](unsafe_uninit_length=total + 1)
+    offsets[total] = Scalar[I](height)
+    var copies = List[_GroupOffsetsJob[I]](capacity=parts)
     var base = 0
     for p in range(parts):
         copies.append(
-            _GroupOffsetsJob(
+            _GroupOffsetsJob[I](
                 Int(jobs[p].offsets.unsafe_ptr()),
                 jobs[p].count,
-                Int(offsets.unsafe_ptr()) + base * size_of[Int](),
+                Int(offsets.unsafe_ptr()) + base * size_of[Scalar[I]](),
             )
         )
         base += jobs[p].count
@@ -946,7 +991,7 @@ def partition_groups(keys: List[Series], height: Int) raises -> GroupRows:
     _ = entry_words^
     _ = hashes^
     _ = flat^
-    return GroupRows(offsets^, rows^)
+    return group_rows_of[I](offsets^, rows^)
 
 
 def sort_key_rows(
