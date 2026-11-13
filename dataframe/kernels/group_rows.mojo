@@ -81,6 +81,61 @@ def group_rows_from_ids(ids: List[Int], count: Int) -> GroupRows:
     return GroupRows(offsets^, rows^)
 
 
+struct _GroupIdsJob(Job):
+    """Groups [first, last): write each group's number to its rows."""
+
+    var offsets: Int
+    var rows: Int
+    var first: Int
+    var last: Int
+    var ids: Int
+
+    def __init__(
+        out self, offsets: Int, rows: Int, first: Int, last: Int, ids: Int
+    ):
+        self.offsets = offsets
+        self.rows = rows
+        self.first = first
+        self.last = last
+        self.ids = ids
+
+    def run(mut self) raises:
+        var offsets = Pointer[Int, MutAnyOrigin](
+            unsafe_from_address=self.offsets
+        )
+        var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.rows)
+        var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ids)
+        for g in range(self.first, self.last):
+            for k in range(
+                offsets[unsafe_offset=g], offsets[unsafe_offset=g + 1]
+            ):
+                ids[unsafe_offset=rows[unsafe_offset=k]] = g
+
+
+def group_ids(groups: GroupRows, height: Int, workers: Int) raises -> List[Int]:
+    """Each row's group number (by input row), from the groups' row lists,
+    for the consumers that read groups row by row. Groups own disjoint
+    rows, so slices of groups are written in parallel."""
+    var ids = huge_uninit[Int](height)
+    var bounds = groups.slices(workers)
+    var jobs = List[_GroupIdsJob](capacity=len(bounds))
+    for s in range(len(bounds) - 1):
+        jobs.append(
+            _GroupIdsJob(
+                Int(groups.offsets.unsafe_ptr()),
+                Int(groups.rows.unsafe_ptr()),
+                bounds[s],
+                bounds[s + 1],
+                Int(ids.unsafe_ptr()),
+            )
+        )
+    if len(jobs) == 1:
+        jobs[0].run()
+    elif len(jobs) > 1:
+        run_jobs(jobs)
+    return ids^
+
+
 struct _WriteNumericJob[D: DType](Job):
     """Groups [first, last): write each group's value to every one of its
     rows, and its validity when the values have nulls."""
