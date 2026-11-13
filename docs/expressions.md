@@ -567,7 +567,9 @@ an independent Python JSON selection reference.
 and `split(literal=False)` take regular expressions and return leftmost-first,
 non-overlapping matches searched left to right. An empty match immediately
 after the previous match is skipped, preventing adjacent empty matches from
-repeating the same position. The engine (`dataframe/regex`) uses a Thompson NFA, a lazily built DFA for match ends and a
+repeating the same position. The standalone
+[regex_mojo](https://github.com/randyzwitch/regex_mojo) engine uses a Thompson
+NFA, a lazily built DFA for match ends and a
 reverse DFA for match starts, a Pike VM for capture groups, and literal
 prefilters. Visited-state tracking and NFA fallback prevent repeated exploration
 from growing exponentially; for a fixed pattern, search work is linear in the

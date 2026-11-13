@@ -5,7 +5,7 @@ split(literal=False).
 Expected values for the same input are written out as literals. Each
 function runs over offsets, a sliced window, chunks and string views, with
 nulls, eagerly and through LazyFrame, in select, filter and group_by().agg.
-The regex engine is also checked against a larger corpus.
+The regex_mojo dependency checks the engine against a larger corpus.
 """
 # contract-group: expr.regex
 from std.testing import assert_equal, assert_true, assert_raises
