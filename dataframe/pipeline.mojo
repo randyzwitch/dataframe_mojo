@@ -2546,7 +2546,9 @@ def finish_pipeline(
     still to run (`PipelineFinish`), whose `result` is the output."""
     var finish = PipelineFinish()
     var finish_counts = List[Int]()
-    var result = _finish_pipeline(run, counts, set_frames, finish_counts, finish)
+    var result = _finish_pipeline(
+        run, counts, set_frames, finish_counts, finish
+    )
     finish.counts = finish_counts^
     if (
         len(run.finish_steps) > 0
@@ -2609,7 +2611,7 @@ struct PipelineFinish(Movable):
     # strings until the parts are finished.
     var held: List[AggregateSink]
 
-    def __init__(out self):
+    def __init__(out self) raises:
         self.frame = DataFrame(List[Series](), height=0)
         self.counts = List[Int]()
         self.parts = List[_FinishStepsJob]()

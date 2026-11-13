@@ -325,9 +325,8 @@ struct _Executor[P: SchedulablePipeline](Movable):
             self.pipeline.append(s.pipeline)
             self.parents.append(List[Int]())
             self.total_dependencies.append(len(s.dependencies))
-            # The execute event learns its count when it schedules
-            # (`Pipeline::Schedule`), a finish event its finalize rounds'
-            # as they come. Initialize, prepare finish and finish each
+            # The execute event learns its count when it schedules, a
+            # finish event its finalize rounds' as they come. Initialize, prepare finish and finish each
             # make one task; complete makes none and finishes when
             # scheduled.
             var tasks = 0 if s.type == STAGE_COMPLETE else 1
@@ -489,7 +488,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
                 var record = _counter(
                     Int(self.records.unsafe_ptr()), slot
                 ).load()
-                _counter(sequences, slot).store(position + self.mask + 1)
+                _counter(sequences, slot).store(position + Int64(self.mask + 1))
                 return Int(record)
 
     def _run_task(mut self, record: Int):

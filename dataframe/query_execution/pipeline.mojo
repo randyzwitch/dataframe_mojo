@@ -1829,7 +1829,10 @@ struct _BatchStream(Movable):
                 else:
                     self.outputs.append(part^)
         self.jobs = List[_StreamJob]()
-        if self.collecting and self.collected_memory.bytes >= self.collect_budget:
+        if (
+            self.collecting
+            and self.collected_memory.bytes >= self.collect_budget
+        ):
             # The budget is reached: reduce what is collected into one
             # state (every key encoded once) and keep collecting. The
             # states merge at the end as batch states do.
@@ -1883,9 +1886,9 @@ struct _BatchStream(Movable):
             var whole = concat(self.collected).rechunk()
             # Groups come back in first-occurrence order only when asked,
             # as the eager group-by's do.
-            result = whole.group_by(
-                self.keys, maintain_order=self.ordered
-            ).agg(self.expressions)
+            result = whole.group_by(self.keys, maintain_order=self.ordered).agg(
+                self.expressions
+            )
         elif self.collecting:
             # Spilled at least once: the rest joins the one state, which
             # merges here.
@@ -1968,7 +1971,6 @@ struct _BatchStream(Movable):
                     wall_ns=stream_wall,
                 )
         return result^
-
 
 
 def _source_rows(self: QueryContext, cursor: Int) raises -> Int:
