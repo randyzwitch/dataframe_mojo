@@ -31,12 +31,12 @@ from dataframe.sorting.sort_key import (
     has_row_key,
 )
 
-# topn_optimizer.cpp, TopN::CanOptimize: a limit over this many rows and
-# over 0.7% of the input sorts the whole input instead.
+# A limit over this many rows and over 0.7% of the input sorts the whole input
+# instead: a top-N heap tests every row and does log N work for each that
+# enters, and with a large N many rows enter, so the parallel full sort is
+# cheaper. Both are empirical choices.
 comptime _TOPN_LARGE_LIMIT = 5000
 comptime _TOPN_INPUT_SHARE = 0.007
-# physical_top_n.cpp, TopNHeap: SMALL_HEAP_THRESHOLD is not needed (it
-# chooses how payload is copied; rows are the payload here).
 
 
 def _sink_threads(rows: Int, threads: Int) -> Int:
@@ -81,23 +81,23 @@ struct _SinkRunJob[W: Int, VAR: Bool](Job):
 
 
 # ===----------------------------------------------------------------------=== #
-# SortedRunMerger
+# Merging sorted runs
 # ===----------------------------------------------------------------------=== #
 
 
 @always_inline
 def _boundary_delta(total_remaining: Int, k: Int, begin: Int, end: Int) -> Int:
-    """ComputeBoundaryDelta: ceil(total_remaining / k), or what the run
-    has left."""
+    """The rows per merge task, ceil(total_remaining / k), or what the run has
+    left."""
     return min((total_remaining + k - 1) // k, end - begin)
 
 
 def _partition_ends[
     W: Int, VAR: Bool
 ](runs: List[Int], counts: List[Int], target: Int) -> List[Int]:
-    """TemplatedComputePartitionBoundaries from the start of every run:
-    per run, how many of its rows fall in the first `target` rows of the
-    merged output (K-way Merge Path)."""
+    """From the start of every run: per run, how many of its rows fall in the
+    first `target` rows of the merged output (K-way Merge Path), found by binary
+    search so each merge partition can be built independently."""
     comptime K = SortKeys[W, VAR]
     var num_runs = len(runs)
     var begins = List[Int](length=num_runs, fill=0)
@@ -152,9 +152,9 @@ struct _BoundaryJob[W: Int, VAR: Bool](Job):
 
 
 struct _MergePartitionJob[W: Int, VAR: Bool](Job):
-    """TemplatedMergePartition and the partition's scan: its records from
-    every run, sorted by vergesort (pdqsort for unsorted stretches), then
-    its row ids written at the partition's place in the output."""
+    """Merge one partition and scan it: its records from every run, sorted by
+    vergesort (pdqsort for unsorted stretches), then its row ids written at the
+    partition's place in the output."""
 
     var runs: List[Int]
     var begins: List[Int]

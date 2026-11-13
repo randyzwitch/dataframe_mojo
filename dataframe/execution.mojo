@@ -160,6 +160,11 @@ from dataframe.aggregation.reducer import Reducer, _sum_bools, _variance_blocks
 from dataframe.aggregation.ungrouped import distinct_count, distinct_counts
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
+from dataframe.kernels.group_rows import (
+    GroupRows,
+    group_rows_from_ids,
+    write_by_groups,
+)
 from std.collections import Optional
 from std.memory import ArcPointer, Pointer
 from std.math import isnan
@@ -1373,13 +1378,13 @@ def _conditional[
     mask: List[Bool],
 ) raises -> Series:
     if not grouped and _every_row(mask) and _null_otherwise(bound, index):
-        # `when(c).then(x)` with null other rows: the branch's values under
-        # a validity that adds the predicate, as a streamed reduction's
-        # input already took (`_feed`), rather than chosen row by row. The
-        # aggregate table's inputs are evaluated whole: TPC-DS q2's seven
-        # weekday sums spent 18% in `choose` and its masks. A mask that
-        # observes every row restricts nothing: the branch an enclosing
-        # scalar `when` takes passes down a one-row true mask.
+        # `when(c).then(x)` with null other rows: the branch's values under a
+        # validity that adds the predicate, as a streamed reduction's input
+        # already took (`_feed`), rather than chosen row by row: the values are
+        # reused as they are and only the validity is computed. The aggregate
+        # table's inputs are evaluated whole. A mask that observes every row
+        # restricts nothing: the branch an enclosing scalar `when` takes passes
+        # down a one-row true mask.
         return _masked_branch[width](
             bound, columns, aggregates, index, offset, length
         )
@@ -1912,10 +1917,10 @@ comptime _SUM_BLOCK = 1 << 30
 
 @fieldwise_init
 struct _ColumnStats(Copyable, Movable):
-    """The sum, count, min and max of one column's valid rows [start,
-    end), kept for the expressions of one batch that read the same
-    column (`_shifted_int_sum`: ClickBench q29's ninety sums of one
-    column plus a constant take one pass instead of ninety)."""
+    """The sum, count, min and max of one column's valid rows [start, end), kept
+    for the expressions of one batch that read the same column
+    (`_shifted_int_sum`: many sums of one column plus different constants take
+    one pass instead of one each)."""
 
     var column: Int
     var start: Int
@@ -1935,15 +1940,14 @@ def _shifted_int_sum(
     end: Int,
     stats: ArcPointer[List[_ColumnStats]],
 ) raises -> Bool:
-    """`sum(col + c)`, `sum(col - c)`, `sum(c - col)` and `sum(col * c)`
-    (or their means) of an integer column and an integer literal, from
-    the column's own sum and count: `sum(col) + c * count`, and so on.
-    Exact in integers. The materialized form raises when a row's result
-    leaves the expression's type, so the same pass takes the column's
-    min and max and the shortcut is declined when either would; the
-    ordinary path then raises as before. ClickBench q29 sums a 16-bit
-    column plus a constant ninety times: a pass that wrote each sum's
-    input and read it back cost 0.8 ms a sum, this reads it once."""
+    """`sum(col + c)`, `sum(col - c)`, `sum(c - col)` and `sum(col * c)` (or
+    their means) of an integer column and an integer literal, from the column's
+    own sum and count: `sum(col) + c * count`, and so on. Exact in integers. The
+    materialized form raises when a row's result leaves the expression's type,
+    so the same pass takes the column's min and max and the shortcut is declined
+    when either would; the ordinary path then raises as before. Materializing
+    `col + c` would write a full column and read it back for each sum; this
+    reads the column once, however many such sums share it."""
     if node.op != SUM and node.op != MEAN:
         return False
     ref inner = bound.expr._nodes[node.left]
@@ -2621,11 +2625,11 @@ def _shifted_sum_shape(
 def direct_reductions(
     expressions: List[Expr], columns: List[Series]
 ) raises -> Bool:
-    """Whether every expression is one reduction that runs as one scan of
-    its column (`_direct_scan`, or the `sum(col op c)` shape), writing no
-    temporary: such a batch can be as long as the input allows, where one
-    that materializes per-batch values must fit them in cache (TPC-DS q9's
-    fifteen conditional sums: 25 ms at 64K rows a batch, 34 at 90K)."""
+    """Whether every expression is one reduction that runs as one scan of its
+    column (`_direct_scan`, or the `sum(col op c)` shape), writing no temporary:
+    such a batch can be as long as the input allows, where one that materializes
+    per-batch values must fit them in cache, or every temporary is written to
+    memory and read back."""
     for expression in expressions:
         var bound = bind(expression, columns)
         var root = len(bound.expr._nodes) - 1
@@ -2727,13 +2731,12 @@ def _coded_compare[
     length: Int,
 ) raises -> Optional[Series]:
     """`column <op> literal` (either order) for a String column carrying
-    dictionary codes: the literal is compared with every dictionary value
-    once and each row takes its value's answer by code, in one pass over
-    the window's codes. None when the node is not of that shape or the
-    dictionary is not small next to the rows (TPC-DS q59 compares
-    d_day_name with seven day names over 10M joined rows, in the 4K-row
-    batches of a streamed reduction, so the per-batch cost has to stay
-    near the cost of the row loop itself)."""
+    dictionary codes: the literal is compared with every dictionary value once
+    and each row takes its value's answer by code, in one pass over the window's
+    codes. None when the node is not of that shape or the dictionary is not
+    small next to the rows: comparing every dictionary value costs work per
+    batch, and in the small batches of a streamed reduction it must stay near
+    the cost of the row loop itself."""
     ref node = bound.expr._nodes[index]
     ref left = bound.expr._nodes[node.left]
     ref right = bound.expr._nodes[node.right]
@@ -2829,11 +2832,11 @@ def _on_dictionary[
     height: Int,
     batch_size: Int,
 ) raises -> Series:
-    """A row-wise expression over a categorical, evaluated on each
-    dictionary value and on null, then gathered by every row's code. A
-    String column with dictionary codes beside it is read as that
-    categorical (TPC-DS q59 compares d_day_name with seven day names over
-    10M joined rows; the bytes were compared per row)."""
+    """A row-wise expression over a categorical, evaluated on each dictionary
+    value and on null, then gathered by every row's code. A String column with
+    dictionary codes beside it is read as that categorical: each distinct value
+    is evaluated once instead of once per row, and a row reads its answer by
+    code."""
     var coded = columns[source].copy()
     if coded.dtype() == DataType.STRING:
         var as_codes = coded._dictionary_codes()
@@ -2913,9 +2916,14 @@ def _reduce[
     grouped: Bool,
     groups: List[Int],
     group_count: Int,
-) raises -> Reducer:
-    """Reduce every row of `node.left`: one pass, or one worker per row
-    partition with states merged in partition order (#6, #8)."""
+    mut group_rows: Optional[ArcPointer[GroupRows]],
+) raises -> Series:
+    """Reduce every row of `node.left`: one pass, or in parallel. Without
+    groups, one worker per row partition, with states merged in partition
+    order (#6, #8). With groups, workers take slices of whole groups and
+    reduce each group's rows: a worker keeps state only for its own
+    groups, so nothing is merged and any number of groups runs in
+    parallel."""
     var workers = worker_count(height)
     if not grouped and _direct_scan(bound, columns, node):
         # A SIMD scan saturates memory bandwidth with few workers, and each
@@ -2933,17 +2941,12 @@ def _reduce[
         # The row count, or a popcount of the validity bitmap: less work
         # than starting a thread.
         workers = 1
-    if grouped:
-        # Each worker holds state for every group and merges it afterwards;
-        # with many groups that costs more than it saves, so require an
-        # average of at least four rows per group per worker.
-        workers = min(workers, max(1, height // max(1, 4 * group_count)))
     if workers <= 1:
         var reducer = _new_reducer(bound, node, group_count)
         if _direct_grouped_count(
             reducer, bound, columns, node, 0, height, grouped, groups
         ):
-            return reducer^
+            return reducer.finish()
         if _direct_numeric_reduction(
             reducer,
             bound,
@@ -2954,7 +2957,7 @@ def _reduce[
             grouped,
             ArcPointer(List[_ColumnStats]()),
         ):
-            return reducer^
+            return reducer.finish()
         for offset in range(0, height, batch_size):
             _feed[width](
                 reducer,
@@ -2967,7 +2970,20 @@ def _reduce[
                 grouped,
                 groups,
             )
-        return reducer^
+        return reducer.finish()
+    if grouped:
+        if not group_rows:
+            group_rows = ArcPointer(group_rows_from_ids(groups, group_count))
+        return _reduce_groups[width](
+            bound,
+            columns,
+            states,
+            node,
+            height,
+            batch_size,
+            workers,
+            group_rows.value(),
+        )
     var shared_groups = ArcPointer(groups.copy())
     var bounds = partitions(height, workers, batch_size)
     var jobs = List[_ReduceJob[width]](capacity=workers)
@@ -2990,7 +3006,176 @@ def _reduce[
     var reducer = jobs.pop(0).into_reducer()
     while len(jobs) > 0:
         reducer.merge(jobs.pop(0).into_reducer())
-    return reducer^
+    return reducer.finish()
+
+
+def _rows_of[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    states: List[Series],
+    index: Int,
+    height: Int,
+    batch_size: Int,
+    workers: Int,
+) raises -> Series:
+    """Node `index` over every row: as it is when it exists whole (a
+    column), else evaluated by row ranges in parallel."""
+    var whole = _whole(bound, columns, states, index, height, False)
+    if whole:
+        return whole.take()
+    var bounds = partitions(height, workers, batch_size)
+    var jobs = List[_RowsJob[width]](capacity=workers)
+    for w in range(workers):
+        if bounds[w + 1] > bounds[w]:
+            jobs.append(
+                _RowsJob[width](
+                    bound,
+                    columns,
+                    states,
+                    index,
+                    bounds[w],
+                    bounds[w + 1],
+                    batch_size,
+                    False,
+                )
+            )
+    run_jobs(jobs)
+    var parts = List[Series](capacity=len(jobs))
+    while len(jobs) > 0:
+        parts.append(jobs.pop(0).into_result())
+    return Series._from_chunks(parts).rechunk()
+
+
+struct _GroupReduceJob[width: Int](Job):
+    """Reduce groups [first, last): each group's rows, read in row order
+    from the whole input, into a state for these groups only."""
+
+    var bound: BoundExpr
+    var node: Node
+    var values: Series
+    var others: Series
+    var groups: ArcPointer[GroupRows]
+    var first: Int
+    var last: Int
+    var batch_size: Int
+    var result: Series
+
+    def __init__(
+        out self,
+        bound: BoundExpr,
+        node: Node,
+        values: Series,
+        others: Series,
+        groups: ArcPointer[GroupRows],
+        first: Int,
+        last: Int,
+        batch_size: Int,
+    ):
+        self.bound = bound.copy()
+        self.node = node.copy()
+        self.values = values.copy()
+        self.others = others.copy()
+        self.groups = groups
+        self.first = first
+        self.last = last
+        self.batch_size = batch_size
+        self.result = Series("", Column[Int64](List[Int64]()))
+
+    def run(mut self) raises:
+        var reducer = _new_reducer(
+            self.bound, self.node, self.last - self.first
+        )
+        if self.node.op == IMPLODE:
+            reducer.metadata = self.values._field_metadata
+        var pair = is_pair_reduction(self.node.op)
+        var offsets = self.groups[].offsets.unsafe_ptr()
+        var all_rows = self.groups[].rows.unsafe_ptr()
+        var g = self.first
+        var start = offsets[unsafe_offset=self.first]
+        var end = offsets[unsafe_offset=self.last]
+        # Bounded batches of whole or partial groups: the rows to read and
+        # each one's group, numbered from `first`.
+        while start < end:
+            var stop = min(end, start + self.batch_size)
+            var rows = List[Int](capacity=stop - start)
+            var local = List[Int](capacity=stop - start)
+            for k in range(start, stop):
+                while offsets[unsafe_offset=g + 1] <= k:
+                    g += 1
+                rows.append(all_rows[unsafe_offset=k])
+                local.append(g - self.first)
+            var chunk = self.values.take(rows)
+            if pair:
+                reducer.update_pair(
+                    chunk, self.others.take(rows), 0, True, local
+                )
+            else:
+                reducer.update(chunk, 0, True, local)
+            start = stop
+        self.result = reducer.finish()
+
+
+def _reduce_groups[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    states: List[Series],
+    node: Node,
+    height: Int,
+    batch_size: Int,
+    workers: Int,
+    groups: ArcPointer[GroupRows],
+) raises -> Series:
+    """A grouped reduction in parallel over slices of whole groups, each
+    reading its groups' rows; the slices hold consecutive groups, so their
+    results, concatenated, are in group order."""
+    var values = _rows_of[width](
+        bound, columns, states, node.left, height, batch_size, workers
+    )
+    if (
+        values.dtype().is_categorical()
+        and bound.dtypes[node.left] == DataType.STRING
+    ):
+        values = decode(values)
+    var others = values.copy()
+    if is_pair_reduction(node.op):
+        others = _rows_of[width](
+            bound, columns, states, node.right, height, batch_size, workers
+        )
+    if values.is_chunked():
+        values = values.rechunk()
+    if others.is_chunked():
+        others = others.rechunk()
+    var bounds = groups[].slices(workers)
+    var jobs = List[_GroupReduceJob[width]](capacity=len(bounds))
+    for s in range(len(bounds) - 1):
+        jobs.append(
+            _GroupReduceJob[width](
+                bound,
+                node,
+                values,
+                others,
+                groups,
+                bounds[s],
+                bounds[s + 1],
+                batch_size,
+            )
+        )
+    if len(jobs) == 0:
+        return _new_reducer(bound, node, 0).finish()
+    if len(jobs) == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    if len(jobs) == 1:
+        return jobs[0].result.copy()
+    var parts = List[Series](capacity=len(jobs))
+    for j in range(len(jobs)):
+        parts.append(jobs[j].result.copy())
+    return Series._from_chunks(parts).rechunk()
 
 
 def _batch[
@@ -3083,10 +3268,9 @@ def _full[
     batch_size: Int,
     grouped: Bool,
 ) raises -> Series:
-    """Materialize a row-valued node over every row, batch by batch; a
-    column, or a window or over() already computed for every row, as it
-    is (TPC-DS q51's running maxima copied 611K rows in 1,024-row batches
-    into each window's input and out of its result)."""
+    """Materialize a row-valued node over every row, batch by batch; a column,
+    or a window or over() already computed for every row, as it is: copying it
+    batch by batch would only move every row twice."""
     var whole = _whole(bound, columns, states, index, height, grouped)
     if whole:
         return whole.take()
@@ -3119,7 +3303,7 @@ from .parallel import configured_workers
 from .window_sort import (
     WindowLayout,
     rank_window,
-    partition_ids,
+    partition_groups,
     window_layout,
 )
 
@@ -3136,10 +3320,13 @@ struct WindowLayouts(Movable):
 
     var keys: List[String]
     var layouts: List[WindowLayout]
-    # Partition ids (and counts) by partition keys, for constant aggregates.
+    # Partition ids, counts and each partition's rows, by partition keys,
+    # for constant aggregates.
     var id_keys: List[String]
     var ids: List[List[Int]]
     var counts: List[Int]
+    # Made from the ids when first needed, if not made with them.
+    var groups: List[Optional[ArcPointer[GroupRows]]]
     # Key columns made contiguous once for every window that reads them.
     var flat_names: List[String]
     var flat: List[Series]
@@ -3150,6 +3337,7 @@ struct WindowLayouts(Movable):
         self.id_keys = List[String]()
         self.ids = List[List[Int]]()
         self.counts = List[Int]()
+        self.groups = List[Optional[ArcPointer[GroupRows]]]()
         self.flat_names = List[String]()
         self.flat = List[Series]()
 
@@ -3215,8 +3403,19 @@ def _over_constant[
     cache_address: Int,
 ) raises -> Series:
     """For a window over a whole partition with no order key, aggregate each
-    partition once and broadcast its result to every member row. Number rows
-    by hash partition without gathering or sorting the input values."""
+    partition once and write its result to every member row: number rows
+    by hash partition, keeping each partition's rows, with no sort and no
+    input values gathered."""
+    var local = bind(argument_expr, inputs)
+    if (node.integer & OVER_GLOBAL) != 0 or height == 0:
+        # One partition: the ungrouped aggregate, broadcast; grouping every
+        # row into one group would only add work.
+        var total = evaluate[width](
+            local, inputs, height, batch_size=batch_size
+        )
+        var whole = total._broadcast(height) if len(total) == 1 else total^
+        whole._name = argument_expr._name
+        return whole^
     var cache = Pointer[WindowLayouts, MutAnyOrigin](
         unsafe_from_address=cache_address
     )
@@ -3226,19 +3425,23 @@ def _over_constant[
             at = k
     if at < 0:
         var keys = _partition_keys(node, columns, cache_address)
-        var ids: List[Int]
-        var count: Int
-        if len(keys) == 0 or height == 0:
+        var ids = List[Int]()
+        var groups = GroupRows()
+        var count = 1
+        if len(keys) == 0:
             ids = List[Int](length=height, fill=0)
-            count = 1 if height > 0 else 0
+            groups = group_rows_from_ids(ids, 1)
         else:
-            ids = List[Int]()
-            count = partition_ids(keys, height, ids)
+            count = partition_groups(keys, height, ids, groups)
         cache[].id_keys.append(node.text2)
         cache[].ids.append(ids^)
         cache[].counts.append(count)
+        cache[].groups.append(ArcPointer(groups^))
         at = len(cache[].id_keys) - 1
-    var local = bind(argument_expr, inputs)
+    if not cache[].groups[at]:
+        cache[].groups[at] = ArcPointer(
+            group_rows_from_ids(cache[].ids[at], cache[].counts[at])
+        )
     var values = evaluate[width](
         local,
         inputs,
@@ -3247,11 +3450,19 @@ def _over_constant[
         grouped=True,
         groups=cache[].ids[at],
         group_count=cache[].counts[at],
+        group_rows=cache[].groups[at],
     )
-    var spread = take_parallel(
-        [values^], cache[].ids[at].copy(), configured_workers()
+    var workers = worker_count(height)
+    var set = write_by_groups(
+        values, cache[].groups[at].value()[], height, workers
     )
-    var result = spread[0].copy()
+    var result: Series
+    if set:
+        result = set.take()
+    else:
+        result = take_parallel(
+            [values^], cache[].ids[at].copy(), configured_workers()
+        )[0].copy()
     result._name = argument_expr._name
     return result^
 
@@ -3340,9 +3551,8 @@ def _crosses_partitions(bound: BoundExpr, keys: String) -> Bool:
 
 
 struct _OverJob(Job):
-    """One hash group of the layout, evaluated on its own: the rows
-    [lo, hi) of the gathered columns, partitions [first, last) (the
-    GETDATA stage of one WindowHashGroup)."""
+    """One hash group of the layout, evaluated on its own: the rows [lo, hi) of
+    the gathered columns, partitions [first, last)."""
 
     var inner: BoundExpr
     var columns: List[Series]
@@ -3404,6 +3614,7 @@ struct _OverJob(Job):
         known.id_keys.append(self.keys)
         known.ids.append(groups.copy())
         known.counts.append(self.last - self.first)
+        known.groups.append(None)
         self.result = evaluate(
             self.inner,
             part,
@@ -3690,10 +3901,9 @@ def _over[
             )
         )
     else:
-        # One task per thread over consecutive hash groups, each about
-        # an equal share of the rows; a thread gets at least one
-        # STANDARD_VECTOR_SIZE block (WindowGlobalSourceState::
-        # CreateTaskList sizes tasks in blocks per thread).
+        # One task per thread over consecutive hash groups, each about an equal
+        # share of the rows; a thread gets at least one STANDARD_VECTOR_SIZE
+        # block, so no task is too small to repay its setup.
         var blocks = (height + _WINDOW_BLOCK - 1) // _WINDOW_BLOCK
         var tasks = max(1, min(lanes, blocks))
         var share = (height + tasks - 1) // tasks
@@ -4121,11 +4331,14 @@ def evaluate[
     groups: List[Int] = List[Int](),
     group_count: Int = 1,
     layouts: Int = 0,
+    group_rows: Optional[ArcPointer[GroupRows]] = None,
 ) raises -> Series:
     """Evaluate a bound expression; temporary vectors are bounded by batch_size.
 
     `layouts`, when not 0, is the address of a `WindowLayouts` that every
-    `over()` of one frame shares.
+    `over()` of one frame shares. `group_rows`, when grouped, may give each
+    group's rows (else they are made from `groups` when a reduction needs
+    them).
 
     Reductions, window operations, and over() partitions are computed first,
     in node order, and then read per batch. Full output and
@@ -4216,6 +4429,7 @@ def evaluate[
     var states = List[Series]()
     for i in range(count):
         states.append(_empty(bound.dtypes[i]))
+    var known_rows = group_rows
     for node_index in range(count):
         if inside_over[node_index]:
             continue
@@ -4265,7 +4479,7 @@ def evaluate[
                 state = state.take(groups)
             states[node_index] = state^
         elif is_reduction(node.op):
-            var reducer = _reduce[width](
+            var state = _reduce[width](
                 bound,
                 prepared_columns,
                 states,
@@ -4275,8 +4489,8 @@ def evaluate[
                 grouped,
                 groups,
                 group_count,
+                known_rows,
             )
-            var state = reducer.finish()
             if row_mode:
                 state = state.take(groups)
             states[node_index] = state^
@@ -4453,11 +4667,10 @@ def _whole_masked_branch[
     workers: Int,
 ) raises -> Optional[Series]:
     """`when(c).then(x)` with null other rows over every row, when `x` is a
-    whole numeric column: reuse `x`'s values with a validity mask that
-    includes the predicate, rather than copying values batch by batch
-    into a new column (TPC-DS q2's seven weekday
-    sums copied their input seven times a morsel, 14% of the query). Only
-    the predicate is evaluated in batches. None otherwise."""
+    whole numeric column: reuse `x`'s values with a validity mask that includes
+    the predicate, rather than copying values batch by batch into a new column,
+    a copy of the input for every such expression. Only the predicate is
+    evaluated in batches. None otherwise."""
     ref node = bound.expr._nodes[index]
     if (
         node.left < 0

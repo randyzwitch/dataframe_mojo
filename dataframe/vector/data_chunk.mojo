@@ -141,10 +141,9 @@ def storage_physical(series: Series) -> Int:
 
 
 def flat_over(arena: ColumnArena, handle: Int, offset: Int) -> Vector:
-    """A flat vector over the arena column `handle` from row `offset` (no
-    copy; Vector::Slice(other, offset, end) of a column segment). Fixed
-    width values are read where they are; strings and booleans are left
-    encoded until a kernel reads them."""
+    """A flat vector over the arena column `handle` from row `offset` (no copy:
+    the vector points into the column). Fixed width values are read where they
+    are; strings and booleans are left encoded until a kernel reads them."""
     ref series = arena.columns[handle]
     var result = Vector()
     result.source = handle
@@ -186,10 +185,10 @@ struct DataChunk(Copyable, Movable):
     """A set of vectors of equal length, at most
     STANDARD_VECTOR_SIZE rows.
 
-    `caches` are the per-column value buffers (`VectorCache`) a step writes
-    its results into; `selections` the selection buffers this chunk's
-    dictionary vectors point at; `scratch` the buffers `unified` decodes encoded vectors
-    into. All three are kept across `reset`.
+    `caches` are the per-column value buffers, reused from chunk to chunk, a
+    step writes its results into; `selections` the selection buffers this
+    chunk's dictionary vectors point at; `scratch` the buffers `unified` decodes
+    encoded vectors into. All three are kept across `reset`.
     """
 
     var data: List[Vector]
@@ -218,7 +217,8 @@ struct DataChunk(Copyable, Movable):
         return len(self.data)
 
     def reset(mut self):
-        """DataChunk::Reset: no rows, every buffer kept for reuse."""
+        """No rows, every buffer kept for reuse, so the next chunk allocates
+        nothing."""
         self.count = 0
         self.selections_used = 0
         self.scratch_used = 0
@@ -226,7 +226,7 @@ struct DataChunk(Copyable, Movable):
             self.data[i] = Vector()
 
     def set_columns(mut self, columns: Int):
-        """Resize to `columns` vectors (InitializeEmpty)."""
+        """Resize to `columns` vectors."""
         while len(self.data) > columns:
             _ = self.data.pop()
         while len(self.data) < columns:
@@ -254,10 +254,10 @@ struct DataChunk(Copyable, Movable):
 
     def writable(mut self, column: Int, physical: Int) -> Vector:
         """Column `column` as a flat vector over this chunk's cache for it,
-        sized for STANDARD_VECTOR_SIZE values of `physical`
-        (Vector::ResetFromCache), every row valid. A kernel writes the
-        values at `data` and clears validity bits through `validity_bits`
-        after `ensure_validity`."""
+        sized for STANDARD_VECTOR_SIZE values of `physical` and reused from
+        chunk to chunk, every row valid. A kernel writes the values at `data`
+        and clears validity bits through `validity_bits` after
+        `ensure_validity`."""
         while len(self.caches) <= column:
             self.caches.append(List[UInt8]())
             self.validity_caches.append(List[UInt8]())
@@ -271,8 +271,8 @@ struct DataChunk(Copyable, Movable):
         return result
 
     def validity_bits(mut self, column: Int) -> Int:
-        """The validity bitmap of column `column`'s cache, every bit set,
-        now the column's validity (FlatVector::Validity(...).Initialize)."""
+        """The validity bitmap of column `column`'s cache, every bit set, now
+        the column's validity."""
         var bytes = STANDARD_VECTOR_SIZE // 8
         if len(self.validity_caches[column]) < bytes:
             self.validity_caches[column] = List[UInt8](length=bytes, fill=255)
@@ -285,17 +285,17 @@ struct DataChunk(Copyable, Movable):
         return address
 
     def reference(mut self, column: Int, vector: Vector):
-        """Column `column` reads `vector` (Vector::Reference)."""
+        """Column `column` reads `vector`, with no copy."""
         self.data[column] = vector
 
     def slice(
         mut self, input: DataChunk, sel: SelectionVector, count: Int
     ) raises:
-        """DataChunk::Slice(other, sel, count): every vector of `input` as
-        a dictionary vector through `sel`, which must live as long as this
-        chunk. A dictionary is not stacked on a dictionary: its selection
-        is merged with `sel` (SelectionVector::Slice), once per distinct
-        selection (the merge cache)."""
+        """Every vector of `input` as a dictionary vector through `sel`, which
+        must live as long as this chunk. A dictionary is not stacked on a
+        dictionary: its selection is merged with `sel`, once per distinct
+        selection (the merge cache), so a read follows one indirection however
+        many filters sliced the chunk."""
         self.set_columns(len(input.data))
         var merged_from = List[Int]()
         var merged_to = List[Int]()
@@ -338,10 +338,11 @@ struct DataChunk(Copyable, Movable):
     def unified(
         mut self, column: Int, mut arena: ColumnArena
     ) raises -> UnifiedVectorFormat:
-        """Vector::ToUnifiedFormat of column `column`. Flat, constant and
-        dictionary vectors convert for free; a sequence is flattened, and
-        an encoded vector (Arrow strings, packed booleans) is decoded here
-        into this chunk's scratch, at the rows it reads only."""
+        """Column `column` as a selection, validity and data that every vector
+        type can be read through. Flat, constant and dictionary vectors convert
+        for free; a sequence is flattened, and an encoded vector (Arrow strings,
+        packed booleans) is decoded here into this chunk's scratch, at the rows
+        it reads only."""
         var v = self.data[column]
         if v.vector_type == SEQUENCE_VECTOR:
             var data = self._new_scratch(8 * STANDARD_VECTOR_SIZE)
@@ -563,7 +564,13 @@ def _decode_strings(column: StringColumn) -> List[UInt8]:
     var target = Pointer[StringT, MutAnyOrigin](
         unsafe_from_address=Int(out.unsafe_ptr())
     )
-    var nulls = column.null_count() > 0
+    # Validity read through the bitmap's address: a method call on the
+    # column would copy the whole column struct for every row.
+    var validity = ValidityMask()
+    if column.null_count() > 0:
+        validity = ValidityMask(
+            Int(column._bits[].unsafe_ptr()), column._offset
+        )
     if (
         column._is_view_storage()
         and not column._view_storage.value()._selects()
@@ -571,8 +578,12 @@ def _decode_strings(column: StringColumn) -> List[UInt8]:
         ref storage = column._view_storage.value()
         var views = storage._views[].unsafe_ptr().unsafe_offset(column._offset)
         ref buffers = storage._buffers[]
+        var bases = List[Int](capacity=len(buffers))
+        for b in range(len(buffers)):
+            bases.append(Int(buffers[b][].unsafe_ptr()))
+        var base_at = bases.unsafe_ptr()
         for i in range(n):
-            if nulls and not column._valid(i):
+            if not validity.row_is_valid(i):
                 target[unsafe_offset=i] = StringT(0, 0, 0)
                 continue
             var view = views[unsafe_offset=i].copy()
@@ -583,12 +594,13 @@ def _decode_strings(column: StringColumn) -> List[UInt8]:
                     UInt64(view.buffer_index) | (UInt64(view.offset) << 32),
                 )
             else:
-                var address = Int(
-                    buffers[Int(view.buffer_index)][].unsafe_ptr()
-                ) + Int(view.offset)
+                var address = base_at[
+                    unsafe_offset=Int(view.buffer_index)
+                ] + Int(view.offset)
                 target[unsafe_offset=i] = StringT(
                     view.length, view.prefix, UInt64(address)
                 )
+        _ = bases^
         return out^
     if not column._is_view_storage():
         var offsets = (
@@ -596,7 +608,7 @@ def _decode_strings(column: StringColumn) -> List[UInt8]:
         )
         var base = Int(column._base())
         for i in range(n):
-            if nulls and not column._valid(i):
+            if not validity.row_is_valid(i):
                 target[unsafe_offset=i] = StringT(0, 0, 0)
                 continue
             var start = Int(offsets[unsafe_offset=i])
@@ -604,7 +616,7 @@ def _decode_strings(column: StringColumn) -> List[UInt8]:
             target[unsafe_offset=i] = StringT.make(base + start, length)
         return out^
     for i in range(n):
-        if nulls and not column._valid(i):
+        if not validity.row_is_valid(i):
             target[unsafe_offset=i] = StringT(0, 0, 0)
             continue
         var text = column._get(i)

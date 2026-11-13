@@ -206,9 +206,9 @@ def plan_lower_right_joins(mut self: QueryContext) raises:
 def plan_eliminate_common_subexpressions(mut self: QueryContext) raises:
     """Compute a repeated row-local subexpression once. An aggregation
     or projection that reads it multiple times uses a temporary column
-    produced by a `with_columns` node below it. For example, TPC-DS
-    q99's five delay buckets compare the same date difference nine
-    times."""
+    produced by a `with_columns` node below it. For example, several
+    `when` buckets that compare the same date difference compute that
+    difference once."""
     var count = len(self._nodes)
     var changed = False
     for i in range(count):
@@ -343,10 +343,10 @@ def plan_filter_shared_subplans(mut self: QueryContext) raises:
     of reader predicates into the shared computation. Keep each reader's own
     filter above it. The retained result then contains every row any reader
     needs while discarding rows none can observe."""
-    # Copies need two aggregates or joins alike in their keys, expression
-    # count and subtree size at least; most plans have none, and
-    # subplan classes are not worth finding for them (ClickBench q29's
-    # ninety sums, TPC-DS q41's two small distincts).
+    # Copies need two aggregates or joins alike in their keys, expression count
+    # and subtree size at least. This one pass over the nodes finds whether any
+    # such pair exists; most plans have none, and for them the costlier search
+    # for subplan classes is skipped.
     var subtree = List[Int](capacity=len(self._nodes))
     var shapes = Dict[String, Int]()
     var alike = False

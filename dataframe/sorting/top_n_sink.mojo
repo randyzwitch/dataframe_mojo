@@ -1,12 +1,13 @@
-"""PhysicalTopN's sink over a stream of chunks (physical_top_n.cpp).
+"""The top-N sink over a stream of chunks.
 
-Each thread's `TopNSink` encodes its chunks' key columns a vector at a
-time and adds the rows that can enter to its `TopNHeap`, copying those
-rows into its payload (`heap_data`, AddLargeHeap). Once the payload holds
-more than ReduceThreshold rows it is cut down to the live entries
-(`Reduce`). The threads share a `TopNBoundary`. `combine` merges each
-thread's heap and payload into one global heap (`TopNHeap::Combine`); the
-finish sorts that heap (`Finalize`) and gathers the payload in order.
+Each thread's `TopNSink` encodes its chunks' key columns a vector at a time and
+adds the rows that can enter to its `TopNHeap`, copying only those rows into its
+payload. Rows that later fall out of the heap stay in the payload, so once it
+holds more than `reduce_threshold()` rows it is cut down to the live entries
+(`_reduce`): the payload stays a small multiple of N. The threads share a
+`TopNBoundary`, so a row worse than every thread's current N-th is dropped
+without a heap test. `combine` merges each thread's heap and payload into one
+global heap; the finish sorts that heap and gathers the payload in order.
 """
 from dataframe.frame import DataFrame
 from dataframe.dtype import DataType
@@ -71,8 +72,8 @@ def _appendable(column: Series) raises -> Series:
 def _sink_rows[
     W: Int, VAR: Bool
 ](mut heap: TopNHeap, block: KeyBlock, base: Int, mut matches: List[Int]):
-    """AddLargeHeap: rows that enter get the next payload positions, and
-    their rows are recorded to be copied into the payload."""
+    """Rows that enter get the next payload positions, and their rows are
+    recorded to be copied into the payload."""
     comptime K = SortKeys[W, VAR]
     var k = K(block.address())
     for i in range(block.count):
@@ -84,16 +85,15 @@ def _sink_rows[
 
 
 struct TopNSink(Sink):
-    """PhysicalTopN's sink over a stream of chunks, for one thread: the key
-    is laid out from the schema alone (no statistics in a stream), its
-    columns named `names`; `limit` rows are kept."""
+    """The top-N sink over a stream of chunks, for one thread: the key is laid
+    out from the schema alone (no statistics in a stream), its columns named
+    `names`; `limit` rows are kept."""
 
     var layout: SortKeyLayout
     var names: List[String]
     var heap: TopNHeap
     var schema: DataFrame
-    # heap_data: the payload rows copied so far, one growing column per
-    # schema column (DataChunk::Append with ALLOW_RESIZE).
+    # The payload rows copied so far, one growing column per schema column.
     var payload: List[Series]
     var payload_rows: Int
     var boundary: TopNBoundary
@@ -153,8 +153,8 @@ struct TopNSink(Sink):
         pass
 
     def combine(var self, mut combined: List[TopNSink]) raises:
-        """Combine (physical_top_n.cpp:532): this thread's heap into the
-        global heap, which the first thread's becomes."""
+        """This thread's heap into the global heap, which the first thread's
+        becomes."""
         if len(combined) == 0:
             combined.append(self^)
             return
@@ -171,9 +171,9 @@ struct TopNSink(Sink):
             self._combine[3, False](other^)
 
     def _combine[W: Int, VAR: Bool](mut self, var other: TopNSink) raises:
-        """TopNHeap::Combine: the other heap sorted (`Finalize`), its
-        entries best first until one cannot enter, each entry's payload row
-        appended to this payload, then Reduce."""
+        """The other heap sorted, its entries best first until one cannot enter
+        (every later one is worse, so none can), each entry's payload row
+        appended to this payload, then `_reduce`."""
         comptime K = SortKeys[W, VAR]
         other.heap.finalize[W, VAR]()
         var k = other.heap.keys[W, VAR]()
@@ -212,17 +212,16 @@ struct TopNSink(Sink):
     def sink_chunk(
         mut self, mut chunk: DataChunk, mut arena: ColumnArena
     ) raises:
-        """PhysicalTopN::Sink over one chunk whose columns are the schema's:
-        the key columns are read out of the chunk, and only the rows that
-        enter the heap are copied into the payload (AddLargeHeap)."""
+        """Sink one chunk whose columns are the schema's: the key columns are
+        read out of the chunk, and only the rows that enter the heap are copied
+        into the payload, since most rows of a large input never enter."""
         if self.heap.heap_size == 0 or chunk.count == 0:
             return
         # The key columns are read where they are, through their
-        # UnifiedVectorFormat (TopNHeap::Sink builds the sort key from the
-        # chunk's vectors, create_sort_key.cpp): flat windows of a morsel's
-        # columns, a filter's dictionary vectors and computed vectors
-        # alike. A vector whose physical type is not the key's (a column
-        # stored narrower than the schema says) is cast first.
+        # UnifiedVectorFormat, with no copy: flat windows of a morsel's columns,
+        # a filter's dictionary vectors and computed vectors alike. A vector
+        # whose physical type is not the key's (a column stored narrower than
+        # the schema says) is cast first.
         var formats = List[UnifiedVectorFormat](capacity=len(self.names))
         for k in range(len(self.names)):
             var c = self.key_columns[k]
@@ -305,8 +304,7 @@ struct TopNSink(Sink):
             self._settle[3, False]()
 
     def _append(mut self, columns: List[Series]) raises:
-        """The entering rows onto the payload (heap_data.Append in
-        TopNHeap::AddLargeHeap, physical_top_n.cpp:276)."""
+        """The entering rows onto the payload."""
         for c in range(len(self.payload)):
             self.payload[c]._append_series(_appendable(columns[c]))
 
@@ -340,8 +338,8 @@ struct TopNSink(Sink):
         return matches^
 
     def _settle[W: Int, VAR: Bool](mut self) raises:
-        """After rows enter: the shared boundary and the scan's dynamic
-        filter from it, and Reduce once the payload is large."""
+        """After rows enter: the shared boundary and the scan's dynamic filter
+        from it, and `_reduce` once the payload is large."""
         if self.heap.publish[W, VAR](self.boundary) and self.dynamic:
             _ = set_dynamic_value(
                 self.dynamic.value(),
@@ -356,8 +354,8 @@ struct TopNSink(Sink):
         if len(matches) > 0:
             self._append(frame.take(matches)._columns)
             self.payload_rows += len(matches)
-        # TopNBoundaryValue::UpdateValue: the boundary's first sort value
-        # becomes the scan filter's constant.
+        # The boundary's first sort value becomes the scan filter's constant, so
+        # the scan skips rows that cannot enter.
         self._settle[W, VAR]()
 
     def _payload_value(self, row: Int) raises -> Series:
@@ -368,8 +366,8 @@ struct TopNSink(Sink):
         return DataFrame(self.payload.copy())
 
     def _reduce[W: Int, VAR: Bool](mut self) raises:
-        """Reduce (physical_top_n.cpp:431): once the payload passes
-        ReduceThreshold, it is cut to the live entries, renumbered."""
+        """Once the payload passes `reduce_threshold()`, cut it to the live
+        entries, renumbered: rows pushed out of the heap are dead weight."""
         var live = self._payload().take(self.heap.payloads[W, VAR]())
         self.heap.renumber[W, VAR]()
         self.heap.compact_keys[W, VAR]()

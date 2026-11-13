@@ -39,13 +39,13 @@ comptime _FIXED_STORAGE = [
 
 @always_inline
 def validity_bytes(count: Int) -> Int:
-    """ValidityBytes::SizeInBytes: one bit a value, rounded up to bytes."""
+    """One bit a value, rounded up to bytes."""
     return (count + 7) // 8
 
 
 @always_inline
 def constant_size(physical: Int) -> Bool:
-    """TypeIsConstantSize: fixed-width values (not strings or nested)."""
+    """Fixed-width values (not strings or nested)."""
     return (
         physical != PHYSICAL_VARCHAR
         and physical != PHYSICAL_LIST
@@ -54,8 +54,8 @@ def constant_size(physical: Int) -> Bool:
 
 
 def physical_of_dtype(dtype: DataType) raises -> Int:
-    """The physical type of a column of `dtype` in a row (LogicalType::
-    InternalType): its storage for numeric, decimal and temporal types."""
+    """The physical type of a column of `dtype` in a row: its storage for
+    numeric, decimal and temporal types."""
     if dtype.is_list():
         return PHYSICAL_LIST
     if dtype.is_struct():
@@ -123,9 +123,9 @@ struct TupleDataLayout(Copyable, Movable):
         can_have_null: Bool = True,
         aggregate_sizes: List[Int] = List[Int](),
     ) raises:
-        """TupleDataLayout::Initialize(types, aggregates, validity_type):
-        `aggregate_sizes` are the payload sizes of the aggregate states
-        that follow the columns (each a multiple of 8)."""
+        """The row layout of `types`, then aggregate states: `aggregate_sizes`
+        are the payload sizes of the aggregate states that follow the columns
+        (each a multiple of 8)."""
         var nodes = List[TupleDataLayoutNode]()
         _ = TupleDataLayout._initialize(
             nodes, types, can_have_null, True, aggregate_sizes

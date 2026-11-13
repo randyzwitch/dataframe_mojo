@@ -26,9 +26,9 @@ comptime ROW_GROUP_ROWS = ROW_GROUP_VECTORS * STATISTICS_VECTOR_SIZE
 
 @fieldwise_init
 struct _StatValue(Copyable, Movable):
-    """`RetrieveStat`'s value: none, an integer (numeric statistics), a
-    float, or a string's stored bytes with whether they are the whole
-    value (a truncated maximum is only a prefix of it)."""
+    """None, an integer (numeric statistics), a float, or a string's stored
+    bytes with whether they are the whole value (a truncated maximum is only a
+    prefix of it)."""
 
     var kind: Int
     var int_value: Int128
@@ -50,8 +50,7 @@ comptime _STRING = 3
 
 
 def _retrieve(stats: BaseStatistics, use_max: Bool) -> _StatValue:
-    """`RowGroupReorderer::RetrieveStat`: the minimum or maximum, or none
-    when the statistics hold no min/max."""
+    """The minimum or maximum, or none when the statistics hold no min/max."""
     if not stats.has_min_max:
         return _StatValue.none()
     if stats.stats_type == NUMERIC_STATS:
@@ -117,11 +116,10 @@ def _differs_below(upper: _StatValue, lower: _StatValue) -> Bool:
 
 
 def _beyond(current: _StatValue, boundary: _StatValue, use_max: Bool) -> Bool:
-    """`CompareValues`: whether the row group keyed `current` comes wholly
-    after the row group whose opposite statistic is `boundary` (MIN:
-    current > boundary; MAX: current < boundary). A truncated string
-    maximum stands for every string it starts, so it compares only where
-    it differs from the other value."""
+    """Whether the row group keyed `current` comes wholly after the row group
+    whose opposite statistic is `boundary` (MIN: current > boundary; MAX:
+    current < boundary). A truncated string maximum stands for every string it
+    starts, so it compares only where it differs from the other value."""
     if current.is_null() or boundary.is_null():
         return False
     if use_max:
@@ -186,8 +184,7 @@ def _row_groups(column: Series) raises -> List[_RowGroup]:
 
 
 def _minimum_qualifying(group: _RowGroup, is_string: Bool) -> Int:
-    """`GetMinimumQualifyingTupleCount`: the rows a row group surely holds
-    at its ordering statistic or better."""
+    """The rows a row group surely holds at its ordering statistic or better."""
     ref stats = group.stats.value()
     if not stats.can_have_null():
         return group.count
@@ -226,9 +223,8 @@ def _add_row_groups(
     use_max: Bool,
     mut ordered: List[Int],
 ) -> Bool:
-    """`AddRowGroups`: the row groups in `seq` until the earlier ones hold
-    `row_limit` rows that every later one comes after; whether any were
-    left out."""
+    """The row groups in `seq` until the earlier ones hold `row_limit` rows that
+    every later one comes after; whether any were left out."""
     var last = 0
     var boundary = _retrieve(groups[seq[0]].stats.value(), not use_max)
     var qualifying = 0
@@ -260,7 +256,8 @@ def _add_row_groups(
 
 @fieldwise_init
 struct _OffsetPruning(Copyable, Movable):
-    """`OffsetPruningResult`."""
+    """What `_offset_after_pruning` found: the offset left, the row groups the
+    offset covers, and the leading all-null groups."""
 
     var offset_remainder: Int
     var pruned_row_group_count: Int
@@ -274,8 +271,8 @@ def _offset_prunable(
     use_max: Bool,
     row_offset: Int,
 ) -> _OffsetPruning:
-    """`FindOffsetPrunableChunks`: the leading row groups that every later
-    one comes after and that lie inside the offset."""
+    """The leading row groups that every later one comes after and that lie
+    inside the offset."""
     if len(seq) == 0:
         return _OffsetPruning(row_offset, 0, 0)
     var last = 0
@@ -301,9 +298,9 @@ def _offset_prunable(
 
 
 def _exact(stats: BaseStatistics) -> Bool:
-    """`MinMaxIsExact`: string statistics may hold a truncated prefix.
-    Numeric and float min/max are values of the rows (a vector holding NaN
-    has none)."""
+    """Whether the bounds are values of the rows: string statistics may hold a
+    truncated prefix. Numeric and float min/max are values of the rows (a vector
+    holding NaN has none)."""
     if stats.stats_type == STRING_STATS:
         return stats.min_exact and stats.max_exact
     return True
@@ -316,7 +313,11 @@ def _offset_after_pruning(
     nulls_last: Bool,
     row_offset: Int,
 ) -> _OffsetPruning:
-    """`RowGroupReorderer::GetOffsetAfterPruning`."""
+    """How much of the limit's offset whole row groups cover: groups whose
+    bounds prove every row sorts before the rest are skipped and their row
+    counts taken off the offset, since those rows would only be read to be
+    discarded. Statistics that are missing or inexact stop the pruning, as
+    nothing is then proven."""
     var remainder = row_offset
     var leading = 0
     var maybe_null = False
@@ -369,7 +370,7 @@ struct RowGroupOrder(Copyable, Movable):
 
 
 def orderable(dtype: DataType) -> Bool:
-    """`FindLogicalOrder`: numeric, temporal and VARCHAR sort columns."""
+    """Numeric, temporal and VARCHAR sort columns."""
     return (
         dtype == DataType.STRING
         or dtype.is_integer()
@@ -390,11 +391,10 @@ def row_group_order(
     offset: Int,
     prune: Bool,
 ) raises -> Optional[RowGroupOrder]:
-    """The row groups of a scan whose first sort column is `column`, for
-    `limit` rows after `offset` (`CreateRowGroupReordererOptions`, then
-    `GetRootSegment`). Without `prune` (a filter between the scan and the
-    order, or no limit) they are only ordered. None when the column has
-    no row group statistics to order by."""
+    """The row groups of a scan whose first sort column is `column`, for `limit`
+    rows after `offset`. Without `prune` (a filter between the scan and the
+    order, or no limit) they are only ordered. None when the column has no row
+    group statistics to order by."""
     var groups = _row_groups(column)
     var any_stats = False
     for g in groups:

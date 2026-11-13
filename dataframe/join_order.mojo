@@ -115,10 +115,10 @@ struct JoinOperator(Copyable, Movable):
         self.must_apply = kind != OPERATOR_INNER
 
     def applicable(self, left: Int, right: Int) -> Bool:
-        """Whether this join may join relation sets `left` and `right`
-        (`IsApplicable`): each side holds its side of the total
-        eligibility set (either way round for an inner join), and every
-        conflict rule a side triggers has its requirement in the two."""
+        """Whether this join may join relation sets `left` and `right`: each
+        side holds its side of the total eligibility set (either way round for
+        an inner join), and every conflict rule a side triggers has its
+        requirement in the two."""
         var direct = (
             left & self.left_total == self.left_total
             and right & self.right_total == self.right_total
@@ -140,8 +140,7 @@ struct JoinOperator(Copyable, Movable):
         return True
 
     def completed_by(self, relations: Int) -> Bool:
-        """Whether `relations` holds this join's total eligibility set
-        (`IsCompletedBy`)."""
+        """Whether `relations` holds this join's total eligibility set."""
         var total = self.left_total | self.right_total
         return relations & total == total
 
@@ -160,8 +159,8 @@ def _associative(
 
 
 def _rule_requirement(input: Int, syntactic: Int) -> Int:
-    """The input's relations the child's keys read, or the whole input
-    when they read none of it (`PredicateIntersectionOrInput`)."""
+    """The input's relations the child's keys read, or the whole input when they
+    read none of it (then nothing narrows what must come first)."""
     var both = input & syntactic
     return both if both != 0 else input
 
@@ -175,9 +174,11 @@ def _add_rule(mut op: JoinOperator, trigger: Int, requirement: Int):
 
 
 def build_conflicts(mut ops: List[JoinOperator]):
-    """Conflict rules and total eligibility sets for every operator
-    (`JoinOrderConflictDetector::Build`). Equality keys never match
-    nulls, so a join reading a shared input's column rejects its nulls."""
+    """Conflict rules and total eligibility sets for every operator: the
+    relations that must already be joined before the operator can be applied
+    without changing the result, which matters for outer, semi and anti joins
+    that do not reorder freely. Equality keys never match nulls, so a join
+    reading a shared input's column rejects its nulls."""
     for o in range(len(ops)):
         var op = ops[o].copy()
         var lefts = op.left_operators.copy()
@@ -212,8 +213,8 @@ def build_conflicts(mut ops: List[JoinOperator]):
         # Decided before the rules simplify: a rule the eligibility set
         # absorbs still pins the join to its operator.
         op.must_apply = op.kind != OPERATOR_INNER or len(op.triggers) > 0
-        # Rules a side of the total set triggers join their requirement
-        # to it (`SimplifyConflictRules`).
+        # Rules a side of the total set triggers join their requirement to it:
+        # such a rule always fires, so it is a plain requirement.
         var total = op.syntactic
         var grew = True
         while grew:
@@ -277,8 +278,9 @@ struct JoinGraph(Movable):
     # Whether each edge's (then filter's) total domain is a distinct count
     # rather than table rows.
     var counted: List[Bool]
-    # Edges joining two relations on two or more equivalence classes
-    # (`RelationPairEqualitySummary::HasDirectCompositeEquality`).
+    # Edges joining two relations on two or more equivalence classes: a
+    # composite key, whose columns are often correlated, so multiplying their
+    # selectivities would underestimate the join's rows.
     var composite: List[Bool]
     var ops: List[JoinOperator]
     # The right relations of semi and anti joins, then of left joins.
@@ -318,8 +320,9 @@ struct JoinGraph(Movable):
         self.filters = filters.copy()
         self.tdom = List[Float64]()
         self.estimates = Dict[Int, Float64]()
-        # Equivalence sets of columns, by (relation, name), through each
-        # key pair and filter (`InitEquivalentRelations`).
+        # Equivalence sets of columns, by (relation, name), through each key
+        # pair and filter: columns equated by joins hold the same values, so
+        # they share one domain.
         var ids = Dict[String, Int]()
         var parent = List[Int]()
 
@@ -353,12 +356,11 @@ struct JoinGraph(Movable):
             var ry = find(parent, y)
             if rx != ry:
                 parent[rx] = ry
-        # A set's total domain (`UpdateTotalDomains`, `DomainEstimate`):
-        # the largest reliable distinct count among its columns (a
-        # HyperLogLog or exact count, `distinct`, by "relation/column"),
-        # else the largest count from integer bounds (`bounded`), else the
-        # fewest fallback rows: a column's own (`fallback`), or its
-        # relation's (`domains`).
+        # A set's total domain: the largest reliable distinct count among its
+        # columns (a HyperLogLog or exact count, `distinct`, by
+        # "relation/column"), else the largest count from integer bounds
+        # (`bounded`), else the fewest fallback rows: a column's own
+        # (`fallback`), or its relation's (`domains`).
         var domain = Dict[Int, Float64]()
         var counted = Dict[Int, Float64]()
         var spans = Dict[Int, Float64]()
@@ -409,11 +411,10 @@ struct JoinGraph(Movable):
             self.counted.append(root in counted)
 
     def estimate(mut self, mask: Int) raises -> Float64:
-        """Estimated rows of joining the relations in `mask`
-        (`EstimateCardinalityWithSet`): the inner joins' estimate without
-        the right relations of semi and anti joins, each of which keeps a
-        fifth of the rows, and no fewer rows than without the right
-        relations of left joins (`CalculateLeftJoinDenomInfo`)."""
+        """Estimated rows of joining the relations in `mask`: the inner joins'
+        estimate without the right relations of semi and anti joins, each of
+        which keeps a fifth of the rows, and no fewer rows than without the
+        right relations of left joins (a left join never drops a left row)."""
         if mask in self.estimates:
             return self.estimates[mask]
         var base = mask & ~self.semi_rights & ~self.uncounted
@@ -455,9 +456,10 @@ struct JoinGraph(Movable):
         for r in range(n):
             component[r] = r
         var denominator = 1.0
-        # Edges met once every relation is connected, by their distinct
-        # domains: each adds one to the denominator's multiplier, the
-        # "slight penalty to cardinality for unused edges" (`GetDenominator`).
+        # Edges met once every relation is connected, by their distinct domains:
+        # each adds one to the denominator's multiplier, a slight reduction in
+        # the estimate, since an extra join condition can only remove rows,
+        # though usually few once the set is connected.
         var unused = List[Float64]()
         var parts = Int(pop_count(mask))
         for k in order:
@@ -515,10 +517,10 @@ struct JoinGraph(Movable):
 
     def candidate(self, a: Int, b: Int) -> Int:
         """How relation sets `a` and `b` may join: -1 by free edges, an
-        operator's index when that operator joins them, -2 when they
-        cannot (`IsJoinOrderCandidate`). An operator that must apply as
-        itself and that the two complete together, but neither alone,
-        is the only way to join them, and it must be applicable."""
+        operator's index when that operator joins them, -2 when they cannot. An
+        operator that must apply as itself and that the two complete together,
+        but neither alone, is the only way to join them, and it must be
+        applicable."""
         var both = a | b
         var chosen = -1
         for k in range(len(self.ops)):
@@ -646,8 +648,8 @@ def order_joins(
         tree.mask.append(1 << r)
         tree.rows.append(max(rows[r], 1.0))
     if n < EXACT_RELATIONS:
-        # Every connected set from the smallest up: its cheapest split into
-        # two connected, joined halves (`SolveJoinOrderExactly`).
+        # Every connected set from the smallest up: its cheapest split into two
+        # connected, joined halves (dynamic programming over subsets).
         var cost = Dict[Int, Float64]()
         var split = Dict[Int, Int]()
         var via = Dict[Int, Int]()
