@@ -96,15 +96,15 @@ struct TupleDataCollection(Movable):
         mut state: TupleDataAppendState,
         column_ids: List[Int] = List[Int](),
     ) raises:
-        """InitializeAppend: append `column_ids` (every column when empty);
-        the others are left unwritten."""
+        """Append `column_ids` (every column when empty); the others are left
+        unwritten."""
         self.initialize_chunk_state(state.chunk_state, column_ids)
 
     def initialize_chunk_state(
         self, mut state: TupleDataChunkState, column_ids: List[Int]
     ) raises:
-        """InitializeChunkState: a format per column (and per nested level)
-        and the columns to read or write."""
+        """A format per column (and per nested level) and the columns to read or
+        write."""
         var types = self.layout.types()
         state.vector_data = List[TupleDataVectorFormat]()
         for t in types:
@@ -144,7 +144,7 @@ struct TupleDataCollection(Movable):
         append_sel: SelectionVector = SelectionVector(),
         append_count: Int = -1,
     ):
-        """AppendUnified: append after `to_unified_format`."""
+        """Append after `to_unified_format`."""
         var count = chunk.count if append_count < 0 else append_count
         if count == 0:
             return
@@ -159,8 +159,7 @@ struct TupleDataCollection(Movable):
         mut chunk: DataChunk,
         mut arena: ColumnArena,
     ) raises:
-        """ToUnifiedFormat of each appended column, its nested levels
-        too."""
+        """The unified format of each appended column, its nested levels too."""
         for k in range(len(state.column_ids)):
             var col = state.column_ids[k]
             var physical = state.vector_data[col].physical
@@ -286,8 +285,8 @@ struct TupleDataCollection(Movable):
     def fetch_chunk(
         self, mut state: TupleDataChunkState, chunk_index: Int, init_heap: Bool
     ) -> Int:
-        """FetchChunk: the row pointers of chunk `chunk_index` of the whole
-        collection into `state`; its row count."""
+        """The row pointers of chunk `chunk_index` of the whole collection into
+        `state`; its row count."""
         var at = chunk_index
         for s in range(len(self.segments)):
             ref segment = self.segments[s]
@@ -328,8 +327,8 @@ struct TupleDataCollection(Movable):
 def _initialize_format(
     mut formats: List[TupleDataVectorFormat], index: Int, dtype: DataType
 ) raises:
-    """InitializeVectorFormat: formats for a struct's fields or a list's
-    child, after the ones already made."""
+    """Formats for a struct's fields or a list's child, after the ones already
+    made."""
     if dtype.is_struct():
         var fields = dtype.field_dtypes()
         var first = len(formats)
@@ -354,12 +353,11 @@ def _storage_format(
     series: Series,
     mut arena: ColumnArena,
 ) raises:
-    """The unified format of every level of a nested at-rest column (Vector
-    ::ToUnifiedFormat of a list or struct vector and its children): a
-    list's list_entry_t from its offsets and its child from the elements
-    these rows use; a struct's fields; each leaf read as `flat_over` and
-    `ColumnArena.values` read a column. `arena` keeps every level alive
-    until the rows are written."""
+    """The unified format of every level of a nested at-rest column (a list or
+    struct vector and its children): a list's (offset, length) entries from its
+    offsets and its child from the elements these rows use; a struct's fields;
+    each leaf read as `flat_over` and `ColumnArena.values` read a column.
+    `arena` keeps every level alive until the rows are written."""
     var column = series.rechunk() if series.is_chunked() else series.copy()
     var physical = state.vector_data[f].physical
     if physical == PHYSICAL_LIST:

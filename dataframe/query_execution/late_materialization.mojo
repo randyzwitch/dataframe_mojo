@@ -23,16 +23,17 @@ from dataframe.pipeline import ROW_ID_COLUMN
 from dataframe.series import Series
 from dataframe.storage.column import Column
 
-# `late_materialization_max_rows` (LateMaterializationMaxRowsSetting).
+# The largest top-N whose other columns are fetched afterwards by row id.
+# Fetching is a random read per kept row, cheap for a few rows; for many rows,
+# carrying the columns through the scan costs less. An empirical choice.
 comptime LATE_MATERIALIZATION_MAX_ROWS = 50
 
 
 @fieldwise_init
 struct LatePlan(Copyable, Movable):
-    """The top-N's side of the rewrite: the scan columns it reads (in the
-    scan's order; the row id is added by the scan) and its operations,
-    each projection cut to the columns used above it and carrying the row
-    id up (`ConstructRHS` with `RemoveUnusedColumns`)."""
+    """The top-N's side of the rewrite: the scan columns it reads (in the scan's
+    order; the row id is added by the scan) and its operations, each projection
+    cut to the columns used above it and carrying the row id up."""
 
     var columns: List[String]
     var operations: List[PlanNode]
@@ -49,9 +50,9 @@ def late_materialization_plan(
     operations: List[PlanNode],
     order_names: List[String],
 ) -> Optional[LatePlan]:
-    """`TryLateMaterialization`: the rewritten top-N side, or None when
-    the chain holds another operator, an expression that is not row-local,
-    a selector, or when every scan column is required anyway."""
+    """The rewritten top-N side, or None when the chain holds another operator,
+    an expression that is not row-local, a selector, or when every scan column
+    is required anyway."""
     var needed = order_names.copy()
     var rewritten = List[PlanNode]()
     var i = len(operations)

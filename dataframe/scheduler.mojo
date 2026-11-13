@@ -1,32 +1,27 @@
-"""Pipelines scheduled by events, ported from DuckDB 2.0's executor
-(src/parallel: executor.cpp, event.cpp, pipeline_schedule.cpp,
-pipeline_initialize_event.cpp, pipeline_event.cpp,
-pipeline_prepare_finish_event.cpp, pipeline_finish_event.cpp,
-pipeline_complete_event.cpp).
+"""Pipelines scheduled by events.
 
-A query's independent pipelines -- the build sides of a stream's joins
-and the probe that depends on them, the inputs of an eager join, shared
-subplans -- are scheduled by their data dependencies. Each pipeline
-becomes five events: initialize, execute, prepare finish, finish and
-complete, each depending on the one before. A pipeline that depends on
-another (its source is the other's sink) executes only after the other
-completes, and sibling join builds under one parent all execute before
-any prepares its finish, and all prepare before any finishes. An event
-whose dependencies are done schedules its tasks on one queue
-(`Event::CompleteDependency`, `Event::SetTasks`); an event with no
-tasks finishes at once, and finishing completes a dependency of each
-parent (`Event::Finish`). The query is done when every pipeline's
-complete event has finished (`Executor::ExecutionIsFinished`).
+A query's independent pipelines -- the build sides of a stream's joins and the
+probe that depends on them, the inputs of an eager join, shared subplans -- are
+scheduled by their data dependencies. Each pipeline becomes five events:
+initialize, execute, prepare finish, finish and complete, each depending on the
+one before. A pipeline that depends on another (its source is the other's sink)
+executes only after the other completes, and sibling join builds under one
+parent all execute before any prepares its finish, and all prepare before any
+finishes. An event whose dependencies are done schedules its tasks on one queue;
+an event with no tasks finishes at once, and finishing completes a dependency of
+each parent. The query is done when every pipeline's complete event has
+finished.
 
-The crew's threads and the caller take tasks from that queue until then
-(`Executor::WorkOnTasks`), so a pipeline never waits for another it does
-not depend on, and independent builds run at the same time. A pipeline
-says how many tasks its execute event makes when that event schedules
-(`Pipeline::Schedule`): a stream's probe makes one per morsel worker. A
+The crew's threads and the caller take tasks from that queue until then,
+so a pipeline never waits for another it does not depend on, and
+independent builds run at the same time. A pipeline says how many tasks
+its execute event makes only when that event schedules, since only then
+are its inputs known: a stream's probe makes one per morsel worker. A
 thread with no task queued runs the jobs that running tasks post to the
 crew (`_Crew._help`): a build side's own plan still runs inside its one
-execute task. A finish event whose sink's Finalize has parallel work (filling a join
-build's pointer table) adds that work's tasks to the queue, and finishes
+execute task. A finish event whose sink's finalize has parallel work
+(filling a join build's pointer table) adds that work's tasks to the
+queue, and finishes
 after the last of them, so the work spreads over every thread while
 nothing reads the sink early. The serial step after those tasks may add
 another round of them, as a merge that halves its runs each round does,
@@ -47,15 +42,15 @@ from dataframe.parallel import (
     configured_workers,
 )
 
-# PipelineScheduleStageType (pipeline_schedule.hpp).
+# The five events of a pipeline, in the order each depends on the last.
 comptime STAGE_INITIALIZE = 0
 comptime STAGE_EXECUTE = 1
 comptime STAGE_PREPARE_FINISH = 2
 comptime STAGE_FINISH = 3
 comptime STAGE_COMPLETE = 4
 
-# MetaPipelineType (meta_pipeline.hpp): a join's build side is a
-# JOIN_BUILD child of the pipeline that probes it.
+# A join's build side is a JOIN_BUILD child of the pipeline that probes it;
+# sibling builds share the prepare-finish barrier.
 comptime META_REGULAR = 0
 comptime META_JOIN_BUILD = 1
 
@@ -75,7 +70,7 @@ trait SchedulablePipeline(Deinitable, Movable):
     """A pipeline's work, as its events' tasks run it."""
 
     def initialize(mut self) raises:
-        """`PipelineInitializeTask`: reset the sink."""
+        """Reset the sink before any execute task runs."""
         ...
 
     def max_execute_tasks(self) -> Int:
@@ -84,10 +79,9 @@ trait SchedulablePipeline(Deinitable, Movable):
         ...
 
     def execute_tasks(mut self) raises -> Int:
-        """`Pipeline::Schedule`, called when the execute event is
-        scheduled (its dependencies complete): set up the source and
-        operators, and say how many tasks to make (at least one, at most
-        `max_execute_tasks`)."""
+        """Called when the execute event is scheduled (its dependencies
+        complete, so its inputs exist): set up the source and operators, and say
+        how many tasks to make (at least one, at most `max_execute_tasks`)."""
         ...
 
     def execute(mut self, task: Int) raises:
@@ -95,11 +89,13 @@ trait SchedulablePipeline(Deinitable, Movable):
         ...
 
     def prepare_finalize(mut self) raises:
-        """`PipelinePreFinishTask`: `Sink::PrepareFinalize`."""
+        """Prepare the sink's finish once every execute task is done, before any
+        sibling build finishes."""
         ...
 
     def finalize(mut self) raises:
-        """`PipelineFinishTask`: `Sink::Finalize`."""
+        """Finish the sink: its result is ready for the pipelines that depend on
+        it."""
         ...
 
     def max_finalize_tasks(self) -> Int:
@@ -173,11 +169,12 @@ def _add_stage(
 def build_pipeline_schedule(
     metas: List[MetaPipeline],
 ) raises -> List[PipelineScheduleStage]:
-    """`BuildPipelineSchedule` for MetaPipelines of one pipeline each:
-    stage `5p + s` is pipeline p's stage s. Raises on a cycle."""
+    """The events of every pipeline and their dependencies, for MetaPipelines of
+    one pipeline each: stage `5p + s` is pipeline p's stage s. Raises on a
+    cycle."""
     var stages = List[PipelineScheduleStage](capacity=5 * len(metas))
     for p in range(len(metas)):
-        # AddBasePipeline: initialize -> execute -> prepare finish ->
+        # Each pipeline's own chain: initialize -> execute -> prepare finish ->
         # finish -> complete.
         var initialize = _add_stage(stages, STAGE_INITIALIZE, p)
         var execute = _add_stage(stages, STAGE_EXECUTE, p)
@@ -212,9 +209,9 @@ def build_pipeline_schedule(
         stages[5 * base + STAGE_PREPARE_FINISH].dependencies.append(
             5 * p + STAGE_EXECUTE
         )
-    # Sibling join builds: all execute through Combine before any runs
-    # PrepareFinalize, and all prepare before any runs Finalize, so the
-    # memory every build needs is known when they finalize.
+    # Sibling join builds: all execute before any runs `prepare_finalize`, and
+    # all prepare before any runs `finalize`, so the memory every build needs is
+    # known when they finalize.
     for a in range(len(metas)):
         if metas[a].type != META_JOIN_BUILD:
             continue
@@ -237,8 +234,9 @@ def build_pipeline_schedule(
 
 
 def _has_cycle(stages: List[PipelineScheduleStage]) -> Bool:
-    """`PipelineSchedule::HasCycle`: a depth-first search over the
-    dependencies (0 unvisited, 1 on the path, 2 done)."""
+    """Whether the dependencies form a cycle, which would leave events waiting
+    forever: a depth-first search over the dependencies (0 unvisited, 1 on the
+    path, 2 done)."""
     var states = List[Int](length=len(stages), fill=0)
     for start in range(len(stages)):
         if states[start] != 0:
@@ -326,9 +324,9 @@ struct _Executor[P: SchedulablePipeline](Movable):
             self.parents.append(List[Int]())
             self.total_dependencies.append(len(s.dependencies))
             # The execute event learns its count when it schedules, a
-            # finish event its finalize rounds' as they come. Initialize, prepare finish and finish each
-            # make one task; complete makes none and finishes when
-            # scheduled.
+            # finish event its finalize rounds' as they come. Initialize,
+            # prepare finish and finish each make one task; complete makes
+            # none and finishes when scheduled.
             var tasks = 0 if s.type == STAGE_COMPLETE else 1
             self.total_tasks.append(tasks)
         var outstanding = 0
@@ -339,7 +337,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
                 pipelines[p].max_finalize_tasks(),
             )
         var capacity = _queue_capacity(outstanding)
-        # `Event::AddDependency`: the dependency learns its parent.
+        # Each dependency learns its parent, to notify it on finishing.
         for e in range(len(stages)):
             for d in stages[e].dependencies:
                 self.parents[d].append(e)
@@ -364,22 +362,22 @@ struct _Executor[P: SchedulablePipeline](Movable):
         )[]
 
     def schedule_events(mut self):
-        """`ScheduleEventsInternal`: schedule the events without
-        dependencies."""
+        """Schedule the events without dependencies; the rest follow as their
+        dependencies finish."""
         for e in range(len(self.stage)):
             if self.total_dependencies[e] == 0:
                 self._schedule(e)
 
     def finished(self) -> Bool:
-        """`Executor::ExecutionIsFinished`."""
+        """Whether every pipeline has completed, or one has failed."""
         return (
             self.completed_pipelines.load() >= Int64(self.total_pipelines)
             or self.failed.load() != 0
         )
 
     def _schedule(mut self, event: Int):
-        """`Event::Schedule` then `SetTasks`; an event without tasks
-        finishes now (`AutoFinishWithoutTasks`)."""
+        """Queue the event's tasks; an event without tasks finishes now, since
+        nothing would ever finish it otherwise."""
         var tasks = self.total_tasks[event]
         if self.stage[event] == STAGE_EXECUTE:
             ref pipeline = self._pipelines()[self.pipeline[event]]
@@ -418,15 +416,16 @@ struct _Executor[P: SchedulablePipeline](Movable):
                 return False
 
     def _complete_dependency(mut self, event: Int):
-        """`Event::CompleteDependency`."""
+        """One dependency of `event` finished: schedule it when it was the
+        last."""
         var base = Int(self.finished_dependencies.unsafe_ptr())
         var done = Int(_counter(base, event).fetch_add(1)) + 1
         if done == self.total_dependencies[event]:
             self._schedule(event)
 
     def _finish(mut self, event: Int):
-        """`Event::Finish`: complete a dependency of every parent, then
-        `FinalizeFinish` (a complete event completes its pipeline)."""
+        """Complete a dependency of every parent; a complete event also
+        completes its pipeline."""
         for k in range(len(self.parents[event])):
             var parent = self.parents[event][k]
             self._complete_dependency(parent)
@@ -452,10 +451,10 @@ struct _Executor[P: SchedulablePipeline](Movable):
             self._finish(event)
 
     def _insert_finalize_tasks(mut self, event: Int) raises -> Bool:
-        """After a finish event's Finalize, or a round's serial step: the
+        """After a finish event's finalize, or a round's serial step: the
         tasks of the next round of its finalize work, as more tasks of the
         finish event, round task t queued as index t + 1 (index 0 is
-        Finalize itself). The finish event finishes, and its parents'
+        finalize itself). The finish event finishes, and its parents'
         dependencies complete, only after every round. Whether a round
         started."""
         ref pipeline = self._pipelines()[self.pipeline[event]]
@@ -514,16 +513,16 @@ struct _Executor[P: SchedulablePipeline](Movable):
         self._finish_task(event)
 
     def _fail(mut self, e: Error):
-        """`Executor::PushError`: the first error is the query's; the
-        failed event never finishes, so every worker stops."""
+        """Record a failure: the first error is the query's; the failed event
+        never finishes, so every worker stops."""
         var none = Int64(0)
         if self.failed.compare_exchange(none, Int64(1)):
             self.error = String(e)
 
     def work_on_tasks(mut self):
-        """`Executor::WorkOnTasks` until the schedule is done. With no
-        task queued, the tasks left are running on other threads: run
-        the jobs they post to the crew meanwhile, else yield."""
+        """Run queued tasks until the schedule is done. With no task queued, the
+        tasks left are running on other threads: run the jobs they post to the
+        crew meanwhile, else yield."""
         while not self.finished():
             var record = self._dequeue()
             if record >= 0:

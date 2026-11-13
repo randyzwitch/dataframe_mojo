@@ -308,11 +308,11 @@ def _filter_keeps(
     operations: List[PlanNode], k: Int, after: List[Expr], keys: List[String]
 ) -> Optional[List[String]]:
     """The columns read after the filter at `k`, when that is known: by the
-    selection right after it, or, when it is the last operation, by the
-    stream's reduction (`after` and its group `keys`; empty `after` means
-    the batch itself is kept). The filter then copies only those columns,
-    not the ones only its predicate reads (PDS-H q6 filters on dates and
-    quantities and sums prices and discounts)."""
+    selection right after it, or, when it is the last operation, by the stream's
+    reduction (`after` and its group `keys`; empty `after` means the batch
+    itself is kept). The filter then copies only those columns, not the ones
+    only its predicate reads (a filter on dates followed by a sum of prices
+    copies only the prices)."""
     if operations[k].kind != FILTER:
         return None
     var exprs: List[Expr]

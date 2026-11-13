@@ -164,8 +164,10 @@ def test_grouped_feed_checked_ast_and_integer_sum_finish_order() raises:
 
 
 def test_grouped_feed_worker_errors_precede_worker_ordered_merges() raises:
-    # Use the actual typed evaluate/_ReduceJob entry, so a GroupBy streaming
-    # alternative cannot silently change the batch/job contract under test.
+    # Use the typed evaluate entry, so a GroupBy streaming alternative
+    # cannot silently change the contract under test. A grouped reduction
+    # evaluates its computed input over every row before it reduces any
+    # group, so an input fault anywhere comes before a reduction fault.
 
     var setting = WorkerSetting(2)
     var rows = 131072
@@ -176,8 +178,8 @@ def test_grouped_feed_worker_errors_precede_worker_ordered_merges() raises:
         var integers = List[Int64](length=rows, fill=0)
         var selected = List[Bool](length=rows, fill=False)
         if scenario == 0:
-            # Job0 update fault wins over job1's input fault, regardless of
-            # completion timing. The source-level run_jobs scan is job-ordered.
+            # The input fault at row 65538 wins over the overflow of rows 0
+            # and 1: the input is complete before anything is summed.
             values[0] = 999
             values[1] = 1
             integers[65538] = 128
@@ -205,8 +207,8 @@ def test_grouped_feed_worker_errors_precede_worker_ordered_merges() raises:
         )
         var bound = bind(decimal_feed_operand().sum(), frame._columns)
         with assert_raises(
-            contains="decimal precision" if scenario == 0
-            or scenario == 2 else "cast from int64 to int8 failed"
+            contains="decimal precision" if scenario
+            == 2 else "cast from int64 to int8 failed"
         ):
             _ = evaluate(
                 bound,
