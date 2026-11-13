@@ -91,9 +91,7 @@ from dataframe.joins.join_filter import (
 )
 from dataframe.parallel import (
     Job,
-    Pool,
     configured_workers,
-    run_jobs,
 )
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
@@ -110,6 +108,7 @@ from dataframe.pipeline import (
     _ensure_zones,
     _range_key,
     _window_bounds,
+    PipelineFinish,
     PipelineRun,
     begin_pipeline,
     finish_pipeline,
@@ -171,7 +170,6 @@ from dataframe.planning.properties import (
 )
 from dataframe.planning.cost.eligibility import (
     _counts_distinct,
-    _filters,
 )
 from dataframe.planning.cost.sampling import (
     _keys_repeat,
@@ -271,6 +269,14 @@ def plan_stream_execute(
         META_REGULAR,
         False,
     )
+    return _run_schedule(self, schedule, top)
+
+
+def _run_schedule(
+    self: QueryContext, mut schedule: _StreamSchedule, top: Int
+) raises -> Optional[DataFrame]:
+    """Run `schedule`'s pipelines and return the result of its stream
+    whose probe is pipeline `top`."""
     schedule.bind()
     try:
         run_pipelines(
@@ -453,9 +459,14 @@ struct _StreamSchedule(Movable):
         for p in range(len(self.pipelines)):
             if len(self.pipelines[p].probe) == 0:
                 continue
-            ref started = self.pipelines[p].probe[0].started
+            ref probe = self.pipelines[p].probe[0]
+            ref started = probe.started
             if len(started) > 0 and len(started[0].piped) > 0:
                 started[0].piped[0].run.release()
+            if len(started) > 0 and len(started[0].batch) > 0:
+                started[0].batch[0].release()
+            if len(probe.finish) > 0:
+                probe.finish[0].release()
 
 
 def _add_stream(
@@ -691,7 +702,7 @@ def plan_union(
 
 
 @fieldwise_init
-struct _StreamHead(Movable):
+struct _StreamHead(Copyable, Movable):
     """What a stream decided before scheduling its inputs, which its
     probe pipeline starts from."""
 
@@ -746,6 +757,11 @@ struct _StreamProbe(Movable):
     # schedule runs them first.
     var through: List[_ThroughBuild]
     var started: List[_ProbeStart]
+    # The morsel pipeline's finish once its sink has finished, and the
+    # tasks of the finish's round under way (the pipeline's or the batch
+    # stream's).
+    var finish: List[PipelineFinish]
+    var round: Int
     var result: Optional[DataFrame]
 
     def __init__(
@@ -778,6 +794,8 @@ struct _StreamProbe(Movable):
         self.siblings = 0
         self.through = List[_ThroughBuild]()
         self.started = List[_ProbeStart]()
+        self.finish = List[PipelineFinish]()
+        self.round = 0
         self.result = None
 
     def tasks(mut self) raises -> Int:
@@ -788,11 +806,14 @@ struct _StreamProbe(Movable):
         ref plan = Pointer[QueryContext, MutAnyOrigin](
             unsafe_from_address=self.plan
         )[]
+        if len(self.started) > 0:
+            # Set up before the schedule (no input to wait for).
+            return self._execute_tasks(plan)
         ref pipelines = Pointer[List[_StreamPipeline], MutAnyOrigin](
             unsafe_from_address=self.siblings
         )[]
-        var ahead = plan._prefetched.value()
         for k in range(len(self.wanted)):
+            var ahead = plan._prefetched.value()
             ref made = pipelines[self.at[k]]
             ahead[][self.wanted[k]] = made.result()
             var built = made.built()
@@ -820,6 +841,11 @@ struct _StreamProbe(Movable):
                 plan, self.index, self.batch_size, self.sink, self.head.pop(0)
             )
         )
+        return self._execute_tasks(plan)
+
+    def _execute_tasks(self, plan: QueryContext) -> Int:
+        """A task per morsel worker, or one for a probe with no morsel
+        pipeline (a batch stream runs in its finish's rounds)."""
         if len(self.started[0].piped) == 0 or plan._report:
             return 1
         return self.started[0].piped[0].run.tasks()
@@ -835,14 +861,53 @@ struct _StreamProbe(Movable):
             self.started[0].piped[0].run.execute(task)
 
     def finalize(mut self) raises:
+        """The sink's finish: its parallel work as rounds of tasks
+        (`finalize_tasks`), each round's end in `finish_finalize`, and
+        the result after the last."""
+        ref started = self.started[0]
+        if len(started.piped) > 0:
+            ref piped = started.piped[0]
+            self.finish.append(
+                finish_pipeline(piped.run, piped.counts, piped.set_frames)
+            )
+            self.round = self.finish[0].tasks()
+        elif len(started.batch) > 0:
+            self.round = started.batch[0].advance()
+        else:
+            swap(self.result, started.result)
+            self.round = 0
+            self._complete()
+            return
+        if self.round == 0:
+            self._complete()
+
+    def finalize_task(mut self, task: Int) raises:
+        if len(self.finish) > 0:
+            self.finish[0].run_task(task)
+        else:
+            self.started[0].batch[0].run_task(task)
+
+    def finish_finalize(mut self) raises:
+        """A round of finalize tasks has ended: the next round, or the
+        result."""
+        if len(self.started[0].batch) > 0:
+            self.round = self.started[0].batch[0].advance()
+        else:
+            self.round = 0
+        if self.round == 0:
+            self._complete()
+
+    def _complete(mut self) raises:
+        """The result once no finalize task is left, and the work after
+        it: a declined input's own run, a build side's hash table."""
         ref plan = Pointer[QueryContext, MutAnyOrigin](
             unsafe_from_address=self.plan
         )[]
         ref started = self.started[0]
         if len(started.piped) > 0:
-            self.result = _probe_finish(plan, started.piped[0])
-        else:
-            swap(self.result, started.result)
+            self.result = _probe_finish(plan, started.piped[0], self.finish[0])
+        elif len(started.batch) > 0:
+            self.result = started.batch[0].result(plan)
         if not self.result and self.is_input:
             # The stream declined: the input's operator runs on its own,
             # as `plan_execute` runs a node no stream takes.
@@ -974,19 +1039,29 @@ struct _StreamPipeline(SchedulablePipeline):
     def max_finalize_tasks(self) -> Int:
         if len(self.input) > 0:
             return self.input[0].max_finalize_tasks()
+        if len(self.probe) > 0:
+            # A round of the probe's finish: a task per worker at most.
+            return configured_workers()
         return 0
 
     def finalize_tasks(mut self) raises -> Int:
         if len(self.input) > 0:
             return self.input[0].finalize_tasks()
+        if len(self.probe) > 0:
+            return self.probe[0].round
         return 0
 
     def finalize_task(mut self, task: Int) raises:
-        self.input[0].finalize_task(task)
+        if len(self.input) > 0:
+            self.input[0].finalize_task(task)
+        else:
+            self.probe[0].finalize_task(task)
 
     def finish_finalize(mut self) raises:
         if len(self.input) > 0:
             self.input[0].finish_finalize()
+        elif len(self.probe) > 0:
+            self.probe[0].finish_finalize()
 
 
 def _probe_start(
@@ -1013,9 +1088,6 @@ def _probe_start(
     var top_descending = head.top_descending.copy()
     var top_nulls_last = head.top_nulls_last.copy()
     ref terminal = self._nodes[index]
-    # A streamed top-N's sink, made at its first batch.
-    var topn = List[TopNSink]()
-    var top_batches = 0
     var operations = List[PlanNode]()
     # The plan node of each operation, for the execution report.
     var operation_nodes = List[Int]()
@@ -1165,27 +1237,9 @@ def _probe_start(
         cursor = node.left
     if cursor < 0 or cursor == index and not _is_scan(self._nodes[cursor].kind):
         return _ProbeStart(None)
-    if cursor == index and (
-        self._nodes[cursor].kind == SCAN_FRAME or sink == 0
-    ):
-        # The source itself, with nothing to apply: batches would only copy it
-        # into chunks that the eager step above rechunks again, two copies of
-        # every row for nothing; a file is read whole by its parallel reader.
-        # Only a file sink streams it.
-        return _ProbeStart(None)
-    if (
-        len(expressions) == 0
-        and top < 0
-        and limit < 0
-        and skip == 0
-        and len(joins) == 0
-        and self._nodes[cursor].kind == SCAN_FRAME
-        and not _filters(operations)
-    ):
-        # Row-local steps that keep every row of an in-memory frame
-        # (with_columns, select, drop) under an eager step: a stream applies
-        # them to batches and copies the results back together, while the eager
-        # steps share the columns they do not touch and copy nothing.
+    if cursor == index and self._nodes[cursor].kind != SCAN_FRAME and sink == 0:
+        # A file with nothing to apply is read whole by its parallel
+        # reader; only a file sink streams it.
         return _ProbeStart(None)
     operations.reverse()
     operation_nodes.reverse()
@@ -1294,16 +1348,9 @@ def _probe_start(
     if decision.is_eager():
         return _ProbeStart(None)
     var workers = configured_workers()
-    var pool = Pool(1)
-    var pool_ready = False
-    var offset = 0
-    var emitted = False
-    var ended = False
-    var outputs = List[DataFrame]()
     # Execution report: rows fed from the source, and rows into and out
     # of each operation, summed over batches.
     var counting = Bool(self._report)
-    var fed_rows = 0
     var operation_rows = List[Int](
         length=2 * len(operations) if counting else 0, fill=0
     )
@@ -1326,9 +1373,6 @@ def _probe_start(
     # is the aggregate table over them,
     # and reduced into one state each time they reach the budget.
     var collecting = len(expressions) > 0 and len(keys) > 0
-    var collected = List[DataFrame]()
-    var collected_memory = RetainedBuffers()
-    var collected_rows = 0
     var collect_budget = _stream_collect_bytes()
     var projection = List[String]()
     if len(expressions) and len(keys):
@@ -1530,225 +1574,483 @@ def _probe_start(
                 finish_nodes^,
             )
         )
-    var per_round = workers
-    while not ended:
-        var jobs = List[_StreamJob]()
-        for _ in range(per_round):
+    return _ProbeStart(
+        _BatchStream(
+            file_scan^,
+            input^,
+            batch_size,
+            operations^,
+            operation_nodes^,
+            shared_joins,
+            shared_indexes,
+            expressions^,
+            keys^,
+            ordered,
+            grouping,
+            workers,
+            acc^,
+            counting,
+            collecting,
+            projection^,
+            collect_budget,
+            top,
+            top_maintain_order,
+            top_names^,
+            top_descending^,
+            top_nulls_last^,
+            skip,
+            limit,
+            sink,
+            index,
+            cursor,
+            _is_scan(source.kind),
+            stream_began,
+            operation_rows^,
+            operation_times^,
+        )
+    )
+
+
+# The kind of round a batch stream has under way (`_BatchStream`).
+comptime _ROUND_NONE = 0
+comptime _ROUND_BATCHES = 1
+comptime _ROUND_MERGE = 2
+
+
+struct _BatchStream(Movable):
+    """A stream whose operations run batch by batch, each batch's result
+    absorbed in input order, rather than as a morsel pipeline: its source
+    or operations need the batches as they come (`pipeline_eligibility`).
+
+    Its work is rounds of tasks. A round of batches is a task per batch,
+    each running every operation over its batch; their results are then
+    absorbed in batch order (reduction states, collected rows, a top-N,
+    or output slices that keep the offset and limit). When parts of the
+    accumulated reduction are due to merge, a round of merge tasks
+    follows, each merging its own parts, which never share a key. Each
+    round reads what the one before left, so the rounds run one after
+    another (`advance`), as rounds of the probe's finish, and every task
+    runs on the schedule's one queue: no thread waits for a round of its
+    own while it could take another task."""
+
+    var file_scan: Optional[ArcPointer[ScanSource]]
+    var source_done: Bool
+    var input: DataFrame
+    var next_row: Int
+    var emitted: Bool
+    var ended: Bool
+    var finishing: Bool
+    var round: Int
+    var batch_size: Int
+    var operations: List[PlanNode]
+    var operation_nodes: List[Int]
+    var joins: ArcPointer[List[DataFrame]]
+    var indexes: ArcPointer[List[Optional[JoinHashTable]]]
+    var expressions: List[Expr]
+    var keys: List[String]
+    var ordered: Bool
+    var grouping: Bool
+    var workers: Int
+    var jobs: List[_StreamJob]
+    var acc: _StateAccumulator
+    var counting: Bool
+    var collecting: Bool
+    var projection: List[String]
+    var collected: List[DataFrame]
+    var collected_memory: RetainedBuffers
+    var collected_rows: Int
+    var collect_budget: Int
+    var top: Int
+    var top_maintain_order: Bool
+    var top_names: List[String]
+    var top_descending: List[Bool]
+    var top_nulls_last: List[Bool]
+    # A streamed top-N's sink, made at its first batch.
+    var topn: List[TopNSink]
+    var top_batches: Int
+    var skip: Int
+    var limit: Int
+    var sink: Int
+    var outputs: List[DataFrame]
+    var index: Int
+    var cursor: Int
+    var scans: Bool
+    var stream_began: Int
+    # Execution report: rows fed from the source, and rows into and out
+    # of each operation, summed over batches; nanoseconds per operation,
+    # then the batches' reductions.
+    var fed_rows: Int
+    var operation_rows: List[Int]
+    var operation_times: List[Int]
+
+    def __init__(
+        out self,
+        var file_scan: Optional[ArcPointer[ScanSource]],
+        var input: DataFrame,
+        batch_size: Int,
+        var operations: List[PlanNode],
+        var operation_nodes: List[Int],
+        joins: ArcPointer[List[DataFrame]],
+        indexes: ArcPointer[List[Optional[JoinHashTable]]],
+        var expressions: List[Expr],
+        var keys: List[String],
+        ordered: Bool,
+        grouping: Bool,
+        workers: Int,
+        var acc: _StateAccumulator,
+        counting: Bool,
+        collecting: Bool,
+        var projection: List[String],
+        collect_budget: Int,
+        top: Int,
+        top_maintain_order: Bool,
+        var top_names: List[String],
+        var top_descending: List[Bool],
+        var top_nulls_last: List[Bool],
+        skip: Int,
+        limit: Int,
+        sink: Int,
+        index: Int,
+        cursor: Int,
+        scans: Bool,
+        stream_began: Int,
+        var operation_rows: List[Int],
+        var operation_times: List[Int],
+    ):
+        self.file_scan = file_scan^
+        self.source_done = False
+        self.input = input^
+        self.next_row = 0
+        self.emitted = False
+        self.ended = False
+        self.finishing = False
+        self.round = _ROUND_NONE
+        self.batch_size = batch_size
+        self.operations = operations^
+        self.operation_nodes = operation_nodes^
+        self.joins = joins
+        self.indexes = indexes
+        self.expressions = expressions^
+        self.keys = keys^
+        self.ordered = ordered
+        self.grouping = grouping
+        self.workers = max(1, workers)
+        self.jobs = List[_StreamJob]()
+        self.acc = acc^
+        self.counting = counting
+        self.collecting = collecting
+        self.projection = projection^
+        self.collected = List[DataFrame]()
+        self.collected_memory = RetainedBuffers()
+        self.collected_rows = 0
+        self.collect_budget = collect_budget
+        self.top = top
+        self.top_maintain_order = top_maintain_order
+        self.top_names = top_names^
+        self.top_descending = top_descending^
+        self.top_nulls_last = top_nulls_last^
+        self.topn = List[TopNSink]()
+        self.top_batches = 0
+        self.skip = skip
+        self.limit = limit
+        self.sink = sink
+        self.outputs = List[DataFrame]()
+        self.index = index
+        self.cursor = cursor
+        self.scans = scans
+        self.stream_began = stream_began
+        self.fed_rows = 0
+        self.operation_rows = operation_rows^
+        self.operation_times = operation_times^
+
+    def advance(mut self) raises -> Int:
+        """End the round under way, if any, and start the next: the tasks
+        it makes, a batch or a merge each, at most `workers`; 0 once the
+        stream has nothing left to run and `result` may read it."""
+        if self.round == _ROUND_BATCHES:
+            self._absorb()
+            self.round = _ROUND_NONE
+            var merges = self.acc.begin_merge(False)
+            if merges > 0:
+                self.round = _ROUND_MERGE
+                return merges
+        elif self.round == _ROUND_MERGE:
+            self.acc.end_merge()
+            self.round = _ROUND_NONE
+            if self.finishing:
+                return 0
+        if not self.ended:
+            var batches = self._take_batches()
+            if batches > 0:
+                self.round = _ROUND_BATCHES
+                return batches
+            self.ended = True
+        if self.finishing:
+            return 0
+        self.finishing = True
+        self._finish_source()
+        if self.collecting or len(self.acc.states) == 0:
+            return 0
+        # The last merge of the reduction's parts, every part forced.
+        var merges = self.acc.begin_merge(True)
+        if merges > 0:
+            self.round = _ROUND_MERGE
+        return merges
+
+    def run_task(mut self, task: Int) raises:
+        """Task `task` of the round under way; they run at the same time."""
+        if self.round == _ROUND_BATCHES:
+            self.jobs[task].run()
+        else:
+            self.acc.merge_task(task)
+
+    def _take_batches(mut self) raises -> Int:
+        """The next round's batches, as many as workers, each a job that
+        decodes (a file's byte range) or slices its batch itself."""
+        self.jobs = List[_StreamJob]()
+        for _ in range(self.workers):
             var frame = DataFrame(List[Series](), height=0)
             var batch = List[ScanBatch]()
-            if file_scan:
-                # The job decodes a byte range itself.
-                var next = file_scan.value()[].take()
+            if self.file_scan:
+                var next = self.file_scan.value()[].take()
                 if not next:
-                    ended = True
+                    self.ended = True
                     break
                 batch.append(next.take())
             else:
-                if emitted and offset >= input.height():
-                    ended = True
+                if self.emitted and self.next_row >= self.input.height():
+                    self.ended = True
                     break
-                frame = input.slice(offset, batch_size)
-                offset += frame.height()
-                emitted = True
+                frame = self.input.slice(self.next_row, self.batch_size)
+                self.next_row += frame.height()
+                self.emitted = True
             var job = _StreamJob(
                 frame^,
-                operations,
-                shared_joins,
-                shared_indexes,
-                expressions,
-                keys,
+                self.operations,
+                self.joins,
+                self.indexes,
+                self.expressions,
+                self.keys,
             )
             job.scan = batch^
-            job.bits = acc.bits
-            job.counting = counting
-            job.collect_only = collecting
-            job.projection = projection.copy()
-            jobs.append(job^)
-        if len(jobs) == 0:
-            break
-        if len(jobs) > 0:
-            if not pool_ready:
-                pool = Pool(min(len(jobs), workers))
-                pool_ready = True
-            pool.run(jobs, claim=True)
-        if counting:
+            job.bits = self.acc.bits
+            job.counting = self.counting
+            job.collect_only = self.collecting
+            job.projection = self.projection.copy()
+            self.jobs.append(job^)
+        return len(self.jobs)
+
+    def _absorb(mut self) raises:
+        """The round's batch results, in batch order."""
+        ref jobs = self.jobs
+        if self.counting:
             for i in range(len(jobs)):
                 ref counts = jobs[i].counts
                 if len(counts) > 0:
-                    fed_rows += counts[0]
-                elif len(expressions):
-                    fed_rows += jobs[i].rows
+                    self.fed_rows += counts[0]
+                elif len(self.expressions):
+                    self.fed_rows += jobs[i].rows
                 else:
-                    fed_rows += jobs[i].frame.height()
+                    self.fed_rows += jobs[i].frame.height()
                 for k in range(len(counts)):
-                    operation_rows[k] += counts[k]
+                    self.operation_rows[k] += counts[k]
                 for k in range(len(jobs[i].times)):
-                    if k < len(operation_times):
-                        operation_times[k] += jobs[i].times[k]
-        # Pool returns jobs in submission order, independently of worker
-        # completion order. Merge states and assemble rows in that order.
+                    if k < len(self.operation_times):
+                        self.operation_times[k] += jobs[i].times[k]
         for i in range(len(jobs)):
-            if collecting:
-                _retain_frame(jobs[i].frame, collected_memory)
-                collected_rows += jobs[i].rows
-                collected.append(jobs[i].frame.copy())
-            elif len(expressions):
-                acc.absorb(jobs[i].take_reduced(), jobs[i].rows)
-            elif top >= 0:
+            if self.collecting:
+                _retain_frame(jobs[i].frame, self.collected_memory)
+                self.collected_rows += jobs[i].rows
+                self.collected.append(jobs[i].frame.copy())
+            elif len(self.expressions):
+                self.acc.absorb(jobs[i].take_reduced(), jobs[i].rows)
+            elif self.top >= 0:
                 # The job has already cut its batch to its first rows
                 # (its own top-N); they combine into the stream's.
                 var batch = jobs[i].frame.copy()
-                if top_maintain_order:
+                if self.top_maintain_order:
                     # Batches arrive in input order: the batch number
                     # and row are the place that settles ties.
                     var places = List[Int64](capacity=batch.height())
-                    var base = Int64(top_batches) << 40
+                    var base = Int64(self.top_batches) << 40
                     for r in range(batch.height()):
                         places.append(base + Int64(r))
                     batch = batch.with_column(
                         Series(_ORDER_COLUMN, Column[Int64](places^))
                     )
-                top_batches += 1
-                if len(topn) == 0:
-                    topn.append(
+                self.top_batches += 1
+                if len(self.topn) == 0:
+                    self.topn.append(
                         TopNSink(
                             batch,
-                            _top_keys(top_names, top_maintain_order),
-                            _top_flags(top_descending, top_maintain_order),
-                            _top_flags(top_nulls_last, top_maintain_order),
-                            top,
+                            _top_keys(self.top_names, self.top_maintain_order),
+                            _top_flags(
+                                self.top_descending, self.top_maintain_order
+                            ),
+                            _top_flags(
+                                self.top_nulls_last, self.top_maintain_order
+                            ),
+                            self.top,
                             TopNBoundary.none(),
                         )
                     )
-                topn[0].sink(batch)
+                self.topn[0].sink(batch)
             else:
                 var part = jobs[i].frame.copy()
-                var dropped = min(skip, part.height())
-                skip -= dropped
-                part = part.slice(dropped, limit)
-                if limit >= 0:
-                    limit -= part.height()
-                if sink != 0:
+                var dropped = min(self.skip, part.height())
+                self.skip -= dropped
+                part = part.slice(dropped, self.limit)
+                if self.limit >= 0:
+                    self.limit -= part.height()
+                if self.sink != 0:
                     Pointer[FileSink, MutAnyOrigin](
-                        unsafe_from_address=sink
+                        unsafe_from_address=self.sink
                     )[].append(part)
                 else:
-                    outputs.append(part^)
-        if collecting and collected_memory.bytes >= collect_budget:
+                    self.outputs.append(part^)
+        self.jobs = List[_StreamJob]()
+        if (
+            self.collecting
+            and self.collected_memory.bytes >= self.collect_budget
+        ):
             # The budget is reached: reduce what is collected into one
             # state (every key encoded once) and keep collecting. The
             # states merge at the end as batch states do.
-            var part = _StreamReduction(concat(collected), expressions, keys)
-            part.shift_firsts(acc.rows_seen)
-            acc.rows_seen += collected_rows
-            collected = List[DataFrame]()
-            collected_memory = RetainedBuffers()
-            collected_rows = 0
-            if len(acc.states) == 0:
-                acc.pending.append(List[_StreamReduction]())
-                acc.pending_groups.append(0)
-                acc.states.append(part^)
+            var part = _StreamReduction(
+                concat(self.collected), self.expressions, self.keys
+            )
+            part.shift_firsts(self.acc.rows_seen)
+            self.acc.rows_seen += self.collected_rows
+            self.collected = List[DataFrame]()
+            self.collected_memory = RetainedBuffers()
+            self.collected_rows = 0
+            if len(self.acc.states) == 0:
+                self.acc.pending.append(List[_StreamReduction]())
+                self.acc.pending_groups.append(0)
+                self.acc.states.append(part^)
             else:
-                acc.pending_groups[0] += part.group_count()
-                acc.pending[0].append(part^)
-        acc.merge(False)
-        if file_scan:
+                self.acc.pending_groups[0] += part.group_count()
+                self.acc.pending[0].append(part^)
+        if self.file_scan:
             # Every job of the round has decoded its byte range.
-            file_scan.value()[].discard()
-        if limit == 0 and top < 0:
-            ended = True
-    pool.release()
-    if file_scan:
-        file_scan.value()[].finish()
-    # Byte ranges borrow mapped addresses; retain the source through the
-    # final worker join, even after an early head or an error.
-    _ = file_scan^
-    var result = Optional[DataFrame]()
-    if collecting and len(acc.states) == 0:
-        trace_path("lazy.collect_group_by")
-        # Contiguous first: the bucket encode reads string keys in view storage
-        # through a buffer table, which costs a lookup per buffer and grows with
-        # the number of batches.
-        var whole = concat(collected).rechunk()
-        # Groups come back in first-occurrence order only when asked,
-        # as the eager group-by's do.
-        result = whole.group_by(keys, maintain_order=ordered).agg(expressions)
-    elif collecting:
-        # Spilled at least once: the rest joins the states.
-        trace_path("lazy.collect_group_by_bounded")
-        if len(collected):
-            var part = _StreamReduction(concat(collected), expressions, keys)
-            part.shift_firsts(acc.rows_seen)
-            acc.pending_groups[0] += part.group_count()
-            acc.pending[0].append(part^)
-        acc.merge(True)
-        result = acc.states[0].finish()
-    elif len(acc.states):
-        acc.merge(True)
-        if len(acc.states) == 1:
-            result = acc.states[0].finish()
-        else:
-            var parts = List[_StreamReduction]()
-            swap(parts, acc.states)
-            result = _finish_parts(parts^)
-    elif top >= 0:
-        if len(topn) > 0:
-            var best = topn[0].finish()
-            if top_maintain_order:
-                best = best.drop([_ORDER_COLUMN])
-            result = best.slice(skip, limit)
-    elif len(outputs):
-        result = concat(outputs)
-    if (
-        sink != 0
-        and not result
-        and (
-            len(expressions) == 0
-            or (len(keys) > 0 and not grouping)
-            or top >= 0
-        )
-    ):
-        result = Pointer[FileSink, MutAnyOrigin](
-            unsafe_from_address=sink
-        )[].schema.copy()
-    if counting:
-        if _is_scan(source.kind):
-            plan_record(self, cursor, "streaming", 0, fed_rows)
-        var into_terminal = fed_rows
-        for k in range(len(operations)):
-            plan_record(
-                self,
-                operation_nodes[k],
-                "streaming",
-                operation_rows[2 * k],
-                operation_rows[2 * k + 1],
-                busy_ns=operation_times[k],
+            self.file_scan.value()[].discard()
+        if self.limit == 0 and self.top < 0:
+            self.ended = True
+
+    def _finish_source(mut self) raises:
+        """Close the file source once no batch is left to read. It stays
+        held with the stream: the batches' byte ranges borrow its mapped
+        addresses."""
+        if self.source_done:
+            return
+        self.source_done = True
+        if self.file_scan:
+            self.file_scan.value()[].finish()
+
+    def release(mut self):
+        """For a stream that failed before its result."""
+        try:
+            self._finish_source()
+        except:
+            pass
+
+    def result(mut self, plan: QueryContext) raises -> Optional[DataFrame]:
+        """The stream's result once `advance` has nothing left to run,
+        and its execution report entries."""
+        var result = Optional[DataFrame]()
+        if self.collecting and len(self.acc.states) == 0:
+            trace_path("lazy.collect_group_by")
+            # Contiguous first: the bucket encode reads string keys in
+            # view storage through a buffer table, which costs a lookup per
+            # buffer and grows with the number of batches.
+            var whole = concat(self.collected).rechunk()
+            # Groups come back in first-occurrence order only when asked,
+            # as the eager group-by's do.
+            result = whole.group_by(self.keys, maintain_order=self.ordered).agg(
+                self.expressions
             )
-            into_terminal = operation_rows[2 * k + 1]
-        var stream_wall = Int(perf_counter_ns()) - stream_began
-        if index != cursor and (index not in operation_nodes):
-            plan_record(
-                self,
-                index,
-                "streaming",
-                into_terminal,
-                result.value().height() if result else 0,
-                busy_ns=operation_times[len(operations)],
-                wall_ns=stream_wall,
+        elif self.collecting:
+            # Spilled at least once: the rest joins the one state, which
+            # merges here.
+            trace_path("lazy.collect_group_by_bounded")
+            if len(self.collected):
+                var part = _StreamReduction(
+                    concat(self.collected), self.expressions, self.keys
+                )
+                part.shift_firsts(self.acc.rows_seen)
+                self.acc.pending_groups[0] += part.group_count()
+                self.acc.pending[0].append(part^)
+            _ = self.acc.begin_merge(True)
+            result = self.acc.states[0].finish()
+        elif len(self.acc.states):
+            # Every part merged in the last round: one state merges here.
+            _ = self.acc.begin_merge(True)
+            if len(self.acc.states) == 1:
+                result = self.acc.states[0].finish()
+            else:
+                var parts = List[_StreamReduction]()
+                swap(parts, self.acc.states)
+                result = _finish_parts(parts^)
+        elif self.top >= 0:
+            if len(self.topn) > 0:
+                var best = self.topn[0].finish()
+                if self.top_maintain_order:
+                    best = best.drop([_ORDER_COLUMN])
+                result = best.slice(self.skip, self.limit)
+        elif len(self.outputs):
+            result = concat(self.outputs)
+        if (
+            self.sink != 0
+            and not result
+            and (
+                len(self.expressions) == 0
+                or (len(self.keys) > 0 and not self.grouping)
+                or self.top >= 0
             )
-        else:
-            # The stream's last node is one of its operations: add the
-            # stream's wall time there, with nothing else.
-            plan_record(
-                self,
-                index,
-                "streaming",
-                0,
-                0,
-                executions=0,
-                wall_ns=stream_wall,
-            )
-    return _ProbeStart(result^)
+        ):
+            result = Pointer[FileSink, MutAnyOrigin](
+                unsafe_from_address=self.sink
+            )[].schema.copy()
+        if self.counting:
+            var index = self.index
+            var cursor = self.cursor
+            if self.scans:
+                plan_record(plan, cursor, "streaming", 0, self.fed_rows)
+            var into_terminal = self.fed_rows
+            for k in range(len(self.operations)):
+                plan_record(
+                    plan,
+                    self.operation_nodes[k],
+                    "streaming",
+                    self.operation_rows[2 * k],
+                    self.operation_rows[2 * k + 1],
+                    busy_ns=self.operation_times[k],
+                )
+                into_terminal = self.operation_rows[2 * k + 1]
+            var stream_wall = Int(perf_counter_ns()) - self.stream_began
+            if index != cursor and (index not in self.operation_nodes):
+                plan_record(
+                    plan,
+                    index,
+                    "streaming",
+                    into_terminal,
+                    result.value().height() if result else 0,
+                    busy_ns=self.operation_times[len(self.operations)],
+                    wall_ns=stream_wall,
+                )
+            else:
+                # The stream's last node is one of its operations: add the
+                # stream's wall time there, with nothing else.
+                plan_record(
+                    plan,
+                    index,
+                    "streaming",
+                    0,
+                    0,
+                    executions=0,
+                    wall_ns=stream_wall,
+                )
+        return result^
 
 
 def _source_rows(self: QueryContext, cursor: Int) raises -> Int:
@@ -1848,10 +2150,11 @@ def _open_scan_source(
 
 
 def _probe_finish(
-    self: QueryContext, mut piped: _PipedProbe
+    self: QueryContext, mut piped: _PipedProbe, mut done: PipelineFinish
 ) raises -> Optional[DataFrame]:
-    """The probe pipeline's result, its execute tasks done (the sink's finish
-    and the plan's bookkeeping after it)."""
+    """The probe pipeline's result, once its sink has finished
+    (`finish_pipeline`) and the tasks of that finish, `done`, have run:
+    the output and the plan's bookkeeping after it."""
     var index = piped.index
     ref terminal = self._nodes[index]
     ref piped_counts = piped.counts
@@ -1873,7 +2176,7 @@ def _probe_finish(
     var top_node = piped.top_node
     var began = piped.began
     ref finish_nodes = piped.finish_nodes
-    var piped_result = finish_pipeline(piped.run, piped_counts, set_frames)
+    var piped_result = done.result(piped_counts)
     if finish:
         finish.value()[].applied = True
     if grouping:
@@ -1952,20 +2255,29 @@ def _stream_probe(
     sink: Int,
     var head: _StreamHead,
 ) raises -> Optional[DataFrame]:
-    """The stream's probe pipeline, run on the calling thread's own
-    schedule: no input ahead of it, so its workers run as `run_jobs`."""
-    var start = _probe_start(self, index, batch_size, sink, head^)
-    if len(start.piped) == 0:
+    """A stream with no input to schedule ahead of its probe: the probe
+    set up here, and, when that leaves work to run, scheduled with its
+    outer scans so its execute and finish tasks share one queue."""
+    var start = _probe_start(self, index, batch_size, sink, head.copy())
+    if not start.runs():
         var result = Optional[DataFrame]()
         swap(result, start.result)
         return result^
-    ref piped = start.piped[0]
-    try:
-        piped.run.execute_all()
-    except e:
-        piped.run.release()
-        raise e^
-    return _probe_finish(self, piped)
+    var schedule = _StreamSchedule()
+    var top = _add_stream(
+        schedule,
+        Int(Pointer(to=self)),
+        index,
+        batch_size,
+        sink,
+        head^,
+        _StreamInputs(),
+        _BuildFor(),
+        META_REGULAR,
+        False,
+    )
+    schedule.pipelines[top].probe[0].started.append(start^)
+    return _run_schedule(self, schedule, top)
 
 
 struct _PipedProbe(Movable):
@@ -2042,19 +2354,33 @@ struct _PipedProbe(Movable):
 
 
 struct _ProbeStart(Movable):
-    """`_probe_start`'s answer: the result, or a probe set up to run."""
+    """`_probe_start`'s answer: the result, or a probe set up to run, as
+    a morsel pipeline or as a batch stream."""
 
     var result: Optional[DataFrame]
     var piped: List[_PipedProbe]
+    var batch: List[_BatchStream]
 
     def __init__(out self, var result: Optional[DataFrame]):
         self.result = result^
         self.piped = List[_PipedProbe]()
+        self.batch = List[_BatchStream]()
 
     def __init__(out self, var piped: _PipedProbe):
         self.result = None
         self.piped = List[_PipedProbe]()
         self.piped.append(piped^)
+        self.batch = List[_BatchStream]()
+
+    def __init__(out self, var batch: _BatchStream):
+        self.result = None
+        self.piped = List[_PipedProbe]()
+        self.batch = List[_BatchStream]()
+        self.batch.append(batch^)
+
+    def runs(self) -> Bool:
+        """Whether a probe is set up to run, rather than a result made."""
+        return len(self.piped) > 0 or len(self.batch) > 0
 
 
 def _row_steps_above(

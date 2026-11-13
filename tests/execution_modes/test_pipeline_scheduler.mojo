@@ -2,8 +2,8 @@
 pipeline only after the pipelines it depends on complete, finish sibling
 join builds only after all of them executed, run independent pipelines at
 the same time, survive nested parallel work inside a task, run the tasks a
-sink's Finalize adds before the finish event finishes, and report the
-first task error."""
+sink's Finalize adds, round after round, before the finish event finishes,
+and report the first task error."""
 # contract-group: execution.lifecycle
 from std.atomic import Atomic
 from std.memory import ArcPointer
@@ -59,10 +59,14 @@ struct Recorded(SchedulablePipeline):
     # Nested parallel work inside the execute task.
     var nested: Bool
     var nested_total: Int
-    # Tasks its Finalize inserts (a join build's finalize event), when
-    # each ran, and when that event finished.
+    # Tasks its Finalize inserts per round (a join build's finalize
+    # event), the rounds, when each task ran (round-major), and when each
+    # round's serial step ran.
     var finals: Int
+    var rounds: Int
+    var round: Int
     var final_ticks: List[Int]
+    var round_ticks: List[Int]
     var finished_finals: Int
 
     def __init__(
@@ -73,6 +77,7 @@ struct Recorded(SchedulablePipeline):
         fail: Bool = False,
         nested: Bool = False,
         finals: Int = 0,
+        rounds: Int = 1,
     ):
         self.clock = clock.copy()
         self.tasks = tasks
@@ -86,7 +91,10 @@ struct Recorded(SchedulablePipeline):
         self.nested = nested
         self.nested_total = 0
         self.finals = finals
-        self.final_ticks = List[Int](length=finals, fill=-1)
+        self.rounds = rounds
+        self.round = 0
+        self.final_ticks = List[Int](length=finals * rounds, fill=-1)
+        self.round_ticks = List[Int]()
         self.finished_finals = -1
 
     def _now(self) -> Int:
@@ -140,13 +148,17 @@ struct Recorded(SchedulablePipeline):
         return self.finals
 
     def finalize_tasks(mut self) raises -> Int:
+        if self.finals == 0 or self.round == self.rounds:
+            return 0
+        self.round += 1
         return self.finals
 
     def finalize_task(mut self, task: Int) raises:
-        self.final_ticks[task] = self._now()
+        self.final_ticks[(self.round - 1) * self.finals + task] = self._now()
 
     def finish_finalize(mut self) raises:
         self.finished_finals = self._now()
+        self.round_ticks.append(self.finished_finals)
 
 
 def _last_execute(p: Recorded) -> Int:
@@ -233,6 +245,30 @@ def test_finalize_tasks_run_before_the_finish_event_finishes() raises:
     for t in build.final_ticks:
         assert_true(build.finalized < t)
         assert_true(t < build.finished_finals)
+    assert_true(build.finished_finals < _first_execute(pipelines[1]))
+
+
+def test_finalize_rounds_run_one_after_another() raises:
+    """Pipeline 0's finish runs 40 rounds of 8 tasks, many more tasks than
+    the queue holds at once: every round's tasks run after the round
+    before ended and before its own serial step, and pipeline 1, which
+    reads 0's sink, executes only after the last round."""
+    var clock = ArcPointer(Clock())
+    var pipelines = List[Recorded]()
+    var metas = List[MetaPipeline]()
+    pipelines.append(Recorded(clock, finals=8, rounds=40))
+    metas.append(MetaPipeline(META_JOIN_BUILD, parent=1))
+    pipelines.append(Recorded(clock, tasks=2))
+    metas.append(MetaPipeline(META_REGULAR, dependencies=[0]))
+    run_pipelines(pipelines, metas)
+    ref build = pipelines[0]
+    assert_equal(len(build.round_ticks), 40)
+    for r in range(40):
+        var before = build.finalized if r == 0 else build.round_ticks[r - 1]
+        for t in range(8):
+            var tick = build.final_ticks[r * 8 + t]
+            assert_true(before < tick)
+            assert_true(tick < build.round_ticks[r])
     assert_true(build.finished_finals < _first_execute(pipelines[1]))
 
 
