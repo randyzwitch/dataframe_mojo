@@ -1,7 +1,8 @@
 """Partitioned hash join storage and bounded probe output.
 
-Build rows contain validity, keys, payload columns, original row numbers,
-match flags and hashes. Long strings stay in the build columns' own buffers,
+Build rows contain validity, keys, payload columns, build row numbers (for
+the eager join, which reads its build frame by them), match flags and
+hashes. Long strings stay in the build columns' own buffers,
 which the table keeps, or else are copied into its heap. Workers append to
 private radix partitions, then independent tasks assemble one
 pointer-table region per partition, avoiding shared inserts.
@@ -42,6 +43,7 @@ from dataframe.join_type import (
     JOIN_RIGHT_ANTI,
     JOIN_RIGHT_SEMI,
     JOIN_SEMI,
+    join_emits_build_rows,
 )
 from dataframe.kernels.partition import _hash_column
 from dataframe.parallel import (
@@ -64,7 +66,9 @@ from dataframe.vector.data_chunk import (
     DataChunk,
     decode_values,
     flat_over,
+    to_series,
 )
+from dataframe.vector.sink import Sink
 from dataframe.vector.partitioned_tuple_data import (
     PartitionedTupleDataAppendState,
     RadixPartitionedTupleData,
@@ -83,12 +87,20 @@ from dataframe.vector.tuple_data_scatter_gather import (
 )
 from dataframe.vector.tuple_data_states import TupleDataChunkState
 from dataframe.vector.types import (
+    FLAT_VECTOR,
     PHYSICAL_BOOL,
+    PHYSICAL_INT16,
+    PHYSICAL_INT32,
+    PHYSICAL_INT64,
+    PHYSICAL_INT8,
+    PHYSICAL_UINT16,
     PHYSICAL_UINT32,
     PHYSICAL_UINT64,
+    PHYSICAL_UINT8,
     PHYSICAL_VARCHAR,
     STANDARD_VECTOR_SIZE,
     SelectionVector,
+    physical_of,
     physical_size,
 )
 
@@ -378,7 +390,7 @@ struct KeyLayout(Copyable, Movable):
             at[fields] - at[0],
             plain,
             at[0],
-            at[index_column],
+            at[index_column] if index_column >= 0 else -1,
             at[found_column] if found_column >= 0 else -1,
             at[len(layout.types()) - 1],
             layout.row_width(),
@@ -525,143 +537,511 @@ struct _TableData(Movable):
         self.pending = List[_FinalizeJob]()
 
 
-struct _SinkJob(Job):
-    """One HashJoinSink thread: build rows [start, start + count) chunk by
-    chunk into its own RadixPartitionedTupleData (PhysicalHashJoin::Sink
-    and JoinHashTable::Build): the keys and the build row referenced, the
-    hash computed, the rows with a null key left out (PrepareKeys)."""
+def _integer_physical(physical: Int) -> Bool:
+    """Whether row values of `physical` are integers, whose least and
+    greatest key a build records."""
+    return (
+        physical == PHYSICAL_UINT8
+        or physical == PHYSICAL_INT8
+        or physical == PHYSICAL_UINT16
+        or physical == PHYSICAL_INT16
+        or physical == PHYSICAL_UINT32
+        or physical == PHYSICAL_INT32
+        or physical == PHYSICAL_UINT64
+        or physical == PHYSICAL_INT64
+    )
 
-    var keys: List[Series]
-    var payload: List[Series]
-    var layout: TupleDataLayout
-    var start: Int
-    var count: Int
-    var invalid: Int
+
+struct JoinBuildLayout(Copyable, Movable):
+    """What every thread sinking rows into one join's build shares: the
+    row layout [keys, payload, build row number, found flag, hash] (the
+    number only when the table is numbered, the flag only when the join
+    reads it), which column of the sink's input chunks each key and
+    payload field comes from, and the build side's columns the join
+    outputs from the rows."""
+
+    var row_layout: TupleDataLayout
+    var key_layout: KeyLayout
+    var key_columns: List[Int]
+    var payload_columns: List[Int]
+    var key_types: List[DataType]
+    # Whether each key's least and greatest values are recorded (integer
+    # keys).
+    var bounded: List[Bool]
+    var numbered: Bool
     var found: Bool
-    var rows: RadixPartitionedTupleData
-    # The buffers this sink's rows point into for strings left where they
-    # are (`_string_buffers`), which the table keeps.
-    var strings: List[_Buffer[UInt8]]
+    var nested: Bool
+    var output_columns: List[Int]
+    var output_names: List[String]
+    var output_types: List[DataType]
+    var perfect: Bool
+    var keys_only: Bool
+    var probe_estimate: Int
+    # The build side's columns in order: names, types, and the row field
+    # holding each (-1 for a column the rows do not keep).
+    var build_names: List[String]
+    var build_types: List[DataType]
+    var build_fields: List[Int]
 
     def __init__(
         out self,
         keys: List[Series],
         payload: List[Series],
-        layout: TupleDataLayout,
-        start: Int,
-        count: Int,
+        key_columns: List[Int],
+        payload_columns: List[Int],
+        numbered: Bool,
         found: Bool,
+        output_columns: List[Int],
+        output_names: List[String],
+        output_types: List[DataType],
+        perfect: Bool,
+        keys_only: Bool,
+        probe_estimate: Int,
+        build_names: List[String],
+        build_types: List[DataType],
+        build_fields: List[Int],
     ) raises:
-        self.keys = List[Series](capacity=len(keys))
+        """`keys` and `payload` are columns (of any length) of the key and
+        payload types, which the row fields are typed from."""
+        var types = List[DataType](capacity=len(keys) + len(payload) + 3)
+        self.key_types = List[DataType](capacity=len(keys))
         for key in keys:
-            self.keys.append(key.slice(start, count))
-        self.payload = List[Series](capacity=len(payload))
+            if key.dtype().is_nested():
+                raise Error(
+                    "list and struct columns cannot be join keys: " + key.name()
+                )
+            types.append(_row_type(key))
+            self.key_types.append(key.dtype())
+        self.nested = False
         for column in payload:
-            self.payload.append(column.slice(start, count))
-        self.layout = layout.copy()
-        self.start = start
-        self.count = count
-        self.invalid = 0
+            if column.dtype().is_nested():
+                types.append(column.dtype())
+                self.nested = True
+            else:
+                types.append(_row_type(column))
+        var index_column = -1
+        if numbered:
+            index_column = len(types)
+            types.append(DataType.UINT32)
+        var found_column = -1
+        if found:
+            found_column = len(types)
+            types.append(DataType.BOOL)
+        types.append(DataType.UINT64)
+        self.row_layout = TupleDataLayout(types)
+        self.key_layout = KeyLayout.of(
+            self.row_layout, keys, index_column, found_column
+        )
+        self.bounded = List[Bool](capacity=len(keys))
+        for k in range(len(keys)):
+            self.bounded.append(
+                _integer_physical(self.row_layout.nodes[][0].physicals[k])
+            )
+        self.key_columns = key_columns.copy()
+        self.payload_columns = payload_columns.copy()
+        self.numbered = numbered
         self.found = found
-        self.strings = List[_Buffer[UInt8]]()
-        self.rows = RadixPartitionedTupleData(
-            self.layout,
-            INITIAL_RADIX_BITS,
-            len(keys) + len(payload) + 1 + (1 if found else 0),
+        self.output_columns = output_columns.copy()
+        self.output_names = output_names.copy()
+        self.output_types = output_types.copy()
+        self.perfect = perfect
+        self.keys_only = keys_only
+        self.probe_estimate = probe_estimate
+        self.build_names = build_names.copy()
+        self.build_types = build_types.copy()
+        self.build_fields = build_fields.copy()
+
+    def width(self) -> Int:
+        """The key and payload fields."""
+        return len(self.key_columns) + len(self.payload_columns)
+
+    def hash_column(self) -> Int:
+        """The row chunk's last column: each row's hash."""
+        return (
+            self.width()
+            + (1 if self.numbered else 0)
+            + (1 if self.found else 0)
         )
 
-    def run(mut self) raises:
-        var fields = len(self.keys)
-        var columns = fields + len(self.payload)
-        var index_column = columns
-        var found_column = columns + 1
-        var hash_column = columns + (2 if self.found else 1)
-        var arena = ColumnArena()
-        var handles = List[Int](capacity=columns)
-        for key in self.keys:
-            handles.append(arena.add(key))
-        for column in self.payload:
-            handles.append(arena.add(column))
-        # A string column whose bytes the table can keep is not copied
-        # into the rows' heap: the rows point at its bytes, and the table
-        # holds the buffers they are in.
-        var referenced = List[Bool](length=columns, fill=False)
+
+struct JoinBuildSink(Sink):
+    """One thread's build state: the input chunks' rows appended to its
+    own radix-partitioned rows (keys, payload and hash; a row with a null
+    key is left out unless the join reads found flags, since it never
+    matches), with the count of rows seen, those with a null key, and
+    each integer key's least and greatest value. Threads never share
+    one, so sinking takes no lock; the table combines them."""
+
+    var layout: ArcPointer[JoinBuildLayout]
+    var rows: RadixPartitionedTupleData
+    var state: PartitionedTupleDataAppendState
+    # The row chunk: the input's key and payload vectors plus the columns
+    # the sink writes.
+    var chunk: DataChunk
+    var kept: List[UInt32]
+    var count: Int
+    var invalid: Int
+    # A numbered table's next build row number.
+    var next_row: Int
+    # The buffers this sink's rows point into for strings left where they
+    # are, each held once (by the address of its bytes).
+    var strings: List[_Buffer[UInt8]]
+    var held: List[Int]
+    var least: List[Int64]
+    var most: List[Int64]
+    # Per key: whether a valid value was seen, and whether every value
+    # fits the 64-bit signed bounds.
+    var seen: List[Bool]
+    var exact: List[Bool]
+
+    def __init__(
+        out self, layout: ArcPointer[JoinBuildLayout], first_row: Int = 0
+    ) raises:
+        self.layout = layout
+        self.rows = RadixPartitionedTupleData(
+            layout[].row_layout, INITIAL_RADIX_BITS, layout[].hash_column()
+        )
+        self.state = PartitionedTupleDataAppendState()
+        self.rows.initialize_append_state(self.state)
+        self.chunk = DataChunk(layout[].hash_column() + 1)
+        self.kept = List[UInt32](unsafe_uninit_length=STANDARD_VECTOR_SIZE)
+        self.count = 0
+        self.invalid = 0
+        self.next_row = first_row
+        self.strings = List[_Buffer[UInt8]]()
+        self.held = List[Int]()
+        var keys = len(layout[].key_columns)
+        self.least = List[Int64](length=keys, fill=Int64.MAX)
+        self.most = List[Int64](length=keys, fill=Int64.MIN)
+        self.seen = List[Bool](length=keys, fill=False)
+        self.exact = layout[].bounded.copy()
+
+    def begin(mut self, morsel: Int):
+        pass
+
+    def sink(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
+        var n = chunk.count
+        if n == 0:
+            return
+        var shared = self.layout
+        ref layout = shared[]
+        var fields = len(layout.key_columns)
+        var columns = layout.width()
+        self.chunk.reset()
+        for k in range(fields):
+            self.chunk.data[k] = chunk.data[layout.key_columns[k]]
+        for p in range(len(layout.payload_columns)):
+            self.chunk.data[fields + p] = chunk.data[layout.payload_columns[p]]
+        var at = columns
+        if layout.numbered:
+            var index = self.chunk.writable(at, PHYSICAL_UINT32)
+            var numbers = Pointer[UInt32, MutAnyOrigin](
+                unsafe_from_address=index.data
+            )
+            for i in range(n):
+                numbers[unsafe_offset=i] = UInt32(self.next_row + i)
+            at += 1
+        if layout.found:
+            # Every row starts not found.
+            var found = self.chunk.writable(at, PHYSICAL_BOOL)
+            unsafe_memset_zero(
+                Pointer[UInt8, MutAnyOrigin](unsafe_from_address=found.data),
+                n,
+            )
+        var hashes = self.chunk.writable(layout.hash_column(), PHYSICAL_UINT64)
+        for k in range(fields):
+            var key = to_series(
+                chunk, layout.key_columns[k], arena, "", layout.key_types[k]
+            )
+            _hash_column(key, 0, n, hashes.data, k == 0)
+            if self.exact[k]:
+                self._bound(k, key)
+        self.chunk.count = n
+        self.rows.partitions[0].to_unified_format(
+            self.state.chunk_state, self.chunk, arena
+        )
         for k in range(columns):
-            if self.layout.nodes[][0].physicals[k] != PHYSICAL_VARCHAR:
+            var referenced = False
+            if layout.row_layout.nodes[][0].physicals[k] == PHYSICAL_VARCHAR:
+                # A window of a column whose bytes the table can keep is
+                # not copied into the rows' heap: the rows point at its
+                # bytes, and the table holds the buffers they are in. A
+                # vector that selects rows of its column is copied, so a
+                # filter that keeps few rows does not keep every byte.
+                var v = self.chunk.data[k]
+                if v.source >= 0 and v.vector_type == FLAT_VECTOR:
+                    var buffers = _string_buffers(arena.columns[v.source])
+                    if buffers:
+                        referenced = True
+                        self._hold(buffers.value())
+            self.state.chunk_state.vector_data[k].referenced = referenced
+        # The rows whose keys are all valid.
+        var sel = self.kept.unsafe_ptr()
+        var added = n
+        var append_sel = SelectionVector()
+        for k in range(fields):
+            ref format = self.state.chunk_state.vector_data[k].unified
+            if format.validity.all_valid():
                 continue
-            var buffers = _string_buffers(arena.columns[handles[k]])
-            if buffers:
-                referenced[k] = True
-                for buffer in buffers.value():
-                    self.strings.append(buffer.copy())
-        var chunk = DataChunk(hash_column + 1)
-        var state = PartitionedTupleDataAppendState()
-        self.rows.initialize_append_state(state)
-        var kept = List[UInt32](unsafe_uninit_length=STANDARD_VECTOR_SIZE)
-        var sel = kept.unsafe_ptr()
+            var kept_count = 0
+            for i in range(added):
+                var row = append_sel.get_index(i)
+                if format.validity.row_is_valid(format.sel.get_index(row)):
+                    sel[unsafe_offset=kept_count] = UInt32(row)
+                    kept_count += 1
+            added = kept_count
+            append_sel = SelectionVector(Int(sel))
+        self.invalid += n - added
+        if layout.found:
+            # A join that reads the found flags keeps its rows with a null
+            # key (never matched, so its scan emits them); only the insert
+            # skips them.
+            self.rows.append_unified(
+                self.state, self.chunk, SelectionVector(), n
+            )
+        else:
+            self.rows.append_unified(self.state, self.chunk, append_sel, added)
+        self.count += n
+        self.next_row += n
+
+    def _hold(mut self, buffers: List[_Buffer[UInt8]]):
+        for buffer in buffers:
+            var address = Int(buffer.unsafe_ptr())
+            var known = False
+            for h in self.held:
+                if h == address:
+                    known = True
+                    break
+            if not known:
+                self.held.append(address)
+                self.strings.append(buffer.copy())
+
+    def _bound(mut self, k: Int, key: Series):
+        """Widen key `k`'s least and greatest value by `key`'s valid
+        values."""
+        var valid = _validity(key)
+        var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid[0])
+        var least = self.least[k]
+        var most = self.most[k]
+        var seen = self.seen[k]
+        comptime for d in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[d]
+            comptime if not D.is_floating_point():
+                if key._data.isa[Column[Scalar[D]]]():
+                    var values = key._data[Column[Scalar[D]]]._ptr()
+                    for i in range(len(key)):
+                        if valid[0] != 0 and not _validity_at(
+                            bitmap, valid[1] + i
+                        ):
+                            continue
+                        var value = values[unsafe_offset=i]
+                        comptime if D == DType.uint64:
+                            if UInt64(value) > UInt64(Int64.MAX):
+                                self.exact[k] = False
+                                return
+                        least = min(least, Int64(value))
+                        most = max(most, Int64(value))
+                        seen = True
+                    self.least[k] = least
+                    self.most[k] = most
+                    self.seen[k] = seen
+                    return
+        self.exact[k] = False
+
+    def release(mut self):
+        self.rows.flush_append_state(self.state)
+
+    def combine(var self, mut combined: List[JoinBuildSink]) raises:
+        """The thread's rows into the global state, every thread's, which
+        the table merges partition by partition."""
+        combined.append(self^)
+
+
+struct _FrameSinkJob(Job):
+    """One build thread over a frame: rows [start, start + count) of the
+    key and payload columns into its own sink, a vector at a time."""
+
+    var columns: List[Series]
+    var start: Int
+    var count: Int
+    # The thread's sink (one), taken by the table once the job has run.
+    var sink: List[JoinBuildSink]
+
+    def __init__(
+        out self,
+        columns: List[Series],
+        layout: ArcPointer[JoinBuildLayout],
+        start: Int,
+        count: Int,
+    ) raises:
+        self.columns = List[Series](capacity=len(columns))
+        for column in columns:
+            self.columns.append(column.slice(start, count))
+        self.start = start
+        self.count = count
+        self.sink = List[JoinBuildSink]()
+        self.sink.append(JoinBuildSink(layout, start))
+
+    def run(mut self) raises:
+        var arena = ColumnArena()
+        var handles = List[Int](capacity=len(self.columns))
+        for column in self.columns:
+            handles.append(arena.add(column))
+        var chunk = DataChunk(len(self.columns))
         var low = 0
         while low < self.count:
             var n = min(STANDARD_VECTOR_SIZE, self.count - low)
             chunk.reset()
-            for k in range(columns):
-                chunk.data[k] = flat_over(arena, handles[k], low)
-            var index = chunk.writable(index_column, PHYSICAL_UINT32)
-            var rows = Pointer[UInt32, MutAnyOrigin](
-                unsafe_from_address=index.data
-            )
-            for i in range(n):
-                rows[unsafe_offset=i] = UInt32(self.start + low + i)
-            if self.found:
-                # Every row starts not found.
-                var found = chunk.writable(found_column, PHYSICAL_BOOL)
-                unsafe_memset_zero(
-                    Pointer[UInt8, MutAnyOrigin](
-                        unsafe_from_address=found.data
-                    ),
-                    n,
-                )
-            var hashes = chunk.writable(hash_column, PHYSICAL_UINT64)
-            for k in range(fields):
-                _hash_column(
-                    self.keys[k],
-                    low,
-                    low + n,
-                    hashes.data,
-                    k == 0,
-                    output_offset=low,
-                )
+            for c in range(len(handles)):
+                chunk.data[c] = flat_over(arena, handles[c], low)
             chunk.count = n
-            self.rows.partitions[0].to_unified_format(
-                state.chunk_state, chunk, arena
-            )
-            for k in range(columns):
-                state.chunk_state.vector_data[k].referenced = referenced[k]
-            # PrepareKeys: the rows whose keys are all valid.
-            var added = n
-            var append_sel = SelectionVector()
-            for k in range(fields):
-                ref format = state.chunk_state.vector_data[k].unified
-                if format.validity.all_valid():
-                    continue
-                var kept_count = 0
-                for i in range(added):
-                    var row = append_sel.get_index(i)
-                    if format.validity.row_is_valid(format.sel.get_index(row)):
-                        sel[unsafe_offset=kept_count] = UInt32(row)
-                        kept_count += 1
-                added = kept_count
-                append_sel = SelectionVector(Int(sel))
-            self.invalid += n - added
-            if self.found:
-                # A join that reads the found flags keeps its rows with a
-                # null key (never matched, so its scan emits them); only
-                # the insert skips them.
-                self.rows.append_unified(state, chunk, SelectionVector(), n)
-            else:
-                self.rows.append_unified(state, chunk, append_sel, added)
+            self.sink[0].sink(chunk, arena)
             low += n
-        self.rows.flush_append_state(state)
-        _ = kept^
+        self.sink[0].release()
+
+
+def join_build_layout(
+    columns: List[Series],
+    keys: List[String],
+    how: Int,
+    coalesce: Bool,
+    probe_estimate: Int,
+    from_chunks: Bool,
+    numbered: Bool = False,
+) raises -> Optional[JoinBuildLayout]:
+    """The rows a hash join of type `how` on the build keys `keys` keeps
+    of a build side with `columns` (columns of any length, typing the
+    rows): the keys, then every other column unless the join is a semi or
+    anti join (it emits no build column), the outputs the join reads from
+    them (a key only where the join does not coalesce it), and found
+    flags when the join emits build rows after its probe. `probe_estimate`
+    is the probe side's estimated rows. None when the build cannot be a
+    table: a nested key, or, for rows sunk from pipeline chunks
+    (`from_chunks`), a categorical key (the probe unifies dictionaries
+    against the build frame) or a nested column (a chunk's nested vector
+    may have no column to read)."""
+    if len(keys) == 0:
+        return None
+    var key_columns = List[Int](capacity=len(keys))
+    for name in keys:
+        var at = -1
+        for c in range(len(columns)):
+            if columns[c].name() == name:
+                at = c
+        if at < 0:
+            raise Error("join build: no key column " + name)
+        ref dtype = columns[at].dtype()
+        if dtype.is_nested() or (from_chunks and dtype.is_categorical()):
+            return None
+        key_columns.append(at)
+    var emits = how != JOIN_SEMI and how != JOIN_ANTI
+    var payload_columns = List[Int]()
+    var output_columns = List[Int]()
+    var output_names = List[String]()
+    var output_types = List[DataType]()
+    var build_names = List[String]()
+    var build_types = List[DataType]()
+    var build_fields = List[Int]()
+    for i in range(len(columns)):
+        ref column = columns[i]
+        if from_chunks and column.dtype().is_nested():
+            return None
+        build_names.append(column.name())
+        build_types.append(column.dtype())
+        var key_at = -1
+        for k in range(len(keys)):
+            if keys[k] == column.name():
+                key_at = k
+        if key_at < 0:
+            # A payload column: in the rows, strings and nested values in
+            # their heap.
+            if emits:
+                payload_columns.append(i)
+                var field = len(keys) + len(payload_columns) - 1
+                build_fields.append(field)
+                output_columns.append(field)
+                output_names.append(column.name())
+                output_types.append(column.dtype())
+            else:
+                build_fields.append(-1)
+            continue
+        # A key column: read from its own field where the join outputs it.
+        build_fields.append(key_at)
+        if not emits:
+            continue
+        if coalesce and how != JOIN_RIGHT_SEMI and how != JOIN_RIGHT_ANTI:
+            continue
+        output_columns.append(key_at)
+        output_names.append(column.name())
+        output_types.append(column.dtype())
+    var key_series = List[Series](capacity=len(key_columns))
+    for c in key_columns:
+        key_series.append(columns[c].copy())
+    var payload_series = List[Series](capacity=len(payload_columns))
+    for c in payload_columns:
+        payload_series.append(columns[c].copy())
+    var perfect = how == JOIN_INNER
+    var keys_only = keys_only_join(how)
+    return JoinBuildLayout(
+        key_series,
+        payload_series,
+        key_columns,
+        payload_columns,
+        numbered,
+        join_emits_build_rows(how) and not perfect and not keys_only,
+        output_columns,
+        output_names,
+        output_types,
+        perfect,
+        keys_only,
+        probe_estimate,
+        build_names,
+        build_types,
+        build_fields,
+    )
+
+
+def build_from_columns(
+    layout: ArcPointer[JoinBuildLayout],
+    columns: List[Series],
+    defer_finalize: Bool,
+) raises -> JoinHashTable:
+    """The table over a build side's whole columns (each one chunk, all of
+    one length), which `layout` reads: the rows are fed as vectors of
+    STANDARD_VECTOR_SIZE, and every thread that can take at least one
+    vector sinks a contiguous run of them into its own partitioned rows.
+    A sink's work per row is the same whatever the table's size, so a
+    small build spreads over the threads just as a large one does instead
+    of leaving them idle. The runs are contiguous so that combining the
+    threads' partitions in thread order keeps every partition's rows in
+    build order. The table keeps the key columns, which its key filters
+    read."""
+    var count = len(columns[0]) if len(columns) > 0 else 0
+    if count > Int(Int32.MAX):
+        raise Error("A join build exceeds 2^31 - 1 rows")
+    var vectors = (count + STANDARD_VECTOR_SIZE - 1) // STANDARD_VECTOR_SIZE
+    var workers = max(1, min(configured_workers(), vectors))
+    var bounds = partitions(count, workers, STANDARD_VECTOR_SIZE)
+    var jobs = List[_FrameSinkJob](capacity=workers)
+    for w in range(workers):
+        if bounds[w] < bounds[w + 1]:
+            jobs.append(
+                _FrameSinkJob(
+                    columns, layout, bounds[w], bounds[w + 1] - bounds[w]
+                )
+            )
+    if len(jobs) == 1:
+        jobs[0].run()
+    elif len(jobs) > 1:
+        run_jobs(jobs)
+    var sinks = List[JoinBuildSink](capacity=len(jobs))
+    for j in range(len(jobs)):
+        sinks.append(jobs[j].sink.pop())
+    _ = jobs^
+    var keys = List[Series](capacity=len(layout[].key_columns))
+    for c in layout[].key_columns:
+        keys.append(columns[c].copy())
+    return JoinHashTable(layout, sinks^, defer_finalize, keys^)
 
 
 def _string_buffers(series: Series) -> Optional[List[_Buffer[UInt8]]]:
@@ -843,7 +1223,9 @@ def _word[D: DType](value: Scalar[D]) -> UInt64:
 
 
 def _perfect_slots(
-    key: Series,
+    physical: Int,
+    least: Int64,
+    most: Int64,
     inserted: Int,
     rows: TupleDataCollection,
     key_offset: Int,
@@ -854,35 +1236,27 @@ def _perfect_slots(
     mut filled_rows: List[UInt64],
     mut filled_builds: List[UInt32],
 ) raises -> Optional[Tuple[UInt64, Int]]:
-    """Build a direct-address table for bounded unique integer keys. Reserve
-    max - min + 1 slots, clear only the validity bitmap, and read a slot
-    only when its bit is set. Reject counts above the slot count, then
-    verify uniqueness while filling slots. A densely populated range is
-    valid because both endpoints have slots."""
-    var valid = _validity(key)
-    var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid[0])
+    """Build a direct-address table for bounded unique integer keys whose
+    row values are `physical`, the least and greatest of them `least` and
+    `most`. Reserve most - least + 1 slots, clear only the validity bitmap,
+    and read a slot only when its bit is set. Reject counts above the slot
+    count, then verify uniqueness while filling slots. A densely populated
+    range is valid because both endpoints have slots. Each slot holds its
+    row's build row number when the rows carry one (`index_offset` >= 0),
+    else the row's place among the rows, either of which numbers the
+    output dictionary's entries."""
+    # Both bounds fit 64-bit signed values, so their two's complement
+    # words differ by the range's width.
+    var base = bitcast[DType.uint64](least)
+    var span = bitcast[DType.uint64](most) - base
+    if span > UInt64(PERFECT_MAX_BUILD_SIZE):
+        return None
+    if UInt64(inserted) > span + 1:
+        return None
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         comptime if not D.is_floating_point():
-            if key._data.isa[Column[Scalar[D]]]():
-                var values = key._data[Column[Scalar[D]]]._ptr()
-                var n = len(key)
-                var least = Scalar[D].MAX
-                var most = Scalar[D].MIN
-                for i in range(n):
-                    if valid[0] != 0 and not _validity_at(bitmap, valid[1] + i):
-                        continue
-                    var value = values[unsafe_offset=i]
-                    least = min(least, value)
-                    most = max(most, value)
-                if least > most:
-                    return None
-                var base = _word[D](least)
-                var span = _word[D](most) - base
-                if span > UInt64(PERFECT_MAX_BUILD_SIZE):
-                    return None
-                if UInt64(inserted) > span + 1:
-                    return None
+            if physical == physical_of[D]():
                 var size = Int(span) + 1
                 slots = List[UInt32](unsafe_uninit_length=size)
                 bits = List[UInt8](unsafe_uninit_length=(size + 7) // 8)
@@ -899,6 +1273,7 @@ def _perfect_slots(
                 filled_rows = List[UInt64](capacity=inserted)
                 filled_builds = List[UInt32](capacity=inserted)
                 var state = TupleDataChunkState()
+                var place = 0
                 for s in range(len(rows.segments)):
                     ref segment = rows.segments[s]
                     for c in range(segment.chunk_count()):
@@ -916,12 +1291,14 @@ def _perfect_slots(
                             if byte & bit != 0:
                                 return None
                             set[unsafe_offset=slot >> 3] = byte | bit
-                            table[unsafe_offset=slot] = _load32(
-                                row + index_offset
-                            )
+                            var number = UInt32(place)
+                            if index_offset >= 0:
+                                number = _load32(row + index_offset)
+                            table[unsafe_offset=slot] = number
                             pointers[unsafe_offset=slot] = UInt64(row)
                             filled_rows.append(UInt64(row))
-                            filled_builds.append(table[unsafe_offset=slot])
+                            filled_builds.append(number)
+                            place += 1
                 return (base, Int(span))
     return None
 
@@ -1033,130 +1410,127 @@ struct JoinHashTable(Copyable, Movable):
     var rows_stored: Int
     # The probe side's estimated rows (dictionary emission at finish).
     var probe_estimate: Int
+    # The key types, and per key its least and greatest valid value, known
+    # for an integer key with a valid value (`bounded`).
+    var key_types: List[DataType]
+    var least: List[Int64]
+    var most: List[Int64]
+    var bounded: List[Bool]
+    # The build side's columns in order (names, types, and the row field
+    # holding each, -1 where the rows do not keep it), from which
+    # `rows_frame` makes a frame of the rows.
+    var build_names: List[String]
+    var build_types: List[DataType]
+    var build_fields: List[Int]
 
     def __init__(
         out self,
         keys: List[Series],
-        payload: Optional[List[Series]] = None,
-        output_columns: List[Int] = List[Int](),
-        output_names: List[String] = List[String](),
-        output_types: List[DataType] = List[DataType](),
         perfect: Bool = False,
         keys_only: Bool = False,
-        probe_estimate: Int = -1,
         propagate: Bool = True,
-        defer_finalize: Bool = False,
     ) raises:
-        """Build and finalize the table over `keys` (one column per
-        equality condition, all of one length). `payload`: the build
-        side's other columns, stored in the rows; none for the eager
-        join, which keeps only each row's build row. `output_columns`
-        (row layout columns: a key, or a payload column),
-        `output_names` and `output_types` are the build side's
-        output columns, gathered from the rows. `perfect`: the join is an
+        """Build and finalize the eager join's table over `keys` (one
+        column per equality condition, all of one length): the rows hold
+        the keys and each row's build row number (`build_side_row`), which
+        the eager join reads its build frame by. `perfect`: the join is an
         inner join, which may run as a perfect hash join. `keys_only`: the
         join is a semi, anti or mark join (`keys_only_join`), which keeps
-        one row per key. `probe_estimate`: the probe side's estimated
-        rows (dictionary emission; -1 when unknown). `propagate`: the join
-        reads the rows' found flags (`PropagatesBuildSide`).
-        `defer_finalize`: leave the finalize tasks to the caller's finish
-        event (`finalize_tasks`, `finalize_task`, `finish_finalize`)
-        rather than running them here."""
-        var unchunked = List[Series](capacity=len(keys))
+        one row per key. `propagate`: the join reads the rows' found flags
+        (it emits build rows after the probe)."""
+        var columns = List[Series](capacity=len(keys))
+        var key_columns = List[Int](capacity=len(keys))
+        var build_names = List[String](capacity=len(keys))
+        var build_types = List[DataType](capacity=len(keys))
         for key in keys:
             if key.dtype().is_nested():
                 raise Error(
                     "list and struct columns cannot be join keys: " + key.name()
                 )
-            unchunked.append(key.rechunk() if key.is_chunked() else key.copy())
-        # BuildJoinLayout: [keys, payload, build row, hash].
-        var payload_columns = List[Series]()
-        if payload:
-            for column in payload.value():
-                payload_columns.append(
-                    column.rechunk() if column.is_chunked() else column.copy()
-                )
-        var types = List[DataType](
-            capacity=len(unchunked) + len(payload_columns) + 2
+            key_columns.append(len(columns))
+            build_names.append(key.name())
+            build_types.append(key.dtype())
+            columns.append(key.rechunk() if key.is_chunked() else key.copy())
+        var layout = ArcPointer(
+            JoinBuildLayout(
+                columns,
+                List[Series](),
+                key_columns,
+                List[Int](),
+                True,
+                propagate and not perfect and not keys_only,
+                List[Int](),
+                List[String](),
+                List[DataType](),
+                perfect,
+                keys_only,
+                -1,
+                build_names,
+                build_types,
+                key_columns,
+            )
         )
-        for key in unchunked:
-            types.append(_row_type(key))
-        for column in payload_columns:
-            if column.dtype().is_nested():
-                types.append(column.dtype())
-            else:
-                types.append(_row_type(column))
-        var index_column = len(types)
-        types.append(DataType.UINT32)
-        var found_column = -1
-        if propagate and not perfect and not keys_only:
-            found_column = len(types)
-            types.append(DataType.BOOL)
-        types.append(DataType.UINT64)
-        var row_layout = TupleDataLayout(types)
-        self.layout = KeyLayout.of(
-            row_layout, unchunked, index_column, found_column
-        )
-        self.row_layout = row_layout.copy()
-        self.output_columns = output_columns.copy()
-        self.output_names = output_names.copy()
-        self.output_types = output_types.copy()
+        self = build_from_columns(layout, columns, False)
+
+    def __init__(
+        out self,
+        layout: ArcPointer[JoinBuildLayout],
+        var sinks: List[JoinBuildSink],
+        defer_finalize: Bool,
+        var keys: List[Series] = List[Series](),
+    ) raises:
+        """The table over the rows every build thread sank (`sinks`, in
+        thread order; Combine, then Finalize): their partitions merged, the
+        pointer table's regions planned, and the finalize tasks run here
+        unless `defer_finalize`. `keys`: the build's key columns when they
+        exist as columns (a build from a frame), which `key_column` then
+        reads instead of the rows."""
+        ref shape = layout[]
+        self.layout = shape.key_layout.copy()
+        self.row_layout = shape.row_layout.copy()
+        self.output_columns = shape.output_columns.copy()
+        self.output_names = shape.output_names.copy()
+        self.output_types = shape.output_types.copy()
+        self.key_types = shape.key_types.copy()
+        self.build_names = shape.build_names.copy()
+        self.build_types = shape.build_types.copy()
+        self.build_fields = shape.build_fields.copy()
         self.use_dictionary = False
         self.rows_stored = 0
-        self.probe_estimate = probe_estimate
-        self.count = len(unchunked[0]) if len(unchunked) > 0 else 0
-        if self.count > Int(Int32.MAX):
-            raise Error("A join build exceeds 2^31 - 1 rows")
-        self.data = ArcPointer(_TableData(unchunked.copy(), row_layout))
-        # Sink: the rows are fed as vectors of STANDARD_VECTOR_SIZE, and
-        # every thread that can take at least one vector sinks a
-        # contiguous run of them into its own partitioned rows. A sink's
-        # work per row is the same whatever the table's size, so a small
-        # build spreads over the threads just as a large one does instead
-        # of leaving them idle. The runs are contiguous so that combining
-        # the threads' partitions in thread order keeps every partition's
-        # rows in build order.
-        var vectors = (
-            self.count + STANDARD_VECTOR_SIZE - 1
-        ) // STANDARD_VECTOR_SIZE
-        var workers = max(1, min(configured_workers(), vectors))
-        var bounds = partitions(self.count, workers, STANDARD_VECTOR_SIZE)
-        var sinks = List[_SinkJob](capacity=workers)
-        for w in range(workers):
-            if bounds[w] < bounds[w + 1]:
-                sinks.append(
-                    _SinkJob(
-                        unchunked,
-                        payload_columns,
-                        row_layout,
-                        bounds[w],
-                        bounds[w + 1] - bounds[w],
-                        found_column >= 0,
-                    )
-                )
-        if len(sinks) == 1:
-            sinks[0].run()
-        elif len(sinks) > 1:
-            run_jobs(sinks)
-        # Combine: the threads' partitions merged, thread by thread, so
-        # each partition's rows stay in build order.
+        self.probe_estimate = shape.probe_estimate
+        self.data = ArcPointer(_TableData(keys^, shape.row_layout))
+        # Combine: the threads' partitions merged, thread by thread, and
+        # their key bounds with them.
+        var fields = len(shape.key_columns)
         var sink = RadixPartitionedTupleData(
-            row_layout,
-            INITIAL_RADIX_BITS,
-            len(unchunked)
-            + len(payload_columns)
-            + 1
-            + (1 if found_column >= 0 else 0),
+            shape.row_layout, INITIAL_RADIX_BITS, shape.hash_column()
         )
         var invalid = 0
+        var count = 0
         var strings = List[_Buffer[UInt8]]()
+        self.least = List[Int64](length=fields, fill=Int64.MAX)
+        self.most = List[Int64](length=fields, fill=Int64.MIN)
+        self.bounded = shape.bounded.copy()
+        var seen = List[Bool](length=fields, fill=False)
         for w in range(len(sinks)):
             invalid += sinks[w].invalid
+            count += sinks[w].count
             sink.combine(sinks[w].rows)
             for buffer in sinks[w].strings:
                 strings.append(buffer.copy())
+            for k in range(fields):
+                self.bounded[k] = self.bounded[k] and sinks[w].exact[k]
+                if sinks[w].seen[k]:
+                    seen[k] = True
+                    self.least[k] = min(self.least[k], sinks[w].least[k])
+                    self.most[k] = max(self.most[k], sinks[w].most[k])
+        for k in range(fields):
+            self.bounded[k] = self.bounded[k] and seen[k]
+        if count > Int(Int32.MAX):
+            raise Error("A join build exceeds 2^31 - 1 rows")
         var sink_threads = max(len(sinks), 1)
         _ = sinks^
+        self.count = count
         self.has_null = invalid > 0
         self.build_filtered = False
         self.inserted = self.count - invalid
@@ -1167,7 +1541,6 @@ struct JoinHashTable(Copyable, Movable):
         self.chains_longer_than_one = False
         self.capacity = 0
         self.parts = 1
-        self.use_dictionary = False
         # Each partition's rows and segments, then Unpartition: the
         # collection lists partition 0's segments first.
         var partition_count = sink.partition_count()
@@ -1187,10 +1560,13 @@ struct JoinHashTable(Copyable, Movable):
         if self.inserted == 0:
             return
         ref rows = self.data[].collection
-        var nested = False
-        for column in payload_columns:
-            nested = nested or column.dtype().is_nested()
-        if perfect and not keys_only and len(unchunked) == 1 and not nested:
+        if (
+            shape.perfect
+            and not shape.keys_only
+            and fields == 1
+            and not shape.nested
+            and self.bounded[0]
+        ):
             # Unique integer keys over a narrow range index their slots
             # directly. Nested build columns are not supported there (a
             # slot array holds fixed-width values or string_t only), and a
@@ -1198,7 +1574,9 @@ struct JoinHashTable(Copyable, Movable):
             var filled_rows = List[UInt64]()
             var filled_builds = List[UInt32]()
             var slots = _perfect_slots(
-                unchunked[0],
+                shape.row_layout.nodes[][0].physicals[0],
+                self.least[0],
+                self.most[0],
                 self.inserted,
                 rows,
                 self.layout.key_offset,
@@ -1215,11 +1593,11 @@ struct JoinHashTable(Copyable, Movable):
                 self.perfect_base = slots.value()[0]
                 self.perfect_span = slots.value()[1]
                 # Every output column a dictionary over the build rows,
-                # each row in the table gathered to its build row number,
-                # which its key's slot holds. Sized by the build rows, not
-                # the key range: a sparse range (few rows over a wide span)
-                # would otherwise allocate and touch memory for every
-                # empty slot, for each column.
+                # each row in the table gathered to its number, which its
+                # key's slot holds. Sized by the build rows, not the key
+                # range: a sparse range (few rows over a wide span) would
+                # otherwise allocate and touch memory for every empty
+                # slot, for each column.
                 if len(self.output_columns) > 0:
                     self._gather_slots(filled_rows, filled_builds, self.count)
                 return
@@ -1261,8 +1639,8 @@ struct JoinHashTable(Copyable, Movable):
                     entries,
                     Int(self.data[].bases[p]),
                     self.data[].masks[p],
-                    not keys_only,
-                    self.has_null and found_column >= 0,
+                    not shape.keys_only,
+                    self.has_null and shape.found,
                 )
             )
         # As many tasks as the build had sink threads, each filling a run
@@ -1282,6 +1660,74 @@ struct JoinHashTable(Copyable, Movable):
         else:
             run_jobs(self.data[].pending)
         self.finish_finalize()
+
+    def key_bounds(self, k: Int) -> Optional[Tuple[Int64, Int64]]:
+        """Key `k`'s least and greatest valid value, when it is an integer
+        key with a valid value."""
+        if not self.bounded[k]:
+            return None
+        return (self.least[k], self.most[k])
+
+    def _row_pointers(self) raises -> List[UInt64]:
+        """Every row's address, in the collection's order."""
+        var pointers = List[UInt64](capacity=self.rows_stored)
+        var state = TupleDataChunkState()
+        ref rows = self.data[].collection
+        for s in range(len(rows.segments)):
+            ref segment = rows.segments[s]
+            for c in range(segment.chunk_count()):
+                var n = segment.initialize_chunk_state(state, c, False)
+                var at = state.row_locations.unsafe_ptr()
+                for i in range(n):
+                    pointers.append(UInt64(at[unsafe_offset=i]))
+        return pointers^
+
+    def key_column(self, k: Int, var name: String) raises -> Series:
+        """Key `k` as a column named `name`: the build's own key column
+        when the table was built from one, else gathered from the rows
+        (every row the table keeps, in no particular order)."""
+        if k < len(self.data[].keys):
+            return self.data[].keys[k].renamed(name^)
+        var pointers = self._row_pointers()
+        var column = self.gather_field(
+            k,
+            Int(pointers.unsafe_ptr()),
+            len(pointers),
+            name^,
+            self.key_types[k],
+        )
+        _ = pointers^
+        return column^
+
+    def rows_frame(self) raises -> List[Series]:
+        """The build side's columns over the rows the table keeps, for an
+        operator that reads the build's columns rather than the table: a
+        row with a null key is missing unless the join reads found flags
+        (no such row ever matches), and a column the rows do not keep (the
+        payload of a join that outputs no build column) is null."""
+        var pointers = self._row_pointers()
+        var n = len(pointers)
+        var columns = List[Series](capacity=len(self.build_names))
+        for c in range(len(self.build_names)):
+            var field = self.build_fields[c]
+            if field < 0:
+                columns.append(
+                    Series.full_null(
+                        self.build_names[c], self.build_types[c], n
+                    )
+                )
+            else:
+                columns.append(
+                    self.gather_field(
+                        field,
+                        Int(pointers.unsafe_ptr()),
+                        n,
+                        self.build_names[c],
+                        self.build_types[c],
+                    )
+                )
+        _ = pointers^
+        return columns^
 
     def finalize_tasks(self) -> Int:
         """The finalize tasks left to run: one per build sink thread, each
@@ -1429,16 +1875,7 @@ struct JoinHashTable(Copyable, Movable):
         last for a left join's unmatched probe rows), each row's number
         stored where its next pointer was, and the next pointers kept in
         `aux_next` (a chain ends at the extra slot)."""
-        var pointers = List[UInt64](capacity=self.rows_stored + 1)
-        var state = TupleDataChunkState()
-        ref rows = self.data[].collection
-        for s in range(len(rows.segments)):
-            ref segment = rows.segments[s]
-            for c in range(segment.chunk_count()):
-                var n = segment.initialize_chunk_state(state, c, False)
-                var at = state.row_locations.unsafe_ptr()
-                for i in range(n):
-                    pointers.append(UInt64(at[unsafe_offset=i]))
+        var pointers = self._row_pointers()
         pointers.append(UInt64(self.null_row_address()))
         self._gather_dictionary(pointers)
         var next_offset = self.layout.pointer_offset
@@ -1461,9 +1898,6 @@ struct JoinHashTable(Copyable, Movable):
         if Int(pointer) == self.null_row_address():
             return -1
         return Int(_load32(Int(pointer) + self.layout.index_offset))
-
-    def keys(self) -> List[Series]:
-        return self.data[].keys.copy()
 
     def entries_address(self) -> Int:
         return Int(self.data[].entries.unsafe_ptr())
@@ -1936,7 +2370,10 @@ struct ScanStructure(Movable):
                     continue
             var p = self.cursor
             while p != 0 and out < STANDARD_VECTOR_SIZE:
-                var b = _load32(Int(p) + index_offset)
+                # The build row number, in rows that keep one.
+                var b = Int32(-1)
+                if index_offset >= 0:
+                    b = Int32(_load32(Int(p) + index_offset))
                 out_probe[unsafe_offset=out] = Int32(i)
                 out_row[unsafe_offset=out] = p
                 if flag:
@@ -1949,7 +2386,7 @@ struct ScanStructure(Movable):
                     out_build[unsafe_offset=out - 1] = Int32(number)
                     p = aux[unsafe_offset=Int(number)]
                 else:
-                    out_build[unsafe_offset=out - 1] = Int32(b)
+                    out_build[unsafe_offset=out - 1] = b
                     p = _load64(Int(p) + next_offset)
             self.cursor = p
             if p == 0:

@@ -648,6 +648,9 @@ struct _StreamProbe(Movable):
     # input of another stream, and the hash table its finish makes.
     var build: _BuildFor
     var built: Optional[JoinHashTable]
+    # Whether the table was made by the probe pipeline's sink, from the
+    # rows as they came: the result is then the build's columns, empty.
+    var sank: Bool
     # Whether this stream is another's input (`_add_input`); the stream
     # at the schedule's top hands a declined run back to its caller.
     var is_input: Bool
@@ -682,6 +685,7 @@ struct _StreamProbe(Movable):
         self.hows = hows^
         self.build = build^
         self.built = None
+        self.sank = False
         self.is_input = is_input
         self.siblings = 0
         self.started = List[_ProbeStart]()
@@ -702,6 +706,7 @@ struct _StreamProbe(Movable):
         for k in range(len(self.wanted)):
             ref made = pipelines[self.at[k]]
             var built = Optional[JoinHashTable]()
+            var sank = False
             if len(made.input) > 0:
                 ahead[][self.wanted[k]] = made.input[0].result.copy()
                 built = made.input[0].built.copy()
@@ -709,13 +714,19 @@ struct _StreamProbe(Movable):
                 ref stream = made.probe[0]
                 ahead[][self.wanted[k]] = stream.result.value().copy()
                 built = stream.built.copy()
+                sank = stream.sank
             if built and plan._prefetched_indexes:
                 plan._prefetched_indexes.value()[][
                     self.wanted[k]
-                ] = _ReadyIndex(self.keys[k], self.hows[k], built.take())
+                ] = _ReadyIndex(self.keys[k], self.hows[k], built.take(), sank)
         self.started.append(
             _probe_start(
-                plan, self.index, self.batch_size, self.sink, self.head.pop(0)
+                plan,
+                self.index,
+                self.batch_size,
+                self.sink,
+                self.head.pop(0),
+                self.build,
             )
         )
         if len(self.started[0].piped) == 0 or plan._report:
@@ -739,6 +750,12 @@ struct _StreamProbe(Movable):
         ref started = self.started[0]
         if len(started.piped) > 0:
             self.result = _probe_finish(plan, started.piped[0])
+            ref run = started.piped[0].run
+            if run.built:
+                # The pipeline sank its rows into the join's table.
+                self.built = run.built.take()
+                self.sank = True
+                return
         else:
             swap(self.result, started.result)
         if not self.result and self.is_input:
@@ -749,6 +766,8 @@ struct _StreamProbe(Movable):
                 self.index, False, True, self.batch_size
             )
         if len(self.build.keys) > 0 and self.result:
+            # A result made as a frame (the stream ran no pipeline, or its
+            # columns' types keep the build on one): its table from it.
             var frame = self.result.take()
             self.built = finish_build(
                 frame,
@@ -756,6 +775,7 @@ struct _StreamProbe(Movable):
                 self.build.how,
                 self.build.coalesce,
                 self.build.probe_estimate,
+                defer_finalize=True,
             )
             self.result = frame^
 
@@ -860,19 +880,29 @@ struct _StreamPipeline(SchedulablePipeline):
     def max_finalize_tasks(self) -> Int:
         if len(self.input) > 0:
             return self.input[0].max_finalize_tasks()
+        if len(self.probe) > 0 and len(self.probe[0].build.keys) > 0:
+            # A build side's table: a finalize task per sink thread.
+            return configured_workers()
         return 0
 
     def finalize_tasks(mut self) raises -> Int:
         if len(self.input) > 0:
             return self.input[0].finalize_tasks()
+        if len(self.probe) > 0 and self.probe[0].built:
+            return self.probe[0].built.value().finalize_tasks()
         return 0
 
     def finalize_task(mut self, task: Int) raises:
-        self.input[0].finalize_task(task)
+        if len(self.input) > 0:
+            self.input[0].finalize_task(task)
+        else:
+            self.probe[0].built.value().finalize_task(task)
 
     def finish_finalize(mut self) raises:
         if len(self.input) > 0:
             self.input[0].finish_finalize()
+        elif len(self.probe) > 0 and self.probe[0].built:
+            self.probe[0].built.value().finish_finalize()
 
 
 def _probe_start(
@@ -881,10 +911,14 @@ def _probe_start(
     batch_size: Int,
     sink: Int,
     var head: _StreamHead,
+    build: _BuildFor = _BuildFor(),
 ) raises -> _ProbeStart:
     """The stream's probe pipeline set up, once its inputs are done
     (`Pipeline::Schedule`): its morsel workers, not yet run, or its
-    result when it ran here (a batch stream, or no pipeline at all)."""
+    result when it ran here (a batch stream, or no pipeline at all).
+    `build`: the join this stream's rows are the build side of; a
+    pipeline whose rows are the result sinks them into that join's hash
+    table."""
     var cursor = head.cursor
     var expressions = head.expressions.copy()
     var keys = head.keys.copy()
@@ -974,8 +1008,23 @@ def _probe_start(
             var algorithm = String(
                 "cross" if node.how == JOIN_CROSS else "eager_hash"
             )
-            var built = self._execute(node.right, False, True, batch_size)
-            if built.height() == 0 and (
+            # The index a prefetch made with this build, if any.
+            var ready = Optional[_ReadyIndex]()
+            if self._prefetched_indexes:
+                var held = self._prefetched_indexes.value()
+                if node.right in held[]:
+                    ready = held[].pop(node.right)
+            var built: DataFrame
+            var build_rows: Int
+            if ready and ready.value().rows_only:
+                # The build's rows are only in its table: its result is
+                # the build's columns, empty, which type the join's output.
+                built = self._prefetched.value()[].pop(node.right)
+                build_rows = ready.value().index.count
+            else:
+                built = self._execute(node.right, False, True, batch_size)
+                build_rows = built.height()
+            if build_rows == 0 and (
                 node.how == JOIN_INNER
                 or node.how == JOIN_SEMI
                 or node.how == JOIN_RIGHT
@@ -1002,12 +1051,6 @@ def _probe_start(
                 return _ProbeStart(
                     _stream_after_materialization(plan, index, batch_size, sink)
                 )
-            # The index a prefetch made with this build, if any.
-            var ready = Optional[_ReadyIndex]()
-            if self._prefetched_indexes:
-                var held = self._prefetched_indexes.value()
-                if node.right in held[]:
-                    ready = held[].pop(node.right)
             # The build finished: one chunk per column, and its keys'
             # hash index, unless a prefetch made the same one already.
             var keys = List[String]()
@@ -1022,6 +1065,14 @@ def _probe_start(
                 prepared = ready.value().index.copy()
                 algorithm = "hash_index"
                 keys = List[String]()
+            elif ready and ready.value().rows_only:
+                # The table was made for another join of these rows: the
+                # rows as a frame, for this join to build its own from.
+                built = DataFrame(
+                    ready.value().index.rows_frame(),
+                    height=ready.value().index.rows_stored,
+                )
+                build_rows = built.height()
             var stats = PlanStatistics()
             var finished = finish_build(
                 built,
@@ -1046,7 +1097,7 @@ def _probe_start(
                 0,
                 0,
                 executions=0,
-                build_rows=joins[len(joins) - 1].height(),
+                build_rows=build_rows,
                 builds=1,
                 algorithm=algorithm,
                 build_side="right",
@@ -1405,6 +1456,18 @@ def _probe_start(
             pushed=pushed,
             source=file_scan,
             source_rows=_source_rows(self, cursor) if file_scan else 0,
+            # The rows are the join's build side only when the pipeline's
+            # rows are the stream's whole result.
+            build_keys=build.keys.copy() if (
+                limit < 0
+                and skip == 0
+                and not grouping
+                and not finish
+                and not late_operations
+            ) else List[String](),
+            build_how=build.how,
+            build_coalesce=build.coalesce,
+            build_probe_estimate=build.probe_estimate,
         )
         return _ProbeStart(
             _PipedProbe(

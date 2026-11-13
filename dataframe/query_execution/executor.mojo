@@ -129,10 +129,10 @@ def plan_execute(
     streaming: Bool = False,
     batch_size: Int = 65536,
 ) raises -> DataFrame:
-    if self._prefetched and not empty:
-        var ahead = self._prefetched.value()
-        if index in ahead[]:
-            return ahead[].pop(index)
+    if not empty:
+        var taken = plan_take_prefetched(self, index)
+        if taken:
+            return taken.take()
     if self._handoff != HANDOFF_OFF and not empty:
         var handed = plan_handoff_region(self, index, streaming, batch_size)
         if handed:
