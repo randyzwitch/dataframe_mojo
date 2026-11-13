@@ -147,7 +147,7 @@ def test_semi_joins_and_other_keys_keep_their_results() raises:
 def test_an_aggregate_on_both_keys_of_a_two_key_join_takes_the_key_pairs() raises:
     # Quantities per (order, supplier), joined on both keys by the few
     # lines a selective supplier filter keeps; a filter on the joined sum
-    # follows, as PDS-H q20's availability check does.
+    # follows, as an availability check would.
     var line = lines()
     var supp = suppliers()
     var totals = (
@@ -186,8 +186,7 @@ def test_an_aggregate_on_both_keys_of_a_two_key_join_takes_the_key_pairs() raise
 
 def test_an_aggregate_reached_through_a_renamed_key_takes_the_probe_keys() raises:
     # Orders with lines from two suppliers, the order key renamed above
-    # the aggregate, as a semi join's right side (TPC-DS q16's orders
-    # shipped from two warehouses).
+    # the aggregate, as a semi join's right side.
     var line = lines()
     var supp = suppliers()
     var split = (
@@ -225,7 +224,7 @@ def test_an_aggregate_reached_through_a_renamed_key_takes_the_probe_keys() raise
 
 def test_an_aggregate_probing_a_filtered_build_takes_the_build_keys() raises:
     # An aggregate joined on two keys to a build that keeps one nation's
-    # lines (PDS-H q20's shape); a filter on the joined sum follows. The
+    # lines; a filter on the joined sum follows. The
     # two sides share their key names, so the join order may reorder the
     # graph (its relations are the aggregate, the lines and the
     # suppliers); whichever way it runs, the rows match.
