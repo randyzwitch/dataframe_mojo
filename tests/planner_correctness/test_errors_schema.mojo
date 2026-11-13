@@ -369,7 +369,7 @@ def test_key_filter_moves_below_aggregates_that_cannot_raise_for_their_types() r
     var plan = (
         source.lazy()
         .group_by("g")
-        .agg([total, col("x").mean().alias("mean")])
+        .agg([total^, col("x").mean().alias("mean")])
         .filter(col("g") == 0)
     )
     assert_true(_filter_below(plan, "GROUP_BY"))
@@ -405,7 +405,10 @@ def test_typed_filters_move_but_raising_casts_stay_in_place() raises:
         ]
     )
     var computed = source.lazy().with_columns(
-        (col("x") * 3.0).alias("y"), col("s").cast(DataType.INT64).alias("n")
+        [
+            (col("x") * 3.0).alias("y"),
+            col("s").cast(DataType.INT64).alias("n"),
+        ]
     )
     var kept = computed.filter(col("x").cast(DataType.FLOAT64) > 0.0)
     for optimize in [False, True]:
