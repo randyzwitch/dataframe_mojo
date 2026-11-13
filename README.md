@@ -376,8 +376,10 @@ Normalization, Unicode properties, case folding, title casing, and UTF-8
 counting, traversal, slicing, reversal, and trimming come from the standalone
 [unicode_mojo](https://github.com/randyzwitch/unicode_mojo) package, resolved
 through Pixi at a pinned Git revision. Its algorithms, generated tables,
-generators, and conformance fixtures live there; dataframe retains storage,
-execution adapters, and the regex parser and matching engines.
+generators, and conformance fixtures live there. The standalone
+[regex_mojo](https://github.com/randyzwitch/regex_mojo) dependency owns the
+regex parser, matching engines, compiled-pattern cache, and engine tests.
+Dataframe retains storage, column/null handling, and execution adapters.
 Tagged releases attach the packages and a generated [API reference](docs/api.md) (`pixi run docs`). See the
 [testing guide](docs/testing.md), the [stability policy](docs/stability.md), and the
 [pandas/Polars migration guide](docs/migration.md).

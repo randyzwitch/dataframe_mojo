@@ -25,7 +25,7 @@ from .expr import (
     _node,
 )
 from .series import Series
-from .regex import Regex, Matcher
+from regex_mojo import Regex, Matcher
 
 
 def _split(text: String) -> List[String]:
