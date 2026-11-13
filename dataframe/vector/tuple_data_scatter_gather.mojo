@@ -1014,10 +1014,11 @@ def gather_rows_slots(
     mut decoded: List[UInt8],
 ) raises -> Series:
     """Column `column_id` of the `count` rows at the pointers at `rows` as
-    a column of `size` values, the row at pointer i at slot `slots[i]`
-    (FullScanHashTable's Gather through `sel_build`). The other slots'
-    values are not written (a string's are empty); a reader reads only
-    filled slots. Strings reference `heaps` (`gather_rows_series`), and
+    a column of `size` values, the row at pointer i at entry `slots[i]`
+    (scattered through a selection, so no row is moved twice). The other
+    entries' values are not written (a string's are empty); a reader
+    reads only filled entries. Strings reference `heaps`
+    (`gather_rows_series`), and
     `decoded` is set to their string_t values as gathered (the vector
     layout, its other slots unwritten)."""
     ref top = layout.nodes[][0]
