@@ -103,7 +103,7 @@ def bloom_set_bits(words: Int, blocks: Int, hash: UInt64, shared: Bool):
     var at = words + 8 * Int(hash & UInt64(blocks - 1))
     var mask = _word_masks[1](hash)[0]
     if shared:
-        _ = Pointer[Atomic[DType.uint64], MutAnyOrigin](
+        _ = Pointer[Atomic[UInt64], MutAnyOrigin](
             unsafe_from_address=at
         )[].fetch_or(mask)
     else:
