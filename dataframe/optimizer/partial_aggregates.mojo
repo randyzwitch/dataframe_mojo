@@ -234,7 +234,6 @@ def _push_partial_aggregate(
     if (
         agg.kind != AGG
         or agg.maintain_order
-        or len(agg.flags) > 0
         or len(agg.names) == 0
         or len(agg.exprs) == 0
         or agg.left < 0
