@@ -18,8 +18,7 @@ from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column, _copy_validity
 from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.parallel import Job, run_jobs, worker_count
-from dataframe.regex import Matcher, Regex, Template, escape
-from dataframe.text.regex_cache import cached_pattern
+from regex_mojo import Matcher, Regex, Template, cached_pattern, escape
 from dataframe.series import Series
 from dataframe.text.bytes import _Bytes
 from dataframe.storage.string import StringColumn, StringBuilder

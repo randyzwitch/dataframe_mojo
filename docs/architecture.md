@@ -261,8 +261,9 @@ imports of query, expression, kernel or provider execution. Two existing
 recursive value seams are explicit: nested columns retain child `Series`, and
 categorical child append calls dictionary unification. Logical dtype metadata
 also remains shared. Those representation dependencies predate this extraction;
-they do not permit storage to select or execute a query. `io/` and `regex/`
-remain their existing domains; later PRs organize computational and text code.
+they do not permit storage to select or execute a query. `io/` remains a
+separate domain; general regex processing comes from the standalone
+`regex_mojo` package.
 
 ## Computational kernels
 
@@ -297,11 +298,12 @@ threshold, algorithm, expression timing, layout or ownership rule changes.
 
 `text/` owns byte spans and literal scans (`bytes`), length/predicate and
 transform kernels, higher string functions, byte codecs, strict numeric parsing,
-and column adapters around the existing `regex/` engine. The bounded compiled
-pattern cache is shared by those adapters. Typed UTF-8/Arrow string layouts,
+and column adapters around the standalone `regex_mojo` engine. The package
+also owns the bounded compiled-pattern cache shared by those adapters.
+Typed UTF-8/Arrow string layouts,
 view blocks and builders remain in `storage/`; categorical code remapping and
-value replacement remain computational kernels. `regex/` retains its parser,
-automata, matchers and Unicode property tables.
+value replacement remain computational kernels. Parser, automata, matchers,
+and engine tests live in `regex_mojo`; Unicode tables live in `unicode_mojo`.
 
 The text gate rejects query/expression evaluation, providers and file readers
 or writers. The strict number parser retains one existing shared primitive,
@@ -354,11 +356,27 @@ the shared text primitives. Dataframe retains string-view ownership, nulls,
 padding/sign rules, and the existing ASCII-whitespace default for empty strip
 arguments; the shared trim set requires an explicit character set.
 Vector expression slices and display truncation use those same shared routines.
-The regex parser, NFA/DFA engines, compiled class directories, and vectorized
-matching remain in dataframe; they consume the package's properties, simple
+The standalone `regex_mojo` dependency consumes these properties, simple
 folding, and range operations through direct imports.
 
 The text boundary gate still checks the dataframe adapter and legacy aliases.
 The dependency's standalone tests cover algorithms and Unicode data; dataframe
 integration tests cover storage and execution behavior. All existing Unicode
 versions and their observable string semantics are preserved.
+
+## Regular expressions
+
+The standalone [regex_mojo](https://github.com/randyzwitch/regex_mojo) package
+owns the regex parser, NFA/DFA engines, capture engines, compiled class
+directories, SIMD scans, replacement templates, literal escaping, and the
+synchronized bounded pattern cache. Its engine tests, concurrent cache tests,
+frozen Polars corpus, and corpus generator moved with the implementation.
+Pixi pins the same Git revision in development, host, and runtime dependencies.
+
+`text/regex_adapter.mojo` binds patterns to dataframe operations and owns
+column/null handling, borrowed Arrow row spans, output builders, and worker
+partitioning. Other text/list kernels consume the public package directly.
+Dataframe retains tests for literal-pattern canonicalization, expressions,
+selectors, chunk boundaries, null propagation, and worker equivalence.
+The old engine and cache modules are removed; the text boundary check rejects
+imports or implementations that reintroduce them.
