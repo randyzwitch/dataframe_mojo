@@ -1,9 +1,11 @@
-"""Group row lists hold the same groups with 32-bit and 64-bit row indices."""
+"""Group row lists hold the same groups with 32-bit and 64-bit row indices,
+and partitions ordered from them come out the same at both widths."""
 # contract-group: kernel.window_mappings
 from std.testing import assert_equal, assert_false, assert_true
 from dataframe import Column, Series, StringColumn
 from dataframe.kernels.group_rows import (
     GroupRows,
+    ROW_INDEX,
     WIDE_ROW_INDEX,
     _group_rows_from_ids,
     group_ids,
@@ -11,7 +13,14 @@ from dataframe.kernels.group_rows import (
     wide_row_indices,
     write_by_groups,
 )
-from dataframe.window_sort import _partition_groups, partition_groups
+from dataframe.window_sort import (
+    PARTITION_START,
+    PEER_START,
+    _RankOut,
+    _partition_groups,
+    _sort_groups,
+    partition_groups,
+)
 
 
 def _lists(groups: GroupRows, height: Int) -> List[List[Int]]:
@@ -123,3 +132,61 @@ def test_writes_and_ids_match_at_both_index_widths() raises:
         assert_equal(b.get(row).int64(), Int64(100 + ids[row]))
         assert_equal(a_ids[row], ids[row])
         assert_equal(b_ids[row], ids[row])
+
+
+def test_sorted_groups_match_at_both_index_widths() raises:
+    var n = 5000
+    var keys = _int_keys(n)
+    var values = List[Int64](capacity=n)
+    for row in range(n):
+        values.append(Int64((row * 104729) % 97))
+    var order_keys = List[Series]()
+    order_keys.append(Series("o", Column[Int64](values.copy())))
+    var flags_off = List[Bool]()
+    flags_off.append(False)
+    var narrow = partition_groups(keys, n)
+    var wide = _partition_groups[WIDE_ROW_INDEX](keys, n)
+    var order_a = List[Int](length=n, fill=-1)
+    var flags_a = List[UInt8](length=n, fill=0)
+    var order_b = List[Int](length=n, fill=-1)
+    var flags_b = List[UInt8](length=n, fill=0)
+    _ = _sort_groups[ROW_INDEX](
+        narrow,
+        order_keys,
+        flags_off,
+        flags_off,
+        order_a,
+        flags_a,
+        True,
+        _RankOut(),
+    )
+    _ = _sort_groups[WIDE_ROW_INDEX](
+        wide,
+        order_keys,
+        flags_off,
+        flags_off,
+        order_b,
+        flags_b,
+        True,
+        _RankOut(),
+    )
+    var ids = group_ids(narrow, n, 4)
+    for k in range(n):
+        assert_equal(order_a[k], order_b[k])
+        assert_equal(flags_a[k], flags_b[k])
+        if k == 0:
+            assert_true((flags_a[k] & PARTITION_START) != 0)
+            continue
+        var before = order_a[k - 1]
+        var row = order_a[k]
+        var starts = ids[before] != ids[row]
+        assert_equal((flags_a[k] & PARTITION_START) != 0, starts)
+        if not starts:
+            # Within a partition: ascending values, ties in row order.
+            assert_true(
+                values[before] < values[row]
+                or (values[before] == values[row] and before < row)
+            )
+            assert_equal(
+                (flags_a[k] & PEER_START) != 0, values[before] != values[row]
+            )
