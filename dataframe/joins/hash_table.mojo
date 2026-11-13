@@ -1828,9 +1828,7 @@ struct JoinHashTable(Copyable, Movable):
             pending.append(job^)
         self.data[].pending = pending^
         var outputs = len(self.output_columns)
-        self.data[].gathered = List[Optional[Series]](
-            length=outputs, fill=None
-        )
+        self.data[].gathered = List[Optional[Series]](length=outputs, fill=None)
         self.data[].gathered_decoded = List[List[UInt8]](
             length=outputs, fill=List[UInt8]()
         )
