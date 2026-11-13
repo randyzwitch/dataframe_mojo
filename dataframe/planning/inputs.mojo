@@ -34,12 +34,14 @@ def finish_build(
     how: Int,
     coalesce: Bool = True,
     probe_estimate: Int = -1,
+    build_filtered: Bool = False,
     defer_finalize: Bool = False,
 ) raises -> Optional[JoinHashTable]:
     """Finish a join build by retaining its columns and constructing its key
     index. Return no index for absent or unsupported keys. Semi/anti joins
     need no build payload because they emit only the preserved side.
-    probe_estimate describes the expected probe cardinality.
+    probe_estimate describes the expected probe cardinality, and
+    build_filtered whether the build side filters its rows.
     `defer_finalize`: the caller's finish event runs the table's finalize
     tasks (`JoinHashTable.finalize_tasks`)."""
     for column in built._columns:
@@ -49,7 +51,13 @@ def finish_build(
     if len(keys) == 0 or built.height() > Int(Int32.MAX):
         return None
     var layout = join_build_layout(
-        built._columns, keys, how, coalesce, probe_estimate, False
+        built._columns,
+        keys,
+        how,
+        coalesce,
+        probe_estimate,
+        False,
+        build_filtered=build_filtered,
     )
     if not layout:
         return None
@@ -74,6 +82,7 @@ struct _SubplanPipeline(SchedulablePipeline):
     var how: Int
     var coalesce: Bool
     var probe_estimate: Int
+    var build_filtered: Bool
     var built: Optional[JoinHashTable]
 
     def __init__(
@@ -86,6 +95,7 @@ struct _SubplanPipeline(SchedulablePipeline):
         how: Int = JOIN_INNER,
         coalesce: Bool = True,
         probe_estimate: Int = -1,
+        build_filtered: Bool = False,
     ) raises:
         self.plan = plan^
         # Its own memo: nested prefetches on other threads never share one.
@@ -101,6 +111,7 @@ struct _SubplanPipeline(SchedulablePipeline):
         self.how = how
         self.coalesce = coalesce
         self.probe_estimate = probe_estimate
+        self.build_filtered = build_filtered
         self.built = None
 
     def initialize(mut self) raises:
@@ -128,6 +139,7 @@ struct _SubplanPipeline(SchedulablePipeline):
                 self.how,
                 self.coalesce,
                 self.probe_estimate,
+                self.build_filtered,
                 defer_finalize=True,
             )
 

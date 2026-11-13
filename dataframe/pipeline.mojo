@@ -3078,6 +3078,7 @@ def begin_pipeline(
     build_how: Int = JOIN_INNER,
     build_coalesce: Bool = True,
     build_probe_estimate: Int = -1,
+    build_filtered: Bool = False,
 ) raises -> PipelineRun:
     """`run_pipeline` up to its workers' jobs, not yet run: its execute
     stage is the jobs, as `Pipeline::Schedule` makes one task per thread;
@@ -3086,8 +3087,8 @@ def begin_pipeline(
     workers take the source's batches as their morsels, and
     `source_rows` is its estimated height. With `build_keys`, the rows
     are the build side of a hash join of type `build_how` on those keys
-    (`build_coalesce`, `build_probe_estimate` as `finish_build` takes
-    them): each worker sinks its chunks into its own rows of the join's
+    (`build_coalesce`, `build_probe_estimate` and `build_filtered` as
+    `finish_build` takes them): each worker sinks its chunks into its own rows of the join's
     hash table (`JoinBuildSink`), and the finish makes the table
     (`PipelineRun.built`) instead of a frame, unless a column's type
     keeps the build on a frame (`join_build_layout`)."""
@@ -3420,6 +3421,7 @@ def begin_pipeline(
             build_coalesce,
             build_probe_estimate,
             True,
+            build_filtered=build_filtered,
         )
         if made:
             trace_path("pipeline.join_build_sink")

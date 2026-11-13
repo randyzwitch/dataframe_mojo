@@ -413,12 +413,14 @@ struct _BuildFor(Copyable, Movable):
     var how: Int
     var coalesce: Bool
     var probe_estimate: Int
+    var build_filtered: Bool
 
     def __init__(out self):
         self.keys = List[String]()
         self.how = JOIN_CROSS
         self.coalesce = True
         self.probe_estimate = -1
+        self.build_filtered = False
 
 
 struct _StreamSchedule(Movable):
@@ -482,6 +484,7 @@ def _add_stream(
             inputs.hows[k],
             inputs.coalesces[k],
             inputs.probe_estimates[k],
+            inputs.build_filtered[k],
         )
         at.append(
             _add_input(
@@ -591,6 +594,7 @@ def _add_input(
                         build.how,
                         build.coalesce,
                         build.probe_estimate,
+                        build.build_filtered,
                     )
                 )
             )
@@ -607,6 +611,7 @@ def _add_input(
                 build.how,
                 build.coalesce,
                 build.probe_estimate,
+                build.build_filtered,
             )
         )
     )
@@ -836,6 +841,7 @@ struct _StreamProbe(Movable):
                 self.build.how,
                 self.build.coalesce,
                 self.build.probe_estimate,
+                self.build.build_filtered,
                 defer_finalize=True,
             )
             self.result = frame^
@@ -1153,6 +1159,7 @@ def _probe_start(
                 node.how,
                 node.coalesce,
                 plan_cardinality(self, stats, node.left),
+                plan_is_filtering(self, node.right),
             )
             if finished:
                 prepared = finished^
@@ -1541,6 +1548,7 @@ def _probe_start(
             build_how=build.how,
             build_coalesce=build.coalesce,
             build_probe_estimate=build.probe_estimate,
+            build_filtered=build.build_filtered,
         )
         return _ProbeStart(
             _PipedProbe(
