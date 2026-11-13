@@ -384,13 +384,35 @@ struct PushedJoinFilter(Copyable, Movable):
     var build_filtered: Bool
 
 
+@fieldwise_init
+struct PlannedJoinFilter(Copyable, Movable):
+    """A join whose build's keys filter the input of an aggregate below
+    its probe side, decided before anything runs: the join's plan node, which of its keys reach a group
+    key (`positions`) and that key's name in the aggregate (`grouped`).
+    The build publishes the filters when it finishes."""
+
+    var join: Int
+    var positions: List[Int]
+    var grouped: List[String]
+    var right_keys: List[String]
+    var build_filtered: Bool
+
+
 struct PushedJoinFilters(Movable):
     """The keys pushed into the input of the aggregate at plan node
-    `node`, for its pipeline to filter its source by."""
+    `node`, for its pipeline to filter its source by: `planned` are the
+    joins they come from, `filters` the keys once those builds finished."""
 
     var node: Int
+    var planned: List[PlannedJoinFilter]
     var filters: List[PushedJoinFilter]
 
-    def __init__(out self, node: Int, var filters: List[PushedJoinFilter]):
+    def __init__(
+        out self,
+        node: Int,
+        var planned: List[PlannedJoinFilter],
+        var filters: List[PushedJoinFilter],
+    ):
         self.node = node
+        self.planned = planned^
         self.filters = filters^
