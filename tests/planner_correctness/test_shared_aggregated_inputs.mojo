@@ -200,7 +200,7 @@ def test_copies_under_their_own_filters_stay_apart() raises:
 
 def chosen_items(item_frame: DataFrame, wanted: DataFrame) raises -> LazyFrame:
     """A subquery two joins build on: the items whose name is one of a
-    list, found by a semi join (as TPC-DS q83 picks its dates)."""
+    list, found by a semi join."""
     return (
         item_frame.lazy()
         .join(

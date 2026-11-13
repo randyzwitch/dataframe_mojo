@@ -930,8 +930,8 @@ def _update_values(
                 unsafe_offset=k
             ] != 0 else UInt64(3)
         return
-    # A string's minimum or maximum (`MinMaxStringState`): a row replaces
-    # the held value only when it orders before (after) it.
+    # A string's minimum or maximum: a row replaces the held value only when it
+    # orders before (after) it.
     var is_max = kind == _K_STRING_MAX
     var sel = format.sel
     for k in range(count):
@@ -1002,11 +1002,10 @@ def _update_slot[
     arena: Pointer[_ValueArena, MutAnyOrigin],
     discard: Int,
 ):
-    """Update group state words with a batch's values of `D`, rows
-    [start, start + count) of a vector. `base` is the byte offset in
-    each group row, and `rows` holds the group-row addresses. Each
-    state kind has its own loop, and a vector without nulls takes one that
-    reads no validity (`UnaryScatterLoop`'s quick path)."""
+    """Update group state words with a batch's values of `D`, rows [start, start
+    + count) of a vector. `base` is the byte offset in each group row, and
+    `rows` holds the group-row addresses. Each state kind has its own loop, and
+    a vector without nulls takes one that reads no validity."""
     var nulls = _format_nulls(format, start, count)
     var kind = slot.kind
     if kind == _K_VALUES:
@@ -1073,9 +1072,9 @@ def _scatter[
     arena: Pointer[_ValueArena, MutAnyOrigin],
     discard: Int,
 ):
-    """One state kind's scatter loop (`UnaryScatterLoop` for one
-    operation): each row's value into the state at its group row's
-    address, a null skipped only when the vector may hold one (`nulls`)."""
+    """One state kind's scatter loop: each row's value into the state at its
+    group row's address, a null skipped only when the vector may hold one
+    (`nulls`)."""
     var values = format.values[D]()
     var sel = format.sel
     var validity = format.validity

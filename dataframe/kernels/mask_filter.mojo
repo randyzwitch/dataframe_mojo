@@ -137,9 +137,9 @@ struct _CompressJob(Job):
     column; `first` is a multiple of 64 and so is `last` unless it is the
     end. Input rows run from `row` on."""
 
-    # The caller's selection, by address: it outlives the jobs, which only
-    # read it. A copy per job cost 16 bytes per 64 rows each, 20 MB for
-    # the 144 jobs of ClickBench q7's 18-chunk filter.
+    # The caller's selection, by address: it outlives the jobs, which only read
+    # it. A copy per job would cost 16 bytes per 64 input rows for every job,
+    # which grows with the jobs times the input.
     var selection: Int
     var columns: List[_Chunks]
     var values: List[Int]
@@ -446,9 +446,9 @@ def filter_columns(
             Int(Pointer(to=bitmaps[j])) if len(bitmaps[j]) > 0 else 0
         )
     if len(fixed_index) > 0 and count > 0:
-        # The work is the mask's words, not the kept rows: a filter keeping
-        # one row in seven of 613K (ClickBench q41's slice) ran on one
-        # thread when sized by its 86K output rows.
+        # The work is the mask's words, not the kept rows: a selective filter
+        # reads every word of a long mask however few rows it keeps, so sizing
+        # the jobs by the output would leave that work on one thread.
         var workers = min(worker_count(len(mask)), max(1, count // 64))
         var jobs = List[_CompressJob](capacity=workers)
         for w in range(workers):
