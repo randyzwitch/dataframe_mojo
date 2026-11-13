@@ -2199,9 +2199,9 @@ def cast_series(
     if source.is_decimal() and target == DataType.FLOAT64:
         # Under a mask too: the conversion cannot fail on an inactive row,
         # and its result there goes unread, so every row converts through
-        # the pointer. The row path under a `when` mask cost TPC-DS
-        # decimal q9 (fifteen conditional means of cast columns) 51 ms
-        # against 3 for the DOUBLE variant.
+        # the pointer. The row path under a `when` mask converts one
+        # value per call with a mask test each, many times slower than
+        # the vectorized conversion.
         return _decimal_to_float(input)
     if source.is_binary() or target.is_binary():
         return _cast_binary(input, source, target, strict, offset, mask)

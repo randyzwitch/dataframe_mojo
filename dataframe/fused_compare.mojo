@@ -1,15 +1,14 @@
 """The AND of a filter's column-versus-constant comparisons in one pass.
 
-A filter like PDS-H q6's (a date range, a discount range and a quantity
-bound: five comparisons on three columns) evaluated each comparison as its
-own expression, each writing a full-length bitmap that the next AND read
-back, about 2 ns a row a comparison. Here every comparison of a numeric
-column against a constant of the column's own type runs over
-cache-sized blocks of rows, and each block's bits are ANDed in a buffer that
-stays in L1, so each column is read from memory once and one bitmap is
-written. The combined bitmap is the selection for the next pipeline step.
-Semantics are the comparison kernels' (`_compare_lanes`): IEEE for
-floats, so a NaN compares false except with `!=`.
+A filter such as a date range, a discount range and a quantity bound (five
+comparisons on three columns), evaluated a comparison at a time, writes a
+full-length bitmap per comparison that the next AND reads back from memory. Here
+every comparison of a numeric column against a constant of the column's own type
+runs over cache-sized blocks of rows, and each block's bits are ANDed in a
+buffer that stays in L1, so each column is read from memory once and one bitmap
+is written. The combined bitmap is the selection for the next pipeline step.
+Semantics are the comparison kernels' (`_compare_lanes`): IEEE for floats, so a
+NaN compares false except with `!=`.
 """
 
 from .expr import node_children

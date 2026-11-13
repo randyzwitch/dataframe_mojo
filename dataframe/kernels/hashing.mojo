@@ -250,9 +250,9 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
         ref column = chunk._data[StringColumn]
         if column._is_view_storage():
             var storage = column._view_storage_unchecked()
-            # A row equal to the one before reuses its code, as on the
-            # offsets path: a column of one repeated label (TPC-DS q35's
-            # unique on a key and a constant tag) costs one compare a row.
+            # A row equal to the one before reuses its code, as on the offsets
+            # path: a column of one repeated label costs one compare a row
+            # instead of a hash lookup.
             var last_key = UInt128(0)
             var last_code = -1
             for i in range(len(column)):
@@ -374,11 +374,10 @@ def encode_string_rows_parallel(
 ) raises -> RowKeys:
     """Encode contiguous string row ranges in parallel, then merge local ids.
 
-    The merge numbers each range's distinct values with the string encoder
-    and renumbers the ranges on every worker (`encode_rows_parallel`). It
-    used to read each distinct value into a `String` and look it up in a
-    `Dict` on one thread, which on 835K distinct ClickBench search phrases
-    took most of a 900 ms group-by.
+    The merge numbers each range's distinct values with the string encoder and
+    renumbers the ranges on every worker (`encode_rows_parallel`), so with many
+    distinct values the merge is spread over the workers rather than done on one
+    thread, and no value is copied into a `String`.
     """
     return encode_rows_parallel([series.copy()], nulls_equal, workers)
 
@@ -542,13 +541,12 @@ def _encode_dense_parts[
 ]:
     """Ids by direct lookup when an integer key's values span few enough
     integers (`_dense_span_limit`), avoiding a hash-table probe and a
-    renumbering pass per row. Values and ids go through pointers, and a
-    column without nulls reads no validity: H2O's 100-value id4 spent most
-    of a group-by here, and ClickBench q7's Int16 AdvEngineID went through
-    the hash table at 6 ns a row. The key may arrive as several chunks (a
-    Parquet scan's row groups, or a worker's range across two of them);
-    they are read in place, where copying them into one buffer first cost
-    a group-by a quarter of its time."""
+    renumbering pass per row. Values and ids go through pointers, and a column
+    without nulls reads no validity, since this loop is the whole per-row cost
+    of a group-by on a small integer key. The key may arrive as several chunks
+    (a Parquet scan's row groups, or a worker's range across two of them); they
+    are read in place rather than copied into one buffer first, which would add
+    a full pass over the key."""
     var n = 0
     for part in parts:
         n += len(part)
@@ -590,8 +588,8 @@ def _encode_dense_parts[
     # A table no larger than a few times the input: a small bucket of a
     # partitioned group-by should not clear a 512 KB table to encode it.
     # A large input may span as many integers as it has rows, up to the
-    # 16-bit keys' 512 KB table: TPC-DS's 18K item keys over 611K rows
-    # hashed at 13 ns a row under the 4,096 span measured for buckets.
+    # 16-bit keys' 512 KB table: a direct table that size is still
+    # cheaper than hashing every row when the rows outnumber its slots.
     var limit = min(
         max(_dense_span_limit[D](), min(n, 1 << 16)), max(4096, 4 * n)
     )
@@ -659,14 +657,12 @@ def _encode_categorical_parts[
 ](
     parts: List[Column[UInt32]], domain: Int, nulls_equal: Bool
 ) raises -> RowKeys:
-    """Ids by direct lookup on a categorical's codes, which already lie in
-    [0, dictionary size): no hash and no range scan, as `_encode_dense_int64`
-    does for small Int64 domains. Sorted H2O q1 grouped its coded string key
-    through the general path 27% slower than the strings. The key may arrive
-    as several chunks (a Parquet scan's row groups), read in place: since
-    #537 a chunked categorical key went to the generic dense encoder, whose
-    range scan with nulls cost H2O q1's id1 (5% nulls) 14.9 ms against
-    10.7."""
+    """Ids by direct lookup on a categorical's codes, which already lie in [0,
+    dictionary size): no hash and no range scan, as `_encode_dense_int64` does
+    for small Int64 domains. The key may arrive as several chunks (a Parquet
+    scan's row groups), read in place. The codes' range is known from the
+    dictionary, so unlike the generic dense encoder there is no range scan,
+    which with nulls costs a validity read per row."""
     var n = 0
     for part in parts:
         n += len(part)
@@ -842,10 +838,9 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
             ids[i] = renumber[code]
         return RowKeys(ids^, representatives^)
 
-    # Column codes fold into one 64-bit key per row, so several columns
-    # cost one numbering pass rather than one table per column, as
-    # ClickHouse packs fixed-width keys into one integer
-    # (AggregationMethodKeysFixed). A stage is numbered, and its packed keys
+    # Column codes fold into one 64-bit key per row, so several columns cost one
+    # numbering pass rather than one table per column, and a 64-bit key hashes
+    # and compares in one instruction. A stage is numbered, and its packed keys
     # replaced by dense ids, before the key outgrows 64 bits, or before it
     # leaves the direct-array range while still inside it, so that
     # low-cardinality prefixes compress through a direct array first.

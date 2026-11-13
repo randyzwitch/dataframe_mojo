@@ -982,9 +982,8 @@ struct _RankOut(ImplicitlyCopyable, Movable):
 
 
 struct _GroupSortJob(Job):
-    """Sort one task's hash groups and mark their boundaries (the SORT,
-    MATERIALIZE and MASK stages of a WindowHashGroup). The keys and hashes
-    are in hash group order, as the sink materialized them."""
+    """Sort one task's hash groups and mark their boundaries. The keys and
+    hashes are in hash group order, as the sink materialized them."""
 
     var keys: List[Series]
     var partition_keys: Int
@@ -1222,7 +1221,8 @@ def _window_layout(
     var flags = huge_uninit[UInt8](height)
     var bounds = List[Int]()
     if len(partition_keys) > 0:
-        # HashedSort: radix-partition rows by their keys' hash.
+        # Radix-partition rows by their keys' hash: every partition then lies in
+        # one hash group, and hash groups sort independently.
         var sink = sink_threads(height)
         var partitioner = Partitioner(partition_keys, sink)
         var bits = radix_bits(height)
@@ -1280,7 +1280,7 @@ def _window_layout(
             _ = flags^
             return layout^
     elif len(order_keys) > 0:
-        # FullSort: one group, sorted on every thread; peers are marked
+        # No partition keys: one group, sorted on every thread; peers are marked
         # in parallel ranges, reading the keys through the sorted order.
         order = sort_key_rows(order_keys, descending, nulls_last, stable)
         var keys = List[Series](capacity=len(order_keys))
@@ -1303,7 +1303,7 @@ def _window_layout(
         flags[0] = PARTITION_START | PEER_START
         bounds.append(0)
     else:
-        # NaturalSort: input order, one partition of peers.
+        # No keys at all: input order, one partition of peers.
         for k in range(height):
             order[k] = k
             flags[k] = 0

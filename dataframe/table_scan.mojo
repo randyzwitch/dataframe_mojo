@@ -1,12 +1,11 @@
 """A table scan with filters.
 
-The scan checks each table filter against the statistics of every row
-group first, then of every vector of a row group no filter ruled out: a
-vector some filter keeps no row of is not read. A filter that keeps every
-row of every vector left is not evaluated (`SetFilterAlwaysTrue`). The rows
-left are the table's own buffers, sliced, never copied; the filters that
-remain are evaluated over them, reading the filter columns first and
-gathering the rest through the rows they keep.
+The scan checks each table filter against the statistics of every row group
+first, then of every vector of a row group no filter ruled out: a vector some
+filter keeps no row of is not read. A filter that keeps every row of every
+vector left is not evaluated. The rows left are the table's own buffers, sliced,
+never copied; the filters that remain are evaluated over them, reading the
+filter columns first and gathering the rest through the rows they keep.
 """
 from std.collections import Optional
 
@@ -66,8 +65,7 @@ def _group_segments(
     length: Int,
     mut segments: _Segments,
 ):
-    """A window's answers per row group (`RowGroup::CheckZonemap`), table
-    rows from `start`."""
+    """A window's answers per row group, table rows from `start`."""
     ref record = found.record[]
     var v = found.first
     while v < found.last:
@@ -168,11 +166,10 @@ def _sweep(
 def prune_scan(
     filters: TableFilterSet, columns: List[Series], height: Int
 ) raises -> Optional[ScanPruning]:
-    """The row groups of a table the filters' statistics do not rule out
-    (`RowGroup::CheckZonemap`): a row group is read when any of its
-    vectors may hold a row every filter keeps. None when no filtered
-    column has statistics. Skipping single vectors inside a row group
-    (`CheckZonemapSegments`) is the chunk loop's (`zonemap_rows`)."""
+    """The row groups of a table the filters' statistics do not rule out: a row
+    group is read when any of its vectors may hold a row every filter keeps.
+    None when no filtered column has statistics. Skipping single vectors inside
+    a row group is the chunk loop's (`zonemap_rows`)."""
     var all = List[_Segments]()
     var any = False
     for filter in filters.filters:
@@ -225,11 +222,10 @@ struct _ColumnWindows(Copyable, Movable):
 
 
 struct ScanFilterInfo(Copyable, Movable):
-    """A scan's table filters and where their columns' statistics are
-    (`ScanFilterInfo`): the chunk loop asks `skip` for each vector it is
-    about to read (`CheckZonemapSegments`), which checks the vector's
-    statistics then. Dynamic filters are read as they are at that moment,
-    as the operator that sets them tightens them while the scan runs (a
+    """A scan's table filters and where their columns' statistics are: the chunk
+    loop asks `skip` for each vector it is about to read, which checks the
+    vector's statistics then. Dynamic filters are read as they are at that
+    moment, as the operator that sets them tightens them while the scan runs (a
     TopN boundary)."""
 
     var filters: TableFilterSet
