@@ -1,30 +1,49 @@
 """Partial aggregation below a join (eager group-by).
 
-A grouped aggregate over an equi-join that reads only one input's columns
-in its aggregate functions can aggregate that input first, by its join
-keys and its own grouping columns, and finish above the join. The join
-then matches one row per partial group instead of every input row, and
-the grouping above it sees as many rows as there are partial groups.
+A grouped aggregate over an equi-join whose aggregate functions read only
+one input's columns can aggregate that input first, by its join keys and
+its own grouping columns, and finish above the join. The join then
+matches one row per partial group instead of every input row, and the
+grouping above it sees as many rows as there are partial groups.
 
-Why the result is the same: group the input of the aggregate side by
-(join keys, that side's grouping columns). Every row of one partial
-group meets the same rows of the other input, so every final group is
-the union of whole partial groups, each repeated once per matching row
-of the other input. For a decomposable aggregate, folding the partial
-results gives the result over the union of their rows: a sum of partial
-sums (a partial group repeated by a duplicate match adds its sum again,
-as each of its rows would have), a sum of partial counts, a minimum of
-partial minimums and a maximum of partial maximums.
+Why the result is the same: group the aggregate side's rows by (join
+keys, that side's grouping columns). Every row of one partial group meets
+the same rows of the other input, so every final group is the union of
+whole partial groups, each repeated once per matching row of the other
+input. For a decomposable aggregate, folding the partial results gives
+the result over the union of their rows. A partial group repeated by a
+duplicate match must count once per match, as each of its rows would
+have: partial sums and partial counts add up again for every copy, so
+the final step is a sum of partial sums or of partial counts, and a
+minimum of partial minimums or a maximum of partial maximums (a repeated
+value changes neither). A mean is a sum divided by a count, each split
+the same way. A count of rows reads no value, so it splits with either
+side: the partial step counts the aggregate side's rows.
+
+The partial aggregate evaluates every row of its input, including rows
+the join would drop. An expression that can raise (checked integer or
+decimal arithmetic and sums, partial casts) would then raise for a row
+the query never kept, so the split is made only when every aggregate
+input is total over its input's types. An error the unsplit plan raises
+in a group it later discards is unaffected: such a function never
+splits, and the final aggregate still evaluates every group.
 """
 from dataframe.planning.node_builders import (
     _aggregate_node,
+    _select_node,
+)
+from dataframe.dtype import (
+    DataType,
 )
 from dataframe.expr import (
+    COL,
     COUNT,
     Expr,
     LEN,
     MAX,
+    MEAN,
     MIN,
+    ROW_LEN,
     SUM,
     col,
     subtree,
@@ -37,6 +56,9 @@ from dataframe.join_type import (
     JOIN_LEFT,
     JOIN_RIGHT,
 )
+from dataframe.optimizer.passes import (
+    plan_cannot_raise,
+)
 from dataframe.planning.context import (
     QueryContext,
 )
@@ -46,10 +68,16 @@ from dataframe.planning.graph import (
 )
 from dataframe.planning.model import (
     AGG,
+    GROUPING_SETS,
     JOIN,
+    SELECT,
 )
 from dataframe.planning.expression_inputs import (
     _references,
+)
+from dataframe.planning.properties import (
+    _produced_at,
+    _through_projection,
 )
 from dataframe.planning.statistics import (
     PlanStatistics,
@@ -58,17 +86,15 @@ from dataframe.planning.statistics import (
 from dataframe.trace import (
     trace_path,
 )
-from std.collections import (
-    Optional,
-)
 
 # Aggregating first pays only when it collapses many rows into few
-# groups. Two estimates decide it, before anything runs. The join must
-# keep most of the aggregate side's rows (at least 70%): a join that
-# discards rows already shrinks the input, and the partial aggregate
-# would hash rows the join throws away. And the aggregate side must hold
-# at least 4 rows per row of the other input, the most groups its join
-# keys can then have per matching row being small next to its rows.
+# groups, decided from estimates before anything runs. The join must keep
+# most of the aggregate side's rows (at least 70%): a join that discards
+# rows already shrinks the input, and the partial aggregate would group
+# rows the join throws away. And the aggregate side must hold at least 4
+# rows per row of the other input: its join keys take at most as many
+# values as the other input has rows, so each partial group then holds
+# several rows on average.
 comptime _MIN_AGGREGATE_TO_DIMENSION_RATIO = 4
 comptime _MIN_JOIN_RETENTION = 0.7
 # The partial groups: the join keys and at most one more grouping column
@@ -83,8 +109,13 @@ def plan_push_partial_aggregates(mut self: QueryContext) raises:
     """Split each grouped aggregate over a join whose aggregate functions
     read one input into a partial aggregate of that input below the join
     and a final aggregate above it (module docs). Run after join order is
-    chosen, since the join directly under the aggregate decides the split.
+    chosen, since the join directly under the aggregate decides the split,
+    and before build sides are chosen, so they see the smaller input.
     """
+    # Splits rewrite nodes in place, so schemas remembered by node index
+    # would be stale; the root is the last node until the plan reorders.
+    self._schema_memo = None
+    var root = len(self._nodes) - 1
     var stats = PlanStatistics()
     var changed = False
     # Partial aggregates appended by a split are visited too: one may sit
@@ -96,7 +127,7 @@ def plan_push_partial_aggregates(mut self: QueryContext) raises:
             trace_path("lazy.partial_aggregate")
         i += 1
     if changed:
-        plan_reorder(self)
+        plan_reorder(self, root)
 
 
 def _parent_counts(self: QueryContext) -> List[Int]:
@@ -129,41 +160,71 @@ def _side_of(
 
 def _partial_function(expr: Expr) -> Int:
     """The aggregate function at the root of `expr` when it can be split
-    into a partial and a final step, else -1: a sum, a count of values or
-    of rows, a minimum or a maximum over a row-local input."""
+    into a partial and a final step, else -1: a sum, a count of values,
+    a minimum, a maximum or a mean over a row-local input, or a count of
+    the group's rows."""
     var root = len(expr._nodes) - 1
-    if root < 1:
+    if root < 0:
         return -1
     ref node = expr._nodes[root]
+    if node.op == ROW_LEN:
+        return ROW_LEN if root == 0 else -1
     if (
         node.op != SUM
         and node.op != COUNT
         and node.op != LEN
         and node.op != MIN
         and node.op != MAX
+        and node.op != MEAN
     ):
         return -1
     if node.left < 0 or node.right >= 0:
+        return -1
+    # With a minimum count above one, a partial group holding too few
+    # valid values would give a null partial sum although its final group
+    # holds enough.
+    if node.op == SUM and node.min_count > 1:
         return -1
     if not _row_local([subtree(expr, node.left)]):
         return -1
     return node.op
 
 
-def _final_expr(expr: Expr, name: String) -> Expr:
-    """The final step over the partial results in column `name`: partial
-    sums and counts add up, minimums and maximums fold again. A sum keeps
-    its minimum count of valid values: a final group with no valid value
-    has only partial sums that are null themselves."""
-    ref node = expr._nodes[len(expr._nodes) - 1]
-    var partial = col(name)
-    if node.op == SUM:
-        return partial.sum(min_count=node.min_count).alias(expr._name)
-    if node.op == COUNT or node.op == LEN:
-        return partial.sum().alias(expr._name)
-    if node.op == MIN:
-        return partial.min().alias(expr._name)
-    return partial.max().alias(expr._name)
+def _counts_rows(expr: Expr, function: Int) -> Bool:
+    """Whether `expr` only counts its group's rows: a count of rows, or
+    the length of a column, which counts nulls too. A length of a
+    computed input still evaluates it, and that may raise."""
+    if function == ROW_LEN:
+        return True
+    return (
+        function == LEN and len(expr._nodes) == 2 and expr._nodes[0].op == COL
+    )
+
+
+def _plain_columns(exprs: List[Expr]) -> Bool:
+    """Whether a projection only selects (and may rename) input columns."""
+    for expr in exprs:
+        if len(expr._nodes) != 1 or expr._nodes[0].op != COL:
+            return False
+    return True
+
+
+def _contains_aggregate(self: QueryContext, index: Int) -> Bool:
+    """Whether the subtree at `index` aggregates: its output is already
+    collapsed to one row per group, so grouping it again first saves
+    little."""
+    var stack = List[Int]()
+    stack.append(index)
+    while len(stack) > 0:
+        var i = stack.pop()
+        ref node = self._nodes[i]
+        if node.kind == AGG or node.kind == GROUPING_SETS:
+            return True
+        if node.left >= 0:
+            stack.append(node.left)
+        if node.right >= 0:
+            stack.append(node.right)
+    return False
 
 
 def _push_partial_aggregate(
@@ -179,7 +240,24 @@ def _push_partial_aggregate(
         or agg.left < 0
     ):
         return False
+    var parents = _parent_counts(self)
+    # Selections between the aggregate and the join (join ordering ends
+    # each reordered graph with one) only pick columns: read the
+    # aggregate's inputs through them. Grouping columns must keep their
+    # names, so the final aggregate's output is named as before.
+    var aggregates = agg.exprs.copy()
     var at = agg.left
+    while self._nodes[at].kind == SELECT:
+        ref step = self._nodes[at]
+        if parents[at] != 1 or step.left < 0 or not _plain_columns(step.exprs):
+            return False
+        for name in agg.names:
+            var produced = _produced_at(step.exprs, name)
+            if produced < 0 or step.exprs[produced]._nodes[0].text != name:
+                return False
+        for j in range(len(aggregates)):
+            aggregates[j] = _through_projection(aggregates[j], step.exprs)
+        at = step.left
     var join = self._nodes[at].copy()
     if (
         join.kind != JOIN
@@ -191,7 +269,6 @@ def _push_partial_aggregate(
     ):
         return False
     # The join must belong to this aggregate alone: it is replaced.
-    var parents = _parent_counts(self)
     if parents[at] != 1:
         return False
     var left = plan_columns_of(self, join.left)
@@ -210,14 +287,18 @@ def _push_partial_aggregate(
         if pair < 0 or not join.coalesce or join.how != JOIN_INNER:
             return False
         shared_keys.append(name)
-    # The aggregate side: the input every aggregate function reads.
+    # The aggregate side: the input every aggregate function reads. A
+    # count of rows reads no value (whichever column it names) and splits
+    # on either side.
     var side = -1
     var functions = List[Int]()
-    for expr in agg.exprs:
+    for expr in aggregates:
         var function = _partial_function(expr)
         if function < 0:
             return False
         functions.append(function)
+        if _counts_rows(expr, function):
+            continue
         var reads = _references(expr)
         if not reads or len(reads.value()) == 0:
             return False
@@ -236,6 +317,9 @@ def _push_partial_aggregate(
     if (join.how == JOIN_LEFT and side != 0) or (
         join.how == JOIN_RIGHT and side != 1
     ):
+        return False
+    var aggregate_input = join.left if side == 0 else join.right
+    if _contains_aggregate(self, aggregate_input):
         return False
     var keys = join.names.copy() if side == 0 else join.right_keys.copy()
     var ours = left.copy() if side == 0 else right.copy()
@@ -266,22 +350,68 @@ def _push_partial_aggregate(
         return False
     if not _collapses(self, stats, at, side):
         return False
-    # Names for the partial results, free in both inputs.
+    # Names for the partial results, free in both inputs. A mean has two.
+    var needed = len(aggregates)
+    for function in functions:
+        if function == MEAN:
+            needed += 1
     var partial_names = List[String]()
     var n = 0
-    while len(partial_names) < len(agg.exprs):
+    while len(partial_names) < needed:
         var name = _PARTIAL_PREFIX + String(n)
         n += 1
         if name not in left and name not in right:
             partial_names.append(name)
     var partial_exprs = List[Expr]()
     var final_exprs = List[Expr]()
-    for j in range(len(agg.exprs)):
-        partial_exprs.append(agg.exprs[j].alias(partial_names[j]))
-        final_exprs.append(_final_expr(agg.exprs[j], partial_names[j]))
+    # A mean finishes as a division above the final aggregate; the other
+    # functions finish in it under their own names.
+    var outputs = List[Expr]()
+    for name in agg.names:
+        outputs.append(col(name))
+    var p = 0
+    var has_mean = False
+    for j in range(len(aggregates)):
+        var name = aggregates[j]._name
+        var function = functions[j]
+        if function == MEAN:
+            has_mean = True
+            var last = len(aggregates[j]._nodes) - 1
+            var input = subtree(aggregates[j], aggregates[j]._nodes[last].left)
+            var total = partial_names[p]
+            var count = partial_names[p + 1]
+            p += 2
+            # A partial group with no valid value has a null sum, so a
+            # final group with none divides a null sum by a zero count:
+            # null, as its mean is.
+            partial_exprs.append(input.sum(min_count=1).alias(total))
+            partial_exprs.append(input.count().alias(count))
+            final_exprs.append(col(total).sum(min_count=1).alias(total))
+            final_exprs.append(col(count).sum().alias(count))
+            # Division takes operands of one type: a mean of floats is a
+            # Float64 (the type check below keeps any other plan).
+            outputs.append(
+                (col(total) / col(count).cast(DataType.FLOAT64)).alias(name)
+            )
+            continue
+        var partial = partial_names[p]
+        p += 1
+        if _counts_rows(aggregates[j], function):
+            # Count the aggregate side's rows by a column it holds.
+            partial_exprs.append(col(keys[0]).len().alias(partial))
+        else:
+            partial_exprs.append(aggregates[j].alias(partial))
+        final_exprs.append(
+            _final_expr(aggregates[j], function, partial).alias(name)
+        )
+        outputs.append(col(name))
+    # The partial aggregate evaluates rows the join drops: only total
+    # inputs may move below it (module docs).
+    if not plan_cannot_raise(self, partial_exprs, aggregate_input):
+        return False
     var before = self._execute(index, True)
     var saved = agg.copy()
-    var aggregate_input = join.left if side == 0 else join.right
+    var count_before = len(self._nodes)
     self._nodes.append(
         _aggregate_node(keys=lower, exprs=partial_exprs, left=aggregate_input)
     )
@@ -295,27 +425,57 @@ def _push_partial_aggregate(
     var final_node = saved.copy()
     final_node.left = len(self._nodes) - 1
     final_node.exprs = final_exprs^
-    self._nodes[index] = final_node^
+    if has_mean:
+        self._nodes.append(final_node^)
+        self._nodes[index] = _select_node(
+            exprs=outputs, left=len(self._nodes) - 1
+        )
+    else:
+        self._nodes[index] = final_node^
     # The final step must give back every column as the aggregate did,
     # in name, order and type; a function whose final step would change
     # its type keeps the plan as it was.
-    var after = self._execute(index, True)
-    var same = after.width() == before.width()
-    if same:
-        var names = before.columns()
-        var now = after.columns()
-        for c in range(len(names)):
-            if (
-                names[c] != now[c]
-                or before.column(names[c]).dtype()
-                != after.column(now[c]).dtype()
-            ):
-                same = False
-                break
+    var same = False
+    try:
+        var after = self._execute(index, True)
+        same = after.width() == before.width()
+        if same:
+            var names = before.columns()
+            var now = after.columns()
+            for c in range(len(names)):
+                if (
+                    names[c] != now[c]
+                    or before.column(names[c]).dtype()
+                    != after.column(now[c]).dtype()
+                ):
+                    same = False
+                    break
+    except:
+        same = False
     if not same:
         self._nodes[index] = saved^
+        while len(self._nodes) > count_before:
+            _ = self._nodes.pop()
         return False
+    # The estimates of the rewritten nodes changed.
+    stats = PlanStatistics()
     return True
+
+
+def _final_expr(expr: Expr, function: Int, name: String) -> Expr:
+    """The final step over the partial results in column `name`: partial
+    sums and counts add up, minimums and maximums fold again. A sum keeps
+    its minimum count of valid values: a final group with no valid value
+    has only partial sums that are null themselves."""
+    var partial = col(name)
+    if function == SUM:
+        var root = expr._nodes[len(expr._nodes) - 1].copy()
+        return partial.sum(min_count=root.min_count)
+    if function == COUNT or function == LEN or function == ROW_LEN:
+        return partial.sum()
+    if function == MIN:
+        return partial.min()
+    return partial.max()
 
 
 def _collapses(
