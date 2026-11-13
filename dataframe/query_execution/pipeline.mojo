@@ -1630,7 +1630,7 @@ struct _BatchStream(Movable):
     var file_scan: Optional[ArcPointer[ScanSource]]
     var source_done: Bool
     var input: DataFrame
-    var offset: Int
+    var next_row: Int
     var emitted: Bool
     var ended: Bool
     var finishing: Bool
@@ -1714,7 +1714,7 @@ struct _BatchStream(Movable):
         self.file_scan = file_scan^
         self.source_done = False
         self.input = input^
-        self.offset = 0
+        self.next_row = 0
         self.emitted = False
         self.ended = False
         self.finishing = False
@@ -1812,11 +1812,11 @@ struct _BatchStream(Movable):
                     break
                 batch.append(next.take())
             else:
-                if self.emitted and self.offset >= self.input.height():
+                if self.emitted and self.next_row >= self.input.height():
                     self.ended = True
                     break
-                frame = self.input.slice(self.offset, self.batch_size)
-                self.offset += frame.height()
+                frame = self.input.slice(self.next_row, self.batch_size)
+                self.next_row += frame.height()
                 self.emitted = True
             var job = _StreamJob(
                 frame^,
