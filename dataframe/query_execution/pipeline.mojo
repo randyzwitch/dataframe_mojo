@@ -2360,15 +2360,15 @@ def _published_filters(
     its keys are read from the table."""
     var filters = List[PushedJoinFilter]()
     if len(made.probe) > 0 and made.probe[0].sank:
-        var table = made.built().value().copy()
+        var hashed = made.built().value().copy()
         for i in range(len(planned.positions)):
             var key = planned.positions[i]
             filters.append(
                 PushedJoinFilter(
                     planned.grouped[i],
-                    table.key_column(key, planned.right_keys[key]),
+                    hashed.key_column(key, planned.right_keys[key]),
                     len(planned.right_keys),
-                    table.inserted,
+                    hashed.inserted,
                     planned.build_filtered,
                 )
             )
