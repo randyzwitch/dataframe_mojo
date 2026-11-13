@@ -2,7 +2,7 @@
 # contract-group: reduce.global
 # contract-group: reduce.grouped
 from std.testing import assert_equal, assert_true
-from dataframe import Column, DataFrame, DataType, Series, col
+from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from tests.support.coverage_compare import assert_value
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.ordered_reduction_fixtures import typed_ordered_columns
@@ -101,3 +101,54 @@ def test_public_categorical_first_last_preserve_documented_result_dtype() raises
             "categorical first/last expressions must return decoded String",
         )
         assert_value(actual.item(), source.get(1 if last else 0))
+
+
+def test_public_lazy_reductions_without_inline_state_match_eager() raises:
+    # Positions of extremes, products and moments have no fixed-size state:
+    # the ungrouped sink holds them by address, each worker's rows in its
+    # own state, and the finish must replay them in input order (the first
+    # of many tied minima is the earliest row overall).
+    var n = 300_000
+    var x = List[Float64](capacity=n)
+    var near_one = List[Float64](capacity=n)
+    var keep = List[Int64](capacity=n)
+    for i in range(n):
+        x.append(Float64((i * 7919) % 1000))
+        near_one.append(1.0 + Float64(i % 3 - 1) * 1e-6)
+        keep.append(Int64(i % 5))
+    var frame = DataFrame(
+        [
+            Series("x", Column[Float64](x^)),
+            Series("p", Column[Float64](near_one^)),
+            Series("k", Column[Int64](keep^)),
+        ]
+    )
+    var expressions: List[Expr] = [
+        col("x").arg_min().alias("arg_min"),
+        col("x").arg_max().alias("arg_max"),
+        col("x").skew().alias("skew"),
+        col("x").kurtosis().alias("kurtosis"),
+        col("p").product().alias("product"),
+        col("x").sum().alias("sum"),
+    ]
+    for filtered in [False, True]:
+        var input = frame.filter(col("k") != 2) if filtered else frame.copy()
+        var expected = input.select_exprs(expressions)
+        var query = (
+            frame.lazy()
+            .filter(col("k") != 2)
+            .select_exprs(expressions) if filtered else frame.lazy()
+            .select_exprs(expressions)
+        )
+        for streaming in [False, True]:
+            var actual = query.collect(engine="cpu", streaming=streaming)
+            assert_equal(actual.height(), 1)
+            for name in ["arg_min", "arg_max"]:
+                assert_value(actual.item(0, name), expected.item(0, name))
+            for name in ["skew", "kurtosis", "product", "sum"]:
+                var a = actual.item(0, name).float64()
+                var b = expected.item(0, name).float64()
+                assert_true(
+                    abs(a - b) <= 1e-9 * max(1.0, abs(b)),
+                    String(name, ": ", a, " != ", b),
+                )

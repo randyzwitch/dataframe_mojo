@@ -29,12 +29,15 @@ from dataframe.aggregation.function import (
     _K_NULLS,
     _K_INT_SUM,
     _K_DISTINCT,
+    _K_ORDERED,
+    _OrderedBuffer,
     ReducerSpec,
     _ValueArena,
     _update_states,
     combine as combine_states,
-    reduction_supported,
-    states_supported,
+    reducer_input,
+    table_reduction,
+    table_states_supported,
 )
 from dataframe.aggregation.hash_table import (
     AggregateLayout,
@@ -78,6 +81,7 @@ from dataframe.vector.data_chunk import (
     DataChunk,
     _NUMERIC_STORAGE,
     storage_physical,
+    to_series,
 )
 from dataframe.vector.expression import VectorExpression
 from dataframe.vector.sink import Sink
@@ -160,10 +164,10 @@ def ungrouped_layout(
     empty: DataFrame, expressions: List[Expr]
 ) raises -> Optional[UngroupedLayout]:
     """The ungrouped aggregate over a sink whose input is typed as `empty`
-    (no rows), or None when some reduction has no inline state: a
-    positional or holistic reduction the table does not hold. A distinct
-    count's state is the count its distinct table finishes with."""
-    if len(expressions) == 0 or not _stream_reductions(expressions, True):
+    (no rows), or None when some reduction has no state here, inline or
+    by address (`table_kind`). A distinct count's state is the count its
+    distinct table finishes with."""
+    if len(expressions) == 0 or not _stream_reductions(expressions, True, True):
         return None
     var inputs = List[Optional[Expr]]()
     var seconds = List[Optional[Expr]]()
@@ -172,7 +176,7 @@ def ungrouped_layout(
         for node in expression._nodes:
             if not is_reduction(node.op):
                 continue
-            if not reduction_supported(node.op):
+            if not table_reduction(node.op):
                 return None
             ops.append(node.op)
             if node.left < 0:
@@ -227,7 +231,7 @@ def ungrouped_layout(
             var one = VectorExpression(value, empty._columns)
             typed.append(_empty(one.root_dtype()))
             compiled[i] = one^
-    if not states_supported(specs, typed):
+    if not table_states_supported(specs, typed):
         return None
     var layout = aggregate_layout(List[Series](), typed, specs)
     var simple: List[Int] = [
@@ -299,7 +303,7 @@ def _unfiltered(
             var one = VectorExpression(inputs[i].value(), empty._columns)
             typed.append(_empty(one.root_dtype()))
             compiled[i] = one^
-    if not states_supported(specs, typed):
+    if not table_states_supported(specs, typed):
         return None
     var layout = aggregate_layout(List[Series](), typed, specs)
     return UngroupedLayout(
@@ -355,6 +359,17 @@ struct UngroupedSink(Sink):
     # distinct count's index there, or -1.
     var distinct: List[AggregateSink]
     var distinct_of: List[Int]
+    # Per state, the `Reducer` (`_K_STATE`) or the buffer of input rows
+    # (`_K_ORDERED`) a state by address points at: the state row holds
+    # the owner's address, never the state, so any reduction's state fits.
+    var owned: List[Reducer]
+    var buffered: List[_OrderedBuffer]
+    # The global state's: every other worker's state row and owners once
+    # combined, kept, since the combined row's chains of states by address
+    # point into them until the finish reads them.
+    var kept_groups: List[_Groups]
+    var kept_owned: List[List[Reducer]]
+    var kept_buffered: List[List[_OrderedBuffer]]
 
     def __init__(out self, shared: UngroupedLayout):
         self.slots = shared.layout.slots.copy()
@@ -382,6 +397,14 @@ struct UngroupedSink(Sink):
         self.sequence = 0
         self.distinct = List[AggregateSink]()
         self.distinct_of = List[Int](length=len(self.slots), fill=-1)
+        self.owned = List[Reducer](capacity=len(self.slots))
+        self.buffered = List[_OrderedBuffer](capacity=len(self.slots))
+        for s in range(len(self.slots)):
+            self.owned.append(shared.layout.templates[s].make(0))
+            self.buffered.append(_OrderedBuffer())
+        self.kept_groups = List[_Groups]()
+        self.kept_owned = List[List[Reducer]]()
+        self.kept_buffered = List[List[_OrderedBuffer]]()
         var workers = configured_workers()
         for d in range(len(shared.layout.distinct)):
             self.distinct_of[shared.layout.distinct[d]] = d
@@ -429,6 +452,9 @@ struct UngroupedSink(Sink):
             var offset = self.slots[s].offset
             if kind == _K_LEN:
                 _words(state + 8 * offset)[] += UInt64(n)
+                continue
+            if self.slots[s].by_address():
+                self._by_address(s, chunk, arena, state + 8 * offset)
                 continue
             var format = self._format(s, chunk, arena)
             if kind == _K_DISTINCT:
@@ -481,6 +507,56 @@ struct UngroupedSink(Sink):
         if c >= 0:
             return chunk.unified(c, arena)
         return self.output.unified(i, arena)
+
+    def _column(
+        mut self, i: Int, mut chunk: DataChunk, mut arena: ColumnArena
+    ) raises -> Series:
+        """Input i over the chunk's rows as a column, the way a `Reducer`
+        reads its input: the chunk's column, or what its expression
+        wrote."""
+        var dtype = self.types[i].dtype()
+        if self.columns[i] >= 0:
+            return to_series(chunk, self.columns[i], arena, "", dtype)
+        return to_series(self.output, i, arena, "", dtype)
+
+    def _by_address(
+        mut self,
+        s: Int,
+        mut chunk: DataChunk,
+        mut arena: ColumnArena,
+        state: Int,
+    ) raises:
+        """State s, held by address: its owner (this sink's `Reducer`, or
+        its buffer of input rows for an order-sensitive reduction) written
+        into the state row once, as the one group's first ordinal; then
+        the owner takes the chunk's rows, a buffer with their sequence
+        numbers, so the finish replays every worker's rows in input
+        order."""
+        var slot = self.slots[s].copy()
+        var ordered = slot.kind == _K_ORDERED
+        var at = _words(state)
+        if at[] == 0:
+            at[] = UInt64(
+                Int(Pointer(to=self.buffered[s])) if ordered else Int(
+                    Pointer(to=self.owned[s])
+                )
+            )
+            at[unsafe_offset=1] = 1
+            at[unsafe_offset=2] = 0
+        var n = chunk.count
+        var ordinals = List[Int](length=n, fill=0)
+        var column = self._column(s, chunk, arena)
+        if ordered:
+            self.buffered[s].add(column, ordinals, self.sequence, 1)
+            return
+        self.owned[s].grow(1)
+        if self.owned[s].op == CORR or self.owned[s].op == COV:
+            var second = self._column(slot.k, chunk, arena)
+            self.owned[s].update_pair(column, second, 0, True, ordinals)
+        else:
+            self.owned[s].update(
+                reducer_input(self.owned[s], column), 0, True, ordinals
+            )
 
     def _scratch(mut self) -> Int:
         """The address of the table update's scratch vectors (values,
@@ -611,9 +687,13 @@ struct UngroupedSink(Sink):
                 self._scratch(),
             )
 
-    def release(mut self):
+    def release(mut self) raises:
         """Free everything but the states and the inputs they point into,
-        on the worker's own thread when its run ends."""
+        on the worker's own thread when its run ends; buffered input rows
+        are made ready for the finish to read."""
+        for s in range(len(self.slots)):
+            if self.slots[s].kind == _K_ORDERED:
+                self.buffered[s].prepare()
         self.expressions = List[Optional[VectorExpression]]()
         self.filters = List[Optional[VectorExpression]]()
         self.columns = List[Int]()
@@ -645,6 +725,18 @@ struct UngroupedSink(Sink):
         self.combine_into(combined[0])
         while len(self.distinct) > 0:
             combined[0].distinct.append(self.distinct.pop(0))
+        for slot in self.slots:
+            if slot.by_address():
+                var groups = _Groups(0, List[Bool](), 0, 1)
+                var owned = List[Reducer]()
+                var buffered = List[_OrderedBuffer]()
+                swap(groups, self.groups)
+                swap(owned, self.owned)
+                swap(buffered, self.buffered)
+                combined[0].kept_groups.append(groups^)
+                combined[0].kept_owned.append(owned^)
+                combined[0].kept_buffered.append(buffered^)
+                return
 
     def finalize_distinct(mut self, layout: AggregateLayout) raises:
         """Finalize the global distinct state: each distinct
