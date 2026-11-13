@@ -404,47 +404,6 @@ def _extract_aggregate_inputs(
     return (result^, rewritten^)
 
 
-def _row_counted(
-    schema: DataFrame,
-    expressions: List[Expr],
-    null_free: List[Bool],
-) raises -> Tuple[List[Expr], List[String], List[String]]:
-    """Identify columns read for values versus validity or row counts. COUNT
-    over a proven non-null column is the retained-row count, so it need not
-    gather that column through a row selection. Keep validity reads for
-    nullable columns."""
-    var rewritten = List[Expr](capacity=len(expressions))
-    var valued = List[String]()
-    var counted = List[String]()
-    for e in expressions:
-        var nodes = e._nodes.copy()
-        var under_len = List[Bool](length=len(nodes), fill=False)
-        for k in range(len(nodes)):
-            var child = nodes[k].left
-            if child < 0 or nodes[child].op != COL:
-                continue
-            if nodes[k].op == COUNT:
-                if null_free[schema._index(nodes[child].text)]:
-                    nodes[k].op = LEN
-            if nodes[k].op == LEN:
-                under_len[child] = True
-        for k in range(len(nodes)):
-            if nodes[k].op != COL:
-                continue
-            ref name = nodes[k].text
-            if under_len[k]:
-                if name not in counted:
-                    counted.append(name)
-            elif name not in valued:
-                valued.append(name)
-        rewritten.append(Expr(nodes^, e._name))
-    var only_counted = List[String]()
-    for name in counted:
-        if name not in valued:
-            only_counted.append(name)
-    return (rewritten^, valued^, only_counted^)
-
-
 def _range_key(dtype: DataType) -> Bool:
     """Keys whose values compare as their physical integers."""
     var physical = dtype.physical()
@@ -1240,11 +1199,8 @@ struct _ChunkRunner(Movable):
     # Grouping sets' tables (`GroupingSetsSink`), likewise.
     var sets: List[GroupingSetsSink]
     var sets_layout: List[ArcPointer[GroupingSetsLayout]]
-    # A reduction neither aggregate sink takes (`_ReduceSink`).
-    var reduce: List[_ReduceSink]
-    var reduce_layout: List[ArcPointer[_ReduceSinkLayout]]
     # A materialize sink (`MaterializeSink`), when the pipeline's rows are
-    # its result.
+    # its result, or the input of a reduction no aggregate sink takes.
     var materialize: List[MaterializeSink]
     var materializes: Bool
     # Retain scan-filter state and its source offset while the morsel runs.
@@ -1289,8 +1245,6 @@ struct _ChunkRunner(Movable):
         self.table_workers = 1
         self.sets = List[GroupingSetsSink]()
         self.sets_layout = List[ArcPointer[GroupingSetsLayout]]()
-        self.reduce = List[_ReduceSink]()
-        self.reduce_layout = List[ArcPointer[_ReduceSinkLayout]]()
         self.materialize = List[MaterializeSink]()
         self.materializes = False
         self.scan = None
@@ -1332,7 +1286,6 @@ struct _ChunkRunner(Movable):
             len(self.ungrouped) > 0
             or len(self.table) > 0
             or len(self.sets) > 0
-            or len(self.reduce) > 0
             or len(self.materialize) > 0
         )
 
@@ -1359,10 +1312,6 @@ struct _ChunkRunner(Movable):
                     GroupingSetsSink(self.sets_layout[0][], self.table_workers)
                 )
             self.sets[0].begin(morsel)
-        elif len(self.reduce_layout) > 0:
-            if len(self.reduce) == 0:
-                self.reduce.append(_ReduceSink(self.reduce_layout[0][]))
-            self.reduce[0].begin(morsel)
         elif self.materializes:
             if len(self.materialize) == 0:
                 self.materialize.append(
@@ -1381,8 +1330,6 @@ struct _ChunkRunner(Movable):
         if len(self.sets) > 0:
             self.sets[0].release()
             self.sets[0].derive()
-        if len(self.reduce) > 0:
-            self.reduce[0].release()
         if len(self.materialize) > 0:
             self.materialize[0].release()
 
@@ -1402,8 +1349,6 @@ struct _ChunkRunner(Movable):
             _sink_chunk(self.table[0], chunk, self.arena)
         elif len(self.sets) > 0:
             _sink_chunk(self.sets[0], chunk, self.arena)
-        elif len(self.reduce) > 0:
-            _sink_chunk(self.reduce[0], chunk, self.arena)
         else:
             _sink_chunk(self.materialize[0], chunk, self.arena)
 
@@ -1503,26 +1448,6 @@ struct _ChunkRunner(Movable):
             if step.output.count == 0:
                 return 0
         return Int(input)
-
-    def chunk_frame(mut self, address: Int) raises -> DataFrame:
-        """An output chunk as a frame of the output schema (the adapter
-        for sinks that read frames)."""
-        var chunk = Pointer[DataChunk, MutAnyOrigin](
-            unsafe_from_address=address
-        )
-        var schema = self.output_schema()
-        var columns = List[Series](capacity=schema.width())
-        for c in range(schema.width()):
-            columns.append(
-                to_series(
-                    chunk[],
-                    c,
-                    self.arena,
-                    schema._columns[c].name(),
-                    schema._columns[c].dtype(),
-                )
-            )
-        return DataFrame(columns^)
 
     def _compiled(mut self, s: Int) raises:
         if not self.compiled[s]:
@@ -1789,100 +1714,6 @@ struct _Cursor(Copyable, Movable):
                 layout=Layout[Atomic[Int64]](length=1),
             )
         )
-
-
-struct _ReduceSinkLayout(Copyable, Movable):
-    """What every worker's reduce sink shares (an ungrouped reduction the
-    ungrouped sink does not take): the sink input's types, the reductions
-    and the input columns read."""
-
-    var schema: DataFrame
-    var expressions: List[Expr]
-    # None: a selector may read any column, so every one is read.
-    var reads: Optional[List[String]]
-
-    def __init__(out self, schema: DataFrame, expressions: List[Expr]):
-        self.schema = schema.copy()
-        self.expressions = expressions.copy()
-        self.reads = _reads(expressions)
-
-
-struct _ReduceSink(Sink):
-    """One worker's reduce sink state, fed a chunk at a time: its reducer
-    state, each chunk's state merged into it."""
-
-    var shared: _ReduceSinkLayout
-    var reduction: List[_StreamReduction]
-    var sequence: Int
-
-    def __init__(out self, shared: _ReduceSinkLayout):
-        self.shared = shared.copy()
-        self.reduction = List[_StreamReduction]()
-        self.sequence = 0
-
-    def begin(mut self, morsel: Int):
-        self.sequence = morsel << 32
-
-    def sink(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
-        var n = chunk.count
-        if n == 0:
-            return
-        ref schema = self.shared.schema
-        var expressions = self.shared.expressions.copy()
-        var input: DataFrame
-        if self.shared.reads:
-            # A count of a column holding no null is the row count, and a
-            # column only row counts read is not gathered.
-            var null_free = List[Bool](capacity=schema.width())
-            for c in range(schema.width()):
-                var source = chunk.data[c].source
-                null_free.append(
-                    source >= 0 and arena.columns[source].null_count() == 0
-                )
-            var counts = _row_counted(schema, expressions, null_free)
-            expressions = counts[0].copy()
-            input = _chunk_frame(chunk, arena, schema, counts[1])
-            for name in counts[2]:
-                # Only row counts read it: a column of the chunk's height
-                # stands in, and its values are never read.
-                input = input.with_column(
-                    Series(name, Column[Int8](List[Int8](length=n, fill=0)))
-                )
-        else:
-            input = _chunk_frame(chunk, arena, schema, schema.columns())
-        var first = self.sequence
-        self.sequence += n
-        var state = _StreamReduction(input, expressions, List[String]())
-        state.shift_firsts(first)
-        if len(self.reduction) == 0:
-            self.reduction.append(state^)
-        else:
-            self.reduction[0].merge(state)
-
-    def release(mut self) raises:
-        pass
-
-    def combine(var self, mut combined: List[_ReduceSink]) raises:
-        """This worker's state into the global state, every worker's: the
-        finish merges them."""
-        combined.append(self^)
-
-
-def _chunk_frame(
-    mut chunk: DataChunk,
-    mut arena: ColumnArena,
-    schema: DataFrame,
-    names: List[String],
-) raises -> DataFrame:
-    """The named columns of a chunk of `schema`'s columns as a frame (the
-    adapter for sinks that read frames)."""
-    var columns = List[Series](capacity=len(names))
-    for name in names:
-        var c = schema._index(name)
-        columns.append(
-            to_series(chunk, c, arena, name, schema._columns[c].dtype())
-        )
-    return DataFrame(columns^, height=chunk.count)
 
 
 struct _PipelineJob(Job):
@@ -2210,53 +2041,61 @@ struct _PipelineJob(Job):
             var chunk = Pointer[DataChunk, MutAnyOrigin](
                 unsafe_from_address=address
             )
+            if len(self.topn) == 0:
+                self._make_top()
             if self.top_maintain_order:
-                # Ties keep the input order: the order column is added to
-                # the chunk's rows as a frame.
-                var frame = self.runner.chunk_frame(address)
-                var height = frame.height()
-                self._sink_top(frame^, k, offset, made)
+                var height = chunk[].count
+                self._sink_ordered_top(chunk[], k, offset, made)
                 made += height
                 continue
-            if len(self.topn) == 0:
-                self._sink_top(self.runner.output_schema(), k, offset, 0)
             _sink_chunk(self.topn[0], chunk[], self.runner.arena)
         if skipped > 0:
             # Once a morsel: tracing reads the environment.
             trace_path("pipeline.top_dynamic_skip_vector")
 
-    def _sink_top(
-        mut self, var output: DataFrame, k: Int, offset: Int, first_row: Int
-    ) raises:
-        """Rows into this worker's top-N heap; `first_row` numbers the
-        first among the morsel's output rows (ties keep that order)."""
+    def _make_top(mut self) raises:
+        """This worker's top-N heap over the output schema; an order
+        column (`_ORDER_COLUMN`) after it when ties keep the input
+        order."""
+        var schema = self.runner.output_schema()
         if self.top_maintain_order:
-            var h = output.height()
-            var places = List[Int64](capacity=h)
-            var base = Int64(k) << 40
-            if self.top_filter.reordered:
-                # A row group's rows (at most ROW_GROUP_ROWS, no
-                # join) after its source row.
-                base = Int64(offset) << 20
-            for r in range(h):
-                places.append(base + Int64(first_row + r))
-            output = output.with_column(
-                Series(_ORDER_COLUMN, Column[Int64](places^))
+            schema = schema.with_column(
+                Series(_ORDER_COLUMN, Column[Int64](List[Int64]()))
             )
-        if len(self.topn) == 0:
-            self.topn.append(
-                TopNSink(
-                    output,
-                    _top_keys(self.top_names, self.top_maintain_order),
-                    _top_flags(self.top_descending, self.top_maintain_order),
-                    _top_flags(self.top_nulls_last, self.top_maintain_order),
-                    self.top,
-                    self.boundary,
-                    self.top_filter.dynamic,
-                    self.top_filter.op,
-                )
+        self.topn.append(
+            TopNSink(
+                schema,
+                _top_keys(self.top_names, self.top_maintain_order),
+                _top_flags(self.top_descending, self.top_maintain_order),
+                _top_flags(self.top_nulls_last, self.top_maintain_order),
+                self.top,
+                self.boundary,
+                self.top_filter.dynamic,
+                self.top_filter.op,
             )
-        self.topn[0].sink(output)
+        )
+
+    def _sink_ordered_top(
+        mut self, mut chunk: DataChunk, k: Int, offset: Int, first_row: Int
+    ) raises:
+        """A chunk into this worker's top-N heap whose ties keep the input
+        order: each row's place in the input is its last sort key, a
+        sequence vector after the chunk's columns (morsel `k`'s rows
+        numbered from `first_row`), so the heap reads it like any key and
+        nothing is materialized for it."""
+        var base = Int64(k) << 40
+        if self.top_filter.reordered:
+            # A row group's rows (at most ROW_GROUP_ROWS, no join) after
+            # its source row.
+            base = Int64(offset) << 20
+        var ordered = DataChunk(len(chunk.data) + 1)
+        for c in range(len(chunk.data)):
+            ordered.data[c] = chunk.data[c]
+        ordered.data[len(chunk.data)] = Vector.sequence(
+            base + Int64(first_row), 1
+        )
+        ordered.count = chunk.count
+        _sink_chunk(self.topn[0], ordered, self.runner.arena)
 
     def _unmatched(self, chunk: Int, length: Int) raises -> DataFrame:
         """The build rows of the hash table's row chunk `chunk` the join
@@ -2838,7 +2677,6 @@ struct PipelineRun(Movable):
     var set_empty: List[DataFrame]
     var derived_from: List[Int]
     var schemas: ArcPointer[List[DataFrame]]
-    var reduce_layout: List[ArcPointer[_ReduceSinkLayout]]
     var collects: Bool
     var ungrouped: List[ArcPointer[UngroupedLayout]]
     var finish_steps: List[Step]
@@ -2879,7 +2717,6 @@ struct PipelineRun(Movable):
         var set_empty: List[DataFrame],
         var derived_from: List[Int],
         schemas: ArcPointer[List[DataFrame]],
-        var reduce_layout: List[ArcPointer[_ReduceSinkLayout]],
         collects: Bool,
         var ungrouped: List[ArcPointer[UngroupedLayout]],
         var finish_steps: List[Step],
@@ -2908,7 +2745,6 @@ struct PipelineRun(Movable):
         self.set_empty = set_empty^
         self.derived_from = derived_from^
         self.schemas = schemas
-        self.reduce_layout = reduce_layout^
         self.collects = collects
         self.ungrouped = ungrouped^
         self.finish_steps = finish_steps^
@@ -3320,26 +3156,13 @@ def begin_pipeline(
         for w in range(len(jobs)):
             jobs[w].runner.sets_layout.append(sets_layout)
             jobs[w].runner.table_workers = workers
-    # A grouping the aggregate table does not take: the rows are collected
-    # (each worker's chunks copied into its collections), then grouped by
-    # the eager group-by, which evaluates any expression over the groups
-    # the table finds. Any other ungrouped reduction: each worker's reduce
-    # sink takes the chunks.
-    var collects = len(expressions) > 0 and len(keys) > 0 and len(layout) == 0
-    var reduce_layout = List[ArcPointer[_ReduceSinkLayout]]()
-    if (
-        len(expressions) > 0
-        and not collects
-        and len(layout) == 0
-        and len(ungrouped) == 0
-    ):
-        reduce_layout.append(
-            ArcPointer(
-                _ReduceSinkLayout(schemas[][len(steps)].clear(), expressions)
-            )
-        )
-        for w in range(len(jobs)):
-            jobs[w].runner.reduce_layout.append(reduce_layout[0])
+    # A reduction neither the aggregate table nor the ungrouped sink
+    # takes: the rows are collected (each worker's chunks copied into its
+    # collections), then reduced by the eager evaluator, which takes any
+    # expression (grouped, over the groups the table finds).
+    var collects = (
+        len(expressions) > 0 and len(layout) == 0 and len(ungrouped) == 0
+    )
     # No reduction and no top-N: the rows are the result, each worker's chunks
     # copied into its collections, numbered by morsel so the finish restores
     # source order.
@@ -3383,7 +3206,6 @@ def begin_pipeline(
         set_empty^,
         derived_from^,
         schemas,
-        reduce_layout^,
         collects,
         ungrouped^,
         finish_steps.copy(),
@@ -3425,7 +3247,6 @@ def _finish_pipeline(
     ref set_empty = run.set_empty
     ref derived_from = run.derived_from
     ref schemas = run.schemas
-    ref reduce_layout = run.reduce_layout
     var collects = run.collects
     ref ungrouped = run.ungrouped
     ref finish_steps = run.finish_steps
@@ -3574,13 +3395,6 @@ def _finish_pipeline(
         else:
             _ = sinks^
         return finished^
-    var reduces = List[_ReduceSink]()
-    if len(reduce_layout) > 0:
-        var locals = List[_ReduceSink]()
-        for j in range(len(jobs)):
-            if len(jobs[j].runner.reduce) > 0:
-                locals.append(jobs[j].runner.reduce.pop())
-        reduces = _combined(locals^)
     if collects:
         var locals = List[MaterializeSink]()
         for j in range(len(jobs)):
@@ -3588,6 +3402,8 @@ def _finish_pipeline(
                 locals.append(jobs[j].runner.materialize.pop())
         var combined = _combined(locals^)
         var whole = materialize_finish(combined, schemas[][len(steps)].clear())
+        if len(keys) == 0:
+            return whole.select_exprs(expressions)
         return whole.group_by(keys, maintain_order=ordered).agg(expressions)
     if len(ungrouped) > 0:
         var sinks = List[UngroupedSink](capacity=len(jobs))
@@ -3596,20 +3412,6 @@ def _finish_pipeline(
                 sinks.append(jobs[j].runner.ungrouped.pop())
         var combined = _combined(sinks^)
         return ungrouped_finish(ungrouped[0][], combined)
-    if len(expressions) > 0:
-        var merged = List[_StreamReduction]()
-        for j in range(len(reduces)):
-            if len(reduces[j].reduction) == 0:
-                continue
-            if len(merged) == 0:
-                merged.append(reduces[j].reduction.pop())
-            else:
-                merged[0].merge(reduces[j].reduction[0])
-        if len(merged) == 0:
-            # No row survived: reduce an empty frame of the right schema.
-            var empty = schemas[][len(steps)].copy()
-            return _StreamReduction(empty, expressions, List[String]()).finish()
-        return merged[0].finish()
     if top <= 0:
         # The workers' batches in source order.
         var locals = List[MaterializeSink]()
