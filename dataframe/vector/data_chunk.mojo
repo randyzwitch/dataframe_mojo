@@ -61,10 +61,14 @@ struct ColumnArena(Movable):
     # string_t for an Arrow string column, a byte a value for a packed
     # Boolean one; empty until decoding is needed.
     var decoded: List[List[UInt8]]
+    # Per column, the address of values already decoded by their owner
+    # (`add_decoded`), 0 for none.
+    var shared: List[Int]
 
     def __init__(out self):
         self.columns = List[Series]()
         self.decoded = List[List[UInt8]]()
+        self.shared = List[Int]()
 
     def add(mut self, series: Series) raises -> Int:
         """Hold `series` as one contiguous array; its handle."""
@@ -76,7 +80,17 @@ struct ColumnArena(Movable):
         else:
             self.columns.append(series.copy())
         self.decoded.append(List[UInt8]())
+        self.shared.append(0)
         return len(self.columns) - 1
+
+    def add_decoded(mut self, series: Series, values: Int) raises -> Int:
+        """Hold `series`, whose values decoded to their vector layout are
+        at `values` (kept alive by their owner while the arena reads
+        them; 0 for none): a join table's dictionary columns, decoded once
+        for every worker reading them."""
+        var handle = self.add(series)
+        self.shared[handle] = values
+        return handle
 
     def mark(self) -> Int:
         return len(self.columns)
@@ -85,10 +99,13 @@ struct ColumnArena(Movable):
         while len(self.columns) > mark:
             _ = self.columns.pop()
             _ = self.decoded.pop()
+            _ = self.shared.pop()
 
     def values(mut self, handle: Int) raises -> Int:
         """The address of column `handle`'s values decoded to their vector
         layout (string_t, or a byte a Boolean), decoded on first use."""
+        if self.shared[handle] != 0:
+            return self.shared[handle]
         if len(self.decoded[handle]) == 0 and len(self.columns[handle]) > 0:
             ref series = self.columns[handle]
             if series._data.isa[StringColumn]():
@@ -521,6 +538,21 @@ def gather_series(
     var result = _from_unified(through, count, name^)
     _ = composed^
     return _typed(result^, dtype)
+
+
+def decode_values(series: Series) -> List[UInt8]:
+    """A string or Boolean column's values in their vector layout (string_t,
+    or a byte a value), as `ColumnArena.values` decodes them; empty for
+    other columns."""
+    if series._data.isa[StringColumn]():
+        return _decode_strings(series._data[StringColumn])
+    if series._data.isa[BoolColumn]():
+        ref bools = series._data[BoolColumn]
+        var out = List[UInt8](unsafe_uninit_length=len(bools))
+        for i in range(len(bools)):
+            out[i] = UInt8(1) if bools._get(i) else UInt8(0)
+        return out^
+    return List[UInt8]()
 
 
 def _decode_strings(column: StringColumn) -> List[UInt8]:
