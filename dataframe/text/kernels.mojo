@@ -3,7 +3,7 @@ are never read."""
 from dataframe.text.bytes import _Bytes
 from unicode_mojo.transform import slice_codepoints
 from dataframe.storage.boolean import BoolColumn
-from dataframe.regex import Regex, escape
+from regex_mojo import Regex, escape
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.text.transform import transform_strings
 from dataframe.expr import (
