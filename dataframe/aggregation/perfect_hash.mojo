@@ -72,9 +72,10 @@ def _type_bounds(part: Series) -> Tuple[Int128, Int128]:
 
 
 def perfect_hash(keys: List[Series]) raises -> PerfectHash:
-    """`CanUsePerfectHashAggregate` for grouping keys like `keys`, which
-    carry (or are given) their statistics: the table's shape, or none
-    when some key does not qualify."""
+    """Whether grouping keys like `keys`, which carry (or are given) their
+    statistics, can address a perfect hash table (each key's value range small
+    enough that the keys' bits side by side index a slot directly): the table's
+    shape, or none when some key does not qualify."""
     if len(keys) == 0:
         return PerfectHash.none()
     var minima = List[UInt64](capacity=len(keys))
@@ -145,10 +146,10 @@ def group_locations(
     count: Int,
     locations: Pointer[UInt64, MutAnyOrigin],
 ) raises:
-    """`ComputeGroupLocation`: each of a key vector's `count` rows adds
-    `(value - low + 1) << shift` to its location, a null adding nothing.
-    `map` (with `map_length` entries) replaces a categorical's codes by
-    their canonical codes first, as the table's key words do."""
+    """Each of a key vector's `count` rows adds `(value - low + 1) << shift` to
+    its location, a null adding nothing. `map` (with `map_length` entries)
+    replaces a categorical's codes by their canonical codes first, as the
+    table's key words do."""
     comptime for d in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[d]
         comptime if D.is_integral():
@@ -176,7 +177,7 @@ def _locations[
     count: Int,
     locations: Pointer[UInt64, MutAnyOrigin],
 ) raises:
-    """`ComputeGroupLocationTemplated` over values of `D`."""
+    """Group slots over values of `D`."""
     var data = format.values[D]()
     var sel = format.sel
     var validity = format.validity
@@ -229,9 +230,9 @@ def _locations[
 
 
 def key_word(perfect: PerfectHash, c: Int, slot: Int) -> Tuple[Bool, UInt64]:
-    """`ReconstructGroupVector` for key c of group `slot`: whether it is
-    valid, and its key word (the least value plus the key's bits less one,
-    wrapping as the key's type does)."""
+    """Key c of group `slot`, rebuilt from the slot's bits: whether it is valid,
+    and its key word (the least value plus the key's bits less one, wrapping as
+    the key's type does)."""
     var shift = perfect.total_bits
     for k in range(c + 1):
         shift -= perfect.bits[k]

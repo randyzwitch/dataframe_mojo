@@ -880,10 +880,9 @@ def _narrow_decimals(frame: DataFrame) raises -> DataFrame:
     Arrow C++ reader's smallest-decimal option loads them (#472): the
     Arrow C interface carries a Parquet DECIMAL(p, s) as decimal128
     whatever its precision, and at 128 bits every kernel takes its
-    per-row path (PDS-H decimal q6: 32 ms against 6 for the DOUBLE
-    variant), while at 64 bits the typed compare and arithmetic kernels
-    apply because precision of at most 18 digits fits in a signed 64-bit
-    integer.
+    slower per-row path, while at 64 bits the typed compare and arithmetic
+    kernels apply because precision of at most 18 digits fits in a signed
+    64-bit integer.
     One chunk a job."""
     var jobs = List[_NarrowDecimalJob]()
     var at = List[Int]()

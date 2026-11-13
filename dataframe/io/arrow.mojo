@@ -964,8 +964,8 @@ def _import_storage(
     # A validity buffer on an array with no nulls (Arrow says 0; -1 is
     # unknown) is dropped: no bitmap is how a column says every row is
     # valid, and the kernels' fast paths take it (Parquet readers attach
-    # one to every column, and a TPC-DS join key's checked per-row reads
-    # of it cost q84 8 ms).
+    # one to every column, and checked per-row reads of an all-valid
+    # bitmap cost a branch per value for nothing).
     var bits = List[UInt8]() if (
         _buffer(array, 0) == 0
         or array.null_count == 0

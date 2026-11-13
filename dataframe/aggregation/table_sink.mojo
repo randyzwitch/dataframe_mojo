@@ -206,10 +206,9 @@ def _as_columns(layout: AggregateLayout, inputs: Int) -> List[Bool]:
 
 
 struct TableSinkInputs(Movable):
-    """A worker's reader of a chunk's group chunk and aggregate input
-    chunk (`PopulateGroupChunk` and the inputs `Sink` evaluates): its own
-    copy of the compiled input expressions and the chunk they write, and
-    the buffers the group chunk's key vectors are read through."""
+    """A worker's reader of a chunk's group chunk and aggregate input chunk: its
+    own copy of the compiled input expressions and the chunk they write, and the
+    buffers the group chunk's key vectors are read through."""
 
     var keys: List[Int]
     var key_types: List[DataType]
@@ -640,9 +639,9 @@ struct TableSink(Sink):
         self.inputs.release()
 
     def combine(var self, mut combined: List[TableSink]) raises:
-        """This worker's table into the global state, every worker's
-        partitioned rows (`RadixPartitionedHashTable::Combine`): the finish
-        merges them partition by partition."""
+        """This worker's table into the global state, every worker's partitioned
+        rows: the finish merges them partition by partition, each partition on
+        its own thread with no locking."""
         combined.append(self^)
 
     def take_table(deinit self) -> AggregateSink:

@@ -72,8 +72,8 @@ def encodable(column: Series) -> Bool:
                 return False
         return True
     # Lengths are read through pointers taken once (`_Bytes`): a
-    # `_byte_length` call per row copied the column's view storage (TPC-DS
-    # q22's top-k spent half its time here).
+    # `_byte_length` call per row would copy the column's view storage
+    # once per row.
     var rows = _Bytes(column._data[StringColumn])
     for i in range(len(column)):
         if len(rows.get(i)) > STRING_PREFIX_BYTES:

@@ -1,7 +1,8 @@
 """Common subexpression elimination: a row-local subexpression that an
 aggregation or a projection reads more than once is computed once, in a
 with_columns below it, and every result equals the unoptimized plan's
-(TPC-DS q99's delay buckets over one date difference). A subexpression
+(for example, several delay buckets over one date difference). A
+subexpression
 read once, a column alone and an aggregate stay where they are."""
 # contract-group: planner.relational
 from std.testing import assert_equal, assert_true
