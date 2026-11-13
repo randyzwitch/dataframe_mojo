@@ -86,8 +86,8 @@ def totals(frame: DataFrame, shift: Int, name: String) raises -> LazyFrame:
 
 def test_join_inputs_run_at_once_and_join_as_computed() raises:
     """A join of two aggregates (both inputs computed, so both run at
-    once) and a stream of left joins over three aggregates (TPC-DS q78's
-    shape: each build and the source end in an aggregate, so all three
+    once) and a stream of left joins over three aggregates (each build
+    and the source end in an aggregate, so all three
     run ahead of the stream) give what joining the separately collected
     inputs gives."""
     var frame = source()
@@ -206,8 +206,8 @@ def test_an_error_in_a_prefetched_input_reaches_the_caller() raises:
 
 
 def test_whole_input_selections_cross_joined_run_ahead_and_match() raises:
-    """One-row statistics of filtered bands, cross joined side by side
-    (TPC-DS q28's shape): each band's selection reads its whole input, so
+    """One-row statistics of filtered bands, cross joined side by side:
+    each band's selection reads its whole input, so
     each is a breaker computed ahead of the stream, and the row is what
     the separately collected bands give."""
     var frame = source()

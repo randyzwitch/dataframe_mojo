@@ -95,7 +95,8 @@ struct CsvSplitFields:
         if self.cached_ends == 0:
             return -1
         var offset = Int(count_trailing_zeros(self.cached_ends))
-        # Match `previous_valid_ends >>= pos + 1` in SplitFields::next.
+        # Drop the bits up to and including this end, so the next lowest set bit
+        # is the following field end.
         self.cached_ends >>= UInt64(offset + 1)
         return self.position + offset
 

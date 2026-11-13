@@ -36,9 +36,14 @@ from dataframe.table_filter import (
     constant_in_domain,
 )
 
-# DynamicOrFilterThresholdSetting's default.
+# The most distinct build keys pushed to the probe scan as an IN list: each list
+# value is one more comparison per zone map and per row, so a long list costs
+# more than the rows it removes. An empirical choice.
 comptime DYNAMIC_OR_FILTER_THRESHOLD = 50
-# GetThresholdAndVectorsToCheck (BF) and SelectivityStats::Update.
+# A bloom filter's selectivity is measured over its first 6 vectors; when it
+# keeps half the rows or more it costs more than it saves, and it pauses for 10
+# vectors (longer after each failed check) before measuring again, since the
+# data can change along the scan. Empirical choices.
 comptime BF_THRESHOLD = 0.5
 comptime BF_CHECK_N = 6
 comptime VECTOR_PAUSE = 10
@@ -46,8 +51,8 @@ comptime VECTOR_PAUSE = 10
 
 @fieldwise_init
 struct SelectivityStats(Copyable, Movable):
-    """One thread's selectivity of an optional row filter
-    (`SelectivityOptionalFilterState::SelectivityStats`)."""
+    """One thread's selectivity of an optional row filter, which turns the
+    filter off while it removes too few rows to pay for itself."""
 
     var n_vectors_to_check: Int
     var threshold: Float64
@@ -150,8 +155,8 @@ struct _BoundsJob(Job):
 
 
 def _bounds(key: Series) raises -> Optional[Tuple[Int64, Int64]]:
-    """The least and greatest non-null value of an integer key: each
-    worker's slice's, combined (JoinFilterGlobalState's Combine)."""
+    """The least and greatest non-null value of an integer key: each worker's
+    slice's, combined."""
     var n = len(key)
     var parts = worker_count(n)
     var bounds = partitions(n, parts, 1)
@@ -368,8 +373,8 @@ def _finalize(
 
 
 def supports_join_filters(how: Int) -> Bool:
-    """JoinFilterPushdownUtil::JoinTypeIsSupported among the pipeline's
-    join steps: a probe row that matches nothing makes no output row."""
+    """Whether a join among the pipeline's steps can filter its probe side: a
+    probe row that matches nothing makes no output row."""
     return (
         how == JOIN_INNER
         or how == JOIN_SEMI
@@ -439,28 +444,50 @@ def keep_rows(
 
 @fieldwise_init
 struct PushedJoinFilter(Copyable, Movable):
-    """A finished build's key for a scan below an aggregate on the join's
-    probe side (`JoinFilterPushdownOptimizer::GetPushdownFilterTargets`,
-    the LOGICAL_AGGREGATE_AND_GROUP_BY case): `column` names the group key
-    in the aggregate's input, which the input's pipeline follows to its
-    source column, where `finalize_filters` makes the key's filters."""
+    """A finished build's key for a scan below an aggregate on the join's probe
+    side. A filter on a group key passes below the aggregate, since removing a
+    group's rows removes only that group: `column` names the group key in the
+    aggregate's input, which the input's pipeline follows to its source column,
+    where `finalize_filters` makes the key's filters."""
 
     var column: String
     var key: Series
-    # The join's equality conditions, and its build's rows with no null
-    # key and whether the build side filters (for CanUseBloomFilter).
+    # The join's equality conditions, and its build's rows with no null key and
+    # whether the build side filters (for `can_use_bloom_filter`).
     var equalities: Int
     var build_count: Int
     var build_filtered: Bool
 
 
+@fieldwise_init
+struct PlannedJoinFilter(Copyable, Movable):
+    """A join whose build's keys filter the input of an aggregate below
+    its probe side, decided before anything runs: the join's plan node, which of its keys reach a group
+    key (`positions`) and that key's name in the aggregate (`grouped`).
+    The build publishes the filters when it finishes."""
+
+    var join: Int
+    var positions: List[Int]
+    var grouped: List[String]
+    var right_keys: List[String]
+    var build_filtered: Bool
+
+
 struct PushedJoinFilters(Movable):
     """The keys pushed into the input of the aggregate at plan node
-    `node`, for its pipeline to filter its source by."""
+    `node`, for its pipeline to filter its source by: `planned` are the
+    joins they come from, `filters` the keys once those builds finished."""
 
     var node: Int
+    var planned: List[PlannedJoinFilter]
     var filters: List[PushedJoinFilter]
 
-    def __init__(out self, node: Int, var filters: List[PushedJoinFilter]):
+    def __init__(
+        out self,
+        node: Int,
+        var planned: List[PlannedJoinFilter],
+        var filters: List[PushedJoinFilter],
+    ):
         self.node = node
+        self.planned = planned^
         self.filters = filters^

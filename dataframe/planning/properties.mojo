@@ -275,14 +275,12 @@ def _schema_of(node: PlanNode, input: DataFrame) -> Optional[DataFrame]:
 def _aggregate_schema(
     node: PlanNode, input: DataFrame
 ) raises -> Optional[DataFrame]:
-    """A group_by's result on a zero-row `input`: its key columns, then
-    each aggregation's name and type bound from its expression. Running
-    one on no rows
-    sets up a whole grouping for nothing (TPC-DS q4: 170 us a group_by,
-    each planned several times). None without keys (a global aggregation
-    has one row), for keys or results of nested or categorical type, and
-    for anything the aggregation would reject, which the caller then
-    runs."""
+    """A group_by's result on a zero-row `input`: its key columns, then each
+    aggregation's name and type bound from its expression. Running one on no
+    rows sets up a whole grouping (hash tables, threads) for nothing, and the
+    planner asks for schemas often. None without keys (a global aggregation has
+    one row), for keys or results of nested or categorical type, and for
+    anything the aggregation would reject, which the caller then runs."""
     if len(node.names) == 0:
         return None
     var columns = List[Series](capacity=len(node.names) + len(node.exprs))
@@ -305,15 +303,13 @@ def _aggregate_schema(
 def _join_schema(
     node: PlanNode, left: DataFrame, right: DataFrame
 ) raises -> Optional[DataFrame]:
-    """An inner, left, semi or anti join's result on zero-row inputs,
-    derived from the input columns without executing the join. The schema
-    contains the left columns, followed by non-coalesced right columns; a
-    right name that collides with a left name receives the suffix.
-    Running one on no
-    rows prepares a hash join for nothing (TPC-DS q4: 60 us a join). None
-    for other join types, keys of differing, nested or categorical types,
-    and output names that still collide, which the caller then runs to
-    raise or handle as it does."""
+    """An inner, left, semi or anti join's result on zero-row inputs, derived
+    from the input columns without executing the join. The schema contains the
+    left columns, followed by non-coalesced right columns; a right name that
+    collides with a left name receives the suffix. Running one on no rows
+    prepares a hash join for nothing. None for other join types, keys of
+    differing, nested or categorical types, and output names that still collide,
+    which the caller then runs to raise or handle as it does."""
     if node.how == JOIN_RIGHT_SEMI or node.how == JOIN_RIGHT_ANTI:
         return None
     var how = join_type(node.text)

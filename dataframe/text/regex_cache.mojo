@@ -32,8 +32,8 @@ struct _PatternCache(Deinitable, Movable):
 
     def compile(mut self, pattern: String) raises -> Regex:
         var cached: Optional[Regex] = None
-        # Lookup/insertion cannot raise. Keep explicit acquisition pairs:
-        # BlockingScopedLock adds measurable overhead to contended hot hits.
+        # Lookup/insertion cannot raise. Keep explicit acquisition pairs: a
+        # scoped lock guard adds measurable overhead to contended hot hits.
         var owner = Int(Pointer(to=cached))
         self.lock.lock(owner)
         cached = Self._lookup(self.entries, pattern)

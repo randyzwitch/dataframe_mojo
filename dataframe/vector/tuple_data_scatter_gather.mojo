@@ -65,8 +65,8 @@ comptime _FIXED = [
     DType.int128,
 ]
 
-# sizeof(uint32_t): a string's slot within a list
-# (TupleDataWithinListFixedSize<string_t>).
+# A string's slot within a list's heap data: its 4-byte length, the bytes
+# following in the heap.
 comptime _WITHIN_LIST_STRING_SIZE = 4
 
 
@@ -162,7 +162,9 @@ def _entry_length(entries: Int, index: Int) -> Int:
 
 @always_inline
 def _null_value[D: DType]() -> Scalar[D]:
-    """NullValue<T>: the type's minimum, NaN for floats."""
+    """The value stored for a null: the type's minimum, NaN for floats. A fixed
+    value keeps a row's bytes the same for every null; validity still marks it
+    null."""
     comptime if D.is_floating_point():
         var zero = Scalar[D](0)
         return zero / zero
@@ -180,8 +182,8 @@ def compute_heap_sizes(
     append_sel: SelectionVector,
     append_count: Int,
 ):
-    """TupleDataCollection::ComputeHeapSizes: each appended row's heap
-    bytes, into `state.heap_sizes`."""
+    """Each appended row's heap bytes (known before any is written, so the heap
+    is allocated once), into `state.heap_sizes`."""
     var sizes = _ints(state.sizes())
     for i in range(append_count):
         sizes[unsafe_offset=i] = 0
@@ -230,7 +232,7 @@ def _within_heap_sizes(
     append_count: Int,
     list_data: UnifiedVectorFormat,
 ):
-    """WithinCollectionComputeHeapSizes."""
+    """Heap bytes of a list's child values, per appended row."""
     var physical = state.vector_data[f].physical
     var source = state.vector_data[f].unified
     var sizes = _ints(state.sizes())
@@ -273,9 +275,9 @@ def _collection_within_heap_sizes(
     append_count: Int,
     list_data: UnifiedVectorFormat,
 ):
-    """CollectionWithinCollectionComputeHeapSizes: a list in a list. The
-    child list's entries of each appended row are combined into one entry,
-    and the grandchild is sliced to read them in order."""
+    """Heap bytes of a list in a list. The child list's entries of each appended
+    row are combined into one entry, and the grandchild is sliced to read them
+    in order."""
     var child_list = state.vector_data[f].unified
     var sizes = _ints(state.sizes())
 
@@ -351,8 +353,8 @@ def _collection_within_heap_sizes(
 def _apply_slice_recursive(
     mut state: TupleDataChunkState, f: Int, combined_sel: Int, count: Int
 ):
-    """ApplySliceRecursive: the format reads its original selection
-    through `combined_sel`; a struct's fields too."""
+    """The format reads its original selection through `combined_sel`, so a
+    nested child is read through one selection; a struct's fields too."""
     ref format = state.vector_data[f]
     format.sliced_sel = List[UInt32](unsafe_uninit_length=max(count, 1))
     var out = format.sliced_sel.unsafe_ptr()
@@ -382,8 +384,8 @@ def scatter(
     append_sel: SelectionVector,
     append_count: Int,
 ):
-    """TupleDataCollection::Scatter: the appended rows' values into the
-    rows at `state.row_locations`, their heap data at the heap pointers."""
+    """The appended rows' values into the rows at `state.row_locations`, their
+    heap data at the heap pointers."""
     var rows = _ints(state.rows())
     ref top = layout.nodes[][0]
     if top.can_have_null:
@@ -516,10 +518,10 @@ def _scatter_strings(
     offset_in_row: Int,
     col: Int,
 ):
-    """TupleDataValueStore<string_t>: an inlined string as it stands; a
-    longer one's bytes into the heap and its header and heap pointer into
-    the row. A null stores NullValue<string_t> ("\\x80", inlined).
-    `heaps` 0: the source's bytes outlive the rows, which point at them."""
+    """Store strings: an inlined string as it stands; a longer one's bytes into
+    the heap and its header and heap pointer into the row. A null stores the
+    fixed one-byte string "\\x80", inlined, so it needs no heap. `heaps` 0:
+    the source's bytes outlive the rows, which point at them."""
     var targets = _ints(rows)
     var heap_at = _ints(heaps)
     var entry = col >> 3
@@ -555,8 +557,8 @@ def _scatter_struct(
     append_count: Int,
     rows: Int,
 ):
-    """TupleDataStructScatter: the struct's validity in this row, then its
-    fields into its nested row."""
+    """The struct's validity in this row, then its fields into its nested
+    row."""
     var source = state.vector_data[f].unified
     var targets = _ints(rows)
     var entry = col >> 3
@@ -602,8 +604,8 @@ def _scatter_list(
     append_count: Int,
     rows: Int,
 ):
-    """TupleDataListScatter: the heap pointer in the row and the length at
-    the start of the list's heap data, then the child."""
+    """The heap pointer in the row and the length at the start of the list's
+    heap data, then the child."""
     var source = state.vector_data[f].unified
     var targets = _ints(rows)
     var heap_at = _ints(state.heaps())
@@ -657,8 +659,8 @@ def _scatter_within(
         _fill_ones(mask, validity_bytes(length))
         heap += validity_bytes(length)
         if physical == PHYSICAL_STRUCT:
-            # TupleDataStructWithinCollectionScatter: the struct validity;
-            # the fields follow, each its own mask and values.
+            # A struct inside a list: the struct validity; the fields follow,
+            # each its own mask and values.
             for c in range(length):
                 var at = source.sel.get_index(list_offset + c)
                 if not source.validity.row_is_valid(at):
@@ -681,8 +683,7 @@ def _scatter_within(
                 else:
                     set_invalid(mask, c)
         elif physical == PHYSICAL_LIST:
-            # TupleDataCollectionWithinCollectionScatter: the child lists'
-            # lengths.
+            # A list inside a list: the child lists' lengths.
             for c in range(length):
                 var at = source.sel.get_index(list_offset + c)
                 if source.validity.row_is_valid(at):
@@ -723,7 +724,7 @@ def _within_fixed_values(
     data_location: Int,
     mask: Int,
 ):
-    """TupleDataTemplatedWithinCollectionScatter's value loop."""
+    """The value loop for fixed-width child values of a list."""
     if physical == PHYSICAL_BOOL:
         _within_fixed_loop[DType.uint8](
             source, list_offset, length, data_location, mask
@@ -773,9 +774,9 @@ def gather_column(
     target_sel: SelectionVector,
     mut arena: ColumnArena,
 ) raises:
-    """TupleDataCollection::Gather of one column: the rows `scan_sel`
-    picks from the row pointers at `rows` into vector `out_column` of
-    `result`, at the positions `target_sel` gives."""
+    """One column of the rows `scan_sel` picks from the row pointers at `rows`
+    into vector `out_column` of `result`, at the positions `target_sel`
+    gives."""
     ref top = layout.nodes[][0]
     var physical = top.physicals[column_id]
     if physical != PHYSICAL_LIST and physical != PHYSICAL_STRUCT:
@@ -958,7 +959,7 @@ def gather_rows_series(
     heaps: TupleDataHeaps,
 ) raises -> Series:
     """The `count` rows of column `column_id` at the row pointers at `rows`,
-    a new at-rest column typed `dtype` of `count` rows (GatherRHS for an
+    a new at-rest column typed `dtype` of `count` rows (for an
     operator reading columns rather than vectors; no 2,048 limit, the row
     pointers are the only limit). A string column references `heaps`, the
     collection's heap blocks, without copying its bytes."""
@@ -1269,8 +1270,8 @@ def _gather_fixed[
     bits: Int,
     target_sel: SelectionVector,
 ):
-    """TupleDataTemplatedGather. As with scatter, the loop without
-    selections (and, here, without nulls) is the one specialized."""
+    """Gather fixed-width values. As with scatter, the loop without selections
+    (and, here, without nulls) is the one specialized."""
     if not scan_sel.is_set() and not target_sel.is_set():
         if can_have_null:
             _gather_fixed_loop[D, True, True](
@@ -1340,16 +1341,15 @@ def _gather_fixed_loop[
                 (_bytes(row)[unsafe_offset=entry] >> bit) & 1 == 0
             ):
                 set_invalid(bits, target_idx)
-                # A null's row value is NullValue (the type's minimum),
-                # which a reader that checks decimal precision on every
-                # value it widens would reject.
+                # A null's row value is the type's minimum (`_null_value`),
+                # which a reader that checks decimal precision on every value it
+                # widens would reject.
                 out[unsafe_offset=target_idx] = 0
 
 
 struct _GatherNode(Copyable, Movable):
-    """The vector a nested column's level is gathered into: values (or
-    list entries), a validity mask, and for a list the child's size
-    (ListVector::GetListSize)."""
+    """The vector a nested column's level is gathered into: values (or list
+    entries), a validity mask, and for a list the child's size."""
 
     var dtype: DataType
     var physical: Int
@@ -1377,7 +1377,8 @@ struct _GatherNode(Copyable, Movable):
         self.children = List[Int]()
 
     def reserve(mut self, count: Int):
-        """ListVector::Reserve: room for `count` rows, new rows valid."""
+        """Room for `count` rows, new rows valid; capacity at least doubles, so
+        repeated appends cost amortized constant time."""
         if count <= self.capacity:
             return
         var capacity = max(count, 2 * self.capacity)
@@ -1479,8 +1480,7 @@ def _gather_struct(
     target: Int,
     target_sel: SelectionVector,
 ) raises:
-    """TupleDataStructGather: the struct's validity, then its fields from
-    the nested rows."""
+    """The struct's validity, then its fields from the nested rows."""
     ref layout_node = layout.nodes[][node]
     var offset = layout_node.offsets[col]
     var can_have_null = layout_node.can_have_null
@@ -1533,8 +1533,8 @@ def _gather_list(
     target: Int,
     target_sel: SelectionVector,
 ) raises:
-    """TupleDataListGather: list entries from the lengths in the heap, then
-    the child from the heap data after them."""
+    """List entries from the lengths in the heap, then the child from the heap
+    data after them."""
     ref layout_node = layout.nodes[][node]
     var offset = layout_node.offsets[col]
     var can_have_null = layout_node.can_have_null
@@ -1677,9 +1677,8 @@ def _collection_within_gather(
     list_entries: Int,
     list_bits: Int,
 ) raises:
-    """TupleDataCollectionWithinCollectionGather: a list in a list. The
-    child lists' entries come from their lengths in the heap; one
-    combined entry per scanned row lets the grandchild gather the same
+    """A list in a list. The child lists' entries come from their lengths in the
+    heap; one combined entry per scanned row lets the grandchild gather the same
     way."""
     var heap_at = _ints(heaps)
     var target_count = 0
