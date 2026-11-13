@@ -14,21 +14,22 @@ from dataframe.vector.types import (
 
 
 struct TupleDataVectorFormat(Copyable, Movable):
-    """TupleDataVectorFormat: one vector's unified format, its selection
-    before a list slice, and the buffers this entry owns."""
+    """One vector's unified format, its selection before a list slice, and the
+    buffers this entry owns."""
 
     var physical: Int
     var unified: UnifiedVectorFormat
     var original_sel: SelectionVector
     var children: List[Int]
-    # A list's list_entry_t (offset, length) pairs, read from storage.
+    # A list's (offset, length) entry per row, read from storage.
     var entries: List[UInt64]
-    # Elements in a list's child (ListVector::GetListSize).
+    # Elements in a list's child.
     var list_size: Int
-    # The selection ApplySliceRecursive composes for a list in a list.
+    # For a list in a list: the outer selection composed with the inner one, so
+    # the inner child is read through a single selection.
     var sliced_sel: List[UInt32]
-    # CombinedListData: a list in a list's child entries, combined per
-    # appended row, and their validity.
+    # A list in a list's child entries, combined per appended row, and their
+    # validity.
     var has_combined: Bool
     var combined: UnifiedVectorFormat
     var combined_entries: List[UInt64]

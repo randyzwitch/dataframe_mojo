@@ -86,6 +86,7 @@ from dataframe.join_type import (
 from dataframe.joins.join_filter import (
     PushedJoinFilter,
     PushedJoinFilters,
+    PlannedJoinFilter,
     supports_join_filters,
 )
 from dataframe.parallel import (
@@ -188,7 +189,9 @@ from dataframe.planning.cost.sampling import (
 )
 from dataframe.query_execution.materialize import (
     _StreamInputs,
-    plan_union,
+    _stack_union,
+    plan_take_prefetched,
+    plan_union_children,
     plan_schedule_inputs,
 )
 from dataframe.query_execution.operators import (
@@ -372,17 +375,19 @@ def _stream_head(
             top_descending.append(self._nodes[cursor].sort_descending(k))
             top_nulls_last.append(self._nodes[cursor].sort_nulls_last(k))
         cursor = self._nodes[cursor].left
-    # Join filters through an aggregate the stream starts from: the
-    # builds above it run first, and the plan with their results runs.
-    var through = plan_push_filters_through_aggregate(self, cursor, batch_size)
-    if through:
-        return _HeadOutcome(through.take())
     # Every join's build side is chosen before anything runs or is
     # scheduled, from estimates:
     # the stream then builds each join's right input as it stands.
     var sided = plan_build_probe_sides(self, cursor, batch_size)
     if sided:
         return _HeadOutcome(sided.take())
+    # Then join filters through an aggregate the stream starts from, on
+    # the sides just chosen (a filter only flows from a build into its
+    # probe side, so sides come first): the aggregate's pipeline waits
+    # for those builds (`_add_stream`).
+    var through = plan_push_filters_through_aggregate(self, cursor)
+    if through:
+        return _HeadOutcome(through.take())
     return _HeadOutcome(
         _StreamHead(
             cursor,
@@ -491,6 +496,25 @@ def _add_stream(
                 inputs.metas[k].type,
             )
         )
+    if self._pushed_filters:
+        # The aggregate the probe reads waits for the builds whose keys
+        # filter its input: it can start only once their keys are known,
+        # and reading fewer rows into the aggregate is the point.
+        ref pushed = self._pushed_filters.value()[]
+        var source = -1
+        for k in range(count):
+            if inputs.wanted[k] == pushed.node:
+                source = at[k]
+        if source >= 0 and len(schedule.pipelines[source].probe) > 0:
+            for planned in pushed.planned:
+                var right = self._nodes[planned.join].right
+                for k in range(count):
+                    if inputs.wanted[k] == right and at[k] != source:
+                        schedule.metas[source].dependencies.append(at[k])
+                        schedule.pipelines[source].probe[0].through.append(
+                            _ThroughBuild(at[k], planned.copy())
+                        )
+                        break
     var probe = len(schedule.pipelines)
     for k in range(count):
         schedule.metas[at[k]].parent = probe
@@ -543,16 +567,25 @@ def _add_input(
     batch_size: Int,
     var build: _BuildFor,
     type: Int,
+    streaming: Bool = True,
 ) raises -> Int:
     """Add input `index` of a stream on `self` to `schedule` and return the
     pipeline that makes its result: the input's own stream when it is one
     (on a copy of the plan with a memo of its own), else a subplan
     pipeline that executes it."""
-    if self._handoff == HANDOFF_OFF:
+    if streaming and self._handoff == HANDOFF_OFF:
         var sub = self.copy()
+        # Filters pushed into this input arrive when its builds finish
+        # (`_StreamProbe.tasks`); the input plans its own below it.
+        sub._pushed_filters = None
         sub._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
         sub._prefetched_indexes = Optional(ArcPointer(Dict[Int, _ReadyIndex]()))
         var outcome = _stream_head(sub, index, batch_size, 0)
+        while len(outcome.plan) > 0:
+            # Build sides chosen (or filters pushed): the input streams on
+            # the plan that made, still in this schedule.
+            sub = outcome.plan.pop()
+            outcome = _stream_head(sub, index, batch_size, 0)
         if len(outcome.head) > 0:
             var head = outcome.head.pop()
             var owned = ArcPointer(sub^)
@@ -574,31 +607,13 @@ def _add_input(
                 type,
                 True,
             )
-        if len(outcome.plan) > 0:
-            # Some inputs materialized for it: the input runs from there.
-            schedule.metas.append(MetaPipeline(type))
-            schedule.pipelines.append(
-                _StreamPipeline(
-                    _SubplanPipeline(
-                        outcome.plan.pop(),
-                        index,
-                        True,
-                        batch_size,
-                        build.keys,
-                        build.how,
-                        build.coalesce,
-                        build.probe_estimate,
-                    )
-                )
-            )
-            return len(schedule.pipelines) - 1
     schedule.metas.append(MetaPipeline(type))
     schedule.pipelines.append(
         _StreamPipeline(
             _SubplanPipeline(
                 self.copy(),
                 index,
-                True,
+                streaming,
                 batch_size,
                 build.keys,
                 build.how,
@@ -608,6 +623,71 @@ def _add_input(
         )
     )
     return len(schedule.pipelines) - 1
+
+
+def plan_execute_inputs(
+    self: QueryContext, nodes: List[Int], streaming: Bool, batch_size: Int
+) raises -> List[DataFrame]:
+    """Independent inputs `nodes`, computed as pipelines of one
+    schedule: an input that is a stream adds its own pipelines
+    (`_add_input`), any other runs as one subplan pipeline."""
+    var schedule = _StreamSchedule()
+    var at = List[Int](capacity=len(nodes))
+    for node in nodes:
+        at.append(
+            _add_input(
+                schedule,
+                self,
+                node,
+                batch_size,
+                _BuildFor(),
+                META_REGULAR,
+                streaming,
+            )
+        )
+    schedule.bind()
+    try:
+        run_pipelines(
+            schedule.pipelines, schedule.metas, parallel=not self._report
+        )
+    except e:
+        schedule.release()
+        raise e^
+    var frames = List[DataFrame](capacity=len(at))
+    for p in at:
+        frames.append(schedule.pipelines[p].result())
+    return frames^
+
+
+def plan_union(
+    self: QueryContext, index: Int, streaming: Bool, batch_size: Int
+) raises -> DataFrame:
+    """The union at node `index` with its children computed as pipelines of
+    one schedule (every child is a pipeline of that schedule, none
+    nested in another's, so all of them share the threads at once), or
+    one after the other on this plan when an execution report is kept.
+    A child a stream already ran (`plan_schedule_inputs`) is taken."""
+    var children = plan_union_children(self, index)
+    var got = Dict[Int, DataFrame]()
+    var wanted = List[Int]()
+    for child in children:
+        if child in got or child in wanted:
+            continue
+        var ready = plan_take_prefetched(self, child)
+        if ready:
+            got[child] = ready.take()
+        elif self._report:
+            got[child] = self._execute(child, False, streaming, batch_size)
+        else:
+            wanted.append(child)
+    if len(wanted) > 0:
+        var frames = plan_execute_inputs(self, wanted, streaming, batch_size)
+        for k in range(len(wanted)):
+            got[wanted[k]] = frames[k].copy()
+    var frames = List[DataFrame](capacity=len(children))
+    for child in children:
+        frames.append(got[child].copy())
+    return _stack_union(frames)
 
 
 @fieldwise_init
@@ -630,9 +710,18 @@ struct _StreamHead(Movable):
     var top_nulls_last: List[Bool]
 
 
+@fieldwise_init
+struct _ThroughBuild(Copyable, Movable):
+    """A build of the schedule (`pipeline`) whose keys filter the input of
+    the aggregate a probe computes (`plan_push_filters_through_aggregate`)."""
+
+    var pipeline: Int
+    var planned: PlannedJoinFilter
+
+
 struct _StreamProbe(Movable):
-    """A stream's probe pipeline: runs once every input it depends on
-    has completed (`Pipeline::GetDependencies`)."""
+    """A stream's probe pipeline: runs once every input it depends on has
+    completed, since it reads their results."""
 
     var plan: Int
     var index: Int
@@ -653,6 +742,9 @@ struct _StreamProbe(Movable):
     var is_input: Bool
     # The schedule's List[_StreamPipeline].
     var siblings: Int
+    # The builds whose keys filter this stream's aggregate input; the
+    # schedule runs them first.
+    var through: List[_ThroughBuild]
     var started: List[_ProbeStart]
     var result: Optional[DataFrame]
 
@@ -684,14 +776,15 @@ struct _StreamProbe(Movable):
         self.built = None
         self.is_input = is_input
         self.siblings = 0
+        self.through = List[_ThroughBuild]()
         self.started = List[_ProbeStart]()
         self.result = None
 
     def tasks(mut self) raises -> Int:
-        """`Pipeline::Schedule`, every input complete: its results in the
-        memo (written by this one thread), the probe set up, and a task
-        per morsel worker. An execution report runs them as one task (its
-        schedule is on one thread), the workers within it as jobs."""
+        """Called once every input is complete: its results in the memo (written
+        by this one thread), the probe set up, and a task per morsel worker. An
+        execution report runs them as one task (its schedule is on one thread),
+        the workers within it as jobs."""
         ref plan = Pointer[QueryContext, MutAnyOrigin](
             unsafe_from_address=self.plan
         )[]
@@ -701,18 +794,27 @@ struct _StreamProbe(Movable):
         var ahead = plan._prefetched.value()
         for k in range(len(self.wanted)):
             ref made = pipelines[self.at[k]]
-            var built = Optional[JoinHashTable]()
-            if len(made.input) > 0:
-                ahead[][self.wanted[k]] = made.input[0].result.copy()
-                built = made.input[0].built.copy()
-            else:
-                ref stream = made.probe[0]
-                ahead[][self.wanted[k]] = stream.result.value().copy()
-                built = stream.built.copy()
+            ahead[][self.wanted[k]] = made.result()
+            var built = made.built()
             if built and plan._prefetched_indexes:
                 plan._prefetched_indexes.value()[][
                     self.wanted[k]
                 ] = _ReadyIndex(self.keys[k], self.hows[k], built.take())
+        if len(self.through) > 0:
+            # The builds above finished: their keys filter this aggregate's
+            # input, published at run time rather than planned from data.
+            var filters = List[PushedJoinFilter]()
+            for t in self.through:
+                filters.extend(
+                    _published_filters(
+                        t.planned, pipelines[t.pipeline].result()
+                    )
+                )
+            plan._pushed_filters = ArcPointer(
+                PushedJoinFilters(
+                    self.index, List[PlannedJoinFilter](), filters^
+                )
+            )
         self.started.append(
             _probe_start(
                 plan, self.index, self.batch_size, self.sink, self.head.pop(0)
@@ -827,6 +929,18 @@ struct _StreamPipeline(SchedulablePipeline):
         self.outer = List[_OuterScan]()
         self.outer.append(outer^)
 
+    def result(self) raises -> DataFrame:
+        """The input's result, once this input's pipeline completed."""
+        if len(self.input) > 0:
+            return self.input[0].result.copy()
+        return self.probe[0].result.value().copy()
+
+    def built(self) -> Optional[JoinHashTable]:
+        """The hash table the input's finish made, if any."""
+        if len(self.input) > 0:
+            return self.input[0].built.copy()
+        return self.probe[0].built.copy()
+
     def initialize(mut self) raises:
         pass
 
@@ -882,9 +996,9 @@ def _probe_start(
     sink: Int,
     var head: _StreamHead,
 ) raises -> _ProbeStart:
-    """The stream's probe pipeline set up, once its inputs are done
-    (`Pipeline::Schedule`): its morsel workers, not yet run, or its
-    result when it ran here (a batch stream, or no pipeline at all)."""
+    """The stream's probe pipeline set up, once its inputs are done: its morsel
+    workers, not yet run, or its result when it ran here (a batch stream, or no
+    pipeline at all)."""
     var cursor = head.cursor
     var expressions = head.expressions.copy()
     var keys = head.keys.copy()
@@ -930,9 +1044,7 @@ def _probe_start(
         plan._frames.append(plan_union(self, first, True, batch_size))
         plan._schemas.append(Optional[CsvSchema]())
         plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
-        return _ProbeStart(
-            _stream_after_materialization(plan, index, batch_size, sink)
-        )
+        return _probe_restart(plan^, index, batch_size, sink, head^)
     if first >= 0 and first != index and not _is_scan(self._nodes[first].kind):
         # Run row-local steps during each worker's aggregate scan. Discard
         # rejected groups before assembling a frame, avoiding an additional
@@ -951,17 +1063,13 @@ def _probe_start(
             plan._frames.append(aggregated^)
             plan._schemas.append(Optional[CsvSchema]())
             plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
-            return _ProbeStart(
-                _stream_after_materialization(plan, index, batch_size, sink)
-            )
+            return _probe_restart(plan^, index, batch_size, sink, head^)
         var computed = self._execute(first, False, True, batch_size)
         var plan = self.copy()
         plan._frames.append(computed^)
         plan._schemas.append(Optional[CsvSchema]())
         plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
-        return _ProbeStart(
-            _stream_after_materialization(plan, index, batch_size, sink)
-        )
+        return _probe_restart(plan^, index, batch_size, sink, head^)
     while cursor >= 0:
         ref node = self._nodes[cursor]
         if _stream_rows(node):
@@ -999,9 +1107,7 @@ def _probe_start(
                     slot=len(plan._frames) - 1
                 )
                 trace_path("stream.empty_build")
-                return _ProbeStart(
-                    _stream_after_materialization(plan, index, batch_size, sink)
-                )
+                return _probe_restart(plan^, index, batch_size, sink, head^)
             # The index a prefetch made with this build, if any.
             var ready = Optional[_ReadyIndex]()
             if self._prefetched_indexes:
@@ -1062,11 +1168,10 @@ def _probe_start(
     if cursor == index and (
         self._nodes[cursor].kind == SCAN_FRAME or sink == 0
     ):
-        # The source itself, with nothing to apply: batches would only
-        # copy it into chunks that the eager step above rechunks
-        # again (ClickBench q16 over 10M in-memory rows, 275 -> 181
-        # ms); a file is read whole by its parallel reader. Only a file
-        # sink streams it.
+        # The source itself, with nothing to apply: batches would only copy it
+        # into chunks that the eager step above rechunks again, two copies of
+        # every row for nothing; a file is read whole by its parallel reader.
+        # Only a file sink streams it.
         return _ProbeStart(None)
     if (
         len(expressions) == 0
@@ -1078,11 +1183,9 @@ def _probe_start(
         and not _filters(operations)
     ):
         # Row-local steps that keep every row of an in-memory frame
-        # (with_columns, select, drop) under an eager step: a stream
-        # applies them to batches and copies the results back
-        # together, while the eager steps share the columns they do
-        # not touch (ClickBench q18 adds a minute column to 10M rows
-        # before a 4.9M-group aggregation).
+        # (with_columns, select, drop) under an eager step: a stream applies
+        # them to batches and copies the results back together, while the eager
+        # steps share the columns they do not touch and copy nothing.
         return _ProbeStart(None)
     operations.reverse()
     operation_nodes.reverse()
@@ -1243,20 +1346,16 @@ def _probe_start(
                     wanted.append(name)
         if any:
             projection = wanted^
-    # Batches of a large in-memory input that streams through joins grow
-    # up to four times the default (not into the aggregate table, which
-    # holds no state per batch: there a morsel's size is what spreads
-    # rows a selective join keeps from a few stretches of sorted input
-    # over the workers, as TPC-DS q39's date join keeps 180K of 11.7M
-    # inventory rows from two of 45 grown batches): each batch probes every join, and
-    # fewer, larger batches cost less per row (PDS-H q21's two joins of
-    # 3.8M rows against 1.5M-row builds: 186 -> 148 ms). They grow only
-    # while every worker still gets a batch: a 150K-row customer table
-    # in one batch ran on one worker (q10, q13 and q22 were 7-23% slower).
-    # A TopN pushes a dynamic filter into the scan when its first sort
-    # column is read from the source as it is: no join, and no operation
-    # that writes a column of that name.
-    # A file's batches have no statistics before they are read.
+    # Batches of a large in-memory input that streams through joins grow up to
+    # four times the default: each batch pays a fixed cost to set up every
+    # join's probe, and fewer, larger batches spread it over more rows. They
+    # grow only while every worker still gets a batch, since one batch runs on
+    # one worker. Not into the aggregate table, which holds no state per batch:
+    # there small morsels are what spread the rows a selective join keeps, often
+    # from a few stretches of sorted input, over the workers. A TopN pushes a
+    # dynamic filter into the scan when its first sort column is read from the
+    # source as it is: no join, and no operation that writes a column of that
+    # name. A file's batches have no statistics before they are read.
     var top_scan_key = (
         top > 0 and len(shared_joins[]) == 0 and source.kind == SCAN_FRAME
     )
@@ -1274,11 +1373,11 @@ def _probe_start(
                         and len(e._nodes) == 1
                     ):
                         top_scan_key = False
-    # RowGroupPruner: a table scan under ORDER BY ... LIMIT on a column it
-    # reads unchanged is read in its row groups' statistics order, and the
-    # row groups that cannot reach the limit are dropped; a filter between
-    # them (or the scan's table filters) leaves the order alone but
-    # prunes nothing. Dropped leading row groups shorten the offset.
+    # A table scan under ORDER BY ... LIMIT on a column it reads unchanged is
+    # read in its row groups' statistics order, and the row groups that cannot
+    # reach the limit are dropped; a filter between them (or the scan's table
+    # filters) leaves the order alone but prunes nothing. Dropped leading row
+    # groups shorten the offset.
     var top_ranges = Optional[List[Int]]()
     if (
         top_scan_key
@@ -1318,10 +1417,10 @@ def _probe_start(
         var step_nodes = List[PlanNode](capacity=step_count)
         for k in range(step_count):
             step_nodes.append(operations[k].copy())
-        # LateMaterialization: a top-N of at most 50 rows over filters and
-        # projections on a table scan runs on the columns its order and
-        # filters read plus the row id; the other columns are fetched for
-        # its rows afterwards.
+        # A top-N of at most LATE_MATERIALIZATION_MAX_ROWS rows over filters and
+        # projections on a table scan runs on the columns its order and filters
+        # read plus the row id; the other columns are fetched for its rows
+        # afterwards.
         var pipe_input = source_columns.value().copy() if source_columns else (
             input.copy()
         )
@@ -1567,9 +1666,9 @@ def _probe_start(
     var result = Optional[DataFrame]()
     if collecting and len(acc.states) == 0:
         trace_path("lazy.collect_group_by")
-        # Contiguous first: the bucket encode reads string keys in
-        # view storage through a buffer table, slow across hundreds
-        # of batches (TPC-DS q39: 10 ms of 40 on 358 batches).
+        # Contiguous first: the bucket encode reads string keys in view storage
+        # through a buffer table, which costs a lookup per buffer and grows with
+        # the number of batches.
         var whole = concat(collected).rechunk()
         # Groups come back in first-occurrence order only when asked,
         # as the eager group-by's do.
@@ -1751,7 +1850,7 @@ def _open_scan_source(
 def _probe_finish(
     self: QueryContext, mut piped: _PipedProbe
 ) raises -> Optional[DataFrame]:
-    """The probe pipeline's result, its execute tasks done (`Sink::Finalize`
+    """The probe pipeline's result, its execute tasks done (the sink's finish
     and the plan's bookkeeping after it)."""
     var index = piped.index
     ref terminal = self._nodes[index]
@@ -1987,6 +2086,25 @@ def _row_steps_above(
     return nodes^
 
 
+def _probe_restart(
+    var plan: QueryContext,
+    index: Int,
+    batch_size: Int,
+    sink: Int,
+    var head: _StreamHead,
+) raises -> _ProbeStart:
+    """The probe set up again on `plan`, where an input it reads is now a
+    frame (a union's children, the aggregate below it, an empty build):
+    the same head, its sides and filters already decided, and this
+    pipeline of the same schedule, not a new stream with a schedule of
+    its own. A declined stream runs the node on `plan`."""
+    var started = _probe_start(plan, index, batch_size, sink, head^)
+    if len(started.piped) > 0 or started.result:
+        return started^
+    plan._declined = index
+    return _ProbeStart(plan._execute(index, False, True, batch_size))
+
+
 def _stream_after_materialization(
     plan: QueryContext,
     index: Int,
@@ -2010,14 +2128,13 @@ comptime _KEY_BAIL = 2
 def _aggregate_group_key(
     self: QueryContext, index: Int, aggregate: Int, key: String
 ) raises -> Tuple[Int, String]:
-    """Where join key `key`, read from node `index`, goes on the way down
-    to `aggregate`, by JoinFilterPushdownOptimizer::GetPushdownFilterTargets:
-    through filters, a projection that passes it on (renamed or not), the
-    left input of joins and explodes of other columns, to one of the
-    aggregate's group keys (_KEY_GROUPED, with its name there). A
-    projection that computes it drops it from the filters (_KEY_DROPPED);
-    anything else, or a column that is not a group key, ends the join's
-    pushdown (_KEY_BAIL)."""
+    """Where join key `key`, read from node `index`, goes on the way down to
+    `aggregate`, through the operators that keep a key's values unchanged and so
+    let a filter on them pass: filters, a projection that passes it on (renamed
+    or not), the left input of joins and explodes of other columns, to one of
+    the aggregate's group keys (_KEY_GROUPED, with its name there). A projection
+    that computes it drops it from the filters (_KEY_DROPPED); anything else, or
+    a column that is not a group key, ends the join's pushdown (_KEY_BAIL)."""
     var at = index
     var name = key
     while at >= 0:
@@ -2072,13 +2189,15 @@ def _keyed_rows(frame: DataFrame, keys: List[String]) raises -> Int:
 
 
 def plan_push_filters_through_aggregate(
-    self: QueryContext, top: Int, batch_size: Int
+    self: QueryContext, top: Int
 ) raises -> Optional[QueryContext]:
-    """Push safe join-key filters below an aggregate through its grouping keys.
-    A filter on group keys removes whole groups, preserving every retained
-    group's aggregate values. Prepare the build inputs first so the probe
-    filters use complete key information. Return None when no join permits
-    this transformation."""
+    """Plan join-key filters below an aggregate through its grouping keys
+    (after build sides are chosen). A
+    filter on group keys removes whole groups, preserving every retained
+    group's aggregate values. Nothing runs here: each join's build is a
+    pipeline of the stream's schedule, and the aggregate's pipeline
+    depends on those builds and filters by their keys
+    (`_StreamProbe.tasks`). Return None when no join permits this."""
     if self._pushed_filters:
         return None
     var first = top
@@ -2097,18 +2216,17 @@ def plan_push_filters_through_aggregate(
         or len(self._nodes[first].names) == 0
     ):
         return None
-    var plan = self.copy()
-    var pushed = List[PushedJoinFilter]()
+    var planned = List[PlannedJoinFilter]()
     var probe = top
     while probe >= 0 and probe != first:
         var j = probe
-        var node = self._nodes[j].copy()
+        ref node = self._nodes[j]
         probe = node.left
         if node.kind != JOIN or not supports_join_filters(node.how):
             continue
         if len(node.names) == 0 or len(node.names) != len(node.right_keys):
             continue
-        var keys = List[Int]()
+        var positions = List[Int]()
         var grouped = List[String]()
         var bail = False
         for k in range(len(node.names)):
@@ -2119,34 +2237,49 @@ def plan_push_filters_through_aggregate(
                 bail = True
                 break
             if found[0] == _KEY_GROUPED:
-                keys.append(k)
+                positions.append(k)
                 grouped.append(found[1])
-        if bail or len(keys) == 0:
+        if bail or len(positions) == 0:
             continue
-        var filtered = plan_is_filtering(self, node.right)
-        var built = plan._execute(node.right, False, True, batch_size)
-        var count = _keyed_rows(built, node.right_keys)
-        for i in range(len(keys)):
-            pushed.append(
-                PushedJoinFilter(
-                    grouped[i],
-                    built.column(node.right_keys[keys[i]]),
-                    len(node.names),
-                    count,
-                    filtered,
-                )
+        planned.append(
+            PlannedJoinFilter(
+                j,
+                positions^,
+                grouped^,
+                node.right_keys.copy(),
+                plan_is_filtering(self, node.right),
             )
-        plan._frames.append(built^)
-        plan._schemas.append(Optional[CsvSchema]())
-        plan._nodes.append(_frame_scan_node(slot=len(plan._frames) - 1))
-        plan._nodes[j].right = len(plan._nodes) - 1
-    if len(pushed) == 0:
+        )
+    if len(planned) == 0:
         return None
     trace_path("stream.join_filter_through_aggregate")
     # The filters belong to this stream's read of the aggregate: a copy of
     # its node takes them, so another reader of the node reads it whole.
+    var plan = self.copy()
     plan._nodes.append(self._nodes[first].copy())
     var aggregate = len(plan._nodes) - 1
     plan._nodes[above].left = aggregate
-    plan._pushed_filters = ArcPointer(PushedJoinFilters(aggregate, pushed^))
+    plan._pushed_filters = ArcPointer(
+        PushedJoinFilters(aggregate, planned^, List[PushedJoinFilter]())
+    )
     return plan^
+
+
+def _published_filters(
+    planned: PlannedJoinFilter, built: DataFrame
+) raises -> List[PushedJoinFilter]:
+    """The filters a finished build publishes for an aggregate below its
+    join's probe side: one per key that reaches a group key."""
+    var count = _keyed_rows(built, planned.right_keys)
+    var filters = List[PushedJoinFilter]()
+    for i in range(len(planned.positions)):
+        filters.append(
+            PushedJoinFilter(
+                planned.grouped[i],
+                built.column(planned.right_keys[planned.positions[i]]),
+                len(planned.right_keys),
+                count,
+                planned.build_filtered,
+            )
+        )
+    return filters^
