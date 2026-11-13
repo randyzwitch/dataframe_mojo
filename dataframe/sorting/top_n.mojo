@@ -16,8 +16,8 @@ from dataframe.sorting.sort_key import KeyBlock
 
 
 struct _KeyArena(Movable):
-    """StringHeap for variable keys: blocks never move, so a key's address
-    stays valid while the arena lives."""
+    """Storage for variable keys: blocks never move, so a key's address stays
+    valid while the arena lives."""
 
     var blocks: List[List[UInt8]]
     var used: Int
@@ -62,9 +62,8 @@ struct _BoundaryCell(Movable):
 
 
 struct TopNBoundary(ImplicitlyCopyable, Movable):
-    """TopNBoundaryValue: the tightest worst key among the threads' full
-    heaps, shared by address (0: none). A variable key's bytes are kept
-    in the cell's own buffer."""
+    """The tightest worst key among the threads' full heaps, shared by address
+    (0: none). A variable key's bytes are kept in the cell's own buffer."""
 
     var address: Int
 
@@ -113,8 +112,8 @@ struct TopNBoundary(ImplicitlyCopyable, Movable):
         return self._cell().version.load()
 
     def publish[W: Int, VAR: Bool](self, rec: Rec) -> Bool:
-        """UpdateValue: take `rec` when there is no boundary yet or it is
-        better than the boundary; whether it was taken."""
+        """Take `rec` when there is no boundary yet or it is better than the
+        boundary; whether it was taken."""
         if self.address == 0:
             return False
         comptime K = SortKeys[W, VAR]
@@ -156,8 +155,8 @@ struct _BoundaryView(Movable):
         self.blob = List[UInt8]()
 
     def refresh[W: Int, VAR: Bool](mut self, shared: TopNBoundary):
-        """TryGetBoundaryValue: an older copy stays valid when taking the
-        new one would block."""
+        """Take the shared boundary; an older copy stays valid (only less tight)
+        when taking the new one would block, so a thread never waits for it."""
         if shared.address == 0 or shared.version() == self.version:
             return
         if not shared._try_lock():
@@ -271,7 +270,9 @@ struct TopNHeap(Movable):
         return SortKeys[W, VAR](Int(heap._data.unsafe_ptr()))
 
     def reduce_threshold(self) -> Int:
-        """ReduceThreshold."""
+        """Payload rows past which the dead rows are cut out: twice the heap, so
+        cutting costs at most as much again as the live rows, and at least 5
+        vectors so small heaps are not cut constantly. An empirical choice."""
         return max(5 * 2048, 2 * self.heap_size)
 
     def full(self) -> Bool:
@@ -279,7 +280,7 @@ struct TopNHeap(Movable):
 
     @always_inline
     def entry_should_be_added[W: Int, VAR: Bool](self, rec: Rec) -> Bool:
-        """EntryShouldBeAdded: room in the heap, or better than its worst."""
+        """Room in the heap, or better than its worst."""
         comptime K = SortKeys[W, VAR]
         if self.heap_size == 0:
             return False
@@ -289,7 +290,8 @@ struct TopNHeap(Movable):
 
     @always_inline
     def should_add[W: Int, VAR: Bool](self, rec: Rec) -> Bool:
-        """A sinking row: CheckBoundaryValues, then EntryShouldBeAdded."""
+        """A sinking row: against the shared boundary first, then this heap
+        (`entry_should_be_added`)."""
         comptime K = SortKeys[W, VAR]
         if self.view.version != 0 and not K.less(rec, self.view.rec):
             return False
@@ -336,10 +338,9 @@ struct TopNHeap(Movable):
         pdqsort_branchless(self.keys[W, VAR](), 0, self.size)
 
     def combine[W: Int, VAR: Bool](mut self, other: TopNHeap):
-        """Combine: another thread's finalized heap, best first, until an
-        entry can no longer enter. Only EntryShouldBeAdded decides: the
-        boundary is a full heap's worst key, and that key's own rows are
-        in the result."""
+        """Another thread's finalized heap, best first, until an entry can no
+        longer enter. Only `entry_should_be_added` decides: the boundary is a
+        full heap's worst key, and that key's own rows are in the result."""
         var k = other.keys[W, VAR]()
         for i in range(other.size):
             var rec = k.get(i)
@@ -378,9 +379,9 @@ struct TopNHeap(Movable):
     def entering[
         W: Int, VAR: Bool
     ](self, prefixes: List[UInt64], count: Int) -> Optional[List[Int]]:
-        """CheckBoundaryValues on a vector's leading sort columns: the rows
-        whose first key word can be at or below the bound (`prefixes`
-        bound each row's from below); None when there is no bound yet."""
+        """Test a vector's leading sort columns against the boundary: the rows
+        whose first key word can be at or below the bound (`prefixes` bound each
+        row's from below); None when there is no bound yet."""
         var bound = self.bound_word[W, VAR]()
         if not bound[0]:
             return None

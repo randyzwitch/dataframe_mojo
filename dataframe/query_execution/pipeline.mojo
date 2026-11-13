@@ -720,8 +720,8 @@ struct _ThroughBuild(Copyable, Movable):
 
 
 struct _StreamProbe(Movable):
-    """A stream's probe pipeline: runs once every input it depends on
-    has completed (`Pipeline::GetDependencies`)."""
+    """A stream's probe pipeline: runs once every input it depends on has
+    completed, since it reads their results."""
 
     var plan: Int
     var index: Int
@@ -781,10 +781,10 @@ struct _StreamProbe(Movable):
         self.result = None
 
     def tasks(mut self) raises -> Int:
-        """`Pipeline::Schedule`, every input complete: its results in the
-        memo (written by this one thread), the probe set up, and a task
-        per morsel worker. An execution report runs them as one task (its
-        schedule is on one thread), the workers within it as jobs."""
+        """Called once every input is complete: its results in the memo (written
+        by this one thread), the probe set up, and a task per morsel worker. An
+        execution report runs them as one task (its schedule is on one thread),
+        the workers within it as jobs."""
         ref plan = Pointer[QueryContext, MutAnyOrigin](
             unsafe_from_address=self.plan
         )[]
@@ -996,9 +996,9 @@ def _probe_start(
     sink: Int,
     var head: _StreamHead,
 ) raises -> _ProbeStart:
-    """The stream's probe pipeline set up, once its inputs are done
-    (`Pipeline::Schedule`): its morsel workers, not yet run, or its
-    result when it ran here (a batch stream, or no pipeline at all)."""
+    """The stream's probe pipeline set up, once its inputs are done: its morsel
+    workers, not yet run, or its result when it ran here (a batch stream, or no
+    pipeline at all)."""
     var cursor = head.cursor
     var expressions = head.expressions.copy()
     var keys = head.keys.copy()
@@ -1168,11 +1168,10 @@ def _probe_start(
     if cursor == index and (
         self._nodes[cursor].kind == SCAN_FRAME or sink == 0
     ):
-        # The source itself, with nothing to apply: batches would only
-        # copy it into chunks that the eager step above rechunks
-        # again (ClickBench q16 over 10M in-memory rows, 275 -> 181
-        # ms); a file is read whole by its parallel reader. Only a file
-        # sink streams it.
+        # The source itself, with nothing to apply: batches would only copy it
+        # into chunks that the eager step above rechunks again, two copies of
+        # every row for nothing; a file is read whole by its parallel reader.
+        # Only a file sink streams it.
         return _ProbeStart(None)
     if (
         len(expressions) == 0
@@ -1184,11 +1183,9 @@ def _probe_start(
         and not _filters(operations)
     ):
         # Row-local steps that keep every row of an in-memory frame
-        # (with_columns, select, drop) under an eager step: a stream
-        # applies them to batches and copies the results back
-        # together, while the eager steps share the columns they do
-        # not touch (ClickBench q18 adds a minute column to 10M rows
-        # before a 4.9M-group aggregation).
+        # (with_columns, select, drop) under an eager step: a stream applies
+        # them to batches and copies the results back together, while the eager
+        # steps share the columns they do not touch and copy nothing.
         return _ProbeStart(None)
     operations.reverse()
     operation_nodes.reverse()
@@ -1349,20 +1346,16 @@ def _probe_start(
                     wanted.append(name)
         if any:
             projection = wanted^
-    # Batches of a large in-memory input that streams through joins grow
-    # up to four times the default (not into the aggregate table, which
-    # holds no state per batch: there a morsel's size is what spreads
-    # rows a selective join keeps from a few stretches of sorted input
-    # over the workers, as TPC-DS q39's date join keeps 180K of 11.7M
-    # inventory rows from two of 45 grown batches): each batch probes every join, and
-    # fewer, larger batches cost less per row (PDS-H q21's two joins of
-    # 3.8M rows against 1.5M-row builds: 186 -> 148 ms). They grow only
-    # while every worker still gets a batch: a 150K-row customer table
-    # in one batch ran on one worker (q10, q13 and q22 were 7-23% slower).
-    # A TopN pushes a dynamic filter into the scan when its first sort
-    # column is read from the source as it is: no join, and no operation
-    # that writes a column of that name.
-    # A file's batches have no statistics before they are read.
+    # Batches of a large in-memory input that streams through joins grow up to
+    # four times the default: each batch pays a fixed cost to set up every
+    # join's probe, and fewer, larger batches spread it over more rows. They
+    # grow only while every worker still gets a batch, since one batch runs on
+    # one worker. Not into the aggregate table, which holds no state per batch:
+    # there small morsels are what spread the rows a selective join keeps, often
+    # from a few stretches of sorted input, over the workers. A TopN pushes a
+    # dynamic filter into the scan when its first sort column is read from the
+    # source as it is: no join, and no operation that writes a column of that
+    # name. A file's batches have no statistics before they are read.
     var top_scan_key = (
         top > 0 and len(shared_joins[]) == 0 and source.kind == SCAN_FRAME
     )
@@ -1380,11 +1373,11 @@ def _probe_start(
                         and len(e._nodes) == 1
                     ):
                         top_scan_key = False
-    # RowGroupPruner: a table scan under ORDER BY ... LIMIT on a column it
-    # reads unchanged is read in its row groups' statistics order, and the
-    # row groups that cannot reach the limit are dropped; a filter between
-    # them (or the scan's table filters) leaves the order alone but
-    # prunes nothing. Dropped leading row groups shorten the offset.
+    # A table scan under ORDER BY ... LIMIT on a column it reads unchanged is
+    # read in its row groups' statistics order, and the row groups that cannot
+    # reach the limit are dropped; a filter between them (or the scan's table
+    # filters) leaves the order alone but prunes nothing. Dropped leading row
+    # groups shorten the offset.
     var top_ranges = Optional[List[Int]]()
     if (
         top_scan_key
@@ -1424,10 +1417,10 @@ def _probe_start(
         var step_nodes = List[PlanNode](capacity=step_count)
         for k in range(step_count):
             step_nodes.append(operations[k].copy())
-        # LateMaterialization: a top-N of at most 50 rows over filters and
-        # projections on a table scan runs on the columns its order and
-        # filters read plus the row id; the other columns are fetched for
-        # its rows afterwards.
+        # A top-N of at most LATE_MATERIALIZATION_MAX_ROWS rows over filters and
+        # projections on a table scan runs on the columns its order and filters
+        # read plus the row id; the other columns are fetched for its rows
+        # afterwards.
         var pipe_input = source_columns.value().copy() if source_columns else (
             input.copy()
         )
@@ -1673,9 +1666,9 @@ def _probe_start(
     var result = Optional[DataFrame]()
     if collecting and len(acc.states) == 0:
         trace_path("lazy.collect_group_by")
-        # Contiguous first: the bucket encode reads string keys in
-        # view storage through a buffer table, slow across hundreds
-        # of batches (TPC-DS q39: 10 ms of 40 on 358 batches).
+        # Contiguous first: the bucket encode reads string keys in view storage
+        # through a buffer table, which costs a lookup per buffer and grows with
+        # the number of batches.
         var whole = concat(collected).rechunk()
         # Groups come back in first-occurrence order only when asked,
         # as the eager group-by's do.
@@ -1857,7 +1850,7 @@ def _open_scan_source(
 def _probe_finish(
     self: QueryContext, mut piped: _PipedProbe
 ) raises -> Optional[DataFrame]:
-    """The probe pipeline's result, its execute tasks done (`Sink::Finalize`
+    """The probe pipeline's result, its execute tasks done (the sink's finish
     and the plan's bookkeeping after it)."""
     var index = piped.index
     ref terminal = self._nodes[index]
@@ -2135,14 +2128,13 @@ comptime _KEY_BAIL = 2
 def _aggregate_group_key(
     self: QueryContext, index: Int, aggregate: Int, key: String
 ) raises -> Tuple[Int, String]:
-    """Where join key `key`, read from node `index`, goes on the way down
-    to `aggregate`, by JoinFilterPushdownOptimizer::GetPushdownFilterTargets:
-    through filters, a projection that passes it on (renamed or not), the
-    left input of joins and explodes of other columns, to one of the
-    aggregate's group keys (_KEY_GROUPED, with its name there). A
-    projection that computes it drops it from the filters (_KEY_DROPPED);
-    anything else, or a column that is not a group key, ends the join's
-    pushdown (_KEY_BAIL)."""
+    """Where join key `key`, read from node `index`, goes on the way down to
+    `aggregate`, through the operators that keep a key's values unchanged and so
+    let a filter on them pass: filters, a projection that passes it on (renamed
+    or not), the left input of joins and explodes of other columns, to one of
+    the aggregate's group keys (_KEY_GROUPED, with its name there). A projection
+    that computes it drops it from the filters (_KEY_DROPPED); anything else, or
+    a column that is not a group key, ends the join's pushdown (_KEY_BAIL)."""
     var at = index
     var name = key
     while at >= 0:

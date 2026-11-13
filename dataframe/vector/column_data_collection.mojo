@@ -72,10 +72,10 @@ def append_raw(
     count: Int,
     size: Int,
 ):
-    """`count` fixed-width values of `size` bytes read through `format`
-    appended to `bytes` after `height` rows, their validity into the
-    packed bitmap `bits` (left empty while every row is valid). Storage is
-    sized for `capacity` rows once (`TemplatedColumnDataCopy`)."""
+    """`count` fixed-width values of `size` bytes read through `format` appended
+    to `bytes` after `height` rows, their validity into the packed bitmap `bits`
+    (left empty while every row is valid). Storage is sized for `capacity` rows
+    once, so appends never reallocate."""
     var start = len(bytes)
     if bytes.capacity() < start + size * count:
         bytes.reserve(
@@ -91,8 +91,8 @@ def append_raw(
             Span[UInt8, MutAnyOrigin](unsafe_ptr=data, length=size * count)
         )
     else:
-        # Each selected value written in place at its width, as
-        # `TemplatedColumnDataCopy` does, not a list append per row.
+        # Each selected value written in place at its width, not a list append
+        # per row.
         bytes.resize(start + size * count, 0)
         var dest = Int(bytes.unsafe_ptr()) + start
         var copied = False
@@ -115,7 +115,7 @@ def append_raw(
                 )
     if format.validity.all_valid() and len(bits) == 0:
         return
-    # ColumnDataCopyValidity.
+    # The validity bits.
     var needed = (max(capacity, height + count) + 7) // 8
     if len(bits) < (height + count + 7) // 8:
         # The rows before were all valid.
@@ -191,7 +191,7 @@ struct ColumnDataCollection(Movable):
         self.count = 0
 
     def append(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
-        """Copy `chunk`'s rows in (`ColumnDataCopy` per column)."""
+        """Copy `chunk`'s rows in, column by column."""
         var n = chunk.count
         if n == 0:
             return
@@ -260,9 +260,9 @@ struct ColumnDataCollection(Movable):
 
 
 struct MaterializeSink(Sink):
-    """One worker's materialize sink state: a collection per batch index,
-    the morsel the rows come from (BatchedDataCollection::Append), so the
-    finish puts every worker's rows back in source order."""
+    """One worker's materialize sink state: a collection per batch index, the
+    morsel the rows come from, so the finish puts every worker's rows back in
+    source order."""
 
     var schema: DataFrame
     var capacity: Int
@@ -296,8 +296,9 @@ struct MaterializeSink(Sink):
         pass
 
     def combine(var self, mut combined: List[MaterializeSink]) raises:
-        """The worker's batches into the global state, every worker's
-        (BatchedDataCollection::Merge: no batch is on two workers)."""
+        """The worker's batches into the global state, every worker's. A morsel
+        goes to one worker, so no batch is on two workers and merging needs no
+        row-level work."""
         combined.append(self^)
 
 

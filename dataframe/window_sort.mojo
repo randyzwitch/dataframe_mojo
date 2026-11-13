@@ -22,10 +22,11 @@ from dataframe.kernels.binary import validity
 from dataframe.kernels.gather import take_parallel
 from dataframe.sorting.sort_key import STANDARD_VECTOR_SIZE
 
-# hashed_sort.cpp, HashedSortGlobalSinkState::Rehash: partitions start at
-# 4 radix bits and grow by 2 while the average hash group holds more than
-# DEFAULT_ROW_GROUP_SIZE rows, up to max_bits (8 for any thread memory
-# above 512 MB: thread_pages >> max_bits > 1).
+# Partitions start at 4 radix bits and grow by 2 while the average hash group
+# holds more than DEFAULT_ROW_GROUP_SIZE rows, so each group is about one morsel
+# of sorting work and the groups spread over the threads. At most 8 bits (256
+# groups): more groups add per-group overhead without adding parallelism.
+# Empirical choices.
 comptime _START_BITS = 4
 comptime _MAX_BITS = 8
 comptime DEFAULT_ROW_GROUP_SIZE = 122880
@@ -47,7 +48,7 @@ def sink_threads(rows: Int) -> Int:
 
 
 def radix_bits(rows: Int) -> Int:
-    """Hash-group radix bits for `rows` rows (HashedSort Rehash)."""
+    """Hash-group radix bits for `rows` rows (see `_START_BITS`)."""
     var bits = _START_BITS
     while bits < _MAX_BITS and rows // (1 << bits) > DEFAULT_ROW_GROUP_SIZE:
         bits = min(bits + 2, _MAX_BITS)
@@ -234,10 +235,10 @@ def mark_changes(
     rows: Int = 0,
 ) raises:
     """Set `bit` in flags[k] for every k in (lo, hi) where the key's row at
-    sorted position k differs from the row at k - 1, as the sort compares
-    them: nulls equal, NaN one value, -0.0 equal to 0.0 (VectorOperations::
-    DistinctFrom in ComputeMasks). Position k's row is rows[k] (the
-    address of the sorted order), or k itself when `rows` is 0."""
+    sorted position k differs from the row at k - 1, as the sort compares them:
+    nulls equal, NaN one value, -0.0 equal to 0.0 (IS DISTINCT FROM semantics).
+    Position k's row is rows[k] (the address of the sorted order), or k itself
+    when `rows` is 0."""
     var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=flags_address)
     var column = key.rechunk() if key.is_chunked() else key.copy()
     comptime for t in range(len(NUMERIC_DTYPES)):
@@ -611,9 +612,9 @@ struct _RowNumberJob(Job):
 
 
 def _task_cuts(bounds: List[Int], height: Int) -> List[Int]:
-    """Cut hash groups (their row bounds) into tasks of about equal rows,
-    each at least one STANDARD_VECTOR_SIZE block, as CreateTaskList sizes
-    window tasks in blocks per thread."""
+    """Cut hash groups (their row bounds) into tasks of about equal rows, each
+    at least one STANDARD_VECTOR_SIZE block, so every thread gets a similar
+    share and no task is too small to repay its setup."""
     var blocks = (height + STANDARD_VECTOR_SIZE - 1) // STANDARD_VECTOR_SIZE
     var tasks = max(1, min(configured_workers(), blocks))
     var share = (height + tasks - 1) // tasks
@@ -736,9 +737,8 @@ struct _RankOut(ImplicitlyCopyable, Movable):
 
 
 struct _GroupSortJob(Job):
-    """Sort one task's hash groups and mark their boundaries (the SORT,
-    MATERIALIZE and MASK stages of a WindowHashGroup). The keys and hashes
-    are in hash group order, as the sink materialized them."""
+    """Sort one task's hash groups and mark their boundaries. The keys and
+    hashes are in hash group order, as the sink materialized them."""
 
     var keys: List[Series]
     var partition_keys: Int
@@ -834,7 +834,8 @@ struct _GroupSortJob(Job):
             firsts,
         )
         if partitions_here == 1 and count == self.partition_keys:
-            # PartitionKeyTracker::CanBypass: one key and no order keys.
+            # One partition here and no order keys: every row is a peer of every
+            # other, so the rows stay in input order unsorted.
             for k in range(n):
                 order[unsafe_offset=self.lo + k] = rows[
                     unsafe_offset=self.lo + k
@@ -974,7 +975,8 @@ def _window_layout(
     var flags = huge_uninit[UInt8](height)
     var bounds = List[Int]()
     if len(partition_keys) > 0:
-        # HashedSort: radix-partition rows by their keys' hash.
+        # Radix-partition rows by their keys' hash: every partition then lies in
+        # one hash group, and hash groups sort independently.
         var sink = sink_threads(height)
         var partitioner = Partitioner(partition_keys, sink)
         var bits = radix_bits(height)
@@ -993,11 +995,10 @@ def _window_layout(
         for k in range(len(order_keys)):
             desc.append(descending[k])
             last.append(nulls_last[k])
-        # Hash groups are sorted by tasks of about equal rows, each at
-        # least one STANDARD_VECTOR_SIZE block (CreateTaskList sizes window
-        # tasks in blocks per thread). A task takes consecutive hash groups
-        # and sorts their rows together: every partition lies in one hash
-        # group, so the task's range is a hash group of the layout.
+        # Hash groups are sorted by tasks of about equal rows, each at least one
+        # STANDARD_VECTOR_SIZE block. A task takes consecutive hash groups and
+        # sorts their rows together: every partition lies in one hash group, so
+        # the task's range is a hash group of the layout.
         var cuts = _task_cuts(parts.bounds, height)
         var jobs = List[_GroupSortJob](capacity=len(cuts) - 1)
         for t in range(len(cuts) - 1):
@@ -1029,7 +1030,7 @@ def _window_layout(
             _ = flags^
             return layout^
     elif len(order_keys) > 0:
-        # FullSort: one group, sorted on every thread; peers are marked
+        # No partition keys: one group, sorted on every thread; peers are marked
         # in parallel ranges, reading the keys through the sorted order.
         order = sort_key_rows(order_keys, descending, nulls_last, stable)
         var keys = List[Series](capacity=len(order_keys))
@@ -1052,7 +1053,7 @@ def _window_layout(
         flags[0] = PARTITION_START | PEER_START
         bounds.append(0)
     else:
-        # NaturalSort: input order, one partition of peers.
+        # No keys at all: input order, one partition of peers.
         for k in range(height):
             order[k] = k
             flags[k] = 0
@@ -1201,9 +1202,9 @@ def rank_order_keys(
 
 struct _RankScanJob(Job):
     """Ranks over sorted positions [lo, hi) from the partition and peer
-    boundaries (WindowPeerLocalState::NextRank, and the peer end for max
-    and average). The first pass summarizes the range; the second writes
-    ranks from the state carried in from the ranges before it."""
+    boundaries (and the peer end for max and average). The first pass summarizes
+    the range; the second writes ranks from the state carried in from the ranges
+    before it."""
 
     var flags: Int
     var order: Int
