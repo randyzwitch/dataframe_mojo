@@ -2,11 +2,12 @@
 by `key - least`: inner,
 left, semi and anti joins against a scalar model, with null probe keys, probe keys outside
 the span, a build whose keys repeat (which keeps the hash table), and
-probes where every row matches once."""
+probes where every row matches once. Builds over many vectors fill their
+slots and gather their columns on several finalize tasks at once."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_true
 
-from dataframe import Column, DataFrame, Series, col
+from dataframe import Column, DataFrame, Series, StringColumn, col
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
     StrategyTrace,
@@ -186,3 +187,64 @@ def test_keys_spanning_the_whole_int64_range_join_in_every_kind() raises:
                 var v = Int(out.item(r, "v").int64())
                 assert_equal(out.item(r, "k").int64(), build_keys[v])
                 assert_equal(probe_keys[id], build_keys[v])
+
+
+def test_builds_over_many_vectors_join_through_slots() raises:
+    """A build of 20,000 unique keys (several vectors, so several finalize
+    tasks fill the slots and gather the payload columns at once) joins
+    through slots with every payload on its key; the same build with one
+    key repeated in its last rows turns back into a hash join with the
+    same answers plus the repeat's extra match."""
+    comptime BUILD = 20_000
+    var probe_keys = List[Int64]()
+    var ids = List[Int64]()
+    for row in range(ROWS):
+        probe_keys.append(Int64((row * 4099) % 62_000) - 1_000)
+        ids.append(Int64(row))
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64](probe_keys.copy())),
+            Series("id", Column[Int64](ids^)),
+        ]
+    )
+    for repeat in [False, True]:
+        var keys = List[Int64]()
+        for i in range(BUILD):
+            keys.append(Int64(3 * ((i * 7919) % BUILD)))
+        if repeat:
+            keys.append(Int64(300))
+        var values = List[Int64]()
+        var texts = List[String]()
+        for k in keys:
+            values.append(10 * k)
+            texts.append(String("key ", k))
+        var right = DataFrame(
+            [
+                Series("bk", Column[Int64](keys^)),
+                Series("v", Column[Int64](values^)),
+                Series("s", StringColumn(texts^)),
+            ]
+        )
+        var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+        var observed = StrategyTrace()
+        var inner = (
+            left.lazy()
+            .join(right.lazy(), left_on=["k"], right_on=["bk"])
+            .collect()
+        )
+        var used = "dataframe-path: join.perfect_hash\n" in observed.text()
+        _ = observed^
+        _ = trace^
+        assert_equal(used, not repeat)
+        var expected = 0
+        for row in range(ROWS):
+            var key = probe_keys[row]
+            if key >= 0 and key < 3 * BUILD and key % 3 == 0:
+                expected += 1
+                if repeat and key == 300:
+                    expected += 1
+        assert_equal(inner.height(), expected)
+        for r in range(inner.height()):
+            var key = inner.item(r, "k").int64()
+            assert_equal(inner.item(r, "v").int64(), 10 * key)
+            assert_equal(inner.item(r, "s").string(), String("key ", key))

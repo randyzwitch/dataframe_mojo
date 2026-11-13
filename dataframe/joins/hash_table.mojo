@@ -20,6 +20,7 @@ keys once per chain and emits at most one chunk per call to next. Null
 keys never match. Right/full joins record matched build rows for a later
 scan; build-side semi/anti joins emit flagged/unflagged rows respectively.
 """
+from std.atomic import Atomic
 from std.bit import next_power_of_two
 from std.collections import Optional
 from std.memory import (
@@ -534,6 +535,22 @@ struct _TableData(Movable):
     var heaps: TupleDataHeaps
     # The finalize tasks not yet run, one per build sink thread.
     var pending: List[_FinalizeJob]
+    # While a perfect hash join's finalize tasks run: per output column
+    # its gathered dictionary column and decoded values, and a word that
+    # a task sets on finding a repeated key.
+    var gathered: List[Optional[Series]]
+    var gathered_decoded: List[List[UInt8]]
+    var repeated: List[UInt64]
+    # What a pointer table needs if a repeated key turns a perfect hash
+    # join back into a hash join: each partition's rows, its first
+    # segment (one more entry for the end), the build's sink threads,
+    # whether the chains keep duplicate keys and whether the inserts skip
+    # null keys.
+    var partition_rows: List[Int]
+    var segment_starts: List[Int]
+    var sink_threads: Int
+    var duplicates: Bool
+    var skip_null_keys: Bool
 
     def __init__(
         out self, var keys: List[Series], layout: TupleDataLayout
@@ -552,6 +569,14 @@ struct _TableData(Movable):
         self.null_row = List[UInt8](length=layout.row_width(), fill=0)
         self.heaps = TupleDataHeaps()
         self.pending = List[_FinalizeJob]()
+        self.gathered = List[Optional[Series]]()
+        self.gathered_decoded = List[List[UInt8]]()
+        self.repeated = List[UInt64](length=1, fill=0)
+        self.partition_rows = List[Int]()
+        self.segment_starts = List[Int]()
+        self.sink_threads = 1
+        self.duplicates = False
+        self.skip_null_keys = False
 
 
 def _integer_physical(physical: Int) -> Bool:
@@ -1086,13 +1111,17 @@ def _string_buffers(series: Series) -> Optional[List[_Buffer[UInt8]]]:
 
 
 struct _FinalizeJob(Job):
-    """One finalize thread's partitions, filled one after another."""
+    """One finalize thread's work: its partitions' regions of the pointer
+    table, filled one after another, or its share of a perfect hash
+    join's slots."""
 
     var regions: List[_InsertJob]
+    var fills: List[_SlotFill]
     var chained: Bool
 
     def __init__(out self):
         self.regions = List[_InsertJob]()
+        self.fills = List[_SlotFill]()
         self.chained = False
 
     def run(mut self) raises:
@@ -1100,6 +1129,136 @@ struct _FinalizeJob(Job):
         for r in range(len(self.regions)):
             self.regions[r].fill(state)
             self.chained = self.chained or self.regions[r].chained
+        for f in range(len(self.fills)):
+            self.fills[f].fill(state)
+
+
+struct _TableTask(Job):
+    """Finalize task `task` of a table, for finalizing on the caller's
+    threads rather than as tasks of a schedule."""
+
+    var table: JoinHashTable
+    var task: Int
+
+    def __init__(out self, table: JoinHashTable, task: Int):
+        self.table = table.copy()
+        self.task = task
+
+    def run(mut self) raises:
+        self.table.finalize_task(self.task)
+
+
+struct _SlotFill(Copyable, Movable):
+    """One task's share of a perfect hash join's slots: a run of the rows'
+    chunks, in collection order, whose first row is row `first` of the
+    collection. Each row sets its key's bit, and writes its number and
+    pointer to its key's slot. The bits are 64-bit words, so tasks that
+    share them set bits with an atomic OR; a bit already set is a repeated
+    key, which the task records in the table's `repeated` word and stops
+    at, since the build then needs a hash table instead."""
+
+    var physical: Int
+    var collection: Int
+    # (segment, chunk) per chunk of the run.
+    var chunks: List[Tuple[Int, Int]]
+    var first: Int
+    var key_offset: Int
+    var index_offset: Int
+    var base: UInt64
+    var slots: Int
+    var bits: Int
+    var slot_rows: Int
+    var shared: Bool
+    var repeated: Int
+
+    def __init__(
+        out self,
+        physical: Int,
+        collection: Int,
+        var chunks: List[Tuple[Int, Int]],
+        first: Int,
+        key_offset: Int,
+        index_offset: Int,
+        base: UInt64,
+        slots: Int,
+        bits: Int,
+        slot_rows: Int,
+        shared: Bool,
+        repeated: Int,
+    ):
+        self.physical = physical
+        self.collection = collection
+        self.chunks = chunks^
+        self.first = first
+        self.key_offset = key_offset
+        self.index_offset = index_offset
+        self.base = base
+        self.slots = slots
+        self.bits = bits
+        self.slot_rows = slot_rows
+        self.shared = shared
+        self.repeated = repeated
+
+    def fill(self, mut state: TupleDataChunkState):
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            comptime if not D.is_floating_point():
+                if self.physical == physical_of[D]():
+                    self._fill[D](state)
+                    return
+
+    def _fill[D: DType](self, mut state: TupleDataChunkState):
+        ref rows = Pointer[TupleDataCollection, MutAnyOrigin](
+            unsafe_from_address=self.collection
+        )[]
+        ref repeated = Pointer[Atomic[UInt64], MutAnyOrigin](
+            unsafe_from_address=self.repeated
+        )[]
+        var table = Pointer[UInt32, MutAnyOrigin](
+            unsafe_from_address=self.slots
+        )
+        var pointers = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=self.slot_rows
+        )
+        var place = self.first
+        for r in range(len(self.chunks)):
+            if repeated.load() != 0:
+                # Another task found a repeated key: the slots are dropped.
+                return
+            var count = rows.segments[self.chunks[r][0]].initialize_chunk_state(
+                state, self.chunks[r][1], False
+            )
+            var at = state.row_locations.unsafe_ptr()
+            for i in range(count):
+                var row = at[unsafe_offset=i]
+                var slot = Int(
+                    _word[D](_load_as[D](row + self.key_offset)) - self.base
+                )
+                var word = self.bits + 8 * (slot >> 6)
+                var bit = UInt64(1) << UInt64(slot & 63)
+                if self.shared:
+                    ref shared = Pointer[Atomic[UInt64], MutAnyOrigin](
+                        unsafe_from_address=word
+                    )[]
+                    var seen = shared.load()
+                    while True:
+                        if seen & bit != 0:
+                            repeated.store(1)
+                            return
+                        if shared.compare_exchange(seen, seen | bit):
+                            break
+                else:
+                    var seen = _load64(word)
+                    if seen & bit != 0:
+                        repeated.store(1)
+                        return
+                    _store64(word, seen | bit)
+                var number = UInt32(place)
+                if self.index_offset >= 0:
+                    number = _load32(row + self.index_offset)
+                table[unsafe_offset=slot] = number
+                pointers[unsafe_offset=slot] = UInt64(row)
+                place += 1
 
 
 struct _InsertJob(Copyable, Job):
@@ -1266,29 +1425,23 @@ def _word[D: DType](value: Scalar[D]) -> UInt64:
         return bitcast[DType.uint64](Int64(value))
 
 
-def _perfect_slots(
-    physical: Int,
-    least: Int64,
-    most: Int64,
-    inserted: Int,
-    rows: TupleDataCollection,
-    key_offset: Int,
-    index_offset: Int,
-    mut slots: List[UInt32],
-    mut bits: List[UInt8],
-    mut slot_rows: List[UInt64],
-    mut filled_rows: List[UInt64],
-    mut filled_builds: List[UInt32],
-) raises -> Optional[Tuple[UInt64, Int]]:
-    """Build a direct-address table for bounded unique integer keys whose
-    row values are `physical`, the least and greatest of them `least` and
-    `most`. Reserve most - least + 1 slots, clear only the validity bitmap,
-    and read a slot only when its bit is set. Reject counts above the slot
-    count, then verify uniqueness while filling slots. A densely populated
-    range is valid because both endpoints have slots. Each slot holds its
-    row's build row number when the rows carry one (`index_offset` >= 0),
-    else the row's place among the rows, either of which numbers the
-    output dictionary's entries."""
+def _perfect_span(
+    physical: Int, least: Int64, most: Int64, inserted: Int
+) -> Optional[Tuple[UInt64, Int]]:
+    """The base and span of a direct-address table for unique integer keys
+    whose row values are `physical`, the least and greatest of them `least`
+    and `most`: one slot per value from least to most, so none when the
+    range is wider than PERFECT_MAX_BUILD_SIZE or narrower than the keys
+    inserted (a repeated key, certainly). Whether the keys are unique is
+    learned while filling the slots (`_SlotFill`)."""
+    var integer = False
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            if physical == physical_of[D]():
+                integer = True
+    if not integer:
+        return None
     # Both bounds fit 64-bit signed values, so their two's complement
     # words differ by the range's width.
     var base = bitcast[DType.uint64](least)
@@ -1297,54 +1450,7 @@ def _perfect_slots(
         return None
     if UInt64(inserted) > span + 1:
         return None
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        comptime if not D.is_floating_point():
-            if physical == physical_of[D]():
-                var size = Int(span) + 1
-                slots = List[UInt32](unsafe_uninit_length=size)
-                bits = List[UInt8](unsafe_uninit_length=(size + 7) // 8)
-                unsafe_memset_zero(
-                    Pointer[UInt8, MutAnyOrigin](
-                        unsafe_from_address=Int(bits.unsafe_ptr())
-                    ),
-                    (size + 7) // 8,
-                )
-                var table = slots.unsafe_ptr()
-                var set = bits.unsafe_ptr()
-                slot_rows = List[UInt64](unsafe_uninit_length=size)
-                var pointers = slot_rows.unsafe_ptr()
-                filled_rows = List[UInt64](capacity=inserted)
-                filled_builds = List[UInt32](capacity=inserted)
-                var state = TupleDataChunkState()
-                var place = 0
-                for s in range(len(rows.segments)):
-                    ref segment = rows.segments[s]
-                    for c in range(segment.chunk_count()):
-                        var count = segment.initialize_chunk_state(
-                            state, c, False
-                        )
-                        var at = state.row_locations.unsafe_ptr()
-                        for i in range(count):
-                            var row = at[unsafe_offset=i]
-                            var slot = Int(
-                                _word[D](_load_as[D](row + key_offset)) - base
-                            )
-                            var byte = set[unsafe_offset=slot >> 3]
-                            var bit = UInt8(1) << UInt8(slot & 7)
-                            if byte & bit != 0:
-                                return None
-                            set[unsafe_offset=slot >> 3] = byte | bit
-                            var number = UInt32(place)
-                            if index_offset >= 0:
-                                number = _load32(row + index_offset)
-                            table[unsafe_offset=slot] = number
-                            pointers[unsafe_offset=slot] = UInt64(row)
-                            filled_rows.append(UInt64(row))
-                            filled_builds.append(number)
-                            place += 1
-                return (base, Int(span))
-    return None
+    return (base, Int(span))
 
 
 def _perfect_heads(
@@ -1606,9 +1712,14 @@ struct JoinHashTable(Copyable, Movable):
         self.data[].heaps = self.data[].collection.heaps()
         self.data[].heaps.add_buffers(strings)
         self.rows_stored = self.data[].collection.count()
+        self.data[].partition_rows = partition_rows^
+        self.data[].segment_starts = segment_starts^
+        self.data[].sink_threads = sink_threads
+        self.data[].duplicates = not shape.keys_only
+        self.data[].skip_null_keys = self.has_null and shape.found
         if self.inserted == 0:
             return
-        ref rows = self.data[].collection
+        var span = Optional[Tuple[UInt64, Int]]()
         if (
             shape.perfect
             and not shape.keys_only
@@ -1620,40 +1731,119 @@ struct JoinHashTable(Copyable, Movable):
             # directly. Nested build columns are not supported there (a
             # slot array holds fixed-width values or string_t only), and a
             # repeated key or a wide range falls back to the hash table.
-            var filled_rows = List[UInt64]()
-            var filled_builds = List[UInt32]()
-            var slots = _perfect_slots(
+            span = _perfect_span(
                 shape.row_layout.nodes[][0].physicals[0],
                 self.least[0],
                 self.most[0],
                 self.inserted,
-                rows,
-                self.layout.key_offset,
-                self.layout.index_offset,
-                self.data[].slots,
-                self.data[].slot_bits,
-                self.data[].slot_rows,
-                filled_rows,
-                filled_builds,
             )
-            if slots:
-                trace_path("join.perfect_hash")
-                self.perfect = True
-                self.perfect_base = slots.value()[0]
-                self.perfect_span = slots.value()[1]
-                # Every output column a dictionary over the build rows,
-                # each row in the table gathered to its number, which its
-                # key's slot holds. Sized by the build rows, not the key
-                # range: a sparse range (few rows over a wide span) would
-                # otherwise allocate and touch memory for every empty
-                # slot, for each column.
-                if len(self.output_columns) > 0:
-                    self._gather_slots(filled_rows, filled_builds, self.count)
-                return
-            # A repeated key: the hash table instead.
-            self.data[].slots = List[UInt32]()
-            self.data[].slot_bits = List[UInt8]()
-            self.data[].slot_rows = List[UInt64]()
+        if span:
+            self._plan_slots(
+                shape.row_layout.nodes[][0].physicals[0],
+                span.value()[0],
+                span.value()[1],
+            )
+        else:
+            self._plan_pointer_table()
+        if not defer_finalize:
+            self._finalize_here()
+
+    def _finalize_here(mut self) raises:
+        """Run the finalize tasks on this thread and the crew's, then the
+        step after them."""
+        var tasks = self.finalize_tasks()
+        if tasks == 1:
+            self.finalize_task(0)
+        elif tasks > 1:
+            var jobs = List[_TableTask](capacity=tasks)
+            for t in range(tasks):
+                jobs.append(_TableTask(self, t))
+            run_jobs(jobs)
+        self.finish_finalize()
+
+    def _plan_slots(mut self, physical: Int, base: UInt64, span: Int) raises:
+        """Plan a perfect hash join's finalize tasks: the slot arrays for
+        keys `base` to `base + span`, their bits cleared, and per task a
+        run of the rows' chunks to fill slots from and every task-th
+        output column to gather. The work per row is the same whatever the
+        build's size, so it splits over as many tasks as the build had
+        sink threads, in runs of whole chunks balanced by rows. Each
+        output column is a dictionary over the build rows, each row at its
+        number (its build row, else its place in the collection), which
+        its key's slot holds; the gathers read only the rows, so they run
+        beside the slot fills."""
+        self.perfect = True
+        self.perfect_base = base
+        self.perfect_span = span
+        var size = span + 1
+        self.data[].slots = List[UInt32](unsafe_uninit_length=size)
+        self.data[].slot_rows = List[UInt64](unsafe_uninit_length=size)
+        # The bits as whole 64-bit words, which the fills set atomically.
+        var words = (size + 63) // 64
+        self.data[].slot_bits = List[UInt8](length=8 * words, fill=0)
+        self.data[].repeated[0] = 0
+        ref rows = self.data[].collection
+        var chunks = List[Tuple[Int, Int]]()
+        var counts = List[Int]()
+        for s in range(len(rows.segments)):
+            ref segment = rows.segments[s]
+            for c in range(segment.chunk_count()):
+                chunks.append((s, c))
+                counts.append(segment.chunks[c].count)
+        var tasks = max(1, min(self.data[].sink_threads, len(chunks)))
+        var collection = Int(Pointer(to=self.data[].collection))
+        var pending = List[_FinalizeJob](capacity=tasks)
+        var at = 0
+        var place = 0
+        for t in range(tasks):
+            # Chunks up to the task's share of the rows, at least one.
+            var end_rows = (t + 1) * self.rows_stored // tasks
+            var run = List[Tuple[Int, Int]]()
+            var first = place
+            # Each later task keeps at least one chunk.
+            var limit = len(chunks) - (tasks - t - 1)
+            while at < limit and (
+                len(run) == 0 or place < end_rows or t == tasks - 1
+            ):
+                run.append(chunks[at])
+                place += counts[at]
+                at += 1
+            var job = _FinalizeJob()
+            job.fills.append(
+                _SlotFill(
+                    physical,
+                    collection,
+                    run^,
+                    first,
+                    self.layout.key_offset,
+                    self.layout.index_offset,
+                    base,
+                    Int(self.data[].slots.unsafe_ptr()),
+                    Int(self.data[].slot_bits.unsafe_ptr()),
+                    Int(self.data[].slot_rows.unsafe_ptr()),
+                    tasks > 1,
+                    Int(self.data[].repeated.unsafe_ptr()),
+                )
+            )
+            pending.append(job^)
+        self.data[].pending = pending^
+        var outputs = len(self.output_columns)
+        self.data[].gathered = List[Optional[Series]](
+            length=outputs, fill=None
+        )
+        self.data[].gathered_decoded = List[List[UInt8]](
+            length=outputs, fill=List[UInt8]()
+        )
+
+    def _plan_pointer_table(mut self) raises:
+        """Plan a hash join's finalize tasks: the pointer table, each
+        partition its own region (together at least MINIMUM_CAPACITY), and
+        as many tasks as the build had sink threads, each filling a run of
+        partitions' regions."""
+        ref partition_rows = self.data[].partition_rows
+        ref segment_starts = self.data[].segment_starts
+        var sink_threads = self.data[].sink_threads
+        ref rows = self.data[].collection
         var collection = Int(Pointer(to=self.data[].collection))
         # The probe's bloom filter, when the join's rule holds: a single
         # integer key, whose row hash is the filter's hash of the key, so
@@ -1661,10 +1851,10 @@ struct JoinHashTable(Copyable, Movable):
         var bloom_words = 0
         var bloom_blocks = 0
         if (
-            fields == 1
+            len(self.key_types) == 1
             and (
-                shape.key_types[0].physical() == DataType.INT64
-                or shape.key_types[0].physical() == DataType.INT32
+                self.key_types[0].physical() == DataType.INT64
+                or self.key_types[0].physical() == DataType.INT32
             )
             and can_use_bloom_filter(
                 1, self.inserted, self.probe_estimate, self.build_filtered
@@ -1674,9 +1864,10 @@ struct JoinHashTable(Copyable, Movable):
             if bloom_blocks > 0:
                 self.bloom = ArcPointer(KeyBloom(bloom_blocks))
                 bloom_words = Int(self.bloom.value()[].words.unsafe_ptr())
-        # Each partition its own region of the table; the regions together
-        # at least MINIMUM_CAPACITY.
-        self.parts = partition_count
+        self.parts = len(partition_rows)
+        self.capacity = 0
+        self.data[].bases = List[UInt64]()
+        self.data[].masks = List[UInt64]()
         var floor = next_power_of_two(
             (MINIMUM_CAPACITY + self.parts - 1) // self.parts
         )
@@ -1707,15 +1898,15 @@ struct JoinHashTable(Copyable, Movable):
                     entries,
                     Int(self.data[].bases[p]),
                     self.data[].masks[p],
-                    not shape.keys_only,
-                    self.has_null and shape.found,
+                    self.data[].duplicates,
+                    self.data[].skip_null_keys,
                     bloom_words,
                     bloom_blocks,
                     sink_threads > 1,
                 )
             )
         # As many tasks as the build had sink threads, each filling a run
-        # of partitions' regions; one runs here.
+        # of partitions' regions.
         var tasks = List[_FinalizeJob](capacity=sink_threads)
         for _ in range(sink_threads):
             tasks.append(_FinalizeJob())
@@ -1724,13 +1915,6 @@ struct JoinHashTable(Copyable, Movable):
                 inserts[p].copy()
             )
         self.data[].pending = tasks^
-        if defer_finalize:
-            return
-        if self.finalize_tasks() == 1:
-            self.finalize_task(0)
-        else:
-            run_jobs(self.data[].pending)
-        self.finish_finalize()
 
     def key_bounds(self, k: Int) -> Optional[Tuple[Int64, Int64]]:
         """Key `k`'s least and greatest valid value, when it is an integer
@@ -1801,22 +1985,112 @@ struct JoinHashTable(Copyable, Movable):
         return columns^
 
     def finalize_tasks(self) -> Int:
-        """The finalize tasks left to run: one per build sink thread, each
-        filling a run of partitions' regions of the pointer table, so the
-        tasks never write the same entries and need no atomics."""
+        """The finalize tasks left to run: one per build sink thread. A
+        hash join's each fill a run of partitions' regions of the pointer
+        table, so the tasks never write the same entries and need no
+        atomics; a perfect hash join's each fill the slots of a run of the
+        rows and gather some of the output columns."""
         return len(self.data[].pending)
 
     def finalize_task(self, task: Int) raises:
         """Run finalize task `task`; tasks run at the same time, each on
-        its own regions."""
+        its own regions, rows or columns."""
         self.data[].pending[task].run()
+        if self.perfect:
+            self._gather_outputs(task)
+
+    def _gather_outputs(self, task: Int) raises:
+        """Perfect hash finalize task `task`'s output columns (every
+        task-th one), each gathered over every row to its number."""
+        var outputs = len(self.output_columns)
+        if task >= outputs:
+            return
+        ref repeated = Pointer[Atomic[UInt64], MutAnyOrigin](
+            unsafe_from_address=Int(self.data[].repeated.unsafe_ptr())
+        )[]
+        if repeated.load() != 0:
+            return
+        # Every row's pointer and number, in collection order.
+        var pointers = List[UInt64](capacity=self.rows_stored)
+        var numbers = List[UInt32](capacity=self.rows_stored)
+        var state = TupleDataChunkState()
+        ref rows = self.data[].collection
+        var index_offset = self.layout.index_offset
+        for s in range(len(rows.segments)):
+            ref segment = rows.segments[s]
+            for c in range(segment.chunk_count()):
+                var n = segment.initialize_chunk_state(state, c, False)
+                var at = state.row_locations.unsafe_ptr()
+                for i in range(n):
+                    var row = at[unsafe_offset=i]
+                    pointers.append(UInt64(row))
+                    if index_offset >= 0:
+                        numbers.append(_load32(row + index_offset))
+                    else:
+                        numbers.append(UInt32(len(numbers)))
+        var tasks = len(self.data[].pending)
+        var c = task
+        while c < outputs:
+            if repeated.load() != 0:
+                return
+            var decoded = List[UInt8]()
+            var column = gather_rows_slots(
+                self.row_layout,
+                Int(pointers.unsafe_ptr()),
+                len(pointers),
+                Int(numbers.unsafe_ptr()),
+                self.count,
+                self.output_columns[c],
+                self.output_names[c],
+                self.output_types[c],
+                self.data[].heaps,
+                decoded,
+            )
+            self.data[].gathered[c] = Optional(column^)
+            self.data[].gathered_decoded[c] = decoded^
+            c += tasks
+        _ = pointers^
+        _ = numbers^
 
     def finish_finalize(mut self) raises:
-        """After the last finalize task, once the whole pointer table is
-        filled: whether any chain is longer than one, then dictionary
-        emission's arrays when it applies."""
+        """After the last finalize task, once the whole table is filled:
+        for a hash join, whether any chain is longer than one, then
+        dictionary emission's arrays when it applies; for a perfect hash
+        join, its gathered columns become the dictionary the probe emits
+        from, unless a task found a repeated key, which turns the join
+        back into a hash join, whose pointer table is filled here."""
         if len(self.data[].pending) == 0:
             return
+        if self.perfect:
+            self.data[].pending = List[_FinalizeJob]()
+            if self.data[].repeated[0] == 0:
+                trace_path("join.perfect_hash")
+                if len(self.output_columns) > 0:
+                    var columns = List[Series](
+                        capacity=len(self.output_columns)
+                    )
+                    for c in range(len(self.output_columns)):
+                        columns.append(self.data[].gathered[c].take())
+                    var decoded = List[List[UInt8]]()
+                    swap(decoded, self.data[].gathered_decoded)
+                    self._set_dictionary(columns^, decoded^)
+                self.data[].gathered = List[Optional[Series]]()
+                return
+            # A repeated key: the hash table instead.
+            self.perfect = False
+            self.perfect_base = 0
+            self.perfect_span = 0
+            self.data[].slots = List[UInt32]()
+            self.data[].slot_bits = List[UInt8]()
+            self.data[].slot_rows = List[UInt64]()
+            self.data[].gathered = List[Optional[Series]]()
+            self.data[].gathered_decoded = List[List[UInt8]]()
+            self._plan_pointer_table()
+            var tasks = self.finalize_tasks()
+            if tasks == 1:
+                self.finalize_task(0)
+            else:
+                run_jobs(self.data[].pending)
         for t in range(len(self.data[].pending)):
             self.chains_longer_than_one = (
                 self.chains_longer_than_one or self.data[].pending[t].chained
@@ -1911,35 +2185,6 @@ struct JoinHashTable(Copyable, Movable):
             dtype,
             self.data[].heaps,
         )
-
-    def _gather_slots(
-        mut self,
-        rows: List[UInt64],
-        slots: List[UInt32],
-        size: Int,
-    ) raises:
-        """Every output column as a column of `size` entries, the row at
-        `rows[i]` at entry `slots[i]`, the other entries unwritten (no
-        probe emits them)."""
-        var out = List[Series](capacity=len(self.output_columns))
-        var decoded = List[List[UInt8]](capacity=len(self.output_columns))
-        for c in range(len(self.output_columns)):
-            decoded.append(List[UInt8]())
-            out.append(
-                gather_rows_slots(
-                    self.row_layout,
-                    Int(rows.unsafe_ptr()),
-                    len(rows),
-                    Int(slots.unsafe_ptr()),
-                    size,
-                    self.output_columns[c],
-                    self.output_names[c],
-                    self.output_types[c],
-                    self.data[].heaps,
-                    decoded[c],
-                )
-            )
-        self._set_dictionary(out^, decoded^)
 
     def _build_dictionary_arrays(mut self) raises:
         """Gather every output column into a dictionary over the rows in
