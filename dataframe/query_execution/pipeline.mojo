@@ -171,7 +171,6 @@ from dataframe.planning.properties import (
 )
 from dataframe.planning.cost.eligibility import (
     _counts_distinct,
-    _filters,
 )
 from dataframe.planning.cost.sampling import (
     _keys_repeat,
@@ -1165,27 +1164,9 @@ def _probe_start(
         cursor = node.left
     if cursor < 0 or cursor == index and not _is_scan(self._nodes[cursor].kind):
         return _ProbeStart(None)
-    if cursor == index and (
-        self._nodes[cursor].kind == SCAN_FRAME or sink == 0
-    ):
-        # The source itself, with nothing to apply: batches would only copy it
-        # into chunks that the eager step above rechunks again, two copies of
-        # every row for nothing; a file is read whole by its parallel reader.
-        # Only a file sink streams it.
-        return _ProbeStart(None)
-    if (
-        len(expressions) == 0
-        and top < 0
-        and limit < 0
-        and skip == 0
-        and len(joins) == 0
-        and self._nodes[cursor].kind == SCAN_FRAME
-        and not _filters(operations)
-    ):
-        # Row-local steps that keep every row of an in-memory frame
-        # (with_columns, select, drop) under an eager step: a stream applies
-        # them to batches and copies the results back together, while the eager
-        # steps share the columns they do not touch and copy nothing.
+    if cursor == index and self._nodes[cursor].kind != SCAN_FRAME and sink == 0:
+        # A file with nothing to apply is read whole by its parallel
+        # reader; only a file sink streams it.
         return _ProbeStart(None)
     operations.reverse()
     operation_nodes.reverse()

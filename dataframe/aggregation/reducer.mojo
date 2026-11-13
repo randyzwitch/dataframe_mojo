@@ -9,7 +9,7 @@ median/quantile keep every valid value of a group.
 from std.bit import bit_width
 from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
-from std.memory import ArcPointer, bitcast
+from std.memory import ArcPointer, Pointer, bitcast
 from dataframe.kernels.approx_distinct import CardinalitySketch, update_sketches
 from dataframe.storage.boolean import BoolColumn, true_count
 from dataframe.storage.column import Column, _validity_at
@@ -1325,6 +1325,50 @@ struct Reducer(Movable):
         if op == APPROX_N_UNIQUE:
             for _ in range(n):
                 self.sketches.append(CardinalitySketch())
+
+    def sum_group_rows(
+        mut self, values: Series, offsets: Int, rows: Int, first: Int, last: Int
+    ) -> Bool:
+        """Integer sums (and means) of groups [first, last), whose rows are
+        `rows[offsets[g]:offsets[g + 1]]` (addresses), read through the row
+        lists into one running total per group. No gathered copy of the
+        values and no per-row group numbers are made, and each group's
+        state is written once. Returns False, changing nothing, for
+        anything but a contiguous integer column without nulls."""
+        if (
+            not (self.op == SUM or self.op == MEAN)
+            or self.logical.is_decimal()
+            or values.is_chunked()
+        ):
+            return False
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            comptime if not D.is_floating_point():
+                if values._data.isa[Column[Scalar[D]]]():
+                    ref column = values._data[Column[Scalar[D]]]
+                    if column.null_count() > 0:
+                        return False
+                    var data = column._ptr()
+                    var at = Pointer[Int, MutAnyOrigin](
+                        unsafe_from_address=offsets
+                    )
+                    var members = Pointer[Int, MutAnyOrigin](
+                        unsafe_from_address=rows
+                    )
+                    var sums = self.int_sums.unsafe_ptr()
+                    for g in range(first, last):
+                        var total = Int128(0)
+                        var lo = at[unsafe_offset=g]
+                        var hi = at[unsafe_offset=g + 1]
+                        for j in range(lo, hi):
+                            total += data.unsafe_offset(
+                                members[unsafe_offset=j]
+                            )[].cast[DType.int128]()
+                        ref state = sums.unsafe_offset(g - first)[]
+                        state.total += total
+                        state.count += Int64(hi - lo)
+                    return True
+        return False
 
     def update(
         mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
