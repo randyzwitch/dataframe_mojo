@@ -137,7 +137,7 @@ def plan_execute(
         var handed = plan_handoff_region(self, index, streaming, batch_size)
         if handed:
             return handed.take()
-    if streaming and not empty:
+    if streaming and not empty and index != self._declined:
         var streamed = plan_stream_execute(self, index, batch_size)
         if streamed:
             return streamed.take()
