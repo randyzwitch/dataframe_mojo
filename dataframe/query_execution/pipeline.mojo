@@ -188,7 +188,9 @@ from dataframe.planning.cost.sampling import (
 )
 from dataframe.query_execution.materialize import (
     _StreamInputs,
-    plan_union,
+    _stack_union,
+    plan_take_prefetched,
+    plan_union_children,
     plan_schedule_inputs,
 )
 from dataframe.query_execution.operators import (
@@ -543,12 +545,13 @@ def _add_input(
     batch_size: Int,
     var build: _BuildFor,
     type: Int,
+    streaming: Bool = True,
 ) raises -> Int:
     """Add input `index` of a stream on `self` to `schedule` and return the
     pipeline that makes its result: the input's own stream when it is one
     (on a copy of the plan with a memo of its own), else a subplan
     pipeline that executes it."""
-    if self._handoff == HANDOFF_OFF:
+    if streaming and self._handoff == HANDOFF_OFF:
         var sub = self.copy()
         sub._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
         sub._prefetched_indexes = Optional(ArcPointer(Dict[Int, _ReadyIndex]()))
@@ -598,7 +601,7 @@ def _add_input(
             _SubplanPipeline(
                 self.copy(),
                 index,
-                True,
+                streaming,
                 batch_size,
                 build.keys,
                 build.how,
@@ -608,6 +611,71 @@ def _add_input(
         )
     )
     return len(schedule.pipelines) - 1
+
+
+def plan_execute_inputs(
+    self: QueryContext, nodes: List[Int], streaming: Bool, batch_size: Int
+) raises -> List[DataFrame]:
+    """Independent inputs `nodes`, computed as pipelines of one
+    schedule: an input that is a stream adds its own pipelines
+    (`_add_input`), any other runs as one subplan pipeline."""
+    var schedule = _StreamSchedule()
+    var at = List[Int](capacity=len(nodes))
+    for node in nodes:
+        at.append(
+            _add_input(
+                schedule,
+                self,
+                node,
+                batch_size,
+                _BuildFor(),
+                META_REGULAR,
+                streaming,
+            )
+        )
+    schedule.bind()
+    try:
+        run_pipelines(
+            schedule.pipelines, schedule.metas, parallel=not self._report
+        )
+    except e:
+        schedule.release()
+        raise e^
+    var frames = List[DataFrame](capacity=len(at))
+    for p in at:
+        frames.append(schedule.pipelines[p].result())
+    return frames^
+
+
+def plan_union(
+    self: QueryContext, index: Int, streaming: Bool, batch_size: Int
+) raises -> DataFrame:
+    """The union at node `index` with its children computed as pipelines of
+    one schedule (every child is a pipeline of that schedule, none
+    nested in another's, so all of them share the threads at once), or
+    one after the other on this plan when an execution report is kept.
+    A child a stream already ran (`plan_schedule_inputs`) is taken."""
+    var children = plan_union_children(self, index)
+    var got = Dict[Int, DataFrame]()
+    var wanted = List[Int]()
+    for child in children:
+        if child in got or child in wanted:
+            continue
+        var ready = plan_take_prefetched(self, child)
+        if ready:
+            got[child] = ready.take()
+        elif self._report:
+            got[child] = self._execute(child, False, streaming, batch_size)
+        else:
+            wanted.append(child)
+    if len(wanted) > 0:
+        var frames = plan_execute_inputs(self, wanted, streaming, batch_size)
+        for k in range(len(wanted)):
+            got[wanted[k]] = frames[k].copy()
+    var frames = List[DataFrame](capacity=len(children))
+    for child in children:
+        frames.append(got[child].copy())
+    return _stack_union(frames)
 
 
 @fieldwise_init
@@ -701,14 +769,8 @@ struct _StreamProbe(Movable):
         var ahead = plan._prefetched.value()
         for k in range(len(self.wanted)):
             ref made = pipelines[self.at[k]]
-            var built = Optional[JoinHashTable]()
-            if len(made.input) > 0:
-                ahead[][self.wanted[k]] = made.input[0].result.copy()
-                built = made.input[0].built.copy()
-            else:
-                ref stream = made.probe[0]
-                ahead[][self.wanted[k]] = stream.result.value().copy()
-                built = stream.built.copy()
+            ahead[][self.wanted[k]] = made.result()
+            var built = made.built()
             if built and plan._prefetched_indexes:
                 plan._prefetched_indexes.value()[][
                     self.wanted[k]
@@ -826,6 +888,18 @@ struct _StreamPipeline(SchedulablePipeline):
         self.probe = List[_StreamProbe]()
         self.outer = List[_OuterScan]()
         self.outer.append(outer^)
+
+    def result(self) raises -> DataFrame:
+        """The input's result, once this input's pipeline completed."""
+        if len(self.input) > 0:
+            return self.input[0].result.copy()
+        return self.probe[0].result.value().copy()
+
+    def built(self) -> Optional[JoinHashTable]:
+        """The hash table the input's finish made, if any."""
+        if len(self.input) > 0:
+            return self.input[0].built.copy()
+        return self.probe[0].built.copy()
 
     def initialize(mut self) raises:
         pass

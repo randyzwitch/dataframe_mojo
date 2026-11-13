@@ -441,39 +441,3 @@ def _stack_union(frames: List[DataFrame]) raises -> DataFrame:
         parts.append(frames[k].select(names) if k > 0 else frames[k].copy())
     # `concat` checks the types.
     return concat(parts)
-
-
-def plan_union(
-    self: QueryContext, index: Int, streaming: Bool, batch_size: Int
-) raises -> DataFrame:
-    """The union at node `index` with its children computed as pipelines of
-    one schedule (every child is a pipeline of that schedule, none
-    nested in another's, so all of them share the threads at once), or
-    one after the other on this plan when an execution report is kept.
-    A child a stream already ran (`plan_schedule_inputs`) is taken."""
-    var children = plan_union_children(self, index)
-    var got = Dict[Int, DataFrame]()
-    var jobs = List[_SubplanPipeline]()
-    var metas = List[MetaPipeline]()
-    var wanted = List[Int]()
-    for child in children:
-        if child in got or child in wanted:
-            continue
-        var ready = plan_take_prefetched(self, child)
-        if ready:
-            got[child] = ready.take()
-        elif self._report:
-            got[child] = self._execute(child, False, streaming, batch_size)
-        else:
-            wanted.append(child)
-            jobs.append(
-                _SubplanPipeline(self.copy(), child, streaming, batch_size)
-            )
-            metas.append(MetaPipeline(META_REGULAR))
-    run_pipelines(jobs, metas)
-    for k in range(len(wanted)):
-        got[wanted[k]] = jobs[k].result.copy()
-    var frames = List[DataFrame](capacity=len(children))
-    for child in children:
-        frames.append(got[child].copy())
-    return _stack_union(frames)
