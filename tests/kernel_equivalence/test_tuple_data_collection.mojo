@@ -2,6 +2,7 @@
 checking payloads, validity, nested children and collection ownership
 independently."""
 # contract-group: kernel.tuple_data
+from std.memory import Pointer
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, Series, StringColumn
@@ -272,7 +273,7 @@ def _assert_columns(got: List[Series], expected: List[Series]) raises:
         assert_true(got[c].equals(expected[c]), expected[c].name())
 
 
-def test_layout_offsets_follow_duckdb() raises:
+def test_layout_offsets_pack_validity_heap_size_and_values() raises:
     # [validity 1][heap size 8][int32 4][string_t 16]
     var types = List[DataType]()
     types.append(DataType.INT32)
@@ -423,7 +424,7 @@ def test_gather_through_row_pointers() raises:
 
 
 def test_boolean_payload_through_row_pointers() raises:
-    # GatherRHS for a Boolean column: `false` stays false, null stays
+    # Gathering a Boolean column from the rows: `false` stays false, null stays
     # null, with and without nulls in the column.
     var n = 3 * STANDARD_VECTOR_SIZE
     var plain_values = List[Bool](capacity=n)
@@ -448,10 +449,65 @@ def test_boolean_payload_through_row_pointers() raises:
                 k,
                 columns[k].name(),
                 columns[k].dtype(),
+                rows.heaps(),
             )
             assert_true(got.equals(columns[k].take(picked)), columns[k].name())
         _ = state^
     _ = rows^
+
+
+def test_strings_reference_the_heap() raises:
+    # Gathering a string column from rows: long strings reference the rows'
+    # heap blocks, which the column keeps alive after the rows are gone.
+    var n = 3 * STANDARD_VECTOR_SIZE
+    var columns = List[Series]()
+    columns.append(_strings("s", n, 7))
+    var long_values = List[String](capacity=n)
+    for i in range(n):
+        long_values.append(_text(i) + " and a tail past twelve bytes")
+    columns.append(Series("long", StringColumn(long_values)))
+    var rows = TupleDataCollection(TupleDataLayout(_types(columns)))
+    _append_all(rows, columns, 0, n)
+    var heaps = rows.heaps()
+    assert_true(len(heaps.buffers) > 1, "strings span several heap blocks")
+    var gathered = List[Series]()
+    var expected = List[Series]()
+    for c in range(rows.chunk_count()):
+        var state = TupleDataChunkState()
+        var count = rows.fetch_chunk(state, c, False)
+        # Every other row, backwards.
+        var pointers = List[UInt64]()
+        var picked = List[Int]()
+        var i = count - 1
+        while i >= 0:
+            pointers.append(
+                UInt64(
+                    Pointer[Int, MutAnyOrigin](
+                        unsafe_from_address=Int(state.rows())
+                    )[unsafe_offset=i]
+                )
+            )
+            picked.append(c * STANDARD_VECTOR_SIZE + i)
+            i -= 2
+        for k in range(len(columns)):
+            gathered.append(
+                gather_rows_series(
+                    rows.layout,
+                    Int(pointers.unsafe_ptr()),
+                    len(pointers),
+                    k,
+                    columns[k].name(),
+                    columns[k].dtype(),
+                    heaps,
+                )
+            )
+            expected.append(columns[k].take(picked))
+        _ = pointers^
+        _ = state^
+    _ = heaps^
+    _ = rows^
+    for k in range(len(gathered)):
+        assert_true(gathered[k].equals(expected[k]), expected[k].name())
 
 
 def test_combined_collections_keep_their_rows() raises:

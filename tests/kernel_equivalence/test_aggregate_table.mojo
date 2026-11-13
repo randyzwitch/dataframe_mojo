@@ -175,7 +175,7 @@ def test_tables_that_fill_many_times_merge_every_group_once() raises:
 def test_few_valued_keys_forming_many_groups_reach_the_table() raises:
     # A brand, a type and a size, each with few values, whose product is
     # under the few-groups bound but which form thousands of groups among
-    # the rows (PDS-H q16's keys): the table takes them, as it does in a
+    # the rows: the table takes them, as it does in a
     # pipeline, rather than per-range states that number each range's
     # strings again.
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")

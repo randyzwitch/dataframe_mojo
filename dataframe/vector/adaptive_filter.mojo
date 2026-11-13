@@ -45,13 +45,13 @@ struct AdaptiveFilter(Copyable, Movable):
         self.random = Random(seed=0x9E3779B97F4A7C15)
 
     def begin(self) -> Int:
-        """BeginFilter: the start time, 0 when the order never changes."""
+        """The start time, 0 when the order never changes."""
         if self.disabled:
             return 0
         return Int(perf_counter_ns())
 
     def end(mut self, start: Int):
-        """EndFilter: adapt to this chunk's duration."""
+        """Adapt to this chunk's duration."""
         if self.disabled:
             return
         self._adapt(Float64(Int(perf_counter_ns()) - start) * 1e-9)

@@ -9,7 +9,8 @@ Nested output is assembled in buffers for each level, then exposed through
 an at-rest column that the chunk's vector can read. String views retain
 the collection's owners so referenced bytes outlive the output vectors.
 """
-from std.memory import Pointer, unsafe_memcpy, unsafe_memset
+from std.collections import Dict
+from std.memory import ArcPointer, Pointer, unsafe_memcpy, unsafe_memset
 from std.sys import size_of
 
 from dataframe.dtype import DataType
@@ -17,7 +18,9 @@ from dataframe.series import Series
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.storage.nested import ListColumn, StructColumn
-from dataframe.storage.string import StringBuilder
+from dataframe.storage.buffer import _Buffer
+from dataframe.storage.string import StringBuilder, StringColumn
+from dataframe.storage.string_view import StringView, StringViewStorage
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
@@ -62,8 +65,8 @@ comptime _FIXED = [
     DType.int128,
 ]
 
-# sizeof(uint32_t): a string's slot within a list
-# (TupleDataWithinListFixedSize<string_t>).
+# A string's slot within a list's heap data: its 4-byte length, the bytes
+# following in the heap.
 comptime _WITHIN_LIST_STRING_SIZE = 4
 
 
@@ -128,7 +131,9 @@ def _entry_length(entries: Int, index: Int) -> Int:
 
 @always_inline
 def _null_value[D: DType]() -> Scalar[D]:
-    """NullValue<T>: the type's minimum, NaN for floats."""
+    """The value stored for a null: the type's minimum, NaN for floats. A fixed
+    value keeps a row's bytes the same for every null; validity still marks it
+    null."""
     comptime if D.is_floating_point():
         var zero = Scalar[D](0)
         return zero / zero
@@ -146,8 +151,8 @@ def compute_heap_sizes(
     append_sel: SelectionVector,
     append_count: Int,
 ):
-    """TupleDataCollection::ComputeHeapSizes: each appended row's heap
-    bytes, into `state.heap_sizes`."""
+    """Each appended row's heap bytes (known before any is written, so the heap
+    is allocated once), into `state.heap_sizes`."""
     var sizes = _ints(state.sizes())
     for i in range(append_count):
         sizes[unsafe_offset=i] = 0
@@ -193,7 +198,7 @@ def _within_heap_sizes(
     append_count: Int,
     list_data: UnifiedVectorFormat,
 ):
-    """WithinCollectionComputeHeapSizes."""
+    """Heap bytes of a list's child values, per appended row."""
     var physical = state.vector_data[f].physical
     var source = state.vector_data[f].unified
     var sizes = _ints(state.sizes())
@@ -236,9 +241,9 @@ def _collection_within_heap_sizes(
     append_count: Int,
     list_data: UnifiedVectorFormat,
 ):
-    """CollectionWithinCollectionComputeHeapSizes: a list in a list. The
-    child list's entries of each appended row are combined into one entry,
-    and the grandchild is sliced to read them in order."""
+    """Heap bytes of a list in a list. The child list's entries of each appended
+    row are combined into one entry, and the grandchild is sliced to read them
+    in order."""
     var child_list = state.vector_data[f].unified
     var sizes = _ints(state.sizes())
 
@@ -314,8 +319,8 @@ def _collection_within_heap_sizes(
 def _apply_slice_recursive(
     mut state: TupleDataChunkState, f: Int, combined_sel: Int, count: Int
 ):
-    """ApplySliceRecursive: the format reads its original selection
-    through `combined_sel`; a struct's fields too."""
+    """The format reads its original selection through `combined_sel`, so a
+    nested child is read through one selection; a struct's fields too."""
     ref format = state.vector_data[f]
     format.sliced_sel = List[UInt32](unsafe_uninit_length=max(count, 1))
     var out = format.sliced_sel.unsafe_ptr()
@@ -345,8 +350,8 @@ def scatter(
     append_sel: SelectionVector,
     append_count: Int,
 ):
-    """TupleDataCollection::Scatter: the appended rows' values into the
-    rows at `state.row_locations`, their heap data at the heap pointers."""
+    """The appended rows' values into the rows at `state.row_locations`, their
+    heap data at the heap pointers."""
     var rows = _ints(state.rows())
     ref top = layout.nodes[][0]
     if top.can_have_null:
@@ -473,9 +478,9 @@ def _scatter_strings(
     offset_in_row: Int,
     col: Int,
 ):
-    """TupleDataValueStore<string_t>: an inlined string as it stands; a
-    longer one's bytes into the heap and its header and heap pointer into
-    the row. A null stores NullValue<string_t> ("\\x80", inlined)."""
+    """Store strings: an inlined string as it stands; a longer one's bytes into
+    the heap and its header and heap pointer into the row. A null stores the
+    fixed one-byte string "\\x80", inlined, so it needs no heap."""
     var targets = _ints(rows)
     var heap_at = _ints(heaps)
     var entry = col >> 3
@@ -511,8 +516,8 @@ def _scatter_struct(
     append_count: Int,
     rows: Int,
 ):
-    """TupleDataStructScatter: the struct's validity in this row, then its
-    fields into its nested row."""
+    """The struct's validity in this row, then its fields into its nested
+    row."""
     var source = state.vector_data[f].unified
     var targets = _ints(rows)
     var entry = col >> 3
@@ -558,8 +563,8 @@ def _scatter_list(
     append_count: Int,
     rows: Int,
 ):
-    """TupleDataListScatter: the heap pointer in the row and the length at
-    the start of the list's heap data, then the child."""
+    """The heap pointer in the row and the length at the start of the list's
+    heap data, then the child."""
     var source = state.vector_data[f].unified
     var targets = _ints(rows)
     var heap_at = _ints(state.heaps())
@@ -613,8 +618,8 @@ def _scatter_within(
         _fill_ones(mask, validity_bytes(length))
         heap += validity_bytes(length)
         if physical == PHYSICAL_STRUCT:
-            # TupleDataStructWithinCollectionScatter: the struct validity;
-            # the fields follow, each its own mask and values.
+            # A struct inside a list: the struct validity; the fields follow,
+            # each its own mask and values.
             for c in range(length):
                 var at = source.sel.get_index(list_offset + c)
                 if not source.validity.row_is_valid(at):
@@ -637,8 +642,7 @@ def _scatter_within(
                 else:
                     set_invalid(mask, c)
         elif physical == PHYSICAL_LIST:
-            # TupleDataCollectionWithinCollectionScatter: the child lists'
-            # lengths.
+            # A list inside a list: the child lists' lengths.
             for c in range(length):
                 var at = source.sel.get_index(list_offset + c)
                 if source.validity.row_is_valid(at):
@@ -679,7 +683,7 @@ def _within_fixed_values(
     data_location: Int,
     mask: Int,
 ):
-    """TupleDataTemplatedWithinCollectionScatter's value loop."""
+    """The value loop for fixed-width child values of a list."""
     if physical == PHYSICAL_BOOL:
         _within_fixed_loop[DType.uint8](
             source, list_offset, length, data_location, mask
@@ -729,9 +733,9 @@ def gather_column(
     target_sel: SelectionVector,
     mut arena: ColumnArena,
 ) raises:
-    """TupleDataCollection::Gather of one column: the rows `scan_sel`
-    picks from the row pointers at `rows` into vector `out_column` of
-    `result`, at the positions `target_sel` gives."""
+    """One column of the rows `scan_sel` picks from the row pointers at `rows`
+    into vector `out_column` of `result`, at the positions `target_sel`
+    gives."""
     ref top = layout.nodes[][0]
     var physical = top.physicals[column_id]
     if physical != PHYSICAL_LIST and physical != PHYSICAL_STRUCT:
@@ -776,6 +780,104 @@ def gather_column(
     result.data[out_column] = flat_over(arena, handle, 0)
 
 
+struct TupleDataHeaps(Copyable, Movable):
+    """A collection's heap blocks in address order, each a buffer that
+    keeps its block alive. A string column gathered from the rows
+    references their strings in place: string_t's pointer becomes the
+    block and offset of a Utf8View descriptor, and the column holds the
+    blocks, so the bytes stay valid after the collection is gone without
+    being copied."""
+
+    var starts: List[Int]
+    var ends: List[Int]
+    var buffers: List[_Buffer[UInt8]]
+    var bytes: Int
+
+    def __init__(out self):
+        self.starts = List[Int]()
+        self.ends = List[Int]()
+        self.buffers = List[_Buffer[UInt8]]()
+        self.bytes = 0
+
+    def __init__(out self, blocks: List[ArcPointer[List[UInt8]]]):
+        """The heaps `blocks`, put in address order."""
+        self.starts = List[Int](capacity=len(blocks))
+        self.ends = List[Int](capacity=len(blocks))
+        self.buffers = List[_Buffer[UInt8]](capacity=len(blocks))
+        self.bytes = 0
+        var at = Dict[Int, Int]()
+        for b in range(len(blocks)):
+            var address = Int(blocks[b][].unsafe_ptr())
+            at[address] = b
+            self.starts.append(address)
+        sort(self.starts)
+        for b in range(len(self.starts)):
+            ref block = blocks[at.get(self.starts[b], 0)]
+            self.ends.append(self.starts[b] + len(block[]))
+            self.buffers.append(_Buffer[UInt8](block))
+            self.bytes += len(block[])
+
+    @always_inline
+    def find(self, address: Int, hint: Int) -> Int:
+        """The block holding `address`; `hint`, the last one found, is
+        checked first (rows gathered in order share blocks)."""
+        if self.starts[hint] <= address and address < self.ends[hint]:
+            return hint
+        var low = 0
+        var high = len(self.starts) - 1
+        while low < high:
+            var mid = (low + high + 1) >> 1
+            if self.starts[mid] <= address:
+                low = mid
+            else:
+                high = mid - 1
+        return low
+
+
+def _views_over_heaps(
+    heaps: TupleDataHeaps,
+    var views: List[StringView],
+    count: Int,
+    var bits: List[UInt8],
+) -> StringColumn:
+    """The `count` gathered string_t values in `views` as Utf8View
+    descriptors, in place: an inlined string is already one, a longer
+    one's pointer becomes its heap block and offset. `bits`: the validity,
+    empty when every row is valid."""
+    return _views_at(heaps, views^, count, 0, len(views), bits^)
+
+
+def _views_at(
+    heaps: TupleDataHeaps,
+    var views: List[StringView],
+    count: Int,
+    slots: Int,
+    size: Int,
+    var bits: List[UInt8],
+) -> StringColumn:
+    """`_views_over_heaps` for the `count` entries at the positions
+    `slots` lists (0: the first `count`) of `size` views."""
+    var at = Int(views.unsafe_ptr())
+    var slot_at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=slots)
+    var hint = 0
+    for i in range(count):
+        var entry = at + 16 * (
+            Int(slot_at[unsafe_offset=i]) if slots != 0 else i
+        )
+        if _load[DType.uint32](entry) > UInt32(STRING_INLINE_BYTES):
+            var address = Int(_load[DType.uint64](entry + 8))
+            hint = heaps.find(address, hint)
+            _store[DType.uint32](entry + 8, UInt32(hint))
+            _store[DType.uint32](
+                entry + 12, UInt32(address - heaps.starts[hint])
+            )
+    return StringColumn(
+        StringViewStorage(
+            views^, heaps.buffers.copy(), bits^, size, heaps.bytes
+        )
+    )
+
+
 def gather_rows_series(
     layout: TupleDataLayout,
     rows: Int,
@@ -783,11 +885,13 @@ def gather_rows_series(
     column_id: Int,
     var name: String,
     dtype: DataType,
+    heaps: TupleDataHeaps,
 ) raises -> Series:
     """The `count` rows of column `column_id` at the row pointers at `rows`,
-    a new at-rest column typed `dtype` of `count` rows (GatherRHS for an
+    a new at-rest column typed `dtype` of `count` rows (for an
     operator reading columns rather than vectors; no 2,048 limit, the row
-    pointers are the only limit)."""
+    pointers are the only limit). A string column references `heaps`, the
+    collection's heap blocks, without copying its bytes."""
     ref top = layout.nodes[][0]
     var physical = top.physicals[column_id]
     if physical == PHYSICAL_LIST or physical == PHYSICAL_STRUCT:
@@ -809,7 +913,7 @@ def gather_rows_series(
     var bits_at = Int(bits.unsafe_ptr())
     var valid_of = bits_at if top.can_have_null else 0
     if physical == PHYSICAL_VARCHAR:
-        var buffer = List[UInt8](unsafe_uninit_length=16 * max(count, 1))
+        var views = List[StringView](unsafe_uninit_length=max(count, 1))
         _gather_fixed_dispatch(
             physical,
             rows,
@@ -818,35 +922,16 @@ def gather_rows_series(
             top.offsets[column_id],
             column_id,
             top.can_have_null,
-            Int(buffer.unsafe_ptr()),
+            Int(views.unsafe_ptr()),
             valid_of,
             SelectionVector(),
         )
-        var builder = StringBuilder(count)
-        var at = Int(buffer.unsafe_ptr())
-        for i in range(count):
-            if not _bit_valid(bits_at, i):
-                builder.append_null()
-                continue
-            var entry = at + 16 * i
-            var length = Int(
-                Pointer[StringT, MutAnyOrigin](
-                    unsafe_from_address=entry
-                )[].length
-            )
-            builder.append(
-                StringSlice[ImmutAnyOrigin](
-                    unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
-                        unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
-                            unsafe_from_address=string_data(entry)
-                        ),
-                        length=length,
-                    )
-                )
-            )
-        _ = buffer^
-        _ = bits^
-        return _typed(Series(name^, builder^.finish()), dtype)
+        if not _any_invalid(bits_at, count):
+            bits = List[UInt8]()
+        return _typed(
+            Series(name^, _views_over_heaps(heaps, views^, count, bits^)),
+            dtype,
+        )
     if physical == PHYSICAL_BOOL:
         var buffer = List[UInt8](unsafe_uninit_length=max(count, 1))
         _gather_fixed_dispatch(
@@ -893,18 +978,7 @@ def gather_rows_series(
                 SelectionVector(),
             )
             if top.can_have_null:
-                var any_null = False
-                var at = bits.unsafe_ptr()
-                for b in range(count // 8):
-                    if at[unsafe_offset=b] != 255:
-                        any_null = True
-                        break
-                if not any_null:
-                    for i in range(count & ~7, count):
-                        if not _bit_valid(bits_at, i):
-                            any_null = True
-                            break
-                if any_null:
+                if _any_invalid(bits_at, count):
                     return _typed(
                         Series(
                             name^,
@@ -916,6 +990,18 @@ def gather_rows_series(
     raise Error("tuple data: no gather for this column type")
 
 
+def _any_invalid(bits: Int, count: Int) -> Bool:
+    """Whether any of the first `count` bits at `bits` is clear."""
+    var at = _bytes(bits)
+    for b in range(count // 8):
+        if at[unsafe_offset=b] != 255:
+            return True
+    for i in range(count & ~7, count):
+        if not _bit_valid(bits, i):
+            return True
+    return False
+
+
 def gather_rows_slots(
     layout: TupleDataLayout,
     rows: Int,
@@ -925,12 +1011,17 @@ def gather_rows_slots(
     column_id: Int,
     var name: String,
     dtype: DataType,
+    heaps: TupleDataHeaps,
+    mut decoded: List[UInt8],
 ) raises -> Series:
     """Column `column_id` of the `count` rows at the pointers at `rows` as
-    a column of `size` values, the row at pointer i at slot `slots[i]`
-    (FullScanHashTable's Gather through `sel_build`). The other slots'
-    values are not written; a reader reads only filled
-    slots."""
+    a column of `size` values, the row at pointer i at entry `slots[i]`
+    (scattered through a selection, so no row is moved twice). The other
+    entries' values are not written (a string's are empty); a reader
+    reads only filled entries. Strings reference `heaps`
+    (`gather_rows_series`), and
+    `decoded` is set to their string_t values as gathered (the vector
+    layout, its other slots unwritten)."""
     ref top = layout.nodes[][0]
     var physical = top.physicals[column_id]
     var target_sel = SelectionVector(slots)
@@ -939,6 +1030,36 @@ def gather_rows_slots(
     var bits_at = Int(bits.unsafe_ptr())
     var valid_of = bits_at if top.can_have_null else 0
     var any_null = False
+    if physical == PHYSICAL_VARCHAR:
+        decoded = List[UInt8](unsafe_uninit_length=16 * max(size, 1))
+        _gather_fixed_dispatch(
+            physical,
+            rows,
+            SelectionVector(),
+            count,
+            top.offsets[column_id],
+            column_id,
+            top.can_have_null,
+            Int(decoded.unsafe_ptr()),
+            valid_of,
+            target_sel,
+        )
+        # The filled slots' string_t become views; the others stay empty.
+        var views = List[StringView](
+            length=max(size, 1), fill=StringView(0, 0, 0, 0)
+        )
+        var source = Int(decoded.unsafe_ptr())
+        var target = Int(views.unsafe_ptr())
+        for i in range(count):
+            var slot = Int(slot_at[unsafe_offset=i])
+            _copy(target + 16 * slot, source + 16 * slot, 16)
+            any_null = any_null or not _bit_valid(bits_at, slot)
+        if not any_null:
+            bits = List[UInt8]()
+        return _typed(
+            Series(name^, _views_at(heaps, views^, count, slots, size, bits^)),
+            dtype,
+        )
     if physical == PHYSICAL_BOOL:
         var buffer = List[UInt8](unsafe_uninit_length=max(size, 1))
         _gather_fixed_dispatch(
@@ -1078,8 +1199,8 @@ def _gather_fixed[
     bits: Int,
     target_sel: SelectionVector,
 ):
-    """TupleDataTemplatedGather. As with scatter, the loop without
-    selections (and, here, without nulls) is the one specialized."""
+    """Gather fixed-width values. As with scatter, the loop without selections
+    (and, here, without nulls) is the one specialized."""
     if not scan_sel.is_set() and not target_sel.is_set():
         if can_have_null:
             _gather_fixed_loop[D, True, True](
@@ -1149,16 +1270,15 @@ def _gather_fixed_loop[
                 (_bytes(row)[unsafe_offset=entry] >> bit) & 1 == 0
             ):
                 set_invalid(bits, target_idx)
-                # A null's row value is NullValue (the type's minimum),
-                # which a reader that checks decimal precision on every
-                # value it widens would reject.
+                # A null's row value is the type's minimum (`_null_value`),
+                # which a reader that checks decimal precision on every value it
+                # widens would reject.
                 out[unsafe_offset=target_idx] = 0
 
 
 struct _GatherNode(Copyable, Movable):
-    """The vector a nested column's level is gathered into: values (or
-    list entries), a validity mask, and for a list the child's size
-    (ListVector::GetListSize)."""
+    """The vector a nested column's level is gathered into: values (or list
+    entries), a validity mask, and for a list the child's size."""
 
     var dtype: DataType
     var physical: Int
@@ -1186,7 +1306,8 @@ struct _GatherNode(Copyable, Movable):
         self.children = List[Int]()
 
     def reserve(mut self, count: Int):
-        """ListVector::Reserve: room for `count` rows, new rows valid."""
+        """Room for `count` rows, new rows valid; capacity at least doubles, so
+        repeated appends cost amortized constant time."""
         if count <= self.capacity:
             return
         var capacity = max(count, 2 * self.capacity)
@@ -1288,8 +1409,7 @@ def _gather_struct(
     target: Int,
     target_sel: SelectionVector,
 ) raises:
-    """TupleDataStructGather: the struct's validity, then its fields from
-    the nested rows."""
+    """The struct's validity, then its fields from the nested rows."""
     ref layout_node = layout.nodes[][node]
     var offset = layout_node.offsets[col]
     var can_have_null = layout_node.can_have_null
@@ -1342,8 +1462,8 @@ def _gather_list(
     target: Int,
     target_sel: SelectionVector,
 ) raises:
-    """TupleDataListGather: list entries from the lengths in the heap, then
-    the child from the heap data after them."""
+    """List entries from the lengths in the heap, then the child from the heap
+    data after them."""
     ref layout_node = layout.nodes[][node]
     var offset = layout_node.offsets[col]
     var can_have_null = layout_node.can_have_null
@@ -1486,9 +1606,8 @@ def _collection_within_gather(
     list_entries: Int,
     list_bits: Int,
 ) raises:
-    """TupleDataCollectionWithinCollectionGather: a list in a list. The
-    child lists' entries come from their lengths in the heap; one
-    combined entry per scanned row lets the grandchild gather the same
+    """A list in a list. The child lists' entries come from their lengths in the
+    heap; one combined entry per scanned row lets the grandchild gather the same
     way."""
     var heap_at = _ints(heaps)
     var target_count = 0

@@ -97,8 +97,8 @@ struct StringColumn(Copyable, Sized):
     # `None` is Arrow large_utf8; native CSV views retain descriptors/blocks.
     var _view_storage: Optional[StringViewStorage]
     # Codes into the source's dictionary, when it had one (`StringCodes`),
-    # behind one pointer: a wider column made every copy slower (ClickBench
-    # q27 111 -> 141 ms with the codes held inline).
+    # behind one pointer: columns are copied often, and every field held inline
+    # widens every copy.
     var _codes: Optional[ArcPointer[StringCodes]]
 
     def __init__(out self, values: List[String]):

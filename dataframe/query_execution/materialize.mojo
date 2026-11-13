@@ -7,6 +7,7 @@ from dataframe.io.csv import (
 )
 from dataframe.frame import (
     DataFrame,
+    concat,
 )
 from dataframe.join_type import (
     JOIN_CROSS,
@@ -55,7 +56,11 @@ from dataframe.series import (
 from dataframe.trace import (
     trace_path,
 )
+from dataframe.planning.model import (
+    CONCAT,
+)
 from std.collections import (
+    Dict,
     Optional,
 )
 
@@ -293,9 +298,9 @@ def plan_collect_shared(
 
 
 struct _StreamInputs(Movable):
-    """The pipelines of a stream's computed inputs, not yet run."""
+    """A stream's computed inputs and the joins they are built for, not
+    yet scheduled."""
 
-    var jobs: List[_SubplanPipeline]
     var metas: List[MetaPipeline]
     var wanted: List[Int]
     var keys: List[List[String]]
@@ -306,7 +311,6 @@ struct _StreamInputs(Movable):
     def __init__(out self):
         self.coalesces = List[Bool]()
         self.probe_estimates = List[Int]()
-        self.jobs = List[_SubplanPipeline]()
         self.metas = List[MetaPipeline]()
         self.wanted = List[Int]()
         self.keys = List[List[String]]()
@@ -314,13 +318,16 @@ struct _StreamInputs(Movable):
 
 
 def plan_schedule_inputs(
-    self: QueryContext, top: Int, batch_size: Int
+    self: QueryContext, terminal: Int, top: Int, batch_size: Int
 ) raises -> _StreamInputs:
     """Schedule computed join inputs as children of the probe pipeline. Each
     build finishes its columns and hash index in its finish event. The probe
     depends on all build completions. Sibling builds finish execution before
     finalization; retained frames and indexes are consumed from the
-    prefetched slots."""
+    prefetched slots. A union the probe reads (below `terminal`, the
+    stream's last node) has its children scheduled the same way: the
+    probe's pipeline is its union pipelines, sharing their operators and
+    sink, so the union's rows never pass through a frame of their own."""
     var ahead = self._prefetched.value()
     var inputs = _StreamInputs()
     var stats = PlanStatistics()
@@ -345,9 +352,24 @@ def plan_schedule_inputs(
             probe = step.left
         else:
             break
+    if (
+        probe >= 0
+        and probe != terminal
+        and self._nodes[probe].kind == CONCAT
+        and probe not in ahead[]
+    ):
+        for child in plan_union_children(self, probe):
+            if child in ahead[] or child in inputs.wanted:
+                continue
+            inputs.wanted.append(child)
+            inputs.keys.append(List[String]())
+            inputs.hows.append(JOIN_CROSS)
+            inputs.coalesces.append(True)
+            inputs.probe_estimates.append(-1)
+            inputs.metas.append(MetaPipeline(META_REGULAR))
     # With no build to overlap, the stream runs its source itself, where
     # an aggregate's finish can take the steps above it (`FinishAbove`).
-    if (
+    elif (
         len(inputs.wanted) > 0
         and probe >= 0
         and probe != top
@@ -360,19 +382,6 @@ def plan_schedule_inputs(
         inputs.coalesces.append(True)
         inputs.probe_estimates.append(-1)
         inputs.metas.append(MetaPipeline(META_REGULAR))
-    for k in range(len(inputs.wanted)):
-        inputs.jobs.append(
-            _SubplanPipeline(
-                self.copy(),
-                inputs.wanted[k],
-                True,
-                batch_size,
-                inputs.keys[k],
-                inputs.hows[k],
-                inputs.coalesces[k],
-                inputs.probe_estimates[k],
-            )
-        )
     return inputs^
 
 
@@ -388,3 +397,47 @@ def plan_take_prefetched(
     if index in ahead[]:
         return ahead[].pop(index)
     return None
+
+
+def plan_union_children(self: QueryContext, index: Int) -> List[Int]:
+    """The inputs of the union at node `index`, in order, a union below it
+    contributing its own: a chain of unions is one union of all their
+    children, each child one pipeline into the same operators."""
+    var children = List[Int]()
+    var pending = List[Int]()
+    pending.append(index)
+    while len(pending) > 0:
+        var at = pending.pop()
+        ref node = self._nodes[at]
+        if node.kind == CONCAT:
+            # Right first: the stack pops the left next.
+            pending.append(node.right)
+            pending.append(node.left)
+        else:
+            children.append(at)
+    return children^
+
+
+def _stack_union(frames: List[DataFrame]) raises -> DataFrame:
+    """The union's child results as one frame, each child's columns in the
+    first's order: their column chunks appended, nothing copied (the
+    union pipelines' sources, numbered in child order, which keeps the
+    union's rows in its children's order)."""
+    var names = frames[0].columns()
+    var parts = List[DataFrame](capacity=len(frames))
+    for k in range(len(frames)):
+        var other = frames[k].columns()
+        if len(other) != len(names):
+            raise Error(
+                "concat: inputs have "
+                + String(len(names))
+                + " and "
+                + String(len(other))
+                + " columns"
+            )
+        for name in names:
+            if name not in other:
+                raise Error("concat: right input has no column " + name)
+        parts.append(frames[k].select(names) if k > 0 else frames[k].copy())
+    # `concat` checks the types.
+    return concat(parts)
