@@ -27,7 +27,6 @@ from dataframe.join_type import (
 )
 from dataframe.parallel import (
     Job,
-    run_jobs,
 )
 from dataframe.pipeline import (
     STEP_DROP,
@@ -82,7 +81,10 @@ def _stream_split_bits(workers: Int) -> Int:
 struct _StateAccumulator(Movable):
     """A streamed reduction's accumulated states: one, or 2^bits hash parts
     once a batch shows many groups, each with the batch states waiting to
-    merge into it (`_merge_parts`)."""
+    merge into it: a part's merge is due once its pending groups reach its
+    accumulated count (or 64 batches). One state merges in place; parts
+    merge as tasks (`begin_merge`, `merge_task`, `end_merge`), since parts
+    never share a key."""
 
     var states: List[_StreamReduction]
     var pending: List[List[_StreamReduction]]
@@ -92,6 +94,10 @@ struct _StateAccumulator(Movable):
     var rows_seen: Int
     var workers: Int
     var split_groups: Int
+    # A merge of parts under way: its tasks, each merging some parts in
+    # turn, and the pending states of the parts not due, set aside.
+    var merging: List[_StreamMergeJob]
+    var carried: List[List[_StreamReduction]]
 
     def __init__(out self, workers: Int, split_groups: Int):
         self.states = List[_StreamReduction]()
@@ -101,6 +107,8 @@ struct _StateAccumulator(Movable):
         self.rows_seen = 0
         self.workers = workers
         self.split_groups = split_groups
+        self.merging = List[_StreamMergeJob]()
+        self.carried = List[List[_StreamReduction]]()
 
     def absorb(mut self, var pieces: List[_StreamReduction], rows: Int) raises:
         """Take one batch's state (or its parts), reduced from `rows` rows
@@ -128,69 +136,66 @@ struct _StateAccumulator(Movable):
             self.pending_groups[p] += piece.group_count()
             self.pending[p].append(piece^)
 
-    def merge(mut self, force: Bool) raises:
-        if len(self.states):
-            _merge_parts(
-                self.states,
-                self.pending,
-                self.pending_groups,
-                self.workers,
-                force,
+    def begin_merge(mut self, force: Bool) raises -> Int:
+        """Start merging the parts that are due, or every part when
+        `force`: one state merges here and makes no task; parts are spread
+        over at most `workers` tasks. The tasks to run, then `end_merge`."""
+        var parts = len(self.states)
+        if parts == 0:
+            return 0
+        var due = List[Bool](capacity=parts)
+        var any_due = False
+        for p in range(parts):
+            var ready = len(self.pending[p]) > 0 and (
+                force
+                or self.states[p].indexing == 1
+                or self.pending_groups[p] >= self.states[p].group_count()
+                or len(self.pending[p]) >= 64
             )
+            due.append(ready)
+            any_due = any_due or ready
+        if not any_due:
+            return 0
+        if parts == 1:
+            self.states[0].merge_all(self.pending[0])
+            self.pending[0] = List[_StreamReduction]()
+            self.pending_groups[0] = 0
+            return 0
+        var task_count = max(1, min(self.workers, parts))
+        self.merging = List[_StreamMergeJob](capacity=task_count)
+        for _ in range(task_count):
+            self.merging.append(_StreamMergeJob())
+        # Part p goes to task p % task_count; parts not due keep their
+        # pending batches here and ride along with nothing to merge.
+        self.carried = List[List[_StreamReduction]](capacity=parts)
+        for p in range(parts):
+            var state = self.states.pop(0)
+            var waiting = self.pending.pop(0)
+            ref job = self.merging[p % task_count]
+            job.states.append(state^)
+            if due[p]:
+                job.pending.append(waiting^)
+                self.carried.append(List[_StreamReduction]())
+                self.pending_groups[p] = 0
+            else:
+                job.pending.append(List[_StreamReduction]())
+                self.carried.append(waiting^)
+        return task_count
 
+    def merge_task(mut self, task: Int) raises:
+        """Merge task `task`'s parts; tasks run at the same time."""
+        self.merging[task].run()
 
-def _merge_parts(
-    mut states: List[_StreamReduction],
-    mut pending: List[List[_StreamReduction]],
-    mut pending_groups: List[Int],
-    workers: Int,
-    force: Bool,
-) raises:
-    """Merge each part whose pending groups reached its accumulated count
-    (or 64 batches), or every part when forced. One state merges in place;
-    parts are spread over `workers` jobs, each merging its parts in turn."""
-    var parts = len(states)
-    var due = List[Bool](capacity=parts)
-    var any_due = False
-    for p in range(parts):
-        var ready = len(pending[p]) > 0 and (
-            force
-            or states[p].indexing == 1
-            or pending_groups[p] >= states[p].group_count()
-            or len(pending[p]) >= 64
-        )
-        due.append(ready)
-        any_due = any_due or ready
-    if not any_due:
-        return
-    if parts == 1:
-        states[0].merge_all(pending[0])
-        pending[0] = List[_StreamReduction]()
-        pending_groups[0] = 0
-        return
-    var job_count = max(1, min(workers, parts))
-    var jobs = List[_StreamMergeJob](capacity=job_count)
-    for _ in range(job_count):
-        jobs.append(_StreamMergeJob())
-    # Part p goes to job p % job_count; parts not due keep their pending
-    # batches here and ride along with nothing to merge.
-    var carried = List[List[_StreamReduction]](capacity=parts)
-    for p in range(parts):
-        var state = states.pop(0)
-        var waiting = pending.pop(0)
-        ref job = jobs[p % job_count]
-        job.states.append(state^)
-        if due[p]:
-            job.pending.append(waiting^)
-            carried.append(List[_StreamReduction]())
-            pending_groups[p] = 0
-        else:
-            job.pending.append(List[_StreamReduction]())
-            carried.append(waiting^)
-    run_jobs(jobs)
-    for p in range(parts):
-        states.append(jobs[p % job_count].states.pop(0))
-        pending.append(carried.pop(0))
+    def end_merge(mut self):
+        """Take the merged parts back, in part order."""
+        var task_count = len(self.merging)
+        if task_count == 0:
+            return
+        var parts = len(self.carried)
+        for p in range(parts):
+            self.states.append(self.merging[p % task_count].states.pop(0))
+            self.pending.append(self.carried.pop(0))
+        self.merging = List[_StreamMergeJob]()
 
 
 struct _StreamJob(Job):
