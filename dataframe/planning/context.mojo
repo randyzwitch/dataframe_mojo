@@ -147,6 +147,9 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # Join build keys pushed through an aggregate's group keys into its
     # input (`plan_push_filters_through_aggregate`); None otherwise.
     var _pushed_filters: Optional[ArcPointer[PushedJoinFilters]]
+    # A node whose stream was scheduled and declined to run it
+    # (`_StreamProbe.finalize`): `_execute` runs its operator directly.
+    var _declined: Int
 
     var _executor: def(
         QueryContext, Int, Bool, Bool, Int
@@ -183,6 +186,7 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._optimized = False
         self._finish_above = None
         self._pushed_filters = None
+        self._declined = -1
         self._executor = executor
         self._collector = collector
         self._supports = supports

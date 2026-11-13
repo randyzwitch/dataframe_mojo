@@ -500,6 +500,8 @@ struct _TableData(Movable):
     var null_row: List[UInt8]
     # The rows' heap blocks, which gathered string columns reference.
     var heaps: TupleDataHeaps
+    # The finalize tasks not yet run, one per build sink thread.
+    var pending: List[_FinalizeJob]
 
     def __init__(
         out self, var keys: List[Series], layout: TupleDataLayout
@@ -517,6 +519,7 @@ struct _TableData(Movable):
         self.aux_next = List[UInt64]()
         self.null_row = List[UInt8](length=layout.row_width(), fill=0)
         self.heaps = TupleDataHeaps()
+        self.pending = List[_FinalizeJob]()
 
 
 struct _SinkJob(Job):
@@ -810,7 +813,7 @@ def _perfect_slots(
     mut bits: List[UInt8],
     mut slot_rows: List[UInt64],
     mut filled_rows: List[UInt64],
-    mut filled_slots: List[UInt32],
+    mut filled_builds: List[UInt32],
 ) raises -> Optional[Tuple[UInt64, Int]]:
     """Build a direct-address table for bounded unique integer keys. Reserve
     max - min + 1 slots, clear only the validity bitmap, and read a slot
@@ -855,7 +858,7 @@ def _perfect_slots(
                 slot_rows = List[UInt64](unsafe_uninit_length=size)
                 var pointers = slot_rows.unsafe_ptr()
                 filled_rows = List[UInt64](capacity=inserted)
-                filled_slots = List[UInt32](capacity=inserted)
+                filled_builds = List[UInt32](capacity=inserted)
                 var state = TupleDataChunkState()
                 for s in range(len(rows.segments)):
                     ref segment = rows.segments[s]
@@ -879,7 +882,7 @@ def _perfect_slots(
                             )
                             pointers[unsafe_offset=slot] = UInt64(row)
                             filled_rows.append(UInt64(row))
-                            filled_slots.append(UInt32(slot))
+                            filled_builds.append(table[unsafe_offset=slot])
                 return (base, Int(span))
     return None
 
@@ -989,6 +992,8 @@ struct JoinHashTable(Copyable, Movable):
     # The rows the collection holds: `inserted`, plus a right or full
     # join's rows with a null key.
     var rows_stored: Int
+    # The probe side's estimated rows (dictionary emission at finish).
+    var probe_estimate: Int
 
     def __init__(
         out self,
@@ -1001,6 +1006,7 @@ struct JoinHashTable(Copyable, Movable):
         keys_only: Bool = False,
         probe_estimate: Int = -1,
         propagate: Bool = True,
+        defer_finalize: Bool = False,
     ) raises:
         """Build and finalize the table over `keys` (one column per
         equality condition, all of one length). `payload`: the build
@@ -1013,7 +1019,10 @@ struct JoinHashTable(Copyable, Movable):
         join is a semi, anti or mark join (`keys_only_join`), which keeps
         one row per key. `probe_estimate`: the probe side's estimated
         rows (dictionary emission; -1 when unknown). `propagate`: the join
-        reads the rows' found flags (`PropagatesBuildSide`)."""
+        reads the rows' found flags (`PropagatesBuildSide`).
+        `defer_finalize`: leave the finalize tasks to the caller's finish
+        event (`finalize_tasks`, `finalize_task`, `finish_finalize`)
+        rather than running them here."""
         var unchunked = List[Series](capacity=len(keys))
         for key in keys:
             if key.dtype().is_nested():
@@ -1055,6 +1064,7 @@ struct JoinHashTable(Copyable, Movable):
         self.output_types = output_types.copy()
         self.use_dictionary = False
         self.rows_stored = 0
+        self.probe_estimate = probe_estimate
         self.count = len(unchunked[0]) if len(unchunked) > 0 else 0
         if self.count > Int(Int32.MAX):
             raise Error("A join build exceeds 2^31 - 1 rows")
@@ -1134,7 +1144,7 @@ struct JoinHashTable(Copyable, Movable):
             # slot array holds fixed-width values or string_t only), and a
             # repeated key or a wide range falls back to the hash table.
             var filled_rows = List[UInt64]()
-            var filled_slots = List[UInt32]()
+            var filled_builds = List[UInt32]()
             var slots = _perfect_slots(
                 unchunked[0],
                 self.inserted,
@@ -1145,20 +1155,21 @@ struct JoinHashTable(Copyable, Movable):
                 self.data[].slot_bits,
                 self.data[].slot_rows,
                 filled_rows,
-                filled_slots,
+                filled_builds,
             )
             if slots:
                 trace_path("join.perfect_hash")
                 self.perfect = True
                 self.perfect_base = slots.value()[0]
                 self.perfect_span = slots.value()[1]
-                # FullScanHashTable: only the rows in the table gathered,
-                # each to its key's slot; every output column a dictionary
-                # over the slots.
+                # Every output column a dictionary over the build rows,
+                # each row in the table gathered to its build row number,
+                # which its key's slot holds. Sized by the build rows, not
+                # the key range: a sparse range (few rows over a wide span)
+                # would otherwise allocate and touch memory for every
+                # empty slot, for each column.
                 if len(self.output_columns) > 0:
-                    self._gather_slots(
-                        filled_rows, filled_slots, Int(self.perfect_span) + 1
-                    )
+                    self._gather_slots(filled_rows, filled_builds, self.count)
                 return
             # A repeated key: the hash table instead.
             self.data[].slots = List[UInt32]()
@@ -1211,15 +1222,38 @@ struct JoinHashTable(Copyable, Movable):
             tasks[p * sink_threads // self.parts].regions.append(
                 inserts[p].copy()
             )
-        if len(tasks) == 1:
-            tasks[0].run()
+        self.data[].pending = tasks^
+        if defer_finalize:
+            return
+        if self.finalize_tasks() == 1:
+            self.finalize_task(0)
         else:
-            run_jobs(tasks)
-        for t in range(len(tasks)):
+            run_jobs(self.data[].pending)
+        self.finish_finalize()
+
+    def finalize_tasks(self) -> Int:
+        """The finalize tasks left to run: one per build sink thread, each
+        filling a run of partitions' regions of the pointer table, so the
+        tasks never write the same entries and need no atomics."""
+        return len(self.data[].pending)
+
+    def finalize_task(self, task: Int) raises:
+        """Run finalize task `task`; tasks run at the same time, each on
+        its own regions."""
+        self.data[].pending[task].run()
+
+    def finish_finalize(mut self) raises:
+        """After the last finalize task, once the whole pointer table is
+        filled: whether any chain is longer than one, then dictionary
+        emission's arrays when it applies."""
+        if len(self.data[].pending) == 0:
+            return
+        for t in range(len(self.data[].pending)):
             self.chains_longer_than_one = (
-                self.chains_longer_than_one or tasks[t].chained
+                self.chains_longer_than_one or self.data[].pending[t].chained
             )
-        if self._can_use_dictionary_emission(probe_estimate):
+        self.data[].pending = List[_FinalizeJob]()
+        if self._can_use_dictionary_emission(self.probe_estimate):
             self._build_dictionary_arrays()
 
     def _can_use_dictionary_emission(self, probe_cardinality: Int) -> Bool:
@@ -1314,10 +1348,9 @@ struct JoinHashTable(Copyable, Movable):
         slots: List[UInt32],
         size: Int,
     ) raises:
-        """Every output column as a column of `size` slots, the row at
-        `rows[i]` at slot `slots[i]`, the other slots unwritten
-        (FullScanHashTable; the probe reads only slots whose bit is
-        set)."""
+        """Every output column as a column of `size` entries, the row at
+        `rows[i]` at entry `slots[i]`, the other entries unwritten (no
+        probe emits them)."""
         var out = List[Series](capacity=len(self.output_columns))
         var decoded = List[List[UInt8]](capacity=len(self.output_columns))
         for c in range(len(self.output_columns)):
@@ -1756,7 +1789,6 @@ struct ScanStructure(Movable):
         var aux = self.table.data[].aux_next.unsafe_ptr()
         var slot_rows = self.table.data[].slot_rows.unsafe_ptr()
         var slots = self.table.data[].slots.unsafe_ptr()
-        var dictionary = self.table.use_dictionary
         var index_offset = self.table.layout.index_offset
         var next_offset = self.table.layout.pointer_offset
         var found_offset = self.table.layout.found_offset
@@ -1816,10 +1848,9 @@ struct ScanStructure(Movable):
                 if h != 0 or outer_rows:
                     out_probe[unsafe_offset=out] = Int32(i)
                     var slot = Int(h) - 1
-                    out_build[unsafe_offset=out] = -1 if h == 0 else (
-                        Int32(slot) if dictionary else Int32(
-                            slots[unsafe_offset=slot]
-                        )
+                    # The slot's build row: also its dictionary entry.
+                    out_build[unsafe_offset=out] = -1 if h == 0 else Int32(
+                        slots[unsafe_offset=slot]
                     )
                     if h != 0:
                         out_row[unsafe_offset=out] = slot_rows[

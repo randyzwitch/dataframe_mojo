@@ -139,6 +139,8 @@ from dataframe.planning.graph import (
 )
 from dataframe.planning.model import (
     AGG,
+    CONCAT,
+    HANDOFF_OFF,
     DROP,
     EXPLODE,
     FILTER,
@@ -185,6 +187,8 @@ from dataframe.planning.cost.sampling import (
     _stream_split_groups,
 )
 from dataframe.query_execution.materialize import (
+    _StreamInputs,
+    plan_union,
     plan_schedule_inputs,
 )
 from dataframe.query_execution.operators import (
@@ -230,6 +234,82 @@ from std.time import (
 def plan_stream_execute(
     self: QueryContext, index: Int, batch_size: Int, sink: Int = 0
 ) raises -> Optional[DataFrame]:
+    var outcome = _stream_head(self, index, batch_size, sink)
+    if len(outcome.plan) > 0:
+        return _stream_after_materialization(
+            outcome.plan[0], index, batch_size, sink
+        )
+    if len(outcome.head) == 0:
+        return None
+    var head = outcome.head.pop()
+    if not self._prefetched:
+        return _stream_probe(self, index, batch_size, sink, head^)
+    # Schedule computed inputs as child pipelines. The probe depends on all
+    # child completions, allowing independent builds to overlap. An input
+    # that is a stream itself adds its own pipelines (its builds, probe and
+    # outer scans) to this schedule rather than running a schedule of its
+    # own: one queue then feeds every thread, where a nested schedule would
+    # run on the one thread that waits for it. Execution reports
+    # serialize these tasks to attribute their measurements.
+    var inputs = plan_schedule_inputs(self, index, head.cursor, batch_size)
+    if len(inputs.wanted) == 0:
+        return _stream_probe(self, index, batch_size, sink, head^)
+    trace_path("stream.scheduled_inputs")
+    var schedule = _StreamSchedule()
+    var top = _add_stream(
+        schedule,
+        Int(Pointer(to=self)),
+        index,
+        batch_size,
+        sink,
+        head^,
+        inputs^,
+        _BuildFor(),
+        META_REGULAR,
+        False,
+    )
+    schedule.bind()
+    try:
+        run_pipelines(
+            schedule.pipelines, schedule.metas, parallel=not self._report
+        )
+    except e:
+        # A failed schedule never reaches the probes' finish.
+        schedule.release()
+        raise e^
+    var result = Optional[DataFrame]()
+    swap(result, schedule.pipelines[top].probe[0].result)
+    return result^
+
+
+struct _HeadOutcome(Movable):
+    """What `_stream_head` decided: no stream (both empty), a plan with
+    some inputs materialized for the stream to restart from, or the head
+    its probe pipeline starts from."""
+
+    var plan: List[QueryContext]
+    var head: List[_StreamHead]
+
+    def __init__(out self):
+        self.plan = List[QueryContext]()
+        self.head = List[_StreamHead]()
+
+    def __init__(out self, var plan: QueryContext):
+        self.plan = List[QueryContext]()
+        self.plan.append(plan^)
+        self.head = List[_StreamHead]()
+
+    def __init__(out self, var head: _StreamHead):
+        self.plan = List[QueryContext]()
+        self.head = List[_StreamHead]()
+        self.head.append(head^)
+
+
+def _stream_head(
+    self: QueryContext, index: Int, batch_size: Int, sink: Int
+) raises -> _HeadOutcome:
+    """The stream's terminal (aggregate, top-N, slice) and its build sides
+    decided before anything is scheduled."""
     var cursor = index
     var expressions = List[Expr]()
     var keys = List[String]()
@@ -245,7 +325,7 @@ def plan_stream_execute(
             if not is_grouping(e):
                 expressions.append(e.copy())
         if not _stream_reductions(expressions, True):
-            return None
+            return _HeadOutcome()
         keys = terminal.names.copy()
         cursor = terminal.left
     elif terminal.kind == AGG or terminal.kind == SELECT:
@@ -259,11 +339,11 @@ def plan_stream_execute(
                 keys = terminal.names.copy()
                 ordered = terminal.maintain_order
                 if len(keys) == 0:
-                    return None
+                    return _HeadOutcome()
             cursor = terminal.left
     if terminal.kind == SLICE:
         if terminal.slice_offset() < 0:
-            return None
+            return _HeadOutcome()
         skip = terminal.slice_offset()
         limit = terminal.slice_length()
         cursor = terminal.left
@@ -296,73 +376,147 @@ def plan_stream_execute(
     # builds above it run first, and the plan with their results runs.
     var through = plan_push_filters_through_aggregate(self, cursor, batch_size)
     if through:
-        return _stream_after_materialization(
-            through.value(), index, batch_size, sink
-        )
+        return _HeadOutcome(through.take())
     # Every join's build side is chosen before anything runs or is
     # scheduled, from estimates:
     # the stream then builds each join's right input as it stands.
     var sided = plan_build_probe_sides(self, cursor, batch_size)
     if sided:
-        return _stream_after_materialization(
-            sided.take(), index, batch_size, sink
+        return _HeadOutcome(sided.take())
+    return _HeadOutcome(
+        _StreamHead(
+            cursor,
+            expressions^,
+            keys^,
+            ordered,
+            skip,
+            limit,
+            grouping,
+            top,
+            top_node,
+            top_maintain_order,
+            top_names^,
+            top_descending^,
+            top_nulls_last^,
         )
-    var head = _StreamHead(
-        cursor,
-        expressions^,
-        keys^,
-        ordered,
-        skip,
-        limit,
-        grouping,
-        top,
-        top_node,
-        top_maintain_order,
-        top_names^,
-        top_descending^,
-        top_nulls_last^,
     )
-    if not self._prefetched:
-        return _stream_probe(self, index, batch_size, sink, head^)
-    # Schedule computed inputs as child pipelines. The probe depends on all
-    # child completions, allowing independent builds to overlap. Execution
-    # reports serialize these tasks to attribute their measurements.
-    var inputs = plan_schedule_inputs(self, cursor, batch_size)
-    if len(inputs.wanted) == 0:
-        return _stream_probe(self, index, batch_size, sink, head^)
-    trace_path("stream.scheduled_inputs")
+
+
+@fieldwise_init
+struct _BuildFor(Copyable, Movable):
+    """The join a scheduled input is the build side of, for its finish
+    (`finish_build`): no keys for an input that is not a hash join's."""
+
+    var keys: List[String]
+    var how: Int
+    var coalesce: Bool
+    var probe_estimate: Int
+
+    def __init__(out self):
+        self.keys = List[String]()
+        self.how = JOIN_CROSS
+        self.coalesce = True
+        self.probe_estimate = -1
+
+
+struct _StreamSchedule(Movable):
+    """The pipelines of one schedule: every stream's inputs, probe and outer
+    scans, those of streams that are inputs of others among them, and the
+    plans those streams run on (each its own copy, with its own memo, at
+    a fixed address while the schedule runs)."""
+
+    var pipelines: List[_StreamPipeline]
+    var metas: List[MetaPipeline]
+    var plans: List[ArcPointer[QueryContext]]
+
+    def __init__(out self):
+        self.pipelines = List[_StreamPipeline]()
+        self.metas = List[MetaPipeline]()
+        self.plans = List[ArcPointer[QueryContext]]()
+
+    def bind(mut self):
+        """Point every probe and outer scan at the pipeline list, now that
+        it no longer grows."""
+        var address = Int(Pointer(to=self.pipelines))
+        for p in range(len(self.pipelines)):
+            if len(self.pipelines[p].probe) > 0:
+                self.pipelines[p].probe[0].siblings = address
+            if len(self.pipelines[p].outer) > 0:
+                self.pipelines[p].outer[0].siblings = address
+
+    def release(mut self):
+        for p in range(len(self.pipelines)):
+            if len(self.pipelines[p].probe) == 0:
+                continue
+            ref started = self.pipelines[p].probe[0].started
+            if len(started) > 0 and len(started[0].piped) > 0:
+                started[0].piped[0].run.release()
+
+
+def _add_stream(
+    mut schedule: _StreamSchedule,
+    plan: Int,
+    index: Int,
+    batch_size: Int,
+    sink: Int,
+    var head: _StreamHead,
+    var inputs: _StreamInputs,
+    var build: _BuildFor,
+    type: Int,
+    is_input: Bool,
+) raises -> Int:
+    """Add a stream's pipelines to `schedule` and return its probe's: each
+    input a pipeline (a stream's own pipelines when the input is one),
+    then the probe depending on them, then an outer scan per right or full
+    join in the probe's finish group. `build` is the join this stream's
+    result is the build side of, `type` its kind there
+    (`META_REGULAR` or `META_JOIN_BUILD`)."""
+    ref self = Pointer[QueryContext, MutAnyOrigin](unsafe_from_address=plan)[]
     var count = len(inputs.wanted)
-    var pipelines = List[_StreamPipeline](capacity=count + 1)
-    var metas = List[MetaPipeline](capacity=count + 1)
-    var dependencies = List[Int](capacity=count)
+    var at = List[Int](capacity=count)
     for k in range(count):
-        pipelines.append(_StreamPipeline(inputs.jobs.pop(0)))
-        var meta = inputs.metas[k].copy()
-        meta.parent = count
-        metas.append(meta^)
-        dependencies.append(k)
-    metas.append(MetaPipeline(META_REGULAR, -1, dependencies))
-    pipelines.append(
+        var builds = _BuildFor(
+            inputs.keys[k].copy(),
+            inputs.hows[k],
+            inputs.coalesces[k],
+            inputs.probe_estimates[k],
+        )
+        at.append(
+            _add_input(
+                schedule,
+                self,
+                inputs.wanted[k],
+                batch_size,
+                builds^,
+                inputs.metas[k].type,
+            )
+        )
+    var probe = len(schedule.pipelines)
+    for k in range(count):
+        schedule.metas[at[k]].parent = probe
+    schedule.metas.append(MetaPipeline(type, -1, at))
+    schedule.pipelines.append(
         _StreamPipeline(
             _StreamProbe(
-                Int(Pointer(to=self)),
+                plan,
                 index,
                 batch_size,
                 sink,
                 head^,
                 inputs.wanted.copy(),
+                at.copy(),
                 inputs.keys.copy(),
                 inputs.hows.copy(),
+                build^,
+                is_input,
             )
         )
     )
-    pipelines[count].probe[0].siblings = Int(Pointer(to=pipelines))
     # Schedule unmatched build-row scans after the probe in operator order,
     # sharing its downstream sink so outer-join rows receive the same later
     # processing.
-    var probe_pipeline = count
-    var below = cursor
-    var previous = count
+    var below = schedule.pipelines[probe].probe[0].head[0].cursor
+    var previous = probe
     while below >= 0:
         ref step = self._nodes[below]
         if _stream_rows(step):
@@ -371,29 +525,89 @@ def plan_stream_execute(
         if not _stream_join(step):
             break
         if join_emits_build_rows(step.how):
-            pipelines.append(
-                _StreamPipeline(
-                    _OuterScan(Int(Pointer(to=pipelines)), probe_pipeline)
-                )
-            )
-            metas.append(
+            schedule.pipelines.append(_StreamPipeline(_OuterScan(0, probe)))
+            schedule.metas.append(
                 MetaPipeline(
                     META_REGULAR, -1, List[Int](), finish_group=previous
                 )
             )
-            previous = len(pipelines) - 1
+            previous = len(schedule.pipelines) - 1
         below = step.left
-    try:
-        run_pipelines(pipelines, metas, parallel=not self._report)
-    except e:
-        # A failed schedule never reaches the probe's finish.
-        ref started = pipelines[count].probe[0].started
-        if len(started) > 0 and len(started[0].piped) > 0:
-            started[0].piped[0].run.release()
-        raise e^
-    var result = Optional[DataFrame]()
-    swap(result, pipelines[count].probe[0].result)
-    return result^
+    return probe
+
+
+def _add_input(
+    mut schedule: _StreamSchedule,
+    self: QueryContext,
+    index: Int,
+    batch_size: Int,
+    var build: _BuildFor,
+    type: Int,
+) raises -> Int:
+    """Add input `index` of a stream on `self` to `schedule` and return the
+    pipeline that makes its result: the input's own stream when it is one
+    (on a copy of the plan with a memo of its own), else a subplan
+    pipeline that executes it."""
+    if self._handoff == HANDOFF_OFF:
+        var sub = self.copy()
+        sub._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
+        sub._prefetched_indexes = Optional(ArcPointer(Dict[Int, _ReadyIndex]()))
+        var outcome = _stream_head(sub, index, batch_size, 0)
+        if len(outcome.head) > 0:
+            var head = outcome.head.pop()
+            var owned = ArcPointer(sub^)
+            schedule.plans.append(owned)
+            var address = Int(Pointer(to=owned[]))
+            ref copy = owned[]
+            var inputs = plan_schedule_inputs(
+                copy, index, head.cursor, batch_size
+            )
+            return _add_stream(
+                schedule,
+                address,
+                index,
+                batch_size,
+                0,
+                head^,
+                inputs^,
+                build^,
+                type,
+                True,
+            )
+        if len(outcome.plan) > 0:
+            # Some inputs materialized for it: the input runs from there.
+            schedule.metas.append(MetaPipeline(type))
+            schedule.pipelines.append(
+                _StreamPipeline(
+                    _SubplanPipeline(
+                        outcome.plan.pop(),
+                        index,
+                        True,
+                        batch_size,
+                        build.keys,
+                        build.how,
+                        build.coalesce,
+                        build.probe_estimate,
+                    )
+                )
+            )
+            return len(schedule.pipelines) - 1
+    schedule.metas.append(MetaPipeline(type))
+    schedule.pipelines.append(
+        _StreamPipeline(
+            _SubplanPipeline(
+                self.copy(),
+                index,
+                True,
+                batch_size,
+                build.keys,
+                build.how,
+                build.coalesce,
+                build.probe_estimate,
+            )
+        )
+    )
+    return len(schedule.pipelines) - 1
 
 
 @fieldwise_init
@@ -426,10 +640,18 @@ struct _StreamProbe(Movable):
     var sink: Int
     var head: List[_StreamHead]
     var wanted: List[Int]
+    # The pipeline making each input's result.
+    var at: List[Int]
     var keys: List[List[String]]
     var hows: List[Int]
-    # The caller's List[_StreamPipeline]; its first `len(wanted)` hold
-    # the inputs, this probe after them.
+    # The join this stream's result is the build side of, when it is an
+    # input of another stream, and the hash table its finish makes.
+    var build: _BuildFor
+    var built: Optional[JoinHashTable]
+    # Whether this stream is another's input (`_add_input`); the stream
+    # at the schedule's top hands a declined run back to its caller.
+    var is_input: Bool
+    # The schedule's List[_StreamPipeline].
     var siblings: Int
     var started: List[_ProbeStart]
     var result: Optional[DataFrame]
@@ -442,8 +664,11 @@ struct _StreamProbe(Movable):
         sink: Int,
         var head: _StreamHead,
         var wanted: List[Int],
+        var at: List[Int],
         var keys: List[List[String]],
         var hows: List[Int],
+        var build: _BuildFor,
+        is_input: Bool,
     ):
         self.plan = plan
         self.index = index
@@ -452,8 +677,12 @@ struct _StreamProbe(Movable):
         self.head = List[_StreamHead]()
         self.head.append(head^)
         self.wanted = wanted^
+        self.at = at^
         self.keys = keys^
         self.hows = hows^
+        self.build = build^
+        self.built = None
+        self.is_input = is_input
         self.siblings = 0
         self.started = List[_ProbeStart]()
         self.result = None
@@ -471,14 +700,19 @@ struct _StreamProbe(Movable):
         )[]
         var ahead = plan._prefetched.value()
         for k in range(len(self.wanted)):
-            ref job = pipelines[k].input[0]
-            ahead[][self.wanted[k]] = job.result.copy()
-            if job.built and plan._prefetched_indexes:
+            ref made = pipelines[self.at[k]]
+            var built = Optional[JoinHashTable]()
+            if len(made.input) > 0:
+                ahead[][self.wanted[k]] = made.input[0].result.copy()
+                built = made.input[0].built.copy()
+            else:
+                ref stream = made.probe[0]
+                ahead[][self.wanted[k]] = stream.result.value().copy()
+                built = stream.built.copy()
+            if built and plan._prefetched_indexes:
                 plan._prefetched_indexes.value()[][
                     self.wanted[k]
-                ] = _ReadyIndex(
-                    self.keys[k], self.hows[k], job.built.value().copy()
-                )
+                ] = _ReadyIndex(self.keys[k], self.hows[k], built.take())
         self.started.append(
             _probe_start(
                 plan, self.index, self.batch_size, self.sink, self.head.pop(0)
@@ -499,16 +733,31 @@ struct _StreamProbe(Movable):
             self.started[0].piped[0].run.execute(task)
 
     def finalize(mut self) raises:
+        ref plan = Pointer[QueryContext, MutAnyOrigin](
+            unsafe_from_address=self.plan
+        )[]
         ref started = self.started[0]
         if len(started.piped) > 0:
-            self.result = _probe_finish(
-                Pointer[QueryContext, MutAnyOrigin](
-                    unsafe_from_address=self.plan
-                )[],
-                started.piped[0],
-            )
+            self.result = _probe_finish(plan, started.piped[0])
         else:
             swap(self.result, started.result)
+        if not self.result and self.is_input:
+            # The stream declined: the input's operator runs on its own,
+            # as `plan_execute` runs a node no stream takes.
+            plan._declined = self.index
+            self.result = plan._execute(
+                self.index, False, True, self.batch_size
+            )
+        if len(self.build.keys) > 0 and self.result:
+            var frame = self.result.take()
+            self.built = finish_build(
+                frame,
+                self.build.keys,
+                self.build.how,
+                self.build.coalesce,
+                self.build.probe_estimate,
+            )
+            self.result = frame^
 
 
 struct _OuterScan(Movable):
@@ -608,6 +857,23 @@ struct _StreamPipeline(SchedulablePipeline):
         elif len(self.input) > 0:
             self.input[0].finalize()
 
+    def max_finalize_tasks(self) -> Int:
+        if len(self.input) > 0:
+            return self.input[0].max_finalize_tasks()
+        return 0
+
+    def finalize_tasks(mut self) raises -> Int:
+        if len(self.input) > 0:
+            return self.input[0].finalize_tasks()
+        return 0
+
+    def finalize_task(mut self, task: Int) raises:
+        self.input[0].finalize_task(task)
+
+    def finish_finalize(mut self) raises:
+        if len(self.input) > 0:
+            self.input[0].finish_finalize()
+
 
 def _probe_start(
     self: QueryContext,
@@ -655,6 +921,18 @@ def _probe_start(
             first = step.left
         else:
             break
+    if first >= 0 and first != index and self._nodes[first].kind == CONCAT:
+        # The union's children, run as pipelines of this stream's schedule
+        # when it has one (`plan_schedule_inputs`): their results are the
+        # union pipelines' sources, one chunk each, into this stream's
+        # operators and sink.
+        var plan = self.copy()
+        plan._frames.append(plan_union(self, first, True, batch_size))
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
+        return _ProbeStart(
+            _stream_after_materialization(plan, index, batch_size, sink)
+        )
     if first >= 0 and first != index and not _is_scan(self._nodes[first].kind):
         # Run row-local steps during each worker's aggregate scan. Discard
         # rejected groups before assembling a frame, avoiding an additional
@@ -942,7 +1220,7 @@ def _probe_start(
     var acc = _StateAccumulator(workers, split_groups)
     # A grouping the pipeline does not run (its steps or order are the
     # batches'): the batches are collected for the eager group-by, which
-    # is the aggregate table over them (`PhysicalHashAggregate::Sink`),
+    # is the aggregate table over them,
     # and reduced into one state each time they reach the budget.
     var collecting = len(expressions) > 0 and len(keys) > 0
     var collected = List[DataFrame]()

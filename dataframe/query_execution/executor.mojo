@@ -52,7 +52,10 @@ from dataframe.planning.inputs import (
     _SubplanPipeline,
 )
 from dataframe.query_execution.materialize import (
+    _stack_union,
     plan_take_prefetched,
+    plan_union,
+    plan_union_children,
 )
 from dataframe.planning.model import (
     AGG,
@@ -134,7 +137,7 @@ def plan_execute(
         var handed = plan_handoff_region(self, index, streaming, batch_size)
         if handed:
             return handed.take()
-    if streaming and not empty:
+    if streaming and not empty and index != self._declined:
         var streamed = plan_stream_execute(self, index, batch_size)
         if streamed:
             return streamed.take()
@@ -588,35 +591,15 @@ def plan_concat(
     streaming: Bool,
     batch_size: Int,
 ) raises -> DataFrame:
-    """A union's two inputs, each executed, then stacked. The inputs are
-    independent, so outside the empty-schema run, and when no
-    execution report is kept, each runs as a job on its own copy of
-    the plan: a worker runs one while the caller runs the other, and
-    both share the crew's thread budget. A worker the budget cannot
-    cover leaves both on
-    the caller, one after the other."""
-    var both = plan_both_inputs(self, index, empty, streaming, batch_size)
-    var input = both[0].copy()
-    var right = both[1].copy()
-    var names = input.columns()
-    var other = right.columns()
-    if len(other) != len(names):
-        raise Error(
-            "concat: inputs have "
-            + String(len(names))
-            + " and "
-            + String(len(other))
-            + " columns"
-        )
-    for name in names:
-        if name not in other:
-            raise Error("concat: right input has no column " + name)
-    # The right input's columns in the left's order; `concat`
-    # checks the types.
-    var parts = List[DataFrame]()
-    parts.append(input^)
-    parts.append(right.select(names))
-    return concat(parts)
+    """A union: its children stacked in order (`plan_union`). The
+    empty-schema run computes each on this plan."""
+    if not empty:
+        return plan_union(self, index, streaming, batch_size)
+    var children = plan_union_children(self, index)
+    var frames = List[DataFrame](capacity=len(children))
+    for child in children:
+        frames.append(self._execute(child, True, streaming, batch_size))
+    return _stack_union(frames)
 
 
 def _execute_dataset_scan(

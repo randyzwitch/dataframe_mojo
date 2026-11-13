@@ -743,6 +743,25 @@ def sort_key_rows(
     return sort_rows(keys, descending, nulls_last, maintain_order=stable)
 
 
+struct _RankOut(ImplicitlyCopyable, Movable):
+    """Where a window's ranks go: the method (-1: no ranks), the input's
+    validity by row (Bool, 0: every row valid) and the outputs, by input
+    row (`ints` or, for average, `floats`; `out_valid` 0 when no nulls)."""
+
+    var method: Int
+    var valid: Int
+    var ints: Int
+    var floats: Int
+    var out_valid: Int
+
+    def __init__(out self):
+        self.method = -1
+        self.valid = 0
+        self.ints = 0
+        self.floats = 0
+        self.out_valid = 0
+
+
 struct _GroupSortJob(Job):
     """Sort one task's hash groups and mark their boundaries (the SORT,
     MATERIALIZE and MASK stages of a WindowHashGroup). The keys and hashes
@@ -762,6 +781,9 @@ struct _GroupSortJob(Job):
     var order: Int
     var flags: Int
     var stable: Bool
+    # Ranks evaluated over the task's rows as soon as they are sorted, by
+    # the same task: no other group's work has to finish first.
+    var rank: _RankOut
 
     def __init__(
         out self,
@@ -776,6 +798,7 @@ struct _GroupSortJob(Job):
         order: Int,
         flags: Int,
         stable: Bool,
+        rank: _RankOut,
     ):
         self.keys = keys.copy()
         self.partition_keys = partition_keys
@@ -788,8 +811,29 @@ struct _GroupSortJob(Job):
         self.order = order
         self.flags = flags
         self.stable = stable
+        self.rank = rank
 
     def run(mut self) raises:
+        self._sort()
+        if self.rank.method < 0 or self.hi == self.lo:
+            return
+        # The task holds whole partitions, so its ranks start fresh at lo
+        # and need no state from other tasks.
+        var scan = _RankScanJob(
+            self.flags,
+            self.order,
+            self.rank.valid,
+            self.lo,
+            self.hi,
+            self.rank.method,
+            self.rank.ints,
+            self.rank.floats,
+            self.rank.out_valid,
+        )
+        scan.write = True
+        scan.run()
+
+    def _sort(mut self) raises:
         var n = self.hi - self.lo
         if n == 0:
             return
@@ -922,6 +966,31 @@ def window_layout(
     """Sort `height` rows by partition and order keys into hash groups and
     mark their boundaries. `descending` and `nulls_last` hold one flag per
     order key. Rows with equal keys keep input order when `stable`."""
+    return _window_layout(
+        partition_keys,
+        order_keys,
+        descending,
+        nulls_last,
+        height,
+        stable,
+        _RankOut(),
+        True,
+    )
+
+
+def _window_layout(
+    partition_keys: List[Series],
+    order_keys: List[Series],
+    descending: List[Bool],
+    nulls_last: List[Bool],
+    height: Int,
+    stable: Bool,
+    rank: _RankOut,
+    inverse: Bool,
+) raises -> WindowLayout:
+    """`window_layout`; with `rank.method` set and partition keys, the hash
+    group tasks also write every row's rank, and the layout comes back
+    empty. Without `inverse`, rows' sorted positions are not recorded."""
     var layout = WindowLayout()
     layout.group_parts.append(0)
     if height == 0:
@@ -972,6 +1041,7 @@ def window_layout(
                     Int(order.unsafe_ptr()),
                     Int(flags.unsafe_ptr()),
                     stable,
+                    rank,
                 )
             )
             bounds.append(cuts[t])
@@ -980,6 +1050,11 @@ def window_layout(
         else:
             run_jobs(jobs)
         _ = parts^
+        if rank.method >= 0:
+            # Ranks are written; nothing reads the layout.
+            _ = order^
+            _ = flags^
+            return layout^
     elif len(order_keys) > 0:
         # FullSort: one group, sorted on every thread; peers are marked
         # in parallel ranges, reading the keys through the sorted order.
@@ -1042,7 +1117,7 @@ def window_layout(
             layout.group_parts.append(p)
             g += 1
     layout.group_parts.append(layout.count)
-    if not layout.in_place:
+    if inverse and not layout.in_place:
         # Each row's sorted position, to put row results back in order.
         layout.inverse = huge_uninit[Int](height)
         for j in range(len(finish)):
@@ -1282,17 +1357,19 @@ struct _RankScanJob(Job):
             var end = e if e < self.hi else self.next_start
             if self.out_valid != 0:
                 for j in range(k, e):
-                    out_valid[unsafe_offset=j] = present
+                    out_valid[unsafe_offset=order[unsafe_offset=j]] = present
             if not present:
                 k = e
                 continue
             if method == RANK_AVERAGE:
                 var value = Float64(peer + 1 + end - 2 * base) / 2
                 for j in range(k, e):
-                    floats[unsafe_offset=j] = value
+                    floats[unsafe_offset=order[unsafe_offset=j]] = value
             elif method == RANK_ORDINAL:
                 for j in range(k, e):
-                    ints[unsafe_offset=j] = Int64(j - base + 1)
+                    ints[unsafe_offset=order[unsafe_offset=j]] = Int64(
+                        j - base + 1
+                    )
             else:
                 var value: Int64
                 if method == RANK_MIN:
@@ -1302,23 +1379,36 @@ struct _RankScanJob(Job):
                 else:
                     value = Int64(dense)
                 for j in range(k, e):
-                    ints[unsafe_offset=j] = value
+                    ints[unsafe_offset=order[unsafe_offset=j]] = value
             k = e
 
 
-def rank_from_layout(
-    layout: WindowLayout, input: Series, method: String
+def rank_window(
+    partition_keys: List[Series],
+    input: Series,
+    descending: Bool,
+    method: String,
 ) raises -> Series:
-    """Every row's rank within its partition, read off a layout whose last
-    order keys are `rank_order_keys(input)`: runs of equal values are
-    peers, identified by adjacent equal sort keys. Ranks
-    are computed in sorted order and gathered back to rows. Nulls
+    """Every row's rank of `input` within its partition of
+    `partition_keys` (none: one partition): rank() OVER (PARTITION BY keys
+    ORDER BY input). Rows are sorted by `rank_order_keys(input)`: runs of
+    equal values are peers, identified by adjacent equal sort keys. Nulls
     rank as null; ranks count from a partition's first value. Ordinal
-    ranks peers in layout order (input order when the layout is stable).
-    Ranges of sorted positions are ranked in parallel, each starting from
-    the state its predecessors carry in."""
+    ranks peers in input order.
+
+    Ranks are computed in sorted order and written straight to their
+    rows. With partition keys, each hash group task sorts its rows, marks
+    their partition and peer boundaries and ranks them in one go: a hash
+    group holds whole partitions, so its ranks depend on no other group
+    and no thread waits for the others. One
+    partition is ranked in parallel ranges of the full sort, each starting
+    from the state its predecessors carry in."""
     var code = rank_method(method)
-    var n = len(layout.order)
+    var n = len(input)
+    var keys = List[Series]()
+    var key_descending = List[Bool]()
+    var key_nulls_last = List[Bool]()
+    rank_order_keys(input, descending, keys, key_descending, key_nulls_last)
     var average = code == RANK_AVERAGE
     var ints = huge_uninit[Int64](0 if average else n)
     var floats = huge_uninit[Float64](n if average else 0)
@@ -1327,6 +1417,40 @@ def rank_from_layout(
     if has_nulls:
         present = validity(input)
     var out_valid = huge_uninit[Bool](n if has_nulls else 0)
+    var rank = _RankOut()
+    rank.method = code
+    rank.valid = Int(present.unsafe_ptr()) if has_nulls else 0
+    rank.ints = Int(ints.unsafe_ptr())
+    rank.floats = Int(floats.unsafe_ptr())
+    rank.out_valid = Int(out_valid.unsafe_ptr()) if has_nulls else 0
+    var layout = _window_layout(
+        partition_keys,
+        keys,
+        key_descending,
+        key_nulls_last,
+        n,
+        method == "ordinal",
+        rank if len(partition_keys) > 0 else _RankOut(),
+        False,
+    )
+    if len(partition_keys) == 0:
+        _rank_ranges(layout, rank)
+    _ = layout^
+    _ = present^
+    if average and has_nulls:
+        return Series("", Column[Float64](floats^, out_valid))
+    if average:
+        return Series("", Column[Float64](floats^))
+    if has_nulls:
+        return Series("", Column[Int64](ints^, out_valid))
+    return Series("", Column[Int64](ints^))
+
+
+def _rank_ranges(layout: WindowLayout, rank: _RankOut) raises:
+    """Rank one sorted layout in parallel ranges of sorted positions: a
+    first pass summarizes each range, the second writes ranks from the
+    state the ranges before it carry in."""
+    var n = len(layout.order)
     var workers = configured_workers()
     var bounds = partitions(n, workers, STANDARD_VECTOR_SIZE)
     var jobs = List[_RankScanJob](capacity=workers)
@@ -1336,13 +1460,13 @@ def rank_from_layout(
                 _RankScanJob(
                     Int(layout.flags.unsafe_ptr()),
                     Int(layout.order.unsafe_ptr()),
-                    Int(present.unsafe_ptr()) if has_nulls else 0,
+                    rank.valid,
                     bounds[w],
                     bounds[w + 1],
-                    code,
-                    Int(ints.unsafe_ptr()),
-                    Int(floats.unsafe_ptr()),
-                    Int(out_valid.unsafe_ptr()) if has_nulls else 0,
+                    rank.method,
+                    rank.ints,
+                    rank.floats,
+                    rank.out_valid,
                 )
             )
     if len(jobs) > 1:
@@ -1378,29 +1502,13 @@ def rank_from_layout(
         run_jobs(jobs)
     elif len(jobs) == 1:
         jobs[0].run()
-    _ = present^
-    # Ranks were written in sorted order; rows read theirs back.
-    var ranked: Series
-    if average and has_nulls:
-        ranked = Series("", Column[Float64](floats^, out_valid))
-    elif average:
-        ranked = Series("", Column[Float64](floats^))
-    elif has_nulls:
-        ranked = Series("", Column[Int64](ints^, out_valid))
-    else:
-        ranked = Series("", Column[Int64](ints^))
-    if layout.in_place:
-        return ranked^
-    var back = take_parallel([ranked^], layout.inverse.copy(), workers)
-    return back[0].copy()
 
 
 def rank_rows(
     input: Series, ids: List[Int], method: String, descending: Bool
 ) raises -> Series:
     """Rank `input` within the partitions `ids` gives (none: one
-    partition), through the window layout: rank() OVER (PARTITION BY ids
-    ORDER BY input)."""
+    partition): rank() OVER (PARTITION BY ids ORDER BY input)."""
     var n = len(input)
     var partition_keys = List[Series]()
     if len(ids) > 0:
@@ -1408,16 +1516,4 @@ def rank_rows(
         for k in range(n):
             codes[k] = Int64(ids[k])
         partition_keys.append(Series("", Column[Int64](codes^)))
-    var keys = List[Series]()
-    var key_descending = List[Bool]()
-    var key_nulls_last = List[Bool]()
-    rank_order_keys(input, descending, keys, key_descending, key_nulls_last)
-    var layout = window_layout(
-        partition_keys,
-        keys,
-        key_descending,
-        key_nulls_last,
-        n,
-        stable=method == "ordinal",
-    )
-    return rank_from_layout(layout, input, method)
+    return rank_window(partition_keys, input, descending, method)
