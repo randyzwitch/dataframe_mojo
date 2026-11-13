@@ -79,8 +79,8 @@ def int64_progression(key: Series) -> Tuple[Bool, Int64, UInt64]:
             row += n
             continue
         # The values read straight from storage, checked a block at a
-        # time: the per-row checked reads took 8.4 ms over TPC-DS's 1.9M
-        # customer_demographics keys, the whole cost of q84's join on them.
+        # time: a checked read per row costs a branch and a bounds test
+        # per key, which over a large key column dominates the join.
         var i = start
         while i < n:
             var stop = min(n, i + 1024)

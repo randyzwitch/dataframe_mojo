@@ -80,12 +80,11 @@ comptime Storage = Variant[
 struct _MergedCache(Movable):
     """The contiguous array a chunked series rechunks into, made once.
 
-    Parquet tables arrive in row-group chunks, and joins, kernels and
-    gathers each rechunk the same key or value column: PDS-H q2 spent a
-    fifth of its time merging the same chunks again. The chunks never
-    change, so the first merge is kept. `state` is 0 (empty), 1 (one caller
-    is filling it) or 2 (ready); a caller that loses the race to fill it
-    merges its own copy without storing it."""
+    Parquet tables arrive in row-group chunks, and joins, kernels and gathers
+    each rechunk the same key or value column, each a full copy. The chunks
+    never change, so the first merge is kept and reused. `state` is 0 (empty), 1
+    (one caller is filling it) or 2 (ready); a caller that loses the race to
+    fill it merges its own copy without storing it."""
 
     var state: Atomic[Int64]
     var merged: Optional[Storage]
@@ -613,8 +612,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         """A decimal32 column widened to decimal64 with the same precision,
         scale and nulls; anything else as it is. The decimal64 kernels
         (typed compares, dense arithmetic) then cover it, where widening
-        to 128 bits sent it down the per-row path (TPC-DS decimal q13:
-        1.34x the DOUBLE variant)."""
+        to 128 bits sends it down the slower per-row path."""
         var dtype = self.dtype()
         if not dtype.is_decimal() or dtype.decimal_width() != 32:
             return self.copy()

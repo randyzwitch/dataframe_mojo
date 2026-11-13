@@ -298,9 +298,9 @@ def plan_collect_shared(
 
 
 struct _StreamInputs(Movable):
-    """The pipelines of a stream's computed inputs, not yet run."""
+    """A stream's computed inputs and the joins they are built for, not
+    yet scheduled."""
 
-    var jobs: List[_SubplanPipeline]
     var metas: List[MetaPipeline]
     var wanted: List[Int]
     var keys: List[List[String]]
@@ -311,7 +311,6 @@ struct _StreamInputs(Movable):
     def __init__(out self):
         self.coalesces = List[Bool]()
         self.probe_estimates = List[Int]()
-        self.jobs = List[_SubplanPipeline]()
         self.metas = List[MetaPipeline]()
         self.wanted = List[Int]()
         self.keys = List[List[String]]()
@@ -383,19 +382,6 @@ def plan_schedule_inputs(
         inputs.coalesces.append(True)
         inputs.probe_estimates.append(-1)
         inputs.metas.append(MetaPipeline(META_REGULAR))
-    for k in range(len(inputs.wanted)):
-        inputs.jobs.append(
-            _SubplanPipeline(
-                self.copy(),
-                inputs.wanted[k],
-                True,
-                batch_size,
-                inputs.keys[k],
-                inputs.hows[k],
-                inputs.coalesces[k],
-                inputs.probe_estimates[k],
-            )
-        )
     return inputs^
 
 
@@ -455,39 +441,3 @@ def _stack_union(frames: List[DataFrame]) raises -> DataFrame:
         parts.append(frames[k].select(names) if k > 0 else frames[k].copy())
     # `concat` checks the types.
     return concat(parts)
-
-
-def plan_union(
-    self: QueryContext, index: Int, streaming: Bool, batch_size: Int
-) raises -> DataFrame:
-    """The union at node `index` with its children computed as pipelines of
-    one schedule (every child is a pipeline of that schedule, none
-    nested in another's, so all of them share the threads at once), or
-    one after the other on this plan when an execution report is kept.
-    A child a stream already ran (`plan_schedule_inputs`) is taken."""
-    var children = plan_union_children(self, index)
-    var got = Dict[Int, DataFrame]()
-    var jobs = List[_SubplanPipeline]()
-    var metas = List[MetaPipeline]()
-    var wanted = List[Int]()
-    for child in children:
-        if child in got or child in wanted:
-            continue
-        var ready = plan_take_prefetched(self, child)
-        if ready:
-            got[child] = ready.take()
-        elif self._report:
-            got[child] = self._execute(child, False, streaming, batch_size)
-        else:
-            wanted.append(child)
-            jobs.append(
-                _SubplanPipeline(self.copy(), child, streaming, batch_size)
-            )
-            metas.append(MetaPipeline(META_REGULAR))
-    run_pipelines(jobs, metas)
-    for k in range(len(wanted)):
-        got[wanted[k]] = jobs[k].result.copy()
-    var frames = List[DataFrame](capacity=len(children))
-    for child in children:
-        frames.append(got[child].copy())
-    return _stack_union(frames)
