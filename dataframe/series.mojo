@@ -125,6 +125,36 @@ def _storage_shares_buffers(a: Storage, b: Storage) -> Bool:
     return False
 
 
+def _storage_joined(a: Storage, b: Storage) -> Optional[Storage]:
+    """`b` appended to `a` as one array, when `b` is the window of the same
+    value and validity buffers that starts where `a` ends (two windows of
+    one column, adjacent): a wider window over those buffers, nothing
+    copied. None otherwise."""
+    comptime for i in range(len(FixedElements.Ts)):
+        comptime E: Copyable & Deinitable = FixedElements.Ts[i]
+        if a.isa[Column[E]]():
+            if not b.isa[Column[E]]():
+                return None
+            ref x = a[Column[E]]
+            ref y = b[Column[E]]
+            if not x._shares_buffers_with(y) or x._offset + x._length != (
+                y._offset
+            ):
+                return None
+            var joined = x.copy()
+            joined._length += y._length
+            return Storage(joined^)
+    if a.isa[BoolColumn]() and b.isa[BoolColumn]():
+        ref x = a[BoolColumn]
+        ref y = b[BoolColumn]
+        if not x._shares_buffers_with(y) or x._offset + x._length != y._offset:
+            return None
+        var joined = x.copy()
+        joined._length += y._length
+        return Storage(joined^)
+    return None
+
+
 struct _ChunkCodesJob(Job):
     """One string chunk's dictionary codes as a categorical chunk; a
     gathered chunk gathers its codes here. The caller has checked that the
@@ -297,6 +327,36 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     def n_chunks(self) -> Int:
         """Number of physical Arrow arrays backing this series."""
         return len(self._chunked.value()[].arrays) if self.is_chunked() else 1
+
+    def _joined_windows(self) -> Self:
+        """The same rows with each run of adjacent windows of one column's
+        buffers (as consecutive pieces of a column cut into morsels are)
+        made one array: fewer chunks, nothing copied."""
+        if not self.is_chunked():
+            return self.copy()
+        ref chunked = self._chunked.value()[]
+        var arrays = List[Storage](capacity=len(chunked.arrays))
+        var ends = List[Int](capacity=len(chunked.ends))
+        for i in range(len(chunked.arrays)):
+            if len(arrays) > 0:
+                var joined = _storage_joined(
+                    arrays[len(arrays) - 1], chunked.arrays[i]
+                )
+                if joined:
+                    arrays[len(arrays) - 1] = joined.take()
+                    ends[len(ends) - 1] = chunked.ends[i]
+                    continue
+            arrays.append(chunked.arrays[i].copy())
+            ends.append(chunked.ends[i])
+        if len(arrays) == len(chunked.arrays):
+            return self.copy()
+        var result = self.copy()
+        result._data = arrays[0].copy()
+        if len(arrays) == 1:
+            result._chunked = None
+        else:
+            result._chunked = ArcPointer(_SeriesChunks(arrays^, ends^))
+        return result^
 
     def chunks(self) -> List[Self]:
         """Owned column views sharing the immutable buffers of each array."""
