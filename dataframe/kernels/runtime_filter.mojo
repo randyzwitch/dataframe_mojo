@@ -103,9 +103,15 @@ def bloom_set_bits(words: Int, blocks: Int, hash: UInt64, shared: Bool):
     var at = words + 8 * Int(hash & UInt64(blocks - 1))
     var mask = _word_masks[1](hash)[0]
     if shared:
-        _ = Pointer[Atomic[UInt64], MutAnyOrigin](
+        ref word = Pointer[Atomic[UInt64], MutAnyOrigin](
             unsafe_from_address=at
-        )[].fetch_or(mask)
+        )[]
+        var seen = word.load()
+        # A word that already has the bits needs no write; otherwise the
+        # OR is retried until no other worker changed the word between.
+        while seen & mask != mask:
+            if word.compare_exchange(seen, seen | mask):
+                break
     else:
         Pointer[UInt64, MutAnyOrigin](unsafe_from_address=at)[] |= mask
 
