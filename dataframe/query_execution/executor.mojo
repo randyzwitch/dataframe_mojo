@@ -40,19 +40,13 @@ from dataframe.io.parquet import (
 from dataframe.join_type import (
     JOIN_CROSS,
 )
-from dataframe.scheduler import (
-    META_REGULAR,
-    MetaPipeline,
-    run_pipelines,
-)
 from dataframe.planning.context import (
     QueryContext,
 )
-from dataframe.planning.inputs import (
-    _SubplanPipeline,
-)
 from dataframe.query_execution.materialize import (
+    _stack_union,
     plan_take_prefetched,
+    plan_union_children,
 )
 from dataframe.planning.model import (
     AGG,
@@ -103,7 +97,9 @@ from dataframe.query_execution.operators import (
     plan_join_frames,
 )
 from dataframe.query_execution.pipeline import (
+    plan_execute_inputs,
     plan_stream_execute,
+    plan_union,
 )
 from dataframe.query_execution.placement import (
     plan_handoff_region,
@@ -134,7 +130,7 @@ def plan_execute(
         var handed = plan_handoff_region(self, index, streaming, batch_size)
         if handed:
             return handed.take()
-    if streaming and not empty:
+    if streaming and not empty and index != self._declined:
         var streamed = plan_stream_execute(self, index, batch_size)
         if streamed:
             return streamed.take()
@@ -546,35 +542,29 @@ def plan_both_inputs(
     streaming: Bool,
     batch_size: Int,
 ) raises -> Tuple[DataFrame, DataFrame]:
-    """A two-input node's inputs, executed at once as two independent
-    pipelines on their own copies of the plan (`run_pipelines`) outside
-    the empty-schema run and when no execution report is kept, else one
-    after the other. An input a stream already ran ahead
+    """A two-input node's inputs, executed at once as pipelines of one
+    schedule (`plan_execute_inputs`) outside the empty-schema run and
+    when no execution report is kept, else one after the other. An input a stream already ran ahead
     (`plan_schedule_inputs`) is taken, not run again."""
     ref node = self._nodes[index]
     if not empty and not self._report:
         var ready = List[Optional[DataFrame]]()
         ready.append(plan_take_prefetched(self, node.left))
         ready.append(plan_take_prefetched(self, node.right))
-        var jobs = List[_SubplanPipeline](capacity=2)
-        var metas = List[MetaPipeline](capacity=2)
-        var slots = List[Int](length=2, fill=-1)
+        var wanted = List[Int]()
         var sides = [node.left, node.right]
         for k in range(2):
-            if ready[k]:
-                continue
-            slots[k] = len(jobs)
-            jobs.append(
-                _SubplanPipeline(self.copy(), sides[k], streaming, batch_size)
-            )
-            metas.append(MetaPipeline(META_REGULAR))
-        run_pipelines(jobs, metas)
+            if not ready[k]:
+                wanted.append(sides[k])
+        var computed = plan_execute_inputs(self, wanted, streaming, batch_size)
         var frames = List[DataFrame](capacity=2)
+        var next = 0
         for k in range(2):
-            if slots[k] < 0:
+            if ready[k]:
                 frames.append(ready[k].take())
             else:
-                frames.append(jobs[slots[k]].result.copy())
+                frames.append(computed[next].copy())
+                next += 1
         return (frames[0].copy(), frames[1].copy())
     var left = self._execute(node.left, empty, streaming, batch_size)
     var right = self._execute(node.right, empty, streaming, batch_size)
@@ -588,35 +578,15 @@ def plan_concat(
     streaming: Bool,
     batch_size: Int,
 ) raises -> DataFrame:
-    """A union's two inputs, each executed, then stacked. The inputs are
-    independent, so outside the empty-schema run, and when no
-    execution report is kept, each runs as a job on its own copy of
-    the plan: a worker runs one while the caller runs the other, and
-    both share the crew's thread budget. A worker the budget cannot
-    cover leaves both on
-    the caller, one after the other."""
-    var both = plan_both_inputs(self, index, empty, streaming, batch_size)
-    var input = both[0].copy()
-    var right = both[1].copy()
-    var names = input.columns()
-    var other = right.columns()
-    if len(other) != len(names):
-        raise Error(
-            "concat: inputs have "
-            + String(len(names))
-            + " and "
-            + String(len(other))
-            + " columns"
-        )
-    for name in names:
-        if name not in other:
-            raise Error("concat: right input has no column " + name)
-    # The right input's columns in the left's order; `concat`
-    # checks the types.
-    var parts = List[DataFrame]()
-    parts.append(input^)
-    parts.append(right.select(names))
-    return concat(parts)
+    """A union: its children stacked in order (`plan_union`). The
+    empty-schema run computes each on this plan."""
+    if not empty:
+        return plan_union(self, index, streaming, batch_size)
+    var children = plan_union_children(self, index)
+    var frames = List[DataFrame](capacity=len(children))
+    for child in children:
+        frames.append(self._execute(child, True, streaming, batch_size))
+    return _stack_union(frames)
 
 
 def _execute_dataset_scan(

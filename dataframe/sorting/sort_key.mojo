@@ -1,30 +1,32 @@
 """Normalized sort keys for every column type.
 
-A row's key is one byte string whose unsigned byte order is the row order:
-for each key column a byte saying null or valid (1 and 2, swapped for
-nulls last; never flipped), then the value's bytes, flipped for a
-descending column (create_sort_key.cpp, `SortKeyVectorData`,
-`TemplatedConstructSortKeyInternal`). A null writes its byte alone.
+A row's key is one byte string whose unsigned byte order is the row order: for
+each key column a byte saying null or valid (1 and 2, swapped for nulls last;
+never flipped), then the value's bytes, flipped for a descending column. One
+memcmp then orders two rows on every key at once, with no per-type comparison. A
+null writes its byte alone.
 
-- Integers are big-endian with the sign bit toggled (Radix::EncodeData);
-  128-bit decimals are their upper word that way, then the lower word.
-- Floats are Radix::EncodeDouble/EncodeFloat: -0.0 equals 0.0, NaN is the
-  greatest value, infinities next to it.
+- Integers are big-endian with the sign bit toggled: big-endian puts the
+  most significant byte first, and toggling the sign bit puts negatives below
+  positives in unsigned order. 128-bit decimals are their upper word that way,
+  then the lower word.
+- Floats map their bits to an unsigned integer in value order (flip
+  every bit of a negative, set the sign bit of a positive): -0.0 equals
+  0.0, NaN is the greatest value, infinities next to it.
 - Booleans are one byte.
-- Strings (`SortKeyVarcharOperator`) are every byte plus one, then a zero
-  delimiter, so a prefix comes first; binary values
-  (`SortKeyBlobOperator`) escape bytes 0 and 1 with a 1 instead.
+- Strings are every byte plus one, then a zero delimiter, so a prefix
+  comes first (no byte of the value can be zero); binary values, whose bytes can
+  be 255, escape bytes 0 and 1 with a 1 instead.
 - Categorical keys are first replaced by their value's rank in string
   order (`sort_ranks`), so they sort as their strings.
 
-The key goes into a fixed record when its widest form fits, as
-TupleDataLayout::Initialize(orders) decides: with the 8-byte payload, at
-most 16, 24 or 32 bytes take `PAYLOAD_FIXED_16/24/32`, anything wider or of
-unknown length `PAYLOAD_VARIABLE_32` (8 inlined bytes, the size, and the
-key's bytes elsewhere). A string column's widest form is 1 + its longest
-value + 1 bytes;
-the column is in memory and measured. The payload is the row's index into
-the sorted input.
+The key goes into a fixed record when its widest form fits, so most sorts move
+fixed-size records with no pointer chasing: with the 8-byte payload, at most 16,
+24 or 32 bytes take `PAYLOAD_FIXED_16/24/32`, anything wider or of unknown
+length `PAYLOAD_VARIABLE_32` (8 inlined bytes, the size, and the key's bytes
+elsewhere). A string column's widest form is 1 + its longest value + 1 bytes;
+the column is in memory and measured. The payload is the row's index into the
+sorted input.
 
 `maintain_order` appends the row index as a last key: equal keys then
 keep input order. Otherwise their order is unspecified.
@@ -52,9 +54,12 @@ from dataframe.vector.types import (
     string_data,
 )
 
-# STANDARD_VECTOR_SIZE and DEFAULT_ROW_GROUP_SIZE (vector_size.hpp,
-# storage_info.hpp): the vector and the row group, which is both a scan
-# morsel and a merge partition (sort.cpp, Sort::Finalize).
+# The vector and the row group, which is both a scan morsel and a merge
+# partition. A 2,048-row vector keeps a few columns of one chunk in the L1/L2
+# caches while still spreading per-chunk overhead over many rows. The row group,
+# 60 vectors, is large enough that per-morsel setup is negligible and small
+# enough that a table of a few million rows splits into many morsels for the
+# threads. Both are empirical choices.
 comptime STANDARD_VECTOR_SIZE = 2048
 comptime DEFAULT_ROW_GROUP_SIZE = 122880
 
@@ -78,7 +83,7 @@ comptime _MSB = UInt64(0x8080808080808080)
 
 @fieldwise_init
 struct SortKeyColumn(Copyable, Movable):
-    """One key column and how it encodes (SortKeyVectorData)."""
+    """One key column and how it encodes."""
 
     var series: Series
     var encoding: Int
@@ -242,9 +247,8 @@ struct SortKeyLayout(Copyable, Movable):
                     UnifiedVectorFormat(),
                 )
             )
-        # TupleDataLayout::Initialize(orders): the widest key, and the null
-        # bytes every key shares while the key is still all fixed-width
-        # and valid.
+        # The widest key, and the null bytes every key shares while the key is
+        # still all fixed-width and valid.
         var all_constant = True
         var constant_size = 0
         var sort_width = 0
@@ -326,10 +330,10 @@ struct SortKeyLayout(Copyable, Movable):
         mut self, formats: List[UnifiedVectorFormat], count: Int
     ):
         """The same key over a chunk's `count` rows, read where they are:
-        `formats` are the key columns' vectors as UnifiedVectorFormat
-        (create_sort_key.cpp builds its SortKeyVectorData from
-        ToUnifiedFormat), valid while the chunk is. A categorical key's
-        codes are read through its ranks."""
+        `formats` are the key columns' vectors as UnifiedVectorFormat, which
+        reads flat, constant and dictionary vectors alike without copying them,
+        valid while the chunk is. A categorical key's codes are read through its
+        ranks."""
         self.vectors = True
         self.rows = count
         for k in range(len(formats)):
@@ -348,7 +352,8 @@ def _store_be[D: DType](address: Int, value: Scalar[D]):
 
 @always_inline
 def _encode_double(x: Float64) -> UInt64:
-    """Radix::EncodeDouble."""
+    """`x`'s bits as an unsigned integer in value order: zeros (both signs) in
+    the middle, NaN greatest, infinities next to the ends."""
     if x == 0:
         return UInt64(1) << 63
     if x != x:
@@ -365,7 +370,7 @@ def _encode_double(x: Float64) -> UInt64:
 
 @always_inline
 def _encode_float(x: Float32) -> UInt32:
-    """Radix::EncodeFloat."""
+    """`x`'s bits as an unsigned integer in value order, as `_encode_double`."""
     if x == 0:
         return UInt32(1) << 31
     if x != x:
@@ -382,7 +387,8 @@ def _encode_float(x: Float32) -> UInt32:
 
 @always_inline
 def _blob_length(bytes: Span[UInt8, ImmutAnyOrigin]) -> Int:
-    """SortKeyBlobOperator::GetEncodeLength."""
+    """The encoded length of a binary value: one extra byte per escaped 0 or 1
+    byte, plus the delimiter."""
     var escaped = 0
     for b in range(len(bytes)):
         if bytes.unsafe_ptr()[unsafe_offset=b] <= 1:
@@ -394,8 +400,9 @@ def _blob_length(bytes: Span[UInt8, ImmutAnyOrigin]) -> Int:
 def _encode_varchar(
     address: Int, bytes: Span[UInt8, ImmutAnyOrigin], flip: Bool
 ) -> Int:
-    """SortKeyVarcharOperator::Encode: every byte plus one, word at a
-    time, then the delimiter; returns the bytes written."""
+    """Every byte plus one, a word at a time, then the zero delimiter; returns
+    the bytes written. UTF-8 never contains byte 255, so adding one never
+    wraps."""
     var data = Int(bytes.unsafe_ptr())
     var n = len(bytes)
     var mask = UInt64.MAX if flip else UInt64(0)
@@ -427,7 +434,8 @@ def _encode_varchar(
 def _encode_blob(
     address: Int, bytes: Span[UInt8, ImmutAnyOrigin], flip: Bool
 ) -> Int:
-    """SortKeyBlobOperator::Encode: bytes 0 and 1 escaped with a 1."""
+    """Bytes 0 and 1 escaped with a 1, then a zero delimiter: the delimiter then
+    sorts below any byte of a longer value."""
     var out = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=address)
     var flip_byte = UInt8(0xFF) if flip else UInt8(0)
     var at = 0
@@ -444,7 +452,8 @@ def _encode_blob(
 
 @always_inline
 def _order_bits[D: DType, U: DType](value: Scalar[D]) -> Scalar[U]:
-    """Radix::EncodeData's value, before the byte swap."""
+    """`value`'s bits as an unsigned integer in value order, before the byte
+    swap to big-endian."""
     comptime if D == DType.float64:
         return rebind[Scalar[U]](_encode_double(rebind[Float64](value)))
     elif D == DType.float32:
@@ -643,7 +652,7 @@ def _part_lengths(
     count: Int,
     lengths: Pointer[Int, MutAnyOrigin],
 ) raises:
-    """GetSortKeyLength: the bytes each row of this column adds."""
+    """The bytes each row of this column adds."""
     if not c.nulls:
         if c.constant_size():
             for i in range(count):
@@ -715,10 +724,10 @@ comptime _VECTOR_NUMERIC = [
     DType.uint8,
 ]
 
-# Keys bound to a chunk's vectors (`SortKeyLayout.rebind_vectors`): row
-# `first + i` of the chunk, or `rows[i]` when `rows` (an address of Ints)
-# is set, read through its UnifiedVectorFormat's selection and validity,
-# as create_sort_key.cpp's SortKeyVectorData reads any vector.
+# Keys bound to a chunk's vectors (`SortKeyLayout.rebind_vectors`): row `first +
+# i` of the chunk, or `rows[i]` when `rows` (an address of Ints) is set, read
+# through its UnifiedVectorFormat's selection and validity, so any vector type
+# is read in place.
 
 
 @always_inline
@@ -950,8 +959,8 @@ struct KeyBlock(Movable):
 
 
 def encode_keys(layout: SortKeyLayout, lo: Int, hi: Int) raises -> KeyBlock:
-    """Records for rows [lo, hi): each row's key (create_sort_key, then
-    SortKey::Construct) and its row index as the payload."""
+    """Records for rows [lo, hi): each row's key and its row index as the
+    payload."""
     return _encode_rows(layout, lo, hi - lo, 0)
 
 
@@ -1091,11 +1100,11 @@ def _string_prefixes(
 def key_prefixes(
     layout: SortKeyLayout, lo: Int, hi: Int, mut prefixes: List[UInt64]
 ) raises -> Bool:
-    """For rows [lo, hi), a lower bound of each key's first word (the
-    record's `part0`), as unsigned integers: the key columns encoded up to
-    the word's eighth byte, zeros past a binary column. A row whose bound
-    exceeds a boundary key's first word is worse than that key:
-    CheckBoundaryValues, over the leading sort columns."""
+    """For rows [lo, hi), a lower bound of each key's first word (the record's
+    `part0`), as unsigned integers: the key columns encoded up to the word's
+    eighth byte, zeros past a binary column. A row whose bound exceeds a
+    boundary key's first word is worse than that key, so it is rejected before
+    its full key is encoded."""
     var n = hi - lo
     if n <= 0:
         return False
@@ -1180,9 +1189,9 @@ def has_row_key(layout: SortKeyLayout) -> Bool:
 def encode_selected(
     layout: SortKeyLayout, lo: Int, selection: List[Int]
 ) raises -> KeyBlock:
-    """Records for the rows `lo + selection[i]` alone, as `encode_keys`
-    makes them (the rows CheckBoundaryValues keeps; a layout with the row
-    index as a key encodes whole ranges instead)."""
+    """Records for the rows `lo + selection[i]` alone, as `encode_keys` makes
+    them (the rows the boundary test keeps; a layout with the row index as a key
+    encodes whole ranges instead)."""
     var rows = List[Int](capacity=len(selection))
     for s in selection:
         rows.append(lo + s)

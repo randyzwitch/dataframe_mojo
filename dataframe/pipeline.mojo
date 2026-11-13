@@ -629,8 +629,8 @@ struct _Columns(Copyable, Movable):
 
     def through(self, rows: List[Int]) -> _Columns:
         """Every column read at its rows `rows` (positions among this one's
-        `height`), the dictionaries merged: a row list over a row list is
-        one row list over the column (SelectionVector::Slice). Columns
+        `height`), the dictionaries merged: a row list over a row list is one
+        row list over the column, so a read follows one indirection. Columns
         sharing a list, or a start, share the merged list."""
         var result = _Columns()
         result.height = len(rows)
@@ -1292,10 +1292,10 @@ struct _ChunkRunner(Movable):
     def begin_sink(
         mut self, morsel: Int, offset: Int = 0, length: Int = 0
     ) raises:
-        """Morsel `morsel` (source rows [offset, offset + length)) comes
-        next: the worker's local sink state, made on its own thread at its
-        first morsel (`GetLocalSinkState`), numbers its rows from the
-        morsel's."""
+        """Morsel `morsel` (source rows [offset, offset + length)) comes next:
+        the worker's local sink state, made on its own thread at its first
+        morsel (so its memory is local to that thread), numbers its rows from
+        the morsel's."""
         if len(self.ungrouped_layout) > 0:
             if len(self.ungrouped) == 0:
                 self.ungrouped.append(UngroupedSink(self.ungrouped_layout[0][]))
@@ -1512,15 +1512,14 @@ struct _ChunkRunner(Movable):
         return collector[0].finish(self.arena)
 
     def _join(mut self, columns: _Columns, s: Int) raises -> _Columns:
-        """A join step over a morsel's collected columns: it probes the
-        step's table (`ScanStructure`) with the key columns only and keeps
-        the probe side a dictionary over where it is. An inner join leaves the build
-        side a dictionary over the build's columns (`EmitDictVectors`); a
-        left, full or right join gathers it (`GatherRHS`), and flags the
-        build rows it matched for `begin_round`, as a right-semi or
-        right-anti join does without emitting anything. A step with no
-        table (nested keys) or whose keys need dictionaries unified joins
-        the morsel's frame eagerly."""
+        """A join step over a morsel's collected columns: it probes the step's
+        table (`ScanStructure`) with the key columns only and keeps the probe
+        side a dictionary over where it is, with no copy. An inner join leaves
+        the build side a dictionary over the build's columns when it can; a
+        left, full or right join gathers it, and flags the build rows it matched
+        for `begin_round`, as a right-semi or right-anti join does without
+        emitting anything. A step with no table (nested keys) or whose keys need
+        dictionaries unified joins the morsel's frame eagerly."""
         ref step = self.steps[][s]
         ref input = self.schemas[][s]
         ref output = self.schemas[][s + 1]
@@ -1733,10 +1732,9 @@ struct _PipelineJob(Job):
     var indexes: ArcPointer[List[Optional[JoinHashTable]]]
     # Whether the pipeline ends in a reduction (no top-N then).
     var reduces: Bool
-    # Top-N sink (PhysicalTopN): this worker's heap over the output's
-    # sort keys (made at its first chunk), the boundary every worker's
-    # full heap shares, and whether ties keep the input order (the
-    # source place is then the last key).
+    # Top-N sink: this worker's heap over the output's sort keys (made at its
+    # first chunk), the boundary every worker's full heap shares, and whether
+    # ties keep the input order (the source place is then the last key).
     var top: Int
     var top_names: List[String]
     var top_descending: List[Bool]
@@ -1834,11 +1832,11 @@ struct _PipelineJob(Job):
     def _join_rows(
         mut self, frame: DataFrame, offset: Int, length: Int
     ) raises -> Tuple[Bool, Optional[List[Int]]]:
-        """The rows of a fresh morsel (`frame`, at source row `offset`) the
-        join filters keep: False when none is, else their rows (None:
-        every row). Vectors the statistics filters rule out are not read
-        (CheckZonemapSegments); the row filters run vector by vector, a
-        bloom filter only while its selectivity keeps it active."""
+        """The rows of a fresh morsel (`frame`, at source row `offset`) the join
+        filters keep: False when none is, else their rows (None: every row).
+        Vectors the statistics filters rule out are not read; the row filters
+        run vector by vector, a bloom filter only while its selectivity keeps it
+        active."""
         for f in self.join_filters:
             if not f.any:
                 return (False, None)
@@ -1930,10 +1928,9 @@ struct _PipelineJob(Job):
             self._morsel(morsel, k, offset, length)
 
     def _run_source(mut self) raises:
-        """Batches from the file source until it is done
-        (`TableScanFunction` with its global state): each is taken under
-        the source's lock and decoded on this thread, then runs as a
-        morsel numbered by its place in the file."""
+        """Batches from the file source until it is done: each is taken under
+        the source's lock and decoded on this thread, then runs as a morsel
+        numbered by its place in the file."""
         while True:
             var next = self.source.value()[].take()
             if not next:
@@ -1959,9 +1956,8 @@ struct _PipelineJob(Job):
         var vectors = Optional[List[Int]]()
         # A top-N taking chunks checks each vector as it is read.
         if self.top_filter.info and not self._chunk_top():
-            # The TopN's dynamic filter against the scan's vector
-            # statistics (CheckZonemapSegments): vectors it rules out
-            # are not read.
+            # The TopN's dynamic filter against the scan's vector statistics:
+            # vectors it rules out are not read.
             vectors = _vectors_kept(
                 self.top_filter.info.value()[], offset, length
             )
@@ -2191,10 +2187,10 @@ def _top_flags(flags: List[Bool], maintain_order: Bool) -> List[Bool]:
 
 @fieldwise_init
 struct _TopScanFilter(Copyable, Movable):
-    """A TopN's dynamic filter on its first sort column, pushed into the
-    scan (`TopN::PushdownDynamicFilters`): `info` checks it against the
-    source's statistics, `dynamic` is the shared constant the sinks set,
-    `op` its comparison."""
+    """A TopN's dynamic filter on its first sort column, pushed into the scan,
+    so the scan skips rows (and whole vectors, by statistics) that cannot enter
+    the heap: `info` checks it against the source's statistics, `dynamic` is the
+    shared constant the sinks set, `op` its comparison."""
 
     var info: Optional[ArcPointer[ScanFilterInfo]]
     var dynamic: Optional[ArcPointer[DynamicFilterData]]
@@ -2669,10 +2665,10 @@ def _finish_with_steps(
 
 
 struct PipelineRun(Movable):
-    """A morsel pipeline between `begin_pipeline` and `finish_pipeline`:
-    its workers' jobs (the execute tasks `Pipeline::Schedule` makes, one
-    per thread) and what its finish reads. Lives on one thread at each
-    stage but its execute, where each task has its own job."""
+    """A morsel pipeline between `begin_pipeline` and `finish_pipeline`: its
+    workers' jobs (the execute tasks, one per thread) and what its finish reads.
+    Lives on one thread at each stage but its execute, where each task has its
+    own job."""
 
     var jobs: List[_PipelineJob]
     var cursor: _Cursor
@@ -2805,7 +2801,8 @@ struct PipelineRun(Movable):
             var last = self.outer_steps[len(self.outer_steps) - 1]
             self.next_round += 1
             ref step = self.steps[j]
-            # One morsel per chunk of the table's rows (ScanFullOuter).
+            # One morsel per chunk of the table's rows, for the scan of
+            # unmatched (or matched) build rows.
             var ranges = List[Int]()
             for c in range(self.indexes[][step.join].value().chunk_count()):
                 ranges.append(c)
@@ -2878,11 +2875,10 @@ def begin_pipeline(
     source: Optional[ArcPointer[ScanSource]] = None,
     source_rows: Int = -1,
 ) raises -> PipelineRun:
-    """`run_pipeline` up to its workers' jobs, not yet run: its execute
-    stage is the jobs, as `Pipeline::Schedule` makes one task per thread;
-    `finish_pipeline` is its finish, after the rounds of `begin_round`.
-    With a file `source`, `frame` holds its columns but no row: the
-    workers take the source's batches as their morsels, and
+    """`run_pipeline` up to its workers' jobs, not yet run: its execute stage is
+    the jobs, one task per thread; `finish_pipeline` is its finish, after the
+    rounds of `begin_round`. With a file `source`, `frame` holds its columns but
+    no row: the workers take the source's batches as their morsels, and
     `source_rows` is its estimated height."""
     trace_path("pipeline.run")
     # Every step's input columns and the output, typed once, and the
@@ -3085,8 +3081,8 @@ def begin_pipeline(
             and indexes[][step.join]
         ):
             indexes[][step.join].value().reset_found()
-    # One job per morsel at most: a tiny source (PDS-H q2's five-row
-    # region frame) runs on the caller, with no crew dispatch to wait on.
+    # At most one job per two morsels: a tiny source (three morsels or fewer)
+    # runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
     if source:
         # A file's batches are not known ahead: every worker scans.
@@ -3132,8 +3128,8 @@ def begin_pipeline(
         trace_path("pipeline.ungrouped_sink")
         for w in range(len(jobs)):
             jobs[w].runner.ungrouped_layout.append(ungrouped[0])
-    # The aggregate table (one grouping): each worker's table takes the
-    # last step's chunks (`PhysicalHashAggregate::Sink`).
+    # The aggregate table (one grouping): each worker's table takes the last
+    # step's chunks, so workers never share a table while sinking.
     if len(layout) > 0 and len(sets) == 0:
         var empty = schemas[][len(steps)].copy()
         var empty_keys = List[Series](capacity=len(keys))
@@ -3184,8 +3180,9 @@ def begin_pipeline(
     var collects = (
         len(expressions) > 0 and len(layout) == 0 and len(ungrouped) == 0
     )
-    # No reduction and no top-N: the rows are the result, each worker's
-    # chunks copied into its collections (PhysicalBatchCollector).
+    # No reduction and no top-N: the rows are the result, each worker's chunks
+    # copied into its collections, numbered by morsel so the finish restores
+    # source order.
     if (len(expressions) == 0 and top <= 0) or collects:
         for w in range(len(jobs)):
             jobs[w].runner.materializes = True

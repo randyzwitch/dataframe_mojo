@@ -63,10 +63,12 @@ from dataframe.table_filter import (
     table_filters,
 )
 
-# RelationStatisticsHelper::DEFAULT_SELECTIVITY: the rows a filter keeps
-# when nothing measures it.
+# The share of rows a filter keeps when nothing measures it: a guess, low enough
+# that a filtered input looks smaller than an unfiltered one (filters usually
+# remove most rows) without assuming it is tiny. An empirical choice.
 comptime DEFAULT_SELECTIVITY = 0.2
-# DistinctCountSource.
+# Where a distinct count came from: the row count or the min/max span (upper
+# bounds), a sketch of the values (an estimate), or an exact count.
 comptime COUNT_CARDINALITY = 0
 comptime COUNT_MIN_MAX = 1
 comptime COUNT_HLL = 2
@@ -89,7 +91,8 @@ struct DistinctCount(Copyable, ImplicitlyCopyable, Movable):
         return self.count >= 0
 
     def reliable(self) -> Bool:
-        """`IsReliableDistinctCount`: a HyperLogLog or exact count."""
+        """Whether the count measured the values: a HyperLogLog or exact count,
+        not a bound."""
         return self.source == COUNT_HLL or self.source == COUNT_EXACT
 
 
@@ -110,11 +113,12 @@ struct PlanStatistics(Movable):
 def estimate_distinct_cardinality(
     counts: List[Int], input_cardinality: Int
 ) -> Int:
-    """`EstimateDistinctCardinality`: the groups so many distinct values per
-    key give over `input_cardinality` rows. The keys' counts multiply, each
-    key after the first taking 5% off for correlation, and that many
-    values drawn from the rows give product * (1 - e^(-rows / product)),
-    at most the rows; half the rows with no counts."""
+    """The groups so many distinct values per key give over `input_cardinality`
+    rows. The keys' counts multiply, each key after the first taking 5% off
+    because keys grouped together are usually correlated (an empirical
+    discount). Drawing `rows` values at random from `product` possible groups
+    hits product * (1 - e^(-rows / product)) distinct ones on average, at most
+    the rows; half the rows with no counts, a guess."""
     if len(counts) == 0:
         return input_cardinality // 2
     var product = 1.0
@@ -152,9 +156,9 @@ def _scan_under_filters(self: QueryContext, index: Int) -> Int:
 def _equality_rows(
     nodes: List[FilterNode], at: Int, cardinality: Int, count: DistinctCount
 ) -> Int:
-    """`InspectTableFilter` over node `at` of a table filter: an equality
-    with a constant keeps the rows over the column's distinct count, a
-    conjunction the fewest any part keeps, anything else every row."""
+    """The rows node `at` of a table filter keeps: an equality with a constant
+    keeps the rows over the column's distinct count, a conjunction the fewest
+    any part keeps, anything else every row."""
     ref node = nodes[at]
     if node.kind == CONJUNCTION_AND:
         var rows = cardinality
@@ -171,9 +175,9 @@ def _equality_rows(
 def _filter_chain_rows(
     self: QueryContext, mut stats: PlanStatistics, index: Int, scan: Int
 ) raises -> Int:
-    """Rows the chain of filters at `index` keeps of the table scan `scan`
-    under it (`ExtractGetStats`): each part reading one of its columns is
-    a table filter, the rest one filter above the scan."""
+    """Rows the chain of filters at `index` keeps of the table scan `scan` under
+    it: each part reading one of its columns is a table filter, the rest one
+    filter above the scan."""
     var table = self._frames[self._nodes[scan].source_slot()].copy()
     var base = table.height()
     var parts = List[Expr]()
@@ -207,10 +211,9 @@ def _filter_chain_rows(
             var bounds = series_statistics(column)
             if bounds and len(filter.nodes) > 0:
                 var proven = check_statistics(filter, bounds.value())
-                # A filter the statistics prove keeps no row makes the
-                # scan an empty result (StatisticsPropagator's
-                # `PropagateTableFilter`: FILTER_ALWAYS_FALSE or
-                # FILTER_FALSE_OR_NULL, `ReplaceWithEmptyResult`).
+                # A filter the statistics prove keeps no row
+                # (FILTER_ALWAYS_FALSE or FILTER_FALSE_OR_NULL: a null result
+                # drops the row too) makes the scan an empty result.
                 if (
                     proven == FILTER_ALWAYS_FALSE
                     or proven == FILTER_FALSE_OR_NULL
@@ -240,9 +243,8 @@ def _filter_chain_rows(
 def plan_cardinality(
     self: QueryContext, mut stats: PlanStatistics, index: Int
 ) raises -> Int:
-    """Rows node `index` yields, estimated from statistics before anything
-    runs (`RelationStatisticsHelper::ExtractOperatorStats`); -1 when an
-    input has none (a file scan, an operator with no estimate)."""
+    """Rows node `index` yields, estimated from statistics before anything runs;
+    -1 when an input has none (a file scan, an operator with no estimate)."""
     if index < 0:
         return -1
     if index in stats.rows:
@@ -274,8 +276,8 @@ def _cardinality(
         or kind == UNNEST
         or (kind == SELECT and _stream_rows(node))
     ):
-        # Projections and windows keep their input's rows; so do unnests
-        # (`ExtractUnnestStats`).
+        # Projections and windows keep their input's rows; so do unnests, for
+        # lack of a measure of the lists' lengths.
         return plan_cardinality(self, stats, node.left)
     if kind == SORT or kind == SLICE or kind == TAIL:
         # A limit keeps at most its count (`LOGICAL_LIMIT`).
@@ -322,7 +324,8 @@ def _cardinality(
         # The build side is the output (the left input probes).
         return plan_cardinality(self, stats, node.right)
     if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
-        # `CalculateSemiAntiJoinDenom`: a fifth of the left rows.
+        # A fifth of the left rows (SEMI_ANTI_SELECTIVITY), with nothing
+        # measuring how many find a match.
         return (
             max(Int(Float64(left) / SEMI_ANTI_SELECTIVITY), 1) if left
             > 0 else 0
@@ -345,9 +348,9 @@ def _cardinality(
 
 
 def _total_domain(a: DistinctCount, b: DistinctCount) -> Int:
-    """`DomainEstimate::GetDistinctCount` over a key pair: the larger
-    reliable count, else the larger bounds count, else the smaller
-    fallback count; 1 when neither side has one."""
+    """The distinct keys two joined columns can share, for estimating the join's
+    rows: the larger reliable count, else the larger bounds count, else the
+    smaller fallback count; 1 when neither side has one."""
     var reliable = -1
     var bounded = -1
     var fallback = -1
@@ -368,9 +371,8 @@ def _total_domain(a: DistinctCount, b: DistinctCount) -> Int:
 
 
 def _group_keys(self: QueryContext, node: PlanNode) raises -> List[String]:
-    """The columns an aggregate groups by: an aggregate's keys, the
-    largest grouping set's (`ExtractAggregationStats`), a unique's subset
-    or every input column (`ExtractDistinctStats`)."""
+    """The columns an aggregate groups by: an aggregate's keys, the largest
+    grouping set's, a unique's subset or every input column."""
     if node.kind == AGG:
         return node.names.copy()
     if node.kind == UNIQUE:
@@ -422,9 +424,8 @@ def plan_distinct(
 def _scan_distinct(
     self: QueryContext, index: Int, name: String
 ) raises -> DistinctCount:
-    """`GetDistinctCountFromStats` for a table column: its HyperLogLog
-    count, else its integer bounds' span (`GetMinMaxDistinctCount`), else
-    the table's rows."""
+    """A table column's distinct count: its HyperLogLog count, else its integer
+    bounds' span (no more values fit between them), else the table's rows."""
     var slot = self._nodes[index].source_slot()
     ref table = self._frames[slot]
     if name not in table.columns():
@@ -518,7 +519,8 @@ def _distinct(
         return _relation_count(self, stats, index)
     if kind != JOIN:
         return DistinctCount.unknown()
-    # A join's column keeps its side's count (`ProjectChildStats`).
+    # A join's column keeps its side's count: a join repeats or drops values but
+    # makes no new ones.
     if node.how == JOIN_RIGHT_SEMI or node.how == JOIN_RIGHT_ANTI:
         return plan_distinct(self, stats, node.right, name)
     if _has_column(self, node.left, name):

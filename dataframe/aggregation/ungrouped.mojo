@@ -458,9 +458,8 @@ struct UngroupedSink(Sink):
                 continue
             var format = self._format(s, chunk, arena)
             if kind == _K_DISTINCT:
-                # The input's vector, as a group key, into the distinct
-                # table (`SinkDistinct`); its strings are held with this
-                # sink's (`_format`).
+                # The input's vector, as a group key, into the distinct table;
+                # its strings are held with this sink's (`_format`).
                 self.distinct[self.distinct_of[s]].sink_vectors(
                     [KeyVector.of(format)],
                     List[UnifiedVectorFormat](),

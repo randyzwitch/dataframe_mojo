@@ -536,9 +536,10 @@ def _seek_cut(points: List[UInt32], target: UInt32, var lo: Int) -> Int:
 
 
 def _build_alphabet(mut program: Program):
-    """Partition code points into classes no instruction tells apart: cut
-    at every range edge, then give intervals that belong to the same sets
-    the same class (regex-automata's `ByteClassSet`, over code points)."""
+    """Partition code points into classes no instruction tells apart: cut at
+    every range edge, then give intervals that belong to the same sets the same
+    class. Matching then steps on a class, not a code point, so tables are
+    indexed by a few classes."""
     var sets = List[List[UInt32]]()
     for pc in range(len(program)):
         var op = program.op[pc]

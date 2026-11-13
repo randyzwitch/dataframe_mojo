@@ -264,7 +264,7 @@ def test_a_filter_comparing_two_relations_is_an_edge_of_the_estimate() raises:
     var unordered = order_joins(rows, domains, edges, distinct)
     var unfiltered = unordered.take()
     assert_equal(unfiltered.mask[4], 0b1100)
-    # The comparison is an edge (`CreateHyperGraphEdges`): its domain, the
+    # The comparison is an edge: its domain, the
     # larger count 12500, is met first and divides by 12500^(2/3); the
     # state edge is then left over and doubles the denominator.
     var filters: List[FilterEdge] = [
@@ -279,7 +279,7 @@ def test_a_filter_comparing_two_relations_is_an_edge_of_the_estimate() raises:
     assert_equal(ordered.mask[4], 0b0011)
 
 
-def test_distinct_estimates_sample_like_duckdb_and_skip_booleans() raises:
+def test_distinct_estimates_sample_rows_and_skip_booleans() raises:
     var n = 100_000
     var few = List[Int64]()
     var unique = List[Int64]()
@@ -352,7 +352,7 @@ def test_joins_over_tables_with_statistics_match_the_written_order() raises:
     assert_frame(query.collect(), eager)
 
 
-def test_join_estimates_follow_duckdbs_relation_statistics() raises:
+def test_join_estimates_follow_join_kind_rules() raises:
     # Verify the estimator's join-kind rules: outer joins use the larger input
     # estimate, semi/anti joins retain a fifth of the left estimate, and inner
     # joins divide input-row products by the shared key domain.
@@ -380,7 +380,7 @@ def test_join_estimates_follow_duckdbs_relation_statistics() raises:
 def test_an_aggregate_over_joins_is_estimated_from_its_keys_counts() raises:
     # An aggregate over joined tables with statistics: its keys keep their
     # tables' HyperLogLog counts through the joins, and its groups are
-    # `EstimateDistinctCardinality` of them over the joined rows.
+    # estimated from them over the joined rows.
     var t = tables()
     var fact = t[0].collect()._with_statistics()
     var products = t[1].collect()._with_statistics()
@@ -410,7 +410,7 @@ def test_an_aggregate_over_joins_is_estimated_from_its_keys_counts() raises:
         (40_000 + amounts - 1) // amounts,
     )
     # With a table's segment statistics, a filter they prove keeps no row
-    # is an empty relation (`StatisticsPropagator`).
+    # is an empty relation.
     var stored = t[0].collect()._with_statistics()._with_storage_statistics()
     var none = stored.lazy().filter(col("f_amount") > lit(Int64(1000)))
     assert_equal(none._estimate(len(none._plan._nodes) - 1), 0)
@@ -511,7 +511,7 @@ def test_join_key_distinct_counts_follow_renames_to_their_table_column() raises:
 
 
 def test_a_semi_join_runs_before_inner_joins_its_keys_do_not_read() raises:
-    # TPC-DS q35's shape: customers joined to addresses and demographics,
+    # Customers joined to addresses and demographics,
     # then a semi join on the customer key. The semi join's conflict
     # rules ask only for the customers (inner joins below it associate),
     # so it can run first and the joins after it see a fifth of the rows.
@@ -696,7 +696,7 @@ def test_one_table_slices_are_not_shared() raises:
 
 
 def test_a_filtered_relation_streaming_into_a_build_is_not_run_ahead() raises:
-    # PDS-H q3's shape: filtered customers, orders and lines. Planning
+    # Filtered customers, orders and lines. Planning
     # estimates every relation from statistics and runs none of them
     # ahead: each filter runs once, in the pipeline the plan puts it in.
     var customer = List[Int64]()

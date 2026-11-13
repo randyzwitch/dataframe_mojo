@@ -4,17 +4,18 @@ Ported from DuckDB's third_party sources over this package's key records
 (`SortKeys`): pdqsort_branchless (pdqsort.h, Orson Peters), vergesort
 (vergesort.h, Morwenn) with the merge policy of
 common/sorting/buffered_merge.hpp, and the in-place MSD radix sort of
-ska_sort.hpp (Malte Skarupke, with DuckDB's changes: radix passes over the
-first key word only, skippable bytes, and a vergesort over the full
-comparison for a bucket whose first word is equal). Constants are theirs:
-pdqsort's insertion threshold 24, ninther threshold 128, block 64;
-vergesort's minimum 128; ska_sort's comparison threshold 128 and American
-flag threshold 1024.
+ska_sort.hpp (Malte Skarupke, with DuckDB's changes: radix passes over the first
+key word only, skippable bytes, and a vergesort over the full comparison for a
+bucket whose first word is equal). The constants are the original authors'
+empirically tuned values: pdqsort's insertion threshold 24, ninther threshold
+128, block 64; vergesort's minimum 128; ska_sort's comparison threshold 128 and
+American flag threshold 1024.
 
-`sorted_run.cpp` sorts a run with `vergesort(fallback = ska_sort)`, and
-`sorted_run_merger.cpp` merges a partition with
-`vergesort(fallback = pdqsort_branchless)`; `vergesort` takes the choice as
-`RADIX`.
+vergesort finds the input's existing sorted runs in linear time and sorts only
+the stretches between them with its fallback. A run of unsorted rows falls back
+to the radix sort, which beats comparison sorts on many fixed-width keys; a
+merge partition, a few already sorted pieces, falls back to
+`pdqsort_branchless`. `vergesort` takes the choice as `RADIX`.
 """
 from std.bit import byte_swap, log2_floor
 from std.memory import Pointer, unsafe_memcmp
@@ -33,11 +34,11 @@ comptime _AMERICAN_FLAG_SORT_THRESHOLD = 1024
 
 
 struct SortKeys[W: Int, VAR: Bool](ImplicitlyCopyable, Movable):
-    """Key records at `base`, `R` words each (sort_key.hpp's SortKey with
-    a payload). Fixed: `W` key words, then the payload (the row id).
-    Variable (`VAR`): the key's first 8 bytes, its byte size, the address
-    of the whole key, then the payload. Key words are stored so that
-    unsigned word order is the key bytes' order."""
+    """Key records at `base`, `R` words each (a normalized key with a payload).
+    Fixed: `W` key words, then the payload (the row id). Variable (`VAR`): the
+    key's first 8 bytes, its byte size, the address of the whole key, then the
+    payload. Key words are stored so that unsigned word order is the key bytes'
+    order."""
 
     comptime R = 4 if Self.VAR else Self.W + 1
     var base: Int
@@ -86,9 +87,9 @@ struct SortKeys[W: Int, VAR: Bool](ImplicitlyCopyable, Movable):
     def less(a: Rec, b: Rec) -> Bool:
         """`operator<` of the key (the payload never takes part)."""
         comptime if Self.VAR:
-            # VariableSortKey: the inlined bytes first; when they are
-            # equal and either key is no longer than them, the shorter one
-            # is less; otherwise the whole keys.
+            # Variable-size keys: the inlined bytes first; when they are equal
+            # and either key is no longer than them, the shorter one is less;
+            # otherwise the whole keys.
             if a[0] != b[0]:
                 return a[0] < b[0]
             if a[1] <= 8 or b[1] <= 8:
@@ -112,10 +113,9 @@ struct SortKeys[W: Int, VAR: Bool](ImplicitlyCopyable, Movable):
 
 
 struct MergeBuffer(Movable):
-    """SortMergeBuffer: scratch for half the keys of a sort plus one
-    (`MaximumKeyCount`), so every merge of two sorted ranges moves its
-    smaller side out and merges in one pass. In memory the allocation
-    cannot come up short, so the rotation fallback of BufferedMerge is not
+    """Scratch for half the keys of a sort plus one, so every merge of two
+    sorted ranges moves its smaller side out and merges in one pass. In memory
+    the allocation cannot come up short, so no in-place rotation fallback is
     needed."""
 
     var data: List[UInt64]
@@ -427,15 +427,16 @@ def pdqsort_branchless[
 
 
 # ===----------------------------------------------------------------------=== #
-# BufferedMerge and vergesort
+# Buffered merge and vergesort
 # ===----------------------------------------------------------------------=== #
 
 
 def buffered_merge[
     W: Int, VAR: Bool
 ](k: SortKeys[W, VAR], first: Int, middle: Int, last: Int, buffer: Int):
-    """Merge sorted [first, middle) and [middle, last) through `buffer`,
-    which holds the smaller side (BufferedMerge's buffered cases)."""
+    """Merge sorted [first, middle) and [middle, last) through `buffer`, which
+    holds the smaller side: only the smaller side is copied out, and the merge
+    writes into the space it left."""
     comptime K = SortKeys[W, VAR]
     var left_count = middle - first
     var right_count = last - middle
@@ -626,11 +627,11 @@ def vergesort[
 
 @fieldwise_init
 struct SkaInfo(ImplicitlyCopyable, Movable):
-    """SkaExtractKey's settings: whether a bucket equal in the first key
-    word still needs the full comparison, how many bytes of that word the
-    radix passes read (`ska_sort_width`), and the bytes every key shares
-    (`sort_skippable_bytes`: null bytes of columns that hold no null),
-    as a bit mask over the eight byte offsets."""
+    """The radix sort's settings: whether a bucket equal in the first key word
+    still needs the full comparison, how many bytes of that word the radix
+    passes read (`ska_sort_width`), and the bytes every key shares
+    (`sort_skippable_bytes`: null bytes of columns that hold no null), as a bit
+    mask over the eight byte offsets."""
 
     var requires_next_sort: Bool
     var ska_sort_width: Int
@@ -643,7 +644,7 @@ struct SkaInfo(ImplicitlyCopyable, Movable):
 
 @fieldwise_init
 struct _scratch[D: DType](ImplicitlyCopyable):
-    """An array on the caller's stack (PartitionInfo partitions[256])."""
+    """An array on the caller's stack (one entry per byte value)."""
 
     var address: Int
 
@@ -684,8 +685,8 @@ def _std_sort_if_less_than_threshold[
 def _next_sort[
     W: Int, VAR: Bool
 ](k: SortKeys[W, VAR], begin: Int, end: Int, info: SkaInfo, buffer: Int):
-    """StdSortFallback: a bucket equal in the first key word, by the full
-    comparison."""
+    """A bucket equal in the first key word, by the full comparison: the radix
+    passes cannot tell its keys apart."""
     vergesort[W, VAR, False](k, begin, end, info, buffer)
 
 
@@ -699,7 +700,9 @@ def _inplace_sort[
     info: SkaInfo,
     buffer: Int,
 ):
-    """UnsignedInplaceSorter<..., 8, Offset>::sort."""
+    """Sort [begin, end) in place by byte `offset` of the first key word onward:
+    skip a byte every key shares, use an American flag sort on a short range,
+    else a ska_sort pass."""
     if offset == 8:
         if info.requires_next_sort:
             _next_sort(k, begin, end, info, buffer)
