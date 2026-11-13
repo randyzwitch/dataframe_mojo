@@ -588,8 +588,8 @@ def _encode_dense_parts[
     # A table no larger than a few times the input: a small bucket of a
     # partitioned group-by should not clear a 512 KB table to encode it.
     # A large input may span as many integers as it has rows, up to the
-    # 16-bit keys' 512 KB table: TPC-DS's 18K item keys over 611K rows
-    # hashed at 13 ns a row under the 4,096 span measured for buckets.
+    # 16-bit keys' 512 KB table: a direct table that size is still
+    # cheaper than hashing every row when the rows outnumber its slots.
     var limit = min(
         max(_dense_span_limit[D](), min(n, 1 << 16)), max(4096, 4 * n)
     )

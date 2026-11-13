@@ -206,9 +206,9 @@ def plan_lower_right_joins(mut self: QueryContext) raises:
 def plan_eliminate_common_subexpressions(mut self: QueryContext) raises:
     """Compute a repeated row-local subexpression once. An aggregation
     or projection that reads it multiple times uses a temporary column
-    produced by a `with_columns` node below it. For example, TPC-DS
-    q99's five delay buckets compare the same date difference nine
-    times."""
+    produced by a `with_columns` node below it. For example, several
+    `when` buckets that compare the same date difference compute that
+    difference once."""
     var count = len(self._nodes)
     var changed = False
     for i in range(count):

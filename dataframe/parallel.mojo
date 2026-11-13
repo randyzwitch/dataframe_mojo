@@ -933,8 +933,8 @@ struct _Crew(Movable):
         a schedule nested in a task of this one, or one running beside
         it. Never an older one, which may be waiting on this one's
         caller; holding a nested schedule's workers back from every
-        thread running the outer one left the nested schedule on its
-        caller alone (TPC-DS, 1.22x)."""
+        thread running the outer one would leave the nested schedule
+        on its caller alone."""
         for q in range(_POSTINGS):
             if q == own:
                 continue

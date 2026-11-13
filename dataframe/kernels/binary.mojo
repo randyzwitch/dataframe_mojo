@@ -1308,9 +1308,9 @@ def _decimal_binary[
 ](left: Series, right: Series, mask: List[Bool]) raises -> Series:
     comptime if is_comparison(op):
         # A comparison cannot fail on an inactive row, and its results
-        # there go unread: compare every row on the unmasked paths. The
-        # masked per-row path made PDS-H decimal q6 4.5 times slower once
-        # filter parts ran under an AND's mask.
+        # there go unread: compare every row on the unmasked paths,
+        # which are vectorized, rather than the masked per-row path,
+        # which filter parts under an AND's mask would otherwise take.
         if len(mask) > 0:
             return _decimal_binary[op](left, right, List[Bool]())
     comptime if op == DIV:

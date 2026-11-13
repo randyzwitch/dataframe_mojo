@@ -552,8 +552,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         """A decimal32 column widened to decimal64 with the same precision,
         scale and nulls; anything else as it is. The decimal64 kernels
         (typed compares, dense arithmetic) then cover it, where widening
-        to 128 bits sent it down the per-row path (TPC-DS decimal q13:
-        1.34x the DOUBLE variant)."""
+        to 128 bits sends it down the slower per-row path."""
         var dtype = self.dtype()
         if not dtype.is_decimal() or dtype.decimal_width() != 32:
             return self.copy()
