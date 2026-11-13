@@ -104,7 +104,7 @@ def test_running_min_and_max_keep_every_integer_storage_type() raises:
 
 
 def test_window_expressions_over_one_key_share_its_layout() raises:
-    """TPC-DS q51's shape: a running count and a running max over the same
+    """A running count and a running max over the same
     key in one select, the max over values filled with the partition's
     minimum (a nested over()), as decimal128."""
     var typed = frame().with_columns(
