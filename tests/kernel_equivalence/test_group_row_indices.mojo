@@ -51,7 +51,7 @@ def _assert_same(narrow: GroupRows, wide: GroupRows, height: Int) raises:
                 assert_true(a[g][k - 1] < a[g][k])
 
 
-def _int_keys(n: Int) -> List[Series]:
+def _int_keys(n: Int) raises -> List[Series]:
     var values = List[Int64](capacity=n)
     var valid = List[Bool](capacity=n)
     for row in range(n):
@@ -60,7 +60,7 @@ def _int_keys(n: Int) -> List[Series]:
     return [Series("k", Column[Int64](values^, valid^))]
 
 
-def _string_keys(n: Int) -> List[Series]:
+def _string_keys(n: Int) raises -> List[Series]:
     var values = List[String](capacity=n)
     for row in range(n):
         values.append("key" + String((row * 31) % 23))
@@ -112,8 +112,10 @@ def test_writes_and_ids_match_at_both_index_widths() raises:
     for g in range(17):
         values.append(Int64(100 + g))
     var per_group = Series("v", Column[Int64](values^))
-    var a = write_by_groups(per_group, narrow, n, 4).value()
-    var b = write_by_groups(per_group, wide, n, 4).value()
+    var written_a = write_by_groups(per_group, narrow, n, 4)
+    var written_b = write_by_groups(per_group, wide, n, 4)
+    var a = written_a.take()
+    var b = written_b.take()
     var a_ids = group_ids(narrow, n, 4)
     var b_ids = group_ids(wide, n, 4)
     for row in range(n):
