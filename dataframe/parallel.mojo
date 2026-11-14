@@ -1173,6 +1173,12 @@ struct Crew(Movable):
         )[]
         var mine = Int64(self.address)
         _ = _current_crew().compare_exchange(mine, Int64(0))
+        # Threads still being created are waited for and parked with the
+        # rest: stopping them instead would make the next operation create
+        # them all again, so an operation shorter than the creation of the
+        # crew (a small eager call) would pay it every time.
+        while state.spawned.load() == 1:
+            _ = external_call["sched_yield", Int32]()
         if state.spawned.load() == 2 and state.threads > 0:
             var none = Int64(0)
             if _parked_crew().compare_exchange(none, Int64(self.address)):

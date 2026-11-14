@@ -25,7 +25,7 @@ from dataframe.binding import (
 from dataframe.dtype import (
     DataType,
 )
-from dataframe.execution import _ColumnStats, _ReduceJob
+from dataframe.execution import _ColumnStats, _ReduceInputs, _ReduceJob
 from dataframe.expr import (
     COL,
     CORR,
@@ -692,10 +692,14 @@ struct _StreamReduction(Movable):
         var column_stats = ArcPointer(List[_ColumnStats]())
         for r in range(len(plan.bounds)):
             var job = _ReduceJob[8](
-                plan.bounds[r],
-                frame._columns,
-                List[Series](),
-                plan.bounds[r].expr._nodes[plan.nodes[r]],
+                ArcPointer(
+                    _ReduceInputs(
+                        plan.bounds[r],
+                        frame._columns,
+                        List[Series](),
+                        plan.bounds[r].expr._nodes[plan.nodes[r]],
+                    )
+                ),
                 0,
                 frame.height(),
                 _reduction_batch(),
