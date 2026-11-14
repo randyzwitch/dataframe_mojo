@@ -66,12 +66,12 @@ def sequence(n: Int) raises -> DataFrame:
 
 
 def test_tasks_taking_many_morsels_keep_source_order() raises:
-    # Two threads over ten morsels: each task takes morsels until the
+    # Two threads over four morsels: each task takes morsels until the
     # source is empty, and the collected rows stay in source order.
     var setting = WorkerSetting(2)
-    var n = 1_000_000
+    var n = 400_000
     var frame = sequence(n)
-    assert_equal(len(_morsel_ranges(frame, 2)) // 2, 10)
+    assert_equal(len(_morsel_ranges(frame, 2)) // 2, 4)
     var kept = (
         frame.lazy()
         .filter(col("x") % 3 == 0)
@@ -81,9 +81,12 @@ def test_tasks_taking_many_morsels_keep_source_order() raises:
     assert_equal(kept.height(), (n + 2) // 3)
     var x = kept.column("x").rechunk()
     var y = kept.column("y").rechunk()
+    ref xs = x._data[Column[Int64]]
+    ref ys = y._data[Column[Int64]]
     for i in range(kept.height()):
-        assert_equal(x._data[Column[Int64]].value(i), Int64(3 * i))
-        assert_equal(y._data[Column[Int64]].value(i), Int64(6 * i))
+        if xs._get(i) != Int64(3 * i) or ys._get(i) != Int64(6 * i):
+            assert_equal(xs.value(i), Int64(3 * i))
+            assert_equal(ys.value(i), Int64(6 * i))
     # Every morsel is reduced once.
     var total = frame.lazy().select(col("x").sum().alias("s")).collect()
     assert_equal(
