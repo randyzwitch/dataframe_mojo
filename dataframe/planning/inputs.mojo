@@ -4,17 +4,10 @@ from dataframe.frame import (
 )
 from dataframe.joins.hash_table import (
     JoinHashTable,
-    keys_only_join,
+    build_from_columns,
+    join_build_layout,
 )
-from dataframe.dtype import DataType
-from dataframe.join_type import (
-    JOIN_ANTI,
-    JOIN_INNER,
-    JOIN_RIGHT_ANTI,
-    JOIN_RIGHT_SEMI,
-    JOIN_SEMI,
-    join_emits_build_rows,
-)
+from dataframe.join_type import JOIN_INNER
 from dataframe.parallel import configured_workers
 from dataframe.scheduler import (
     SchedulablePipeline,
@@ -41,67 +34,35 @@ def finish_build(
     how: Int,
     coalesce: Bool = True,
     probe_estimate: Int = -1,
+    build_filtered: Bool = False,
     defer_finalize: Bool = False,
 ) raises -> Optional[JoinHashTable]:
     """Finish a join build by retaining its columns and constructing its key
     index. Return no index for absent or unsupported keys. Semi/anti joins
     need no build payload because they emit only the preserved side.
-    probe_estimate describes the expected probe cardinality.
+    probe_estimate describes the expected probe cardinality, and
+    build_filtered whether the build side filters its rows.
     `defer_finalize`: the caller's finish event runs the table's finalize
     tasks (`JoinHashTable.finalize_tasks`)."""
     for column in built._columns:
         if column.is_chunked():
             built = built.rechunk()
             break
-    if len(keys) == 0:
+    if len(keys) == 0 or built.height() > Int(Int32.MAX):
         return None
-    var sources = List[Series]()
-    var supported = built.height() <= Int(Int32.MAX)
-    for name in keys:
-        var key = built[name]
-        supported = supported and not key.dtype().is_nested()
-        sources.append(key.copy())
-    if not supported:
+    var layout = join_build_layout(
+        built._columns,
+        keys,
+        how,
+        coalesce,
+        probe_estimate,
+        False,
+        build_filtered=build_filtered,
+    )
+    if not layout:
         return None
-    var emits = how != JOIN_SEMI and how != JOIN_ANTI
-    var payload = List[Series]()
-    var output_columns = List[Int]()
-    var output_names = List[String]()
-    var output_types = List[DataType]()
-    for i in range(built.width()):
-        ref column = built._columns[i]
-        var key_at = -1
-        for k in range(len(keys)):
-            if keys[k] == column.name():
-                key_at = k
-        if key_at < 0:
-            # A payload column: in the rows, strings and nested values in
-            # their heap.
-            if emits:
-                payload.append(column.copy())
-                output_columns.append(len(keys) + len(payload) - 1)
-                output_names.append(column.name())
-                output_types.append(column.dtype())
-            continue
-        # A key column: read from its own field where the join outputs it.
-        if not emits:
-            continue
-        if coalesce and how != JOIN_RIGHT_SEMI and how != JOIN_RIGHT_ANTI:
-            continue
-        output_columns.append(key_at)
-        output_names.append(column.name())
-        output_types.append(column.dtype())
-    return JoinHashTable(
-        sources,
-        payload=Optional(payload^),
-        output_columns=output_columns,
-        output_names=output_names,
-        output_types=output_types,
-        perfect=how == JOIN_INNER,
-        keys_only=keys_only_join(how),
-        probe_estimate=probe_estimate,
-        propagate=join_emits_build_rows(how),
-        defer_finalize=defer_finalize,
+    return build_from_columns(
+        ArcPointer(layout.take()), built._columns, defer_finalize
     )
 
 
@@ -121,6 +82,7 @@ struct _SubplanPipeline(SchedulablePipeline):
     var how: Int
     var coalesce: Bool
     var probe_estimate: Int
+    var build_filtered: Bool
     var built: Optional[JoinHashTable]
 
     def __init__(
@@ -133,6 +95,7 @@ struct _SubplanPipeline(SchedulablePipeline):
         how: Int = JOIN_INNER,
         coalesce: Bool = True,
         probe_estimate: Int = -1,
+        build_filtered: Bool = False,
     ) raises:
         self.plan = plan^
         # Its own memo: nested prefetches on other threads never share one.
@@ -148,6 +111,7 @@ struct _SubplanPipeline(SchedulablePipeline):
         self.how = how
         self.coalesce = coalesce
         self.probe_estimate = probe_estimate
+        self.build_filtered = build_filtered
         self.built = None
 
     def initialize(mut self) raises:
@@ -175,6 +139,7 @@ struct _SubplanPipeline(SchedulablePipeline):
                 self.how,
                 self.coalesce,
                 self.probe_estimate,
+                self.build_filtered,
                 defer_finalize=True,
             )
 

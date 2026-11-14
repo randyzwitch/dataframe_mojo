@@ -85,21 +85,26 @@ struct FinishAbove(Movable):
 
 struct _ReadyIndex(Copyable, Movable):
     """A prefetched build side's hash table, the keys it hashes and the
-    join type it was finished for (`finish_build`)."""
+    join type it was finished for (`finish_build`), and whether the build's
+    rows are only in the table (`rows_only`: its pipeline sank them there,
+    and its prefetched result is the build's columns, empty)."""
 
     var keys: List[String]
     var how: Int
     var index: JoinHashTable
+    var rows_only: Bool
 
     def __init__(
         out self,
         keys: List[String],
         how: Int,
         var index: JoinHashTable,
+        rows_only: Bool = False,
     ):
         self.keys = keys.copy()
         self.how = how
         self.index = index^
+        self.rows_only = rows_only
 
 
 struct QueryContext(Copyable, Deinitable, Movable):
