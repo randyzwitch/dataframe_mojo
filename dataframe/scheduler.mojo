@@ -283,6 +283,9 @@ struct _Executor[P: SchedulablePipeline](Movable):
     var parents: List[List[Int]]
     var total_dependencies: List[Int]
     var total_tasks: List[Int]
+    # Each pipeline's `max_execute_tasks`, asked once when the queue is
+    # sized.
+    var max_execute: List[Int]
     # Atomics, one per event: dependencies finished, tasks finished.
     var finished_dependencies: List[Int64]
     var finished_tasks: List[Int64]
@@ -318,6 +321,9 @@ struct _Executor[P: SchedulablePipeline](Movable):
         self.parents = List[List[Int]](capacity=len(stages))
         self.total_dependencies = List[Int](capacity=len(stages))
         self.total_tasks = List[Int](capacity=len(stages))
+        self.max_execute = List[Int](capacity=len(pipelines))
+        for p in range(len(pipelines)):
+            self.max_execute.append(max(1, pipelines[p].max_execute_tasks()))
         for s in stages:
             self.stage.append(s.type)
             self.pipeline.append(s.pipeline)
@@ -332,8 +338,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
         var outstanding = 0
         for p in range(len(pipelines)):
             outstanding += max(
-                1,
-                pipelines[p].max_execute_tasks(),
+                self.max_execute[p],
                 pipelines[p].max_finalize_tasks(),
             )
         var capacity = _queue_capacity(outstanding)
@@ -383,7 +388,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
             ref pipeline = self._pipelines()[self.pipeline[event]]
             try:
                 tasks = max(1, pipeline.execute_tasks())
-                if tasks > max(1, pipeline.max_execute_tasks()):
+                if tasks > self.max_execute[self.pipeline[event]]:
                     raise Error("more execute tasks than max_execute_tasks")
             except e:
                 self._fail(e)
@@ -523,12 +528,14 @@ struct _Executor[P: SchedulablePipeline](Movable):
         """Run queued tasks until the schedule is done. With no task queued, the
         tasks left are running on other threads: run the jobs they post to the
         crew meanwhile, else yield."""
+        # The crew is looked up once per thread, not between tasks: it
+        # stays the same while this schedule runs.
+        var crew = Int(_current_crew().load())
         while not self.finished():
             var record = self._dequeue()
             if record >= 0:
                 self._run_task(record)
                 continue
-            var crew = Int(_current_crew().load())
             if crew == 0 or not Pointer[_Crew, MutAnyOrigin](
                 unsafe_from_address=crew
             )[]._help(-1, self.stamp):
@@ -573,8 +580,7 @@ def run_pipelines[
     var width = 0
     for p in range(len(pipelines)):
         width += max(
-            1,
-            pipelines[p].max_execute_tasks(),
+            executor.max_execute[p],
             pipelines[p].max_finalize_tasks(),
         )
     var threads = min(width, configured_workers()) if parallel else 1

@@ -81,6 +81,8 @@ from dataframe.join_type import (
     JOIN_INNER,
     JOIN_LEFT,
     JOIN_RIGHT,
+    JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI,
     JOIN_SEMI,
 )
 from dataframe.joins.join_filter import (
@@ -422,12 +424,14 @@ struct _BuildFor(Copyable, Movable):
     var how: Int
     var coalesce: Bool
     var probe_estimate: Int
+    var build_filtered: Bool
 
     def __init__(out self):
         self.keys = List[String]()
         self.how = JOIN_CROSS
         self.coalesce = True
         self.probe_estimate = -1
+        self.build_filtered = False
 
 
 struct _StreamSchedule(Movable):
@@ -496,6 +500,7 @@ def _add_stream(
             inputs.hows[k],
             inputs.coalesces[k],
             inputs.probe_estimates[k],
+            inputs.build_filtered[k],
         )
         at.append(
             _add_input(
@@ -630,6 +635,7 @@ def _add_input(
                 build.how,
                 build.coalesce,
                 build.probe_estimate,
+                build.build_filtered,
             )
         )
     )
@@ -902,11 +908,11 @@ struct _StreamProbe(Movable):
 
     def finish_finalize(mut self) raises:
         """A round of finalize tasks has ended: the next round, or the
-        result. The build table's fill is the last round."""
+        result. The build table's fill is the last rounds."""
         if self.filling:
             self.built.value().finish_finalize()
-            self.filling = False
-            self.round = 0
+            self.round = self.built.value().finalize_tasks()
+            self.filling = self.round > 0
             return
         if len(self.started[0].batch) > 0:
             self.round = self.started[0].batch[0].advance()
@@ -950,14 +956,16 @@ struct _StreamProbe(Movable):
                 self.build.how,
                 self.build.coalesce,
                 self.build.probe_estimate,
+                self.build.build_filtered,
                 defer_finalize=True,
             )
             self.result = frame^
             self._fill_table()
 
     def _fill_table(mut self) raises:
-        """The built table's pointer table filled as one more round of
-        finalize tasks, each on its own partitions' regions."""
+        """The built table filled as more rounds of finalize tasks (its
+        pointer table, each task on its own partitions' regions, or a
+        perfect hash join's slots and columns)."""
         self.round = self.built.value().finalize_tasks()
         if self.round > 0:
             self.filling = True
@@ -1137,6 +1145,10 @@ def _probe_start(
     # The plan node of each join built so far.
     var join_nodes = List[Int]()
     var indexes = List[Optional[JoinHashTable]]()
+    # Set once an inner, semi or right join's build is empty: no row of the
+    # source can reach the sink, so the pipeline is set up as usual but its
+    # source yields nothing and the sink finalizes over no rows.
+    var no_output = False
     # Run union inputs through morsel pipelines into worker-local aggregate
     # tables. Discover this route before building joins below it, avoiding
     # duplicate build work.
@@ -1209,6 +1221,11 @@ def _probe_start(
                 # the build's columns, empty, which type the join's output.
                 built = self._prefetched.value()[].pop(node.right)
                 build_rows = ready.value().index.count
+            elif no_output:
+                # Rows below an empty build never reach the sink: a build
+                # not computed yet is only needed for its columns.
+                built = self._execute(node.right, True, True, batch_size)
+                build_rows = 0
             else:
                 built = self._execute(node.right, False, True, batch_size)
                 build_rows = built.height()
@@ -1216,29 +1233,17 @@ def _probe_start(
                 node.how == JOIN_INNER
                 or node.how == JOIN_SEMI
                 or node.how == JOIN_RIGHT
+                or node.how == JOIN_RIGHT_SEMI
+                or node.how == JOIN_RIGHT_ANTI
             ):
-                # Join semantics prove the result empty: finalize the sink and
-                # skip both probe work and unnecessary execution beneath the
-                # join.
-                var plan = self.copy()
-                for k in range(len(joins)):
-                    plan._frames.append(joins[k].copy())
-                    plan._schemas.append(Optional[CsvSchema]())
-                    plan._nodes.append(
-                        _frame_scan_node(slot=len(plan._frames) - 1)
-                    )
-                    plan._nodes[join_nodes[k]].right = len(plan._nodes) - 1
-                plan._frames.append(
-                    self._execute(cursor, True, False, batch_size)
-                )
-                plan._schemas.append(Optional[CsvSchema]())
-                plan._nodes[cursor] = _frame_scan_node(
-                    slot=len(plan._frames) - 1
-                )
-                trace_path("stream.empty_build")
-                return _probe_restart(
-                    plan^, index, batch_size, sink, head^, build
-                )
+                # Each output row of these joins needs a matching build
+                # row, so no probe row passes this join: the pipeline keeps
+                # its operators and sink, and its source is emptied below.
+                # Joins above that emit unmatched build rows still do,
+                # from their own scans.
+                if not no_output:
+                    trace_path("stream.empty_build")
+                no_output = True
             # The build finished: one chunk per column, and its keys'
             # hash index, unless a prefetch made the same one already.
             var keys = List[String]()
@@ -1261,6 +1266,11 @@ def _probe_start(
                     height=ready.value().index.rows_stored,
                 )
                 build_rows = built.height()
+            if no_output and not prepared and build_rows > 0:
+                # A join below an empty build never sees a row: an empty
+                # table of the same columns serves it.
+                built = built.clear()
+                build_rows = 0
             var stats = PlanStatistics()
             var finished = finish_build(
                 built,
@@ -1268,6 +1278,7 @@ def _probe_start(
                 node.how,
                 node.coalesce,
                 plan_cardinality(self, stats, node.left),
+                plan_is_filtering(self, node.right),
             )
             if finished:
                 prepared = finished^
@@ -1305,6 +1316,12 @@ def _probe_start(
     operations.reverse()
     operation_nodes.reverse()
     ref source = self._nodes[cursor]
+    # With no output possible, the source is its columns without rows,
+    # read as an in-memory frame: nothing is scanned.
+    var empty_source = Optional[DataFrame]()
+    if no_output:
+        empty_source = self._execute(cursor, True, False, batch_size)
+    var frame_source = source.kind == SCAN_FRAME or Bool(empty_source)
     # A file source's scan state (`ScanSource`), opened once, and its
     # columns, which the pipeline's steps are typed from.
     var file_scan = Optional[ArcPointer[ScanSource]]()
@@ -1322,7 +1339,7 @@ def _probe_start(
         ordered,
         expressions,
     )
-    if eligibility.allowed and source.kind != SCAN_FRAME:
+    if eligibility.allowed and not frame_source:
         var opened = _open_scan_source(self, cursor, operations, batch_size)
         if not opened:
             return _ProbeStart(None)
@@ -1346,9 +1363,13 @@ def _probe_start(
     if consider_inline_table(
         eligibility, len(keys), len(expressions), ordered, distinct
     ):
-        var empty = source_columns.value().copy() if source_columns else (
-            self._frames[source.source_slot()].clear()
-        )
+        var empty: DataFrame
+        if source_columns:
+            empty = source_columns.value().copy()
+        elif empty_source:
+            empty = empty_source.value().copy()
+        else:
+            empty = self._frames[source.source_slot()].clear()
         var empty_joins = ArcPointer(joins.copy())
         var empty_indexes = ArcPointer(indexes.copy())
         for operation in operations:
@@ -1378,12 +1399,14 @@ def _probe_start(
     var shared_joins = ArcPointer(joins^)
     var shared_indexes = ArcPointer(indexes^)
     var input = DataFrame(List[Series](), height=0)
-    if source.kind != SCAN_FRAME:
+    if not frame_source:
         if not file_scan:
             var opened = _open_scan_source(self, cursor, operations, batch_size)
             if not opened:
                 return _ProbeStart(None)
             file_scan = ArcPointer(opened.take())
+    elif empty_source:
+        input = empty_source.value().copy()
     else:
         source._record_execution()
         input = self._frames[source.source_slot()].copy()
@@ -1621,6 +1644,7 @@ def _probe_start(
             build_how=build.how,
             build_coalesce=build.coalesce,
             build_probe_estimate=build.probe_estimate,
+            build_filtered=build.build_filtered,
         )
         return _ProbeStart(
             _PipedProbe(
@@ -2494,11 +2518,11 @@ def _probe_restart(
     build: _BuildFor = _BuildFor(),
 ) raises -> _ProbeStart:
     """The probe set up again on `plan`, where an input it reads is now a
-    frame (a union's children, the aggregate below it, an empty build):
-    the same head, its sides and filters already decided, the same join
-    whose build side its rows are (`build`), and this pipeline of the same
-    schedule, not a new stream with a schedule of its own. A declined
-    stream runs the node on `plan`."""
+    frame (a union's children, the aggregate below it): the same head, its
+    sides and filters already decided, the same join whose build side its
+    rows are (`build`), and this pipeline of the same schedule, not a new
+    stream with a schedule of its own. A declined stream runs the node on
+    `plan`."""
     var started = _probe_start(plan, index, batch_size, sink, head^, build)
     if len(started.piped) > 0 or started.result:
         return started^
