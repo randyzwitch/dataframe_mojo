@@ -679,8 +679,6 @@ struct _Claims(Movable):
     var next: Atomic[Int64]
     # Jobs finished, for a caller that waits on crew threads (`_Crew`).
     var done: Atomic[Int64]
-    # An unhelpable posting's schedule stamp (`_Crew._help`), 0 for others.
-    var schedule: Int
 
     def __init__(out self, slots: Int, stride: Int, count: Int, entry: Int):
         self.slots = slots
@@ -689,7 +687,6 @@ struct _Claims(Movable):
         self.entry = entry
         self.next = Atomic[Int64](0)
         self.done = Atomic[Int64](0)
-        self.schedule = 0
 
     def run(mut self):
         var entry = Pointer(to=self.entry).unsafe_bitcast[_Entry]()[]
@@ -735,11 +732,13 @@ comptime _POSTINGS = 64
 # A posting's state bit set by `retire`: no helper may join it again, nor
 # hand back a slot it took (bit 31 of the running count's word).
 comptime _CLOSED = Int64(1) << 31
-# Set in a posting's job-list address (which is 8-byte aligned) when only
-# an idle crew thread may join it, never a caller waiting in `_help`: an
-# executor's workers (`dataframe.scheduler`) wait for the whole schedule,
-# including the task of that schedule the waiting caller is running.
-comptime _UNHELPABLE = Int64(1)
+# Open pipeline schedules (`dataframe.scheduler`) a crew serves at once.
+# Slot s is five words at `schedules + 40s`: the schedule's address, the
+# function that runs one of its queued tasks (`_Entry`, 1 when it ran one),
+# its stamp, a state word (the threads in it now, `_CLOSED` set while the
+# slot is free or closing) and the function that tells whether a task is
+# queued (`_Entry`, 1 when one is).
+comptime _SCHEDULES = 64
 # How long a crew thread looks for work before parking. A thread that sleeps
 # wakes on a core the CPU governor (schedutil) has clocked down, and runs its
 # next jobs slower than a thread started fresh (we measured a group-by's jobs
@@ -767,6 +766,8 @@ struct _Crew(Movable):
     var stopping: Atomic[Int64]
     var postings: Int
     var _postings: List[Atomic[Int64]]
+    var schedules: Int
+    var _schedules: List[Atomic[Int64]]
     var _thread_ids: List[UInt64]
     var threads: Int
     # Threads are created by the first `run_jobs` that posts work (0 not
@@ -787,8 +788,16 @@ struct _Crew(Movable):
             self._postings.unsafe_ptr().unsafe_offset(slot).unsafe_write(
                 Atomic[Int64](0)
             )
+        self._schedules = List[Atomic[Int64]](
+            unsafe_uninit_length=5 * _SCHEDULES
+        )
+        for slot in range(5 * _SCHEDULES):
+            self._schedules.unsafe_ptr().unsafe_offset(slot).unsafe_write(
+                Atomic[Int64](_CLOSED if slot % 5 == 3 else 0)
+            )
         self._thread_ids = List[UInt64](length=max(wanted, 1), fill=0)
         self.postings = Int(self._postings.unsafe_ptr())
+        self.schedules = Int(self._schedules.unsafe_ptr())
         self.threads = 0
         self.spawned = Atomic[Int64](0)
         self.ids = Int(self._thread_ids.unsafe_ptr())
@@ -879,6 +888,86 @@ struct _Crew(Movable):
                 break
         return -2 if starved else -1
 
+    def _slot(self, s: Int, word: Int) -> ref[MutAnyOrigin] Atomic[Int64]:
+        return Pointer[Atomic[Int64], MutAnyOrigin](
+            unsafe_from_address=self.schedules + 40 * s + 8 * word
+        )[]
+
+    def open_schedule(
+        mut self, schedule: Int, step: Int, queued: Int, stamp: Int
+    ) -> Int:
+        """Offer a pipeline schedule's queued tasks to every thread of the
+        crew: any free crew thread, or one waiting in an older schedule,
+        runs them one at a time (`step`, while `queued`) until the schedule
+        closes. The slot's index, or -1 when every slot is taken."""
+        for s in range(_SCHEDULES):
+            var free = Int64(0)
+            if self._slot(s, 0).compare_exchange(free, Int64(schedule)):
+                self._slot(s, 1).store(Int64(step))
+                self._slot(s, 2).store(Int64(stamp))
+                self._slot(s, 4).store(Int64(queued))
+                self._slot(s, 3).store(0)
+                _ = external_call["pthread_mutex_lock", Int32](self._mutex())
+                _ = external_call["pthread_cond_broadcast", Int32](self._cond())
+                _ = external_call["pthread_mutex_unlock", Int32](self._mutex())
+                return s
+        return -1
+
+    def close_schedule(mut self, s: Int):
+        """Turn new threads away from slot `s`, wait for the ones in it to
+        leave, then free it."""
+        while True:
+            var state = self._slot(s, 3).load()
+            if self._slot(s, 3).compare_exchange(state, state | _CLOSED):
+                break
+        while self._slot(s, 3).load() & ~_CLOSED != 0:
+            _ = external_call["sched_yield", Int32]()
+        self._slot(s, 0).store(0)
+
+    def step(mut self, own: Int, stamp: Int) -> Bool:
+        """Run one queued task of an open schedule other than slot `own`:
+        True when one ran. A thread waiting for its own schedule (`stamp`
+        its stamp) runs only tasks of schedules stamped after it -- one
+        nested in its tasks, or one started beside it -- since an older one
+        may be waiting on the task this thread is the caller of. A free
+        crew thread (`stamp` -1) runs any, with a budget slot
+        (`_reserve_helpers`) as a posting's jobs take. A task never waits
+        for its schedule's other tasks, so a thread leaves a schedule as
+        soon as it has run one, and goes wherever work is queued next."""
+        for s in range(_SCHEDULES):
+            if s == own:
+                continue
+            var state = self._slot(s, 3).load()
+            if state & _CLOSED != 0:
+                continue
+            if not self._slot(s, 3).compare_exchange(state, state + 1):
+                continue
+            # Joined: the slot stays open until this thread leaves.
+            var ran = 0
+            var schedule = Int(self._slot(s, 0).load())
+            var queued = Int(self._slot(s, 4).load())
+            if (stamp < 0 or Int(self._slot(s, 2).load()) > stamp) and Pointer(
+                to=queued
+            ).unsafe_bitcast[_Entry]()[](schedule) != 0:
+                var free = stamp < 0
+                if not free or _reserve_helpers(1) > 0:
+                    var step = Int(self._slot(s, 1).load())
+                    ran = Pointer(to=step).unsafe_bitcast[_Entry]()[](schedule)
+                    if free:
+                        _release_helpers(1)
+            _ = self._slot(s, 3).fetch_sub(1)
+            if ran != 0:
+                return True
+        return False
+
+    def _scheduling(mut self) -> Bool:
+        """Whether any schedule is open: its tasks may be queued at any
+        moment, so a free thread looks for them rather than parking."""
+        for s in range(_SCHEDULES):
+            if self._slot(s, 3).load() & _CLOSED == 0:
+                return True
+        return False
+
     def _wanted(mut self) -> Bool:
         for p in range(_POSTINGS):
             if (self._state(p).load() >> 32) > 0:
@@ -916,32 +1005,21 @@ struct _Crew(Movable):
                 _ = external_call["sched_yield", Int32]()
         self._claims(p).store(0)
 
-    def _help(mut self, own: Int, schedule: Int = -1) -> Bool:
+    def _help(mut self, own: Int) -> Bool:
         """Join another posting that still wants a helper and run its
         jobs: True when it ran some. A caller whose own jobs are taken
         waits for the threads running them, and the jobs those threads
         start wait for helpers. Run queued work while waiting, so nested
-        jobs can progress instead of leaving all workers blocked. The caller's thread already runs jobs, so it joins
-        without a budget slot (`_reserve_helpers`): the threads running
-        jobs stay at the budget plus the callers. A posting it joins was
-        made by a job that does not wait on its own caller, so no wait
-        cycle forms.
-
-        An unhelpable posting (a schedule's workers, which wait for the
-        whole schedule) is joined only by a thread between tasks of a
-        schedule stamped earlier (`schedule`, -1 for any waiting caller):
-        a schedule nested in a task of this one, or one running beside
-        it. Never an older one, which may be waiting on this one's
-        caller; holding a nested schedule's workers back from every
-        thread running the outer one would leave the nested schedule
-        on its caller alone."""
+        jobs can progress instead of leaving all workers blocked. The
+        caller's thread already runs jobs, so it joins without a budget
+        slot (`_reserve_helpers`): the threads running jobs stay at the
+        budget plus the callers. A posting it joins was made by a job that
+        does not wait on its own caller, so no wait cycle forms."""
         for q in range(_POSTINGS):
             if q == own:
                 continue
             var state = self._state(q).load()
             while (state >> 32) > 0:
-                if not self._may_help(self._claims(q).load(), schedule):
-                    break
                 if not self._state(q).compare_exchange(
                     state, state - (Int64(1) << 32) + 1
                 ):
@@ -950,38 +1028,15 @@ struct _Crew(Movable):
                 # Joined, the posting stays put: read its list again, as
                 # the slot may have been reposted since the check above.
                 var claims = self._claims(q).load()
-                if not self._may_help(claims, schedule):
-                    while True:
-                        var now = self._state(q).load()
-                        var back = now - 1
-                        if now & _CLOSED == 0:
-                            back += Int64(1) << 32
-                        if self._state(q).compare_exchange(now, back):
-                            break
+                if claims == 0:
+                    _ = self._state(q).fetch_sub(1)
                     break
                 Pointer[_Claims, MutAnyOrigin](
-                    unsafe_from_address=Int(claims & ~_UNHELPABLE)
+                    unsafe_from_address=Int(claims)
                 )[].run()
                 _ = self._state(q).fetch_sub(1)
                 return True
         return False
-
-    @staticmethod
-    def _may_help(claims: Int64, schedule: Int) -> Bool:
-        """Whether a thread helping at `schedule` may join a posting: any
-        helpable one, or a schedule's workers stamped after `schedule`."""
-        if claims == 0:
-            return False
-        if claims & _UNHELPABLE == 0:
-            return True
-        if schedule < 0:
-            return False
-        return (
-            Pointer[_Claims, MutAnyOrigin](
-                unsafe_from_address=Int(claims & ~_UNHELPABLE)
-            )[].schedule
-            > schedule
-        )
 
 
 def _crew_spawner(address: Int) abi("C") -> Int:
@@ -1016,9 +1071,16 @@ def _crew_worker(address: Int) abi("C") -> Int:
                     p = crew._take()
                     if p >= 0:
                         break
-                if p == -2:
+                if p >= 0:
+                    break
+                # A queued task of an open schedule.
+                if crew.step(-1, -1):
+                    deadline = perf_counter_ns() + crew.spin_ns
+                    continue
+                if p == -2 or crew._scheduling():
                     # Work is waiting for a thread the budget has not
-                    # freed: yield rather than park, and look again.
+                    # freed, or a schedule may queue tasks any moment:
+                    # yield rather than park, and look again.
                     _ = external_call["sched_yield", Int32]()
                     deadline = perf_counter_ns() + crew.spin_ns
                     continue
@@ -1026,14 +1088,18 @@ def _crew_worker(address: Int) abi("C") -> Int:
                     break
         if p < 0:
             _ = external_call["pthread_mutex_lock", Int32](crew._mutex())
-            while not crew._wanted() and crew.stopping.load() == 0:
+            while (
+                not crew._wanted()
+                and not crew._scheduling()
+                and crew.stopping.load() == 0
+            ):
                 _ = external_call["pthread_cond_wait", Int32](
                     crew._cond(), crew._mutex()
                 )
             _ = external_call["pthread_mutex_unlock", Int32](crew._mutex())
             continue
         Pointer[_Claims, MutAnyOrigin](
-            unsafe_from_address=Int(crew._claims(p).load() & ~_UNHELPABLE)
+            unsafe_from_address=Int(crew._claims(p).load())
         )[].run()
         # Out of work: give the thread back to the budget now, as
         # `_claim_worker` does, so a job still running can start helpers.
@@ -1185,18 +1251,11 @@ struct Crew(Movable):
 
 def _run_on_crew[
     J: Job
-](
-    mut slots: List[_Slot[J]],
-    entry: Int,
-    threads: Int,
-    helpable: Bool = True,
-    schedule: Int = 0,
-) -> Bool:
+](mut slots: List[_Slot[J]], entry: Int, threads: Int,) -> Bool:
     """Run every slot with crew threads and the caller; False (nothing
     run) when no crew is running or every posting is taken. Crew threads
     join while jobs remain, each as the budget frees a thread for it;
-    a waiting caller (`_Crew._help`) joins too unless `helpable` is
-    False (`_UNHELPABLE`)."""
+    a waiting caller (`_Crew._help`) joins too."""
     var address = Int(_current_crew().load())
     if address == 0:
         return False
@@ -1209,12 +1268,8 @@ def _run_on_crew[
     var claims = _Claims(
         Int(slots.unsafe_ptr()), size_of[_Slot[J]](), len(slots), entry
     )
-    claims.schedule = schedule
     var claims_address = Int(Pointer(to=claims))
-    var posted = claims_address
-    if not helpable:
-        posted |= Int(_UNHELPABLE)
-    var p = crew.post(posted, helpers)
+    var p = crew.post(claims_address, helpers)
     if p < 0:
         return False
     claims.run()
@@ -1237,14 +1292,8 @@ def run_jobs[J: Job](mut jobs: List[J]) raises:
     _run_jobs(jobs, Int.MAX)
 
 
-def _run_jobs[
-    J: Job
-](
-    mut jobs: List[J], limit: Int, helpable: Bool = True, schedule: Int = 0
-) raises:
-    """`run_jobs` on at most `limit` threads, the caller included. Jobs
-    that wait on each other's work, as an executor's workers do, pass
-    `helpable=False` (`_UNHELPABLE`)."""
+def _run_jobs[J: Job](mut jobs: List[J], limit: Int) raises:
+    """`run_jobs` on at most `limit` threads, the caller included."""
     if len(jobs) == 0:
         return
     if len(jobs) > 1 and limit > 1 and _current_crew().load() == 0:
@@ -1255,7 +1304,7 @@ def _run_jobs[
         var crew = Crew.start()
         if crew.address != 0:
             try:
-                _run_jobs(jobs, limit, helpable, schedule)
+                _run_jobs(jobs, limit)
             except e:
                 crew.release()
                 raise e^
@@ -1266,9 +1315,7 @@ def _run_jobs[
         slots.append(_Slot[J](jobs.pop(0)))
     var entry: _Entry = _entry[J]
     var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
-    if len(slots) > 1 and _run_on_crew(
-        slots, entry_address, limit, helpable, schedule
-    ):
+    if len(slots) > 1 and _run_on_crew(slots, entry_address, limit):
         for t in range(len(slots)):
             if slots[t].failed:
                 raise Error(slots[t].message)
@@ -1369,6 +1416,19 @@ def morsel_ranges(ends: List[Int], workers: Int, align: Int = 64) -> List[Int]:
             at += length
         start = end
     return ranges^
+
+
+def source_tasks(morsels: Int, workers: Int) -> Int:
+    """Tasks for a pipeline on `workers` threads whose source holds
+    `morsels` morsels (-1 when they are not known ahead, as a file's
+    batches are not): one a thread, up to the source's parallelism. Each
+    task takes morsels from the source until none is left, so a thread
+    that finishes a morsel early takes the next one and the work balances
+    itself; a task beyond the morsel count would only find the source
+    empty. A source of one morsel runs as one task."""
+    if morsels < 0:
+        return max(1, workers)
+    return max(1, min(workers, morsels))
 
 
 def configured_workers() -> Int:

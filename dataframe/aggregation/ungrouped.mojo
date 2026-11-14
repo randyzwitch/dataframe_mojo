@@ -47,7 +47,11 @@ from dataframe.aggregation.hash_table import (
     aggregate_layout,
 )
 from dataframe.aggregation.table_sink import _sink_jobs, input_vector
-from dataframe.parallel import configured_workers, morsel_ranges
+from dataframe.parallel import (
+    configured_workers,
+    morsel_ranges,
+    source_tasks,
+)
 from dataframe.aggregation.expressions import _stream_reductions
 from dataframe.aggregation.reducer import Reducer
 from dataframe.aggregation.selected_rows import _canonical_int
@@ -811,7 +815,7 @@ def distinct_count(values: Series, ignore_nulls: Bool) raises -> Int:
     var keys: List[Series] = [values.copy()]
     var layout = aggregate_layout(keys, List[Series](), List[ReducerSpec]())
     var ranges = _chunk_morsels(values)
-    var workers = max(1, min(configured_workers(), len(ranges) // 2))
+    var workers = source_tasks(len(ranges) // 2, configured_workers())
     var tables = _sink_jobs(keys, List[Series](), layout, ranges, workers)
     return distinct_values(tables, layout, ignore_nulls)
 
@@ -834,7 +838,7 @@ def distinct_counts(
     var keys: List[Series] = [Series("", Column[Int64](ids^)), values.copy()]
     var layout = aggregate_layout(keys, List[Series](), List[ReducerSpec]())
     var ranges = _chunk_morsels(values)
-    var workers = max(1, min(configured_workers(), len(ranges) // 2))
+    var workers = source_tasks(len(ranges) // 2, configured_workers())
     var tables = _sink_jobs(keys, List[Series](), layout, ranges, workers)
     var pairs = aggregate_finish(tables, layout, rows_only=True, ordered=False)
     var counts = List[Int64](length=group_count, fill=0)

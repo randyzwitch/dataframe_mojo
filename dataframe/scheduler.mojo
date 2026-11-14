@@ -12,22 +12,28 @@ an event with no tasks finishes at once, and finishing completes a dependency of
 each parent. The query is done when every pipeline's complete event has
 finished.
 
-The crew's threads and the caller take tasks from that queue until then,
-so a pipeline never waits for another it does not depend on, and
-independent builds run at the same time. A pipeline says how many tasks
-its execute event makes only when that event schedules, since only then
-are its inputs known: a stream's probe makes one per morsel worker. A
-thread with no task queued runs the jobs that running tasks post to the
-crew (`_Crew._help`): a build side's own plan still runs inside its one
-execute task. A finish event whose sink's finalize has parallel work
+The caller takes tasks from that queue until then, and so does every
+crew thread with nothing of its own to do: the schedule is open to the
+crew while it runs (`_Crew.open_schedule`), and a free thread runs one
+queued task at a time of whichever open schedule has one, bound to
+none, so threads go where work is queued and no schedule keeps idle
+threads from another. A pipeline never waits for another it does not
+depend on, and independent builds run at the same time. A pipeline says
+how many tasks its execute event makes only when that event schedules,
+since only then are its inputs known: a stream's probe makes one a
+thread, up to its source's morsels, and each takes morsels until none
+is left. A thread waiting for its own schedule runs the tasks of
+schedules started after it (nested in its tasks, or beside it) and the
+jobs running tasks post to the crew (`_Crew._help`): a build side's own
+plan still runs inside its one execute task. A finish event whose sink's
+finalize has parallel work
 (filling a join build's pointer table) adds that work's tasks to the
 queue, and finishes
 after the last of them, so the work spreads over every thread while
 nothing reads the sink early. The serial step after those tasks may add
 another round of them, as a merge that halves its runs each round does,
 so a finish of any number of parallel rounds never waits on a nested
-run. The workers themselves are posted so that only idle crew
-threads join them (`_UNHELPABLE`).
+run.
 """
 from std.atomic import Atomic
 from std.ffi import external_call
@@ -35,10 +41,10 @@ from std.memory import Pointer
 from std.time import perf_counter_ns
 
 from dataframe.parallel import (
-    Job,
+    Crew,
     _Crew,
+    _Entry,
     _current_crew,
-    _run_jobs,
     configured_workers,
 )
 
@@ -273,8 +279,8 @@ def _counter(base: Int, i: Int) -> ref[MutAnyOrigin] Atomic[Int64]:
 
 struct _Executor[P: SchedulablePipeline](Movable):
     """The events of one schedule and the queue of their tasks. Lives on
-    the caller's stack while the crew works on it; workers reach it by
-    address."""
+    the caller's stack while the crew works on it; crew threads reach it
+    by address."""
 
     # The caller's List[P], which stays put while the events run.
     var pipelines: Int
@@ -304,7 +310,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
     var failed: Atomic[Int64]
     var error: String
     # When the schedule began: orders it against schedules nested in its
-    # tasks for `_Crew._help`.
+    # tasks (`_Crew.step`).
     var stamp: Int
 
     def __init__(
@@ -519,34 +525,47 @@ struct _Executor[P: SchedulablePipeline](Movable):
         if self.failed.compare_exchange(none, Int64(1)):
             self.error = String(e)
 
-    def work_on_tasks(mut self):
-        """Run queued tasks until the schedule is done. With no task queued, the
-        tasks left are running on other threads: run the jobs they post to the
-        crew meanwhile, else yield."""
+    def work_on_tasks(mut self, slot: Int = -1):
+        """Run queued tasks until the schedule is done (`slot` its place
+        among the crew's open schedules, -1 for none). With no task queued,
+        the tasks left are running on other threads: meanwhile run a queued
+        task of a schedule nested in them or started beside this one, or
+        the jobs they post to the crew, else yield."""
+        var crew = Int(_current_crew().load())
         while not self.finished():
             var record = self._dequeue()
             if record >= 0:
                 self._run_task(record)
                 continue
-            var crew = Int(_current_crew().load())
-            if crew == 0 or not Pointer[_Crew, MutAnyOrigin](
-                unsafe_from_address=crew
-            )[]._help(-1, self.stamp):
-                _ = external_call["sched_yield", Int32]()
+            if crew != 0:
+                ref helping = Pointer[_Crew, MutAnyOrigin](
+                    unsafe_from_address=crew
+                )[]
+                if helping.step(slot, self.stamp) or helping._help(-1):
+                    continue
+            _ = external_call["sched_yield", Int32]()
 
 
-struct _EventWorker[P: SchedulablePipeline](Job):
-    """One thread working on an executor's tasks."""
+def _step[P: SchedulablePipeline](address: Int) abi("C") -> Int:
+    """One queued task of the schedule at `address`, run on this thread:
+    1 when one was queued. A crew thread with nothing of its own to do
+    takes the tasks of every open schedule this way, one at a time."""
+    ref executor = Pointer[_Executor[P], MutAnyOrigin](
+        unsafe_from_address=address
+    )[]
+    var record = executor._dequeue()
+    if record < 0:
+        return 0
+    executor._run_task(record)
+    return 1
 
-    var executor: Int
 
-    def __init__(out self, executor: Int):
-        self.executor = executor
-
-    def run(mut self) raises:
-        Pointer[_Executor[Self.P], MutAnyOrigin](
-            unsafe_from_address=self.executor
-        )[].work_on_tasks()
+def _queued[P: SchedulablePipeline](address: Int) abi("C") -> Int:
+    """1 when the schedule at `address` has a task queued."""
+    ref executor = Pointer[_Executor[P], MutAnyOrigin](
+        unsafe_from_address=address
+    )[]
+    return 1 if executor.tail.load() > executor.head.load() else 0
 
 
 def run_pipelines[
@@ -568,26 +587,35 @@ def run_pipelines[
     var stages = build_pipeline_schedule(metas)
     var executor = _Executor[P](pipelines, stages)
     executor.schedule_events()
-    # As many threads as tasks can run at once: every pipeline's execute
-    # tasks or finalize tasks, within the thread count.
-    var width = 0
-    for p in range(len(pipelines)):
-        width += max(
-            1,
-            pipelines[p].max_execute_tasks(),
-            pipelines[p].max_finalize_tasks(),
-        )
-    var threads = min(width, configured_workers()) if parallel else 1
-    if threads <= 1:
+    if not parallel or configured_workers() <= 1:
         executor.work_on_tasks()
     else:
-        var address = Int(Pointer(to=executor))
-        var workers = List[_EventWorker[P]](capacity=threads)
-        for _ in range(threads):
-            workers.append(_EventWorker[P](address))
-        # Posted for idle crew threads only: a thread waiting inside one
-        # of these tasks must not take a worker that waits for that task.
-        _run_jobs(workers, Int.MAX, helpable=False, schedule=executor.stamp)
+        # The schedule is open to the crew while it runs: a thread with
+        # nothing of its own to do takes one queued task at a time, of
+        # whichever open schedule has one, and is bound to none of them.
+        var borrowed = Crew.start()
+        var crew = Int(_current_crew().load())
+        var slot = -1
+        if crew != 0:
+            ref serving = Pointer[_Crew, MutAnyOrigin](
+                unsafe_from_address=crew
+            )[]
+            if serving.spawned.load() != 2:
+                serving.spawn(crew)
+            var step: _Entry = _step[P]
+            var queued: _Entry = _queued[P]
+            slot = serving.open_schedule(
+                Int(Pointer(to=executor)),
+                Pointer(to=step).unsafe_bitcast[Int]()[],
+                Pointer(to=queued).unsafe_bitcast[Int]()[],
+                executor.stamp,
+            )
+        executor.work_on_tasks(slot)
+        if slot >= 0:
+            Pointer[_Crew, MutAnyOrigin](
+                unsafe_from_address=crew
+            )[].close_schedule(slot)
+        borrowed.release()
     if executor.failed.load() != 0:
         raise Error(executor.error)
     if executor.completed_pipelines.load() < Int64(len(pipelines)):
