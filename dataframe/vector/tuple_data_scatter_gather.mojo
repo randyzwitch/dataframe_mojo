@@ -9,7 +9,7 @@ Nested output is assembled in buffers for each level, then exposed through
 an at-rest column that the chunk's vector can read. String views retain
 the collection's owners so referenced bytes outlive the output vectors.
 """
-from std.collections import Dict
+from std.collections import Dict, Optional
 from std.memory import ArcPointer, Pointer, unsafe_memcpy, unsafe_memset
 from std.sys import size_of
 
@@ -1073,132 +1073,260 @@ def _any_invalid(bits: Int, count: Int) -> Bool:
     return False
 
 
-def gather_rows_slots(
-    layout: TupleDataLayout,
-    rows: Int,
-    count: Int,
-    slots: Int,
-    size: Int,
-    column_id: Int,
-    var name: String,
-    dtype: DataType,
-    heaps: TupleDataHeaps,
-    mut decoded: List[UInt8],
-) raises -> Series:
-    """Column `column_id` of the `count` rows at the pointers at `rows` as
-    a column of `size` values, the row at pointer i at entry `slots[i]`
-    (scattered through a selection, so no row is moved twice). The other
-    entries' values are not written (a string's are empty); a reader
-    reads only filled entries. Strings reference `heaps`
-    (`gather_rows_series`), and
-    `decoded` is set to their string_t values as gathered (the vector
-    layout, its other slots unwritten)."""
-    ref top = layout.nodes[][0]
-    var physical = top.physicals[column_id]
-    var target_sel = SelectionVector(slots)
-    var slot_at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=slots)
-    var bits = List[UInt8](length=(size + 7) // 8 + 1, fill=255)
-    var bits_at = Int(bits.unsafe_ptr())
-    var valid_of = bits_at if top.can_have_null else 0
-    var any_null = False
-    if physical == PHYSICAL_VARCHAR:
-        decoded = List[UInt8](unsafe_uninit_length=16 * max(size, 1))
-        _gather_fixed_dispatch(
-            physical,
-            rows,
-            SelectionVector(),
-            count,
-            top.offsets[column_id],
-            column_id,
-            top.can_have_null,
-            Int(decoded.unsafe_ptr()),
-            valid_of,
-            target_sel,
+def pack_bytes(bytes: Int, size: Int) -> List[UInt8]:
+    """The `size` bytes at `bytes`, each 0 or 1, as bits (eight to a byte,
+    byte i's value at bit i)."""
+    var bits = List[UInt8](length=(size + 7) // 8, fill=0)
+    var target = bits.unsafe_ptr()
+    var whole = size // 8
+    for w in range(whole):
+        # Each byte is 0 or 1: the multiply gathers the low bit of each of
+        # the eight bytes into the top byte, byte i at bit i.
+        var eight = _load[DType.uint64](bytes + 8 * w)
+        target[unsafe_offset=w] = UInt8((eight * 0x0102040810204080) >> 56)
+    for i in range(8 * whole, size):
+        if _bytes(bytes)[unsafe_offset=i] != 0:
+            target[unsafe_offset=i >> 3] |= UInt8(1) << UInt8(i & 7)
+    return bits^
+
+
+struct NumberedGather(Movable):
+    """Column `column_id` of a collection's rows gathered into a column of
+    `size` entries, each row at the entry its number names, by tasks that
+    each gather their own rows. No two rows share a number, so no two
+    tasks write the same entry, and every write is a whole entry: a
+    value, or a validity byte (the bits are packed once every task is
+    done). Strings reference the collection's heaps."""
+
+    var column_id: Int
+    var physical: Int
+    var offset: Int
+    var nullable: Bool
+    var size: Int
+    var name: String
+    var dtype: DataType
+    # A fixed-width column's values, written in place.
+    var values: Optional[Series]
+    # Strings: each entry's string_t (the vector layout) and Utf8View
+    # descriptor; Booleans: a byte per entry.
+    var decoded: List[UInt8]
+    var views: List[StringView]
+    # A validity byte per entry, and per task whether its rows held a null.
+    var valid: List[UInt8]
+    var nulls: List[UInt8]
+    var target: Int
+
+    def __init__(
+        out self,
+        layout: TupleDataLayout,
+        column_id: Int,
+        var name: String,
+        dtype: DataType,
+        size: Int,
+        tasks: Int,
+        every_entry: Bool,
+    ) raises:
+        """The column's storage, uninitialized where `every_entry` (every
+        entry gets a row); otherwise the entries no row fills read as
+        valid and empty."""
+        ref top = layout.nodes[][0]
+        self.column_id = column_id
+        self.physical = top.physicals[column_id]
+        self.offset = top.offsets[column_id]
+        self.nullable = top.can_have_null
+        self.size = size
+        self.name = name^
+        self.dtype = dtype
+        self.values = None
+        self.decoded = List[UInt8]()
+        self.views = List[StringView]()
+        self.valid = List[UInt8]()
+        self.nulls = List[UInt8](length=tasks, fill=0)
+        self.target = 0
+        if self.nullable:
+            if every_entry:
+                self.valid = List[UInt8](unsafe_uninit_length=size)
+            else:
+                self.valid = List[UInt8](length=size, fill=1)
+        if self.physical == PHYSICAL_VARCHAR:
+            if every_entry:
+                self.decoded = List[UInt8](unsafe_uninit_length=16 * size)
+                self.views = List[StringView](unsafe_uninit_length=size)
+            else:
+                self.decoded = List[UInt8](length=16 * size, fill=0)
+                self.views = List[StringView](
+                    length=size, fill=StringView(0, 0, 0, 0)
+                )
+            self.target = Int(self.views.unsafe_ptr())
+            return
+        if self.physical == PHYSICAL_BOOL:
+            if every_entry:
+                self.decoded = List[UInt8](unsafe_uninit_length=size)
+            else:
+                self.decoded = List[UInt8](length=size, fill=0)
+            self.target = Int(self.decoded.unsafe_ptr())
+            return
+        comptime for k in range(len(_FIXED)):
+            comptime D = _FIXED[k]
+            if self.physical == physical_of[D]():
+                var column = Column[Scalar[D]](
+                    List[Scalar[D]](unsafe_uninit_length=size)
+                )
+                self.target = Int(column._ptr())
+                self.values = Series(self.name, column^)
+                return
+        raise Error("tuple data: no numbered gather for this column type")
+
+    def gather(
+        self,
+        rows: Int,
+        numbers: Int,
+        count: Int,
+        task: Int,
+        heaps: TupleDataHeaps,
+    ):
+        """Gather the `count` rows at the pointers at `rows`, row i to
+        entry `numbers[i]` (UInt32s); `task` is the gathering task."""
+        var sources = _ints(rows)
+        var number_at = Pointer[UInt32, MutAnyOrigin](
+            unsafe_from_address=numbers
         )
-        # The filled slots' string_t become views; the others stay empty.
-        var views = List[StringView](
-            length=max(size, 1), fill=StringView(0, 0, 0, 0)
-        )
-        var source = Int(decoded.unsafe_ptr())
-        var target = Int(views.unsafe_ptr())
-        for i in range(count):
-            var slot = Int(slot_at[unsafe_offset=i])
-            _copy(target + 16 * slot, source + 16 * slot, 16)
-            any_null = any_null or not _bit_valid(bits_at, slot)
-        if not any_null:
-            bits = List[UInt8]()
-        return _typed(
-            Series(name^, _views_at(heaps, views^, count, slots, size, bits^)),
-            dtype,
-        )
-    if physical == PHYSICAL_BOOL:
-        var buffer = List[UInt8](unsafe_uninit_length=max(size, 1))
-        _gather_fixed_dispatch(
-            physical,
-            rows,
-            SelectionVector(),
-            count,
-            top.offsets[column_id],
-            column_id,
-            top.can_have_null,
-            Int(buffer.unsafe_ptr()),
-            valid_of,
-            target_sel,
-        )
-        var packed = List[UInt8](length=(size + 7) // 8, fill=0)
-        var at = buffer.unsafe_ptr()
-        var into = packed.unsafe_ptr()
-        for i in range(count):
-            var slot = Int(slot_at[unsafe_offset=i])
-            if at[unsafe_offset=slot] != 0:
-                into[unsafe_offset=slot >> 3] |= UInt8(1) << UInt8(slot & 7)
-            any_null = any_null or not _bit_valid(bits_at, slot)
-        _ = buffer^
-        if not any_null:
+        var valid = Int(self.valid.unsafe_ptr())
+        var entry = self.column_id >> 3
+        var bit = UInt8(self.column_id & 7)
+        var any_null = False
+        if self.physical == PHYSICAL_VARCHAR:
+            var decoded = Int(self.decoded.unsafe_ptr())
+            var hint = 0
+            for i in range(count):
+                var row = sources[unsafe_offset=i]
+                var at = Int(number_at[unsafe_offset=i])
+                var low = _load[DType.uint64](row + self.offset)
+                var high = _load[DType.uint64](row + self.offset + 8)
+                if self.nullable:
+                    var ok = (_bytes(row)[unsafe_offset=entry] >> bit) & 1
+                    _bytes(valid)[unsafe_offset=at] = ok
+                    if ok == 0:
+                        any_null = True
+                        low = 0
+                        high = 0
+                _store[DType.uint64](decoded + 16 * at, low)
+                _store[DType.uint64](decoded + 16 * at + 8, high)
+                var view = self.target + 16 * at
+                _store[DType.uint64](view, low)
+                if UInt32(low & 0xFFFFFFFF) > UInt32(STRING_INLINE_BYTES):
+                    # A longer string's pointer becomes its heap block and
+                    # offset.
+                    var address = Int(high)
+                    hint = heaps.find(address, hint)
+                    _store[DType.uint32](view + 8, UInt32(hint))
+                    _store[DType.uint32](
+                        view + 12, UInt32(address - heaps.starts[hint])
+                    )
+                else:
+                    _store[DType.uint64](view + 8, high)
+        elif self.physical == PHYSICAL_BOOL:
+            for i in range(count):
+                var row = sources[unsafe_offset=i]
+                var at = Int(number_at[unsafe_offset=i])
+                var value = UInt8(1) if _bytes(row)[
+                    unsafe_offset=self.offset
+                ] != 0 else UInt8(0)
+                if self.nullable:
+                    var ok = (_bytes(row)[unsafe_offset=entry] >> bit) & 1
+                    _bytes(valid)[unsafe_offset=at] = ok
+                    if ok == 0:
+                        any_null = True
+                        value = 0
+                _bytes(self.target)[unsafe_offset=at] = value
+        else:
+            comptime for k in range(len(_FIXED)):
+                comptime D = _FIXED[k]
+                if self.physical == physical_of[D]():
+                    var out = Pointer[Scalar[D], MutAnyOrigin](
+                        unsafe_from_address=self.target
+                    )
+                    for i in range(count):
+                        var row = sources[unsafe_offset=i]
+                        var at = Int(number_at[unsafe_offset=i])
+                        var value = _load[D](row + self.offset)
+                        if self.nullable:
+                            var ok = (
+                                _bytes(row)[unsafe_offset=entry] >> bit
+                            ) & 1
+                            _bytes(valid)[unsafe_offset=at] = ok
+                            if ok == 0:
+                                any_null = True
+                                # A null's row value is the type's minimum
+                                # (`_null_value`), which a reader that
+                                # checks decimal precision on every value
+                                # it widens would reject.
+                                value = 0
+                        out[unsafe_offset=at] = value
+        if any_null:
+            _bytes(Int(self.nulls.unsafe_ptr()))[unsafe_offset=task] = 1
+
+    def finish(
+        mut self, heaps: TupleDataHeaps, mut decoded: List[UInt8]
+    ) raises -> Series:
+        """The gathered column, once every task is done; `decoded` is set
+        to its values in the vector layout (strings' string_t, Booleans'
+        bytes; empty for other columns)."""
+        var any_null = False
+        for t in range(len(self.nulls)):
+            any_null = any_null or self.nulls[t] != 0
+        var bits = List[UInt8]()
+        if any_null:
+            bits = pack_bytes(Int(self.valid.unsafe_ptr()), self.size)
+        self.valid = List[UInt8]()
+        if self.physical == PHYSICAL_VARCHAR:
+            swap(decoded, self.decoded)
+            var views = List[StringView]()
+            swap(views, self.views)
             return _typed(
                 Series(
-                    name^,
-                    BoolColumn(
-                        values=packed^,
-                        bits=List[UInt8](length=(size + 7) // 8, fill=255),
-                        length=size,
+                    self.name,
+                    StringColumn(
+                        StringViewStorage(
+                            views^,
+                            heaps.buffers.copy(),
+                            bits^,
+                            self.size,
+                            heaps.bytes,
+                        )
                     ),
                 ),
-                dtype,
+                self.dtype,
             )
-        return _typed(
-            Series(name^, BoolColumn(values=packed^, bits=bits^, length=size)),
-            dtype,
-        )
-    comptime for k in range(len(_FIXED)):
-        comptime D = _FIXED[k]
-        if physical == physical_of[D]():
-            var values = List[Scalar[D]](unsafe_uninit_length=max(size, 1))
-            _gather_fixed_dispatch(
-                physical,
-                rows,
-                SelectionVector(),
-                count,
-                top.offsets[column_id],
-                column_id,
-                top.can_have_null,
-                Int(values.unsafe_ptr()),
-                valid_of,
-                target_sel,
+        if self.physical == PHYSICAL_BOOL:
+            var packed = pack_bytes(Int(self.decoded.unsafe_ptr()), self.size)
+            swap(decoded, self.decoded)
+            if not any_null:
+                bits = List[UInt8](length=(self.size + 7) // 8, fill=255)
+            return _typed(
+                Series(
+                    self.name,
+                    BoolColumn(values=packed^, bits=bits^, length=self.size),
+                ),
+                self.dtype,
             )
-            for i in range(count):
-                if not _bit_valid(bits_at, Int(slot_at[unsafe_offset=i])):
-                    any_null = True
-                    break
-            if any_null:
-                return _typed(
-                    Series(
-                        name^, Column[Scalar[D]](values=values^, bits=bits^)
-                    ),
-                    dtype,
-                )
-            return _typed(Series(name^, Column[Scalar[D]](values^)), dtype)
-    raise Error("tuple data: no slot gather for this column type")
+        decoded = List[UInt8]()
+        var values = self.values.take()
+        if any_null:
+            comptime for k in range(len(_FIXED)):
+                comptime D = _FIXED[k]
+                if self.physical == physical_of[D]():
+                    ref column = values._data[Column[Scalar[D]]]
+                    return _typed(
+                        Series(
+                            self.name,
+                            Column[Scalar[D]]._from_buffers(
+                                column._data, _Buffer(bits^), 0, self.size
+                            ),
+                        ),
+                        self.dtype,
+                    )
+        return _typed(values^, self.dtype)
 
 
 def _gather_fixed_dispatch(

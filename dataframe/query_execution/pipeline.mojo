@@ -908,11 +908,11 @@ struct _StreamProbe(Movable):
 
     def finish_finalize(mut self) raises:
         """A round of finalize tasks has ended: the next round, or the
-        result. The build table's fill is the last round."""
+        result. The build table's fill is the last rounds."""
         if self.filling:
             self.built.value().finish_finalize()
-            self.filling = False
-            self.round = 0
+            self.round = self.built.value().finalize_tasks()
+            self.filling = self.round > 0
             return
         if len(self.started[0].batch) > 0:
             self.round = self.started[0].batch[0].advance()
@@ -963,8 +963,9 @@ struct _StreamProbe(Movable):
             self._fill_table()
 
     def _fill_table(mut self) raises:
-        """The built table's pointer table filled as one more round of
-        finalize tasks, each on its own partitions' regions."""
+        """The built table filled as more rounds of finalize tasks (its
+        pointer table, each task on its own partitions' regions, or a
+        perfect hash join's slots and columns)."""
         self.round = self.built.value().finalize_tasks()
         if self.round > 0:
             self.filling = True

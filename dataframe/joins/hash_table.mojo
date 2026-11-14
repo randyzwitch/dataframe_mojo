@@ -21,7 +21,7 @@ keys never match. Right/full joins record matched build rows for a later
 scan; build-side semi/anti joins emit flagged/unflagged rows respectively.
 """
 from std.atomic import Atomic
-from std.bit import next_power_of_two, pop_count
+from std.bit import next_power_of_two
 from std.collections import Optional
 from std.memory import (
     ArcPointer,
@@ -89,8 +89,8 @@ from dataframe.vector.tuple_data_layout import (
 )
 from dataframe.vector.tuple_data_scatter_gather import (
     TupleDataHeaps,
+    NumberedGather,
     gather_rows_series,
-    gather_rows_slots,
 )
 from dataframe.vector.tuple_data_states import TupleDataChunkState
 from dataframe.vector.types import (
@@ -535,19 +535,24 @@ struct _TableData(Movable):
     var heaps: TupleDataHeaps
     # The finalize tasks not yet run, one per build sink thread.
     var pending: List[_FinalizeJob]
-    # While a perfect hash join's finalize tasks run: per output column
-    # its gathered dictionary column and decoded values, and a word that
-    # a task sets on finding a repeated key.
-    var gathered: List[Optional[Series]]
-    var gathered_decoded: List[List[UInt8]]
+    # While a perfect hash join's finalize tasks run, two rounds of them.
+    # The first: per task, the run of chunks it reads and the
+    # collection's row its run starts at; each task gathers its rows into
+    # every output column (`gathers`) and sorts their slots into
+    # `buckets` (per task, per range of slots: slot and number in one
+    # word, then the row's pointer). The second: per range of
+    # `1 << slot_shift` slots, a task fills its slots from every task's
+    # bucket for it. `repeated`: a word a task sets on finding a repeated
+    # key. `phase`: the round under way (0 when none).
+    var gathers: List[NumberedGather]
     var repeated: List[UInt64]
-    # Per perfect hash finalize task, the run of chunks it fills slots
-    # from and the collection's row its run starts at; a mark byte per
-    # slot; and the key's physical type.
     var slot_runs: List[List[Tuple[Int, Int]]]
     var slot_firsts: List[Int]
-    var slot_marks: List[UInt8]
+    var buckets: List[List[UInt64]]
+    var slot_shift: Int
+    var slot_ranges: Int
     var slot_physical: Int
+    var phase: Int
     # What a pointer table needs if a repeated key turns a perfect hash
     # join back into a hash join: each partition's rows, its first
     # segment (one more entry for the end), the build's sink threads,
@@ -576,13 +581,15 @@ struct _TableData(Movable):
         self.null_row = List[UInt8](length=layout.row_width(), fill=0)
         self.heaps = TupleDataHeaps()
         self.pending = List[_FinalizeJob]()
-        self.gathered = List[Optional[Series]]()
-        self.gathered_decoded = List[List[UInt8]]()
+        self.gathers = List[NumberedGather]()
         self.repeated = List[UInt64](length=1, fill=0)
         self.slot_runs = List[List[Tuple[Int, Int]]]()
         self.slot_firsts = List[Int]()
-        self.slot_marks = List[UInt8]()
+        self.buckets = List[List[UInt64]]()
+        self.slot_shift = 0
+        self.slot_ranges = 0
         self.slot_physical = 0
+        self.phase = 0
         self.partition_rows = List[Int]()
         self.segment_starts = List[Int]()
         self.sink_threads = 1
@@ -1153,114 +1160,107 @@ struct _TableTask(Job):
         self.table.finalize_task(self.task)
 
 
-def _fill_slots(
+def _bucket_slots(
     physical: Int,
-    rows: TupleDataCollection,
-    chunks: List[Tuple[Int, Int]],
-    first: Int,
+    rows: Int,
+    count: Int,
     key_offset: Int,
     index_offset: Int,
+    place: Int,
     base: UInt64,
-    slots: Int,
-    marks: Int,
-    slot_rows: Int,
-    repeated: Int,
-):
-    """Fill the perfect hash slots of a run of the rows' chunks (`chunks`,
-    (segment, chunk) each, in collection order, its first row the
-    collection's row `first`): each row marks its key's slot (a byte per
-    slot) and writes its number (its build row, else its place in the
-    collection) and pointer there. Tasks filling other runs at the same
-    time write other slots unless a key repeats, so no write needs an
-    atomic: every mark is the same byte value, and the slots a repeated
-    key writes are discarded. A slot found marked already is a repeated
-    key, recorded in the `repeated` word that every task reads between
-    chunks; a repeat that two tasks write at the same time is found when
-    the marks are counted (`_pack_marks`)."""
+    span: UInt64,
+    shift: Int,
+    numbers: Int,
+    mut buckets: List[List[UInt64]],
+) -> Bool:
+    """Sort the `count` rows at the pointers at `rows` (the collection's
+    rows from `place` on) into `buckets` by their keys' slots, a bucket
+    per range of `1 << shift` slots: per row its slot and number in one
+    word (the slot above), then its pointer. A row's number is its build
+    row when the rows carry one (`index_offset` >= 0), else its place in
+    the collection; the numbers also go to `numbers` (UInt32s). False,
+    sorting no further, if a key's slot is past `span`."""
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         comptime if not D.is_floating_point():
             if physical == physical_of[D]():
-                _fill_slots_of[D](
+                return _bucket_slots_of[D](
                     rows,
-                    chunks,
-                    first,
+                    count,
                     key_offset,
                     index_offset,
+                    place,
                     base,
-                    slots,
-                    marks,
-                    slot_rows,
-                    repeated,
+                    span,
+                    shift,
+                    numbers,
+                    buckets,
                 )
-                return
+    return False
 
 
-def _fill_slots_of[
+def _bucket_slots_of[
     D: DType
 ](
-    rows: TupleDataCollection,
-    chunks: List[Tuple[Int, Int]],
-    first: Int,
+    rows: Int,
+    count: Int,
     key_offset: Int,
     index_offset: Int,
+    place: Int,
     base: UInt64,
+    span: UInt64,
+    shift: Int,
+    numbers: Int,
+    mut buckets: List[List[UInt64]],
+) -> Bool:
+    var at = Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)
+    var numbered = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=numbers)
+    for i in range(count):
+        var row = at[unsafe_offset=i]
+        var slot = _word[D](_load_as[D](row + key_offset)) - base
+        if slot > span:
+            return False
+        var number = UInt32(place + i)
+        if index_offset >= 0:
+            number = _load32(row + index_offset)
+        numbered[unsafe_offset=i] = number
+        ref bucket = buckets[Int(slot >> UInt64(shift))]
+        bucket.append((slot << 32) | UInt64(number))
+        bucket.append(UInt64(row))
+    return True
+
+
+def _fill_slot_range(
+    buckets: List[List[UInt64]],
+    tasks: Int,
+    ranges: Int,
+    range_index: Int,
     slots: Int,
-    marks: Int,
+    bits: Int,
     slot_rows: Int,
-    repeated: Int,
-):
-    ref seen = Pointer[Atomic[UInt64], MutAnyOrigin](
-        unsafe_from_address=repeated
-    )[]
+) -> Bool:
+    """Fill range `range_index`'s slots from every task's bucket for it
+    (bucket `t * ranges + range_index` of task t): each row's number and
+    pointer at its slot, its bit set. No other range shares a byte of
+    bits or a cache line of slots, so no write needs an atomic. False,
+    filling no further, on a slot set already: a repeated key."""
     var table = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=slots)
-    var rows_at = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=slot_rows)
-    var marked = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=marks)
-    var state = TupleDataChunkState()
-    var place = first
-    for r in range(len(chunks)):
-        if seen.load() != 0:
-            return
-        var count = rows.segments[chunks[r][0]].initialize_chunk_state(
-            state, chunks[r][1], False
-        )
-        var at = state.row_locations.unsafe_ptr()
-        for i in range(count):
-            var row = at[unsafe_offset=i]
-            var slot = Int(_word[D](_load_as[D](row + key_offset)) - base)
-            if marked[unsafe_offset=slot] != 0:
-                seen.store(1)
-                return
-            marked[unsafe_offset=slot] = 1
-            var number = UInt32(place + i)
-            if index_offset >= 0:
-                number = _load32(row + index_offset)
-            table[unsafe_offset=slot] = number
-            rows_at[unsafe_offset=slot] = UInt64(row)
-        place += count
-
-
-def _pack_marks(marks: List[UInt8], mut bits: List[UInt8]) -> Int:
-    """The slots' bits from their mark bytes (eight marks to a byte of
-    bits), and how many slots are marked."""
-    var size = len(marks)
-    bits = List[UInt8](length=(size + 7) // 8, fill=0)
-    var source = marks.unsafe_ptr()
-    var target = bits.unsafe_ptr()
-    var marked = 0
-    var whole = size // 8
-    for w in range(whole):
-        # Each mark is 0 or 1: the multiply gathers the low bit of each of
-        # the eight bytes into the top byte, mark i at bit i.
-        var eight = _load64(Int(source) + 8 * w)
-        var packed = UInt8((eight * 0x0102040810204080) >> 56)
-        target[unsafe_offset=w] = packed
-        marked += Int(pop_count(packed))
-    for i in range(8 * whole, size):
-        if source[unsafe_offset=i] != 0:
-            target[unsafe_offset=i >> 3] |= UInt8(1) << UInt8(i & 7)
-            marked += 1
-    return marked
+    var set = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bits)
+    var pointers = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=slot_rows)
+    for t in range(tasks):
+        ref bucket = buckets[t * ranges + range_index]
+        var words = bucket.unsafe_ptr()
+        for j in range(0, len(bucket), 2):
+            var word = words[unsafe_offset=j]
+            var slot = Int(word >> 32)
+            var byte = set[unsafe_offset=slot >> 3]
+            var bit = UInt8(1) << UInt8(slot & 7)
+            if byte & bit != 0:
+                return False
+            set[unsafe_offset=slot >> 3] = byte | bit
+            table[unsafe_offset=slot] = UInt32(word & 0xFFFFFFFF)
+            pointers[unsafe_offset=slot] = words[unsafe_offset=j + 1]
+    return True
 
 
 struct _InsertJob(Copyable, Job):
@@ -1751,37 +1751,44 @@ struct JoinHashTable(Copyable, Movable):
             self._finalize_here()
 
     def _finalize_here(mut self) raises:
-        """Run the finalize tasks on this thread and the crew's, then the
-        step after them."""
-        var tasks = self.finalize_tasks()
-        if tasks == 1:
-            self.finalize_task(0)
-        elif tasks > 1:
-            var jobs = List[_TableTask](capacity=tasks)
-            for t in range(tasks):
-                jobs.append(_TableTask(self, t))
-            run_jobs(jobs)
-        self.finish_finalize()
+        """Run the finalize tasks on this thread and the crew's, round by
+        round, each round's step after it."""
+        while True:
+            var tasks = self.finalize_tasks()
+            if tasks == 0:
+                return
+            if tasks == 1:
+                self.finalize_task(0)
+            else:
+                var jobs = List[_TableTask](capacity=tasks)
+                for t in range(tasks):
+                    jobs.append(_TableTask(self, t))
+                run_jobs(jobs)
+            self.finish_finalize()
 
     def _plan_slots(mut self, physical: Int, base: UInt64, span: Int) raises:
-        """Plan a perfect hash join's finalize tasks: the slot arrays for
-        keys `base` to `base + span` (a mark byte per slot, cleared), and
-        as many tasks as the build had sink threads, each filling the
-        slots of a run of whole chunks of the rows (balanced by rows) and
-        gathering every task-th output column. The work per row is the
-        same whatever the build's size, so it splits like the sink did.
+        """Plan a perfect hash join's finalize tasks for keys `base` to
+        `base + span`, two rounds of them. The first: as many tasks as the
+        build had sink threads, each reading a run of whole chunks of the
+        rows (balanced by rows): it gathers its rows into every output
+        column, and sorts their slots into a bucket per range of slots.
         Each output column is a dictionary over the build rows, each row
         at its number (its build row, else its place in the collection),
-        which its key's slot holds; the gathers read only the rows, so
-        they run beside the slot fills. The slots' bits are packed from
-        the marks once every task is done."""
+        so the tasks write disjoint entries of columns allocated here. The
+        second: a task per range of slots, filling its slots from every
+        first-round task's bucket for it. A range covers whole cache
+        lines of every slot array (at least 512 slots, a 64-byte line of
+        bits), so no two tasks write near each other, and a repeated key
+        is found exactly, without atomics."""
         self.perfect = True
         self.perfect_base = base
         self.perfect_span = span
         var size = span + 1
         self.data[].slots = List[UInt32](unsafe_uninit_length=size)
         self.data[].slot_rows = List[UInt64](unsafe_uninit_length=size)
-        self.data[].slot_marks = List[UInt8](length=size, fill=0)
+        self.data[].slot_bits = List[UInt8](
+            unsafe_uninit_length=(size + 7) // 8
+        )
         self.data[].repeated[0] = 0
         self.data[].slot_physical = physical
         ref rows = self.data[].collection
@@ -1812,11 +1819,34 @@ struct JoinHashTable(Copyable, Movable):
             runs.append(run^)
         self.data[].slot_runs = runs^
         self.data[].slot_firsts = firsts^
-        var outputs = len(self.output_columns)
-        self.data[].gathered = List[Optional[Series]](length=outputs, fill=None)
-        self.data[].gathered_decoded = List[List[UInt8]](
-            length=outputs, fill=List[UInt8]()
+        # Ranges of a power of two slots, as many as the first round's
+        # tasks unless that would make them narrower than 512 slots.
+        var width = max(512, next_power_of_two((size + tasks - 1) // tasks))
+        var shift = 0
+        while (1 << shift) < width:
+            shift += 1
+        self.data[].slot_shift = shift
+        self.data[].slot_ranges = (size + width - 1) // width
+        self.data[].buckets = List[List[UInt64]](
+            length=tasks * self.data[].slot_ranges, fill=List[UInt64]()
         )
+        # Every entry gets a row when every build row is in the table;
+        # numbered rows without one (null keys) leave theirs empty.
+        var gathers = List[NumberedGather](capacity=len(self.output_columns))
+        for c in range(len(self.output_columns)):
+            gathers.append(
+                NumberedGather(
+                    self.row_layout,
+                    self.output_columns[c],
+                    self.output_names[c],
+                    self.output_types[c],
+                    self.count,
+                    tasks,
+                    self.count == self.rows_stored,
+                )
+            )
+        self.data[].gathers = gathers^
+        self.data[].phase = 1
 
     def _plan_pointer_table(mut self) raises:
         """Plan a hash join's finalize tasks: the pointer table, each
@@ -1968,145 +1998,177 @@ struct JoinHashTable(Copyable, Movable):
         return columns^
 
     def finalize_tasks(self) -> Int:
-        """The finalize tasks left to run: one per build sink thread. A
-        hash join's each fill a run of partitions' regions of the pointer
-        table, so the tasks never write the same entries and need no
-        atomics; a perfect hash join's each fill the slots of a run of the
-        rows and gather some of the output columns."""
-        return len(self.data[].pending) + len(self.data[].slot_runs)
+        """The finalize tasks of the round to run next, 0 once the table is
+        done. A hash join's: one per build sink thread, each filling a run
+        of partitions' regions of the pointer table, so the tasks never
+        write the same entries and need no atomics. A perfect hash join's
+        two rounds (`_plan_slots`): one per build sink thread, then one per
+        range of slots."""
+        if self.data[].phase == 1:
+            return len(self.data[].slot_runs)
+        if self.data[].phase == 2:
+            return self.data[].slot_ranges
+        return len(self.data[].pending)
 
     def finalize_task(self, task: Int) raises:
-        """Run finalize task `task`; tasks run at the same time, each on
-        its own regions, rows or columns."""
-        if len(self.data[].slot_runs) > 0:
-            self._perfect_task(task)
+        """Run finalize task `task` of the round under way; tasks run at
+        the same time, each on its own regions, rows or slots."""
+        if self.data[].phase == 1:
+            self._perfect_rows(task)
+        elif self.data[].phase == 2:
+            self._perfect_slots(task)
         else:
             self.data[].pending[task].run()
 
-    def _perfect_task(self, task: Int) raises:
-        """Perfect hash finalize task `task`: fill the slots of its run of
-        the rows, then gather its output columns (every task-th one), each
-        over every row to its number."""
-        _fill_slots(
-            self.data[].slot_physical,
-            self.data[].collection,
-            self.data[].slot_runs[task],
-            self.data[].slot_firsts[task],
-            self.layout.key_offset,
-            self.layout.index_offset,
-            self.perfect_base,
-            Int(self.data[].slots.unsafe_ptr()),
-            Int(self.data[].slot_marks.unsafe_ptr()),
-            Int(self.data[].slot_rows.unsafe_ptr()),
-            Int(self.data[].repeated.unsafe_ptr()),
+    def _repeat_found(self) -> Bool:
+        return (
+            Pointer[Atomic[UInt64], MutAnyOrigin](
+                unsafe_from_address=Int(self.data[].repeated.unsafe_ptr())
+            )[].load()
+            != 0
         )
-        var tasks = len(self.data[].slot_runs)
-        var outputs = len(self.output_columns)
-        if task >= outputs:
-            return
-        ref repeated = Pointer[Atomic[UInt64], MutAnyOrigin](
+
+    def _record_repeat(self):
+        Pointer[Atomic[UInt64], MutAnyOrigin](
             unsafe_from_address=Int(self.data[].repeated.unsafe_ptr())
-        )[]
-        if repeated.load() != 0:
-            return
-        # Every row's pointer and number, in collection order.
-        var count = self.rows_stored
-        var pointers = List[UInt64](unsafe_uninit_length=count)
-        var numbers = List[UInt32](unsafe_uninit_length=count)
-        var listed = pointers.unsafe_ptr()
-        var numbered = numbers.unsafe_ptr()
-        var index_offset = self.layout.index_offset
+        )[].store(1)
+
+    def _perfect_rows(self, task: Int) raises:
+        """A perfect hash join's first-round task `task`: for each chunk
+        of its run, sort the rows' slots into its buckets, then gather the
+        rows into every output column."""
+        var ranges = self.data[].slot_ranges
+        var buckets = List[List[UInt64]](capacity=ranges)
+        ref run = self.data[].slot_runs[task]
+        var rows_in_run = 0
+        for r in range(len(run)):
+            rows_in_run += (
+                self.data[]
+                .collection.segments[run[r][0]]
+                .chunks[run[r][1]]
+                .count
+            )
+        # Keys spread over the ranges about evenly when they are dense.
+        var expected = 2 * (rows_in_run // ranges + rows_in_run // 8 + 8)
+        for _ in range(ranges):
+            buckets.append(List[UInt64](capacity=expected))
+        var numbers = List[UInt32](unsafe_uninit_length=STANDARD_VECTOR_SIZE)
         var state = TupleDataChunkState()
         ref rows = self.data[].collection
-        var place = 0
-        for s in range(len(rows.segments)):
-            ref segment = rows.segments[s]
-            for c in range(segment.chunk_count()):
-                var n = segment.initialize_chunk_state(state, c, False)
-                var at = state.row_locations.unsafe_ptr()
-                for i in range(n):
-                    var row = at[unsafe_offset=i]
-                    listed[unsafe_offset=place + i] = UInt64(row)
-                    if index_offset >= 0:
-                        numbered[unsafe_offset=place + i] = _load32(
-                            row + index_offset
-                        )
-                    else:
-                        numbered[unsafe_offset=place + i] = UInt32(place + i)
-                place += n
-        var c = task
-        while c < outputs:
-            if repeated.load() != 0:
+        var place = self.data[].slot_firsts[task]
+        var span = UInt64(self.perfect_span)
+        for r in range(len(run)):
+            if self._repeat_found():
                 return
-            var decoded = List[UInt8]()
-            var column = gather_rows_slots(
-                self.row_layout,
-                Int(pointers.unsafe_ptr()),
-                count,
-                Int(numbers.unsafe_ptr()),
-                self.count,
-                self.output_columns[c],
-                self.output_names[c],
-                self.output_types[c],
-                self.data[].heaps,
-                decoded,
+            var count = rows.segments[run[r][0]].initialize_chunk_state(
+                state, run[r][1], False
             )
-            self.data[].gathered[c] = Optional(column^)
-            self.data[].gathered_decoded[c] = decoded^
-            c += tasks
-        _ = pointers^
+            var at = Int(state.row_locations.unsafe_ptr())
+            if not _bucket_slots(
+                self.data[].slot_physical,
+                at,
+                count,
+                self.layout.key_offset,
+                self.layout.index_offset,
+                place,
+                self.perfect_base,
+                span,
+                self.data[].slot_shift,
+                Int(numbers.unsafe_ptr()),
+                buckets,
+            ):
+                self._record_repeat()
+                return
+            for c in range(len(self.data[].gathers)):
+                self.data[].gathers[c].gather(
+                    at,
+                    Int(numbers.unsafe_ptr()),
+                    count,
+                    task,
+                    self.data[].heaps,
+                )
+            place += count
+        for r in range(ranges):
+            swap(self.data[].buckets[task * ranges + r], buckets[r])
         _ = numbers^
 
-    def finish_finalize(mut self) raises:
-        """After the last finalize task, once the whole table is filled:
-        for a hash join, whether any chain is longer than one, then
-        dictionary emission's arrays when it applies; for a perfect hash
-        join, its gathered columns become the dictionary the probe emits
-        from, unless a task found a repeated key, which turns the join
-        back into a hash join, whose pointer table is filled here."""
-        if self.finalize_tasks() == 0:
+    def _perfect_slots(self, task: Int) raises:
+        """A perfect hash join's second-round task `task`: clear its range
+        of slot bits, then fill the range's slots from every first-round
+        task's bucket for it."""
+        var shift = self.data[].slot_shift
+        var size = self.perfect_span + 1
+        var low = task << shift
+        var high = min(size, (task + 1) << shift)
+        var bits = Int(self.data[].slot_bits.unsafe_ptr())
+        # `low` is a multiple of 512, so the range's bits start a byte.
+        unsafe_memset_zero(
+            Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bits + (low >> 3)),
+            (high + 7) // 8 - (low >> 3),
+        )
+        if self._repeat_found():
             return
-        if self.perfect:
+        if not _fill_slot_range(
+            self.data[].buckets,
+            len(self.data[].slot_runs),
+            self.data[].slot_ranges,
+            task,
+            Int(self.data[].slots.unsafe_ptr()),
+            bits,
+            Int(self.data[].slot_rows.unsafe_ptr()),
+        ):
+            self._record_repeat()
+
+    def finish_finalize(mut self) raises:
+        """After a round of finalize tasks. A perfect hash join's first
+        round arms its second; after the second its gathered columns
+        become the dictionary the probe emits from. A repeated key found
+        in either turns the join back into a hash join, whose pointer
+        table is the next round. After a hash join's round: whether any
+        chain is longer than one, then dictionary emission's arrays when
+        they apply."""
+        if self.data[].phase == 1:
+            self.data[].phase = 2
+            if self.data[].repeated[0] == 0:
+                return
+        if self.data[].phase == 2:
+            self.data[].phase = 0
             self.data[].slot_runs = List[List[Tuple[Int, Int]]]()
             self.data[].slot_firsts = List[Int]()
-            if self.data[].repeated[0] == 0:
-                # Every row marked a slot of its own unless a key repeats:
-                # two tasks writing the same slot at once leave fewer
-                # marked slots than rows.
-                if (
-                    _pack_marks(self.data[].slot_marks, self.data[].slot_bits)
-                    != self.rows_stored
-                ):
-                    self.data[].repeated[0] = 1
-            self.data[].slot_marks = List[UInt8]()
+            self.data[].buckets = List[List[UInt64]]()
             if self.data[].repeated[0] == 0:
                 trace_path("join.perfect_hash")
                 if len(self.output_columns) > 0:
                     var columns = List[Series](
                         capacity=len(self.output_columns)
                     )
+                    var decoded = List[List[UInt8]](
+                        capacity=len(self.output_columns)
+                    )
                     for c in range(len(self.output_columns)):
-                        columns.append(self.data[].gathered[c].take())
-                    var decoded = List[List[UInt8]]()
-                    swap(decoded, self.data[].gathered_decoded)
+                        var values = List[UInt8]()
+                        columns.append(
+                            self.data[]
+                            .gathers[c]
+                            .finish(self.data[].heaps, values)
+                        )
+                        decoded.append(values^)
                     self._set_dictionary(columns^, decoded^)
-                self.data[].gathered = List[Optional[Series]]()
+                self.data[].gathers = List[NumberedGather]()
                 return
-            # A repeated key: the hash table instead.
+            # A repeated key: the hash table instead, its pointer table the
+            # next round.
             self.perfect = False
             self.perfect_base = 0
             self.perfect_span = 0
             self.data[].slots = List[UInt32]()
             self.data[].slot_bits = List[UInt8]()
             self.data[].slot_rows = List[UInt64]()
-            self.data[].gathered = List[Optional[Series]]()
-            self.data[].gathered_decoded = List[List[UInt8]]()
+            self.data[].gathers = List[NumberedGather]()
             self._plan_pointer_table()
-            var tasks = self.finalize_tasks()
-            if tasks == 1:
-                self.finalize_task(0)
-            else:
-                run_jobs(self.data[].pending)
+            return
+        if len(self.data[].pending) == 0:
+            return
         for t in range(len(self.data[].pending)):
             self.chains_longer_than_one = (
                 self.chains_longer_than_one or self.data[].pending[t].chained

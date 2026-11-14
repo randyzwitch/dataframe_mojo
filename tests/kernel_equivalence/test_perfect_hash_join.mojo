@@ -2,12 +2,21 @@
 by `key - least`: inner,
 left, semi and anti joins against a scalar model, with null probe keys, probe keys outside
 the span, a build whose keys repeat (which keeps the hash table), and
-probes where every row matches once. Builds over many vectors fill their
-slots and gather their columns on several finalize tasks at once."""
+probes where every row matches once. Builds over many vectors gather
+their columns (nulls, inlined and longer strings, Booleans) and fill
+their slots on several finalize tasks at once, and a repeated key in any
+of their rows keeps the hash table."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_true
 
-from dataframe import Column, DataFrame, Series, StringColumn, col
+from dataframe import (
+    BoolColumn,
+    Column,
+    DataFrame,
+    Series,
+    StringColumn,
+    col,
+)
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
     StrategyTrace,
@@ -248,3 +257,174 @@ def test_builds_over_many_vectors_join_through_slots() raises:
             var key = inner.item(r, "k").int64()
             assert_equal(inner.item(r, "v").int64(), 10 * key)
             assert_equal(inner.item(r, "s").string(), String("key ", key))
+
+
+comptime MANY = 20_000
+
+
+def many_keys(repeat_at: Int, repeat_of: Int) -> List[Int64]:
+    """MANY unique keys (every third from 0) in a scattered order; with
+    `repeat_at` >= 0, the key at row `repeat_of` again at row `repeat_at`
+    (rows after it shift down one)."""
+    var keys = List[Int64]()
+    for i in range(MANY):
+        keys.append(Int64(3 * ((i * 7919) % MANY)))
+    if repeat_at >= 0:
+        keys.insert(repeat_at, keys[repeat_of])
+    return keys^
+
+
+def text_of(key: Int64) -> String:
+    # Short keys inline in their row; the others live in the heap.
+    if key % 2 == 0:
+        return String("k", key)
+    return String("a longer string for key ", key)
+
+
+def many_build(var keys: List[Int64]) raises -> DataFrame:
+    """Payloads of every kind, each null on some keys of its own."""
+    var values = List[Int64]()
+    var values_valid = List[Bool]()
+    var reals = List[Float64]()
+    var texts = List[String]()
+    var texts_valid = List[Bool]()
+    var flags = List[Bool]()
+    var flags_valid = List[Bool]()
+    for k in keys:
+        values.append(10 * k)
+        values_valid.append(k % 7 != 1)
+        reals.append(Float64(k) / 4)
+        texts.append(text_of(k))
+        texts_valid.append(k % 11 != 2)
+        flags.append(k % 5 == 0)
+        flags_valid.append(k % 13 != 4)
+    return DataFrame(
+        [
+            Series("bk", Column[Int64](keys^)),
+            Series("v", Column[Int64](values^, values_valid)),
+            Series("f", Column[Float64](reals^)),
+            Series("s", StringColumn(texts^, texts_valid)),
+            Series("b", BoolColumn(flags^, flags_valid)),
+        ]
+    )
+
+
+def many_probe() raises -> DataFrame:
+    var keys = List[Int64]()
+    var ids = List[Int64]()
+    for row in range(ROWS):
+        keys.append(Int64((row * 4099) % 62_000) - 1_000)
+        ids.append(Int64(row))
+    return DataFrame(
+        [Series("k", Column[Int64](keys^)), Series("id", Column[Int64](ids^))]
+    )
+
+
+def check_payloads(out: DataFrame, matched_only: Bool) raises:
+    """Every row's payloads are its key's, nulls where the build's are,
+    and all null on a row without a match."""
+    for r in range(out.height()):
+        var key = out.item(r, "k").int64()
+        var hit = key >= 0 and key < 3 * MANY and key % 3 == 0
+        if matched_only:
+            assert_true(hit)
+        var v = out.item(r, "v")
+        var s = out.item(r, "s")
+        var b = out.item(r, "b")
+        var f = out.item(r, "f")
+        if not hit:
+            assert_true(v.is_null() and s.is_null() and b.is_null())
+            assert_true(f.is_null())
+            continue
+        assert_equal(v.is_null(), key % 7 == 1)
+        if not v.is_null():
+            assert_equal(v.int64(), 10 * key)
+        assert_equal(f.float64(), Float64(key) / 4)
+        assert_equal(s.is_null(), key % 11 == 2)
+        if not s.is_null():
+            assert_equal(s.string(), text_of(key))
+        assert_equal(b.is_null(), key % 13 == 4)
+        if not b.is_null():
+            assert_equal(b.bool(), key % 5 == 0)
+
+
+def test_payloads_of_every_kind_gather_over_many_vectors() raises:
+    """A build over many vectors gathers each payload on the finalize task
+    that reads its rows: nullable integers, floats, inlined and heap
+    strings with nulls, and Booleans with nulls all land on their keys,
+    for an inner and a left join, lazily and eagerly."""
+    var left = many_probe()
+    var right = many_build(many_keys(-1, 0))
+    for how in ["inner", "left"]:
+        for lazy in [False, True]:
+            var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+            var observed = StrategyTrace()
+            var out = (
+                left.lazy()
+                .join(right.lazy(), left_on=["k"], right_on=["bk"], how=how)
+                .collect() if lazy else left.join(
+                    right, left_on=["k"], right_on=["bk"], how=how
+                )
+            )
+            var used = "dataframe-path: join.perfect_hash\n" in observed.text()
+            _ = observed^
+            _ = trace^
+            if how == "inner" and lazy:
+                assert_true(used)
+            var expected = 0
+            for row in range(ROWS):
+                var key = (row * 4099) % 62_000 - 1_000
+                if key >= 0 and key < 3 * MANY and key % 3 == 0:
+                    expected += 1
+                elif how == "left":
+                    expected += 1
+            assert_equal(out.height(), expected)
+            check_payloads(out, how == "inner")
+
+
+def test_a_repeated_key_anywhere_keeps_the_hash_table() raises:
+    """A key repeated in neighbouring rows, at the build's two ends (rows
+    different finalize tasks read), or for the least and the greatest key
+    (slots different tasks fill) is found, and the join runs through the
+    hash table with the repeat's extra matches."""
+    var left = many_probe()
+    # (row the repeat goes to, row whose key it repeats)
+    var cases: List[Tuple[Int, Int]] = [
+        (1, 0),
+        (MANY, 0),
+        (MANY // 2, 1),
+        (MANY // 3, MANY - 1),
+    ]
+    var keys0 = many_keys(-1, 0)
+    # The rows holding the least (0) and the greatest key.
+    var least_row = 0
+    var greatest_row = 0
+    for i in range(MANY):
+        if keys0[i] == 0:
+            least_row = i
+        if keys0[i] == Int64(3 * (MANY - 1)):
+            greatest_row = i
+    cases.append((MANY, least_row))
+    cases.append((0, greatest_row))
+    for c in cases:
+        var keys = many_keys(c[0], c[1])
+        var repeated = keys[c[0]]
+        var right = many_build(keys^)
+        var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+        var observed = StrategyTrace()
+        var out = (
+            left.lazy()
+            .join(right.lazy(), left_on=["k"], right_on=["bk"])
+            .collect()
+        )
+        var used = "dataframe-path: join.perfect_hash\n" in observed.text()
+        _ = observed^
+        _ = trace^
+        assert_true(not used)
+        var expected = 0
+        for row in range(ROWS):
+            var key = Int64((row * 4099) % 62_000 - 1_000)
+            if key >= 0 and key < 3 * MANY and key % 3 == 0:
+                expected += 2 if key == repeated else 1
+        assert_equal(out.height(), expected)
+        check_payloads(out, True)
