@@ -364,6 +364,10 @@ struct UngroupedSink(Sink):
     # the owner's address, never the state, so any reduction's state fits.
     var owned: List[Reducer]
     var buffered: List[_OrderedBuffer]
+    # Per state by address, whether its owner takes its input straight from
+    # the chunk's vectors (`Reducer.update_vector`,
+    # `_OrderedBuffer.add_vector`) rather than as a column.
+    var vectors: List[Bool]
     # The global state's: every other worker's state row and owners once
     # combined, kept, since the combined row's chains of states by address
     # point into them until the finish reads them.
@@ -399,6 +403,7 @@ struct UngroupedSink(Sink):
         self.distinct_of = List[Int](length=len(self.slots), fill=-1)
         self.owned = List[Reducer](capacity=len(self.slots))
         self.buffered = List[_OrderedBuffer](capacity=len(self.slots))
+        self.vectors = shared.layout.vectors.copy()
         for s in range(len(self.slots)):
             self.owned.append(shared.layout.templates[s].make(0))
             self.buffered.append(_OrderedBuffer())
@@ -544,13 +549,38 @@ struct UngroupedSink(Sink):
             at[unsafe_offset=1] = 1
             at[unsafe_offset=2] = 0
         var n = chunk.count
-        var ordinals = List[Int](length=n, fill=0)
-        var column = self._column(s, chunk, arena)
+        var dtype = self.types[s].dtype()
         if ordered:
-            self.buffered[s].add(column, ordinals, self.sequence, 1)
+            if self.vectors[s]:
+                var format = self._format(s, chunk, arena)
+                var storage = storage_physical(self.types[s])
+                if self.buffered[s].add_vector(
+                    format, n, dtype, storage, self.sequence
+                ):
+                    return
+            var column = self._column(s, chunk, arena)
+            self.buffered[s].add(
+                column, List[Int](length=n, fill=0), self.sequence, 1
+            )
             return
         self.owned[s].grow(1)
-        if self.owned[s].op == CORR or self.owned[s].op == COV:
+        var pair = self.owned[s].op == CORR or self.owned[s].op == COV
+        if self.vectors[s]:
+            # The state reads the input's vector in place: no column of the
+            # chunk's rows is made.
+            var format = self._format(s, chunk, arena)
+            if pair:
+                var second = self._format(slot.k, chunk, arena)
+                var second_type = self.types[slot.k].dtype()
+                self.owned[s].update_pair_vector(
+                    format, second, n, dtype, second_type
+                )
+            else:
+                self.owned[s].update_vector(format, n, dtype)
+            return
+        var ordinals = List[Int](length=n, fill=0)
+        var column = self._column(s, chunk, arena)
+        if pair:
             var second = self._column(slot.k, chunk, arena)
             self.owned[s].update_pair(column, second, 0, True, ordinals)
         else:

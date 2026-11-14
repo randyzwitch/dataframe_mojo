@@ -28,6 +28,7 @@ from dataframe.aggregation.reducer import (
     Reducer,
     _from_canonical,
     quantile_in,
+    reads_vectors,
 )
 from dataframe.categorical import decode
 from dataframe.decimal import check_limit, decimal_mean, precision_limit
@@ -72,6 +73,7 @@ from dataframe.kernels.rank import _key
 from dataframe.series import Series
 from dataframe.text.bytes import _Bytes
 from dataframe.storage.string import StringColumn
+from dataframe.vector.column_data_collection import append_raw, raw_series
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
     PHYSICAL_INT128,
@@ -79,9 +81,11 @@ from dataframe.vector.types import (
     PHYSICAL_INT64,
     PHYSICAL_VARCHAR,
     STRING_INLINE_BYTES,
+    SelectionVector,
     StringT,
     UnifiedVectorFormat,
     physical_of,
+    physical_size,
     string_data,
 )
 from dataframe.storage.string_view import (
@@ -656,6 +660,33 @@ def states_supported(specs: List[ReducerSpec], inputs: List[Series]) -> Bool:
         elif _slot_kind(specs[s], inputs[s]) < 0:
             return False
     return True
+
+
+def vector_input(
+    kind: Int, op: Int, dtype: DataType, second: DataType, storage: Int
+) -> Bool:
+    """Whether a state by address of `kind` takes its input (values of
+    `dtype`, stored as the physical type `storage`; `second` the type of a
+    correlation's or covariance's other input) straight from the chunk's
+    vectors rather than as a column of the chunk's rows: a `Reducer`
+    (`Reducer.update_vector`) for the reductions and types
+    `reads_vectors` admits, on both inputs of a pair; a buffer of input
+    rows (`_OrderedBuffer.add_vector`) for fixed-width numbers, whose raw
+    bytes it keeps."""
+    if kind == _K_STATE:
+        if not reads_vectors(op, dtype):
+            return False
+        if op == CORR or op == COV:
+            return reads_vectors(op, second)
+        return True
+    if kind == _K_ORDERED:
+        return (
+            physical_size(storage) > 0
+            and storage != PHYSICAL_BOOL
+            and storage != PHYSICAL_VARCHAR
+            and not dtype.is_categorical()
+        )
+    return False
 
 
 def _address_kind(op: Int) -> Int:
@@ -1799,6 +1830,16 @@ struct _OrderedBuffer(Movable):
     var sequences: List[Int]
     var groups: Int
     var values: Optional[Series]
+    # Rows taken straight from vectors (`add_vector`): fixed-width values
+    # appended as raw bytes of their storage type, a packed validity bitmap
+    # (empty while every row is valid), and their count. They follow every
+    # batch, in input order; a batch added after them moves them into a
+    # batch of their own first.
+    var raw: List[UInt8]
+    var raw_bits: List[UInt8]
+    var raw_physical: Int
+    var raw_rows: Int
+    var raw_type: DataType
     # Each group's rows, in input order: those of ordinal o are
     # rows[starts[o]:starts[o + 1]].
     var starts: List[Int]
@@ -1812,12 +1853,107 @@ struct _OrderedBuffer(Movable):
         self.values = None
         self.starts = List[Int]()
         self.rows = List[Int]()
+        self.raw = List[UInt8]()
+        self.raw_bits = List[UInt8]()
+        self.raw_physical = 0
+        self.raw_rows = 0
+        self.raw_type = DataType.NULL
+
+    def add_vector(
+        mut self,
+        format: UnifiedVectorFormat,
+        count: Int,
+        dtype: DataType,
+        storage: Int,
+        first: Int,
+        ordinals: List[Int] = List[Int](),
+        groups: Int = 1,
+    ) raises -> Bool:
+        """The `count` rows `format` reads, the k-th of group ordinal
+        `ordinals[k]` (-1 for a row that joins no group; every row of
+        ordinal 0 when `ordinals` is empty) and sequence number
+        `first + k`, copied straight from the vector: values of a
+        fixed-width number type that is `dtype`'s storage (`storage`) are
+        appended as raw bytes through the vector's selection, the only copy
+        they need. False, taking nothing, for any other vector (strings,
+        Booleans, categorical codes, nested values): the caller adds those
+        as a column (`add`)."""
+        var size = physical_size(format.physical)
+        if (
+            size == 0
+            or format.physical == PHYSICAL_BOOL
+            or format.physical == PHYSICAL_VARCHAR
+            or format.physical != storage
+            or dtype.is_categorical()
+            or (self.raw_rows > 0 and format.physical != self.raw_physical)
+        ):
+            return False
+        self.raw_physical = format.physical
+        self.raw_type = dtype
+        if len(ordinals) == 0:
+            append_raw(
+                self.raw,
+                self.raw_bits,
+                self.raw_rows,
+                0,
+                format,
+                count,
+                size,
+            )
+            self.raw_rows += count
+            for k in range(count):
+                self.ordinals.append(0)
+                self.sequences.append(first + k)
+            self.groups = groups
+            return True
+        # The rows that join a group, through a selection of their own.
+        var picked = List[UInt32](capacity=count)
+        for k in range(count):
+            if ordinals[k] < 0:
+                continue
+            picked.append(UInt32(format.sel.get_index(k)))
+            self.ordinals.append(ordinals[k])
+            self.sequences.append(first + k)
+        var kept = len(picked)
+        var through = format
+        if kept < count:
+            through.sel = SelectionVector(Int(picked.unsafe_ptr()))
+        append_raw(
+            self.raw,
+            self.raw_bits,
+            self.raw_rows,
+            0,
+            through,
+            kept,
+            size,
+        )
+        _ = picked^
+        self.raw_rows += kept
+        self.groups = groups
+        return True
+
+    def _flush_raw(mut self) raises:
+        """The rows taken from vectors as one batch, after every other."""
+        if self.raw_rows == 0:
+            return
+        self.batches.append(
+            raw_series(
+                self.raw,
+                self.raw_bits,
+                self.raw_physical,
+                Series.full_null("", self.raw_type, 0),
+            )
+        )
+        self.raw = List[UInt8]()
+        self.raw_bits = List[UInt8]()
+        self.raw_rows = 0
 
     def add(
         mut self, batch: Series, ordinals: List[Int], first: Int, groups: Int
     ) raises:
         """A batch's rows, the k-th of group ordinal `ordinals[k]` (-1 for a
         row that joins no group) and sequence number `first + k`."""
+        self._flush_raw()
         var kept = List[Int]()
         for k in range(len(ordinals)):
             if ordinals[k] < 0:
@@ -1834,6 +1970,7 @@ struct _OrderedBuffer(Movable):
     def prepare(mut self) raises:
         """The values as one column and the rows by group (a stable
         counting sort, so each group's rows stay in input order)."""
+        self._flush_raw()
         if self.values or len(self.batches) == 0:
             return
         self.values = (

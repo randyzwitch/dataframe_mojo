@@ -16,7 +16,12 @@ from dataframe.storage.column import Column, _validity_at
 from dataframe.storage.column import _count_valid as _valid_count
 from dataframe.storage.string import StringColumn
 from dataframe.dtype import DataType, NUMERIC_DTYPES
-from dataframe.decimal import check_limit, decimal_mean, precision_limit
+from dataframe.decimal import (
+    check_limit,
+    decimal_mean,
+    pow10,
+    precision_limit,
+)
 from dataframe.series import Series
 from dataframe.expr import (
     SUM,
@@ -58,6 +63,14 @@ from dataframe.aggregation.scalar_states import (
 )
 from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.parallel import Job, Pool, configured_workers
+from dataframe.vector.types import (
+    PHYSICAL_BOOL,
+    PHYSICAL_VARCHAR,
+    StringT,
+    UnifiedVectorFormat,
+    physical_of,
+    string_data,
+)
 
 
 # Values per variance block: compute a block's mean and
@@ -946,6 +959,143 @@ def _group_quantiles(
     pool.release()
 
 
+# The number types a vector holds: every integer and float width, and the
+# 128-bit integers wide decimals are stored as.
+comptime _VECTOR_NUMBERS = [
+    DType.int64,
+    DType.float64,
+    DType.int8,
+    DType.int16,
+    DType.int32,
+    DType.uint8,
+    DType.uint16,
+    DType.uint32,
+    DType.uint64,
+    DType.float32,
+    DType.int128,
+]
+
+
+def reads_vectors(op: Int, dtype: DataType) -> Bool:
+    """Whether a `Reducer` of `op` over values of `dtype` updates straight
+    from a vector's unified format (`Reducer.update_vector`): numbers,
+    decimals, Booleans and strings, for the reductions whose state takes
+    one value at a time. Categorical labels (whose codes need the column's
+    dictionary), nested values and binary strings are read as a column."""
+    var number = dtype.is_integer() or dtype.is_float() or dtype.is_decimal()
+    var logic = dtype == DataType.BOOL
+    var text = dtype == DataType.STRING
+    if op == LEN or op == COUNT or op == NULL_COUNT or op == MODE:
+        return number or logic or text
+    if op == MIN or op == MAX:
+        return number or logic or text
+    if op == SUM or op == MEAN or op == PRODUCT:
+        return number or logic
+    if op in [STD, VAR, SKEW, KURTOSIS, MEDIAN, QUANTILE, CORR, COV]:
+        return number
+    if op == ANY or op == ALL:
+        return logic
+    return False
+
+
+@always_inline
+def _vector_valid(format: UnifiedVectorFormat, count: Int) -> List[Bool]:
+    """Whether each of the `count` rows `format` reads is valid."""
+    if format.validity.all_valid():
+        return List[Bool](length=count, fill=True)
+    var valid = List[Bool](unsafe_uninit_length=count)
+    for i in range(count):
+        valid[i] = format.validity.row_is_valid_unsafe(format.sel.get_index(i))
+    return valid^
+
+
+def _vector_floats(
+    format: UnifiedVectorFormat, count: Int, dtype: DataType
+) raises -> List[Float64]:
+    """The `count` numbers `format` reads as Float64: a decimal's unscaled
+    integer over 10^scale, any other number converted as it is (an
+    unsigned 64-bit value unbiased). A null row reads 0."""
+    var values = List[Float64](unsafe_uninit_length=count)
+    var out = values.unsafe_ptr()
+    var divisor = Float64(pow10(dtype.scale())) if dtype.is_decimal() else 1.0
+    var decimal = dtype.is_decimal()
+    comptime for k in range(len(_VECTOR_NUMBERS)):
+        comptime D = _VECTOR_NUMBERS[k]
+        if format.physical == physical_of[D]():
+            var data = format.values[D]()
+            for i in range(count):
+                var value = data[unsafe_offset=format.sel.get_index(i)].cast[
+                    DType.float64
+                ]()
+                if decimal:
+                    value = value / divisor
+                out[unsafe_offset=i] = value
+            return values^
+    if format.physical == PHYSICAL_BOOL:
+        var data = format.values[DType.uint8]()
+        for i in range(count):
+            out[unsafe_offset=i] = Float64(
+                data[unsafe_offset=format.sel.get_index(i)]
+            )
+        return values^
+    raise Error("expected a numeric column")
+
+
+def _vector_wide(
+    format: UnifiedVectorFormat, count: Int
+) raises -> List[Int128]:
+    """The `count` integers `format` reads as Int128, exactly (a decimal's
+    unscaled integer, an unsigned 64-bit value unbiased, a Boolean as 0 or
+    1). A null row reads what its slot holds."""
+    var values = List[Int128](unsafe_uninit_length=count)
+    var out = values.unsafe_ptr()
+    comptime for k in range(len(_VECTOR_NUMBERS)):
+        comptime D = _VECTOR_NUMBERS[k]
+        comptime if not D.is_floating_point():
+            if format.physical == physical_of[D]():
+                var data = format.values[D]()
+                for i in range(count):
+                    out[unsafe_offset=i] = data[
+                        unsafe_offset=format.sel.get_index(i)
+                    ].cast[DType.int128]()
+                return values^
+    if format.physical == PHYSICAL_BOOL:
+        var data = format.values[DType.uint8]()
+        for i in range(count):
+            out[unsafe_offset=i] = Int128(
+                data[unsafe_offset=format.sel.get_index(i)] != 0
+            )
+        return values^
+    raise Error("expected an integer column")
+
+
+@always_inline
+def _canonical_key(value: Int128, unsigned: Bool) -> Int64:
+    """An integer as the Int64 a state orders and compares it by: an
+    unsigned 64-bit value biased by 2^63, so its order survives the
+    signed compare (`_canonical`)."""
+    if unsigned:
+        return bitcast[DType.int64](UInt64(value) ^ _UINT64_BIAS)
+    return Int64(value)
+
+
+@always_inline
+def _vector_string(
+    format: UnifiedVectorFormat, i: Int
+) -> StringSlice[ImmutAnyOrigin]:
+    """Row i's string, read in place from its string_t."""
+    var entry = format.data + 16 * format.sel.get_index(i)
+    var s = Pointer[StringT, MutAnyOrigin](unsafe_from_address=entry)[]
+    return StringSlice[ImmutAnyOrigin](
+        unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                unsafe_from_address=string_data(entry)
+            ),
+            length=Int(s.length),
+        )
+    )
+
+
 struct Reducer(Movable):
     """Per-group reduction state for one expression.
 
@@ -1442,6 +1592,350 @@ struct Reducer(Movable):
                 self.pair_y[g].append(ys[0][i])
             else:
                 self.comoments[g].add(xs[0][i], ys[0][i])
+
+    def update_vector(
+        mut self,
+        format: UnifiedVectorFormat,
+        count: Int,
+        dtype: DataType,
+        groups: List[Int] = List[Int](),
+    ) raises:
+        """The `count` rows `format` reads (values of `dtype`) into the
+        states straight from the vector: row i into group `groups[i]`, or
+        every row into group 0 when `groups` is empty. Each row is read
+        through its selection, a null skipped by validity, and every value
+        converted exactly as the column update converts it (`update`), so
+        either route leaves the same states. Only for a reduction
+        `reads_vectors` admits."""
+        var op = self.op
+        var grouped = len(groups) > 0
+        var ids = groups.unsafe_ptr()
+        if op == LEN:
+            if not grouped:
+                self.counts[0] += Int64(count)
+                return
+            for i in range(count):
+                self.counts[ids[unsafe_offset=i]] += 1
+            return
+        var valid = _vector_valid(format, count)
+        if op == COUNT or op == NULL_COUNT:
+            if not grouped:
+                var seen = 0
+                for i in range(count):
+                    seen += Int(valid[i])
+                self.counts[0] += Int64(seen if op == COUNT else count - seen)
+                return
+            for i in range(count):
+                if valid[i] == (op == COUNT):
+                    self.counts[ids[unsafe_offset=i]] += 1
+            return
+        if format.physical == PHYSICAL_VARCHAR:
+            self._update_vector_strings(format, count, valid, groups)
+            return
+        if format.physical == PHYSICAL_BOOL:
+            self._update_vector_bools(format, count, valid, groups)
+            return
+        var floating = dtype.is_float()
+        var decimal = dtype.is_decimal()
+        if (
+            op in [STD, VAR, SKEW, KURTOSIS, MEDIAN, QUANTILE]
+            or (op == PRODUCT and (floating or decimal))
+            or ((op == SUM or op == MEAN) and floating)
+            or ((op == MIN or op == MAX or op == MODE) and floating)
+        ):
+            var values = _vector_floats(format, count, dtype)
+            self._update_vector_floats(values, valid, count, groups)
+            return
+        var wide = _vector_wide(format, count)
+        if op == SUM or op == MEAN:
+            if decimal:
+                # A narrow decimal adds without a check per row: values
+                # under 10^18 cannot carry a 128-bit total past 10^38
+                # before 10^20 rows. A 128-bit one is held to the
+                # result's precision on every add.
+                var checked = dtype.decimal_width() == 128
+                var limit = precision_limit(self.dtype.precision())
+                if grouped:
+                    for i in range(count):
+                        if not valid[i]:
+                            continue
+                        var g = ids[unsafe_offset=i]
+                        var total = self.decimals[g] + wide[i]
+                        if checked:
+                            total = check_limit(total, limit, self.dtype)
+                        self.decimals[g] = total
+                        self.counts[g] += 1
+                    return
+                var total = self.decimals[0]
+                var seen = 0
+                for i in range(count):
+                    if not valid[i]:
+                        continue
+                    total = total + wide[i]
+                    if checked:
+                        total = check_limit(total, limit, self.dtype)
+                    seen += 1
+                self.decimals[0] = total
+                self.counts[0] += Int64(seen)
+                return
+            if grouped:
+                var sums = self.int_sums.unsafe_ptr()
+                for i in range(count):
+                    if valid[i]:
+                        ref state = sums.unsafe_offset(ids[unsafe_offset=i])[]
+                        state.total += wide[i]
+                        state.count += 1
+                return
+            var total = Int128(0)
+            var seen = 0
+            for i in range(count):
+                if valid[i]:
+                    total += wide[i]
+                    seen += 1
+            self.int_sums[0].total += total
+            self.int_sums[0].count += Int64(seen)
+            return
+        if op == PRODUCT:
+            var unsigned = self.logical.product_type() == DataType.UINT64
+            for i in range(count):
+                if valid[i]:
+                    var g = ids[unsafe_offset=i] if grouped else 0
+                    self.int_products[g] = _checked_product(
+                        self.int_products[g], wide[i], unsigned
+                    )
+            return
+        if decimal:
+            for i in range(count):
+                var g = ids[unsafe_offset=i] if grouped else 0
+                if op == MODE and not valid[i]:
+                    self.mode_nulls[g] += 1
+                    continue
+                if not valid[i]:
+                    continue
+                var value = wide[i]
+                if op == MODE:
+                    self.mode_decimals[g][value] = (
+                        self.mode_decimals[g].get(value, 0) + 1
+                    )
+                elif (
+                    not self.seen[g]
+                    or (op == MAX and value > self.decimals[g])
+                    or (op == MIN and value < self.decimals[g])
+                ):
+                    self.decimals[g] = value
+                    self.seen[g] = True
+            return
+        var unsigned = dtype == DataType.UINT64
+        for i in range(count):
+            var g = ids[unsafe_offset=i] if grouped else 0
+            if op == MODE and not valid[i]:
+                self.mode_nulls[g] += 1
+                continue
+            if not valid[i]:
+                continue
+            var key = _canonical_key(wide[i], unsigned)
+            if op == MODE:
+                self.mode_ints[g][key] = self.mode_ints[g].get(key, 0) + 1
+            elif (
+                not self.seen[g]
+                or (op == MAX and key > self.ints[g])
+                or (op == MIN and key < self.ints[g])
+            ):
+                self.ints[g] = key
+                self.seen[g] = True
+
+    def _update_vector_floats(
+        mut self,
+        values: List[Float64],
+        valid: List[Bool],
+        count: Int,
+        groups: List[Int],
+    ) raises:
+        """The states from a vector's numbers read as Float64
+        (`update_vector`)."""
+        var op = self.op
+        var grouped = len(groups) > 0
+        var ids = groups.unsafe_ptr()
+        if (op == STD or op == VAR) and not grouped:
+            # Valid values a block at a time, as the column update adds an
+            # ungrouped variance, so both routes round alike.
+            var block = List[Float64](length=_VARIANCE_BLOCK, fill=0)
+            var at = block.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+            var held = 0
+            for i in range(count):
+                if not valid[i]:
+                    continue
+                at.unsafe_store(held, values[i])
+                held += 1
+                if held == _VARIANCE_BLOCK:
+                    self.moments[0].merge(
+                        _block_moments[DType.float64](at, held)
+                    )
+                    held = 0
+            if held > 0:
+                self.moments[0].merge(_block_moments[DType.float64](at, held))
+            _ = block^
+            return
+        if (op == SUM or op == MEAN) and not grouped:
+            var total = Float64(0)
+            var seen = 0
+            for i in range(count):
+                if valid[i]:
+                    total += values[i]
+                    seen += 1
+            self.float_sums[0].total += total
+            self.float_sums[0].count += Int64(seen)
+            return
+        for i in range(count):
+            var g = ids[unsafe_offset=i] if grouped else 0
+            if op == MODE and not valid[i]:
+                self.mode_nulls[g] += 1
+                continue
+            if not valid[i]:
+                continue
+            var value = values[i]
+            if op == SUM or op == MEAN:
+                # A group's total takes its rows one at a time, in order,
+                # as the column update adds them.
+                self.float_sums[g].total += value
+                self.float_sums[g].count += 1
+            elif op == STD or op == VAR:
+                self.moments[g].add(value)
+            elif op == MEDIAN or op == QUANTILE:
+                self.samples[g].append(value)
+            elif op == SKEW or op == KURTOSIS:
+                self.moments4[g].add(value)
+            elif op == PRODUCT:
+                self.float_products[g] *= value
+            elif op == MODE:
+                var key = float_key(value)
+                var seen = self.mode_floats[g].get(key, 0)
+                if seen == 0:
+                    self.mode_float_values[g][key] = value
+                self.mode_floats[g][key] = seen + 1
+            elif isnan(value):
+                self.nan_seen[g] = True
+            elif (
+                not self.seen[g]
+                or (op == MAX and value > self.floats[g])
+                or (op == MIN and value < self.floats[g])
+            ):
+                self.floats[g] = value
+                self.seen[g] = True
+
+    def _update_vector_bools(
+        mut self,
+        format: UnifiedVectorFormat,
+        count: Int,
+        valid: List[Bool],
+        groups: List[Int],
+    ) raises:
+        """The states from a vector of Booleans (`update_vector`)."""
+        var op = self.op
+        var grouped = len(groups) > 0
+        var ids = groups.unsafe_ptr()
+        var data = format.values[DType.uint8]()
+        if (op == SUM or op == MEAN) and not grouped:
+            var trues = 0
+            var seen = 0
+            for i in range(count):
+                if valid[i]:
+                    trues += Int(
+                        data[unsafe_offset=format.sel.get_index(i)] != 0
+                    )
+                    seen += 1
+            self.int_sums[0].total += Int128(trues)
+            self.int_sums[0].count += Int64(seen)
+            return
+        for i in range(count):
+            var g = ids[unsafe_offset=i] if grouped else 0
+            var value = data[unsafe_offset=format.sel.get_index(i)] != 0
+            if op == ANY or op == ALL:
+                self.logic[g].add(valid[i], value)
+                continue
+            if op == MODE and not valid[i]:
+                self.mode_nulls[g] += 1
+                continue
+            if not valid[i]:
+                continue
+            if op == SUM or op == MEAN:
+                self.int_sums[g].total += Int128(value)
+                self.int_sums[g].count += 1
+            elif op == MODE:
+                var key = Int64(value)
+                self.mode_ints[g][key] = self.mode_ints[g].get(key, 0) + 1
+            elif op == PRODUCT:
+                self.int_products[g] = _checked_product(
+                    self.int_products[g], Int128(value), False
+                )
+            elif (
+                not self.seen[g]
+                or (op == MAX and value and not self.bools[g])
+                or (op == MIN and not value and self.bools[g])
+            ):
+                self.bools[g] = value
+                self.seen[g] = True
+
+    def _update_vector_strings(
+        mut self,
+        format: UnifiedVectorFormat,
+        count: Int,
+        valid: List[Bool],
+        groups: List[Int],
+    ) raises:
+        """The states from a vector of strings (`update_vector`): a value
+        is copied into a state only when the state keeps it."""
+        var op = self.op
+        var grouped = len(groups) > 0
+        var ids = groups.unsafe_ptr()
+        for i in range(count):
+            var g = ids[unsafe_offset=i] if grouped else 0
+            if op == MODE and not valid[i]:
+                self.mode_nulls[g] += 1
+                continue
+            if not valid[i]:
+                continue
+            var value = _vector_string(format, i)
+            if op == MODE:
+                var key = String(value)
+                self.mode_strings[g][key] = self.mode_strings[g].get(key, 0) + 1
+            elif (
+                not self.seen[g]
+                or (op == MAX and value > self.strings[g])
+                or (op == MIN and value < self.strings[g])
+            ):
+                self.strings[g] = String(value)
+                self.seen[g] = True
+
+    def update_pair_vector(
+        mut self,
+        left: UnifiedVectorFormat,
+        right: UnifiedVectorFormat,
+        count: Int,
+        left_type: DataType,
+        right_type: DataType,
+        groups: List[Int] = List[Int](),
+    ) raises:
+        """Correlation or covariance rows (left, right) straight from two
+        vectors, read as Float64 (`update_pair`): row i into group
+        `groups[i]`, or group 0 when `groups` is empty; a null on either
+        side drops the pair."""
+        var xs = _vector_floats(left, count, left_type)
+        var ys = _vector_floats(right, count, right_type)
+        var x_valid = _vector_valid(left, count)
+        var y_valid = _vector_valid(right, count)
+        var spearman = len(self.pair_x) > 0
+        var grouped = len(groups) > 0
+        var ids = groups.unsafe_ptr()
+        for i in range(count):
+            if not (x_valid[i] and y_valid[i]):
+                continue
+            var g = ids[unsafe_offset=i] if grouped else 0
+            if spearman:
+                self.pair_x[g].append(xs[i])
+                self.pair_y[g].append(ys[i])
+            else:
+                self.comoments[g].add(xs[i], ys[i])
 
     def _update(
         mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]

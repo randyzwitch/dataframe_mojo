@@ -108,6 +108,7 @@ from dataframe.aggregation.function import (
     table_kind,
     table_reduction,
     table_states_supported,
+    vector_input,
 )
 from dataframe.aggregation.clustered import (
     ClusteredAggrState,
@@ -144,6 +145,7 @@ from dataframe.kernels.partition import (
 from dataframe.series import Series
 from dataframe.trace import trace_path
 from dataframe.storage.string import StringColumn
+from dataframe.vector.data_chunk import storage_physical
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
     PHYSICAL_INT128,
@@ -623,6 +625,14 @@ struct AggregateLayout(Copyable, Movable):
     # default): every worker's table then holds a row for every key
     # combination, found from the keys' bits (`perfect_hash.mojo`).
     var perfect: PerfectHash
+    # Each input's type and the physical type it is stored as (the
+    # reductions' own, then the second input of each correlation or
+    # covariance), and per reduction whether its state by address takes its
+    # input straight from the chunk's vectors (`vector_input`) rather than
+    # as a column.
+    var input_types: List[DataType]
+    var input_storage: List[Int]
+    var vectors: List[Bool]
 
     def use_perfect_hash(mut self, keys: List[Series]) raises:
         """Use direct-address slots when the bounded domains are small enough
@@ -652,6 +662,9 @@ struct AggregateLayout(Copyable, Movable):
             List[List[Bool]](),
             List[ArcPointer[_SinkBits]](),
             PerfectHash.none(),
+            List[DataType](),
+            List[Int](),
+            List[Bool](),
         )
 
 
@@ -709,6 +722,27 @@ def aggregate_layout(
             )
         )
         state_words += slots[s].state_size()
+    var input_types = List[DataType](capacity=len(inputs))
+    var input_storage = List[Int](capacity=len(inputs))
+    for input in inputs:
+        input_types.append(input.dtype())
+        input_storage.append(storage_physical(input))
+    var vectors = List[Bool](length=len(slots), fill=False)
+    for s in range(len(slots)):
+        if not slots[s].by_address():
+            continue
+        var second = DataType.NULL
+        if slots[s].kind == _K_STATE and (
+            templates[s].op == CORR or templates[s].op == COV
+        ):
+            second = input_types[slots[s].k]
+        vectors[s] = vector_input(
+            slots[s].kind,
+            templates[s].op,
+            input_types[s],
+            second,
+            input_storage[s],
+        )
     var key_templates = List[Series](capacity=len(keys))
     for key in keys:
         key_templates.append(key.slice(0, 0))
@@ -750,6 +784,9 @@ def aggregate_layout(
         distinct_addressed^,
         distinct_radix^,
         PerfectHash.none(),
+        input_types^,
+        input_storage^,
+        vectors^,
     )
 
 
@@ -1398,6 +1435,12 @@ struct AggregateSink(Movable):
     var by_address: List[Int]
     var owned: List[Reducer]
     var buffered: List[_OrderedBuffer]
+    # Per reduction, whether its state by address reads the chunk's vector
+    # of its input (`AggregateLayout.vectors`); each input's type and
+    # storage.
+    var vectors: List[Bool]
+    var input_types: List[DataType]
+    var input_storage: List[Int]
     # A perfect hash table (`AggregateLayout.perfect`): its shape, and a
     # row of `parts.stride` words for every group slot,
     # all empty until a row finds it; word 1 of a slot's row is then its
@@ -1469,6 +1512,9 @@ struct AggregateSink(Movable):
         self.only = -1
         self.in_order = True
         self.by_address = List[Int]()
+        self.vectors = layout.vectors.copy()
+        self.input_types = layout.input_types.copy()
+        self.input_storage = layout.input_storage.copy()
         self.owned = List[Reducer](capacity=len(layout.slots))
         self.buffered = List[_OrderedBuffer](capacity=len(layout.slots))
         for s in range(len(layout.slots)):
@@ -1764,7 +1810,7 @@ struct AggregateSink(Movable):
                 skip=self.kernels,
             )
             if len(self.by_address) > 0:
-                self._update_by_address(columns, first, count)
+                self._update_by_address(inputs, columns, first, count)
         self.sunk += count
 
     def _update_groups(
@@ -1792,7 +1838,7 @@ struct AggregateSink(Movable):
             self.only,
         )
         if len(self.by_address) > 0 and self.only < 0:
-            self._update_by_address(columns, first, count)
+            self._update_by_address(inputs, columns, first, count)
         self.sunk += count
 
     def _perfect_groups(
@@ -1858,14 +1904,21 @@ struct AggregateSink(Movable):
             groups[unsafe_offset=k] = at
 
     def _update_by_address(
-        mut self, columns: List[Series], first: Int, count: Int
+        mut self,
+        inputs: List[UnifiedVectorFormat],
+        columns: List[Series],
+        first: Int,
+        count: Int,
     ) raises:
         """The batch's states held by address: a group row's state with no
         owner yet is made,
         its owner's address and its ordinal there written into the row;
         then each owner takes the batch's rows by their states' ordinals,
         a `Reducer` updating them and a buffer keeping the rows with their
-        sequence numbers (`first` onward)."""
+        sequence numbers (`first` onward). An owner that reads vectors
+        (`vectors`) takes its input's vector in `inputs` where it is; the
+        others read their input as a column of the batch's rows in
+        `columns`."""
         var rows = self.groups.unsafe_ptr()
         var discard = Int(self.discard.unsafe_ptr())
         for s in self.by_address:
@@ -1898,13 +1951,45 @@ struct AggregateSink(Movable):
                     state[unsafe_offset=2] = 0
                     made += 1
                 ordinals[k] = Int(state[unsafe_offset=1]) - 1
+            var pair = slot.kind == _K_STATE and (
+                self.owned[s].op == CORR or self.owned[s].op == COV
+            )
+            if self.vectors[s]:
+                # The owner reads the input's vector in place: no column of
+                # the batch's rows is made.
+                var dtype = self.input_types[s]
+                if ordered:
+                    if not self.buffered[s].add_vector(
+                        inputs[s],
+                        count,
+                        dtype,
+                        self.input_storage[s],
+                        first,
+                        ordinals,
+                        made,
+                    ):
+                        raise Error("aggregate table: an unbuffered vector")
+                    continue
+                self.owned[s].grow(made)
+                if pair:
+                    self.owned[s].update_pair_vector(
+                        inputs[s],
+                        inputs[slot.k],
+                        count,
+                        dtype,
+                        self.input_types[slot.k],
+                        ordinals,
+                    )
+                else:
+                    self.owned[s].update_vector(
+                        inputs[s], count, dtype, ordinals
+                    )
+                continue
             if ordered:
                 self.buffered[s].add(columns[s], ordinals, first, made)
                 continue
             self.owned[s].grow(made)
-            if slot.kind == _K_STATE and (
-                self.owned[s].op == CORR or self.owned[s].op == COV
-            ):
+            if pair:
                 self.owned[s].update_pair(
                     columns[s], columns[slot.k], 0, True, ordinals
                 )
