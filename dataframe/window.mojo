@@ -1143,14 +1143,95 @@ def _rolling_frames(
     (default window_size) give null."""
     var n = len(input)
     var window = Int(node.integer)
+    var needed = window if node.floating < 0 else Int(node.floating)
+    if (
+        (node.op == ROLLING_SUM or node.op == ROLLING_MEAN)
+        and window >= 1
+        and input._data.isa[Column[Int64]]()
+    ):
+        var mean = node.op == ROLLING_MEAN
+        if input.null_count() > 0:
+            return _sliding_int_frames[True](
+                input, starts, window, needed, mean
+            )
+        return _sliding_int_frames[False](input, starts, window, needed, mean)
     var begins = List[Int](unsafe_uninit_length=n)
     var ends = List[Int](unsafe_uninit_length=n)
     for p in range(len(starts) - 1):
         for j in range(starts[p], starts[p + 1]):
             begins[j] = max(starts[p], j - window + 1)
             ends[j] = j + 1
-    var needed = window if node.floating < 0 else Int(node.floating)
     return _frames(node, input, begins, ends, starts, needed)
+
+
+def _sliding_int_frames[
+    nulls: Bool
+](
+    input: Series, starts: List[Int], window: Int, needed: Int, mean: Bool
+) raises -> Series:
+    """Fixed-size rolling sums (or means) of an Int64 column, partition by
+    partition: one running 128-bit total adds the row entering the frame
+    and subtracts the row leaving it, so a frame costs two updates whatever
+    its size. Integer addition is exact, so the running total equals the
+    frame's sum taken from scratch, and a 128-bit total cannot wrap for
+    any frame of Int64 values. A frame with fewer than `needed` valid
+    values, or none, is null; a sum outside Int64 raises, as a grouped sum
+    does, and a mean is the total over the count in Float64."""
+    ref column = input._data[Column[Int64]]
+    var n = len(column)
+    var values = column._ptr()
+    var ints = List[Int64](unsafe_uninit_length=0 if mean else n)
+    var floats = List[Float64](unsafe_uninit_length=n if mean else 0)
+    var ok = List[Bool](unsafe_uninit_length=n)
+    var int_out = ints.unsafe_ptr()
+    var float_out = floats.unsafe_ptr()
+    var ok_out = ok.unsafe_ptr()
+    var lowest = Int64.MIN.cast[DType.int128]()
+    var highest = Int64.MAX.cast[DType.int128]()
+    var any_null = False
+    for p in range(len(starts) - 1):
+        var lo = starts[p]
+        var total = Int128(0)
+        var count = 0
+        for j in range(lo, starts[p + 1]):
+            comptime if nulls:
+                if column._valid(j):
+                    total += values[unsafe_offset=j].cast[DType.int128]()
+                    count += 1
+            else:
+                total += values[unsafe_offset=j].cast[DType.int128]()
+                count += 1
+            var leaving = j - window
+            if leaving >= lo:
+                comptime if nulls:
+                    if column._valid(leaving):
+                        total -= values[unsafe_offset=leaving].cast[
+                            DType.int128
+                        ]()
+                        count -= 1
+                else:
+                    total -= values[unsafe_offset=leaving].cast[DType.int128]()
+                    count -= 1
+            var good = count >= needed and count > 0
+            ok_out[unsafe_offset=j] = good
+            any_null = any_null or not good
+            if mean:
+                float_out[unsafe_offset=j] = (
+                    total.cast[DType.float64]() / Float64(count) if good else 0
+                )
+            else:
+                if good and (total > highest or total < lowest):
+                    raise Error("Int64 expression sum overflow")
+                int_out[unsafe_offset=j] = total.cast[
+                    DType.int64
+                ]() if good else 0
+    if mean:
+        if any_null:
+            return Series("", Column[Float64](floats^, ok))
+        return Series("", Column[Float64](floats^))
+    if any_null:
+        return Series("", Column[Int64](ints^, ok))
+    return Series("", Column[Int64](ints^))
 
 
 def rolling_by_op(
