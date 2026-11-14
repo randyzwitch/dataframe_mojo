@@ -169,7 +169,7 @@ from dataframe.kernels.gather import (
 )
 from dataframe.storage.allocation import huge_list
 from dataframe.kernels.mask_filter import filter_columns
-from .parallel import Job, morsel_ranges, run_jobs, worker_count
+from .parallel import Job, morsel_ranges, run_jobs, source_tasks
 from .series import Series
 from dataframe.kernels.segment_statistics import (
     ensure_statistics,
@@ -3107,12 +3107,9 @@ def begin_pipeline(
             and indexes[][step.join]
         ):
             indexes[][step.join].value().reset_found()
-    # At most one job per two morsels: a tiny source (three morsels or fewer)
-    # runs on the caller, with no crew dispatch to wait on.
-    var job_count = max(1, min(workers, len(ranges[]) // 2))
-    if source:
-        # A file's batches are not known ahead: every worker scans.
-        job_count = max(1, workers)
+    # One job a thread, up to the source's morsels (`ranges` holds an
+    # (offset, length) pair each); a file's batches are not known ahead.
+    var job_count = source_tasks(-1 if source else len(ranges[]) // 2, workers)
     # The source's table filters with their answers per vector, found once
     # for every worker's chunk loop.
     var scan = Optional[ScanFilterInfo]()
