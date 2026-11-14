@@ -104,10 +104,14 @@ struct PlanStatistics(Movable):
 
     var rows: Dict[Int, Int]
     var counts: Dict[String, DistinctCount]
+    # Each node's output column names, derived once: a join's distinct
+    # counts ask which side holds a column at every join below it.
+    var names: Dict[Int, List[String]]
 
     def __init__(out self):
         self.rows = Dict[Int, Int]()
         self.counts = Dict[String, DistinctCount]()
+        self.names = Dict[Int, List[String]]()
 
 
 def estimate_distinct_cardinality(
@@ -397,12 +401,20 @@ def _group_keys(self: QueryContext, node: PlanNode) raises -> List[String]:
     return best^
 
 
-def _has_column(self: QueryContext, index: Int, name: String) raises -> Bool:
+def _has_column(
+    self: QueryContext, mut stats: PlanStatistics, index: Int, name: String
+) raises -> Bool:
     """Whether node `index` outputs column `name`."""
+    var known = stats.names.get(index)
+    if known:
+        return name in known.value()
     var names = plan_names_of(self, index)
-    if names:
-        return name in names.value()
-    return name in self._execute(index, True).columns()
+    var columns = names.take() if names else self._execute(
+        index, True
+    ).columns()
+    var found = name in columns
+    stats.names[index] = columns^
+    return found
 
 
 def plan_distinct(
@@ -523,11 +535,11 @@ def _distinct(
     # makes no new ones.
     if node.how == JOIN_RIGHT_SEMI or node.how == JOIN_RIGHT_ANTI:
         return plan_distinct(self, stats, node.right, name)
-    if _has_column(self, node.left, name):
+    if _has_column(self, stats, node.left, name):
         return plan_distinct(self, stats, node.left, name)
     if node.how == JOIN_SEMI or node.how == JOIN_ANTI:
         return DistinctCount.unknown()
-    if _has_column(self, node.right, name):
+    if _has_column(self, stats, node.right, name):
         return plan_distinct(self, stats, node.right, name)
     var suffix = node.join_suffix()
     if suffix.byte_length() > 0 and name.endswith(suffix):
