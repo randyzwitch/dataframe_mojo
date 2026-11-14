@@ -31,6 +31,7 @@ from dataframe.planning.graph import (
     plan_ends_in_breaker,
     plan_filtered_scan,
     plan_height_bound,
+    plan_is_filtering,
     plan_materialized,
     plan_reorder,
     plan_spine_rows,
@@ -307,10 +308,14 @@ struct _StreamInputs(Movable):
     var hows: List[Int]
     var coalesces: List[Bool]
     var probe_estimates: List[Int]
+    # Whether each build side filters its rows (the join filters' bloom
+    # rule reads it).
+    var build_filtered: List[Bool]
 
     def __init__(out self):
         self.coalesces = List[Bool]()
         self.probe_estimates = List[Int]()
+        self.build_filtered = List[Bool]()
         self.metas = List[MetaPipeline]()
         self.wanted = List[Int]()
         self.keys = List[List[String]]()
@@ -348,6 +353,9 @@ def plan_schedule_inputs(
                 inputs.probe_estimates.append(
                     plan_cardinality(self, stats, step.left)
                 )
+                inputs.build_filtered.append(
+                    plan_is_filtering(self, step.right)
+                )
                 inputs.metas.append(MetaPipeline(META_JOIN_BUILD))
             probe = step.left
         else:
@@ -366,6 +374,7 @@ def plan_schedule_inputs(
             inputs.hows.append(JOIN_CROSS)
             inputs.coalesces.append(True)
             inputs.probe_estimates.append(-1)
+            inputs.build_filtered.append(False)
             inputs.metas.append(MetaPipeline(META_REGULAR))
     # With no build to overlap, the stream runs its source itself, where
     # an aggregate's finish can take the steps above it (`FinishAbove`).
@@ -381,6 +390,7 @@ def plan_schedule_inputs(
         inputs.hows.append(JOIN_CROSS)
         inputs.coalesces.append(True)
         inputs.probe_estimates.append(-1)
+        inputs.build_filtered.append(False)
         inputs.metas.append(MetaPipeline(META_REGULAR))
     return inputs^
 
