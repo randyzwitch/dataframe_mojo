@@ -427,6 +427,11 @@ def to_series(
 def _typed(var series: Series, dtype: DataType) raises -> Series:
     if series.dtype() == dtype:
         return series^
+    if series.dtype().is_categorical() and dtype.is_categorical():
+        # A categorical's codes index its own dictionary (a step may
+        # recode one per chunk): retyping it to another dictionary would
+        # change what its codes mean.
+        return series^
     return series.with_dtype(dtype)
 
 

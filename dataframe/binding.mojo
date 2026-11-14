@@ -1,6 +1,6 @@
 """Schema-only binding and expression shape analysis before execution."""
 from std.memory import ArcPointer
-from .regex import Regex
+from regex_mojo import Regex
 from dataframe.text.regex_adapter import compile_pattern, is_literal_pattern
 from .expr import (
     Expr,

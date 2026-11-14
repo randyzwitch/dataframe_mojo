@@ -2,11 +2,17 @@
 
 Hash each build key into a small block of bits. A probe missing any required
 bit cannot be present; a possible hit still needs the join's exact key
-comparison. Workers can build filters privately and merge their bits,
-avoiding atomic operations on every build key. False positives only add
-probe work, while false negatives would incorrectly discard result rows.
+comparison. A key's bits come from the hash a join row stores for a single
+integer key, so a hash table can fill the filter from its rows' hashes
+without reading the key values again. Workers either fill private filters
+and merge their bits, or set bits in one shared filter with atomic ORs.
+False positives only add probe work, while false negatives would
+incorrectly discard result rows.
 """
-from std.memory import ArcPointer, Pointer
+from std.atomic import Atomic
+from std.memory import ArcPointer, Pointer, bitcast
+
+from dataframe.hash_bits import _splitmix64
 
 from dataframe.storage.column import Column
 from dataframe.dtype import DataType
@@ -24,19 +30,10 @@ comptime _SHIFT_MASK = UInt64(0x3F3F3F3F3F3F3F3F)
 
 
 @always_inline
-def _hash_keys[
-    width: Int
-](values: SIMD[DType.int64, width]) -> SIMD[DType.uint64, width]:
-    """A 64-bit mix of each key (the murmur finalizer, as the distinct-count
-    sketch uses)."""
-    comptime m = SIMD[DType.uint64, width](0xD6E8FEB86659FD93)
-    var x = values.cast[DType.uint64]()
-    x ^= x >> 32
-    x *= m
-    x ^= x >> 32
-    x *= m
-    x ^= x >> 32
-    return x
+def key_hash(key: Int64) -> UInt64:
+    """The hash a join row stores for a single integer key `key` (signed
+    values sign-extended, as the join's key hash reads them)."""
+    return _splitmix64(bitcast[DType.uint64](key))
 
 
 @always_inline
@@ -67,6 +64,58 @@ def bloom_blocks_for(keys: Int) -> Int:
     return words
 
 
+# The join's bloom filter rule: a filter pays only when the build has
+# fewer keys than the probe has rows, so that most probe rows can miss it.
+# A build side that is not itself filtered usually holds every key of a
+# foreign-key probe, so then its keys must also be few next to the probe
+# (ratio) or few overall (count) for the filter to reject enough rows.
+comptime BUILD_TO_PROBE_RATIO_THRESHOLD = 1.0
+comptime NON_FILTERING_RATIO_THRESHOLD = 0.1
+comptime NON_FILTERING_BUILD_SIDE_THRESHOLD = 4194304
+
+
+def can_use_bloom_filter(
+    equalities: Int, build_count: Int, probe_rows: Int, build_filtered: Bool
+) -> Bool:
+    """Whether a join's bloom filter is worth building: one equality key
+    (the filter tests one probe column), and a build small next to its
+    probe by the rule above."""
+    if equalities != 1 or build_count == 0 or probe_rows <= 0:
+        return False
+    var ratio = Float64(build_count) / Float64(probe_rows)
+    if ratio > BUILD_TO_PROBE_RATIO_THRESHOLD:
+        return False
+    if (
+        not build_filtered
+        and ratio > NON_FILTERING_RATIO_THRESHOLD
+        and build_count > NON_FILTERING_BUILD_SIDE_THRESHOLD
+    ):
+        return False
+    return True
+
+
+@always_inline
+def bloom_set_bits(words: Int, blocks: Int, hash: UInt64, shared: Bool):
+    """Set `hash`'s bits in the filter whose `blocks` words are at
+    `words`. `shared`: other workers set bits in the same filter at the
+    same time, so the word is updated with an atomic OR and no bit another
+    worker sets is lost."""
+    var at = words + 8 * Int(hash & UInt64(blocks - 1))
+    var mask = _word_masks[1](hash)[0]
+    if shared:
+        ref word = Pointer[Atomic[UInt64], MutAnyOrigin](
+            unsafe_from_address=at
+        )[]
+        var seen = word.load()
+        # A word that already has the bits needs no write; otherwise the
+        # OR is retried until no other worker changed the word between.
+        while seen & mask != mask:
+            if word.compare_exchange(seen, seen | mask):
+                break
+    else:
+        Pointer[UInt64, MutAnyOrigin](unsafe_from_address=at)[] |= mask
+
+
 struct KeyBloom(Movable):
     """A register-blocked bloom filter over 64-bit integer keys: `blocks`
     64-bit words, a power of two."""
@@ -86,33 +135,21 @@ struct KeyBloom(Movable):
 
     @always_inline
     def insert(self, key: Int64):
-        var hash = _hash_keys[1](SIMD[DType.int64, 1](key))
-        var at = self._base().unsafe_offset(Int(hash & UInt64(self.blocks - 1)))
-        at[] |= _word_masks[1](hash)[0]
+        self.insert_hash(key_hash(key))
+
+    @always_inline
+    def insert_hash(self, hash: UInt64):
+        """Set `hash`'s bits (one writer at a time)."""
+        bloom_set_bits(Int(self.words.unsafe_ptr()), self.blocks, hash, False)
 
     @always_inline
     def contains(self, key: Int64) -> Bool:
-        var hash = _hash_keys[1](SIMD[DType.int64, 1](key))
+        var hash = key_hash(key)
         var mask = _word_masks[1](hash)[0]
         var word = self._base()[
             unsafe_offset=Int(hash & UInt64(self.blocks - 1))
         ]
         return word & mask == mask
-
-    @always_inline
-    def found[
-        width: Int
-    ](self, keys: SIMD[DType.int64, width]) -> SIMD[DType.bool, width]:
-        """Which of `width` keys may be in the filter: hashed together, then
-        one word read for each."""
-        var hashes = _hash_keys[width](keys)
-        var masks = _word_masks[width](hashes)
-        var at = hashes & SIMD[DType.uint64, width](UInt64(self.blocks - 1))
-        var base = self._base()
-        var words = SIMD[DType.uint64, width](0)
-        comptime for lane in range(width):
-            words[lane] = base[unsafe_offset=Int(at[lane])]
-        return (words & masks).eq(masks)
 
     def add_column[D: DType](self, column: Column[Scalar[D]]):
         """Insert the non-null values of a column."""

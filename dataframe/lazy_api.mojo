@@ -2181,7 +2181,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     ) -> Tuple[List[Int], List[Int]]:
         return plan_subplan_classes(self._plan)
 
-    def _filter_shared_subplans(mut self):
+    def _filter_shared_subplans(mut self) raises:
         plan_filter_shared_subplans(self._plan)
 
     def _order_joins(mut self, streaming: Bool, batch_size: Int) raises:

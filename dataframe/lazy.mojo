@@ -139,7 +139,6 @@ from dataframe.query_execution.stream_state import (
     _StreamJob,
     _apply_operation,
     _filter_keeps,
-    _merge_parts,
     _pipeline_steps,
     _steps_of,
     _stream_split_bits,

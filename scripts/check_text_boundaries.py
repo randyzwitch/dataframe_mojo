@@ -16,6 +16,9 @@ LEGACY = {'dataframe.' + name for name in (
 
 def check():
     failures = []
+    for removed in ('dataframe/regex', 'dataframe/text/regex_cache.mojo'):
+        if (ROOT / removed).exists():
+            failures.append(f'{removed} belongs in the regex_mojo dependency')
     for path in sorted((ROOT / 'dataframe/text').rglob('*.mojo')):
         name = module_name(path)
         for dependency in imports(path):
@@ -35,6 +38,11 @@ def check():
     for tree in ('dataframe', 'dataframe_metal', 'dataframe_provider', 'providers'):
         for path in sorted((ROOT / tree).rglob('*.mojo')):
             name = module_name(path)
+            for dependency in imports(path):
+                if dependency in {'dataframe.regex', 'dataframe.text.regex_cache'} or dependency.startswith((
+                    'dataframe.regex.', 'dataframe.text.regex_cache.',
+                )):
+                    failures.append(f'{name} imports extracted regex implementation: {dependency}')
             if name in LEGACY:
                 source = re.sub(r'"""[\s\S]*?"""|#[^\n]*', '', path.read_text())
                 if re.search(r'^(?:def|struct|trait|comptime)\s+', source, re.M):
