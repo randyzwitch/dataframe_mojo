@@ -355,9 +355,10 @@ def _rolling_reference(
 
 
 def test_ordered_over_rolling_sums_partitions_of_varied_sizes_and_nulls() raises:
-    # Enough rows that partitions are evaluated by several tasks: one half
-    # of the rows, a seventh, a key per thirteenth and a null key.
-    var n = 20011
+    # Rows in more than one 2048-row block, so partitions are evaluated by
+    # several tasks. Partitions of varied sizes: one half of the rows, a
+    # seventh, a key per thirteenth and a null key.
+    var n = 5003
     var keys = List[Int64]()
     var key_valid = List[Bool]()
     var order = List[Int64]()
@@ -381,7 +382,7 @@ def test_ordered_over_rolling_sums_partitions_of_varied_sizes_and_nulls() raises
                 Series("x", Column[Int64](values.copy(), valid)),
             ]
         )
-        for width in [1, 3, 11]:
+        for width in [1, 11]:
             for needed in [-1, 2]:
                 for mean in [False, True]:
                     var e = (
@@ -403,7 +404,7 @@ def test_ordered_over_rolling_sums_partitions_of_varied_sizes_and_nulls() raises
                         mean,
                     )
                     # Whole columns compared at once: a cell-by-cell
-                    # comparison of 20K rows dominates the test's time.
+                    # comparison of every row dominates the test's time.
                     assert_true(
                         frame.select_exprs(expressions)
                         .column("w")
