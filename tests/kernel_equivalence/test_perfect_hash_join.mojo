@@ -320,18 +320,18 @@ def many_probe() raises -> DataFrame:
     )
 
 
-def check_payloads(out: DataFrame, matched_only: Bool) raises:
+def check_payloads(joined: DataFrame, matched_only: Bool) raises:
     """Every row's payloads are its key's, nulls where the build's are,
     and all null on a row without a match."""
-    for r in range(out.height()):
-        var key = out.item(r, "k").int64()
+    for r in range(joined.height()):
+        var key = joined.item(r, "k").int64()
         var hit = key >= 0 and key < 3 * MANY and key % 3 == 0
         if matched_only:
             assert_true(hit)
-        var v = out.item(r, "v")
-        var s = out.item(r, "s")
-        var b = out.item(r, "b")
-        var f = out.item(r, "f")
+        var v = joined.item(r, "v")
+        var s = joined.item(r, "s")
+        var b = joined.item(r, "b")
+        var f = joined.item(r, "f")
         if not hit:
             assert_true(v.is_null() and s.is_null() and b.is_null())
             assert_true(f.is_null())

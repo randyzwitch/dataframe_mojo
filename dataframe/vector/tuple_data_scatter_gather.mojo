@@ -1077,16 +1077,15 @@ def pack_bytes(bytes: Int, size: Int) -> List[UInt8]:
     """The `size` bytes at `bytes`, each 0 or 1, as bits (eight to a byte,
     byte i's value at bit i)."""
     var bits = List[UInt8](length=(size + 7) // 8, fill=0)
-    var target = bits.unsafe_ptr()
     var whole = size // 8
     for w in range(whole):
         # Each byte is 0 or 1: the multiply gathers the low bit of each of
         # the eight bytes into the top byte, byte i at bit i.
         var eight = _load[DType.uint64](bytes + 8 * w)
-        target[unsafe_offset=w] = UInt8((eight * 0x0102040810204080) >> 56)
+        bits[w] = UInt8((eight * 0x0102040810204080) >> 56)
     for i in range(8 * whole, size):
         if _bytes(bytes)[unsafe_offset=i] != 0:
-            target[unsafe_offset=i >> 3] |= UInt8(1) << UInt8(i & 7)
+            bits[i >> 3] |= UInt8(1) << UInt8(i & 7)
     return bits^
 
 
@@ -1275,10 +1274,9 @@ struct NumberedGather(Movable):
         var any_null = False
         for t in range(len(self.nulls)):
             any_null = any_null or self.nulls[t] != 0
-        var bits = List[UInt8]()
-        if any_null:
-            bits = pack_bytes(Int(self.valid.unsafe_ptr()), self.size)
-        self.valid = List[UInt8]()
+        var bits = pack_bytes(
+            Int(self.valid.unsafe_ptr()), self.size
+        ) if any_null else List[UInt8]()
         if self.physical == PHYSICAL_VARCHAR:
             swap(decoded, self.decoded)
             var views = List[StringView]()
