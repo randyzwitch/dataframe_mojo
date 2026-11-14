@@ -7,6 +7,8 @@ from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, Series
 from dataframe.join_type import JOIN_ANTI, JOIN_INNER, JOIN_LEFT, JOIN_SEMI
 from dataframe.joins.hash_table import JoinHashTable, probe_pairs
+from dataframe.storage.string import StringColumn
+from dataframe.storage.string_view import StringViewBuilder
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
     StrategyTrace,
@@ -188,3 +190,67 @@ def test_eager_join_builds_the_smaller_side_and_keeps_order_when_asked() raises:
 
 def right_keys_of(j: Int) -> Int64:
     return Int64((j * 7919) % 1_000)
+
+
+def test_build_strings_stay_valid_after_the_build_frame_is_gone() raises:
+    # 9,000 build rows: several sink threads, each pointing its rows at
+    # the build columns' string bytes (Arrow offsets and views). The
+    # join's output must still read every string once the build frame
+    # itself has been dropped.
+    var setting = JoinWorkers(4)
+    var n = 9_000
+    var probe_keys = List[String]()
+    var probe_numbers = List[Int64]()
+    # Every key twice, so the probe side stays the larger one.
+    for i in range(2 * (n + 50)):
+        probe_keys.append("key-number-" + String(i // 2) + "-long")
+        probe_numbers.append(Int64(i // 2))
+    var probe = DataFrame(
+        [
+            Series("k", StringColumn(probe_keys^)),
+            Series("n", Column[Int64](probe_numbers^)),
+        ]
+    )
+    var joined: DataFrame
+    if True:
+        var keys = List[String]()
+        var texts = List[String]()
+        var valid = List[Bool]()
+        var views = StringViewBuilder()
+        for i in range(n):
+            keys.append("key-number-" + String(i) + "-long")
+            texts.append("payload string " + String(i * 7) + " past inline")
+            valid.append(i % 11 != 4)
+            views.append(StringSlice("view value " + String(i) + " is long"))
+        var build = DataFrame(
+            [
+                Series("k", StringColumn(keys^)),
+                Series("v", StringColumn(texts^, valid^)),
+                Series("w", StringColumn(views^.finish())),
+            ]
+        )
+        joined = (
+            probe.lazy()
+            .join(build.lazy(), on=["k"], how="left")
+            .collect()
+            .sort(["n"])
+        )
+        _ = build^
+    assert_equal(joined.height(), 2 * (n + 50))
+    for row in range(joined.height()):
+        var number = Int(joined.item(row, "n").int64())
+        var v = joined.item(row, "v")
+        var w = joined.item(row, "w")
+        if number >= n:
+            assert_true(v.is_null())
+            assert_true(w.is_null())
+            continue
+        assert_equal(w.string(), "view value " + String(number) + " is long")
+        if number % 11 == 4:
+            assert_true(v.is_null())
+        else:
+            assert_equal(
+                v.string(),
+                "payload string " + String(number * 7) + " past inline",
+            )
+    _ = setting^
