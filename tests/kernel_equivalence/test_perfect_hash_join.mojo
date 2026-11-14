@@ -309,15 +309,25 @@ def many_build(var keys: List[Int64]) raises -> DataFrame:
     )
 
 
+def probe_key(row: Int) -> Int64:
+    """Each key twice (so the probe side is never a perfect hash build),
+    a third of them in the build's range."""
+    return Int64(((row % 15_000) * 4099) % 62_000 - 1_000)
+
+
 def many_probe() raises -> DataFrame:
+    """Wider rows than the build's, so the build side stays the build."""
     var keys = List[Int64]()
-    var ids = List[Int64]()
+    var columns = List[Series]()
     for row in range(ROWS):
-        keys.append(Int64((row * 4099) % 62_000) - 1_000)
-        ids.append(Int64(row))
-    return DataFrame(
-        [Series("k", Column[Int64](keys^)), Series("id", Column[Int64](ids^))]
-    )
+        keys.append(probe_key(row))
+    columns.append(Series("k", Column[Int64](keys^)))
+    for c in range(8):
+        var ids = List[Int64]()
+        for row in range(ROWS):
+            ids.append(Int64(row + c))
+        columns.append(Series(String("id", c), Column[Int64](ids^)))
+    return DataFrame(columns^)
 
 
 def check_payloads(joined: DataFrame, matched_only: Bool) raises:
@@ -373,7 +383,7 @@ def test_payloads_of_every_kind_gather_over_many_vectors() raises:
                 assert_true(used)
             var expected = 0
             for row in range(ROWS):
-                var key = (row * 4099) % 62_000 - 1_000
+                var key = Int(probe_key(row))
                 if key >= 0 and key < 3 * MANY and key % 3 == 0:
                     expected += 1
                 elif how == "left":
@@ -423,7 +433,7 @@ def test_a_repeated_key_anywhere_keeps_the_hash_table() raises:
         assert_true(not used)
         var expected = 0
         for row in range(ROWS):
-            var key = Int64((row * 4099) % 62_000 - 1_000)
+            var key = probe_key(row)
             if key >= 0 and key < 3 * MANY and key % 3 == 0:
                 expected += 2 if key == repeated else 1
         assert_equal(out.height(), expected)
