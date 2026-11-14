@@ -72,6 +72,7 @@ from dataframe.kernels.rank import _key
 from dataframe.series import Series
 from dataframe.text.bytes import _Bytes
 from dataframe.storage.string import StringColumn
+from dataframe.vector.column_data_collection import append_raw, raw_series
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
     PHYSICAL_INT128,
@@ -82,6 +83,7 @@ from dataframe.vector.types import (
     StringT,
     UnifiedVectorFormat,
     physical_of,
+    physical_size,
     string_data,
 )
 from dataframe.storage.string_view import (
@@ -1799,6 +1801,16 @@ struct _OrderedBuffer(Movable):
     var sequences: List[Int]
     var groups: Int
     var values: Optional[Series]
+    # Rows taken straight from vectors (`add_vector`): fixed-width values
+    # appended as raw bytes of their storage type, a packed validity bitmap
+    # (empty while every row is valid), and their count. They follow every
+    # batch, in input order; a batch added after them moves them into a
+    # batch of their own first.
+    var raw: List[UInt8]
+    var raw_bits: List[UInt8]
+    var raw_physical: Int
+    var raw_rows: Int
+    var raw_type: DataType
     # Each group's rows, in input order: those of ordinal o are
     # rows[starts[o]:starts[o + 1]].
     var starts: List[Int]
@@ -1812,12 +1824,77 @@ struct _OrderedBuffer(Movable):
         self.values = None
         self.starts = List[Int]()
         self.rows = List[Int]()
+        self.raw = List[UInt8]()
+        self.raw_bits = List[UInt8]()
+        self.raw_physical = 0
+        self.raw_rows = 0
+        self.raw_type = DataType.NULL
+
+    def add_vector(
+        mut self,
+        format: UnifiedVectorFormat,
+        count: Int,
+        dtype: DataType,
+        storage: Int,
+        first: Int,
+    ) raises -> Bool:
+        """The `count` rows `format` reads, every one of group ordinal 0
+        with sequence numbers from `first`, copied straight from the
+        vector: values of a fixed-width number type that is `dtype`'s
+        storage (`storage`) are appended as raw bytes through the vector's
+        selection, the only copy they need. False, taking nothing, for any
+        other vector (strings, Booleans, categorical codes, nested values):
+        the caller adds those as a column (`add`)."""
+        var size = physical_size(format.physical)
+        if (
+            size == 0
+            or format.physical == PHYSICAL_BOOL
+            or format.physical == PHYSICAL_VARCHAR
+            or format.physical != storage
+            or dtype.is_categorical()
+            or (self.raw_rows > 0 and format.physical != self.raw_physical)
+        ):
+            return False
+        self.raw_physical = format.physical
+        self.raw_type = dtype
+        append_raw(
+            self.raw,
+            self.raw_bits,
+            self.raw_rows,
+            0,
+            format,
+            count,
+            size,
+        )
+        self.raw_rows += count
+        for k in range(count):
+            self.ordinals.append(0)
+            self.sequences.append(first + k)
+        self.groups = 1
+        return True
+
+    def _flush_raw(mut self) raises:
+        """The rows taken from vectors as one batch, after every other."""
+        if self.raw_rows == 0:
+            return
+        self.batches.append(
+            raw_series(
+                self.raw,
+                self.raw_bits,
+                self.raw_physical,
+                Series.full_null("", self.raw_type, 0),
+            )
+        )
+        self.raw = List[UInt8]()
+        self.raw_bits = List[UInt8]()
+        self.raw_rows = 0
 
     def add(
         mut self, batch: Series, ordinals: List[Int], first: Int, groups: Int
     ) raises:
         """A batch's rows, the k-th of group ordinal `ordinals[k]` (-1 for a
         row that joins no group) and sequence number `first + k`."""
+        self._flush_raw()
         var kept = List[Int]()
         for k in range(len(ordinals)):
             if ordinals[k] < 0:
@@ -1834,6 +1911,7 @@ struct _OrderedBuffer(Movable):
     def prepare(mut self) raises:
         """The values as one column and the rows by group (a stable
         counting sort, so each group's rows stay in input order)."""
+        self._flush_raw()
         if self.values or len(self.batches) == 0:
             return
         self.values = (
