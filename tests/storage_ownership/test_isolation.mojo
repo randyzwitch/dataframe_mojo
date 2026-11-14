@@ -2,7 +2,7 @@
 # contract-group: storage.views
 # contract-group: storage.isolation
 from std.testing import assert_equal, assert_true
-from dataframe import Column, DataFrame, Series
+from dataframe import Column, DataFrame, Series, col
 from tests.support.reference_model import generated_model, ReferenceTable
 from tests.support.coverage_generators import frame_from_model
 from tests.support.coverage_compare import assert_model
@@ -76,3 +76,38 @@ def test_payload_snapshot_and_unaligned_validity_are_separate_contracts() raises
         # The owned snapshot is independent even though the view shares storage.
         raw[0] = -1
         assert_equal(view.to_list()[0], payloads[offset])
+
+
+def test_streamed_row_local_steps_keep_untouched_columns_as_views() raises:
+    # A lazy step that only adds a column runs over the frame in morsels;
+    # the columns no step changed are collected as windows of the stored
+    # columns, and adjacent windows join back into one view of each: the
+    # result shares their buffers rather than copying them.
+    var n = 300_000
+    var ints = List[Int64](capacity=n)
+    var valid = List[Bool](capacity=n)
+    var floats = List[Float64](capacity=n)
+    for row in range(n):
+        ints.append(Int64(row))
+        valid.append(row % 7 != 3)
+        floats.append(Float64(row) * 0.5)
+    var frame = DataFrame(
+        [
+            Series("i", Column[Int64](ints^, valid^)),
+            Series("f", Column[Float64](floats^)),
+        ]
+    )
+    var result = (
+        frame.lazy()
+        .with_columns((col("f") * 2.0).alias("g"))
+        .collect(engine="cpu")
+    )
+    assert_equal(result.height(), n)
+    for name in ["i", "f"]:
+        assert_true(not result.column(name).is_chunked())
+        assert_true(
+            result.column(name)._shares_buffers_with(frame.column(name))
+        )
+    for row in [0, 3, 2048, 150_001, n - 1]:
+        assert_equal(result.item(row, "g").float64(), Float64(row) * 1.0)
+        assert_equal(result.item(row, "i").is_null(), row % 7 == 3)

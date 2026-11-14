@@ -123,12 +123,12 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
     plan_fold_casts(plan)
     plan_unique_as_aggregate(plan)
     plan_lower_right_joins(plan)
-    plan_filter_shared_subplans(plan)
-    # Memoize derived schemas across predicate and projection pushdown. These
-    # passes retain output shape; invalidate memo entries for nodes that are
-    # rewritten or renumbered.
+    # Memoize derived schemas across shared-subplan filtering, predicate
+    # and projection pushdown. These passes retain output shape; invalidate
+    # memo entries for nodes that are rewritten or renumbered.
     plan._schema_memo = Optional(ArcPointer(Dict[Int, DataFrame]()))
     try:
+        plan_filter_shared_subplans(plan)
         plan_push_predicates(plan)
         plan_push_slices(plan)
         plan_fuse_top_k(plan)
@@ -338,7 +338,7 @@ def plan_unique_as_aggregate(mut self: QueryContext) raises:
         plan_reorder(self)
 
 
-def plan_filter_shared_subplans(mut self: QueryContext):
+def plan_filter_shared_subplans(mut self: QueryContext) raises:
     """For a shared subplan read only through row-local filters, push the union
     of reader predicates into the shared computation. Keep each reader's own
     filter above it. The retained result then contains every row any reader
@@ -411,7 +411,9 @@ def plan_filter_shared_subplans(mut self: QueryContext):
                 above >= 0
                 and self._nodes[above].kind == FILTER
                 and _row_local(self._nodes[above].exprs)
-                and _cannot_raise(self._nodes[above].exprs)
+                and plan_cannot_raise(
+                    self, self._nodes[above].exprs, self._nodes[above].left
+                )
                 and not _pinned(self._nodes[above])
             ):
                 run.append(above)
@@ -470,16 +472,37 @@ def plan_push_predicates(mut self: QueryContext) raises:
         self._schema_memo = None
 
 
-def plan_movable(node: PlanNode) -> Bool:
+def plan_movable(self: QueryContext, index: Int) raises -> Bool:
     """Whether a filter's predicate may join the pushed set: row-local,
-    unable to raise and not pinned above a shared subplan. Any other
-    filter stays where it is and the set stops above it."""
+    unable to raise over its input's types and not pinned above a shared
+    subplan. Any other filter stays where it is and the set stops above
+    it."""
+    ref node = self._nodes[index]
     return (
         node.kind == FILTER
         and not _pinned(node)
         and _row_local(node.exprs)
-        and _cannot_raise(node.exprs)
+        and plan_cannot_raise(self, node.exprs, node.left)
     )
+
+
+def plan_cannot_raise(
+    self: QueryContext, exprs: List[Expr], input: Int
+) raises -> Bool:
+    """Whether evaluating `exprs` over the output of node `input` is total
+    for that output's column types (`_cannot_raise` with an input). The
+    untyped check answers first, so the schema is derived only for
+    expressions it rejects."""
+    if _cannot_raise(exprs):
+        return True
+    if input < 0:
+        return False
+    var schema: DataFrame
+    try:
+        schema = self._execute(input, True)
+    except:
+        return False
+    return _cannot_raise(exprs, schema._columns)
 
 
 def _literal(predicate: Expr) -> Int:
@@ -617,7 +640,7 @@ def plan_pushdown_filter(
     set into its own predicate, after its own, so a scan below sees
     them together."""
     var left = self._nodes[index].left
-    if plan_movable(self._nodes[index]):
+    if plan_movable(self, index):
         if not plan_add_filter(filters, self._nodes[index].exprs[0]):
             if plan_empty_result(self, left):
                 return plan_final_filters(self, left, List[Expr]())
@@ -631,7 +654,7 @@ def plan_pushdown_filter(
     if (
         pinned
         and local
-        and _cannot_raise(self._nodes[index].exprs)
+        and plan_cannot_raise(self, self._nodes[index].exprs, left)
         and _pinned(self._nodes[left])
         and _row_local(self._nodes[left].exprs)
     ):
@@ -663,7 +686,7 @@ def plan_pushdown_projection(
     var exprs = self._nodes[index].exprs.copy()
     var select = self._nodes[index].kind == SELECT
     if (
-        not _cannot_raise(exprs)
+        not plan_cannot_raise(self, exprs, self._nodes[index].left)
         or not _row_local(exprs)
         or (select and not _reads_input(exprs))
     ):
@@ -721,9 +744,9 @@ def plan_pushdown_aggregate(
     cell (min, max, first, last, count, len). Filters on aggregates,
     and every filter over an aggregate without keys, stay above."""
     var keys = List[String]()
-    ref node = self._nodes[index]
+    var node = self._nodes[index].copy()
     if node.kind == AGG:
-        if _cannot_raise(node.exprs):
+        if plan_cannot_raise(self, node.exprs, node.left):
             keys = node.names.copy()
     elif node.text in ["min", "max", "first", "last", "count", "len"]:
         keys = List[String](node.pivot_columns()[: node.pivot_index_count()])
@@ -896,7 +919,7 @@ def plan_transfer_key_filter(
     return copy^
 
 
-def plan_can_discard(self: QueryContext, index: Int) -> Bool:
+def plan_can_discard(self: QueryContext, index: Int) raises -> Bool:
     """Whether skipping this subtree preserves evaluation errors.
 
     File scans can fail while decoding rows even if their schema is valid.
@@ -912,7 +935,7 @@ def plan_can_discard(self: QueryContext, index: Int) -> Bool:
             continue
         if node.kind not in [SELECT, WITH_COLUMNS, FILTER, SORT, CONCAT, AGG]:
             return False
-        if not _cannot_raise(node.exprs):
+        if not plan_cannot_raise(self, node.exprs, node.left):
             return False
         pending.append(node.left)
         pending.append(node.right)
