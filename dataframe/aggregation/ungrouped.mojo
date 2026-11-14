@@ -30,6 +30,7 @@ from dataframe.aggregation.function import (
     _K_INT_SUM,
     _K_DISTINCT,
     _K_ORDERED,
+    _K_STATE,
     _OrderedBuffer,
     ReducerSpec,
     _ValueArena,
@@ -49,7 +50,7 @@ from dataframe.aggregation.hash_table import (
 from dataframe.aggregation.table_sink import _sink_jobs, input_vector
 from dataframe.parallel import configured_workers, morsel_ranges
 from dataframe.aggregation.expressions import _stream_reductions
-from dataframe.aggregation.reducer import Reducer
+from dataframe.aggregation.reducer import Reducer, reads_vectors
 from dataframe.aggregation.selected_rows import _canonical_int
 from dataframe.aggregation.state import (
     _StreamReduction,
@@ -86,11 +87,13 @@ from dataframe.vector.data_chunk import (
 from dataframe.vector.expression import VectorExpression
 from dataframe.vector.sink import Sink
 from dataframe.vector.types import (
+    PHYSICAL_BOOL,
     PHYSICAL_VARCHAR,
     SelectionVector,
     UnifiedVectorFormat,
     Vector,
     physical_of,
+    physical_size,
 )
 
 
@@ -262,6 +265,16 @@ def ungrouped_layout(
     )
 
 
+def _fixed_width(physical: Int) -> Bool:
+    """Whether vectors of a physical type hold fixed-width numbers, which a
+    buffer of input rows copies as raw bytes."""
+    return (
+        physical_size(physical) > 0
+        and physical != PHYSICAL_BOOL
+        and physical != PHYSICAL_VARCHAR
+    )
+
+
 def _bare_column(expression: Expr, empty: DataFrame) -> Int:
     """The input column a bare column expression reads, else -1."""
     if len(expression._nodes) != 1 or expression._nodes[0].op != COL:
@@ -364,6 +377,10 @@ struct UngroupedSink(Sink):
     # the owner's address, never the state, so any reduction's state fits.
     var owned: List[Reducer]
     var buffered: List[_OrderedBuffer]
+    # Per state by address, whether its owner takes its input straight from
+    # the chunk's vectors (`Reducer.update_vector`,
+    # `_OrderedBuffer.add_vector`) rather than as a column.
+    var vectors: List[Bool]
     # The global state's: every other worker's state row and owners once
     # combined, kept, since the combined row's chains of states by address
     # point into them until the finish reads them.
@@ -399,9 +416,24 @@ struct UngroupedSink(Sink):
         self.distinct_of = List[Int](length=len(self.slots), fill=-1)
         self.owned = List[Reducer](capacity=len(self.slots))
         self.buffered = List[_OrderedBuffer](capacity=len(self.slots))
+        self.vectors = List[Bool](length=len(self.slots), fill=False)
         for s in range(len(self.slots)):
             self.owned.append(shared.layout.templates[s].make(0))
             self.buffered.append(_OrderedBuffer())
+            if self.slots[s].kind == _K_STATE:
+                var op = self.owned[s].op
+                var dtype = self.types[s].dtype()
+                var reads = reads_vectors(op, dtype)
+                if op == CORR or op == COV:
+                    reads = reads and reads_vectors(
+                        op, self.types[self.slots[s].k].dtype()
+                    )
+                self.vectors[s] = reads
+            elif self.slots[s].kind == _K_ORDERED:
+                self.vectors[s] = (
+                    _fixed_width(storage_physical(self.types[s]))
+                    and not self.types[s].dtype().is_categorical()
+                )
         self.kept_groups = List[_Groups]()
         self.kept_owned = List[List[Reducer]]()
         self.kept_buffered = List[List[_OrderedBuffer]]()
@@ -544,13 +576,38 @@ struct UngroupedSink(Sink):
             at[unsafe_offset=1] = 1
             at[unsafe_offset=2] = 0
         var n = chunk.count
-        var ordinals = List[Int](length=n, fill=0)
-        var column = self._column(s, chunk, arena)
+        var dtype = self.types[s].dtype()
         if ordered:
-            self.buffered[s].add(column, ordinals, self.sequence, 1)
+            if self.vectors[s]:
+                var format = self._format(s, chunk, arena)
+                var storage = storage_physical(self.types[s])
+                if self.buffered[s].add_vector(
+                    format, n, dtype, storage, self.sequence
+                ):
+                    return
+            var column = self._column(s, chunk, arena)
+            self.buffered[s].add(
+                column, List[Int](length=n, fill=0), self.sequence, 1
+            )
             return
         self.owned[s].grow(1)
-        if self.owned[s].op == CORR or self.owned[s].op == COV:
+        var pair = self.owned[s].op == CORR or self.owned[s].op == COV
+        if self.vectors[s]:
+            # The state reads the input's vector in place: no column of the
+            # chunk's rows is made.
+            var format = self._format(s, chunk, arena)
+            if pair:
+                var second = self._format(slot.k, chunk, arena)
+                var second_type = self.types[slot.k].dtype()
+                self.owned[s].update_pair_vector(
+                    format, second, n, dtype, second_type
+                )
+            else:
+                self.owned[s].update_vector(format, n, dtype)
+            return
+        var ordinals = List[Int](length=n, fill=0)
+        var column = self._column(s, chunk, arena)
+        if pair:
             var second = self._column(slot.k, chunk, arena)
             self.owned[s].update_pair(column, second, 0, True, ordinals)
         else:
