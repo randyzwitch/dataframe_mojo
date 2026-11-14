@@ -46,6 +46,7 @@ from dataframe.expr import (
     OVER,
     SELECTOR,
     UNTYPED,
+    WHEN,
     _set_node_children,
     col,
     is_reduction,
@@ -354,6 +355,41 @@ def _shared_text(expr: Expr, root: Int) -> Optional[String]:
         return None
     part._name = String()
     return _expr_signature(part)
+
+
+def count_shared(
+    expr: Expr,
+    i: Int,
+    short: Bool,
+    mut every_row: Dict[String, Int],
+    mut seen: Dict[String, Int],
+):
+    """Count each subexpression of `expr` under node `i` that common
+    subexpression elimination may compute once (`_shared_text`): in
+    `seen` every occurrence, in `every_row` those evaluated on every row.
+
+    A conditional evaluates its branches only on the rows that take them,
+    and a conjunction may skip its later operands, so an occurrence there
+    (`short`) may never be evaluated on a row where it would raise. One
+    computed once for every row is safe only when some occurrence is
+    evaluated on every row anyway. A reduction or window evaluates its
+    input on every row whatever conditional holds its result."""
+    var text = _shared_text(expr, i)
+    if text:
+        seen[text.value()] = seen.get(text.value(), 0) + 1
+        if not short:
+            every_row[text.value()] = every_row.get(text.value(), 0) + 1
+    ref node = expr._nodes[i]
+    var below = short
+    if is_reduction(node.op) or is_window(node.op) or node.op == OVER:
+        below = False
+    var first = True
+    for child in node_children(node):
+        var conditional = (
+            node.op == WHEN or node.op == AND or node.op == OR
+        ) and not first
+        count_shared(expr, child, below or conditional, every_row, seen)
+        first = False
 
 
 def _emit_shared(

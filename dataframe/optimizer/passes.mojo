@@ -42,9 +42,9 @@ from dataframe.join_type import (
 from dataframe.optimizer.expressions import (
     _cannot_raise,
     _emit_shared,
+    count_shared,
     _fold_casts,
     _fold_constants,
-    _shared_text,
 )
 from dataframe.planning.context import (
     QueryContext,
@@ -218,13 +218,20 @@ def plan_eliminate_common_subexpressions(mut self: QueryContext) raises:
         if self._nodes[i].left < 0:
             continue
         ref exprs = self._nodes[i].exprs
-        # How often each eligible subexpression appears, by its text.
+        # How often each eligible subexpression appears, by its text; one
+        # that no occurrence evaluates on every row is not computed once
+        # for every row (`count_shared`).
         var seen = Dict[String, Int]()
+        var every_row = Dict[String, Int]()
         for e in exprs:
-            for r in range(len(e._nodes)):
-                var text = _shared_text(e, r)
-                if text:
-                    seen[text.value()] = seen.get(text.value(), 0) + 1
+            if len(e._nodes) > 0:
+                count_shared(e, len(e._nodes) - 1, False, every_row, seen)
+        var texts = List[String]()
+        for text in seen.keys():
+            texts.append(text)
+        for text in texts:
+            if every_row.get(text, 0) == 0:
+                seen[text] = 1
         var any = False
         for entry in seen.items():
             any = any or entry.value > 1

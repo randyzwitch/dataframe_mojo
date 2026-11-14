@@ -338,15 +338,14 @@ def _extract_aggregate_inputs(
         for i in range(len(nodes)):
             if not is_reduction(nodes[i].op):
                 continue
-            # A conditional aggregate input with no otherwise can project its
-            # condition and value separately. Update the reduction only for
-            # rows where the condition is true, preserving which values and
-            # errors are observed.
+            # A conditional aggregate input with no otherwise projects only
+            # its condition, which every row evaluates. Its value stays in
+            # the reduction: the sink computes it at the rows the condition
+            # keeps, so no other row is evaluated or can raise.
             var targets = List[Int]()
             for child in node_children(nodes[i]):
                 if nodes[child].op == WHEN and nodes[child].extra < 0:
                     targets.append(nodes[child].left)
-                    targets.append(nodes[child].right)
                 else:
                     targets.append(child)
             for child in targets:
