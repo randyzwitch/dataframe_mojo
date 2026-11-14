@@ -1,6 +1,12 @@
 """Parallel stable row sorting shared by rank and normalized-key orders."""
 from std.memory import ArcPointer, Pointer
-from dataframe.parallel import Job, Pool, configured_workers, partitions
+from dataframe.parallel import (
+    Job,
+    Pool,
+    configured_workers,
+    partitions,
+    task_count,
+)
 from dataframe.trace import trace_path
 
 
@@ -203,20 +209,15 @@ struct _MergeJob[K: KeyOrder](Job):
         )
 
 
-comptime _MIN_ROWS_PER_RUN = 8192
-
-
 def comparison_arg_sort[
     K: KeyOrder
 ](var ranks: K, n: Int, first: List[Int] = List[Int]()) raises -> List[Int]:
     var workers = configured_workers()
-    # One run per thread, not one per MIN_ROWS_PER_WORKER rows: that minimum
-    # is sized for a linear scan, and it both caps a 1M-row sort at 15 runs
-    # however many cores are free and leaves a 100k-row sort entirely serial.
-    # Sorting a run is n log n, so shorter runs still repay their scheduling,
-    # and the merge rounds below are themselves split across threads and so
-    # do not lengthen as runs are added.
-    var target = max(1, min(workers, n // _MIN_ROWS_PER_RUN))
+    # One run per thread, each at least one vector: sorting a run is
+    # n log n, so a run of any whole number of vectors repays taking it,
+    # and the merge rounds below are themselves split across threads, so
+    # they do not lengthen as runs are added.
+    var target = task_count(n, workers)
     if target <= 1 or n < 2:
         return _sort_range(ranks, 0, n)
 

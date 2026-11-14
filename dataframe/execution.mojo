@@ -1500,13 +1500,33 @@ def _feed[
         reducer.update(chunk, offset, grouped, groups)
 
 
-struct _ReduceJob[width: Int](Job):
-    """Reduce rows [start, end) of one reduction input into a local state."""
+struct _ReduceInputs(Movable):
+    """What every task of one reduction reads, held once and shared: each
+    task keeps only a reference, so a task costs no copy of the
+    expression or the column list."""
 
     var bound: BoundExpr
     var columns: List[Series]
     var states: List[Series]
     var node: Node
+
+    def __init__(
+        out self,
+        bound: BoundExpr,
+        columns: List[Series],
+        states: List[Series],
+        node: Node,
+    ):
+        self.bound = bound.copy()
+        self.columns = columns.copy()
+        self.states = states.copy()
+        self.node = node.copy()
+
+
+struct _ReduceJob[width: Int](Job):
+    """Reduce rows [start, end) of one reduction input into a local state."""
+
+    var inputs: ArcPointer[_ReduceInputs]
     var start: Int
     var end: Int
     var batch_size: Int
@@ -1519,10 +1539,7 @@ struct _ReduceJob[width: Int](Job):
 
     def __init__(
         out self,
-        bound: BoundExpr,
-        columns: List[Series],
-        states: List[Series],
-        node: Node,
+        inputs: ArcPointer[_ReduceInputs],
         start: Int,
         end: Int,
         batch_size: Int,
@@ -1534,22 +1551,20 @@ struct _ReduceJob[width: Int](Job):
         self.stats = stats.value().copy() if stats else ArcPointer(
             List[_ColumnStats]()
         )
-        self.bound = bound.copy()
-        self.columns = columns.copy()
-        self.states = states.copy()
-        self.node = node.copy()
+        self.inputs = inputs
         self.start = start
         self.end = end
         self.batch_size = batch_size
         self.grouped = grouped
         self.groups = groups
-        self.reducer = _new_reducer(bound, node, group_count)
-        if node.op == IMPLODE:
+        ref shared = inputs[]
+        self.reducer = _new_reducer(shared.bound, shared.node, group_count)
+        if shared.node.op == IMPLODE:
             # The lists' child keeps its input's field metadata, as the
             # evaluator's implode does (`_empty_output`).
             try:
                 self.reducer.metadata = _empty_output(
-                    bound, columns, node.left
+                    shared.bound, shared.columns, shared.node.left
                 )._field_metadata
             except:
                 pass
@@ -1558,12 +1573,13 @@ struct _ReduceJob[width: Int](Job):
         return self.reducer^
 
     def run(mut self) raises:
+        ref shared = self.inputs[]
         reduce_rows[Self.width](
             self.reducer,
-            self.bound,
-            self.columns,
-            self.states,
-            self.node,
+            shared.bound,
+            shared.columns,
+            shared.states,
+            shared.node,
             self.start,
             self.end,
             self.batch_size,
@@ -2577,16 +2593,6 @@ def _direct_numeric_reduction(
     return True
 
 
-def _scan_width(bound: BoundExpr, columns: List[Series], node: Node) -> Int:
-    """Bytes per row a direct scan reads."""
-    var input = node.left
-    if _widening_cast(bound, columns, node):
-        input = bound.expr._nodes[input].left
-    return max(
-        1, columns[bound.sources[input]].dtype().physical().bit_width() // 8
-    )
-
-
 def _shifted_sum_shape(
     bound: BoundExpr, columns: List[Series], node: Node
 ) -> Bool:
@@ -2927,14 +2933,6 @@ def _reduce[
     groups, so nothing is merged and any number of groups runs in
     parallel."""
     var workers = worker_count(height)
-    if not grouped and _direct_scan(bound, columns, node):
-        # A SIMD scan saturates memory bandwidth with few workers, and each
-        # worker's thread costs more to start than scanning a few MB: 10M
-        # Int16 values sum in 0.45 ms on 4 workers and 0.62 ms on 8.
-        workers = min(
-            workers,
-            min(8, max(1, height * _scan_width(bound, columns, node) >> 22)),
-        )
     if (
         not grouped
         and (node.op == LEN or node.op == COUNT)
@@ -2987,23 +2985,22 @@ def _reduce[
             group_rows.value(),
         )
     var shared_groups = ArcPointer(groups.copy())
+    var inputs = ArcPointer(_ReduceInputs(bound, columns, states, node))
     var bounds = partitions(height, workers, batch_size)
     var jobs = List[_ReduceJob[width]](capacity=workers)
     for w in range(workers):
-        jobs.append(
-            _ReduceJob[width](
-                bound,
-                columns,
-                states,
-                node,
-                bounds[w],
-                bounds[w + 1],
-                batch_size,
-                grouped,
-                shared_groups,
-                group_count,
+        if bounds[w + 1] > bounds[w]:
+            jobs.append(
+                _ReduceJob[width](
+                    inputs,
+                    bounds[w],
+                    bounds[w + 1],
+                    batch_size,
+                    grouped,
+                    shared_groups,
+                    group_count,
+                )
             )
-        )
     run_jobs(jobs)
     var reducer = jobs.pop(0).into_reducer()
     while len(jobs) > 0:

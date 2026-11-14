@@ -45,6 +45,7 @@ from dataframe.parallel import (
     configured_workers,
     partitions,
     run_jobs,
+    task_count,
     worker_count,
 )
 from dataframe.series import Series
@@ -570,14 +571,6 @@ def _take_sorted_chunked_partitioned(
     return result^
 
 
-# Cap jobs by both configured workers and physical/performance cores.
-# M1 8-worker / 2-column / 1M-row gather: two parts 2.07 ms, four 2.46 ms.
-comptime _SORTED_GATHER_MAX_PARTS = 4
-
-# Selected rows needed per dispatched column/partition job (measured below).
-comptime _SORTED_GATHER_ROWS_PER_JOB = 16_384
-
-
 def take_sorted_chunked(
     columns: List[Series],
     var indices: List[Int],
@@ -596,20 +589,15 @@ def take_sorted_chunked(
                 gathered.append(c.take(indices))
             return gathered^
     if workers > 1 and len(columns) > 1:
-        var parts = min(
-            _SORTED_GATHER_MAX_PARTS,
+        # One task per column and row range, a task per thread at most and
+        # each at least one vector of rows. On a heterogeneous CPU only the
+        # performance cores count: a range on a slower core finishes last.
+        var parts = task_count(
+            len(indices),
             min(configured_workers(), _performance_core_count())
             // len(columns),
         )
-        # Dispatch cost grows with the column/partition job count. Swept
-        # on a 3970X at 32 workers: 2 columns win from 100-125k selected
-        # rows; 8 columns are flat around 500-750k and win from 1M.
-        # See docs/design/join-cutoffs.md; do not fit this to a benchmark row size.
-        if (
-            parts > 1
-            and len(indices) // (parts * len(columns))
-            >= _SORTED_GATHER_ROWS_PER_JOB
-        ):
+        if parts > 1:
             var chunked = True
             for column in columns:
                 if not column.is_chunked():
@@ -837,9 +825,7 @@ def take_parallel(
             contiguous[positions.pop(0)] = rechunk.pop(0).into_result()
         return take_parallel(contiguous, indices^, workers, or_null)
     var m = len(indices)
-    # Keep each gather job large enough to amortize pool scheduling and
-    # string-view chunk assembly across columns.
-    var active_workers = min(workers, max(1, (m + 65_535) // 65_536))
+    var active_workers = task_count(m, workers)
     var nonnullable_fixed = 0
     if or_null and active_workers < workers:
         for column in columns:

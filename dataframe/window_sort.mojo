@@ -1093,7 +1093,11 @@ struct _GroupSortJob(Job):
         var count = len(self.keys)
         var slices = List[Series](capacity=count)
         for key in self.keys:
-            slices.append(key.slice(self.lo, n))
+            # The gathered keys may be chunked (a parallel gather keeps each
+            # thread's string rows as a chunk); the reads below index one
+            # buffer, so a range that crosses chunks is made one.
+            var part = key.slice(self.lo, n)
+            slices.append(part.rechunk() if part.is_chunked() else part^)
         # The task's partitions numbered by a dictionary of their keys:
         # partitions need only be contiguous, so the sort orders rows by
         # that number (one integer) rather than by the key values.
