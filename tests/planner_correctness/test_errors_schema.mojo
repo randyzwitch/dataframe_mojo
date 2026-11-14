@@ -338,3 +338,91 @@ def test_key_filter_preserves_aggregate_overflow_in_a_discarded_group() raises:
     )
     for optimize in [False, True]:
         _error(plan, False, optimize, "overflow")
+
+
+def _filter_below(plan: LazyFrame, step: String) raises -> Bool:
+    """Whether the optimized plan filters rows before `step`: no FILTER
+    line printed above the step's line (the filter sits under it, or in
+    the scan)."""
+    var text = plan.explain()
+    var at = text.find(step)
+    assert_true(at >= 0, "the plan must hold " + step)
+    var filtered = text.find("FILTER")
+    return filtered < 0 or filtered > at
+
+
+def test_key_filter_moves_below_aggregates_that_cannot_raise_for_their_types() raises:
+    """Float arithmetic, float sums and means, and casts into a type holding
+    every source value never raise, so dropping a group before
+    aggregating it suppresses no error: the key filter moves below the
+    aggregate. An integer sum of the same shape stays above it."""
+    var source = DataFrame(
+        [
+            Series("g", Column[Int64]([0, 1, 1])),
+            Series("x", Column[Float64]([1.5, 1.0e308, 1.0e308])),
+            Series("i", Column[Int32]([1, 2, 3])),
+        ]
+    )
+    var total = (
+        (col("x") * 2.0 - col("i").cast(DataType.FLOAT64)).sum().alias("total")
+    )
+    var plan = (
+        source.lazy()
+        .group_by("g")
+        .agg([total^, col("x").mean().alias("mean")])
+        .filter(col("g") == 0)
+    )
+    assert_true(_filter_below(plan, "GROUP_BY"))
+    var expected = DataFrame(
+        [
+            Series("g", Column[Int64]([0])),
+            Series("total", Column[Float64]([2.0])),
+            Series("mean", Column[Float64]([1.5])),
+        ]
+    )
+    for optimize in [False, True]:
+        assert_frame(
+            plan.collect(optimize=optimize, streaming=False, engine="cpu"),
+            expected,
+        )
+    var counted = (
+        source.lazy()
+        .group_by("g")
+        .agg((col("i") * 2).sum().alias("total"))
+        .filter(col("g") == 0)
+    )
+    assert_true(not _filter_below(counted, "GROUP_BY"))
+
+
+def test_typed_filters_move_but_raising_casts_stay_in_place() raises:
+    """A strict cast from Float64 to Float64 is total and the filter using
+    it moves below the projection; a strict cast from text to Int64 can
+    fail on a row the filter would remove, so that filter stays above."""
+    var source = DataFrame(
+        [
+            Series("x", Column[Float64]([1.0, -2.0])),
+            Series("s", Column[String](["1", "invalid"])),
+        ]
+    )
+    var computed = source.lazy().with_columns(
+        [
+            (col("x") * 3.0).alias("y"),
+            col("s").cast(DataType.INT64).alias("n"),
+        ]
+    )
+    var kept = computed.filter(col("x").cast(DataType.FLOAT64) > 0.0)
+    for optimize in [False, True]:
+        _error(kept, False, optimize, "")
+    var floats = (
+        source.lazy()
+        .with_columns((col("x") * 3.0).alias("y"))
+        .filter(col("x").cast(DataType.FLOAT64) > 0.0)
+    )
+    assert_true(_filter_below(floats, "WITH_COLUMNS"))
+    for optimize in [False, True]:
+        assert_equal(
+            floats.collect(
+                optimize=optimize, streaming=False, engine="cpu"
+            ).height(),
+            1,
+        )

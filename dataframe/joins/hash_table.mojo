@@ -46,6 +46,12 @@ from dataframe.join_type import (
     join_emits_build_rows,
 )
 from dataframe.kernels.partition import _hash_column
+from dataframe.kernels.runtime_filter import (
+    KeyBloom,
+    bloom_blocks_for,
+    bloom_set_bits,
+    can_use_bloom_filter,
+)
 from dataframe.parallel import (
     Job,
     configured_workers,
@@ -588,6 +594,8 @@ struct JoinBuildLayout(Copyable, Movable):
     var perfect: Bool
     var keys_only: Bool
     var probe_estimate: Int
+    # Whether the build side filters its rows (the bloom filter rule).
+    var build_filtered: Bool
     # The build side's columns in order: names, types, and the row field
     # holding each (-1 for a column the rows do not keep).
     var build_names: List[String]
@@ -611,6 +619,7 @@ struct JoinBuildLayout(Copyable, Movable):
         build_names: List[String],
         build_types: List[DataType],
         build_fields: List[Int],
+        build_filtered: Bool = False,
     ) raises:
         """`keys` and `payload` are columns (of any length) of the key and
         payload types, which the row fields are typed from."""
@@ -658,6 +667,7 @@ struct JoinBuildLayout(Copyable, Movable):
         self.perfect = perfect
         self.keys_only = keys_only
         self.probe_estimate = probe_estimate
+        self.build_filtered = build_filtered
         self.build_names = build_names.copy()
         self.build_types = build_types.copy()
         self.build_fields = build_fields.copy()
@@ -918,6 +928,7 @@ def join_build_layout(
     probe_estimate: Int,
     from_chunks: Bool,
     numbered: Bool = False,
+    build_filtered: Bool = False,
 ) raises -> Optional[JoinBuildLayout]:
     """The rows a hash join of type `how` on the build keys `keys` keeps
     of a build side with `columns` (columns of any length, typing the
@@ -925,7 +936,8 @@ def join_build_layout(
     anti join (it emits no build column), the outputs the join reads from
     them (a key only where the join does not coalesce it), and found
     flags when the join emits build rows after its probe. `probe_estimate`
-    is the probe side's estimated rows. None when the build cannot be a
+    is the probe side's estimated rows, `build_filtered` whether the build
+    side filters its rows. None when the build cannot be a
     table: a nested key, or, for rows sunk from pipeline chunks
     (`from_chunks`), a categorical key (the probe unifies dictionaries
     against the build frame) or a nested column (a chunk's nested vector
@@ -1008,6 +1020,7 @@ def join_build_layout(
         build_names,
         build_types,
         build_fields,
+        build_filtered,
     )
 
 
@@ -1103,6 +1116,11 @@ struct _InsertJob(Copyable, Job):
     var bitmask: UInt64
     var duplicates: Bool
     var skip_null_keys: Bool
+    # The bloom filter's words and their count (0: no filter), and whether
+    # other tasks set bits in it at the same time.
+    var bloom_words: Int
+    var bloom_blocks: Int
+    var bloom_shared: Bool
     var chained: Bool
     var kinds_at: Int
     var offsets_at: Int
@@ -1118,6 +1136,9 @@ struct _InsertJob(Copyable, Job):
         bitmask: UInt64,
         duplicates: Bool,
         skip_null_keys: Bool,
+        bloom_words: Int = 0,
+        bloom_blocks: Int = 0,
+        bloom_shared: Bool = False,
     ):
         self.layout = layout.copy()
         self.collection = collection
@@ -1127,6 +1148,9 @@ struct _InsertJob(Copyable, Job):
         self.bitmask = bitmask
         self.duplicates = duplicates
         self.skip_null_keys = skip_null_keys
+        self.bloom_words = bloom_words
+        self.bloom_blocks = bloom_blocks
+        self.bloom_shared = bloom_shared
         self.chained = False
         self.kinds_at = 0
         self.offsets_at = 0
@@ -1159,6 +1183,17 @@ struct _InsertJob(Copyable, Job):
                     state, c, False
                 )
                 var at = state.row_locations.unsafe_ptr()
+                if self.bloom_words != 0:
+                    # The bloom filter from the hashes the rows store, so
+                    # no key is read or hashed again.
+                    var hash_at = self.layout.pointer_offset
+                    for i in range(n):
+                        bloom_set_bits(
+                            self.bloom_words,
+                            self.bloom_blocks,
+                            _load64(at[unsafe_offset=i] + hash_at),
+                            self.bloom_shared,
+                        )
                 var i = n - 1
                 while i >= 0:
                     if not self.skip_null_keys or self._keys_valid(
@@ -1407,6 +1442,9 @@ struct JoinHashTable(Copyable, Movable):
     # Whether the build's subplan filters its tables, which the join's bloom
     # filter rule reads.
     var build_filtered: Bool
+    # The probe's bloom filter over the single key's hashes, filled while
+    # the table finalizes when the join's bloom rule holds.
+    var bloom: Optional[ArcPointer[KeyBloom]]
     # The row layout, and the output columns gathered from it.
     var row_layout: TupleDataLayout
     var output_columns: List[Int]
@@ -1542,7 +1580,8 @@ struct JoinHashTable(Copyable, Movable):
         _ = sinks^
         self.count = count
         self.has_null = invalid > 0
-        self.build_filtered = False
+        self.build_filtered = shape.build_filtered
+        self.bloom = None
         self.inserted = self.count - invalid
         self.radix_bits = INITIAL_RADIX_BITS
         self.perfect = False
@@ -1616,6 +1655,25 @@ struct JoinHashTable(Copyable, Movable):
             self.data[].slot_bits = List[UInt8]()
             self.data[].slot_rows = List[UInt64]()
         var collection = Int(Pointer(to=self.data[].collection))
+        # The probe's bloom filter, when the join's rule holds: a single
+        # integer key, whose row hash is the filter's hash of the key, so
+        # the finalize tasks fill it from the hashes the rows store.
+        var bloom_words = 0
+        var bloom_blocks = 0
+        if (
+            fields == 1
+            and (
+                shape.key_types[0].physical() == DataType.INT64
+                or shape.key_types[0].physical() == DataType.INT32
+            )
+            and can_use_bloom_filter(
+                1, self.inserted, self.probe_estimate, self.build_filtered
+            )
+        ):
+            bloom_blocks = bloom_blocks_for(self.inserted)
+            if bloom_blocks > 0:
+                self.bloom = ArcPointer(KeyBloom(bloom_blocks))
+                bloom_words = Int(self.bloom.value()[].words.unsafe_ptr())
         # Each partition its own region of the table; the regions together
         # at least MINIMUM_CAPACITY.
         self.parts = partition_count
@@ -1651,6 +1709,9 @@ struct JoinHashTable(Copyable, Movable):
                     self.data[].masks[p],
                     not shape.keys_only,
                     self.has_null and shape.found,
+                    bloom_words,
+                    bloom_blocks,
+                    sink_threads > 1,
                 )
             )
         # As many tasks as the build had sink threads, each filling a run
