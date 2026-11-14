@@ -107,7 +107,10 @@ struct ColumnArena(Movable):
         if self.shared[handle] != 0:
             return self.shared[handle]
         if len(self.decoded[handle]) == 0 and len(self.columns[handle]) > 0:
-            ref series = self.columns[handle]
+            # A constant decodes its one value: its vectors read row 0 only.
+            var series = self.columns[handle].copy()
+            if series.is_constant():
+                series = series._constant_resized(1)
             if series._data.isa[StringColumn]():
                 self.decoded[handle] = _decode_strings(
                     series._data[StringColumn]
@@ -148,6 +151,8 @@ def flat_over(arena: ColumnArena, handle: Int, offset: Int) -> Vector:
     var result = Vector()
     result.source = handle
     result.source_offset = offset
+    if series.is_constant():
+        return _constant_over(series, handle)
     comptime for k in range(len(_NUMERIC_STORAGE)):
         comptime D = _NUMERIC_STORAGE[k]
         if series._data.isa[Column[Scalar[D]]]():
@@ -178,6 +183,35 @@ def flat_over(arena: ColumnArena, handle: Int, offset: Int) -> Vector:
             )
         return result
     result.physical = PHYSICAL_OPAQUE
+    return result
+
+
+def _constant_over(series: Series, handle: Int) -> Vector:
+    """A constant vector over the constant arena column `handle`: every row
+    reads its one value, which is never written out to the column's rows.
+    Fixed-width values are read where the column keeps them; strings and
+    booleans are decoded from that one row (`ColumnArena.values`)."""
+    var result: Vector
+    comptime for k in range(len(_NUMERIC_STORAGE)):
+        comptime D = _NUMERIC_STORAGE[k]
+        if series._data.isa[Column[Scalar[D]]]():
+            ref column = series._data[Column[Scalar[D]]]
+            result = Vector.constant(
+                physical_of[D](),
+                Int(Pointer(to=column.constant_value())),
+                column.constant_valid(),
+            )
+            result.source = handle
+            return result
+    if series._data.isa[BoolColumn]():
+        result = Vector.constant(
+            PHYSICAL_BOOL, 0, series._data[BoolColumn].constant_valid()
+        )
+    else:
+        result = Vector.constant(
+            PHYSICAL_VARCHAR, 0, series._data[StringColumn].constant_valid()
+        )
+    result.source = handle
     return result
 
 

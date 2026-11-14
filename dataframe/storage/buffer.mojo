@@ -1,6 +1,7 @@
 """Shared owned or read-only foreign buffers, with explicit writable access."""
 from std.atomic import Atomic
 from std.collections import Optional
+from std.ffi import external_call
 from std.sys import size_of
 from std.memory import ArcPointer, Pointer, Layout, Allocation, alloc, dealloc
 from dataframe.storage.statistics import BaseStatistics
@@ -43,6 +44,52 @@ struct _RowSelection(Movable):
         self.rows = rows.copy()
         self.first = first
         self.shift = shift
+
+
+comptime _UNFILLED = 0
+comptime _FILLING = 1
+comptime _FILLED = 2
+
+
+struct _Repeat[T: Copyable & Deinitable](Movable):
+    """One value that stands for every element of a buffer: the storage of
+    a constant column (a scalar spread over every row).
+
+    A reader that knows the buffer repeats reads `value` and nothing else,
+    so a constant costs one element however many rows it covers. Any other
+    reader goes through `_BufferData.unsafe_ptr`, which writes the value
+    out to the buffer's full length the first time it is asked, however
+    many threads ask at once, and hands every later reader that one copy.
+    """
+
+    var value: Self.T
+    var _state: Atomic[Int64]
+    var _filled: List[Self.T]
+
+    def __init__(out self, var value: Self.T):
+        self.value = value^
+        self._state = Atomic[Int64](_UNFILLED)
+        self._filled = List[Self.T]()
+
+    def is_filled(self) -> Bool:
+        return self._state.load() == _FILLED
+
+    def filled(self, length: Int) -> Int:
+        """The address of `length` copies of the value, written once."""
+        # Field pointers give interior mutability, as `_DeviceResidence`
+        # does: the repeat is shared by every buffer that refers to it.
+        var cell = Pointer(to=self._state).unsafe_mut_cast[True]()
+        var out = Pointer(to=self._filled).unsafe_mut_cast[True]()
+        while True:
+            var state = cell[].load()
+            if state == _FILLED:
+                return Int(out[].unsafe_ptr())
+            var expected = Int64(_UNFILLED)
+            if cell[].compare_exchange(expected, Int64(_FILLING)):
+                out[] = List[Self.T](length=length, fill=self.value.copy())
+                cell[].store(_FILLED)
+                return Int(out[].unsafe_ptr())
+            _ = external_call["sched_yield", Int32]()
 
 
 struct _StatsRecord(Movable):
@@ -91,6 +138,9 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
     # than in the string storage itself, because columns are copied often and
     # every extra field widens every copy.
     var selection: Optional[ArcPointer[_RowSelection]]
+    # Set on a buffer whose every element is one value (`_Repeat`); `address`
+    # is then 0 and host reads go through the repeat's one-time fill.
+    var repeat: Optional[ArcPointer[_Repeat[Self.T]]]
     # The address of a heap `ArcPointer[_StatsRecord]`, 0 until statistics
     # are published (once; `publish_statistics`).
     var _stats: Atomic[Int64]
@@ -102,6 +152,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.owner = None
         self.residence = None
         self.selection = None
+        self.repeat = None
         self._stats = Atomic[Int64](0)
 
     def __init__(
@@ -113,6 +164,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.owner = owner
         self.residence = None
         self.selection = None
+        self.repeat = None
         self._stats = Atomic[Int64](0)
 
     def __init__(
@@ -126,6 +178,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.owner = ArcPointer(_ForeignOwner(0, 0))
         self.residence = residence
         self.selection = None
+        self.repeat = None
         self._stats = Atomic[Int64](0)
 
     def __deinit__(deinit self):
@@ -165,12 +218,19 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
     def unsafe_ptr(self) -> Pointer[Self.T, MutAnyOrigin]:
         """A read-only pointer; the buffer/producer must remain alive."""
         if self.owner:
-            if self.address == 0 and self.residence:
-                return Pointer[Self.T, MutAnyOrigin](
-                    unsafe_from_address=_host_address_or_abort(
-                        self.residence.value()[]
+            if self.address == 0:
+                if self.residence:
+                    return Pointer[Self.T, MutAnyOrigin](
+                        unsafe_from_address=_host_address_or_abort(
+                            self.residence.value()[]
+                        )
                     )
-                )
+                if self.repeat:
+                    return Pointer[Self.T, MutAnyOrigin](
+                        unsafe_from_address=self.repeat.value()[].filled(
+                            self.length
+                        )
+                    )
             return Pointer[Self.T, MutAnyOrigin](
                 unsafe_from_address=self.address
             )
@@ -245,6 +305,28 @@ struct _Buffer[T: Copyable & Deinitable](Copyable, Sized):
         if residence[].bytes != length * size_of[Self.T]():
             raise Error("device buffer size does not match its length")
         return Self(_BufferData[Self.T](length, residence))
+
+    @staticmethod
+    def repeating(var value: Self.T, length: Int) -> Self:
+        """`length` elements that are all `value`, held as that one value
+        (`_Repeat`) until a reader needs them in memory."""
+        var data = _BufferData[Self.T](
+            0, length, ArcPointer(_ForeignOwner(0, 0))
+        )
+        data.repeat = ArcPointer(_Repeat[Self.T](value^))
+        return Self(data^)
+
+    def repeats(self) -> Bool:
+        """Whether every element is one value (`repeating`)."""
+        return Bool(self._state[].repeat)
+
+    def repeated(self) -> ref[ImmutAnyOrigin] Self.T:
+        """The value every element holds; only when `repeats()`."""
+        return Pointer[Self.T, ImmutAnyOrigin](
+            unsafe_from_address=Int(
+                Pointer(to=self._state[].repeat.value()[].value)
+            )
+        )[]
 
     def residence(self) -> Optional[ArcPointer[_DeviceResidence]]:
         """The device copy, for a backend that can read it in place."""

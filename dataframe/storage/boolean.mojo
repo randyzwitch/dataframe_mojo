@@ -81,6 +81,52 @@ struct BoolColumn(Copyable, Sized):
         result._length = length
         return result^
 
+    @staticmethod
+    def _repeated(value: Bool, length: Int, valid: Bool) -> Self:
+        """`length` rows that all hold `value` (or are all null), kept as
+        one value: a constant column (see `Column._repeated`). Every bit of
+        a repeated byte of all ones or all zeros is the same, so the bitmaps
+        read correctly at any offset once written out."""
+        var bytes = (length + 7) // 8
+        var result = Self(values=List[UInt8](), bits=List[UInt8](), length=0)
+        result._data = _Buffer[UInt8].repeating(
+            UInt8(255) if value else UInt8(0), bytes
+        )
+        result._bits = _Buffer[UInt8].repeating(
+            UInt8(255) if valid else UInt8(0), bytes
+        )
+        result._length = length
+        return result^
+
+    def is_constant(self) -> Bool:
+        """Whether every row holds one value, or every row is null, kept as
+        that value (`_repeated`)."""
+        return self._data.repeats() and (
+            len(self._bits[]) == 0 or self._bits.repeats()
+        )
+
+    def constant_valid(self) -> Bool:
+        """Whether a constant column's rows are valid; only when
+        `is_constant()`."""
+        return len(self._bits[]) == 0 or self._bits.repeated() != 0
+
+    def constant_value(self) -> Bool:
+        """A constant column's value; only when `is_constant()`."""
+        return self._data.repeated() != 0
+
+    def _resized(self, length: Int) -> Self:
+        """This constant column's value over `length` rows."""
+        return Self._repeated(
+            self.constant_value(), length, self.constant_valid()
+        )
+
+    def _same_constant(self, other: Self) -> Bool:
+        """Whether two constant columns hold the same value."""
+        var valid = self.constant_valid()
+        if valid != other.constant_valid():
+            return False
+        return not valid or self.constant_value() == other.constant_value()
+
     def __len__(self) -> Int:
         return self._length
 
@@ -156,6 +202,8 @@ struct BoolColumn(Copyable, Sized):
     def take(self, indices: List[Int]) raises -> Self:
         for i in indices:
             self._check_index(i)
+        if self.is_constant():
+            return self._resized(len(indices))
         ref data = self._data[]
         ref bits = self._bits[]
         var base = self._offset
@@ -203,6 +251,8 @@ struct BoolColumn(Copyable, Sized):
             or length > self._length - offset
         ):
             raise Error("Invalid column slice")
+        if self.is_constant() and length != self._length:
+            return self._resized(length)
         var result = self.copy()
         result._offset = self._offset + offset
         result._length = length
@@ -235,7 +285,15 @@ struct BoolColumn(Copyable, Sized):
 
     def _append_column(mut self, other: Self):
         """Append values and validity bitwise, copying first unless this
-        column owns its buffers."""
+        column owns its buffers. Two constants with the same value stay one
+        constant."""
+        if other.is_constant():
+            if self._length == 0:
+                self = other.copy()
+                return
+            if self.is_constant() and self._same_constant(other):
+                self = self._resized(self._length + other._length)
+                return
         if not self._owned():
             self = self._compact()
         var count = other._length
@@ -270,16 +328,7 @@ struct BoolColumn(Copyable, Sized):
     def _broadcast(self, length: Int) raises -> Self:
         if self._length != 1 or length < 0:
             raise Error("Only a scalar result can broadcast")
-        var bytes = (length + 7) // 8
-        return Self(
-            values=List[UInt8](
-                length=bytes, fill=UInt8(255) if self._get(0) else UInt8(0)
-            ),
-            bits=List[UInt8](
-                length=bytes, fill=UInt8(255) if self._valid(0) else UInt8(0)
-            ),
-            length=length,
-        )
+        return Self._repeated(self._get(0), length, self._valid(0))
 
 
 comptime _FULL = UInt64(0xFFFFFFFFFFFFFFFF)
