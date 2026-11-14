@@ -15,7 +15,11 @@ from dataframe.join_type import (
     JOIN_SEMI,
 )
 from dataframe.joins.hash_table import JoinHashTable
-from dataframe.kernels.runtime_filter import KeyBloom, build_bloom
+from dataframe.kernels.runtime_filter import (
+    KeyBloom,
+    build_bloom,
+    can_use_bloom_filter,
+)
 from dataframe.parallel import Job, partitions, run_jobs, worker_count
 from dataframe.series import Series
 from dataframe.storage.column import Column, _validity_at
@@ -36,15 +40,6 @@ from dataframe.table_filter import (
 # value is one more comparison per zone map and per row, so a long list costs
 # more than the rows it removes. An empirical choice.
 comptime DYNAMIC_OR_FILTER_THRESHOLD = 50
-# A bloom filter pays when it removes probe rows before the join: not when the
-# build side has more keys than the probe has rows (most probe rows then match),
-# nor when an unfiltered build side is large (over 4M keys, a tenth of the probe
-# rows or more): without a filter below it, it likely holds most of its key
-# domain, so the bloom filter removes little and no longer fits cache. Empirical
-# choices.
-comptime BUILD_TO_PROBE_RATIO_THRESHOLD = 1.0
-comptime NON_FILTERING_RATIO_THRESHOLD = 0.1
-comptime NON_FILTERING_BUILD_SIDE_THRESHOLD = 4194304
 # A bloom filter's selectivity is measured over its first 6 vectors; when it
 # keeps half the rows or more it costs more than it saves, and it pauses for 10
 # vectors (longer after each failed check) before measuring again, since the
@@ -238,25 +233,6 @@ def _dynamic(
     return ArcPointer(data^)
 
 
-def can_use_bloom_filter(
-    equalities: Int, build_count: Int, probe_rows: Int, build_filtered: Bool
-) -> Bool:
-    """Whether a bloom filter on the build keys is likely to remove enough probe
-    rows to pay for itself (see `BUILD_TO_PROBE_RATIO_THRESHOLD`)."""
-    if equalities != 1 or build_count == 0 or probe_rows <= 0:
-        return False
-    var ratio = Float64(build_count) / Float64(probe_rows)
-    if ratio > BUILD_TO_PROBE_RATIO_THRESHOLD:
-        return False
-    if (
-        not build_filtered
-        and ratio > NON_FILTERING_RATIO_THRESHOLD
-        and build_count > NON_FILTERING_BUILD_SIDE_THRESHOLD
-    ):
-        return False
-    return True
-
-
 struct _BuildKey(Movable):
     """A build key's values, read only when a filter needs them: a key
     column, or a key of a hash table (`JoinHashTable.key_column`)."""
@@ -325,9 +301,9 @@ def finalize_table_filters(
     mut scan: TableFilterSet,
 ) raises -> Optional[JoinFilter]:
     """`finalize_filters` for key `key` of a finished build's hash table:
-    its bounds are the ones the build recorded as its rows came in, and
-    its values are read from the table only for a filter that lists them
-    (a short IN list, a bloom filter)."""
+    its bounds are the ones the build recorded as its rows came in, its
+    values are read from the table only for a short IN list, and its bloom
+    filter is the one the table filled from its rows' hashes."""
     var dtype = table.key_types[key]
     if dtype != probe_dtype or not _row_key(dtype):
         return None
@@ -385,7 +361,11 @@ def _finalize(
             scan.push_dynamic(probe_column, lower.value())
             scan.push_dynamic(probe_column, upper.value())
     var bloom = Optional[ArcPointer[KeyBloom]]()
-    if can_use_bloom_filter(
+    if key.table:
+        # A hash table fills its filter from its rows' hashes while it
+        # finalizes, when the rule held then.
+        bloom = key.table.value().bloom.copy()
+    elif can_use_bloom_filter(
         equalities, build_count, probe_rows, build_filtered
     ):
         bloom = build_bloom(key.column(), build_count)
