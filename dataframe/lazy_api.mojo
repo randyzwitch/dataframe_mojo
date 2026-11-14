@@ -116,6 +116,9 @@ from dataframe.join_type import (
 from dataframe.optimizer.expressions import (
     _fold_casts,
 )
+from dataframe.optimizer.partial_aggregates import (
+    plan_push_partial_aggregates,
+)
 from dataframe.optimizer.passes import (
     plan_align_union_inputs,
     plan_eliminate_common_subexpressions,
@@ -1636,6 +1639,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if optimize:
             plan._share_subplans(True, batch_size)
             plan._order_joins(True, batch_size)
+            plan._push_partial_aggregates()
         plan._plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
         plan._plan._prefetched_indexes = Optional(
             ArcPointer(Dict[Int, _ReadyIndex]())
@@ -1873,6 +1877,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if optimize:
             plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
+            plan._push_partial_aggregates()
         plan._plan._report = Optional(ArcPointer(ExecutionReport()))
         if engine == "auto" and _automatic_handoff():
             plan._plan._handoff = HANDOFF_AUTO
@@ -2019,6 +2024,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if optimize:
             plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
+            plan._push_partial_aggregates()
         plan._plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
         plan._plan._prefetched_indexes = Optional(
             ArcPointer(Dict[Int, _ReadyIndex]())
@@ -2186,6 +2192,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
 
     def _order_joins(mut self, streaming: Bool, batch_size: Int) raises:
         plan_order_joins(self._plan, streaming=streaming, batch_size=batch_size)
+
+    def _push_partial_aggregates(mut self) raises:
+        plan_push_partial_aggregates(self._plan)
 
     def _filtered_table(self, index: Int) -> Bool:
         return plan_filtered_table(self._plan, index=index)

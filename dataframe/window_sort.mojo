@@ -5,7 +5,7 @@ partition and peer boundaries. Stable ordering keeps input order among
 equal keys, which makes positional window functions deterministic. The
 result maps computed values back to the original row positions.
 """
-from std.memory import Pointer, unsafe_memcmp
+from std.memory import Pointer, unsafe_memcmp, unsafe_memcpy
 from std.sys import size_of
 
 from dataframe.storage.allocation import huge_uninit
@@ -23,11 +23,11 @@ from dataframe.kernels.binary import validity
 from dataframe.kernels.gather import take_parallel
 from dataframe.sorting.sort_key import STANDARD_VECTOR_SIZE
 
-# Partitions start at 4 radix bits and grow by 2 while the average hash group
-# holds more than DEFAULT_ROW_GROUP_SIZE rows, so each group is about one morsel
-# of sorting work and the groups spread over the threads. At most 8 bits (256
-# groups): more groups add per-group overhead without adding parallelism.
-# Empirical choices.
+# Hash groups: rows are split by 4 radix bits of their hash, 2 more at a
+# time while the average group would hold more than DEFAULT_ROW_GROUP_SIZE
+# rows, up to 8 bits (256 groups). Each group is sorted on its own, so
+# groups of about one morsel keep every sort small, and the cap bounds
+# the per-group bookkeeping.
 comptime _START_BITS = 4
 comptime _MAX_BITS = 8
 comptime DEFAULT_ROW_GROUP_SIZE = 122880
@@ -236,10 +236,10 @@ def mark_changes(
     rows: Int = 0,
 ) raises:
     """Set `bit` in flags[k] for every k in (lo, hi) where the key's row at
-    sorted position k differs from the row at k - 1, as the sort compares them:
-    nulls equal, NaN one value, -0.0 equal to 0.0 (IS DISTINCT FROM semantics).
-    Position k's row is rows[k] (the address of the sorted order), or k itself
-    when `rows` is 0."""
+    sorted position k differs from the row at k - 1, as the sort compares
+    them: nulls equal, NaN one value, -0.0 equal to 0.0. Position k's row
+    is rows[k] (the address of the sorted order), or k itself when `rows`
+    is 0."""
     var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=flags_address)
     var column = key.rechunk() if key.is_chunked() else key.copy()
     comptime for t in range(len(NUMERIC_DTYPES)):
@@ -324,49 +324,32 @@ def _hash_partition(hash: UInt64, parts: Int) -> Int:
     return Int((UInt128(hash) * UInt128(parts)) >> 64)
 
 
-struct _Numbering[D: DType, GENERIC: Bool](Movable):
+struct _Numbering(Movable):
     """A dictionary of partition keys, probed with row hashes, that numbers
-    partitions in first-occurrence order. One integer key (GENERIC off)
-    compares its values directly; any other keys compare through
-    `_rows_equal`. The table holds one slot per partition, not per row,
-    grown (rehashing the stored hashes) to stay at most half full, so it
-    stays in cache. Slots come from a multiplicative mix of the whole hash:
-    its top bits chose the hash group or partition."""
+    partitions in first-occurrence order, comparing keys row against row
+    (`_rows_equal`) when hashes match. It serves any keys but one integer
+    column, which `_IntGroups` numbers by value. The table holds one slot
+    per partition, not per row, grown (rehashing the stored hashes) to
+    stay at most half full, so it stays in cache. Slots come from a
+    multiplicative mix of the whole hash: its top bits chose the hash
+    group or partition."""
 
     var slots: List[Int]
     var shift: UInt64
     var mask: UInt64
     var first_rows: List[Int]
     var first_hashes: List[UInt64]
-    var first_values: List[Scalar[Self.D]]
-    var first_valid: List[Bool]
-    # The integer key's values (address) and whether it has a bitmap.
-    var values: Int
-    var bits: Bool
 
-    def __init__(out self, column: Column[Scalar[Self.D]]):
+    def __init__(out self):
         self.slots = List[Int](length=256, fill=-1)
         self.shift = UInt64(56)
         self.mask = UInt64(255)
         self.first_rows = List[Int]()
         self.first_hashes = List[UInt64]()
-        self.first_values = List[Scalar[Self.D]]()
-        self.first_valid = List[Bool]()
-        self.values = Int(column._ptr())
-        self.bits = len(column._bits[]) != 0
 
     @always_inline
-    def number(
-        mut self,
-        keys: List[Series],
-        column: Column[Scalar[Self.D]],
-        row: Int,
-        hash: UInt64,
-    ) -> Int:
+    def number(mut self, keys: List[Series], row: Int, hash: UInt64) -> Int:
         """Row `row`'s partition number, numbering its keys if new."""
-        var values = Pointer[Scalar[Self.D], MutAnyOrigin](
-            unsafe_from_address=self.values
-        )
         var at = Int((hash * 0x9E3779B97F4A7C15) >> self.shift)
         while True:
             var slot = self.slots[at]
@@ -375,29 +358,14 @@ struct _Numbering[D: DType, GENERIC: Bool](Movable):
                 self.slots[at] = id
                 self.first_rows.append(row)
                 self.first_hashes.append(hash)
-                comptime if not Self.GENERIC:
-                    self.first_values.append(values[unsafe_offset=row])
-                    self.first_valid.append(not self.bits or column._valid(row))
                 if 2 * len(self.first_rows) > len(self.slots):
                     self._grow()
                 return id
-            if self.first_hashes[slot] == hash:
-                var same: Bool
-                comptime if Self.GENERIC:
-                    same = _rows_equal(keys, self.first_rows[slot], row)
-                else:
-                    var u = not self.bits or column._valid(row)
-                    same = u == self.first_valid[slot] and (
-                        not u
-                        or self.first_values[slot] == values[unsafe_offset=row]
-                    )
-                if same:
-                    return slot
+            if self.first_hashes[slot] == hash and _rows_equal(
+                keys, self.first_rows[slot], row
+            ):
+                return slot
             at = Int((UInt64(at) + 1) & self.mask)
-
-    def into_firsts(deinit self) -> List[Int]:
-        """Each number's first row, moved out."""
-        return self.first_rows^
 
     def _grow(mut self):
         var count = 2 * len(self.slots)
@@ -418,105 +386,188 @@ def number_partitions(
     hashes_address: Int,
     n: Int,
     ids_address: Int,
-    mut firsts: List[Int],
 ) -> Int:
-    """Number the partitions of the keys' n rows by a dictionary of their
-    keys, probed with the sink's row hashes (`hashes_address`, one per
-    row, in the same order); ids[k] (at `ids_address`) gets row k's number,
-    in first-occurrence order, and firsts each number's first row. Returns
-    the count."""
+    """Number the partitions of the keys' n rows in first-occurrence
+    order: ids[k] (at `ids_address`) gets row k's number. Returns the
+    count. One integer key is numbered by its values alone (`_IntGroups`,
+    the table the over() groups use); any other keys are probed with the
+    sink's row hashes (`hashes_address`, one per row, in the same order)
+    and compared row against row."""
     if len(keys) == 1:
         comptime for t in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[t]
             comptime if not D.is_floating_point():
                 if keys[0]._data.isa[Column[Scalar[D]]]():
-                    return _number_partitions[D, False](
-                        keys,
-                        keys[0]._data[Column[Scalar[D]]],
-                        hashes_address,
-                        n,
-                        ids_address,
-                        firsts,
+                    return _number_int_partitions[D](
+                        keys[0]._data[Column[Scalar[D]]], n, ids_address
                     )
-    return _number_partitions[DType.int64, True](
-        keys,
-        Column[Scalar[DType.int64]](List[Int64]()),
-        hashes_address,
-        n,
-        ids_address,
-        firsts,
-    )
-
-
-def _number_partitions[
-    D: DType, GENERIC: Bool
-](
-    keys: List[Series],
-    column: Column[Scalar[D]],
-    hashes_address: Int,
-    n: Int,
-    ids_address: Int,
-    mut firsts: List[Int],
-) -> Int:
+    var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=ids_address)
     var hashes = Pointer[UInt64, MutAnyOrigin](
         unsafe_from_address=hashes_address
     )
-    var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=ids_address)
-    var numbering = _Numbering[D, GENERIC](column)
+    var numbering = _Numbering()
     for k in range(n):
         ids[unsafe_offset=k] = numbering.number(
-            keys, column, k, hashes[unsafe_offset=k]
+            keys, k, hashes[unsafe_offset=k]
         )
-    var count = len(numbering.first_rows)
-    firsts = numbering^.into_firsts()
-    return count
+    return len(numbering.first_rows)
+
+
+def _number_int_partitions[
+    D: DType
+](column: Column[Scalar[D]], n: Int, ids_address: Int) -> Int:
+    var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=ids_address)
+    var values = column._ptr()
+    var table = _IntGroups[D]()
+    if len(column._bits[]) == 0:
+        for k in range(n):
+            ids[unsafe_offset=k] = table.number(values[unsafe_offset=k], True)
+    else:
+        for k in range(n):
+            ids[unsafe_offset=k] = table.number(
+                values[unsafe_offset=k], column._valid(k)
+            )
+    return table.count()
 
 
 # Multiplying by a fixed odd constant spreads integer keys over the high
-# bits of the product, which is all `_hash_partition` and `_Numbering`
+# bits of the product, which is all `_hash_partition` and `_IntGroups`
 # read; equal keys give equal hashes, so it is a valid partition hash
 # that costs one multiply per row.
 comptime _ODD_MIX: UInt64 = 0x55FBFD6BFC5458E9
 
 
-struct _PartitionNumberJob(Job):
-    """Partition `part` of `parts`: scan every row and number only the rows
-    whose hash falls in this partition, in one thread-local dictionary, so
-    no two tasks ever see the same key and nothing is merged afterwards.
-    Keeps the partition's rows in row order with their local numbers.
+@always_inline
+def _key_hash[D: DType](value: Scalar[D], valid: Bool) -> UInt64:
+    """An integer key's partition hash; every null hashes to 0, so all
+    nulls share a partition."""
+    if not valid:
+        return 0
+    return value.cast[DType.uint64]() * _ODD_MIX
 
-    One integer key is hashed here, as it is read (a multiply, cheaper
-    than reading a stored hash), so the keys are scanned once. Any other
-    keys read hashes made beforehand (`hashes`), since hashing strings or
-    several columns once per partition would repeat real work."""
+
+struct _IntGroups[D: DType](Movable):
+    """A dictionary from one integer key's values to group numbers, given
+    in first-arrival order. A slot holds a group number; the group's key
+    is compared directly, so equal hashes need no second check, and a
+    null key gets a number of its own outside the table. The table is
+    grown (rehashing the stored keys) to stay at most half full; it holds
+    one slot per group, not per row, so it stays in cache. Slots come from
+    a second multiplicative mix of the key's hash, so they do not repeat
+    the top bits that may have chosen the rows' partition. Both the over()
+    groups and the sorted windows' partitions are numbered with it."""
+
+    var slots: List[Int]
+    var keys: List[Scalar[Self.D]]
+    var shift: UInt64
+    var mask: UInt64
+    var null_group: Int
+
+    def __init__(out self):
+        self.slots = List[Int](length=256, fill=-1)
+        self.keys = List[Scalar[Self.D]]()
+        self.shift = UInt64(56)
+        self.mask = UInt64(255)
+        self.null_group = -1
+
+    def count(self) -> Int:
+        return len(self.keys)
+
+    @always_inline
+    def number(mut self, value: Scalar[Self.D], valid: Bool) -> Int:
+        """The group number of key `value` (null when not `valid`),
+        numbering it if new."""
+        if not valid:
+            if self.null_group < 0:
+                # The null group's key place holds a placeholder.
+                self.null_group = len(self.keys)
+                self.keys.append(Scalar[Self.D](0))
+            return self.null_group
+        var slots = self.slots.unsafe_ptr()
+        var keys = self.keys.unsafe_ptr()
+        var at = Int(
+            (_key_hash[Self.D](value, True) * 0x9E3779B97F4A7C15) >> self.shift
+        )
+        while True:
+            var slot = slots[at]
+            if slot < 0:
+                return self._insert(at, value)
+            if keys[slot] == value:
+                return slot
+            at = Int((UInt64(at) + 1) & self.mask)
+
+    def _insert(mut self, at: Int, value: Scalar[Self.D]) -> Int:
+        var id = len(self.keys)
+        self.slots[at] = id
+        self.keys.append(value)
+        if 2 * len(self.keys) > len(self.slots):
+            self._grow()
+        return id
+
+    def _grow(mut self):
+        var count = 2 * len(self.slots)
+        self.shift -= 1
+        self.mask = UInt64(count - 1)
+        self.slots = List[Int](length=count, fill=-1)
+        for id in range(len(self.keys)):
+            if id == self.null_group:
+                continue
+            var to = Int(
+                (_key_hash[Self.D](self.keys[id], True) * 0x9E3779B97F4A7C15)
+                >> self.shift
+            )
+            while self.slots[to] >= 0:
+                to = Int((UInt64(to) + 1) & self.mask)
+            self.slots[to] = id
+
+
+struct _ScatterJob(Job):
+    """Rows [lo, hi): find each row's hash partition, then copy the rows
+    into this range's own stretch of the entry arrays (also [lo, hi)),
+    grouped by partition and in row order within each. A partition's
+    rows are then read from the stretches of every range, one after
+    another, so each row is read and moved once, by one task, rather than
+    every partition task scanning every row.
+
+    An entry is the row and a word: for one integer key, its value (the
+    row's bits inverted when the key is null), so the partition task
+    reads only the entries and never goes back to the key column; for any
+    other keys, the hash made beforehand."""
 
     var keys: List[Series]
     var hashes: Int
-    var height: Int
+    var lo: Int
+    var hi: Int
     var parts: Int
-    var part: Int
-    # Output: the partition's rows, ascending, their local numbers, and the
-    # partition's count.
-    var rows: List[Int]
-    var locals: List[Int]
-    var count: Int
+    var entry_rows: Int
+    var entry_words: Int
+    # Where each partition's entries start in the entry arrays (parts + 1
+    # values, the last `hi`).
+    var starts: List[Int]
+    # Scratch for each row's partition (address of one Int a row; this
+    # task uses only its own range [lo, hi), as UInt32s).
+    var owners: Int
 
     def __init__(
         out self,
         keys: List[Series],
         hashes: Int,
-        height: Int,
+        lo: Int,
+        hi: Int,
         parts: Int,
-        part: Int,
+        entry_rows: Int,
+        entry_words: Int,
+        owners: Int,
     ):
+        self.owners = owners
         self.keys = keys.copy()
         self.hashes = hashes
-        self.height = height
+        self.lo = lo
+        self.hi = hi
         self.parts = parts
-        self.part = part
-        self.rows = List[Int]()
-        self.locals = List[Int]()
-        self.count = 0
+        self.entry_rows = entry_rows
+        self.entry_words = entry_words
+        self.starts = List[Int]()
 
     def run(mut self) raises:
         if self.hashes == 0:
@@ -527,111 +578,244 @@ struct _PartitionNumberJob(Job):
                         var column = (
                             self.keys[0]._data[Column[Scalar[D]]].copy()
                         )
-                        self._number[D, False](column)
+                        self._scatter[D, False](column)
                         return
-        self._number[DType.int64, True](
+        self._scatter[DType.int64, True](
             Column[Scalar[DType.int64]](List[Int64]())
         )
 
-    def _number[D: DType, GENERIC: Bool](mut self, column: Column[Scalar[D]]):
+    def _scatter[D: DType, GENERIC: Bool](mut self, column: Column[Scalar[D]]):
         var hashes = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=self.hashes
         )
         var values = column._ptr()
         var bits = len(column._bits[]) != 0
-        var keys = self.keys.copy()
-        var numbering = _Numbering[D, GENERIC](column)
-        var rows = List[Int]()
-        var locals = List[Int]()
+        var rows = Pointer[Int, MutAnyOrigin](
+            unsafe_from_address=self.entry_rows
+        )
+        var words = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=self.entry_words
+        )
+        var lo = self.lo
+        var n = self.hi - lo
         var parts = self.parts
-        var part = self.part
-        for k in range(self.height):
+        # Each row's partition, kept so the second pass need not hash
+        # again. It goes into memory the caller fills later anyway: a
+        # fresh list for each task would cost page faults on every call.
+        var own = Pointer[UInt32, MutAnyOrigin](
+            unsafe_from_address=self.owners + lo * size_of[Int]()
+        )
+        var cursor = List[Int](length=parts + 1, fill=0)
+        var at = cursor.unsafe_ptr()
+        for k in range(n):
             var hash: UInt64
             comptime if GENERIC:
-                hash = hashes[unsafe_offset=k]
+                hash = hashes[unsafe_offset=lo + k]
             else:
-                # Every null hashes to 0, so all nulls share a partition.
-                if bits and not column._valid(k):
-                    hash = 0
-                else:
-                    hash = (
-                        values[unsafe_offset=k].cast[DType.uint64]() * _ODD_MIX
-                    )
-            if _hash_partition(hash, parts) == part:
-                locals.append(numbering.number(keys, column, k, hash))
-                rows.append(k)
-        self.count = len(numbering.first_rows)
-        self.rows = rows^
-        self.locals = locals^
+                hash = _key_hash[D](
+                    values[unsafe_offset=lo + k],
+                    not bits or column._valid(lo + k),
+                )
+            var p = _hash_partition(hash, parts)
+            own[unsafe_offset=k] = UInt32(p)
+            at[unsafe_offset=p + 1] += 1
+        at[unsafe_offset=0] = lo
+        for p in range(parts):
+            at[unsafe_offset=p + 1] += at[unsafe_offset=p]
+        self.starts = cursor.copy()
+        for k in range(n):
+            var p = Int(own[unsafe_offset=k])
+            var to = at[unsafe_offset=p]
+            at[unsafe_offset=p] = to + 1
+            var row = lo + k
+            comptime if GENERIC:
+                rows[unsafe_offset=to] = row
+                words[unsafe_offset=to] = hashes[unsafe_offset=row]
+            else:
+                rows[unsafe_offset=to] = (
+                    row if not bits or column._valid(row) else ~row
+                )
+                words[unsafe_offset=to] = values[unsafe_offset=row].cast[
+                    DType.uint64
+                ]()
 
 
-struct _GroupRowsJob(Job):
-    """One hash partition's groups, numbered from `base`: count each
-    group's rows, then write every row into its group's list (rows from
-    `row_base` in the shared array), in row order, so each list stays
-    ascending. The partition's lists fill one contiguous stretch of the
-    array, so no two tasks write the same cache line. Groups are numbered
-    in partition order, not by first row: aggregates over partitions do
-    not depend on group order."""
+struct _PartitionGroupsJob(Job):
+    """Hash partition `part`: number its rows' keys in one thread-local
+    dictionary, then write each group's rows, ascending, into the
+    partition's own stretch of the shared row array (from `row_base`).
+    Equal keys have equal hashes, so each key belongs to one partition:
+    no two tasks see the same key and nothing is merged afterwards. The
+    entries come from every range's stretch in range order, so rows
+    arrive ascending and every group's list stays ascending."""
 
-    var rows: Int
-    var locals: Int
-    var entries: Int
-    var count: Int
-    var base: Int
+    var keys: List[Series]
+    var generic: Bool
+    var part: Int
+    # Address of every range's `starts` (ranges x (parts + 1) values).
+    var starts: Int
+    var ranges: Int
+    var parts: Int
+    var entry_rows: Int
+    var entry_words: Int
     var row_base: Int
-    var offsets: Int
     var all_rows: Int
+    # Output: where each group's rows start (count + 1 values, the last
+    # one past the partition's rows) and the group count.
+    var offsets: List[Int]
+    var count: Int
 
     def __init__(
         out self,
-        rows: Int,
-        locals: Int,
-        entries: Int,
-        count: Int,
-        base: Int,
+        keys: List[Series],
+        generic: Bool,
+        part: Int,
+        starts: Int,
+        ranges: Int,
+        parts: Int,
+        entry_rows: Int,
+        entry_words: Int,
         row_base: Int,
-        offsets: Int,
         all_rows: Int,
     ):
-        self.rows = rows
-        self.locals = locals
-        self.entries = entries
-        self.count = count
-        self.base = base
+        self.keys = keys.copy()
+        self.generic = generic
+        self.part = part
+        self.starts = starts
+        self.ranges = ranges
+        self.parts = parts
+        self.entry_rows = entry_rows
+        self.entry_words = entry_words
         self.row_base = row_base
-        self.offsets = offsets
         self.all_rows = all_rows
+        self.offsets = List[Int]()
+        self.count = 0
 
     def run(mut self) raises:
-        var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.rows)
-        var locals = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.locals)
-        var offsets = Pointer[Int, MutAnyOrigin](
-            unsafe_from_address=self.offsets
+        if not self.generic:
+            comptime for t in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[t]
+                comptime if not D.is_floating_point():
+                    if self.keys[0]._data.isa[Column[Scalar[D]]]():
+                        var column = (
+                            self.keys[0]._data[Column[Scalar[D]]].copy()
+                        )
+                        self._group[D, False](column)
+                        return
+        self._group[DType.int64, True](
+            Column[Scalar[DType.int64]](List[Int64]())
+        )
+
+    def _group[D: DType, GENERIC: Bool](mut self, column: Column[Scalar[D]]):
+        var starts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.starts)
+        var rows = Pointer[Int, MutAnyOrigin](
+            unsafe_from_address=self.entry_rows
+        )
+        var words = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=self.entry_words
         )
         var all_rows = Pointer[Int, MutAnyOrigin](
             unsafe_from_address=self.all_rows
         )
-        var cursors = List[Int](length=self.count + 1, fill=0)
+        var width = self.parts + 1
+        var part = self.part
+        # Number each entry's group; the number replaces the entry's word,
+        # which is not needed again.
+        var count: Int
+        comptime if GENERIC:
+            var keys = self.keys.copy()
+            var numbering = _Numbering()
+            for r in range(self.ranges):
+                var lo = starts[unsafe_offset=r * width + part]
+                var hi = starts[unsafe_offset=r * width + part + 1]
+                for k in range(lo, hi):
+                    words[unsafe_offset=k] = UInt64(
+                        numbering.number(
+                            keys,
+                            rows[unsafe_offset=k],
+                            words[unsafe_offset=k],
+                        )
+                    )
+            count = len(numbering.first_rows)
+        else:
+            var table = _IntGroups[D]()
+            for r in range(self.ranges):
+                var lo = starts[unsafe_offset=r * width + part]
+                var hi = starts[unsafe_offset=r * width + part + 1]
+                for k in range(lo, hi):
+                    var row = rows[unsafe_offset=k]
+                    words[unsafe_offset=k] = UInt64(
+                        table.number(words[unsafe_offset=k].cast[D](), row >= 0)
+                    )
+                    # The row itself from here on.
+                    if row < 0:
+                        rows[unsafe_offset=k] = ~row
+            count = table.count()
+        # A counting sort of the entries by group into the partition's
+        # stretch: entries arrive in row order, so each list is ascending.
+        var cursors = List[Int](length=count + 1, fill=0)
         var at = cursors.unsafe_ptr()
-        for e in range(self.entries):
-            at[unsafe_offset=locals[unsafe_offset=e] + 1] += 1
+        for r in range(self.ranges):
+            var lo = starts[unsafe_offset=r * width + part]
+            var hi = starts[unsafe_offset=r * width + part + 1]
+            for k in range(lo, hi):
+                at[unsafe_offset=Int(words[unsafe_offset=k]) + 1] += 1
         at[unsafe_offset=0] = self.row_base
-        for g in range(self.count):
+        for g in range(count):
             at[unsafe_offset=g + 1] += at[unsafe_offset=g]
-        for g in range(self.count):
-            offsets[unsafe_offset=self.base + g] = at[unsafe_offset=g]
-        for e in range(self.entries):
-            var local = locals[unsafe_offset=e]
-            var row = rows[unsafe_offset=e]
-            all_rows[unsafe_offset=at[unsafe_offset=local]] = row
-            at[unsafe_offset=local] += 1
+        self.offsets = cursors.copy()
+        for r in range(self.ranges):
+            var lo = starts[unsafe_offset=r * width + part]
+            var hi = starts[unsafe_offset=r * width + part + 1]
+            for k in range(lo, hi):
+                var g = Int(words[unsafe_offset=k])
+                all_rows[unsafe_offset=at[unsafe_offset=g]] = rows[
+                    unsafe_offset=k
+                ]
+                at[unsafe_offset=g] += 1
+        self.count = count
+
+    def row_base_end(self) -> Int:
+        """Where the partition's rows end in the shared row array."""
+        var starts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.starts)
+        var width = self.parts + 1
+        var end = self.row_base
+        for r in range(self.ranges):
+            end += (
+                starts[unsafe_offset=r * width + self.part + 1]
+                - starts[unsafe_offset=r * width + self.part]
+            )
+        return end
+
+
+struct _GroupOffsetsJob(Job):
+    """Copy one partition's group starts into the shared offsets, from
+    its first group's number."""
+
+    var source: Int
+    var count: Int
+    var dest: Int
+
+    def __init__(out self, source: Int, count: Int, dest: Int):
+        self.source = source
+        self.count = count
+        self.dest = dest
+
+    def run(mut self) raises:
+        if self.count > 0:
+            unsafe_memcpy(
+                dest=Pointer[Int, MutAnyOrigin](unsafe_from_address=self.dest),
+                src=Pointer[Int, MutAnyOrigin](unsafe_from_address=self.source),
+                count=self.count,
+            )
 
 
 def _task_cuts(bounds: List[Int], height: Int) -> List[Int]:
-    """Cut hash groups (their row bounds) into tasks of about equal rows, each
-    at least one STANDARD_VECTOR_SIZE block, so every thread gets a similar
-    share and no task is too small to repay its setup."""
+    """Cut hash groups (their row bounds) into at most one task per
+    worker, each of whole hash groups and about equal rows, so the workers
+    finish together. Every task holds at least one STANDARD_VECTOR_SIZE
+    block of rows: a task smaller than one vector costs more to schedule
+    than its work, so small inputs get fewer tasks."""
     var blocks = (height + STANDARD_VECTOR_SIZE - 1) // STANDARD_VECTOR_SIZE
     var tasks = max(1, min(configured_workers(), blocks))
     var share = (height + tasks - 1) // tasks
@@ -661,19 +845,23 @@ def _integer_key(keys: List[Series]) -> Bool:
 def partition_groups(keys: List[Series], height: Int) raises -> GroupRows:
     """The groups of the partition keys' rows, each group's rows in
     ascending order, with no sort and no rows moved, for aggregates over
-    whole partitions. One task per thread numbers the rows whose key hash
-    falls in its partition. Equal keys have equal hashes, so each key is
-    numbered by exactly one task and no tables are merged. Each partition
-    then writes its groups' row lists into its own stretch of one array.
-    No group number is kept per row: the lists are what the aggregates
-    and the write back to rows read."""
+    whole partitions. Rows are first moved, by row range in parallel,
+    into buckets by key-hash partition (one per thread). Then one task per
+    partition numbers its keys and writes its groups' row lists straight
+    into its own stretch of one array: each partition's row count is
+    known from the buckets, so every stretch is placed before any task
+    starts. No group number is kept per row: the lists are what the
+    aggregates and the write back to rows read. Groups are numbered in
+    partition order, not by first row: aggregates over partitions do not
+    depend on group order."""
     if height == 0:
         return GroupRows(List[Int](length=1, fill=0), List[Int]())
     var workers = configured_workers()
     var parts = workers
     var flat = List[Series](capacity=len(keys))
     var hashes = List[UInt64]()
-    if _integer_key(keys):
+    var generic = not _integer_key(keys)
+    if not generic:
         flat.append(
             keys[0].rechunk() if keys[0].is_chunked() else keys[0].copy()
         )
@@ -681,17 +869,52 @@ def partition_groups(keys: List[Series], height: Int) raises -> GroupRows:
         var partitioner = Partitioner(keys, workers)
         flat = partitioner.keys.copy()
         hashes = partitioner^.into_hashes()
-    var jobs = List[_PartitionNumberJob](capacity=parts)
-    for p in range(parts):
-        jobs.append(
-            _PartitionNumberJob(
+    var entry_rows = huge_uninit[Int](height)
+    var entry_words = huge_uninit[UInt64](height)
+    # The groups' row lists, filled by the partition tasks. Until then
+    # each scatter task keeps its rows' partitions in its own range of
+    # it, so the scatter needs no scratch memory of its own.
+    var rows = huge_uninit[Int](height)
+    var bounds = partitions(height, workers, 1)
+    var scatter = List[_ScatterJob](capacity=workers)
+    for r in range(workers):
+        scatter.append(
+            _ScatterJob(
                 flat,
-                Int(hashes.unsafe_ptr()) if len(hashes) > 0 else 0,
-                height,
+                Int(hashes.unsafe_ptr()) if generic else 0,
+                bounds[r],
+                bounds[r + 1],
                 parts,
-                p,
+                Int(entry_rows.unsafe_ptr()),
+                Int(entry_words.unsafe_ptr()),
+                Int(rows.unsafe_ptr()),
             )
         )
+    if workers == 1:
+        scatter[0].run()
+    else:
+        run_jobs(scatter)
+    var starts = List[Int](capacity=workers * (parts + 1))
+    for r in range(workers):
+        starts.extend(scatter[r].starts.copy())
+    var jobs = List[_PartitionGroupsJob](capacity=parts)
+    var row_base = 0
+    for p in range(parts):
+        jobs.append(
+            _PartitionGroupsJob(
+                flat,
+                generic,
+                p,
+                Int(starts.unsafe_ptr()),
+                workers,
+                parts,
+                Int(entry_rows.unsafe_ptr()),
+                Int(entry_words.unsafe_ptr()),
+                row_base,
+                Int(rows.unsafe_ptr()),
+            )
+        )
+        row_base = jobs[p].row_base_end()
     if parts == 1:
         jobs[0].run()
     else:
@@ -701,31 +924,26 @@ def partition_groups(keys: List[Series], height: Int) raises -> GroupRows:
         total += jobs[p].count
     var offsets = List[Int](unsafe_uninit_length=total + 1)
     offsets[total] = height
-    var rows = huge_uninit[Int](height)
-    var fill = List[_GroupRowsJob](capacity=parts)
+    var copies = List[_GroupOffsetsJob](capacity=parts)
     var base = 0
-    var row_base = 0
     for p in range(parts):
-        fill.append(
-            _GroupRowsJob(
-                Int(jobs[p].rows.unsafe_ptr()),
-                Int(jobs[p].locals.unsafe_ptr()),
-                len(jobs[p].rows),
+        copies.append(
+            _GroupOffsetsJob(
+                Int(jobs[p].offsets.unsafe_ptr()),
                 jobs[p].count,
-                base,
-                row_base,
-                Int(offsets.unsafe_ptr()),
-                Int(rows.unsafe_ptr()),
+                Int(offsets.unsafe_ptr()) + base * size_of[Int](),
             )
         )
         base += jobs[p].count
-        row_base += len(jobs[p].rows)
     if parts == 1:
-        fill[0].run()
+        copies[0].run()
     else:
-        run_jobs(fill)
+        run_jobs(copies)
     # Jobs read these by address: keep them alive until here.
     _ = jobs^
+    _ = starts^
+    _ = entry_rows^
+    _ = entry_words^
     _ = hashes^
     _ = flat^
     return GroupRows(offsets^, rows^)
@@ -777,6 +995,8 @@ struct _GroupSortJob(Job):
     var hashes: Int
     var lo: Int
     var hi: Int
+    # Scratch for the partition numbers (address of one Int a row).
+    var ids: Int
     # Output: order[lo:hi] and flags[lo:hi].
     var order: Int
     var flags: Int
@@ -795,6 +1015,7 @@ struct _GroupSortJob(Job):
         hashes: Int,
         lo: Int,
         hi: Int,
+        ids: Int,
         order: Int,
         flags: Int,
         stable: Bool,
@@ -808,6 +1029,7 @@ struct _GroupSortJob(Job):
         self.hashes = hashes
         self.lo = lo
         self.hi = hi
+        self.ids = ids
         self.order = order
         self.flags = flags
         self.stable = stable
@@ -851,18 +1073,15 @@ struct _GroupSortJob(Job):
         var part_keys = List[Series](capacity=self.partition_keys)
         for c in range(self.partition_keys):
             part_keys.append(slices[c].copy())
-        var ids = huge_uninit[Int](n)
-        var firsts = List[Int]()
+        # Each row's partition number, in this task's range of a buffer
+        # shared by all tasks (one fresh allocation, not one per task).
+        var ids_at = self.ids + self.lo * size_of[Int]()
+        var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=ids_at)
         var partitions_here = number_partitions(
-            part_keys,
-            self.hashes + self.lo * size_of[UInt64](),
-            n,
-            Int(ids.unsafe_ptr()),
-            firsts,
+            part_keys, self.hashes + self.lo * size_of[UInt64](), n, ids_at
         )
         if partitions_here == 1 and count == self.partition_keys:
-            # One partition here and no order keys: every row is a peer of every
-            # other, so the rows stay in input order unsorted.
+            # One partition and no order keys: the rows keep their order.
             for k in range(n):
                 order[unsafe_offset=self.lo + k] = rows[
                     unsafe_offset=self.lo + k
@@ -875,7 +1094,7 @@ struct _GroupSortJob(Job):
             # alone, so it sorts by counting (stable, rows in input order).
             var at = List[Int](length=partitions_here + 1, fill=0)
             for k in range(n):
-                at[ids[k] + 1] += 1
+                at[ids[unsafe_offset=k] + 1] += 1
             for g in range(partitions_here):
                 at[g + 1] += at[g]
             for k in range(n):
@@ -883,8 +1102,8 @@ struct _GroupSortJob(Job):
             for g in range(partitions_here):
                 flags[unsafe_offset=at[g]] = PARTITION_START | PEER_START
             for k in range(n):
-                var to = at[ids[k]]
-                at[ids[k]] = to + 1
+                var to = at[ids[unsafe_offset=k]]
+                at[ids[unsafe_offset=k]] = to + 1
                 order[unsafe_offset=self.lo + to] = rows[
                     unsafe_offset=self.lo + k
                 ]
@@ -897,12 +1116,12 @@ struct _GroupSortJob(Job):
             # stay narrow.
             var narrow = huge_uninit[UInt32](n)
             for k in range(n):
-                narrow[k] = UInt32(ids[k])
+                narrow[k] = UInt32(ids[unsafe_offset=k])
             sort_keys.append(Series("", Column[UInt32](narrow^)))
         elif partitions_here > 1:
             var wide = huge_uninit[Int64](n)
             for k in range(n):
-                wide[k] = Int64(ids[k])
+                wide[k] = Int64(ids[unsafe_offset=k])
             sort_keys.append(Series("", Column[Int64](wide^)))
         if partitions_here > 1:
             descending.append(False)
@@ -917,9 +1136,9 @@ struct _GroupSortJob(Job):
             var at = perm[k]
             order[unsafe_offset=self.lo + k] = rows[unsafe_offset=self.lo + at]
             flags[unsafe_offset=k] = (PARTITION_START | PEER_START) if ids[
-                at
+                unsafe_offset=at
             ] != previous else 0
-            previous = ids[at]
+            previous = ids[unsafe_offset=at]
         for c in range(self.partition_keys, count):
             mark_changes(
                 slices[c], flags_at, 0, n, PEER_START, Int(perm.unsafe_ptr())
@@ -1022,11 +1241,13 @@ def _window_layout(
         for k in range(len(order_keys)):
             desc.append(descending[k])
             last.append(nulls_last[k])
-        # Hash groups are sorted by tasks of about equal rows, each at least one
-        # STANDARD_VECTOR_SIZE block. A task takes consecutive hash groups and
-        # sorts their rows together: every partition lies in one hash group, so
-        # the task's range is a hash group of the layout.
+        # Hash groups are sorted by tasks of about equal rows, each at
+        # least one STANDARD_VECTOR_SIZE block (`_task_cuts`). A task takes
+        # consecutive hash groups
+        # and sorts their rows together: every partition lies in one hash
+        # group, so the task's range is a hash group of the layout.
         var cuts = _task_cuts(parts.bounds, height)
+        var ids = huge_uninit[Int](height)
         var jobs = List[_GroupSortJob](capacity=len(cuts) - 1)
         for t in range(len(cuts) - 1):
             jobs.append(
@@ -1039,6 +1260,7 @@ def _window_layout(
                     Int(parts.hashes.unsafe_ptr()),
                     cuts[t],
                     cuts[t + 1],
+                    Int(ids.unsafe_ptr()),
                     Int(order.unsafe_ptr()),
                     Int(flags.unsafe_ptr()),
                     stable,
@@ -1051,6 +1273,7 @@ def _window_layout(
         else:
             run_jobs(jobs)
         _ = parts^
+        _ = ids^
         if rank.method >= 0:
             # Ranks are written; nothing reads the layout.
             _ = order^
@@ -1229,9 +1452,10 @@ def rank_order_keys(
 
 struct _RankScanJob(Job):
     """Ranks over sorted positions [lo, hi) from the partition and peer
-    boundaries (and the peer end for max and average). The first pass summarizes
-    the range; the second writes ranks from the state carried in from the ranges
-    before it."""
+    boundaries (a rank restarts at each partition start and advances at
+    each peer start; max and average also need the peer end). The first
+    pass summarizes the range; the second writes ranks from the state
+    carried in from the ranges before it."""
 
     var flags: Int
     var order: Int
