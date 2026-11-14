@@ -12,7 +12,7 @@ from dataframe.storage.buffer import _Buffer, _BufferData, _ForeignOwner
 from dataframe.storage.facts import _BufferFacts
 from std.bit import pop_count
 from std.memory import ArcPointer, Pointer, pack_bits, unsafe_memcpy
-from std.sys import Endian
+from std.sys import Endian, size_of
 
 
 struct Column[T: Copyable & Deinitable](Copyable, Sized):
@@ -85,6 +85,52 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         debug_assert(result._facts.count() == 1)
         result._facts[].initialize_window(offset, offset + length)
         return result^
+
+    @staticmethod
+    def _repeated(value: Self.T, length: Int, valid: Bool) -> Self:
+        """`length` rows that all hold `value` (or are all null), kept as
+        the one value: a constant column. Reading its values through a
+        pointer writes them out once (`_Buffer.repeating`); `is_constant`
+        lets a reader that only needs the value skip that."""
+        var result = Self(List[Self.T]())
+        result._data = _Buffer[Self.T].repeating(value.copy(), length)
+        if not valid:
+            result._bits = _Buffer[UInt8].repeating(UInt8(0), (length + 7) // 8)
+        result._length = length
+        return result^
+
+    def is_constant(self) -> Bool:
+        """Whether every row holds one value, or every row is null, kept as
+        that value (`_repeated`)."""
+        return self._data.repeats() and (
+            len(self._bits[]) == 0 or self._bits.repeats()
+        )
+
+    def constant_valid(self) -> Bool:
+        """Whether a constant column's rows are valid; only when
+        `is_constant()`."""
+        return len(self._bits[]) == 0 or self._bits.repeated() != 0
+
+    def constant_value(self) -> ref[ImmutAnyOrigin] Self.T:
+        """A constant column's value (undefined when its rows are null);
+        only when `is_constant()`."""
+        return self._data.repeated()
+
+    def _resized(self, length: Int) -> Self:
+        """This constant column's value over `length` rows."""
+        return Self._repeated(
+            self.constant_value(), length, self.constant_valid()
+        )
+
+    def _same_constant(self, other: Self) -> Bool:
+        """Whether two constant columns hold the same value: both null, or
+        both valid with the same bits."""
+        var valid = self.constant_valid()
+        if valid != other.constant_valid():
+            return False
+        return not valid or _same_bits(
+            self.constant_value(), other.constant_value()
+        )
 
     def __len__(self) -> Int:
         return self._length
@@ -183,6 +229,8 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     def take(self, indices: List[Int]) raises -> Self:
         for i in indices:
             self._check_index(i)
+        if self.is_constant():
+            return self._resized(len(indices))
         ref data = self._data[]
         ref bits = self._bits[]
         var base = self._offset
@@ -231,6 +279,10 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
             or length > self._length - offset
         ):
             raise Error("Invalid column slice")
+        if self.is_constant() and length != self._length:
+            # A window onto a constant is the value over fewer rows, so a
+            # reader of the window writes out only its own rows.
+            return self._resized(length)
         var result = self.copy()
         result._offset = self._offset + offset
         result._length = length
@@ -272,8 +324,16 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         """Append payloads and validity bytewise, shifting when unaligned.
 
         Copies first unless this column owns its buffers, so values shared
-        with other columns are never modified.
+        with other columns are never modified. Two constants with the same
+        value stay one constant.
         """
+        if other.is_constant():
+            if self._length == 0:
+                self = other.copy()
+                return
+            if self.is_constant() and self._same_constant(other):
+                self = self._resized(self._length + other._length)
+                return
         if not self._owned():
             self = self._compact()
         var start = self._length
@@ -305,9 +365,9 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     def _broadcast(self, length: Int) raises -> Self:
         if self._length != 1 or length < 0:
             raise Error("Only a scalar result can broadcast")
-        var values = List[Self.T](length=length, fill=self._get(0).copy())
-        var valid = List[Bool](length=length, fill=self._valid(0))
-        return Self(values^, valid)
+        # The value is kept once, not written to every row: a reader that
+        # needs the rows in memory writes them out then.
+        return Self._repeated(self._get(0), length, self._valid(0))
 
 
 # Validity bitmaps: LSB-first bytes, 1 = valid, as in Arrow. Bits past a
@@ -562,7 +622,20 @@ def _validity_bit(bits: _BufferData[UInt8], index: Int) -> Bool:
 
 
 def _count_valid(bits: _BufferData[UInt8], offset: Int, length: Int) -> Int:
+    if bits.repeat:
+        # A constant's bitmap: every bit is the repeated byte's.
+        return length if bits.repeat.value()[].value != 0 else 0
     return _count_valid(bits.span(), offset, length)
+
+
+def _same_bits[T: Copyable & Deinitable](a: T, b: T) -> Bool:
+    """Whether two values have the same bytes."""
+    var x = Pointer(to=a).unsafe_bitcast[UInt8]()
+    var y = Pointer(to=b).unsafe_bitcast[UInt8]()
+    for i in range(size_of[T]()):
+        if x[unsafe_offset=i] != y[unsafe_offset=i]:
+            return False
+    return True
 
 
 def _copy_validity(

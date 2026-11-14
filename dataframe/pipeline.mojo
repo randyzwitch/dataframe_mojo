@@ -764,7 +764,10 @@ struct _Columns(Copyable, Movable):
         chunk.set_columns(self.width())
         for c in range(self.width()):
             var v = bases[c]
-            if self.lists[c] < 0:
+            if v.vector_type == CONSTANT_VECTOR:
+                # Every row of a constant column is its one value.
+                pass
+            elif self.lists[c] < 0:
                 var at = self.starts[c] + low
                 if v.data != 0:
                     v.data += physical_size(v.physical) * at

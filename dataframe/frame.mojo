@@ -1114,6 +1114,27 @@ struct DataFrame(Copyable, Sized, Writable):
             # Nothing to drop (`is_not_null()` on a column without nulls):
             # the frame's columns are shared, not copied.
             return self.copy()
+        var constants = 0
+        for column in self._columns:
+            if column.is_constant():
+                constants += 1
+        if constants > 0:
+            # A constant keeps its value over the kept rows; only the other
+            # columns are filtered.
+            var others = List[Series](capacity=self.width() - constants)
+            for column in self._columns:
+                if not column.is_constant():
+                    others.append(column.copy())
+            var kept = Self(others^, height=self._height).filter(mask)
+            var columns = List[Series](capacity=self.width())
+            var next = 0
+            for column in self._columns:
+                if column.is_constant():
+                    columns.append(column._constant_resized(kept._height))
+                else:
+                    columns.append(kept._columns[next].copy())
+                    next += 1
+            return Self(columns^, height=kept._height)
         var filtered = filter_columns(self._columns, mask)
         ref others = filtered[1]
         var count = filtered[2]

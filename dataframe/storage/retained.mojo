@@ -64,10 +64,16 @@ struct RetainedBuffers(Movable):
                     unsafe_from_address=owner.context
                 )[]
                 self.list(held[])
-            elif not data.residence:
+            elif not data.residence and not data.repeat:
                 self.add(data.address, data.length * size_of[T]())
         else:
             self.list(data.values)
+        if data.repeat:
+            # A constant holds one value until a reader writes it out.
+            ref repeat = data.repeat.value()[]
+            self.add(Int(Pointer(to=repeat)), size_of[T]())
+            if repeat.is_filled():
+                self.list(repeat._filled)
         if data.residence:
             ref residence = data.residence.value()[]
             # Use the residence identity: inspecting usage must never trigger

@@ -1,6 +1,6 @@
 """Ordered windows preserve typed cells and restore every original row."""
 # contract-group: expr.ordered_over
-from std.testing import assert_raises
+from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, Expr, Series, col
 from tests.support.coverage_compare import assert_frame
 from tests.support.coverage_generators import chunk_layout, offset_layout
@@ -306,3 +306,157 @@ def test_ordered_over_composes_with_group_sequences_and_shift_defaults() raises:
                     ),
                     expected,
                 )
+
+
+def _rolling_reference(
+    keys: List[Int64],
+    key_valid: List[Bool],
+    order: List[Int64],
+    values: List[Int64],
+    valid: List[Bool],
+    width: Int,
+    needed: Int,
+    mean: Bool,
+) raises -> Series:
+    """rolling_sum / rolling_mean over (partition, order) by brute force:
+    each partition's rows in order, every frame summed from scratch."""
+    var n = len(keys)
+    var by_order = List[Int](length=n, fill=0)
+    for row in range(n):
+        by_order[Int(order[row])] = row
+    var parts = Dict[Int64, List[Int]]()
+    for k in range(n):
+        var row = by_order[k]
+        # A null key is a partition of its own.
+        var key = keys[row] if key_valid[row] else Int64.MIN
+        if key not in parts:
+            parts[key] = List[Int]()
+        parts[key].append(row)
+    var ints = List[Int64](length=n, fill=0)
+    var floats = List[Float64](length=n, fill=0)
+    var ok = List[Bool](length=n, fill=False)
+    var at_least = width if needed < 0 else needed
+    for entry in parts.items():
+        ref rows = entry.value
+        for k in range(len(rows)):
+            var total = Int64(0)
+            var count = 0
+            for f in range(max(0, k - width + 1), k + 1):
+                if valid[rows[f]]:
+                    total += values[rows[f]]
+                    count += 1
+            var row = rows[k]
+            ok[row] = count >= at_least and count > 0
+            ints[row] = total if ok[row] else 0
+            floats[row] = Float64(total) / Float64(count) if ok[row] else 0
+    if mean:
+        return Series("w", Column[Float64](floats^, ok))
+    return Series("w", Column[Int64](ints^, ok))
+
+
+def test_ordered_over_rolling_sums_partitions_of_varied_sizes_and_nulls() raises:
+    # Rows in more than one 2048-row block, so partitions are evaluated by
+    # several tasks. Partitions of varied sizes: one half of the rows, a
+    # seventh, a key per thirteenth and a null key.
+    var n = 5003
+    var keys = List[Int64]()
+    var key_valid = List[Bool]()
+    var order = List[Int64]()
+    var values = List[Int64]()
+    var valid = List[Bool]()
+    for row in range(n):
+        keys.append(
+            0 if row % 2 == 0 else (1 if row % 7 == 1 else Int64(row % 13 + 2))
+        )
+        key_valid.append(row % 97 != 5)
+        order.append(Int64((row * 7919) % n))
+        values.append(Int64((row * 31) % 201 - 100))
+    for null_values in [False, True]:
+        valid.clear()
+        for row in range(n):
+            valid.append(not null_values or row % 11 != 3)
+        var frame = DataFrame(
+            [
+                Series("g", Column[Int64](keys.copy(), key_valid)),
+                Series("t", Column[Int64](order.copy())),
+                Series("x", Column[Int64](values.copy(), valid)),
+            ]
+        )
+        for width in [1, 11]:
+            for needed in [-1, 2]:
+                for mean in [False, True]:
+                    var e = (
+                        col("x")
+                        .rolling_mean(width, needed) if mean else col("x")
+                        .rolling_sum(width, needed)
+                    )
+                    var expressions: List[Expr] = [
+                        e.over("g", order_by="t").alias("w")
+                    ]
+                    var expected = _rolling_reference(
+                        keys,
+                        key_valid,
+                        order,
+                        values,
+                        valid,
+                        width,
+                        needed,
+                        mean,
+                    )
+                    # Whole columns compared at once: a cell-by-cell
+                    # comparison of every row dominates the test's time.
+                    assert_true(
+                        frame.select_exprs(expressions)
+                        .column("w")
+                        .equals(expected)
+                    )
+                    assert_true(
+                        chunk_layout(frame)
+                        .lazy()
+                        .select_exprs(expressions)
+                        .collect(engine="cpu")
+                        .column("w")
+                        .equals(expected)
+                    )
+
+
+def test_ordered_over_rolling_sum_overflow_raises_only_for_counted_frames() raises:
+    var frame = DataFrame(
+        [
+            Series("g", Column[Int64]([0, 0, 1, 1])),
+            Series("t", Column[Int64]([0, 1, 2, 3])),
+            Series("x", Column[Int64]([Int64.MAX, 1, Int64.MIN, -1])),
+        ]
+    )
+    with assert_raises():
+        _ = frame.select_exprs(
+            [col("x").rolling_sum(2).over("g", order_by="t").alias("w")]
+        )
+    with assert_raises():
+        _ = (
+            frame.lazy()
+            .select_exprs(
+                [col("x").rolling_sum(2).over("g", order_by="t").alias("w")]
+            )
+            .collect(engine="cpu")
+        )
+    # Frames under min_samples are null and never summed into a result.
+    assert_frame(
+        frame.select_exprs(
+            [col("x").rolling_sum(2, 3).over("g", order_by="t").alias("w")]
+        ),
+        DataFrame(
+            [
+                Series(
+                    "w",
+                    Column[Int64]([0, 0, 0, 0], [False, False, False, False]),
+                )
+            ]
+        ),
+    )
+    # A mean divides the exact total, so it does not overflow.
+    var means = frame.select_exprs(
+        [col("x").rolling_mean(2, 1).over("g", order_by="t").alias("w")]
+    )
+    assert_equal(means.item(1, "w").float64(), 4611686018427387904.0)
+    assert_equal(means.item(3, "w").float64(), -4611686018427387904.0)

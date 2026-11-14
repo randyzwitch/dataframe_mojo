@@ -116,6 +116,12 @@ A window onto shared, bit-packed values and validity.
   Pack a byte-per-value Boolean column.
 - `def __init__(out self, values: List[Bool])`
 - `def __init__(out self, values: List[Bool], valid: List[Bool])`
+- `def is_constant(self) -> Bool`
+  Whether every row holds one value, or every row is null, kept as that value (`_repeated`).
+- `def constant_valid(self) -> Bool`
+  Whether a constant column's rows are valid; only when `is_constant()`.
+- `def constant_value(self) -> Bool`
+  A constant column's value; only when `is_constant()`.
 - `def __len__(self) -> Int`
 - `def to_list(self) -> List[Bool]`
 - `def is_null(self, index: Int) -> Bool`
@@ -192,6 +198,12 @@ no mutable buffers or implicit negative indexing are exposed.
   Adopt typed values and a prepacked validity bitmap without copying.
 - `def __init__(out self, var values: List[T])`
 - `def __init__(out self, var values: List[T], valid: List[Bool])`
+- `def is_constant(self) -> Bool`
+  Whether every row holds one value, or every row is null, kept as that value (`_repeated`).
+- `def constant_valid(self) -> Bool`
+  Whether a constant column's rows are valid; only when `is_constant()`.
+- `def constant_value(self) -> ref[ImmUnsafeAnyOrigin] T`
+  A constant column's value (undefined when its rows are null); only when `is_constant()`.
 - `def __len__(self) -> Int`
 - `def to_list(self) -> List[T]`
   An owned copy of this window's payloads, null slots included.
@@ -1998,6 +2010,8 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def __or__(self, other: Self) -> Self`
 - `def __xor__(self, other: Self) -> Self`
 - `def is_chunked(self) -> Bool`
+- `def is_constant(self) -> Bool`
+  Whether every row holds one value, or every row is null, kept as that one value rather than written to every row (a scalar spread over a frame's rows). Its values are written out the first time a reader needs them in memory, once; operations that only need the value (slices, gathers, filters, arithmetic with it, concatenation with the same value) keep it a constant.
 - `def n_chunks(self) -> Int`
   Number of physical Arrow arrays backing this series.
 - `def chunks(self) -> List[Self]`
@@ -2139,6 +2153,12 @@ A window onto shared UTF-8 bytes, Int64 offsets, and validity.
   Adopt finished Arrow Utf8View descriptors and their Arc blocks.
 - `def from_bytes(values: List[List[UInt8]], valid: List[Bool]) -> Self`
   Arbitrary bytes per row, not checked for UTF-8: the storage of a binary column. Tag the Series `DataType.BINARY` before reading.
+- `def is_constant(self) -> Bool`
+  Whether every row holds one value, or every row is null, kept as that value (`_repeated`).
+- `def constant_valid(self) -> Bool`
+  Whether a constant column's rows are valid; only when `is_constant()`.
+- `def constant_bytes(self) -> Span[UInt8, ImmutAnyOrigin]`
+  A constant column's value (empty when its rows are null); only when `is_constant()`.
 - `def __len__(self) -> Int`
 - `def to_large_utf8(self) -> Self`
   Return an owned large_utf8 adapter when a contiguous ABI is needed.
