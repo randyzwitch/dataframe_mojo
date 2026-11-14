@@ -132,8 +132,11 @@ from dataframe.aggregation.keys import (
 )
 from dataframe.aggregation.selected_rows import _reduce_floats, _reduce_ints
 from dataframe.joins.hash_table import (
+    JoinBuildLayout,
+    JoinBuildSink,
     JoinHashTable,
     ScanStructure,
+    join_build_layout,
 )
 from dataframe.joins.join_filter import (
     BF_CHECK_N,
@@ -142,6 +145,7 @@ from dataframe.joins.join_filter import (
     PushedJoinFilter,
     SelectivityStats,
     finalize_filters,
+    finalize_table_filters,
     keep_rows,
     supports_join_filters,
 )
@@ -540,15 +544,14 @@ def _join_filters(
                     if not probe:
                         continue
                     var name = probe.value()
-                    var made = finalize_filters(
+                    var made = finalize_table_filters(
                         name,
                         frame.column(name).dtype(),
-                        build.column(step.right_keys[k]),
+                        table,
+                        k,
                         at,
                         len(step.names),
-                        table.inserted,
                         probe_rows,
-                        table.build_filtered,
                         scan,
                     )
                     if made:
@@ -1203,6 +1206,11 @@ struct _ChunkRunner(Movable):
     # its result, or the input of a reduction no aggregate sink takes.
     var materialize: List[MaterializeSink]
     var materializes: Bool
+    # A join build sink (`JoinBuildSink`), when the pipeline's rows are a
+    # hash join's build side: the chunks go into the worker's own rows,
+    # which become the join's table, and nothing is collected.
+    var build: List[JoinBuildSink]
+    var build_layout: List[ArcPointer[JoinBuildLayout]]
     # Retain scan-filter state and its source offset while the morsel runs.
     # Statistics can skip a vector before any values are read; -1 denotes no
     # source offset.
@@ -1247,6 +1255,8 @@ struct _ChunkRunner(Movable):
         self.sets_layout = List[ArcPointer[GroupingSetsLayout]]()
         self.materialize = List[MaterializeSink]()
         self.materializes = False
+        self.build = List[JoinBuildSink]()
+        self.build_layout = List[ArcPointer[JoinBuildLayout]]()
         self.scan = None
         self.scan_offset = -1
 
@@ -1287,6 +1297,7 @@ struct _ChunkRunner(Movable):
             or len(self.table) > 0
             or len(self.sets) > 0
             or len(self.materialize) > 0
+            or len(self.build) > 0
         )
 
     def begin_sink(
@@ -1312,6 +1323,10 @@ struct _ChunkRunner(Movable):
                     GroupingSetsSink(self.sets_layout[0][], self.table_workers)
                 )
             self.sets[0].begin(morsel)
+        elif len(self.build_layout) > 0:
+            if len(self.build) == 0:
+                self.build.append(JoinBuildSink(self.build_layout[0]))
+            self.build[0].begin(morsel)
         elif self.materializes:
             if len(self.materialize) == 0:
                 self.materialize.append(
@@ -1332,6 +1347,8 @@ struct _ChunkRunner(Movable):
             self.sets[0].derive()
         if len(self.materialize) > 0:
             self.materialize[0].release()
+        if len(self.build) > 0:
+            self.build[0].release()
 
     def release_local(mut self):
         """Release worker-local compiled steps on the worker that used them.
@@ -1349,6 +1366,8 @@ struct _ChunkRunner(Movable):
             _sink_chunk(self.table[0], chunk, self.arena)
         elif len(self.sets) > 0:
             _sink_chunk(self.sets[0], chunk, self.arena)
+        elif len(self.build) > 0:
+            _sink_chunk(self.build[0], chunk, self.arena)
         else:
             _sink_chunk(self.materialize[0], chunk, self.arena)
 
@@ -2098,8 +2117,8 @@ struct _PipelineJob(Job):
         _sink_chunk(self.topn[0], ordered, self.runner.arena)
 
     def _unmatched(self, chunk: Int, length: Int) raises -> DataFrame:
-        """The build rows of the hash table's row chunk `chunk` the join
-        emits after the probe, as the step's output: a
+        """The build rows of the hash table's row chunks [chunk, chunk +
+        length) the join emits after the probe, as the step's output: a
         right-semi or right-anti join's build columns, or an outer join's
         with the probe columns null, coalesced keys taken from the rows."""
         ref step = self.steps[][self.unmatched_step]
@@ -2107,7 +2126,8 @@ struct _PipelineJob(Job):
         ref right = self.joins[][step.join]
         var want = UInt8(1) if step.how == JOIN_RIGHT_SEMI else UInt8(0)
         var pointers = List[UInt64]()
-        table.scan_chunk(chunk, want, pointers)
+        for c in range(chunk, chunk + length):
+            table.scan_chunk(c, want, pointers)
         ref schema = self.runner.schemas[][self.unmatched_step + 1]
         if len(pointers) == 0:
             return schema.clear()
@@ -2690,6 +2710,10 @@ struct PipelineRun(Movable):
     var round_cursor: Optional[_Cursor]
     # The file source the workers scan, when not `frame`.
     var source: Optional[ArcPointer[ScanSource]]
+    # A join build's row layout, when the workers sink into its rows, and
+    # the table the finish makes of them (its finalize tasks not yet run).
+    var build_layout: Optional[ArcPointer[JoinBuildLayout]]
+    var built: Optional[JoinHashTable]
 
     def __init__(
         out self,
@@ -2759,6 +2783,8 @@ struct PipelineRun(Movable):
         self.next_morsel = len(self.jobs[0].ranges[]) // 2
         self.round_cursor = None
         self.source = None
+        self.build_layout = None
+        self.built = None
 
     def tasks(self) -> Int:
         return len(self.jobs)
@@ -2784,12 +2810,18 @@ struct PipelineRun(Movable):
             var last = self.outer_steps[len(self.outer_steps) - 1]
             self.next_round += 1
             ref step = self.steps[j]
-            # One morsel per chunk of the table's rows, for the scan of
-            # unmatched (or matched) build rows.
+            # The table's row chunks split into one run per worker: a
+            # table sunk by many threads holds many partly filled chunks
+            # (one set per thread and partition), and a morsel per chunk
+            # would run the steps after the join on a few rows at a time.
             var ranges = List[Int]()
-            for c in range(self.indexes[][step.join].value().chunk_count()):
+            var chunks = self.indexes[][step.join].value().chunk_count()
+            var per_worker = max(
+                (chunks + len(self.jobs) - 1) // len(self.jobs), 1
+            )
+            for c in range(0, chunks, per_worker):
                 ranges.append(c)
-                ranges.append(1)
+                ranges.append(min(per_worker, chunks - c))
             if len(ranges) == 0 and j != last:
                 continue
             var cursor = _Cursor.new()
@@ -2857,12 +2889,22 @@ def begin_pipeline(
     pushed: List[PushedJoinFilter],
     source: Optional[ArcPointer[ScanSource]] = None,
     source_rows: Int = -1,
+    build_keys: List[String] = List[String](),
+    build_how: Int = JOIN_INNER,
+    build_coalesce: Bool = True,
+    build_probe_estimate: Int = -1,
 ) raises -> PipelineRun:
     """`run_pipeline` up to its workers' jobs, not yet run: its execute stage is
     the jobs, one task per thread; `finish_pipeline` is its finish, after the
     rounds of `begin_round`. With a file `source`, `frame` holds its columns but
     no row: the workers take the source's batches as their morsels, and
-    `source_rows` is its estimated height."""
+    `source_rows` is its estimated height. With `build_keys`, the rows
+    are the build side of a hash join of type `build_how` on those keys
+    (`build_coalesce`, `build_probe_estimate` as `finish_build` takes
+    them): each worker sinks its chunks into its own rows of the join's
+    hash table (`JoinBuildSink`), and the finish makes the table
+    (`PipelineRun.built`) instead of a frame, unless a column's type
+    keeps the build on a frame (`join_build_layout`)."""
     trace_path("pipeline.run")
     # Every step's input columns and the output, typed once, and the
     # row-local steps compiled once for every worker. A late-materialized
@@ -3163,10 +3205,32 @@ def begin_pipeline(
     var collects = (
         len(expressions) > 0 and len(layout) == 0 and len(ungrouped) == 0
     )
+    # A hash join's build side: each worker's chunks into its own rows of
+    # the join's table, so the rows are never copied into a frame first.
+    var build_layout = Optional[ArcPointer[JoinBuildLayout]]()
+    if (
+        len(build_keys) > 0
+        and len(expressions) == 0
+        and top <= 0
+        and len(sets) == 0
+    ):
+        var made = join_build_layout(
+            schemas[][len(steps)]._columns,
+            build_keys,
+            build_how,
+            build_coalesce,
+            build_probe_estimate,
+            True,
+        )
+        if made:
+            trace_path("pipeline.join_build_sink")
+            build_layout = ArcPointer(made.take())
+            for w in range(len(jobs)):
+                jobs[w].runner.build_layout.append(build_layout.value())
     # No reduction and no top-N: the rows are the result, each worker's chunks
     # copied into its collections, numbered by morsel so the finish restores
     # source order.
-    if (len(expressions) == 0 and top <= 0) or collects:
+    if ((len(expressions) == 0 and top <= 0) or collects) and not build_layout:
         for w in range(len(jobs)):
             jobs[w].runner.materializes = True
     if scan:
@@ -3211,6 +3275,7 @@ def begin_pipeline(
         finish_steps.copy(),
     )
     run.source = source
+    run.build_layout = build_layout^
     return run^
 
 
@@ -3412,6 +3477,19 @@ def _finish_pipeline(
                 sinks.append(jobs[j].runner.ungrouped.pop())
         var combined = _combined(sinks^)
         return ungrouped_finish(ungrouped[0][], combined)
+    if run.build_layout:
+        # A join's build side: the workers' rows combined into its table,
+        # whose finalize tasks the caller's finish event runs. The result
+        # is the build's columns, empty.
+        var locals = List[JoinBuildSink]()
+        for j in range(len(jobs)):
+            if len(jobs[j].runner.build) > 0:
+                locals.append(jobs[j].runner.build.pop())
+        var combined = _combined(locals^)
+        run.built = JoinHashTable(
+            run.build_layout.value(), combined^, defer_finalize=True
+        )
+        return schemas[][len(steps)].clear()
     if top <= 0:
         # The workers' batches in source order.
         var locals = List[MaterializeSink]()

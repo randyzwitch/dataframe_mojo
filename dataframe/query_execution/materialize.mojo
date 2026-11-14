@@ -394,9 +394,21 @@ def plan_take_prefetched(
     if not self._prefetched:
         return None
     var ahead = self._prefetched.value()
-    if index in ahead[]:
-        return ahead[].pop(index)
-    return None
+    if index not in ahead[]:
+        return None
+    var frame = ahead[].pop(index)
+    if self._prefetched_indexes:
+        var held = self._prefetched_indexes.value()
+        if index in held[] and held[][index].rows_only:
+            # A build whose pipeline sank its rows into a join's table,
+            # read by an operator that takes frames (the stream over the
+            # join did not run it): the rows as a frame.
+            trace_path("join.build_rows_frame")
+            var ready = held[].pop(index)
+            return DataFrame(
+                ready.index.rows_frame(), height=ready.index.rows_stored
+            )
+    return frame^
 
 
 def plan_union_children(self: QueryContext, index: Int) -> List[Int]:
