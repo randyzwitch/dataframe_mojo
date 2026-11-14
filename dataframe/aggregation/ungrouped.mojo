@@ -83,7 +83,7 @@ from dataframe.vector.data_chunk import (
     storage_physical,
     to_series,
 )
-from dataframe.vector.expression import VectorExpression
+from dataframe.vector.expression import VectorExpression, select_true
 from dataframe.vector.sink import Sink
 from dataframe.vector.types import (
     PHYSICAL_VARCHAR,
@@ -340,6 +340,12 @@ struct UngroupedSink(Sink):
     # A filter's kept rows, and those rows through the input's selection.
     var kept: List[UInt32]
     var through: List[UInt32]
+    # Per chunk, the kept rows of each Boolean filter column read so far
+    # (its column, how many, the rows), so states filtered by the same
+    # column select once.
+    var selected_columns: List[Int]
+    var selected_counts: List[Int]
+    var selected_rows: List[List[UInt32]]
     var arena: _ValueArena
     # Every row of a batch updates the one state row.
     var rows: List[Int]
@@ -385,6 +391,9 @@ struct UngroupedSink(Sink):
         self.types = shared.types.copy()
         self.kept = List[UInt32](length=_BATCH, fill=0)
         self.through = List[UInt32](length=_BATCH, fill=0)
+        self.selected_columns = List[Int]()
+        self.selected_counts = List[Int]()
+        self.selected_rows = List[List[UInt32]]()
         self.output = DataChunk(len(shared.expressions))
         self.arena = _ValueArena()
         self.rows = List[Int](length=_BATCH, fill=self.groups.at(0))
@@ -443,8 +452,10 @@ struct UngroupedSink(Sink):
             return
         self.output.reset()
         self.output.count = n
+        self.selected_columns.clear()
+        self.selected_counts.clear()
         for i in range(len(self.expressions)):
-            if self.expressions[i]:
+            if self.expressions[i] and not self._after_filter(i):
                 self.expressions[i].value().write(chunk, arena, self.output, i)
         var state = self.groups.at(0) + 8 * self.groups.states_at
         for s in range(len(self.slots)):
@@ -455,6 +466,9 @@ struct UngroupedSink(Sink):
                 continue
             if self.slots[s].by_address():
                 self._by_address(s, chunk, arena, state + 8 * offset)
+                continue
+            if self.filter_columns[s] >= 0 or self.filters[s]:
+                self._filtered(s, chunk, arena, state + 8 * offset)
                 continue
             var format = self._format(s, chunk, arena)
             if kind == _K_DISTINCT:
@@ -467,9 +481,6 @@ struct UngroupedSink(Sink):
                     self.sequence,
                     n,
                 )
-                continue
-            if self.filter_columns[s] >= 0 or self.filters[s]:
-                self._filtered(s, chunk, arena, format, state + 8 * offset)
                 continue
             if _simple_update(self.slots[s], format, n, state + 8 * offset):
                 continue
@@ -565,41 +576,73 @@ struct UngroupedSink(Sink):
             self.scratch = List[UInt64](length=18 * _BATCH, fill=0)
         return Int(self.scratch.unsafe_ptr())
 
+    def _after_filter(self, i: Int) -> Bool:
+        """Whether input i is computed only at the rows its filter keeps
+        (`_filtered`) rather than over the whole chunk: a filtered input
+        computed in lanes."""
+        return (
+            i < len(self.slots)
+            and (self.filter_columns[i] >= 0 or Bool(self.filters[i]))
+            and Bool(self.expressions[i])
+            and self.expressions[i].value().computes_rows()
+        )
+
+    def _column_rows(
+        mut self, c: Int, mut chunk: DataChunk, mut arena: ColumnArena
+    ) raises -> Tuple[Int, Int]:
+        """The chunk rows a Boolean filter column keeps, true and valid:
+        how many, and where they are. Selected once a chunk however many
+        states the column filters."""
+        for j in range(len(self.selected_columns)):
+            if self.selected_columns[j] == c:
+                return (
+                    self.selected_counts[j],
+                    Int(self.selected_rows[j].unsafe_ptr()),
+                )
+        var j = len(self.selected_columns)
+        if len(self.selected_rows) <= j:
+            self.selected_rows.append(List[UInt32](length=_BATCH, fill=0))
+        var rows = Int(self.selected_rows[j].unsafe_ptr())
+        var kept = select_true(chunk.unified(c, arena), chunk.count, rows)
+        self.selected_columns.append(c)
+        self.selected_counts.append(kept)
+        return (kept, rows)
+
     def _filtered(
         mut self,
         s: Int,
         mut chunk: DataChunk,
         mut arena: ColumnArena,
-        format: UnifiedVectorFormat,
         state: Int,
     ) raises:
-        """State s updated from its input's rows its filter keeps."""
-        var through = self.through.unsafe_ptr()
-        var kept = 0
+        """State s updated from its input at the rows its filter keeps.
+        The filter selects first; then the input is read at those rows, or,
+        when computed, computed at only those rows, so it never sees (or
+        raises for) a row the filter drops."""
+        var n = chunk.count
+        var after = self._after_filter(s)
+        var format = UnifiedVectorFormat()
+        if not after:
+            format = self._format(s, chunk, arena)
+        var kept: Int
+        var rows: Int
         if self.filter_columns[s] >= 0:
-            var condition = chunk.unified(self.filter_columns[s], arena)
-            if (
-                not condition.sel.is_set()
-                and condition.validity.all_valid()
-                and _flat_update(
-                    self.slots[s], format, condition.data, chunk.count, state
-                )
-            ):
-                return
-            # A Boolean column: its vector read in place, each row kept
-            # when true and valid, no lanes loaded.
-            var flags = Pointer[UInt8, MutAnyOrigin](
-                unsafe_from_address=condition.data
-            )
-            var whole = condition.validity.all_valid()
-            for k in range(chunk.count):
-                var r = condition.sel.get_index(k)
-                var keep = flags[unsafe_offset=r] != 0
-                if not whole:
-                    keep = keep and condition.validity.row_is_valid_unsafe(r)
-                through[unsafe_offset=kept] = UInt32(format.sel.get_index(k))
-                kept += Int(keep)
+            var c = self.filter_columns[s]
+            if not after:
+                var condition = chunk.unified(c, arena)
+                if (
+                    not condition.sel.is_set()
+                    and condition.validity.all_valid()
+                    and _flat_update(
+                        self.slots[s], format, condition.data, n, state
+                    )
+                ):
+                    return
+            var found = self._column_rows(c, chunk, arena)
+            kept = found[0]
+            rows = found[1]
         else:
+            rows = Int(self.kept.unsafe_ptr())
             kept = (
                 self.filters[s]
                 .value()
@@ -607,23 +650,35 @@ struct UngroupedSink(Sink):
                     chunk,
                     arena,
                     SelectionVector(),
-                    chunk.count,
-                    SelectionVector(Int(self.kept.unsafe_ptr())),
+                    n,
+                    SelectionVector(rows),
                 )
             )
-            var rows = self.kept.unsafe_ptr()
-            for k in range(kept):
-                through[unsafe_offset=k] = UInt32(
-                    format.sel.get_index(Int(rows[unsafe_offset=k]))
-                )
         if kept == 0:
             return
-        var selected = UnifiedVectorFormat(
-            SelectionVector(Int(through)),
-            format.data,
-            format.validity,
-            format.physical,
-        )
+        var selected: UnifiedVectorFormat
+        if after:
+            # The input computed at the kept rows only, as the first
+            # `kept` values of its output column.
+            self.output.count = kept
+            self.expressions[s].value().write_rows(
+                chunk, arena, self.output, s, SelectionVector(rows), kept
+            )
+            selected = self._format(s, chunk, arena)
+            self.output.count = n
+        else:
+            var through = self.through.unsafe_ptr()
+            var at = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=rows)
+            for k in range(kept):
+                through[unsafe_offset=k] = UInt32(
+                    format.sel.get_index(Int(at[unsafe_offset=k]))
+                )
+            selected = UnifiedVectorFormat(
+                SelectionVector(Int(through)),
+                format.data,
+                format.validity,
+                format.physical,
+            )
         if _simple_update(self.slots[s], selected, kept, state):
             return
         # A state the simple updates do not keep: the kept rows' vector
@@ -702,6 +757,7 @@ struct UngroupedSink(Sink):
         self.scratch = List[UInt64]()
         self.kept = List[UInt32]()
         self.through = List[UInt32]()
+        self.selected_rows = List[List[UInt32]]()
         self.rows = List[Int]()
 
     def combine_into(self, mut other: UngroupedSink) raises:
