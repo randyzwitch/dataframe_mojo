@@ -105,6 +105,9 @@ from dataframe.query_execution.late_materialization import (
 )
 from dataframe.pipeline import (
     _ORDER_COLUMN,
+    PipelineTypes,
+    _step_schemas,
+    pipeline_types,
     _top_flags,
     _top_keys,
     _ensure_zones,
@@ -132,6 +135,7 @@ from dataframe.scheduler import (
 )
 from dataframe.planning.graph import (
     plan_is_filtering,
+    plan_remember_schemas,
     plan_columns_of,
     plan_filters_rows,
     plan_grouped_on,
@@ -203,7 +207,6 @@ from dataframe.query_execution.reporting import (
 from dataframe.query_execution.stream_state import (
     _StateAccumulator,
     _StreamJob,
-    _apply_operation,
     _steps_of,
 )
 from dataframe.planning.cost.eligibility import (
@@ -254,7 +257,7 @@ def plan_stream_execute(
     # own: one queue then feeds every thread, where a nested schedule would
     # run on the one thread that waits for it. Execution reports
     # serialize these tasks to attribute their measurements.
-    var inputs = plan_schedule_inputs(self, index, head.cursor, batch_size)
+    var inputs = _scheduled_inputs(self, index, head.cursor, batch_size)
     if len(inputs.wanted) == 0:
         return _stream_probe(self, index, batch_size, sink, head^)
     trace_path("stream.scheduled_inputs")
@@ -316,11 +319,66 @@ struct _HeadOutcome(Movable):
         self.head.append(head^)
 
 
+def _remembering(self: QueryContext) -> Bool:
+    """Keep each node's schema on `self` once derived, until
+    `_forgetting`: deciding a stream's build sides and its inputs asks for
+    the columns of the same subtrees at every join of its spine, and the
+    nodes stay as they are meanwhile (a side flip rewrites a copy, under a
+    selection that keeps every node's output). True when this call started
+    remembering."""
+    ref plan = Pointer[QueryContext, MutAnyOrigin](
+        unsafe_from_address=Int(Pointer(to=self))
+    )[]
+    return plan_remember_schemas(plan)
+
+
+def _forgetting(self: QueryContext, owned: Bool):
+    """End what `_remembering` started, when it started it."""
+    if not owned:
+        return
+    ref plan = Pointer[QueryContext, MutAnyOrigin](
+        unsafe_from_address=Int(Pointer(to=self))
+    )[]
+    plan._schema_memo = None
+
+
 def _stream_head(
     self: QueryContext, index: Int, batch_size: Int, sink: Int
 ) raises -> _HeadOutcome:
     """The stream's terminal (aggregate, top-N, slice) and its build sides
     decided before anything is scheduled."""
+    var owned = _remembering(self)
+    try:
+        var outcome = _decide_head(self, index, batch_size, sink)
+        _forgetting(self, owned)
+        for k in range(len(outcome.plan)):
+            # A rewritten plan's nodes differ: it starts with no schema
+            # remembered.
+            outcome.plan[k]._schema_memo = None
+        return outcome^
+    except e:
+        _forgetting(self, owned)
+        raise e^
+
+
+def _scheduled_inputs(
+    self: QueryContext, terminal: Int, top: Int, batch_size: Int
+) raises -> _StreamInputs:
+    """`plan_schedule_inputs`, each node's schema derived once."""
+    var owned = _remembering(self)
+    try:
+        var inputs = plan_schedule_inputs(self, terminal, top, batch_size)
+        _forgetting(self, owned)
+        return inputs^
+    except e:
+        _forgetting(self, owned)
+        raise e^
+
+
+def _decide_head(
+    self: QueryContext, index: Int, batch_size: Int, sink: Int
+) raises -> _HeadOutcome:
+    """`_stream_head`'s decisions."""
     var cursor = index
     var expressions = List[Expr]()
     var keys = List[String]()
@@ -411,6 +469,8 @@ def _stream_head(
             top_names^,
             top_descending^,
             top_nulls_last^,
+            Dict[Int, Int](),
+            Dict[Int, Bool](),
         )
     )
 
@@ -493,6 +553,10 @@ def _add_stream(
     (`META_REGULAR` or `META_JOIN_BUILD`)."""
     ref self = Pointer[QueryContext, MutAnyOrigin](unsafe_from_address=plan)[]
     var count = len(inputs.wanted)
+    for k in range(count):
+        if inputs.joins[k] >= 0:
+            head.probe_estimates[inputs.joins[k]] = inputs.probe_estimates[k]
+            head.build_filtered[inputs.joins[k]] = inputs.build_filtered[k]
     var at = List[Int](capacity=count)
     for k in range(count):
         var builds = _BuildFor(
@@ -608,9 +672,7 @@ def _add_input(
             schedule.plans.append(owned)
             var address = Int(Pointer(to=owned[]))
             ref copy = owned[]
-            var inputs = plan_schedule_inputs(
-                copy, index, head.cursor, batch_size
-            )
+            var inputs = _scheduled_inputs(copy, index, head.cursor, batch_size)
             return _add_stream(
                 schedule,
                 address,
@@ -725,6 +787,12 @@ struct _StreamHead(Copyable, Movable):
     var top_names: List[String]
     var top_descending: List[Bool]
     var top_nulls_last: List[Bool]
+    # Each join's probe-side estimate and whether its build side filters
+    # its rows, by the join's node, as the plan gave them when its
+    # inputs were scheduled (`plan_schedule_inputs`): the probe reads them
+    # rather than estimating the same plan again once its builds finish.
+    var probe_estimates: Dict[Int, Int]
+    var build_filtered: Dict[Int, Bool]
 
 
 @fieldwise_init
@@ -766,6 +834,9 @@ struct _StreamProbe(Movable):
     # schedule runs them first.
     var through: List[_ThroughBuild]
     var started: List[_ProbeStart]
+    # What the probe's setup reads from the plan alone, made in the
+    # pipeline's first stage while its inputs still run (`_probe_types`).
+    var types: Optional[_ProbeTypes]
     # The morsel pipeline's finish once its sink has finished, and the
     # tasks of the finish's round under way (the pipeline's or the batch
     # stream's).
@@ -806,10 +877,31 @@ struct _StreamProbe(Movable):
         self.siblings = 0
         self.through = List[_ThroughBuild]()
         self.started = List[_ProbeStart]()
+        self.types = None
         self.finish = List[PipelineFinish]()
         self.round = 0
         self.filling = False
         self.result = None
+
+    def initialize(mut self):
+        """The probe's setup that reads no input's rows, made as the
+        schedule starts, at the same time as the inputs it waits for:
+        each step's columns, the steps compiled, the aggregate table's
+        layout (`_probe_types`). A probe set up before the schedule has
+        none to make."""
+        if len(self.started) > 0 or len(self.head) == 0:
+            return
+        ref plan = Pointer[QueryContext, MutAnyOrigin](
+            unsafe_from_address=self.plan
+        )[]
+        try:
+            self.types = _probe_types(
+                plan, self.index, self.head[0], self.batch_size
+            )
+        except:
+            # The setup is made again where the inputs' results are
+            # read, which raises what is wrong.
+            self.types = None
 
     def tasks(mut self) raises -> Int:
         """Called once every input is complete: its results in the memo (written
@@ -848,6 +940,8 @@ struct _StreamProbe(Movable):
                     self.index, List[PlannedJoinFilter](), filters^
                 )
             )
+        var types = Optional[_ProbeTypes]()
+        swap(types, self.types)
         self.started.append(
             _probe_start(
                 plan,
@@ -856,6 +950,7 @@ struct _StreamProbe(Movable):
                 self.sink,
                 self.head.pop(0),
                 self.build,
+                types^,
             )
         )
         return self._execute_tasks(plan)
@@ -1052,7 +1147,8 @@ struct _StreamPipeline(SchedulablePipeline):
         return self.probe[0].built.copy()
 
     def initialize(mut self) raises:
-        pass
+        if len(self.probe) > 0:
+            self.probe[0].initialize()
 
     def max_execute_tasks(self) -> Int:
         return configured_workers() if len(self.input) == 0 else 1
@@ -1117,12 +1213,14 @@ def _probe_start(
     sink: Int,
     var head: _StreamHead,
     build: _BuildFor = _BuildFor(),
+    var types: Optional[_ProbeTypes] = None,
 ) raises -> _ProbeStart:
     """The stream's probe pipeline set up, once its inputs are done: its morsel
     workers, not yet run, or its result when it ran here (a batch stream, or no
     pipeline at all). `build`: the join this stream's rows are the build side of; a
     pipeline whose rows are the result sinks them into that join's hash
-    table."""
+    table. `types`: the setup made from the plan alone (`_probe_types`),
+    used where the inputs' results have the columns it was made for."""
     var cursor = head.cursor
     var expressions = head.expressions.copy()
     var keys = head.keys.copy()
@@ -1148,6 +1246,9 @@ def _probe_start(
     # source can reach the sink, so the pipeline is set up as usual but its
     # source yields nothing and the sink finalizes over no rows.
     var no_output = False
+    # Estimates the schedule did not already give, from one memo: the
+    # joins' probe sides nest, so each estimate reuses the one below it.
+    var stats = PlanStatistics()
     # Run union inputs through morsel pipelines into worker-local aggregate
     # tables. Discover this route before building joins below it, avoiding
     # duplicate build work.
@@ -1270,21 +1371,28 @@ def _probe_start(
                 # table of the same columns serves it.
                 built = built.clear()
                 build_rows = 0
-            var stats = PlanStatistics()
+            var known = head.probe_estimates.get(cursor)
+            var probe_estimate = known.value() if known else plan_cardinality(
+                self, stats, node.left
+            )
+            var filtered = head.build_filtered.get(cursor)
+            var build_filtered = filtered.value() if filtered else (
+                plan_is_filtering(self, node.right)
+            )
             var finished = finish_build(
                 built,
                 keys,
                 node.how,
                 node.coalesce,
-                plan_cardinality(self, stats, node.left),
-                plan_is_filtering(self, node.right),
+                probe_estimate,
+                build_filtered,
             )
             if finished:
                 prepared = finished^
                 algorithm = "hash_index"
             if prepared:
                 var hash_index = prepared.take()
-                hash_index.build_filtered = plan_is_filtering(self, node.right)
+                hash_index.build_filtered = build_filtered
                 prepared = hash_index^
             joins.append(built^)
             join_nodes.append(cursor)
@@ -1314,11 +1422,16 @@ def _probe_start(
         return _ProbeStart(None)
     operations.reverse()
     operation_nodes.reverse()
+    # The setup made from the plan alone holds when every build has the
+    # columns it was made for (an empty build's are its own, cleared).
+    var ahead = Bool(types) and _same_frames(types.value().builds, joins)
     ref source = self._nodes[cursor]
     # With no output possible, the source is its columns without rows,
     # read as an in-memory frame: nothing is scanned.
     var empty_source = Optional[DataFrame]()
-    if no_output:
+    if no_output and ahead:
+        empty_source = types.value().source.copy()
+    elif no_output:
         empty_source = self._execute(cursor, True, False, batch_size)
     var frame_source = source.kind == SCAN_FRAME or Bool(empty_source)
     # A file source's scan state (`ScanSource`), opened once, and its
@@ -1349,6 +1462,10 @@ def _probe_start(
             state.finish()
             return _ProbeStart(None)
         file_scan = ArcPointer(state^)
+        if ahead and not _same_columns(
+            types.value().source, source_columns.value()
+        ):
+            ahead = False
         for column in source_columns.value()._columns:
             if column.dtype().is_categorical():
                 # Each batch may carry its own dictionary (Arrow
@@ -1359,21 +1476,31 @@ def _probe_start(
                 source_columns = None
                 break
     var inline_table_eligible = False
+    if not frame_source and not source_columns:
+        # A file read batch by batch: no setup is made for its steps.
+        ahead = False
     if consider_inline_table(
         eligibility, len(keys), len(expressions), ordered, distinct
     ):
-        var empty: DataFrame
-        if source_columns:
-            empty = source_columns.value().copy()
-        elif empty_source:
-            empty = empty_source.value().copy()
+        if ahead:
+            ref typed = types.value().typed
+            inline_table_eligible = table_supported(
+                typed[len(typed) - 1], keys, expressions
+            )
         else:
-            empty = self._frames[source.source_slot()].clear()
-        var empty_joins = ArcPointer(joins.copy())
-        var empty_indexes = ArcPointer(indexes.copy())
-        for operation in operations:
-            _apply_operation(operation, empty, empty_joins, empty_indexes)
-        inline_table_eligible = table_supported(empty, keys, expressions)
+            var empty: DataFrame
+            if source_columns:
+                empty = source_columns.value().copy()
+            elif empty_source:
+                empty = empty_source.value().copy()
+            else:
+                empty = self._frames[source.source_slot()].clear()
+                if len(source.names):
+                    empty = empty.select(source.names)
+            var typed = _step_schemas(empty, _steps_of(operations), joins)
+            inline_table_eligible = table_supported(
+                typed[len(typed) - 1], keys, expressions
+            )
     var decision = select_aggregation_strategy(
         self,
         cursor,
@@ -1406,6 +1533,17 @@ def _probe_start(
             file_scan = ArcPointer(opened.take())
     elif empty_source:
         input = empty_source.value().copy()
+        if ahead and types.value().filter:
+            # The steps as the setup compiled them: over no rows, the
+            # conjuncts the table filters proved true change nothing.
+            operations[0].exprs = types.value().filter.value().copy()
+    elif ahead:
+        # Read and narrowed by the table filters as the setup was made.
+        source._record_execution()
+        input = types.value().input.value().copy()
+        if types.value().filter:
+            trace_path("filter.table_filters")
+            operations[0].exprs = types.value().filter.value().copy()
     else:
         source._record_execution()
         input = self._frames[source.source_slot()].copy()
@@ -1607,6 +1745,9 @@ def _probe_start(
             pushed = self._pushed_filters.value()[].filters.copy()
         for n in finish_nodes:
             finish_operations.append(self._nodes[n].copy())
+        var pipeline_ahead = Optional[PipelineTypes]()
+        if ahead and not late_operations:
+            swap(pipeline_ahead, types.value().types)
         var run = begin_pipeline(
             pipe_input,
             _steps_of(step_nodes),
@@ -1630,7 +1771,11 @@ def _probe_start(
             finish_steps=_steps_of(finish_operations),
             pushed=pushed,
             source=file_scan,
-            source_rows=_source_rows(self, cursor) if file_scan else 0,
+            # The scan's estimated rows: its probe side's cardinality for
+            # join filters.
+            source_rows=plan_cardinality(
+                self, stats, cursor
+            ) if file_scan else 0,
             # The rows are the join's build side only when the pipeline's
             # rows are the stream's whole result.
             build_keys=build.keys.copy() if (
@@ -1644,6 +1789,9 @@ def _probe_start(
             build_coalesce=build.coalesce,
             build_probe_estimate=build.probe_estimate,
             build_filtered=build.build_filtered,
+            # Made ahead for the same steps over the same columns, unless
+            # late materialization changed them.
+            types=pipeline_ahead^,
         )
         return _ProbeStart(
             _PipedProbe(
@@ -2149,13 +2297,6 @@ struct _BatchStream(Movable):
         return result^
 
 
-def _source_rows(self: QueryContext, cursor: Int) raises -> Int:
-    """The scan's estimated rows (its probe side's cardinality for join
-    filters), as the planner's statistics give them."""
-    var stats = PlanStatistics()
-    return plan_cardinality(self, stats, cursor)
-
-
 def _open_scan_source(
     self: QueryContext,
     cursor: Int,
@@ -2449,6 +2590,155 @@ struct _PipedProbe(Movable):
         self.finish_nodes = finish_nodes^
 
 
+struct _ProbeTypes(Movable):
+    """What a probe's setup reads from the plan alone, made while the
+    inputs it waits for still run (`_probe_types`): each join build's
+    columns, the source's columns and, for an in-memory source, its rows
+    left by the first filter's table filters and that filter's remaining
+    conjuncts; each operation's input columns and output; and the
+    pipeline's steps typed and compiled with the aggregate table's
+    layout."""
+
+    var builds: List[DataFrame]
+    var source: DataFrame
+    var input: Optional[DataFrame]
+    var filter: Optional[List[Expr]]
+    var typed: List[DataFrame]
+    var types: Optional[PipelineTypes]
+
+    def __init__(
+        out self,
+        var builds: List[DataFrame],
+        var source: DataFrame,
+        var input: Optional[DataFrame],
+        var filter: Optional[List[Expr]],
+        var typed: List[DataFrame],
+        var types: Optional[PipelineTypes],
+    ):
+        self.builds = builds^
+        self.source = source^
+        self.input = input^
+        self.filter = filter^
+        self.typed = typed^
+        self.types = types^
+
+
+def _probe_types(
+    self: QueryContext, index: Int, head: _StreamHead, batch_size: Int
+) raises -> Optional[_ProbeTypes]:
+    """The setup `_probe_start` makes from the plan alone, for a probe
+    that reads a scan through its operations and joins: what the plan's
+    types decide (each build's and the source's columns, every step's
+    columns, the steps compiled, the aggregate table's layout) and the
+    in-memory source's table filters, none of which reads an input's
+    result. None for a probe whose source an input computes (a union, an
+    aggregate): it is set up on another plan."""
+    var first = head.cursor
+    while first >= 0:
+        ref step = self._nodes[first]
+        if _stream_rows(step) or _stream_join(step):
+            first = step.left
+        else:
+            break
+    if first < 0 or (first != index and not _is_scan(self._nodes[first].kind)):
+        return None
+    var cursor = head.cursor
+    var operations = List[PlanNode]()
+    var builds = List[DataFrame]()
+    while cursor >= 0:
+        ref node = self._nodes[cursor]
+        if _stream_rows(node):
+            operations.append(node.copy())
+        elif _stream_join(node):
+            var operation = node.copy()
+            operation.set_join_build_slot(len(builds))
+            builds.append(self._execute(node.right, True, True, batch_size))
+            operations.append(operation^)
+        else:
+            break
+        cursor = node.left
+    if cursor < 0 or not _is_scan(self._nodes[cursor].kind):
+        return None
+    operations.reverse()
+    ref source = self._nodes[cursor]
+    var empty: DataFrame
+    var input = Optional[DataFrame]()
+    var filter = Optional[List[Expr]]()
+    if source.kind == SCAN_FRAME:
+        var frame = self._frames[source.source_slot()].copy()
+        if len(source.names):
+            frame = frame.select(source.names)
+        empty = frame.clear()
+        # The first row-local filter as a scan filter: vectors ruled out
+        # by statistics are skipped, and conjuncts every remaining row is
+        # proven to pass are not evaluated.
+        if (
+            len(operations) > 0
+            and operations[0].kind == FILTER
+            and _row_local(operations[0].exprs)
+            and frame.height() > 0
+        ):
+            var scanned = scan_filtered(
+                frame, conjuncts(operations[0].exprs[0])
+            )
+            if scanned:
+                frame = scanned.value().frame.copy()
+                var remaining = List[Expr]()
+                remaining.append(conjunction(scanned.value().remaining))
+                operations[0].exprs = remaining.copy()
+                filter = remaining^
+        input = frame^
+    else:
+        empty = self._execute(cursor, True, False, batch_size)
+    var steps = _steps_of(operations)
+    var typed = _step_schemas(empty, steps, builds)
+    var sets = List[List[Int]]()
+    if head.grouping:
+        for members in _set_members(self._nodes[index]):
+            var indices = List[Int]()
+            for name in members:
+                var at = head.keys.index(name) if name in head.keys else -1
+                if at not in indices:
+                    indices.append(at)
+            sets.append(indices^)
+    var types = pipeline_types(
+        empty,
+        steps,
+        builds,
+        head.expressions,
+        head.keys,
+        sets,
+        len(head.keys) > 0 and len(head.expressions) > 0,
+    )
+    return _ProbeTypes(
+        builds^, empty^, input^, filter^, typed^, Optional(types^)
+    )
+
+
+def _same_columns(a: DataFrame, b: DataFrame) -> Bool:
+    """Whether two frames have the same columns: names and types, in
+    order."""
+    if a.width() != b.width():
+        return False
+    for c in range(a.width()):
+        if (
+            a._columns[c].name() != b._columns[c].name()
+            or a._columns[c].dtype() != b._columns[c].dtype()
+        ):
+            return False
+    return True
+
+
+def _same_frames(a: List[DataFrame], b: List[DataFrame]) -> Bool:
+    """Whether two lists of frames have the same columns, frame by frame."""
+    if len(a) != len(b):
+        return False
+    for k in range(len(a)):
+        if not _same_columns(a[k], b[k]):
+            return False
+    return True
+
+
 struct _ProbeStart(Movable):
     """`_probe_start`'s answer: the result, or a probe set up to run, as
     a morsel pipeline or as a batch stream."""
@@ -2522,6 +2812,10 @@ def _probe_restart(
     rows are (`build`), and this pipeline of the same schedule, not a new
     stream with a schedule of its own. A declined stream runs the node on
     `plan`."""
+    # The plan's estimates for it changed with its inputs: they are
+    # taken from `plan`.
+    head.probe_estimates = Dict[Int, Int]()
+    head.build_filtered = Dict[Int, Bool]()
     var started = _probe_start(plan, index, batch_size, sink, head^, build)
     if len(started.piped) > 0 or started.result:
         return started^

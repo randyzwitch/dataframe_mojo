@@ -2865,59 +2865,59 @@ struct PipelineRun(Movable):
                 pass
 
 
-def begin_pipeline(
-    frame: DataFrame,
+struct PipelineTypes(Movable):
+    """What a pipeline's setup decides from its columns' types alone, not
+    from any row: each step's input columns and the output, the
+    row-local steps compiled once for every worker, and the aggregate
+    table's layout (`pipeline_types`). A pipeline's first stage can make
+    them while the builds its rows probe are still running."""
+
+    var steps: List[Step]
+    var expressions: List[Expr]
+    var schemas: ArcPointer[List[DataFrame]]
+    var templates: ArcPointer[List[Optional[_VectorStep]]]
+    var layout: List[AggregateLayout]
+    var template: List[_StreamReduction]
+    var set_empty: List[DataFrame]
+
+    def __init__(
+        out self,
+        var steps: List[Step],
+        var expressions: List[Expr],
+        schemas: ArcPointer[List[DataFrame]],
+        templates: ArcPointer[List[Optional[_VectorStep]]],
+        var layout: List[AggregateLayout],
+        var template: List[_StreamReduction],
+        var set_empty: List[DataFrame],
+    ):
+        self.steps = steps^
+        self.expressions = expressions^
+        self.schemas = schemas
+        self.templates = templates
+        self.layout = layout^
+        self.template = template^
+        self.set_empty = set_empty^
+
+
+def pipeline_types(
+    schema_frame: DataFrame,
     given_steps: List[Step],
-    joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[JoinHashTable]]],
+    joins: List[DataFrame],
     given_expressions: List[Expr],
     keys: List[String],
-    ordered: Bool,
-    workers: Int,
-    batch_size: Int,
     sets: List[List[Int]],
-    top: Int,
-    top_names: List[String],
-    top_descending: List[Bool],
-    top_nulls_last: List[Bool],
-    top_maintain_order: Bool,
-    top_scan_key: Bool,
-    top_ranges: Optional[List[Int]],
-    top_row_ids: Bool,
     table: Bool,
-    finish_steps: List[Step],
-    pushed: List[PushedJoinFilter],
-    source: Optional[ArcPointer[ScanSource]] = None,
-    source_rows: Int = -1,
-    build_keys: List[String] = List[String](),
-    build_how: Int = JOIN_INNER,
-    build_coalesce: Bool = True,
-    build_probe_estimate: Int = -1,
-    build_filtered: Bool = False,
-) raises -> PipelineRun:
-    """`run_pipeline` up to its workers' jobs, not yet run: its execute stage is
-    the jobs, one task per thread; `finish_pipeline` is its finish, after the
-    rounds of `begin_round`. With a file `source`, `frame` holds its columns but
-    no row: the workers take the source's batches as their morsels, and
-    `source_rows` is its estimated height. With `build_keys`, the rows
-    are the build side of a hash join of type `build_how` on those keys
-    (`build_coalesce`, `build_probe_estimate` and `build_filtered` as
-    `finish_build` takes them): each worker sinks its chunks into its own rows of the join's
-    hash table (`JoinBuildSink`), and the finish makes the table
-    (`PipelineRun.built`) instead of a frame, unless a column's type
-    keeps the build on a frame (`join_build_layout`)."""
-    trace_path("pipeline.run")
+) raises -> PipelineTypes:
+    """The steps over `schema_frame`'s columns typed and compiled, and,
+    when the aggregate table takes the reduction (`table`), its layout:
+    `joins` are the build sides (their columns; rows are not read). A
+    layout reads no key statistics here: those are the rows'
+    (`begin_pipeline`)."""
     # Every step's input columns and the output, typed once, and the
-    # row-local steps compiled once for every worker. A late-materialized
-    # top-N's scan adds its row id column to every morsel.
-    var schema_frame = frame.clear()
-    if top_row_ids:
-        schema_frame = schema_frame.with_column(
-            Series(ROW_ID_COLUMN, Column[Int64](List[Int64]()))
-        )
+    # row-local steps compiled once for every worker.
     var steps = given_steps.copy()
     var expressions = given_expressions.copy()
-    var typed = _step_schemas(schema_frame, steps, joins[])
+    var typed = _step_schemas(schema_frame, steps, joins)
     if len(expressions) > 0:
         var extracted = _extract_aggregate_inputs(
             steps, expressions, keys, typed[len(steps)]
@@ -2969,22 +2969,113 @@ def begin_pipeline(
             for name in keys:
                 empty_keys.append(empty.column(name))
             var reduction = _StreamReduction(empty, expressions, keys)
-            var made = aggregate_layout(
-                empty_keys,
-                table_inputs(empty, empty_keys, expressions),
-                table_specs(reduction),
+            layout.append(
+                aggregate_layout(
+                    empty_keys,
+                    table_inputs(empty, empty_keys, expressions),
+                    table_specs(reduction),
+                )
             )
-            # Bounded source key statistics can select direct-address
-            # aggregation. Use those bounds only when every grouping key has a
-            # compatible estimate.
-            # A file source's statistics are not known before its scan.
-            var stats = List[Series]()
-            if not source:
-                stats = _key_statistics(frame, steps, keys)
-            if len(stats) == len(keys):
-                made.use_perfect_hash(stats)
-            layout.append(made^)
             template.append(reduction^)
+    return PipelineTypes(
+        steps^,
+        expressions^,
+        schemas,
+        templates,
+        layout^,
+        template^,
+        set_empty^,
+    )
+
+
+def begin_pipeline(
+    frame: DataFrame,
+    given_steps: List[Step],
+    joins: ArcPointer[List[DataFrame]],
+    indexes: ArcPointer[List[Optional[JoinHashTable]]],
+    given_expressions: List[Expr],
+    keys: List[String],
+    ordered: Bool,
+    workers: Int,
+    batch_size: Int,
+    sets: List[List[Int]],
+    top: Int,
+    top_names: List[String],
+    top_descending: List[Bool],
+    top_nulls_last: List[Bool],
+    top_maintain_order: Bool,
+    top_scan_key: Bool,
+    top_ranges: Optional[List[Int]],
+    top_row_ids: Bool,
+    table: Bool,
+    finish_steps: List[Step],
+    pushed: List[PushedJoinFilter],
+    source: Optional[ArcPointer[ScanSource]] = None,
+    source_rows: Int = -1,
+    build_keys: List[String] = List[String](),
+    build_how: Int = JOIN_INNER,
+    build_coalesce: Bool = True,
+    build_probe_estimate: Int = -1,
+    build_filtered: Bool = False,
+    var types: Optional[PipelineTypes] = None,
+) raises -> PipelineRun:
+    """`run_pipeline` up to its workers' jobs, not yet run: its execute stage is
+    the jobs, one task per thread; `finish_pipeline` is its finish, after the
+    rounds of `begin_round`. With a file `source`, `frame` holds its columns but
+    no row: the workers take the source's batches as their morsels, and
+    `source_rows` is its estimated height. With `build_keys`, the rows
+    are the build side of a hash join of type `build_how` on those keys
+    (`build_coalesce`, `build_probe_estimate` and `build_filtered` as
+    `finish_build` takes them): each worker sinks its chunks into its own rows of the join's
+    hash table (`JoinBuildSink`), and the finish makes the table
+    (`PipelineRun.built`) instead of a frame, unless a column's type
+    keeps the build on a frame (`join_build_layout`). `types`: the steps
+    typed and compiled and the table's layout (`pipeline_types`), when
+    the caller made them already for `given_steps` over `frame`'s
+    columns."""
+    trace_path("pipeline.run")
+    # The steps typed and compiled and the table's layout, unless the
+    # caller made them already for these steps and columns.
+    var made = Optional[PipelineTypes]()
+    if not types:
+        # A late-materialized top-N's scan adds its row id column to
+        # every morsel.
+        var schema_frame = frame.clear()
+        if top_row_ids:
+            schema_frame = schema_frame.with_column(
+                Series(ROW_ID_COLUMN, Column[Int64](List[Int64]()))
+            )
+        made = pipeline_types(
+            schema_frame,
+            given_steps,
+            joins[],
+            given_expressions,
+            keys,
+            sets,
+            table,
+        )
+    var chosen = types.take() if types else made.take()
+    var steps = List[Step]()
+    var expressions = List[Expr]()
+    swap(steps, chosen.steps)
+    swap(expressions, chosen.expressions)
+    var schemas = chosen.schemas
+    var templates = chosen.templates
+    var layout = List[AggregateLayout]()
+    var template = List[_StreamReduction]()
+    var set_empty = List[DataFrame]()
+    if table:
+        swap(layout, chosen.layout)
+        swap(template, chosen.template)
+        swap(set_empty, chosen.set_empty)
+    if len(layout) > 0 and len(sets) == 0 and not source:
+        # Bounded source key statistics can select direct-address
+        # aggregation. Use those bounds only when every grouping key has a
+        # compatible estimate. A file source's statistics are not known
+        # before its scan.
+        var stats = _key_statistics(frame, steps, keys)
+        if len(stats) == len(keys):
+            layout[0].use_perfect_hash(stats)
     if len(layout) > 0:
         trace_path("pipeline.group_table")
     elif len(keys) > 0 and len(expressions) > 0:
