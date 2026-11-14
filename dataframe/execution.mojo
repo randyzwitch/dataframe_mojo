@@ -162,6 +162,9 @@ from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from dataframe.kernels.group_rows import (
     GroupRows,
+    ROW_INDEX,
+    WIDE_ROW_INDEX,
+    consecutive_group_rows,
     group_ids,
     group_rows_from_ids,
     write_by_groups,
@@ -3086,15 +3089,25 @@ struct _GroupReduceJob[width: Int](Job):
         self.result = Series("", Column[Int64](List[Int64]()))
 
     def run(mut self) raises:
+        if self.groups[].wide:
+            self._run[WIDE_ROW_INDEX]()
+        else:
+            self._run[ROW_INDEX]()
+
+    def _run[I: DType](mut self) raises:
         var reducer = _new_reducer(
             self.bound, self.node, self.last - self.first
         )
         if self.node.op == IMPLODE:
             reducer.metadata = self.values._field_metadata
         var pair = is_pair_reduction(self.node.op)
-        var offsets = self.groups[].offsets.unsafe_ptr()
-        var all_rows = self.groups[].rows.unsafe_ptr()
-        if not pair and reducer.sum_group_rows(
+        var offsets = Pointer[Scalar[I], MutAnyOrigin](
+            unsafe_from_address=self.groups[].offsets_address()
+        )
+        var all_rows = Pointer[Scalar[I], MutAnyOrigin](
+            unsafe_from_address=self.groups[].rows_address()
+        )
+        if not pair and reducer.sum_group_rows[I](
             self.values,
             Int(offsets),
             Int(all_rows),
@@ -3104,8 +3117,8 @@ struct _GroupReduceJob[width: Int](Job):
             self.result = reducer.finish()
             return
         var g = self.first
-        var start = offsets[unsafe_offset=self.first]
-        var end = offsets[unsafe_offset=self.last]
+        var start = Int(offsets[unsafe_offset=self.first])
+        var end = Int(offsets[unsafe_offset=self.last])
         # Bounded batches of whole or partial groups: the rows to read and
         # each one's group, numbered from `first`.
         while start < end:
@@ -3113,9 +3126,9 @@ struct _GroupReduceJob[width: Int](Job):
             var rows = List[Int](capacity=stop - start)
             var local = List[Int](capacity=stop - start)
             for k in range(start, stop):
-                while offsets[unsafe_offset=g + 1] <= k:
+                while Int(offsets[unsafe_offset=g + 1]) <= k:
                     g += 1
-                rows.append(all_rows[unsafe_offset=k])
+                rows.append(Int(all_rows[unsafe_offset=k]))
                 local.append(g - self.first)
             var chunk = self.values.take(rows)
             if pair:
@@ -3436,7 +3449,7 @@ def _over_constant[
         var keys = _partition_keys(node, columns, cache_address)
         var made: GroupRows
         if len(keys) == 0:
-            made = group_rows_from_ids(List[Int](length=height, fill=0), 1)
+            made = consecutive_group_rows([0, height], height)
         else:
             made = partition_groups(keys, height)
         cache[].id_keys.append(node.text2)
@@ -3607,11 +3620,7 @@ struct _OverJob(Job):
         var offsets = List[Int](capacity=self.last - self.first + 1)
         for g in range(self.first, self.last + 1):
             offsets.append(starts[unsafe_offset=g] - self.lo)
-        var members = huge_uninit[Int](rows)
-        var at = members.unsafe_ptr()
-        for k in range(rows):
-            at[unsafe_offset=k] = k
-        var groups = ArcPointer(GroupRows(offsets^, members^))
+        var groups = ArcPointer(consecutive_group_rows(offsets, rows))
         var known = WindowLayouts()
         known.id_keys.append(self.keys)
         known.groups.append(groups)
@@ -4496,9 +4505,9 @@ def evaluate[
                 for group in groups:
                     counts[group] += 1
             elif grouped:
-                ref offsets = known_rows.value()[].offsets
+                ref lists = known_rows.value()[]
                 for g in range(group_count):
-                    counts[g] = Int64(offsets[g + 1] - offsets[g])
+                    counts[g] = Int64(lists.offset(g + 1) - lists.offset(g))
             else:
                 counts[0] = Int64(height)
             var state = Series("", Column[Int64](counts^))

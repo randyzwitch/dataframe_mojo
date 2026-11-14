@@ -224,11 +224,11 @@ def _sum_decimals[
 
 
 def _sum_int_rows[
-    D: DType
+    D: DType, I: DType
 ](
     column: Column[Scalar[D]],
-    at: Pointer[Int, MutAnyOrigin],
-    members: Pointer[Int, MutAnyOrigin],
+    at: Pointer[Scalar[I], MutAnyOrigin],
+    members: Pointer[Scalar[I], MutAnyOrigin],
     first: Int,
     last: Int,
     mut sums: List[IntSumState],
@@ -239,12 +239,12 @@ def _sum_int_rows[
     if column.null_count() == 0:
         for g in range(first, last):
             var total = Int128(0)
-            var lo = at[unsafe_offset=g]
-            var hi = at[unsafe_offset=g + 1]
+            var lo = Int(at[unsafe_offset=g])
+            var hi = Int(at[unsafe_offset=g + 1])
             for j in range(lo, hi):
-                total += data.unsafe_offset(members[unsafe_offset=j])[].cast[
-                    DType.int128
-                ]()
+                total += data.unsafe_offset(
+                    Int(members[unsafe_offset=j])
+                )[].cast[DType.int128]()
             ref state = out.unsafe_offset(g - first)[]
             state.total += total
             state.count += Int64(hi - lo)
@@ -254,8 +254,8 @@ def _sum_int_rows[
     for g in range(first, last):
         var total = Int128(0)
         var count = 0
-        for j in range(at[unsafe_offset=g], at[unsafe_offset=g + 1]):
-            var row = members[unsafe_offset=j]
+        for j in range(Int(at[unsafe_offset=g]), Int(at[unsafe_offset=g + 1])):
+            var row = Int(members[unsafe_offset=j])
             if _validity_at(bits, bit_offset + row):
                 total += data.unsafe_offset(row)[].cast[DType.int128]()
                 count += 1
@@ -265,11 +265,11 @@ def _sum_int_rows[
 
 
 def _sum_float_rows[
-    D: DType
+    D: DType, I: DType
 ](
     column: Column[Scalar[D]],
-    at: Pointer[Int, MutAnyOrigin],
-    members: Pointer[Int, MutAnyOrigin],
+    at: Pointer[Scalar[I], MutAnyOrigin],
+    members: Pointer[Scalar[I], MutAnyOrigin],
     first: Int,
     last: Int,
     mut sums: List[FloatSumState],
@@ -284,8 +284,8 @@ def _sum_float_rows[
     for g in range(first, last):
         var total = Float64(0)
         var count = 0
-        for j in range(at[unsafe_offset=g], at[unsafe_offset=g + 1]):
-            var row = members[unsafe_offset=j]
+        for j in range(Int(at[unsafe_offset=g]), Int(at[unsafe_offset=g + 1])):
+            var row = Int(members[unsafe_offset=j])
             if nulls and not _validity_at(bits, bit_offset + row):
                 continue
             total += data.unsafe_offset(row)[].cast[DType.float64]()
@@ -296,11 +296,11 @@ def _sum_float_rows[
 
 
 def _sum_decimal_rows[
-    D: DType
+    D: DType, I: DType
 ](
     column: Column[Scalar[D]],
-    at: Pointer[Int, MutAnyOrigin],
-    members: Pointer[Int, MutAnyOrigin],
+    at: Pointer[Scalar[I], MutAnyOrigin],
+    members: Pointer[Scalar[I], MutAnyOrigin],
     first: Int,
     last: Int,
     mut sums: List[Int128],
@@ -321,8 +321,8 @@ def _sum_decimal_rows[
     for g in range(first, last):
         var total = Int128(0)
         var count = 0
-        for j in range(at[unsafe_offset=g], at[unsafe_offset=g + 1]):
-            var row = members[unsafe_offset=j]
+        for j in range(Int(at[unsafe_offset=g]), Int(at[unsafe_offset=g + 1])):
+            var row = Int(members[unsafe_offset=j])
             if nulls and not _validity_at(bits, bit_offset + row):
                 continue
             comptime if D == DType.int128:
@@ -1446,11 +1446,14 @@ struct Reducer(Movable):
             for _ in range(n):
                 self.sketches.append(CardinalitySketch())
 
-    def sum_group_rows(
+    def sum_group_rows[
+        I: DType
+    ](
         mut self, values: Series, offsets: Int, rows: Int, first: Int, last: Int
     ) raises -> Bool:
         """Sums (and means) of groups [first, last), whose rows are
-        `rows[offsets[g]:offsets[g + 1]]` (addresses), read through the row
+        `rows[offsets[g]:offsets[g + 1]]` (addresses of `I` row indices),
+        read through the row
         lists into one running total per group. No gathered copy of the
         values and no per-row group numbers are made, and each group's
         state is written once. Integers add in 128 bits, floats in Float64
@@ -1462,15 +1465,15 @@ struct Reducer(Movable):
         if not (self.op == SUM or self.op == MEAN) or values.is_chunked():
             return False
         var n = last - first
-        var at = Pointer[Int, MutAnyOrigin](unsafe_from_address=offsets)
-        var members = Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)
+        var at = Pointer[Scalar[I], MutAnyOrigin](unsafe_from_address=offsets)
+        var members = Pointer[Scalar[I], MutAnyOrigin](unsafe_from_address=rows)
         if values.dtype().is_decimal():
             if not self.dtype.is_decimal() or len(self.decimals) < n:
                 return False
             comptime for k in range(3):
                 comptime D = (DType.int32, DType.int64, DType.int128)[k]
                 if values._data.isa[Column[Scalar[D]]]():
-                    _sum_decimal_rows[D](
+                    _sum_decimal_rows[D, I](
                         values._data[Column[Scalar[D]]],
                         at,
                         members,
@@ -1490,7 +1493,7 @@ struct Reducer(Movable):
                 comptime if D.is_floating_point():
                     if len(self.float_sums) < n:
                         return False
-                    _sum_float_rows[D](
+                    _sum_float_rows[D, I](
                         values._data[Column[Scalar[D]]],
                         at,
                         members,
@@ -1501,7 +1504,7 @@ struct Reducer(Movable):
                 else:
                     if len(self.int_sums) < n:
                         return False
-                    _sum_int_rows[D](
+                    _sum_int_rows[D, I](
                         values._data[Column[Scalar[D]]],
                         at,
                         members,
