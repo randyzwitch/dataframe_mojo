@@ -110,11 +110,20 @@ def _reserve_helpers(wanted: Int) -> Int:
     """
     if wanted <= 0:
         return 0
-    var limit = Int64(configured_workers() - 1)
-    ref helpers = _helpers()
+    return _reserve_from(
+        Int(Pointer(to=_helpers())), configured_workers() - 1, wanted
+    )
+
+
+def _reserve_from(budget: Int, limit: Int, wanted: Int) -> Int:
+    """`_reserve_helpers` against a budget counter already looked up (at
+    address `budget`), with `limit` helpers in all."""
+    ref helpers = Pointer[Atomic[Int64], MutAnyOrigin](
+        unsafe_from_address=budget
+    )[]
     var busy = helpers.load()
     while True:
-        var granted = min(Int64(wanted), limit - busy)
+        var granted = min(Int64(wanted), Int64(limit) - busy)
         if granted <= 0:
             return 0
         if helpers.compare_exchange(busy, busy + granted):
@@ -776,6 +785,9 @@ struct _Crew(Movable):
     var wanted: Int
     # How long a thread looks for work before parking (`_CREW_SPIN_NS`).
     var spin_ns: Int
+    # The process-wide helper budget's counter, looked up once: its
+    # threads take and return budget slots between every pair of jobs.
+    var budget: Int
 
     def __init__(out self, wanted: Int):
         self.mutex = Array[UInt8, _SYNC_BYTES](fill=0)
@@ -796,6 +808,7 @@ struct _Crew(Movable):
         self.spin_ns = 0 if wanted + 1 > _performance_core_count() else (
             _CREW_SPIN_NS
         )
+        self.budget = Int(Pointer(to=_helpers()))
 
     def spawn(mut self, address: Int):
         """Start the threads, once: the caller that wins the flag creates
@@ -863,7 +876,7 @@ struct _Crew(Movable):
                 ):
                     state = self._state(p).load()
                     continue
-                if _reserve_helpers(1) > 0:
+                if _reserve_from(self.budget, self.wanted, 1) > 0:
                     return p
                 # The budget is spent: leave, handing the slot back to a
                 # thread the budget frees later, unless the posting closed.
@@ -1036,7 +1049,9 @@ def _crew_worker(address: Int) abi("C") -> Int:
         )[].run()
         # Out of work: give the thread back to the budget now, as
         # `_claim_worker` does, so a job still running can start helpers.
-        _release_helpers(1)
+        _ = Pointer[Atomic[Int64], MutAnyOrigin](
+            unsafe_from_address=crew.budget
+        )[].fetch_sub(1)
         _ = crew._state(p).fetch_sub(1)
 
 

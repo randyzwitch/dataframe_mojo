@@ -210,6 +210,126 @@ def _sum_decimals[
         seen[unsafe_offset=g] += 1
 
 
+def _sum_int_rows[
+    D: DType
+](
+    column: Column[Scalar[D]],
+    at: Pointer[Int, MutAnyOrigin],
+    members: Pointer[Int, MutAnyOrigin],
+    first: Int,
+    last: Int,
+    mut sums: List[IntSumState],
+):
+    """Each group's integer total over its row list, in 128 bits."""
+    var data = column._ptr()
+    var out = sums.unsafe_ptr()
+    if column.null_count() == 0:
+        for g in range(first, last):
+            var total = Int128(0)
+            var lo = at[unsafe_offset=g]
+            var hi = at[unsafe_offset=g + 1]
+            for j in range(lo, hi):
+                total += data.unsafe_offset(members[unsafe_offset=j])[].cast[
+                    DType.int128
+                ]()
+            ref state = out.unsafe_offset(g - first)[]
+            state.total += total
+            state.count += Int64(hi - lo)
+        return
+    var bits = column._bits[].unsafe_ptr()
+    var bit_offset = column._offset
+    for g in range(first, last):
+        var total = Int128(0)
+        var count = 0
+        for j in range(at[unsafe_offset=g], at[unsafe_offset=g + 1]):
+            var row = members[unsafe_offset=j]
+            if _validity_at(bits, bit_offset + row):
+                total += data.unsafe_offset(row)[].cast[DType.int128]()
+                count += 1
+        ref state = out.unsafe_offset(g - first)[]
+        state.total += total
+        state.count += Int64(count)
+
+
+def _sum_float_rows[
+    D: DType
+](
+    column: Column[Scalar[D]],
+    at: Pointer[Int, MutAnyOrigin],
+    members: Pointer[Int, MutAnyOrigin],
+    first: Int,
+    last: Int,
+    mut sums: List[FloatSumState],
+):
+    """Each group's float total over its row list, added as Float64 in row
+    order."""
+    var data = column._ptr()
+    var out = sums.unsafe_ptr()
+    var nulls = column.null_count() > 0
+    var bits = column._bits[].unsafe_ptr()
+    var bit_offset = column._offset
+    for g in range(first, last):
+        var total = Float64(0)
+        var count = 0
+        for j in range(at[unsafe_offset=g], at[unsafe_offset=g + 1]):
+            var row = members[unsafe_offset=j]
+            if nulls and not _validity_at(bits, bit_offset + row):
+                continue
+            total += data.unsafe_offset(row)[].cast[DType.float64]()
+            count += 1
+        ref state = out.unsafe_offset(g - first)[]
+        state.total += total
+        state.count += Int64(count)
+
+
+def _sum_decimal_rows[
+    D: DType
+](
+    column: Column[Scalar[D]],
+    at: Pointer[Int, MutAnyOrigin],
+    members: Pointer[Int, MutAnyOrigin],
+    first: Int,
+    last: Int,
+    mut sums: List[Int128],
+    mut counts: List[Int64],
+    dtype: DataType,
+) raises:
+    """Each group's unscaled decimal total over its row list, in 128 bits.
+    Values of at most 64 bits stay under 10^18, so their totals cannot
+    reach 10^38 before 10^20 rows and need no check; 128-bit values are
+    checked against the precision after every addition."""
+    var data = column._ptr()
+    var totals = sums.unsafe_ptr()
+    var seen = counts.unsafe_ptr()
+    var nulls = column.null_count() > 0
+    var bits = column._bits[].unsafe_ptr()
+    var bit_offset = column._offset
+    var limit = precision_limit(dtype.precision())
+    for g in range(first, last):
+        var total = Int128(0)
+        var count = 0
+        for j in range(at[unsafe_offset=g], at[unsafe_offset=g + 1]):
+            var row = members[unsafe_offset=j]
+            if nulls and not _validity_at(bits, bit_offset + row):
+                continue
+            comptime if D == DType.int128:
+                total = check_limit(
+                    total + data.unsafe_offset(row)[].cast[DType.int128](),
+                    limit,
+                    dtype,
+                )
+            else:
+                total += data.unsafe_offset(row)[].cast[DType.int128]()
+            count += 1
+        comptime if D == DType.int128:
+            totals[unsafe_offset=g - first] = check_limit(
+                totals[unsafe_offset=g - first] + total, limit, dtype
+            )
+        else:
+            totals[unsafe_offset=g - first] += total
+        seen[unsafe_offset=g - first] += Int64(count)
+
+
 def _sum_ints[
     D: DType
 ](
@@ -1178,46 +1298,68 @@ struct Reducer(Movable):
 
     def sum_group_rows(
         mut self, values: Series, offsets: Int, rows: Int, first: Int, last: Int
-    ) -> Bool:
-        """Integer sums (and means) of groups [first, last), whose rows are
+    ) raises -> Bool:
+        """Sums (and means) of groups [first, last), whose rows are
         `rows[offsets[g]:offsets[g + 1]]` (addresses), read through the row
         lists into one running total per group. No gathered copy of the
         values and no per-row group numbers are made, and each group's
-        state is written once. Returns False, changing nothing, for
-        anything but a contiguous integer column without nulls."""
-        if (
-            not (self.op == SUM or self.op == MEAN)
-            or self.logical.is_decimal()
-            or values.is_chunked()
-        ):
+        state is written once. Integers add in 128 bits, floats in Float64
+        and decimals in their 128-bit unscaled sums, each in the same state
+        a row-by-row update fills; null rows are skipped and not counted.
+        Each group's rows are ascending, so every total adds its values in
+        row order, as a sequential pass would. Returns False, changing
+        nothing, for any other reduction or a chunked column."""
+        if not (self.op == SUM or self.op == MEAN) or values.is_chunked():
+            return False
+        var n = last - first
+        var at = Pointer[Int, MutAnyOrigin](unsafe_from_address=offsets)
+        var members = Pointer[Int, MutAnyOrigin](unsafe_from_address=rows)
+        if values.dtype().is_decimal():
+            if not self.dtype.is_decimal() or len(self.decimals) < n:
+                return False
+            comptime for k in range(3):
+                comptime D = (DType.int32, DType.int64, DType.int128)[k]
+                if values._data.isa[Column[Scalar[D]]]():
+                    _sum_decimal_rows[D](
+                        values._data[Column[Scalar[D]]],
+                        at,
+                        members,
+                        first,
+                        last,
+                        self.decimals,
+                        self.counts,
+                        self.dtype,
+                    )
+                    return True
+            return False
+        if self.logical.is_decimal():
             return False
         comptime for k in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[k]
-            comptime if not D.is_floating_point():
-                if values._data.isa[Column[Scalar[D]]]():
-                    ref column = values._data[Column[Scalar[D]]]
-                    if column.null_count() > 0:
+            if values._data.isa[Column[Scalar[D]]]():
+                comptime if D.is_floating_point():
+                    if len(self.float_sums) < n:
                         return False
-                    var data = column._ptr()
-                    var at = Pointer[Int, MutAnyOrigin](
-                        unsafe_from_address=offsets
+                    _sum_float_rows[D](
+                        values._data[Column[Scalar[D]]],
+                        at,
+                        members,
+                        first,
+                        last,
+                        self.float_sums,
                     )
-                    var members = Pointer[Int, MutAnyOrigin](
-                        unsafe_from_address=rows
+                else:
+                    if len(self.int_sums) < n:
+                        return False
+                    _sum_int_rows[D](
+                        values._data[Column[Scalar[D]]],
+                        at,
+                        members,
+                        first,
+                        last,
+                        self.int_sums,
                     )
-                    var sums = self.int_sums.unsafe_ptr()
-                    for g in range(first, last):
-                        var total = Int128(0)
-                        var lo = at[unsafe_offset=g]
-                        var hi = at[unsafe_offset=g + 1]
-                        for j in range(lo, hi):
-                            total += data.unsafe_offset(
-                                members[unsafe_offset=j]
-                            )[].cast[DType.int128]()
-                        ref state = sums.unsafe_offset(g - first)[]
-                        state.total += total
-                        state.count += Int64(hi - lo)
-                    return True
+                return True
         return False
 
     def update(
