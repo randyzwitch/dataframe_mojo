@@ -6,7 +6,11 @@ from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Expr, Series, col
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.binding import bind
-from dataframe.execution import _ReduceJob, _direct_grouped_sum
+from dataframe.execution import (
+    _ReduceInputs,
+    _ReduceJob,
+    _direct_grouped_sum,
+)
 from dataframe.frame import _bind_all
 
 
@@ -61,10 +65,11 @@ def native_intervals[D: DType]() raises:
                                 == 1 else start
                             )
                             var job = _ReduceJob[8](
-                                bound,
-                                columns,
-                                List[Series](),
-                                node,
+                                ArcPointer(
+                                    _ReduceInputs(
+                                        bound, columns, List[Series](), node
+                                    )
+                                ),
                                 start,
                                 end,
                                 17,
@@ -161,10 +166,7 @@ def test_grouped_native_eligibility_rejects_computed_logical_and_ungrouped_input
                 and expression._nodes[1].op == col("v").sum()._nodes[1].op
             )
             var job = _ReduceJob[8](
-                bound,
-                columns,
-                List[Series](),
-                node,
+                ArcPointer(_ReduceInputs(bound, columns, List[Series](), node)),
                 0,
                 3,
                 17,
