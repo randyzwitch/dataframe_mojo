@@ -15,9 +15,12 @@ Threads come from one process-wide budget of `DATAFRAME_THREADS` - 1
 helpers, shared by every `run_jobs` call and `Pool` round, nested or
 concurrent, so the setting is a limit on threads running jobs (#390).
 
-`worker_count` sizes the pool: `DATAFRAME_THREADS` (1 disables parallelism),
-else the physical core count, capped so each worker gets at least
-`MIN_ROWS_PER_WORKER` rows (small inputs stay single-threaded).
+`worker_count` sizes a kernel's tasks: one per thread (`DATAFRAME_THREADS`,
+1 disables parallelism, else the physical core count), up to one per
+vector of `STANDARD_VECTOR_SIZE` rows. A vector is the unit every kernel
+processes rows in, so a task never holds less than one: an input of a
+few vectors runs as that many tasks, and one of a vector or less on the
+calling thread alone.
 
 An algorithm that runs several rounds of jobs -- a sort's run pass and then
 its merge rounds -- would pay that creation cost once per round. `Pool`
@@ -39,11 +42,7 @@ from std.os import getenv
 from std.time import perf_counter_ns
 from std.sys import num_performance_cores, num_physical_cores, size_of
 
-# Threadripper 3970X and M1, 4/8/16-worker sweeps: 16k helps 100k-row
-# expressions on M1 but makes cheap counts 5-7x slower and oversubscribed
-# grouping 4x slower. Keep the shared 64k floor; per-operation tuning is
-# separate. See docs/design/worker-calibration.md.
-comptime MIN_ROWS_PER_WORKER = 65536
+from .vector.types import STANDARD_VECTOR_SIZE
 
 # pthread_mutex_t and pthread_cond_t are opaque and platform-sized (up to 64
 # bytes on the platforms built for); over-allocating is harmless.
@@ -1372,13 +1371,8 @@ def morsel_ranges(ends: List[Int], workers: Int, align: Int = 64) -> List[Int]:
 
 
 def configured_workers() -> Int:
-    """The thread count itself, before any per-stage minimum is applied:
-    `DATAFRAME_THREADS` if set, else the physical core count.
-
-    A stage whose work per row is more than a scan -- sorting, which is
-    n log n -- can divide further than `MIN_ROWS_PER_WORKER` allows and
-    still keep every thread busy, so it sizes itself from this directly.
-    """
+    """The thread count itself: `DATAFRAME_THREADS` if set, else the
+    physical core count."""
     var configured = num_physical_cores()
     var setting = getenv("DATAFRAME_THREADS")
     if setting:
@@ -1390,8 +1384,19 @@ def configured_workers() -> Int:
 
 
 def worker_count(rows: Int) -> Int:
-    """Threads to use for `rows` rows (see the module docstring)."""
-    return max(1, min(configured_workers(), rows // MIN_ROWS_PER_WORKER))
+    """Tasks for a kernel over `rows` rows (see the module docstring)."""
+    return task_count(rows, configured_workers())
+
+
+def task_count(rows: Int, workers: Int) -> Int:
+    """Tasks for `rows` rows on `workers` threads: one a thread, each at
+    least one whole vector of `STANDARD_VECTOR_SIZE` rows. The vector is
+    the unit a kernel's inner loops run over, so a task's fixed cost (a
+    crew thread taking it, its output buffers) is paid at most once per
+    vector, and an input a thread could finish in one vector stays on
+    the calling thread. Work per row does not change the count: a task
+    over more rows takes longer, but the threads are just as busy."""
+    return max(1, min(workers, rows // STANDARD_VECTOR_SIZE))
 
 
 def partitions(rows: Int, workers: Int, align: Int) -> List[Int]:

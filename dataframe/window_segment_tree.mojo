@@ -28,7 +28,12 @@ from dataframe.aggregation.function import (
 )
 from dataframe.aggregation.reducer import Reducer
 from dataframe.dtype import DataType
-from dataframe.parallel import Job, configured_workers, partitions, run_jobs
+from dataframe.parallel import (
+    Job,
+    partitions,
+    run_jobs,
+    worker_count,
+)
 from dataframe.series import Series
 from dataframe.storage.string import StringColumn
 from dataframe.vector.data_chunk import ColumnArena, DataChunk, flat_over
@@ -453,7 +458,7 @@ struct _EvaluateJob(Job):
 
 
 def _workers(items: Int) -> Int:
-    return max(1, min(configured_workers(), items // STANDARD_VECTOR_SIZE))
+    return worker_count(items)
 
 
 def _build(mut tree: WindowSegmentTree) raises:

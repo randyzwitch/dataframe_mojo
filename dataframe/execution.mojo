@@ -2577,16 +2577,6 @@ def _direct_numeric_reduction(
     return True
 
 
-def _scan_width(bound: BoundExpr, columns: List[Series], node: Node) -> Int:
-    """Bytes per row a direct scan reads."""
-    var input = node.left
-    if _widening_cast(bound, columns, node):
-        input = bound.expr._nodes[input].left
-    return max(
-        1, columns[bound.sources[input]].dtype().physical().bit_width() // 8
-    )
-
-
 def _shifted_sum_shape(
     bound: BoundExpr, columns: List[Series], node: Node
 ) -> Bool:
@@ -2927,14 +2917,6 @@ def _reduce[
     groups, so nothing is merged and any number of groups runs in
     parallel."""
     var workers = worker_count(height)
-    if not grouped and _direct_scan(bound, columns, node):
-        # A SIMD scan saturates memory bandwidth with few workers, and each
-        # worker's thread costs more to start than scanning a few MB: 10M
-        # Int16 values sum in 0.45 ms on 4 workers and 0.62 ms on 8.
-        workers = min(
-            workers,
-            min(8, max(1, height * _scan_width(bound, columns, node) >> 22)),
-        )
     if (
         not grouped
         and (node.op == LEN or node.op == COUNT)
