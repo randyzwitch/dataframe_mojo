@@ -1,5 +1,6 @@
 """Expression folding and common-subexpression helpers."""
 from dataframe.binding import (
+    BoundExpr,
     bind,
 )
 from dataframe.storage.column import (
@@ -9,11 +10,18 @@ from dataframe.dtype import (
     DataType,
     NUMERIC_DTYPES,
 )
-from dataframe.execution import evaluate
+from dataframe.execution import _total_cast, evaluate
 from dataframe.expr import (
+    ADD,
     AND,
     CAST,
     COL,
+    DIV,
+    MEAN,
+    MUL,
+    NEG,
+    SUB,
+    SUM,
     EQ,
     GE,
     GT,
@@ -74,45 +82,113 @@ def _cannot_raise(expr: Expr) -> Bool:
     here only when all of its bound implementations are total.
     """
     for node in expr._nodes:
-        if node.op not in [
-            COL,
-            SELECTOR,
-            LIT_BOOL,
-            LIT_INT,
-            LIT_FLOAT,
-            LIT_STRING,
-            LIT_NULL,
-            EQ,
-            NE,
-            LT,
-            LE,
-            GT,
-            GE,
-            AND,
-            OR,
-            NOT,
-            IS_NULL,
-            IS_NOT_NULL,
-            IS_NAN,
-            IS_NOT_NAN,
-            IS_FINITE,
-            IS_INFINITE,
-            COUNT,
-            LEN,
-            NULL_COUNT,
-            MIN,
-            MAX,
-            FIRST,
-            LAST,
-        ]:
+        if not _total_op(node.op):
             return False
     return True
+
+
+def _total_op(op: Int) -> Bool:
+    """Whether every bound implementation of `op` is total."""
+    return op in [
+        COL,
+        SELECTOR,
+        LIT_BOOL,
+        LIT_INT,
+        LIT_FLOAT,
+        LIT_STRING,
+        LIT_NULL,
+        EQ,
+        NE,
+        LT,
+        LE,
+        GT,
+        GE,
+        AND,
+        OR,
+        NOT,
+        IS_NULL,
+        IS_NOT_NULL,
+        IS_NAN,
+        IS_NOT_NAN,
+        IS_FINITE,
+        IS_INFINITE,
+        COUNT,
+        LEN,
+        NULL_COUNT,
+        MIN,
+        MAX,
+        FIRST,
+        LAST,
+    ]
 
 
 def _cannot_raise(exprs: List[Expr]) -> Bool:
     for expr in exprs:
         if not _cannot_raise(expr):
             return False
+    return True
+
+
+def _cannot_raise(exprs: List[Expr], input: List[Series]) -> Bool:
+    """Whether evaluating `exprs` over columns typed as `input` is total.
+
+    Some operations raise for one input type and never for another: integer
+    and decimal arithmetic and sums are checked for overflow, while float
+    arithmetic follows IEEE 754 and yields an infinity or NaN instead; a
+    cast raises only when some source value has no target value. So an
+    expression the untyped check rejects can still be total once its
+    operand types are known. An expression that does not bind keeps the
+    untyped answer."""
+    if _cannot_raise(exprs):
+        return True
+    for expr in exprs:
+        try:
+            if not _cannot_raise(bind(expr, input, fuse=False)):
+                return False
+        except:
+            return False
+    return True
+
+
+def _cannot_raise(bound: BoundExpr) -> Bool:
+    """Whether every operation of a bound expression is total for the
+    types it was bound to: the untyped total operations; float addition,
+    subtraction, multiplication, division and negation; sums and means of
+    floats; and casts that are defined for every value (to the same type,
+    between numeric types when not strict, or strict into a type that
+    holds every source value). Decimal targets are excluded: a decimal
+    cast can overflow its precision."""
+    ref nodes = bound.expr._nodes
+    for i in range(len(nodes)):
+        ref node = nodes[i]
+        if _total_op(node.op):
+            continue
+        var op = node.op
+        if op == ADD or op == SUB or op == MUL or op == DIV or op == NEG:
+            if not bound.dtypes[i].is_float():
+                return False
+            for child in [node.left, node.right]:
+                if child >= 0 and not bound.dtypes[child].is_float():
+                    return False
+            continue
+        if op == SUM or op == MEAN:
+            if node.left < 0 or not bound.dtypes[node.left].is_float():
+                return False
+            continue
+        if op == CAST and node.left >= 0:
+            var source = bound.dtypes[node.left]
+            var target = bound.dtypes[i]
+            if source == target:
+                continue
+            if (
+                target.is_numeric()
+                and not target.is_decimal()
+                and source.is_numeric()
+                and (not source.is_decimal() or target.is_float())
+                and (node.integer != 1 or _total_cast(source, target))
+            ):
+                continue
+        return False
     return True
 
 

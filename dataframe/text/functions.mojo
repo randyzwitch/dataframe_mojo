@@ -40,7 +40,7 @@ from dataframe.expr import (
 )
 from dataframe.dtype import DataType
 from dataframe.storage.nested import StructColumn
-from dataframe.regex import Regex
+from regex_mojo import Regex
 from dataframe.text.regex_adapter import (
     compile_pattern,
     regex_count,

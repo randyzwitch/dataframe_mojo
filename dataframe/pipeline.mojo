@@ -132,8 +132,11 @@ from dataframe.aggregation.keys import (
 )
 from dataframe.aggregation.selected_rows import _reduce_floats, _reduce_ints
 from dataframe.joins.hash_table import (
+    JoinBuildLayout,
+    JoinBuildSink,
     JoinHashTable,
     ScanStructure,
+    join_build_layout,
 )
 from dataframe.joins.join_filter import (
     BF_CHECK_N,
@@ -142,6 +145,7 @@ from dataframe.joins.join_filter import (
     PushedJoinFilter,
     SelectivityStats,
     finalize_filters,
+    finalize_table_filters,
     keep_rows,
     supports_join_filters,
 )
@@ -540,15 +544,14 @@ def _join_filters(
                     if not probe:
                         continue
                     var name = probe.value()
-                    var made = finalize_filters(
+                    var made = finalize_table_filters(
                         name,
                         frame.column(name).dtype(),
-                        build.column(step.right_keys[k]),
+                        table,
+                        k,
                         at,
                         len(step.names),
-                        table.inserted,
                         probe_rows,
-                        table.build_filtered,
                         scan,
                     )
                     if made:
@@ -1203,6 +1206,11 @@ struct _ChunkRunner(Movable):
     # its result, or the input of a reduction no aggregate sink takes.
     var materialize: List[MaterializeSink]
     var materializes: Bool
+    # A join build sink (`JoinBuildSink`), when the pipeline's rows are a
+    # hash join's build side: the chunks go into the worker's own rows,
+    # which become the join's table, and nothing is collected.
+    var build: List[JoinBuildSink]
+    var build_layout: List[ArcPointer[JoinBuildLayout]]
     # Retain scan-filter state and its source offset while the morsel runs.
     # Statistics can skip a vector before any values are read; -1 denotes no
     # source offset.
@@ -1247,6 +1255,8 @@ struct _ChunkRunner(Movable):
         self.sets_layout = List[ArcPointer[GroupingSetsLayout]]()
         self.materialize = List[MaterializeSink]()
         self.materializes = False
+        self.build = List[JoinBuildSink]()
+        self.build_layout = List[ArcPointer[JoinBuildLayout]]()
         self.scan = None
         self.scan_offset = -1
 
@@ -1287,6 +1297,7 @@ struct _ChunkRunner(Movable):
             or len(self.table) > 0
             or len(self.sets) > 0
             or len(self.materialize) > 0
+            or len(self.build) > 0
         )
 
     def begin_sink(
@@ -1312,6 +1323,10 @@ struct _ChunkRunner(Movable):
                     GroupingSetsSink(self.sets_layout[0][], self.table_workers)
                 )
             self.sets[0].begin(morsel)
+        elif len(self.build_layout) > 0:
+            if len(self.build) == 0:
+                self.build.append(JoinBuildSink(self.build_layout[0]))
+            self.build[0].begin(morsel)
         elif self.materializes:
             if len(self.materialize) == 0:
                 self.materialize.append(
@@ -1332,6 +1347,8 @@ struct _ChunkRunner(Movable):
             self.sets[0].derive()
         if len(self.materialize) > 0:
             self.materialize[0].release()
+        if len(self.build) > 0:
+            self.build[0].release()
 
     def release_local(mut self):
         """Release worker-local compiled steps on the worker that used them.
@@ -1349,6 +1366,8 @@ struct _ChunkRunner(Movable):
             _sink_chunk(self.table[0], chunk, self.arena)
         elif len(self.sets) > 0:
             _sink_chunk(self.sets[0], chunk, self.arena)
+        elif len(self.build) > 0:
+            _sink_chunk(self.build[0], chunk, self.arena)
         else:
             _sink_chunk(self.materialize[0], chunk, self.arena)
 
@@ -2098,8 +2117,8 @@ struct _PipelineJob(Job):
         _sink_chunk(self.topn[0], ordered, self.runner.arena)
 
     def _unmatched(self, chunk: Int, length: Int) raises -> DataFrame:
-        """The build rows of the hash table's row chunk `chunk` the join
-        emits after the probe, as the step's output: a
+        """The build rows of the hash table's row chunks [chunk, chunk +
+        length) the join emits after the probe, as the step's output: a
         right-semi or right-anti join's build columns, or an outer join's
         with the probe columns null, coalesced keys taken from the rows."""
         ref step = self.steps[][self.unmatched_step]
@@ -2107,7 +2126,8 @@ struct _PipelineJob(Job):
         ref right = self.joins[][step.join]
         var want = UInt8(1) if step.how == JOIN_RIGHT_SEMI else UInt8(0)
         var pointers = List[UInt64]()
-        table.scan_chunk(chunk, want, pointers)
+        for c in range(chunk, chunk + length):
+            table.scan_chunk(c, want, pointers)
         ref schema = self.runner.schemas[][self.unmatched_step + 1]
         if len(pointers) == 0:
             return schema.clear()
@@ -2369,125 +2389,142 @@ def _morsel_ranges(frame: DataFrame, workers: Int) -> List[Int]:
     return morsel_ranges(ends, max(1, workers))
 
 
-def run_pipeline(
-    frame: DataFrame,
-    steps: List[Step],
-    joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[JoinHashTable]]],
-    expressions: List[Expr],
-    keys: List[String],
-    ordered: Bool,
-    workers: Int,
-    batch_size: Int,
-    mut counts: List[Int],
-    mut set_frames: List[DataFrame],
-    sets: List[List[Int]] = List[List[Int]](),
-    top: Int = -1,
-    top_names: List[String] = List[String](),
-    top_descending: List[Bool] = List[Bool](),
-    top_nulls_last: List[Bool] = List[Bool](),
-    top_maintain_order: Bool = False,
-    top_scan_key: Bool = False,
-    top_ranges: Optional[List[Int]] = None,
-    top_row_ids: Bool = False,
-    table: Bool = False,
-    finish_steps: List[Step] = List[Step](),
-    pushed: List[PushedJoinFilter] = List[PushedJoinFilter](),
-) raises -> DataFrame:
-    """Run the steps over `frame` in morsels on `workers` threads, into a
-    materialize sink, or a reduce sink when `expressions` are reductions
-    over the steps' output, grouped by `keys` when given (`ordered`: groups
-    in first-occurrence order; `table`: into the aggregate table, when it
-    holds every state, else collected for the eager group-by; `sets`: grouping sets, each a
-    list of indices into `keys`, one sink per set fed by every morsel,
-    whose finished frames (set order) land in `set_frames`, the grand
-    total's among them with its one row, and the result is the steps'
-    empty output). `finish_steps` are row-local steps (no
-    joins) over the reduce sink's output, run where it is made: on each
-    worker finishing a part of the aggregate table, else as a pipeline
-    over the output. `pushed` are join keys from above an aggregate these
-    steps feed, for the source's join filters (`_join_filters`).
-    `counts` receives the rows fed, then each step's input and output
-    rows, then each finish step's."""
-    var run = begin_pipeline(
-        frame,
-        steps,
-        joins,
-        indexes,
-        expressions,
-        keys,
-        ordered,
-        workers,
-        batch_size,
-        sets,
-        top,
-        top_names,
-        top_descending,
-        top_nulls_last,
-        top_maintain_order,
-        top_scan_key,
-        top_ranges,
-        top_row_ids,
-        table,
-        finish_steps,
-        pushed,
-    )
-    try:
-        run.execute_all()
-    except e:
-        run.release()
-        raise e^
-    return finish_pipeline(run, counts, set_frames)
-
-
 def finish_pipeline(
     mut run: PipelineRun,
     mut counts: List[Int],
     mut set_frames: List[DataFrame],
-) raises -> DataFrame:
-    """`run`'s result once its execute tasks are done; `counts` and
-    `set_frames` as in `run_pipeline`."""
+) raises -> PipelineFinish:
+    """`run`'s sink finished once its execute tasks are done: the counts
+    of rows fed and of each step's input and output rows in `counts`, the
+    finished frames of grouping sets in `set_frames` (set order, the
+    grand total's with its one row) and the finish steps' parallel work
+    still to run (`PipelineFinish`), whose `result` is the output."""
+    var finish = PipelineFinish()
     var finish_counts = List[Int]()
-    var result = _finish_pipeline(run, counts, set_frames, finish_counts)
-    if len(run.finish_steps) > 0 and len(finish_counts) == 0:
+    var result = _finish_pipeline(
+        run, counts, set_frames, finish_counts, finish
+    )
+    finish.counts = finish_counts^
+    if (
+        len(run.finish_steps) > 0
+        and len(finish.parts) == 0
+        and len(finish.counts) == 0
+    ):
         # The sink finished the output whole: the steps run over it as
         # a pipeline of their own, morsels on every worker.
-        var inner = List[Int]()
-        var none = List[DataFrame]()
-        var second = begin_pipeline(
-            result,
-            run.finish_steps,
-            run.joins,
-            run.indexes,
-            List[Expr](),
-            List[String](),
-            False,
-            run.workers,
-            run.batch_size,
-            List[List[Int]](),
-            -1,
-            List[String](),
-            List[Bool](),
-            List[Bool](),
-            False,
-            False,
-            None,
-            False,
-            False,
-            List[Step](),
-            List[PushedJoinFilter](),
+        finish.second.append(
+            begin_pipeline(
+                result,
+                run.finish_steps,
+                run.joins,
+                run.indexes,
+                List[Expr](),
+                List[String](),
+                False,
+                run.workers,
+                run.batch_size,
+                List[List[Int]](),
+                -1,
+                List[String](),
+                List[Bool](),
+                List[Bool](),
+                False,
+                False,
+                None,
+                False,
+                False,
+                List[Step](),
+                List[PushedJoinFilter](),
+            )
         )
-        try:
-            second.execute_all()
-        except e:
-            second.release()
-            raise e^
-        result = _finish_pipeline(second, inner, none, finish_counts)
-        for k in range(len(run.finish_steps)):
-            finish_counts.append(inner[2 * k + 1])
-            finish_counts.append(inner[2 * k + 2])
-    counts.extend(Span(finish_counts))
-    return result^
+        finish.steps = len(run.finish_steps)
+    finish.frame = result^
+    return finish^
+
+
+struct PipelineFinish(Movable):
+    """The parallel work of a pipeline's finish after its sink finished,
+    as tasks that run at the same time (`tasks`, `run_task`), and the
+    output once they are done (`result`). The work is the row-local
+    steps above an aggregate: run on each finished part of the aggregate
+    table by the task that takes the part (`parts`), or, when the sink
+    finished its output whole, as a second pipeline over it (`second`),
+    a task per worker. Either way each row runs through the steps on one
+    thread, and no thread waits on another while they run."""
+
+    # The sink's output, or the result when no work is left.
+    var frame: DataFrame
+    # The finish steps' input and output rows counted so far.
+    var counts: List[Int]
+    var parts: List[_FinishStepsJob]
+    var second: List[PipelineRun]
+    # The steps the parts or the second pipeline run.
+    var steps: Int
+    # Tasks for the parts: task t runs parts t, t + stride, ...
+    var stride: Int
+    # The aggregate table's sinks, whose heaps hold the parts' long key
+    # strings until the parts are finished.
+    var held: List[AggregateSink]
+
+    def __init__(out self) raises:
+        self.frame = DataFrame(List[Series](), height=0)
+        self.counts = List[Int]()
+        self.parts = List[_FinishStepsJob]()
+        self.second = List[PipelineRun]()
+        self.steps = 0
+        self.stride = 0
+        self.held = List[AggregateSink]()
+
+    def tasks(self) -> Int:
+        """The tasks left to run, 0 when the output is ready."""
+        if len(self.second) > 0:
+            return self.second[0].tasks()
+        return self.stride
+
+    def run_task(mut self, task: Int) raises:
+        if len(self.second) > 0:
+            self.second[0].execute(task)
+            return
+        var p = task
+        while p < len(self.parts):
+            self.parts[p].run()
+            p += self.stride
+
+    def result(mut self, mut counts: List[Int]) raises -> DataFrame:
+        """The output, after every task; the finish steps' input and
+        output rows are appended to `counts`."""
+        if len(self.second) > 0:
+            var inner = List[Int]()
+            var none = List[DataFrame]()
+            var unused = List[Int]()
+            var later = PipelineFinish()
+            self.frame = _finish_pipeline(
+                self.second[0], inner, none, unused, later
+            )
+            for k in range(self.steps):
+                self.counts.append(inner[2 * k + 1])
+                self.counts.append(inner[2 * k + 2])
+            self.second = List[PipelineRun]()
+        elif len(self.parts) > 0:
+            var frames = List[DataFrame](capacity=len(self.parts))
+            var rest = List[Int](length=2 * self.steps, fill=0)
+            for j in range(len(self.parts)):
+                frames.append(self.parts[j].frame.copy())
+                for k in range(len(rest)):
+                    rest[k] += self.parts[j].counts[k]
+            self.frame = chunks_frame(frames)
+            self.counts.extend(Span(rest))
+            self.parts = List[_FinishStepsJob]()
+            self.stride = 0
+            self.held = List[AggregateSink]()
+        counts.extend(Span(self.counts))
+        return self.frame.copy()
+
+    def release(mut self):
+        """Free the second pipeline's shared state, for a finish that
+        failed before its result."""
+        if len(self.second) > 0:
+            self.second[0].release()
 
 
 struct _FinishStepsJob(Job):
@@ -2630,40 +2667,6 @@ def _having_keep(context: Int, states: List[Reducer]) raises -> List[Int]:
     return true_rows(values._selection(having.predicate, having.batch_size))
 
 
-def _finish_with_steps(
-    template: _StreamReduction,
-    var parts: List[_StreamReduction],
-    steps: List[Step],
-    joins: ArcPointer[List[DataFrame]],
-    indexes: ArcPointer[List[Optional[JoinHashTable]]],
-    batch_size: Int,
-    mut counts: List[Int],
-) raises -> DataFrame:
-    """The aggregate table's `parts` finished and run through `steps`,
-    each part on its own worker, the kept rows of each a chunk of the
-    result; `counts` receives each step's input and output rows. With no
-    part (no groups), the steps run over the empty finished output."""
-    if len(parts) == 0:
-        # No group: the steps over the empty result, for its columns.
-        return _steps_over_frame(
-            template.finish(), steps, joins, indexes, counts
-        )
-    trace_path("pipeline.aggregate_finish_steps")
-    var finishes = List[_FinishStepsJob](capacity=len(parts))
-    while len(parts) > 0:
-        finishes.append(
-            _FinishStepsJob(parts.pop(0), steps, joins, indexes, batch_size)
-        )
-    run_jobs(finishes)
-    var frames = List[DataFrame](capacity=len(finishes))
-    counts = List[Int](length=2 * len(steps), fill=0)
-    for j in range(len(finishes)):
-        frames.append(finishes[j].frame.copy())
-        for k in range(len(counts)):
-            counts[k] += finishes[j].counts[k]
-    return chunks_frame(frames)
-
-
 struct PipelineRun(Movable):
     """A morsel pipeline between `begin_pipeline` and `finish_pipeline`: its
     workers' jobs (the execute tasks, one per thread) and what its finish reads.
@@ -2707,6 +2710,10 @@ struct PipelineRun(Movable):
     var round_cursor: Optional[_Cursor]
     # The file source the workers scan, when not `frame`.
     var source: Optional[ArcPointer[ScanSource]]
+    # A join build's row layout, when the workers sink into its rows, and
+    # the table the finish makes of them (its finalize tasks not yet run).
+    var build_layout: Optional[ArcPointer[JoinBuildLayout]]
+    var built: Optional[JoinHashTable]
 
     def __init__(
         out self,
@@ -2776,6 +2783,8 @@ struct PipelineRun(Movable):
         self.next_morsel = len(self.jobs[0].ranges[]) // 2
         self.round_cursor = None
         self.source = None
+        self.build_layout = None
+        self.built = None
 
     def tasks(self) -> Int:
         return len(self.jobs)
@@ -2801,12 +2810,18 @@ struct PipelineRun(Movable):
             var last = self.outer_steps[len(self.outer_steps) - 1]
             self.next_round += 1
             ref step = self.steps[j]
-            # One morsel per chunk of the table's rows, for the scan of
-            # unmatched (or matched) build rows.
+            # The table's row chunks split into one run per worker: a
+            # table sunk by many threads holds many partly filled chunks
+            # (one set per thread and partition), and a morsel per chunk
+            # would run the steps after the join on a few rows at a time.
             var ranges = List[Int]()
-            for c in range(self.indexes[][step.join].value().chunk_count()):
+            var chunks = self.indexes[][step.join].value().chunk_count()
+            var per_worker = max(
+                (chunks + len(self.jobs) - 1) // len(self.jobs), 1
+            )
+            for c in range(0, chunks, per_worker):
                 ranges.append(c)
-                ranges.append(1)
+                ranges.append(min(per_worker, chunks - c))
             if len(ranges) == 0 and j != last:
                 continue
             var cursor = _Cursor.new()
@@ -2874,12 +2889,23 @@ def begin_pipeline(
     pushed: List[PushedJoinFilter],
     source: Optional[ArcPointer[ScanSource]] = None,
     source_rows: Int = -1,
+    build_keys: List[String] = List[String](),
+    build_how: Int = JOIN_INNER,
+    build_coalesce: Bool = True,
+    build_probe_estimate: Int = -1,
+    build_filtered: Bool = False,
 ) raises -> PipelineRun:
     """`run_pipeline` up to its workers' jobs, not yet run: its execute stage is
     the jobs, one task per thread; `finish_pipeline` is its finish, after the
     rounds of `begin_round`. With a file `source`, `frame` holds its columns but
     no row: the workers take the source's batches as their morsels, and
-    `source_rows` is its estimated height."""
+    `source_rows` is its estimated height. With `build_keys`, the rows
+    are the build side of a hash join of type `build_how` on those keys
+    (`build_coalesce`, `build_probe_estimate` and `build_filtered` as
+    `finish_build` takes them): each worker sinks its chunks into its own rows of the join's
+    hash table (`JoinBuildSink`), and the finish makes the table
+    (`PipelineRun.built`) instead of a frame, unless a column's type
+    keeps the build on a frame (`join_build_layout`)."""
     trace_path("pipeline.run")
     # Every step's input columns and the output, typed once, and the
     # row-local steps compiled once for every worker. A late-materialized
@@ -3180,10 +3206,33 @@ def begin_pipeline(
     var collects = (
         len(expressions) > 0 and len(layout) == 0 and len(ungrouped) == 0
     )
+    # A hash join's build side: each worker's chunks into its own rows of
+    # the join's table, so the rows are never copied into a frame first.
+    var build_layout = Optional[ArcPointer[JoinBuildLayout]]()
+    if (
+        len(build_keys) > 0
+        and len(expressions) == 0
+        and top <= 0
+        and len(sets) == 0
+    ):
+        var made = join_build_layout(
+            schemas[][len(steps)]._columns,
+            build_keys,
+            build_how,
+            build_coalesce,
+            build_probe_estimate,
+            True,
+            build_filtered=build_filtered,
+        )
+        if made:
+            trace_path("pipeline.join_build_sink")
+            build_layout = ArcPointer(made.take())
+            for w in range(len(jobs)):
+                jobs[w].runner.build_layout.append(build_layout.value())
     # No reduction and no top-N: the rows are the result, each worker's chunks
     # copied into its collections, numbered by morsel so the finish restores
     # source order.
-    if (len(expressions) == 0 and top <= 0) or collects:
+    if ((len(expressions) == 0 and top <= 0) or collects) and not build_layout:
         for w in range(len(jobs)):
             jobs[w].runner.materializes = True
     if scan:
@@ -3228,6 +3277,7 @@ def begin_pipeline(
         finish_steps.copy(),
     )
     run.source = source
+    run.build_layout = build_layout^
     return run^
 
 
@@ -3236,12 +3286,15 @@ def _finish_pipeline(
     mut counts: List[Int],
     mut set_frames: List[DataFrame],
     mut finish_counts: List[Int],
+    mut finish: PipelineFinish,
 ) raises -> DataFrame:
     """The sink's result, after every execute task of `run`: the rows no
     probe matched (`begin_round`), then the workers' sinks combined and
-    finished. `counts` and `set_frames` are `run_pipeline`'s; `finish_counts`
-    receives each finish step's input and output rows when the aggregate
-    table's finish ran them, and stays empty otherwise."""
+    finished. `counts` and `set_frames` are `finish_pipeline`'s;
+    `finish_counts` receives each finish step's input and output rows when
+    the aggregate table's finish ran them, and stays empty otherwise. When
+    the finish steps run on the aggregate table's finished parts, those
+    parts are left in `finish` for its tasks."""
     ref jobs = run.jobs
     ref steps = run.steps
     ref joins = run.joins
@@ -3378,21 +3431,36 @@ def _finish_pipeline(
             for p in range(len(result.firsts)):
                 kept += len(result.firsts[p])
             var parts = table_parts(template[0], result^)
-            var rest_counts = List[Int]()
-            finished = _finish_with_steps(
-                template[0],
-                parts^,
-                rest,
-                joins,
-                indexes,
-                batch_size,
-                rest_counts,
-            )
             if filter:
                 finish_counts.append(merged)
                 finish_counts.append(kept)
-            finish_counts.extend(Span(rest_counts))
-        _ = sinks^
+            if len(parts) == 0:
+                # No group: the steps over the empty result, for its
+                # columns.
+                var rest_counts = List[Int]()
+                finished = _steps_over_frame(
+                    template[0].finish(), rest, joins, indexes, rest_counts
+                )
+                finish_counts.extend(Span(rest_counts))
+            else:
+                # Each part finished and run through the steps by the task
+                # that takes it, the kept rows of each a chunk of the
+                # result.
+                trace_path("pipeline.aggregate_finish_steps")
+                while len(parts) > 0:
+                    finish.parts.append(
+                        _FinishStepsJob(
+                            parts.pop(0), rest, joins, indexes, batch_size
+                        )
+                    )
+                finish.steps = len(rest)
+                finish.stride = min(len(finish.parts), max(1, run.workers))
+                finished = frame.clear()
+        if len(finish.parts) > 0:
+            # The parts' key strings still point into the sinks' heaps.
+            finish.held = sinks^
+        else:
+            _ = sinks^
         return finished^
     if collects:
         var locals = List[MaterializeSink]()
@@ -3411,6 +3479,19 @@ def _finish_pipeline(
                 sinks.append(jobs[j].runner.ungrouped.pop())
         var combined = _combined(sinks^)
         return ungrouped_finish(ungrouped[0][], combined)
+    if run.build_layout:
+        # A join's build side: the workers' rows combined into its table,
+        # whose finalize tasks the caller's finish event runs. The result
+        # is the build's columns, empty.
+        var locals = List[JoinBuildSink]()
+        for j in range(len(jobs)):
+            if len(jobs[j].runner.build) > 0:
+                locals.append(jobs[j].runner.build.pop())
+        var combined = _combined(locals^)
+        run.built = JoinHashTable(
+            run.build_layout.value(), combined^, defer_finalize=True
+        )
+        return schemas[][len(steps)].clear()
     if top <= 0:
         # The workers' batches in source order.
         var locals = List[MaterializeSink]()

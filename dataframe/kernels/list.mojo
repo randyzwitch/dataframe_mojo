@@ -20,7 +20,7 @@ from dataframe.expr import (
     Node,
 )
 from dataframe.storage.nested import ListColumn, StructColumn
-from dataframe.regex import Regex
+from regex_mojo import Regex
 from dataframe.text.regex_adapter import (
     compile_pattern,
     regex_extract_all,

@@ -231,18 +231,18 @@ def test_group_by_expressions_match_eager() raises:
                 frame.lazy().group_by(keys, maintain_order=True).agg(aggs),
                 frame.group_by(keys, maintain_order=True).agg(aggs),
             )
-    # SUM is not proven total across its supported input types. Keep a key
-    # filter above it so discarded groups cannot hide reduction errors.
+    # An Int64 SUM is overflow-checked, so it can raise. Keep a key filter
+    # above it so discarded groups cannot hide reduction errors.
     var filtered = (
         frame.lazy()
         .group_by([(col("k") * 2).alias("double")], maintain_order=True)
-        .agg(col("f").sum().alias("total"))
+        .agg(col("k").sum().alias("total"))
         .filter(col("double") > 2)
     )
     check(
         filtered,
         frame.group_by([(col("k") * 2).alias("double")], maintain_order=True)
-        .agg(col("f").sum().alias("total"))
+        .agg(col("k").sum().alias("total"))
         .filter(col("double") > 2),
     )
     var text = filtered.explain(streaming=False)
@@ -265,6 +265,25 @@ def test_group_by_expressions_match_eager() raises:
         .filter(col("double") > 2),
     )
     text = maximum.explain(streaming=False)
+    group = line_of(text, "GROUP_BY double")
+    filter = line_of(text, "FILTER")
+    keys = line_of(text, "WITH_COLUMNS double")
+    assert_true(group >= 0 and group < filter and filter < keys, text)
+    # A Float64 SUM cannot raise (overflow gives infinity), so its key filter
+    # moves below the grouping like MAX's does.
+    var float_sum = (
+        frame.lazy()
+        .group_by([(col("k") * 2).alias("double")], maintain_order=True)
+        .agg(col("f").sum().alias("total"))
+        .filter(col("double") > 2)
+    )
+    check(
+        float_sum,
+        frame.group_by([(col("k") * 2).alias("double")], maintain_order=True)
+        .agg(col("f").sum().alias("total"))
+        .filter(col("double") > 2),
+    )
+    text = float_sum.explain(streaming=False)
     group = line_of(text, "GROUP_BY double")
     filter = line_of(text, "FILTER")
     keys = line_of(text, "WITH_COLUMNS double")
