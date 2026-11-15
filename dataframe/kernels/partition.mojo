@@ -87,16 +87,36 @@ def _hash_bytes(bytes: Span[UInt8, ImmutAnyOrigin]) -> UInt64:
     return h
 
 
-def _hash_column(
+@always_inline
+def _row_at[
+    selected: Bool
+](rows: Pointer[UInt32, MutAnyOrigin], start: Int, i: Int) -> Int:
+    """Where position `i` of a run starting at `start` reads its column:
+    `start + i`, or the row a selection names for it."""
+    comptime if selected:
+        return Int(rows[unsafe_offset=i])
+    else:
+        return start + i
+
+
+def _hash_column[
+    selected: Bool = False
+](
     series: Series,
     start: Int,
     end: Int,
     out_address: Int,
     first: Bool,
     output_offset: Int = 0,
+    selection: Int = 0,
 ) raises:
     """Hash rows [start, end) of one key column into `out`, combining with
-    what earlier key columns wrote unless this is the first."""
+    what earlier key columns wrote unless this is the first.
+
+    With `selected`, position i of the run reads the column at the row
+    the UInt32 selection at `selection` holds for it (entry `i - start`),
+    so a column filtered upstream is hashed where it is, with no copy."""
+    var rows = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=selection)
     if series.dtype().is_nested():
         raise Error(
             "list and struct columns cannot be keys yet: " + series.name()
@@ -117,7 +137,9 @@ def _hash_column(
                     # No validity bitmap: every row through the pointer,
                     # with no per-row validity test or bounds check.
                     for i in range(start, end):
-                        var value = values.unsafe_offset(i)[]
+                        var value = values.unsafe_offset(
+                            _row_at[selected](rows, start, i - start)
+                        )[]
 
                         comptime if D.is_unsigned():
                             write(i, UInt64(value))
@@ -130,7 +152,8 @@ def _hash_column(
                 var bits = column._bits[].unsafe_ptr()
                 var bit_offset = column._offset
                 for i in range(start, end):
-                    var value = values.unsafe_offset(i)[]
+                    var r = _row_at[selected](rows, start, i - start)
+                    var value = values.unsafe_offset(r)[]
                     var word: UInt64
 
                     comptime if D.is_unsigned():
@@ -140,7 +163,7 @@ def _hash_column(
                     write(
                         i,
                         word if _validity_at(
-                            bits, bit_offset + i
+                            bits, bit_offset + r
                         ) else _NULL_KEY,
                     )
                 return
@@ -152,7 +175,8 @@ def _hash_column(
             var offset = column._offset
             var has_bits = len(column._bits[]) != 0
             for i in range(start, end):
-                var value = values.unsafe_offset(i)[]
+                var r = _row_at[selected](rows, start, i - start)
+                var value = values.unsafe_offset(r)[]
                 var key: UInt64
 
                 comptime if D.is_floating_point():
@@ -161,26 +185,28 @@ def _hash_column(
                     key = UInt64(value)
                 else:
                     key = bitcast[DType.uint64](Int64(value))
-                if has_bits and not _validity_at(valid, offset + i):
+                if has_bits and not _validity_at(valid, offset + r):
                     key = _NULL_KEY
                 write(i, key)
             return
     if series._data.isa[Column[Int128]]():
         ref column = series._data[Column[Int128]]
         for i in range(start, end):
-            if not column._valid(i):
+            var r = _row_at[selected](rows, start, i - start)
+            if not column._valid(r):
                 write(i, _NULL_KEY)
             else:
-                var key = bitcast[DType.uint128](column._get(i))
+                var key = bitcast[DType.uint128](column._get(r))
                 write(i, UInt64(key) ^ UInt64(key >> 64))
         return
     if series._data.isa[BoolColumn]():
         ref bools = series._data[BoolColumn]
         for i in range(start, end):
-            if not bools._valid(i):
+            var r = _row_at[selected](rows, start, i - start)
+            if not bools._valid(r):
                 write(i, _NULL_KEY)
             else:
-                write(i, UInt64(1) if bools._get(i) else UInt64(2))
+                write(i, UInt64(1) if bools._get(r) else UInt64(2))
         return
     ref strings = series._data[StringColumn]
     if not strings._is_view_storage():
@@ -196,11 +222,12 @@ def _hash_column(
         # so it must not count them.
         var nulls = len(strings._bits[]) != 0
         for i in range(start, end):
-            if nulls and not strings._valid(i):
+            var r = _row_at[selected](rows, start, i - start)
+            if nulls and not strings._valid(r):
                 write(i, _NULL_KEY)
                 continue
-            var byte_start = Int(offsets[unsafe_offset=i])
-            var length = Int(offsets[unsafe_offset=i + 1]) - byte_start
+            var byte_start = Int(offsets[unsafe_offset=r])
+            var length = Int(offsets[unsafe_offset=r + 1]) - byte_start
             if length <= 8 and byte_start <= size - 8:
                 var word = bitcast[DType.uint64, 1](
                     base.unsafe_offset(byte_start).unsafe_load[width=8]()
@@ -232,10 +259,11 @@ def _hash_column(
     var buffers = storage._buffers[].unsafe_ptr()
     var nulls = len(strings._bits[]) != 0
     for i in range(start, end):
-        if nulls and not strings._valid(i):
+        var r = _row_at[selected](rows, start, i - start)
+        if nulls and not strings._valid(r):
             write(i, _NULL_KEY)
             continue
-        var view = views.unsafe_offset(_mapped(map[1], map[2], i))
+        var view = views.unsafe_offset(_mapped(map[1], map[2], r))
         var length = Int(view[].length)
         var inline = view.unsafe_bitcast[UInt8]().unsafe_offset(4)
         if length <= 8:

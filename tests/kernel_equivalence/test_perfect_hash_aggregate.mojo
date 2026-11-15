@@ -78,7 +78,7 @@ def _assert_close(actual: AnyValue, expected: AnyValue) raises:
 
 
 def test_perfect_hash_group_by_matches_string_keys() raises:
-    # 140K rows take two workers (`parallel.worker_count`), whose slots
+    # 140K rows take several workers (`parallel.worker_count`), whose slots
     # merge; once, as the string grouping is slow in a test build.
     for n in [0, 1, 9, 65, 3000, 140_000]:
         for chunked in [False, True]:

@@ -12,11 +12,20 @@ from dataframe.frame import DataFrame, concat
 from dataframe.parallel import Job, run_jobs
 from dataframe.series import Series
 from dataframe.storage.column import Column
-from dataframe.vector.data_chunk import ColumnArena, DataChunk, to_series
+from dataframe.dtype import DataType
+from dataframe.vector.data_chunk import (
+    ColumnArena,
+    DataChunk,
+    _from_unified,
+    _typed,
+    to_series,
+)
 from dataframe.vector.sink import Sink
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
+    PHYSICAL_OPAQUE,
     PHYSICAL_VARCHAR,
+    CONSTANT_VECTOR,
     FLAT_VECTOR,
     SEQUENCE_VECTOR,
     UnifiedVectorFormat,
@@ -44,6 +53,9 @@ comptime _COPY_VALUES = 2
 # A window of a column the collection's rows already are, in order: kept
 # as a reference to its buffers, not copied.
 comptime _COPY_WINDOW = 3
+# Rows that are all one stored constant column's value: kept as that
+# constant, not written out.
+comptime _COPY_CONSTANT = 4
 # The fixed widths a selected copy moves as one typed value.
 comptime _COPY_WIDTHS = [
     DType.uint8,
@@ -217,6 +229,27 @@ struct ColumnDataCollection(Movable):
             # step changed are), the collected rows are that window, so
             # they are referenced rather than copied: columns are
             # immutable, and the reference keeps their buffers alive.
+            if v.vector_type == CONSTANT_VECTOR and v.physical != (
+                PHYSICAL_OPAQUE
+            ):
+                # A constant vector: while every chunk's is the same value,
+                # the collected rows are that one value over more rows.
+                var piece = self._constant_piece(chunk, c, arena, dtype)
+                if piece:
+                    if mode == _COPY_NONE and self.count == 0:
+                        self.modes[c] = _COPY_CONSTANT
+                        self.windows[c] = piece.take()
+                        continue
+                    if mode == _COPY_CONSTANT and piece.value()._same_constant(
+                        self.windows[c]
+                    ):
+                        continue
+            if mode == _COPY_CONSTANT:
+                # The constant so far as a piece, then this chunk's.
+                self.values[c] = [self._constant(c)]
+                self.windows[c] = self.schema._columns[c].copy()
+                self.modes[c] = _COPY_VALUES
+                mode = _COPY_VALUES
             if v.vector_type == FLAT_VECTOR and v.source >= 0:
                 ref column = arena.columns[v.source]
                 if mode == _COPY_NONE and self.count == 0:
@@ -283,6 +316,42 @@ struct ColumnDataCollection(Movable):
             .renamed(self.schema._columns[c].name())
         )
 
+    def _constant_piece(
+        self,
+        mut chunk: DataChunk,
+        c: Int,
+        mut arena: ColumnArena,
+        dtype: DataType,
+    ) raises -> Optional[Series]:
+        """Column `c` of `chunk`, a constant vector, as a one-row constant
+        column of the schema type; None for a type kept otherwise."""
+        var v = chunk.data[c]
+        if v.source >= 0:
+            ref column = arena.columns[v.source]
+            if column.is_constant() and column.dtype() == dtype:
+                return column._constant_resized(1)
+            return None
+        if dtype.is_categorical() or dtype.is_nested():
+            return None
+        # The value alone: one row read through the vector's format.
+        var one = _typed(
+            _from_unified(
+                chunk.unified(c, arena), 1, self.schema._columns[c].name()
+            ),
+            dtype,
+        )._broadcast(1)
+        if not one.is_constant() or one.dtype() != dtype:
+            return None
+        return one^
+
+    def _constant(self, c: Int) -> Series:
+        """Column `c`'s rows so far, all its one constant value."""
+        return (
+            self.windows[c]
+            ._constant_resized(self.count)
+            .renamed(self.schema._columns[c].name())
+        )
+
     def _raw_column(self, c: Int) raises -> Series:
         return raw_series(
             self.raw[c],
@@ -299,6 +368,8 @@ struct ColumnDataCollection(Movable):
                 columns.append(self._raw_column(c))
             elif self.modes[c] == _COPY_WINDOW:
                 columns.append(self._window(c))
+            elif self.modes[c] == _COPY_CONSTANT:
+                columns.append(self._constant(c))
             else:
                 ref pieces = self.values[c]
                 if len(pieces) == 1:

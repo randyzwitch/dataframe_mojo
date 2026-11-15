@@ -87,6 +87,7 @@ from dataframe.parallel import (
     morsel_size,
     partitions,
     run_jobs,
+    source_tasks,
     worker_count,
 )
 from dataframe.kernels.partition import (
@@ -739,7 +740,7 @@ comptime _GROUP_ROWS = "__group_rows"
 
 
 def group_by_workers(height: Int) -> Int:
-    """Workers the eager group-by divides `height` rows among: at most one
-    per morsel (`morsel_size`), at most the configured threads."""
+    """Workers the eager group-by divides `height` rows among: one a
+    thread, up to its morsels (`source_tasks`)."""
     var workers = configured_workers()
-    return max(1, min(workers, -(-height // morsel_size(height, workers))))
+    return source_tasks(-(-height // morsel_size(height, workers)), workers)
