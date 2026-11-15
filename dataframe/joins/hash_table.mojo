@@ -54,7 +54,6 @@ from dataframe.kernels.runtime_filter import (
 )
 from dataframe.parallel import (
     Job,
-    configured_workers,
     partitions,
     run_jobs,
     worker_count,
@@ -1042,8 +1041,7 @@ def build_from_columns(
     var count = len(columns[0]) if len(columns) > 0 else 0
     if count > Int(Int32.MAX):
         raise Error("A join build exceeds 2^31 - 1 rows")
-    var vectors = (count + STANDARD_VECTOR_SIZE - 1) // STANDARD_VECTOR_SIZE
-    var workers = max(1, min(configured_workers(), vectors))
+    var workers = worker_count(count)
     var bounds = partitions(count, workers, STANDARD_VECTOR_SIZE)
     var jobs = List[_FrameSinkJob](capacity=workers)
     for w in range(workers):
@@ -2583,8 +2581,8 @@ def probe_pairs(
 ) raises -> Tuple[List[Int], List[Int]]:
     """Every row `keys` (the probe side's key columns) joins against
     `table` with physical join type `how`: the probe rows and the build
-    rows (-1 for none), in probe order, on `workers` threads (0: by the
-    row count). A semi, anti or mark join gives probe rows only. A right
+    rows (-1 for none), in probe order, on `workers` threads (0: one a
+    thread, each at least one vector of probe rows). A semi, anti or mark join gives probe rows only. A right
     or full join then appends the build rows no probe matched (probe row
     -1), and a right-semi or right-anti join gives its build rows only
     (`scan_full_outer`)."""

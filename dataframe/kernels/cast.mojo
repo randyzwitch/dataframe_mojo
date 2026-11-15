@@ -31,7 +31,7 @@ from dataframe.decimal import (
     precision_limit,
 )
 from dataframe.series import Series, Storage
-from dataframe.parallel import Job, configured_workers, run_jobs
+from dataframe.parallel import Job, run_jobs, worker_count
 from dataframe.categorical import decode, encode, recode
 from dataframe.kernels.temporal import cast_temporal
 from dataframe.kernels.physical_input import _has_physical_storage
@@ -534,7 +534,7 @@ def _chunk_parse_strings[
     var valid = List[Bool](length=n, fill=False)
     var observed = mask.copy() if len(mask) == n else List[Bool]()
     # Preserve the contiguous parser's worker policy and disjoint byte writes.
-    var workers = configured_workers() if n >= (1 << 16) else 1
+    var workers = worker_count(n)
     var jobs = List[_ChunkParseJob[D]](capacity=workers)
     for worker in range(workers):
         jobs.append(
@@ -791,7 +791,7 @@ def _parse_strings[
     var values = List[Scalar[D]](length=n, fill=0)
     var valid = List[Bool](length=n, fill=False)
     var observed = mask.copy() if len(mask) == n else List[Bool]()
-    var workers = configured_workers() if n >= (1 << 16) else 1
+    var workers = worker_count(n)
     var jobs = List[_ParseJob[D]](capacity=workers)
     for w in range(workers):
         jobs.append(

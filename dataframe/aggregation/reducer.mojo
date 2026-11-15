@@ -62,7 +62,7 @@ from dataframe.aggregation.scalar_states import (
     VarState,
 )
 from dataframe.storage.nested import ListColumn, StructColumn
-from dataframe.parallel import Job, Pool, configured_workers
+from dataframe.parallel import Job, Pool, worker_count
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
     PHYSICAL_VARCHAR,
@@ -1053,7 +1053,7 @@ def _group_quantiles(
     var total = 0
     for g in range(n):
         total += len(samples[g])
-    var workers = configured_workers() if total >= (1 << 16) else 1
+    var workers = worker_count(total)
     var jobs = List[_QuantileJob]()
     var share = max(1, total // (4 * workers))
     var first = 0
