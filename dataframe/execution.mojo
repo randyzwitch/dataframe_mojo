@@ -3095,6 +3095,19 @@ struct _GroupReduceJob[width: Int](Job):
             self._run[ROW_INDEX]()
 
     def _run[I: DType](mut self) raises:
+        if not is_pair_reduction(self.node.op):
+            # Plain sums go straight to one value per group, with no
+            # states to set up and finish.
+            var sums = _new_reducer(self.bound, self.node, 0).group_sums[I](
+                self.values,
+                self.groups[].offsets_address(),
+                self.groups[].rows_address(),
+                self.first,
+                self.last,
+            )
+            if sums:
+                self.result = sums.take()
+                return
         var reducer = _new_reducer(
             self.bound, self.node, self.last - self.first
         )
@@ -3565,8 +3578,8 @@ def _crosses_partitions(bound: BoundExpr, keys: String) -> Bool:
 
 
 struct _OverJob(Job):
-    """One hash group of the layout, evaluated on its own: the rows [lo, hi) of
-    the gathered columns, partitions [first, last)."""
+    """One run of whole partitions of the layout, evaluated on its own: the
+    rows [lo, hi) of the gathered columns, partitions [first, last)."""
 
     var inner: BoundExpr
     var columns: List[Series]
@@ -3892,7 +3905,7 @@ def _over[
         reads, layout.order.copy(), lanes
     )
     var local = bind(argument_expr, gathered)
-    # Hash groups in parallel, unless a nested over() reaches across
+    # Runs of partitions in parallel, unless a nested over() reaches across
     # partitions: then all rows are evaluated together.
     var groups = len(layout.group_parts) - 1
     var jobs = List[_OverJob](capacity=max(groups, 1))
@@ -3911,7 +3924,7 @@ def _over[
             )
         )
     else:
-        # One task per thread over consecutive hash groups, each about an equal
+        # One task per thread over consecutive runs, each about an equal
         # share of the rows; a thread gets at least one STANDARD_VECTOR_SIZE
         # block, so no task is too small to repay its setup.
         var blocks = (height + _WINDOW_BLOCK - 1) // _WINDOW_BLOCK

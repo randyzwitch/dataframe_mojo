@@ -26,45 +26,16 @@ from dataframe.parallel import Job, configured_workers, partitions, run_jobs
 from dataframe.series import Series
 from dataframe.sorting.sort import sort_rows
 from dataframe.kernels.binary import validity
-from dataframe.kernels.gather import take_parallel
 from dataframe.sorting.sort_key import STANDARD_VECTOR_SIZE
 
-# Hash groups: rows are split by 4 radix bits of their hash, 2 more at a
-# time while the average group would hold more than DEFAULT_ROW_GROUP_SIZE
-# rows, up to 8 bits (256 groups). Each group is sorted on its own, so
-# groups of about one morsel keep every sort small, and the cap bounds
-# the per-group bookkeeping.
-comptime _START_BITS = 4
-comptime _MAX_BITS = 8
-comptime DEFAULT_ROW_GROUP_SIZE = 122880
 # Boundary flags per sorted position.
 comptime PARTITION_START = UInt8(1)
 comptime PEER_START = UInt8(2)
 
 
-def sink_threads(rows: Int) -> Int:
-    """Threads sinking `rows` rows into the window: one per source morsel
-    (DEFAULT_ROW_GROUP_SIZE rows), each hashing its own rows."""
-    return max(
-        1,
-        min(
-            configured_workers(),
-            (rows + DEFAULT_ROW_GROUP_SIZE - 1) // DEFAULT_ROW_GROUP_SIZE,
-        ),
-    )
-
-
-def radix_bits(rows: Int) -> Int:
-    """Hash-group radix bits for `rows` rows (see `_START_BITS`)."""
-    var bits = _START_BITS
-    while bits < _MAX_BITS and rows // (1 << bits) > DEFAULT_ROW_GROUP_SIZE:
-        bits = min(bits + 2, _MAX_BITS)
-    return bits
-
-
 struct WindowLayout(Movable):
-    """Rows sorted by hash group, then partition and order keys, with the
-    partition and peer boundaries of the sorted order."""
+    """Rows grouped by partition, each partition ordered by the order
+    keys, with the partition and peer boundaries of the sorted order."""
 
     # Sorted position -> input row.
     var order: List[Int]
@@ -77,7 +48,8 @@ struct WindowLayout(Movable):
     # Where each partition starts in the sorted order (count + 1 entries).
     var starts: List[Int]
     var count: Int
-    # Partition index bounds of the hash groups (groups + 1 entries).
+    # Partition index bounds of the runs of whole partitions that were
+    # ordered by one task (runs + 1 entries).
     var group_parts: List[Int]
 
     def __init__(out self):
@@ -385,55 +357,6 @@ struct _Numbering(Movable):
             while self.slots[to] >= 0:
                 to = Int((UInt64(to) + 1) & self.mask)
             self.slots[to] = id
-
-
-def number_partitions(
-    keys: List[Series],
-    hashes_address: Int,
-    n: Int,
-    ids_address: Int,
-) -> Int:
-    """Number the partitions of the keys' n rows in first-occurrence
-    order: ids[k] (at `ids_address`) gets row k's number. Returns the
-    count. One integer key is numbered by its values alone (`_IntGroups`,
-    the table the over() groups use); any other keys are probed with the
-    sink's row hashes (`hashes_address`, one per row, in the same order)
-    and compared row against row."""
-    if len(keys) == 1:
-        comptime for t in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[t]
-            comptime if not D.is_floating_point():
-                if keys[0]._data.isa[Column[Scalar[D]]]():
-                    return _number_int_partitions[D](
-                        keys[0]._data[Column[Scalar[D]]], n, ids_address
-                    )
-    var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=ids_address)
-    var hashes = Pointer[UInt64, MutAnyOrigin](
-        unsafe_from_address=hashes_address
-    )
-    var numbering = _Numbering()
-    for k in range(n):
-        ids[unsafe_offset=k] = numbering.number(
-            keys, k, hashes[unsafe_offset=k]
-        )
-    return len(numbering.first_rows)
-
-
-def _number_int_partitions[
-    D: DType
-](column: Column[Scalar[D]], n: Int, ids_address: Int) -> Int:
-    var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=ids_address)
-    var values = column._ptr()
-    var table = _IntGroups[D]()
-    if len(column._bits[]) == 0:
-        for k in range(n):
-            ids[unsafe_offset=k] = table.number(values[unsafe_offset=k], True)
-    else:
-        for k in range(n):
-            ids[unsafe_offset=k] = table.number(
-                values[unsafe_offset=k], column._valid(k)
-            )
-    return table.count()
 
 
 # Multiplying by a fixed odd constant spreads integer keys over the high
@@ -849,25 +772,6 @@ struct _GroupOffsetsJob[I: DType](Job):
             )
 
 
-def _task_cuts(bounds: List[Int], height: Int) -> List[Int]:
-    """Cut hash groups (their row bounds) into at most one task per
-    worker, each of whole hash groups and about equal rows, so the workers
-    finish together. Every task holds at least one STANDARD_VECTOR_SIZE
-    block of rows: a task smaller than one vector costs more to schedule
-    than its work, so small inputs get fewer tasks."""
-    var blocks = (height + STANDARD_VECTOR_SIZE - 1) // STANDARD_VECTOR_SIZE
-    var tasks = max(1, min(configured_workers(), blocks))
-    var share = (height + tasks - 1) // tasks
-    var cuts = List[Int]()
-    cuts.append(0)
-    for b in range(1, len(bounds) - 1):
-        var at = bounds[b]
-        if at < height and at - cuts[len(cuts) - 1] >= share:
-            cuts.append(at)
-    cuts.append(height)
-    return cuts^
-
-
 def _integer_key(keys: List[Series]) -> Bool:
     """Whether the keys are one integer column, which the numbering tasks
     hash themselves as they read it."""
@@ -1026,55 +930,57 @@ struct _RankOut(ImplicitlyCopyable, Movable):
         self.out_valid = 0
 
 
-struct _GroupSortJob(Job):
-    """Sort one task's hash groups and mark their boundaries. The keys and
-    hashes are in hash group order, as the sink materialized them."""
+struct _GroupSortJob[I: DType](Job):
+    """Order one task's groups by their order keys and mark their
+    boundaries. The task holds whole groups [g0, g1) of the partition
+    groups, whose rows lie at [lo, hi) of the group row lists, each list
+    ascending. Only the order keys are read, for these rows: the groups
+    were already found, so no partition key is read again, hashed or
+    numbered, and every position's group is known from the offsets."""
 
     var keys: List[Series]
-    var partition_keys: Int
     var descending: List[Bool]
     var nulls_last: List[Bool]
-    # Hash group position -> input row (the scatter's order), and each
-    # position's partition key hash.
+    # The group row lists (`I` indices): rows and offsets, by address.
     var rows: Int
-    var hashes: Int
+    var offsets: Int
+    var g0: Int
+    var g1: Int
     var lo: Int
     var hi: Int
-    # Scratch for the partition numbers (address of one Int a row).
-    var ids: Int
     # Output: order[lo:hi] and flags[lo:hi].
     var order: Int
     var flags: Int
     var stable: Bool
     # Ranks evaluated over the task's rows as soon as they are sorted, by
-    # the same task: no other group's work has to finish first.
+    # the same task: no other task's work has to finish first.
     var rank: _RankOut
 
     def __init__(
         out self,
         keys: List[Series],
-        partition_keys: Int,
         descending: List[Bool],
         nulls_last: List[Bool],
         rows: Int,
-        hashes: Int,
+        offsets: Int,
+        g0: Int,
+        g1: Int,
         lo: Int,
         hi: Int,
-        ids: Int,
         order: Int,
         flags: Int,
         stable: Bool,
         rank: _RankOut,
     ):
         self.keys = keys.copy()
-        self.partition_keys = partition_keys
         self.descending = descending.copy()
         self.nulls_last = nulls_last.copy()
         self.rows = rows
-        self.hashes = hashes
+        self.offsets = offsets
+        self.g0 = g0
+        self.g1 = g1
         self.lo = lo
         self.hi = hi
-        self.ids = ids
         self.order = order
         self.flags = flags
         self.stable = stable
@@ -1104,96 +1010,135 @@ struct _GroupSortJob(Job):
         var n = self.hi - self.lo
         if n == 0:
             return
-        var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.rows)
+        var rows = Pointer[Scalar[Self.I], MutAnyOrigin](
+            unsafe_from_address=self.rows
+        )
+        var offsets = Pointer[Scalar[Self.I], MutAnyOrigin](
+            unsafe_from_address=self.offsets
+        )
         var order = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
         var flags_at = self.flags + self.lo
         var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=flags_at)
-        var count = len(self.keys)
-        var slices = List[Series](capacity=count)
+        # Partition starts come from the offsets: every group is one
+        # partition, and the sort below keeps groups where they are.
+        for k in range(n):
+            flags[unsafe_offset=k] = 0
+        for g in range(self.g0, self.g1):
+            flags[unsafe_offset=Int(offsets[unsafe_offset=g]) - self.lo] = (
+                PARTITION_START | PEER_START
+            )
+        if len(self.keys) == 0:
+            # No order keys: each group's rows, ascending, are its order.
+            for k in range(self.lo, self.hi):
+                order[unsafe_offset=k] = Int(rows[unsafe_offset=k])
+            return
+        # The order keys of the task's rows, in group-list order.
+        var gathered = List[Series](capacity=len(self.keys))
         for key in self.keys:
-            slices.append(key.slice(self.lo, n))
-        # The task's partitions numbered by a dictionary of their keys:
-        # partitions need only be contiguous, so the sort orders rows by
-        # that number (one integer) rather than by the key values.
-        var part_keys = List[Series](capacity=self.partition_keys)
-        for c in range(self.partition_keys):
-            part_keys.append(slices[c].copy())
-        # Each row's partition number, in this task's range of a buffer
-        # shared by all tasks (one fresh allocation, not one per task).
-        var ids_at = self.ids + self.lo * size_of[Int]()
-        var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=ids_at)
-        var partitions_here = number_partitions(
-            part_keys, self.hashes + self.lo * size_of[UInt64](), n, ids_at
+            gathered.append(_gather_rows[Self.I](key, self.rows, self.lo, n))
+        # Groups are sorted in runs of consecutive groups holding at least
+        # one STANDARD_VECTOR_SIZE block of rows: a sort call has a fixed
+        # setup that a run of tiny groups would pay for each group, while
+        # a run of one group needs no group number in its sort key.
+        var g = self.g0
+        while g < self.g1:
+            var first = g
+            var a = Int(offsets[unsafe_offset=g]) - self.lo
+            g += 1
+            while (
+                g < self.g1
+                and Int(offsets[unsafe_offset=g]) - self.lo - a
+                < STANDARD_VECTOR_SIZE
+            ):
+                g += 1
+            var b = Int(offsets[unsafe_offset=g]) - self.lo
+            self._sort_run(gathered, first, g, a, b)
+
+    def _sort_run(
+        self, gathered: List[Series], g0: Int, g1: Int, a: Int, b: Int
+    ) raises:
+        """Order the run of groups [g0, g1), at task positions [a, b)."""
+        var n = b - a
+        var rows = Pointer[Scalar[Self.I], MutAnyOrigin](
+            unsafe_from_address=self.rows
         )
-        if partitions_here == 1 and count == self.partition_keys:
-            # One partition and no order keys: the rows keep their order.
-            for k in range(n):
-                order[unsafe_offset=self.lo + k] = rows[
-                    unsafe_offset=self.lo + k
-                ]
-                flags[unsafe_offset=k] = 0
-            flags[unsafe_offset=0] = PARTITION_START | PEER_START
-            return
-        if count == self.partition_keys:
-            # No order keys: the sort key is the dense partition number
-            # alone, so it sorts by counting (stable, rows in input order).
-            var at = List[Int](length=partitions_here + 1, fill=0)
-            for k in range(n):
-                at[ids[unsafe_offset=k] + 1] += 1
-            for g in range(partitions_here):
-                at[g + 1] += at[g]
-            for k in range(n):
-                flags[unsafe_offset=k] = 0
-            for g in range(partitions_here):
-                flags[unsafe_offset=at[g]] = PARTITION_START | PEER_START
-            for k in range(n):
-                var to = at[ids[unsafe_offset=k]]
-                at[ids[unsafe_offset=k]] = to + 1
-                order[unsafe_offset=self.lo + to] = rows[
-                    unsafe_offset=self.lo + k
-                ]
-            return
-        var sort_keys = List[Series](capacity=1 + count - self.partition_keys)
-        var descending = List[Bool](capacity=1 + count - self.partition_keys)
-        var nulls_last = List[Bool](capacity=1 + count - self.partition_keys)
-        if partitions_here > 1 and partitions_here <= Int(UInt32.MAX):
-            # Four bytes hold the partition numbers, so the sort's records
-            # stay narrow.
-            var narrow = huge_uninit[UInt32](n)
-            for k in range(n):
-                narrow[k] = UInt32(ids[unsafe_offset=k])
-            sort_keys.append(Series("", Column[UInt32](narrow^)))
-        elif partitions_here > 1:
-            var wide = huge_uninit[Int64](n)
-            for k in range(n):
-                wide[k] = Int64(ids[unsafe_offset=k])
-            sort_keys.append(Series("", Column[Int64](wide^)))
-        if partitions_here > 1:
+        var offsets = Pointer[Scalar[Self.I], MutAnyOrigin](
+            unsafe_from_address=self.offsets
+        )
+        var order = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
+        var base = self.lo + a
+        var sort_keys = List[Series](capacity=1 + len(gathered))
+        var descending = List[Bool](capacity=1 + len(gathered))
+        var nulls_last = List[Bool](capacity=1 + len(gathered))
+        if g1 - g0 > 1:
+            # Each position's group within the run leads the sort key, so
+            # the groups stay in place and each is ordered on its own. The
+            # numbers fit four bytes, keeping the sort's records narrow.
+            var local = huge_uninit[UInt32](n)
+            var at = 0
+            for g in range(g1 - g0):
+                var end = Int(offsets[unsafe_offset=g0 + g + 1]) - base
+                while at < end:
+                    local[at] = UInt32(g)
+                    at += 1
+            sort_keys.append(Series("", Column[UInt32](local^)))
             descending.append(False)
             nulls_last.append(False)
-        for c in range(self.partition_keys, count):
-            sort_keys.append(slices[c].copy())
+        var keys = List[Series](capacity=len(gathered))
+        for c in range(len(gathered)):
+            keys.append(gathered[c].slice(a, n))
+            sort_keys.append(keys[c].copy())
             descending.append(self.descending[c])
             nulls_last.append(self.nulls_last[c])
         var perm = sort_key_rows(sort_keys, descending, nulls_last, self.stable)
-        var previous = -1
         for k in range(n):
-            var at = perm[k]
-            order[unsafe_offset=self.lo + k] = rows[unsafe_offset=self.lo + at]
-            flags[unsafe_offset=k] = (PARTITION_START | PEER_START) if ids[
-                unsafe_offset=at
-            ] != previous else 0
-            previous = ids[unsafe_offset=at]
-        for c in range(self.partition_keys, count):
+            order[unsafe_offset=base + k] = Int(
+                rows[unsafe_offset=base + perm[k]]
+            )
+        for c in range(len(keys)):
             mark_changes(
-                slices[c], flags_at, 0, n, PEER_START, Int(perm.unsafe_ptr())
+                keys[c],
+                self.flags + base,
+                0,
+                n,
+                PEER_START,
+                Int(perm.unsafe_ptr()),
             )
         _ = perm^
 
 
+def _gather_rows[
+    I: DType
+](key: Series, rows_address: Int, lo: Int, n: Int) raises -> Series:
+    """The key's values at rows[lo:lo + n] (`I` row indices at
+    `rows_address`), in that order."""
+    var rows = Pointer[Scalar[I], MutAnyOrigin](
+        unsafe_from_address=rows_address
+    )
+    comptime for t in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[t]
+        if key._data.isa[Column[Scalar[D]]]():
+            ref column = key._data[Column[Scalar[D]]]
+            if len(column._bits[]) == 0:
+                var values = column._ptr()
+                var out = huge_uninit[Scalar[D]](n)
+                var to = out.unsafe_ptr()
+                for k in range(n):
+                    to[unsafe_offset=k] = values[
+                        unsafe_offset=Int(rows[unsafe_offset=lo + k])
+                    ]
+                var result = Series("", Column[Scalar[D]](out^))
+                result._dtype = key._dtype
+                return result^
+    var indices = List[Int](unsafe_uninit_length=n)
+    for k in range(n):
+        indices[k] = Int(rows[unsafe_offset=lo + k])
+    return key.take(indices)
+
+
 struct _MaskJob(Job):
-    """Mark peer boundaries over one range of a fully sorted key set (the
-    MASK stage, split across threads for one large hash group)."""
+    """Mark peer boundaries over one range of a fully sorted key set (one
+    partition's peers, split across threads)."""
 
     var keys: List[Series]
     var lo: Int
@@ -1220,6 +1165,56 @@ struct _MaskJob(Job):
             mark_changes(key, self.flags, from_, self.hi, PEER_START, self.rows)
 
 
+def _sort_groups[
+    I: DType
+](
+    groups: GroupRows,
+    keys: List[Series],
+    descending: List[Bool],
+    nulls_last: List[Bool],
+    order: List[Int],
+    flags: List[UInt8],
+    stable: Bool,
+    rank: _RankOut,
+) raises -> List[Int]:
+    """Order every group's rows by the order keys into `order` and mark
+    `flags`, in tasks of whole groups and about equal rows; returns the
+    tasks' first positions. A task holds at least one STANDARD_VECTOR_SIZE
+    block of rows: a task smaller than one vector costs more to schedule
+    than its work, so small inputs get fewer tasks."""
+    var height = len(order)
+    var blocks = (height + STANDARD_VECTOR_SIZE - 1) // STANDARD_VECTOR_SIZE
+    var tasks = max(1, min(configured_workers(), blocks))
+    var cuts = groups.slices(tasks)
+    var jobs = List[_GroupSortJob[I]](capacity=len(cuts) - 1)
+    var bounds = List[Int](capacity=len(cuts))
+    for t in range(len(cuts) - 1):
+        var lo = groups.offset(cuts[t])
+        jobs.append(
+            _GroupSortJob[I](
+                keys,
+                descending,
+                nulls_last,
+                groups.rows_address(),
+                groups.offsets_address(),
+                cuts[t],
+                cuts[t + 1],
+                lo,
+                groups.offset(cuts[t + 1]),
+                Int(order.unsafe_ptr()),
+                Int(flags.unsafe_ptr()),
+                stable,
+                rank,
+            )
+        )
+        bounds.append(lo)
+    if len(jobs) == 1:
+        jobs[0].run()
+    elif len(jobs) > 1:
+        run_jobs(jobs)
+    return bounds^
+
+
 def window_layout(
     partition_keys: List[Series],
     order_keys: List[Series],
@@ -1228,8 +1223,8 @@ def window_layout(
     height: Int,
     stable: Bool = True,
 ) raises -> WindowLayout:
-    """Sort `height` rows by partition and order keys into hash groups and
-    mark their boundaries. `descending` and `nulls_last` hold one flag per
+    """Sort `height` rows by partition and order keys and mark their
+    boundaries. `descending` and `nulls_last` hold one flag per
     order key. Rows with equal keys keep input order when `stable`."""
     return _window_layout(
         partition_keys,
@@ -1266,59 +1261,21 @@ def _window_layout(
     var flags = huge_uninit[UInt8](height)
     var bounds = List[Int]()
     if len(partition_keys) > 0:
-        # Radix-partition rows by their keys' hash: every partition then lies in
-        # one hash group, and hash groups sort independently.
-        var sink = sink_threads(height)
-        var partitioner = Partitioner(partition_keys, sink)
-        var bits = radix_bits(height)
-        var parts = partitioner.scatter(
-            sink, with_hashes=True, bucket_count=1 << bits
-        )
-        var keys = partitioner.keys.copy()
+        # Each partition's rows, ascending, found by hashing the keys once
+        # (the over() groups' lists). Tasks then order whole groups by
+        # their order keys alone, writing their positions of the layout.
+        var groups = partition_groups(partition_keys, height)
+        var keys = List[Series](capacity=len(order_keys))
         for key in order_keys:
             keys.append(key.rechunk() if key.is_chunked() else key.copy())
-        # The sink materializes each hash group's rows (partition and order
-        # keys) with their hashes (RadixPartitionedTupleData), so the tasks
-        # read them in order.
-        keys = take_parallel(keys, parts.order.copy(), workers)
-        var desc = List[Bool](length=len(partition_keys), fill=False)
-        var last = List[Bool](length=len(partition_keys), fill=False)
-        for k in range(len(order_keys)):
-            desc.append(descending[k])
-            last.append(nulls_last[k])
-        # Hash groups are sorted by tasks of about equal rows, each at
-        # least one STANDARD_VECTOR_SIZE block (`_task_cuts`). A task takes
-        # consecutive hash groups
-        # and sorts their rows together: every partition lies in one hash
-        # group, so the task's range is a hash group of the layout.
-        var cuts = _task_cuts(parts.bounds, height)
-        var ids = huge_uninit[Int](height)
-        var jobs = List[_GroupSortJob](capacity=len(cuts) - 1)
-        for t in range(len(cuts) - 1):
-            jobs.append(
-                _GroupSortJob(
-                    keys,
-                    len(partition_keys),
-                    desc,
-                    last,
-                    Int(parts.order.unsafe_ptr()),
-                    Int(parts.hashes.unsafe_ptr()),
-                    cuts[t],
-                    cuts[t + 1],
-                    Int(ids.unsafe_ptr()),
-                    Int(order.unsafe_ptr()),
-                    Int(flags.unsafe_ptr()),
-                    stable,
-                    rank,
-                )
+        if groups.wide:
+            bounds = _sort_groups[WIDE_ROW_INDEX](
+                groups, keys, descending, nulls_last, order, flags, stable, rank
             )
-            bounds.append(cuts[t])
-        if len(jobs) == 1:
-            jobs[0].run()
         else:
-            run_jobs(jobs)
-        _ = parts^
-        _ = ids^
+            bounds = _sort_groups[ROW_INDEX](
+                groups, keys, descending, nulls_last, order, flags, stable, rank
+            )
         if rank.method >= 0:
             # Ranks are written; nothing reads the layout.
             _ = order^
@@ -1667,10 +1624,10 @@ def rank_window(
     ranks peers in input order.
 
     Ranks are computed in sorted order and written straight to their
-    rows. With partition keys, each hash group task sorts its rows, marks
-    their partition and peer boundaries and ranks them in one go: a hash
-    group holds whole partitions, so its ranks depend on no other group
-    and no thread waits for the others. One
+    rows. With partition keys, each task sorts the rows of its whole
+    partitions, marks their partition and peer boundaries and ranks them
+    in one go: its ranks depend on no other task and no thread waits for
+    the others. One
     partition is ranked in parallel ranges of the full sort, each starting
     from the state its predecessors carry in."""
     var code = rank_method(method)
