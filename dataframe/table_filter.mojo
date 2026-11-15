@@ -21,6 +21,7 @@ from std.memory import ArcPointer, Pointer
 from dataframe.binding import bind
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.execution import evaluate
+from dataframe.kernels.runtime_filter import KeyBitmap
 from dataframe.expr import (
     AND,
     COL,
@@ -78,6 +79,8 @@ comptime IS_NOT_NULL_FILTER = 3
 comptime CONJUNCTION_AND = 4
 comptime CONJUNCTION_OR = 5
 comptime DYNAMIC_FILTER = 6
+# Membership in an exact bitmap of a join build's integer keys.
+comptime KEY_BITMAP_FILTER = 7
 
 
 @fieldwise_init
@@ -341,6 +344,21 @@ def _dynamic_check(
     return result
 
 
+def _key_bitmap_check(bitmap: KeyBitmap, stats: BaseStatistics) -> Int:
+    """What the statistics prove about membership in a key bitmap: no row
+    is kept when every row is null (a null key is no build key) or when
+    no key lies in the rows' value range."""
+    if not stats.can_have_no_null():
+        return FILTER_ALWAYS_FALSE
+    if not stats.has_min_max or stats.stats_type != NUMERIC_STATS:
+        return NO_PRUNING_POSSIBLE
+    if stats.int_min < Int128(Int64.MIN) or stats.int_max > Int128(Int64.MAX):
+        return NO_PRUNING_POSSIBLE
+    if bitmap.any_between(Int64(stats.int_min), Int64(stats.int_max)):
+        return NO_PRUNING_POSSIBLE
+    return FILTER_ALWAYS_FALSE
+
+
 @fieldwise_init
 struct FilterNode(Copyable, Movable):
     var kind: Int
@@ -348,6 +366,7 @@ struct FilterNode(Copyable, Movable):
     var children: List[Int]
     var constants: FilterConstants
     var dynamic: Optional[ArcPointer[DynamicFilterData]]
+    var bitmap: Optional[ArcPointer[KeyBitmap]]
 
 
 @fieldwise_init
@@ -393,6 +412,26 @@ struct TableFilterSet(Copyable, Movable):
                 List[Int](),
                 FilterConstants.of(-1, False),
                 Optional(data),
+                None,
+            )
+        )
+        self.filters.append(TableFilter(column, nodes^, -1, None, True))
+
+    def push_key_bitmap(
+        mut self, column: String, bitmap: ArcPointer[KeyBitmap]
+    ):
+        """Add a join build's exact key bitmap on integer column `column`:
+        an optional filter the scan checks against each vector's
+        statistics, ruling out a vector whose value range holds no key."""
+        var nodes = List[FilterNode]()
+        nodes.append(
+            FilterNode(
+                KEY_BITMAP_FILTER,
+                0,
+                List[Int](),
+                FilterConstants.of(-1, False),
+                None,
+                Optional(bitmap),
             )
         )
         self.filters.append(TableFilter(column, nodes^, -1, None, True))
@@ -468,6 +507,8 @@ def _check_node(
         return NO_PRUNING_POSSIBLE
     if node.kind == DYNAMIC_FILTER:
         return _dynamic_check(node.dynamic.value(), stats)
+    if node.kind == KEY_BITMAP_FILTER:
+        return _key_bitmap_check(node.bitmap.value()[], stats)
     if node.kind == CONJUNCTION_AND:
         # AND: always true only when every child is, always false when any child
         # is.
@@ -568,7 +609,7 @@ struct _Builder(Movable):
 def _leaf(
     kind: Int, op: Int, var constants: FilterConstants, children: List[Int]
 ) -> FilterNode:
-    return FilterNode(kind, op, children.copy(), constants^, None)
+    return FilterNode(kind, op, children.copy(), constants^, None, None)
 
 
 def _parse_ints(text: String) raises -> List[Int128]:

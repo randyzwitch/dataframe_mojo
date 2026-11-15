@@ -47,6 +47,7 @@ from dataframe.join_type import (
 )
 from dataframe.kernels.partition import _hash_column, _row_at
 from dataframe.kernels.runtime_filter import (
+    KeyBitmap,
     KeyBloom,
     bloom_blocks_for,
     bloom_set_bits,
@@ -522,10 +523,9 @@ struct _TableData(Movable):
     var entries: List[UInt64]
     var keys: List[Series]
     # A perfect hash join's table: per key slot its build row (the payload
-    # stand-in, unset where the slot's bit is clear) and one bit per slot, set
-    # when a build row has the slot's key.
+    # stand-in, unset where the slot's bit is clear; the bits are the
+    # table's `key_bits`).
     var slots: List[UInt32]
-    var slot_bits: List[UInt8]
     # Each partition's region of `entries` (one region unless the table
     # is built per partition): its first entry and its bitmask.
     var bases: List[UInt64]
@@ -554,7 +554,6 @@ struct _TableData(Movable):
         self.entries = List[UInt64]()
         self.keys = keys^
         self.slots = List[UInt32]()
-        self.slot_bits = List[UInt8]()
         self.bases = List[UInt64]()
         self.masks = List[UInt64]()
         self.dictionary = List[Series]()
@@ -1443,6 +1442,10 @@ struct JoinHashTable(Copyable, Movable):
     var perfect: Bool
     var perfect_base: UInt64
     var perfect_span: Int
+    # A perfect table's bit per key slot, set when a build row has the
+    # slot's key: the probe's lookup, and an exact filter of the build's
+    # keys that probe-side filters share without a copy.
+    var key_bits: Optional[ArcPointer[KeyBitmap]]
     # Build rows, and those whose keys are all valid (in the table).
     var count: Int
     var inserted: Int
@@ -1602,6 +1605,7 @@ struct JoinHashTable(Copyable, Movable):
         self.perfect = False
         self.perfect_base = 0
         self.perfect_span = 0
+        self.key_bits = None
         self.chains_longer_than_one = False
         self.capacity = 0
         self.parts = 1
@@ -1637,6 +1641,7 @@ struct JoinHashTable(Copyable, Movable):
             # repeated key or a wide range falls back to the hash table.
             var filled_rows = List[UInt64]()
             var filled_builds = List[UInt32]()
+            var slot_bits = List[UInt8]()
             var slots = _perfect_slots(
                 shape.row_layout.nodes[][0].physicals[0],
                 self.least[0],
@@ -1646,7 +1651,7 @@ struct JoinHashTable(Copyable, Movable):
                 self.layout.key_offset,
                 self.layout.index_offset,
                 self.data[].slots,
-                self.data[].slot_bits,
+                slot_bits,
                 self.data[].slot_rows,
                 filled_rows,
                 filled_builds,
@@ -1656,6 +1661,14 @@ struct JoinHashTable(Copyable, Movable):
                 self.perfect = True
                 self.perfect_base = slots.value()[0]
                 self.perfect_span = slots.value()[1]
+                self.key_bits = ArcPointer(
+                    KeyBitmap(
+                        slot_bits^,
+                        self.perfect_base,
+                        UInt64(self.perfect_span),
+                        self.inserted,
+                    )
+                )
                 # Every output column a dictionary over the build rows,
                 # each row in the table gathered to its number, which its
                 # key's slot holds. Sized by the build rows, not the key
@@ -1667,7 +1680,6 @@ struct JoinHashTable(Copyable, Movable):
                 return
             # A repeated key: the hash table instead.
             self.data[].slots = List[UInt32]()
-            self.data[].slot_bits = List[UInt8]()
             self.data[].slot_rows = List[UInt64]()
         var collection = Int(Pointer(to=self.data[].collection))
         # The probe's bloom filter, when the join's rule holds: a single
@@ -2174,7 +2186,7 @@ struct ScanStructure(Movable):
         chain to walk."""
         var heads = Int(self.heads.unsafe_ptr())
         var slots = Int(self.table.data[].slots.unsafe_ptr())
-        var bits = Int(self.table.data[].slot_bits.unsafe_ptr())
+        var bits = Int(self.table.key_bits.value()[].bits.unsafe_ptr())
         if selection != 0:
             _perfect_heads[True](
                 key,

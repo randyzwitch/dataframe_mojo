@@ -1989,30 +1989,37 @@ struct _PipelineJob(Job):
         filters keep: False when none is, else their selection (None: every
         row). Vectors the statistics filters rule out are not read; the row
         filters run vector by vector, each narrowing the vector's selection in
-        turn (a bloom filter only while its selectivity keeps it active), and
-        the morsel's selection is the vectors' selections end to end."""
+        turn (a bloom filter or key bitmap only while its selectivity keeps it
+        active), and the morsel's selection is the vectors' selections end to
+        end."""
         for f in self.join_filters:
             if not f.any:
                 return (False, None)
         var vectors = Optional[List[Int]]()
         if self.join_scan:
             vectors = _vectors_kept(self.join_scan.value()[], offset, length)
-            if vectors and len(vectors.value()) == 0:
-                trace_path("pipeline.join_filter_skip")
-                return (False, None)
+            if vectors:
+                trace_path("pipeline.join_filter_vector_skip")
+                if len(vectors.value()) == 0:
+                    trace_path("pipeline.join_filter_skip")
+                    return (False, None)
         var rowwise = False
         for f in self.join_filters:
-            rowwise = rowwise or f.equal or Bool(f.bloom)
+            rowwise = rowwise or f.equal or Bool(f.bloom) or Bool(f.bitmap)
         if not rowwise:
             if not vectors:
                 return (True, None)
             return (True, _rows_in_vectors(None, vectors.value(), length))
         var keys = List[Series](capacity=len(self.join_filters))
+        # Whether each key has no null, counted once for the morsel.
+        var valid = List[Bool](capacity=len(self.join_filters))
         for f in self.join_filters:
-            if f.equal or f.bloom:
+            if f.equal or f.bloom or f.bitmap:
                 keys.append(_unchunked(frame.column(f.column)))
+                valid.append(keys[len(keys) - 1].null_count() == 0)
             else:
                 keys.append(Series("", Column[Int64](List[Int64]())))
+                valid.append(True)
         var starts = List[Int]()
         if vectors:
             starts = vectors.value().copy()
@@ -2020,33 +2027,43 @@ struct _PipelineJob(Job):
             for at in range(0, length, STATISTICS_VECTOR_SIZE):
                 starts.append(at)
         # Room for every row: each vector's selection is written after the
-        # ones before it, then narrowed in place.
+        # ones before it, then narrowed in place. A vector no row filter
+        # narrows (all paused) keeps every row; its identity selection is
+        # written only once some vector is narrowed, as until then the
+        # selection is the vectors themselves.
         var rows = List[UInt32](unsafe_uninit_length=length)
         var used = 0
-        for start in starts:
+        var listed = False
+        for v in range(len(starts)):
+            var start = starts[v]
             var end = min(length, start + STATISTICS_VECTOR_SIZE)
-            var at = Int(rows.unsafe_ptr()) + 4 * used
             var count = end - start
             var dense = True
             for k in range(len(self.join_filters)):
                 ref f = self.join_filters[k]
-                if not f.equal and not f.bloom:
+                if not f.equal and not f.bloom and not f.bitmap:
                     continue
-                if f.bloom and not self.join_stats[k].active:
+                if not f.equal and not self.join_stats[k].active:
                     self.join_stats[k].update(0, 0)
                     continue
-                var kept = keep_rows(f, keys[k], start, count, at, dense)
+                if not listed:
+                    _identity_rows(rows, starts, v, length)
+                    listed = True
+                var at = Int(rows.unsafe_ptr()) + 4 * used
+                var kept = keep_rows(
+                    f, keys[k], start, count, at, dense, valid[k]
+                )
                 if not f.equal:
                     self.join_stats[k].update(kept, count)
                 dense = False
                 count = kept
-            if dense:
-                var sel = rows.unsafe_ptr()
-                for i in range(count):
-                    sel[unsafe_offset=used + i] = UInt32(start + i)
+            if dense and listed:
+                _fill_identity(rows, used, start, count)
             used += count
         if used == length:
             return (True, None)
+        if not listed:
+            _identity_rows(rows, starts, len(starts), length)
         rows.shrink(used)
         return (True, rows^)
 
@@ -2414,6 +2431,35 @@ def _row_ids(offset: Int, length: Int) -> Series:
     return Series(ROW_ID_COLUMN, Column[Int64](ids^))
 
 
+def _fill_identity(mut rows: List[UInt32], at: Int, start: Int, count: Int):
+    """Rows [start, start + count) as a selection in `rows` from `at`, eight
+    at a time."""
+    comptime W = 8
+    var out = rows.unsafe_ptr().unsafe_offset(at)
+    var lanes = SIMD[DType.uint32, W](0, 1, 2, 3, 4, 5, 6, 7) + UInt32(start)
+    var i = 0
+    while i + W <= count:
+        out.unsafe_store(i, lanes)
+        lanes += UInt32(W)
+        i += W
+    while i < count:
+        out[unsafe_offset=i] = UInt32(start + i)
+        i += 1
+
+
+def _identity_rows(
+    mut rows: List[UInt32], starts: List[Int], vectors: Int, length: Int
+):
+    """Every row of the first `vectors` vectors (at `starts`, the last
+    ending at `length`), written to the front of `rows`."""
+    var used = 0
+    for v in range(vectors):
+        var start = starts[v]
+        var count = min(length, start + STATISTICS_VECTOR_SIZE) - start
+        _fill_identity(rows, used, start, count)
+        used += count
+
+
 def _vectors_kept(
     info: ScanFilterInfo, offset: Int, length: Int
 ) raises -> Optional[List[Int]]:
@@ -2439,12 +2485,14 @@ def _rows_in_vectors(
 ) -> List[UInt32]:
     """The rows of the selection `rows` (None: every row of the morsel)
     inside the kept vectors."""
-    var out = List[UInt32]()
     if not rows:
+        var total = 0
         for start in vectors:
-            for r in range(start, min(length, start + STATISTICS_VECTOR_SIZE)):
-                out.append(UInt32(r))
-        return out^
+            total += min(length, start + STATISTICS_VECTOR_SIZE) - start
+        var every = List[UInt32](unsafe_uninit_length=total)
+        _identity_rows(every, vectors, len(vectors), length)
+        return every^
+    var out = List[UInt32]()
     ref mine = rows.value()
     var v = 0
     for r in mine:
@@ -3329,6 +3377,10 @@ def begin_pipeline(
     for f in join_filters:
         if f.bloom:
             trace_path("pipeline.join_bloom")
+            break
+    for f in join_filters:
+        if f.bitmap:
+            trace_path("pipeline.join_key_bitmap")
             break
     var join_scan = Optional[ArcPointer[ScanFilterInfo]]()
     if join_scan_filters.has_filters() and not source:

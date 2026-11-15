@@ -5,7 +5,7 @@ Apply these filters only where dropping unmatched probe rows preserves the
 join's semantics. Each worker collects local bounds; merge them before
 probing so no key from another build partition is excluded.
 """
-from std.memory import ArcPointer, Pointer
+from std.memory import ArcPointer, Pointer, bitcast
 
 from dataframe.dtype import DataType
 from dataframe.join_type import (
@@ -16,6 +16,7 @@ from dataframe.join_type import (
 )
 from dataframe.joins.hash_table import JoinHashTable
 from dataframe.kernels.runtime_filter import (
+    KeyBitmap,
     KeyBloom,
     build_bloom,
     can_use_bloom_filter,
@@ -98,8 +99,10 @@ struct JoinFilter(Copyable, Movable):
     # A single build value, compared with each row.
     var equal: Bool
     var value: Int64
-    # Applied to rows, with its pause.
+    # Applied to rows, with its pause: a bloom filter, or the exact bitmap
+    # of a perfect hash table's keys.
     var bloom: Optional[ArcPointer[KeyBloom]]
+    var bitmap: Optional[ArcPointer[KeyBitmap]]
 
 
 def _row_key(dtype: DataType) -> Bool:
@@ -302,8 +305,9 @@ def finalize_table_filters(
 ) raises -> Optional[JoinFilter]:
     """`finalize_filters` for key `key` of a finished build's hash table:
     its bounds are the ones the build recorded as its rows came in, its
-    values are read from the table only for a short IN list, and its bloom
-    filter is the one the table filled from its rows' hashes."""
+    values are read from the table only for a short IN list, and its row
+    filter is the one the table holds: the bloom filter it filled from its
+    rows' hashes, or a perfect table's own bitmap of its keys."""
     var dtype = table.key_types[key]
     if dtype != probe_dtype or not _row_key(dtype):
         return None
@@ -334,7 +338,7 @@ def _finalize(
     mut scan: TableFilterSet,
 ) raises -> Optional[JoinFilter]:
     if not bounds:
-        return JoinFilter(probe_column, step, False, False, 0, None)
+        return JoinFilter(probe_column, step, False, False, 0, None, None)
     var low = bounds.value()[0]
     var high = bounds.value()[1]
     if low == high:
@@ -342,7 +346,29 @@ def _finalize(
         var equal = _dynamic(probe_dtype, COMPARE_EQUAL, one)
         if equal:
             scan.push_dynamic(probe_column, equal.value())
-        return JoinFilter(probe_column, step, True, True, low, None)
+        return JoinFilter(probe_column, step, True, True, low, None, None)
+    var bloom = Optional[ArcPointer[KeyBloom]]()
+    var bitmap = Optional[ArcPointer[KeyBitmap]]()
+    var perfect = Bool(key.table) and key.table.value().perfect
+    if perfect:
+        # A perfect hash table already holds an exact bitmap of its keys
+        # over their range, which the probe side shares as its row filter:
+        # no hashing, no false positives, under the same rule as a bloom
+        # filter (a build small next to its probe). When the unique keys
+        # fill their whole range it is the range itself, checked per row as
+        # one comparison; the statistics filter alone only skips vectors.
+        if can_use_bloom_filter(
+            equalities, build_count, probe_rows, build_filtered
+        ):
+            bitmap = key.table.value().key_bits.copy()
+    elif key.table:
+        # A hash table fills its filter from its rows' hashes while it
+        # finalizes, when the rule held then.
+        bloom = key.table.value().bloom.copy()
+    elif can_use_bloom_filter(
+        equalities, build_count, probe_rows, build_filtered
+    ):
+        bloom = build_bloom(key.column(), build_count)
     var pushed_in = False
     if build_count > 1 and build_count <= DYNAMIC_OR_FILTER_THRESHOLD:
         var values = _distinct(key.column())
@@ -352,7 +378,11 @@ def _finalize(
             if listed:
                 scan.push_dynamic(probe_column, listed.value())
                 pushed_in = True
-    if not pushed_in:
+    if bitmap:
+        # The bitmap rules out a vector whose value range holds no key,
+        # which covers the vectors outside the keys' range too.
+        scan.push_key_bitmap(probe_column, bitmap.value())
+    elif not pushed_in:
         var least: List[Int64] = [low]
         var most: List[Int64] = [high]
         var lower = _dynamic(probe_dtype, COMPARE_GREATERTHANOREQUALTO, least)
@@ -360,27 +390,7 @@ def _finalize(
         if lower and upper:
             scan.push_dynamic(probe_column, lower.value())
             scan.push_dynamic(probe_column, upper.value())
-    var bloom = Optional[ArcPointer[KeyBloom]]()
-    var perfect = Bool(key.table) and key.table.value().perfect
-    if key.table and not perfect:
-        # A hash table fills its filter from its rows' hashes while it
-        # finalizes, when the rule held then.
-        bloom = key.table.value().bloom.copy()
-    elif perfect and Int64(build_count) - 1 == high - low:
-        # A perfect hash table's keys are unique, so as many keys as the
-        # range is wide fill it: the range filter above already drops
-        # every row the bloom filter would.
-        pass
-    elif can_use_bloom_filter(
-        equalities, build_count, probe_rows, build_filtered
-    ):
-        # A perfect hash table indexes its keys' slots directly and never
-        # runs the finalize that fills a filter, so its filter is built
-        # from the key values here, as for a build without a table: its
-        # keys lie in a narrow range, but the probe can hold many values
-        # in that range that no build row has.
-        bloom = build_bloom(key.column(), build_count)
-    return JoinFilter(probe_column, step, True, False, 0, bloom^)
+    return JoinFilter(probe_column, step, True, False, 0, bloom^, bitmap^)
 
 
 def supports_join_filters(how: Int) -> Bool:
@@ -401,22 +411,30 @@ def keep_rows(
     count: Int,
     rows: Int,
     dense: Bool,
+    all_valid: Bool,
 ) -> Int:
     """Narrow a selection to the rows of an unchunked integer key that
-    `filter` keeps (its equality, or its bloom filter).
+    `filter` keeps (its equality, its key bitmap or its bloom filter).
 
     The selection is `count` UInt32 row numbers of `key` at address `rows`;
     when `dense` it is rows [start, start + count) and is not read, only
     written. The kept rows are written in order to the selection's front
     (in place: a row is written no later than it is read), and their number
     returned. Each filter reads only the rows the ones before it kept, and
-    no row is copied: what passes on is the selection."""
+    no row is copied: what passes on is the selection. `all_valid`: the
+    key has no null, found once for the key rather than per selection."""
     if key.dtype().physical() == DataType.INT64:
         return _keep_rows(
-            filter, key._data[Column[Int64]], start, count, rows, dense
+            filter,
+            key._data[Column[Int64]],
+            start,
+            count,
+            rows,
+            dense,
+            all_valid,
         )
     return _keep_rows(
-        filter, key._data[Column[Int32]], start, count, rows, dense
+        filter, key._data[Column[Int32]], start, count, rows, dense, all_valid
     )
 
 
@@ -429,13 +447,46 @@ def _keep_rows[
     count: Int,
     rows: Int,
     dense: Bool,
+    all_valid: Bool,
 ) -> Int:
     var sel = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=rows)
     var values = column._ptr()
-    var all_valid = column.null_count() == 0
     var bits = column.unsafe_validity()
     var offset = column._offset
     var kept = 0
+    if filter.bitmap:
+        ref bitmap = filter.bitmap.value()[]
+        if bitmap.dense:
+            if dense and all_valid:
+                return _keep_in_range[D, True, True](
+                    bitmap, values, bits, offset, start, count, rows
+                )
+            if dense:
+                return _keep_in_range[D, True, False](
+                    bitmap, values, bits, offset, start, count, rows
+                )
+            if all_valid:
+                return _keep_in_range[D, False, True](
+                    bitmap, values, bits, offset, start, count, rows
+                )
+            return _keep_in_range[D, False, False](
+                bitmap, values, bits, offset, start, count, rows
+            )
+        if dense and all_valid:
+            return _keep_in_bitmap[D, True, True](
+                bitmap, values, bits, offset, start, count, rows
+            )
+        if dense:
+            return _keep_in_bitmap[D, True, False](
+                bitmap, values, bits, offset, start, count, rows
+            )
+        if all_valid:
+            return _keep_in_bitmap[D, False, True](
+                bitmap, values, bits, offset, start, count, rows
+            )
+        return _keep_in_bitmap[D, False, False](
+            bitmap, values, bits, offset, start, count, rows
+        )
     for i in range(count):
         var row = start + i if dense else Int(sel[unsafe_offset=i])
         var ok = all_valid or _validity_at(bits, offset + row)
@@ -445,6 +496,75 @@ def _keep_rows[
                 ok = v == filter.value
             else:
                 ok = filter.bloom.value()[].contains(v)
+        sel[unsafe_offset=kept] = UInt32(row)
+        kept += Int(ok)
+    return kept
+
+
+def _keep_in_bitmap[
+    D: DType, dense: Bool, all_valid: Bool
+](
+    bitmap: KeyBitmap,
+    keys: Pointer[Scalar[D], MutAnyOrigin],
+    bits: Pointer[UInt8, MutAnyOrigin],
+    offset: Int,
+    start: Int,
+    count: Int,
+    rows: Int,
+) -> Int:
+    """`_keep_rows` for a key bitmap, with the selection's form and the
+    key's validity fixed: a key's bit is its distance from the bitmap's
+    base, and a key outside the range (below the base it wraps past the
+    span) reads the last slot's bit, which is then masked off."""
+    var sel = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=rows)
+    var set = bitmap.bits.unsafe_ptr()
+    var base = bitmap.base
+    var span = bitmap.span
+    var kept = 0
+    for i in range(count):
+        var row: Int
+        comptime if dense:
+            row = start + i
+        else:
+            row = Int(sel[unsafe_offset=i])
+        var at = bitcast[DType.uint64](Int64(keys[unsafe_offset=row])) - base
+        var slot = Int(min(at, span))
+        var bit = (set[unsafe_offset=slot >> 3] >> UInt8(slot & 7)) & 1
+        var ok = (at <= span) & (bit != 0)
+        comptime if not all_valid:
+            ok = ok & _validity_at(bits, offset + row)
+        sel[unsafe_offset=kept] = UInt32(row)
+        kept += Int(ok)
+    return kept
+
+
+def _keep_in_range[
+    D: DType, dense: Bool, all_valid: Bool
+](
+    bitmap: KeyBitmap,
+    keys: Pointer[Scalar[D], MutAnyOrigin],
+    bits: Pointer[UInt8, MutAnyOrigin],
+    offset: Int,
+    start: Int,
+    count: Int,
+    rows: Int,
+) -> Int:
+    """`_keep_in_bitmap` for a bitmap with every bit set: a key is kept
+    when its distance from the base is within the span."""
+    var sel = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=rows)
+    var base = bitmap.base
+    var span = bitmap.span
+    var kept = 0
+    for i in range(count):
+        var row: Int
+        comptime if dense:
+            row = start + i
+        else:
+            row = Int(sel[unsafe_offset=i])
+        var at = bitcast[DType.uint64](Int64(keys[unsafe_offset=row])) - base
+        var ok = at <= span
+        comptime if not all_valid:
+            ok = ok & _validity_at(bits, offset + row)
         sel[unsafe_offset=kept] = UInt32(row)
         kept += Int(ok)
     return kept

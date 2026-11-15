@@ -14,6 +14,7 @@ from std.memory import ArcPointer, Pointer, bitcast
 
 from dataframe.hash_bits import _splitmix64
 
+from dataframe.storage.bitmap import _bitmap_word
 from dataframe.storage.column import Column
 from dataframe.dtype import DataType
 from dataframe.parallel import Job, partitions, run_jobs, worker_count
@@ -158,6 +159,62 @@ struct KeyBloom(Movable):
         for i in range(len(column)):
             if all_valid or column._valid(i):
                 self.insert(Int64(values[unsafe_offset=i]))
+
+
+struct KeyBitmap(Movable):
+    """An exact membership filter over integer keys in a narrow range: one
+    bit per value from `base` to `base + span`, set when a key has that
+    value. A key's bit is its distance from `base`, so a lookup needs no
+    hash, and a missing bit proves the key absent with no false positives.
+    Values are 64-bit words, signed keys sign-extended, so the unsigned
+    difference of two words is their distance."""
+
+    var bits: List[UInt8]
+    var base: UInt64
+    var span: UInt64
+    # Every bit set: membership is the range alone.
+    var dense: Bool
+
+    def __init__(
+        out self, var bits: List[UInt8], base: UInt64, span: UInt64, keys: Int
+    ):
+        """`keys` distinct keys set the bits."""
+        self.bits = bits^
+        self.base = base
+        self.span = span
+        self.dense = UInt64(keys) == span + 1
+
+    @always_inline
+    def contains(self, key: Int64) -> Bool:
+        var at = bitcast[DType.uint64](key) - self.base
+        if at > self.span:
+            return False
+        if self.dense:
+            return True
+        var slot = Int(at)
+        var byte = self.bits.unsafe_ptr()[unsafe_offset=slot >> 3]
+        return (byte >> UInt8(slot & 7)) & 1 != 0
+
+    def any_between(self, least: Int64, most: Int64) -> Bool:
+        """Whether some key lies in [least, most]: the range is clipped to
+        the bitmap's, then its bits are read a word at a time, stopping at
+        the first set one."""
+        var low = bitcast[DType.int64](self.base)
+        var high = bitcast[DType.int64](self.base + self.span)
+        if most < low or least > high or least > most:
+            return False
+        if self.dense:
+            return True
+        var first = Int(bitcast[DType.uint64](max(least, low)) - self.base)
+        var last = Int(bitcast[DType.uint64](min(most, high)) - self.base)
+        var bits = Span(self.bits)
+        var at = first
+        while at <= last:
+            var n = min(64, last - at + 1)
+            if _bitmap_word[DType.uint64](bits, at, n) != 0:
+                return True
+            at += n
+        return False
 
 
 struct _BloomBuild(Job):

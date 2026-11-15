@@ -5,7 +5,9 @@ Int64 and Int32 keys, nullable probe keys, a second join after the first so
 the filter works on rows an earlier filter kept, a probe filter before the
 joins (on another column, and on the filtered key itself, whose nulls leave
 the filter's mask with a validity bitmap), and builds too big for a filter,
-on one and eight workers. The filter itself never loses a key."""
+on one and eight workers. The filter itself never loses a key. A perfect
+hash build hands the probe its exact bitmap of keys instead, which also
+rules out whole vectors by their value ranges."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_true
 
@@ -180,58 +182,88 @@ def test_a_bloom_filter_never_loses_a_key() raises:
     assert_true(false_hits < 500)
 
 
-def test_a_perfect_hash_build_hands_the_probe_a_bloom_filter() raises:
+def perfect_probe_key(row: Int) -> Int:
+    """Probe keys in [0, 20,000): every third 2,048-row vector holds only
+    values between two build keys (none of which joins), the rest are
+    spread over the range."""
+    var vector = row // 2048
+    if vector % 3 == 1:
+        return (vector * 50) % 20_000 + 1 + row % 49
+    return (row * 7) % 20_000
+
+
+def test_a_perfect_hash_build_hands_the_probe_its_key_bitmap() raises:
     # Unique build keys over a narrow range join through a perfect hash
-    # table, which never fills a filter while it finalizes; the probe still
-    # gets one, built from the keys, and drops the rows in that range that
-    # match no key.
+    # table, whose bitmap of keys becomes the probe's exact filter: rows in
+    # the range whose key no build row has are dropped before any step
+    # reads them, and vectors whose value range holds no key are not read.
     for threads in [1, 8]:
-        var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
-        var probe_ids = List[Int64]()
-        var probe_keys = List[Int64]()
-        var valid = List[Bool]()
-        for row in range(ROWS):
-            probe_ids.append(Int64(row))
-            probe_keys.append(Int64((row * 7) % 20_000))
-            valid.append(key_valid(row))
-        var source = DataFrame(
-            [
-                Series("id", Column[Int64](probe_ids^)),
-                Series("k", Column[Int64](probe_keys^, valid)),
-            ]
-        )
-        var keys = List[Int64]()
-        var payload = List[Int64]()
-        for m in range(0, 20_000, 50):
-            keys.append(Int64(m))
-            payload.append(Int64(m // 50))
-        var dimension = DataFrame(
-            [
-                Series("d", Column[Int64](keys^)),
-                Series("d_v", Column[Int64](payload^)),
-            ]
-        )
-        var expected = List[Int]()
-        for row in range(ROWS):
-            if key_valid(row) and ((row * 7) % 20_000) % 50 == 0:
-                expected.append(row)
-        var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-        var observed = StrategyTrace()
-        var result = (
-            source.lazy()
-            .join(dimension.lazy(), left_on=["k"], right_on=["d"])
-            .collect()
-        )
-        var text = observed.text()
-        _ = observed^
-        _ = trace^
-        assert_true(
-            "dataframe-path: join.perfect_hash\n" in text,
-            "the build did not take a perfect hash table",
-        )
-        assert_true(
-            "dataframe-path: pipeline.join_bloom\n" in text,
-            "no bloom filter was built",
-        )
-        assert_equal(ids(result), expected)
-        _ = workers^
+        for dtype in [DataType.INT64, DataType.INT32]:
+            var workers = ScopedEnvironment(
+                "DATAFRAME_THREADS", String(threads)
+            )
+            var probe_ids = List[Int64]()
+            var probe_keys = List[Int64]()
+            var valid = List[Bool]()
+            for row in range(ROWS):
+                probe_ids.append(Int64(row))
+                probe_keys.append(Int64(perfect_probe_key(row)))
+                valid.append(key_valid(row))
+            var source = DataFrame(
+                [
+                    Series("id", Column[Int64](probe_ids^)),
+                    Series("k", Column[Int64](probe_keys^, valid)),
+                ]
+            ).with_columns([col("k").cast(dtype).alias("k")])
+            var keys = List[Int64]()
+            var payload = List[Int64]()
+            for m in range(0, 20_000, 50):
+                keys.append(Int64(m))
+                payload.append(Int64(m // 50))
+            var dimension = DataFrame(
+                [
+                    Series("d", Column[Int64](keys^)),
+                    Series("d_v", Column[Int64](payload^)),
+                ]
+            ).with_columns([col("d").cast(dtype).alias("d")])
+            var expected = List[Int]()
+            for row in range(ROWS):
+                if key_valid(row) and perfect_probe_key(row) % 50 == 0:
+                    expected.append(row)
+            var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+            var observed = StrategyTrace()
+            var result = (
+                source.lazy()
+                .join(dimension.lazy(), left_on=["k"], right_on=["d"])
+                .collect()
+            )
+            var text = observed.text()
+            _ = observed^
+            _ = trace^
+            assert_true(
+                "dataframe-path: join.perfect_hash\n" in text,
+                "the build did not take a perfect hash table",
+            )
+            assert_true(
+                "dataframe-path: pipeline.join_key_bitmap\n" in text,
+                "the probe did not get the build's key bitmap",
+            )
+            assert_true(
+                "dataframe-path: pipeline.join_bloom\n" not in text,
+                "a bloom filter was built for a perfect hash table",
+            )
+            assert_true(
+                "dataframe-path: pipeline.join_filter_vector_skip\n" in text,
+                "no vector was ruled out by the key bitmap",
+            )
+            assert_equal(ids(result), expected)
+            var sorted = result.sort(["id"]).with_columns(
+                [col("k").cast(DataType.INT64).alias("k")]
+            )
+            var got_keys = sorted.column("k")
+            var got_payload = sorted.column("d_v")
+            for r in range(len(expected)):
+                var key = perfect_probe_key(expected[r])
+                assert_equal(Int(got_keys.get(r).int64()), key)
+                assert_equal(Int(got_payload.get(r).int64()), key // 50)
+            _ = workers^
