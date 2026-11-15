@@ -16,7 +16,7 @@ from dataframe.vector.data_chunk import (
     from_frame_window,
     to_series,
 )
-from dataframe.vector.expression import VectorExpression
+from dataframe.vector.expression import _KIND_LANE, VectorExpression
 from dataframe.vector.types import SelectionVector
 from tests.support.coverage_compare import assert_frame
 
@@ -353,6 +353,80 @@ def test_abs_of_the_minimum_raises_as_the_column_kernel() raises:
     except e:
         message = String(e)
     assert_equal(message, "Int64 abs overflow")
+
+
+def test_narrow_integer_arithmetic_computes_in_lanes_and_checks_range() raises:
+    # Sums, differences and products of 8-, 16- and 32-bit integers keep
+    # their type: computed in lanes, with the column kernels' values, nulls
+    # and range errors.
+    var small = List[Int16]()
+    var small_valid = List[Bool]()
+    var tiny = List[UInt8]()
+    var wide = List[Int32]()
+    for row in range(2048):
+        small.append(Int16(row % 301 - 150))
+        small_valid.append(row % 9 != 2)
+        tiny.append(UInt8(row % 200))
+        wide.append(Int32(row * 1000 - 1_000_000))
+    var source = DataFrame(
+        [
+            Series("h", Column[Int16](small^, small_valid)),
+            Series("u", Column[UInt8](tiny^)),
+            Series("w", Column[Int32](wide^)),
+        ]
+    )
+    var schema = source.clear()._columns.copy()
+    var arena = ColumnArena()
+    var chunk = chunk_of(source, arena, 0, 2048, 1)
+    var exact: List[Expr] = [
+        (col("h") + lit(Int16(7))).alias("a"),
+        (col("h") * col("h") - lit(Int16(5))).alias("b"),
+        (col("u") + lit(UInt8(55))).alias("c"),
+        (col("w") * lit(Int32(2)) + col("w")).alias("d"),
+    ]
+    for e in exact:
+        var compiled = VectorExpression(e, schema)
+        assert_equal(compiled.root_kind(), _KIND_LANE)
+        var out = DataChunk(1)
+        out.count = chunk.count
+        compiled.write(chunk, arena, out, 0)
+        var expected = source.select_exprs([e.copy()])
+        var got = to_series(
+            out,
+            0,
+            arena,
+            expected._columns[0].name(),
+            expected._columns[0].dtype(),
+        )
+        assert_frame(DataFrame([got^]), expected)
+    var past: List[Expr] = [
+        (col("h") * lit(Int16(300))).alias("a"),
+        (col("u") + lit(UInt8(57))).alias("b"),
+        (col("u") - lit(UInt8(1))).alias("c"),
+        (col("w") * col("w")).alias("d"),
+    ]
+    var messages: List[String] = [
+        "int16 multiplication overflow",
+        "uint8 addition overflow",
+        "uint8 subtraction overflow",
+        "int32 multiplication overflow",
+    ]
+    for i in range(len(past)):
+        var compiled = VectorExpression(past[i], schema)
+        var out = DataChunk(1)
+        out.count = chunk.count
+        var message = String()
+        try:
+            compiled.write(chunk, arena, out, 0)
+        except e:
+            message = String(e)
+        assert_equal(message, messages[i])
+        var eager = String()
+        try:
+            _ = source.select_exprs([past[i].copy()])
+        except e:
+            eager = String(e)
+        assert_equal(eager, messages[i])
 
 
 def test_adaptive_conjunctions_keep_the_eager_rows() raises:

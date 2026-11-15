@@ -237,7 +237,27 @@ def _computed_supported(bound: BoundExpr, index: Int) raises -> Bool:
         return left == DataType.FLOAT64
     if dtype == DataType.INT64:
         return node.op != DIV and left == DataType.INT64
+    if _narrow_int_bounds(dtype):
+        return node.op != DIV and left == dtype
     return False
+
+
+def _narrow_int_bounds(dtype: DataType) -> Optional[Tuple[Int64, Int64]]:
+    """The range of an integer type narrower than 64 bits that computes in
+    the 64-bit integer lanes, or None for any other type."""
+    if dtype == DataType.INT8:
+        return (Int64(Int8.MIN), Int64(Int8.MAX))
+    if dtype == DataType.INT16:
+        return (Int64(Int16.MIN), Int64(Int16.MAX))
+    if dtype == DataType.INT32:
+        return (Int64(Int32.MIN), Int64(Int32.MAX))
+    if dtype == DataType.UINT8:
+        return (Int64(0), Int64(UInt8.MAX))
+    if dtype == DataType.UINT16:
+        return (Int64(0), Int64(UInt16.MAX))
+    if dtype == DataType.UINT32:
+        return (Int64(0), Int64(UInt32.MAX))
+    return None
 
 
 def _reads_column(bound: BoundExpr, index: Int) -> Bool:
@@ -2103,6 +2123,50 @@ struct VectorExpression(Copyable, Movable):
         for k in range(count):
             out[unsafe_offset=k] = a[unsafe_offset=k] ^ flip
 
+    def _narrow_int_arithmetic(
+        mut self,
+        op: Int,
+        dtype: DataType,
+        left: Int,
+        right: Int,
+        index: Int,
+        count: Int,
+    ) raises:
+        """Sum, difference or product of two integers of a type narrower
+        than 64 bits, held in 64-bit lanes. Operands of at most 32 bits
+        give an exact result in 128 bits, which is then checked against the
+        result type's range: a valid row outside it raises the error the
+        column kernels raise for that type."""
+        var bounds = _narrow_int_bounds(dtype).value()
+        var low = Int128(bounds[0])
+        var high = Int128(bounds[1])
+        var x = self.lane_ints[left].unsafe_ptr()
+        var y = self.lane_ints[right].unsafe_ptr()
+        var out = self.lane_ints[index].unsafe_ptr()
+        var whole = self.whole[index]
+        var flags = self.valid[index].unsafe_ptr()
+        var overflow = False
+        for k in range(count):
+            var a = Int128(x[unsafe_offset=k])
+            var b = Int128(y[unsafe_offset=k])
+            var wide: Int128
+            if op == ADD:
+                wide = a + b
+            elif op == SUB:
+                wide = a - b
+            else:
+                wide = a * b
+            var keep = whole or flags[unsafe_offset=k] != 0
+            overflow |= keep and (wide < low or wide > high)
+            out[unsafe_offset=k] = Int64(wide) if keep else 0
+        if overflow:
+            var what = String("addition")
+            if op == SUB:
+                what = "subtraction"
+            elif op == MUL:
+                what = "multiplication"
+            raise Error(dtype.name() + " " + what + " overflow")
+
     def _compute(mut self, index: Int, count: Int) raises:
         """Arithmetic or a cast over the computed rows, in lanes."""
         var node = _Shape(
@@ -2244,6 +2308,11 @@ struct VectorExpression(Copyable, Movable):
                 out[unsafe_offset=k] = (
                     value if whole or flags[unsafe_offset=k] != 0 else 0
                 )
+            return
+        if lane == _LANE_INT and dtype != DataType.INT64:
+            self._narrow_int_arithmetic(
+                node.op, dtype, left, right, index, count
+            )
             return
         if lane == _LANE_INT:
             var x = self.lane_ints[left].unsafe_ptr()
