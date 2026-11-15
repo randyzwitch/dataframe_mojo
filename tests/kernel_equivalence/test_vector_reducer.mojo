@@ -1,9 +1,11 @@
 """A reduction's state updated straight from a chunk's vectors equals the
 same state updated from the chunk's rows as a column: flat windows and
 dictionary slices, nulls, every number width, decimals, Booleans and
-strings; and a buffer of input rows filled from vectors holds the rows a
-column would."""
+strings, for one state and for many groups' states (rows by group
+ordinal, as the aggregate table's states by address take them); and a
+buffer of input rows filled from vectors holds the rows a column would."""
 # contract-group: reduce.global
+# contract-group: reduce.grouped
 from std.collections import Optional
 from std.math import nan
 from std.testing import assert_equal, assert_true
@@ -106,11 +108,11 @@ def _columns() raises -> List[Series]:
     return result^
 
 
-def _reducer(op: Int, dtype: DataType) -> Reducer:
+def _reducer(op: Int, dtype: DataType, groups: Int = 1) -> Reducer:
     return Reducer(
         op,
         dtype.physical(),
-        1,
+        groups,
         0,
         1,
         0.3 if op == QUANTILE else 0.0,
@@ -208,6 +210,168 @@ def test_reducer_vector_update_matches_column_update() raises:
                 checked += 1
             _ = arena^
     assert_true(checked > 100)
+
+
+comptime _GROUPS = 13
+
+
+def _ordinals(count: Int, start: Int, unjoined: Bool) -> List[Int]:
+    """Group ordinals of `count` rows from row `start`, scattered over the
+    groups; with `unjoined`, every ninth row joins no group (-1)."""
+    var ordinals = List[Int](capacity=count)
+    for i in range(count):
+        var row = start + i
+        if unjoined and row % 9 == 4:
+            ordinals.append(-1)
+        else:
+            ordinals.append((row * 7919) % _GROUPS)
+    return ordinals^
+
+
+def test_grouped_vector_update_matches_column_update() raises:
+    """Every group's state, bit for bit, whichever route its rows take."""
+    var columns = _columns()
+    var ops: List[Int] = [
+        COUNT,
+        NULL_COUNT,
+        SUM,
+        MEAN,
+        MIN,
+        MAX,
+        STD,
+        VAR,
+        SKEW,
+        KURTOSIS,
+        MEDIAN,
+        QUANTILE,
+        PRODUCT,
+        MODE,
+        ANY,
+        ALL,
+    ]
+    var checked = 0
+    for dictionary in [False, True]:
+        for c in range(len(columns)):
+            var name = columns[c].name()
+            var dtype = columns[c].dtype()
+            var arena = ColumnArena()
+            var handle = arena.add(columns[c])
+            var chunks = _chunks(arena, [handle], dictionary)
+            for op in ops:
+                if not reads_vectors(op, dtype):
+                    continue
+                if op == SUM and name == "u64":
+                    continue
+                if op == PRODUCT and not (
+                    name == "small" or name == "near" or name == "flags"
+                ):
+                    continue
+                var by_column = _reducer(op, dtype, _GROUPS)
+                var by_vector = _reducer(op, dtype, _GROUPS)
+                var at = 0
+                for k in range(len(chunks)):
+                    var n = chunks[k].count
+                    var ordinals = _ordinals(n, at, False)
+                    var column = to_series(chunks[k], 0, arena, "", dtype)
+                    by_column.update(
+                        reducer_input(by_column, column), 0, True, ordinals
+                    )
+                    by_vector.update_vector(
+                        chunks[k].unified(0, arena), n, dtype, ordinals
+                    )
+                    at += n
+                _assert_same(by_vector, by_column)
+                checked += 1
+            _ = arena^
+    assert_true(checked > 100)
+
+
+def test_grouped_pair_vector_update_matches_column_update() raises:
+    var columns = _columns()
+    var pairs: List[Tuple[Int, Int]] = [(3, 0), (4, 1), (2, 5), (7, 6)]
+    for dictionary in [False, True]:
+        for pair in pairs:
+            var x = columns[pair[0]].copy()
+            var y = columns[pair[1]].copy()
+            var arena = ColumnArena()
+            var handles: List[Int] = [arena.add(x), arena.add(y)]
+            var chunks = _chunks(arena, handles, dictionary)
+            for method in ["pearson", "spearman", "cov"]:
+                var op = COV if method == "cov" else CORR
+                var text = "pearson" if method == "cov" else method
+                var by_column = Reducer(
+                    op, DataType.FLOAT64, _GROUPS, 0, 1, 0.0, text, None
+                )
+                var by_vector = Reducer(
+                    op, DataType.FLOAT64, _GROUPS, 0, 1, 0.0, text, None
+                )
+                var at = 0
+                for k in range(len(chunks)):
+                    var n = chunks[k].count
+                    var ordinals = _ordinals(n, at, False)
+                    var left = to_series(chunks[k], 0, arena, "", x.dtype())
+                    var right = to_series(chunks[k], 1, arena, "", y.dtype())
+                    by_column.update_pair(left, right, 0, True, ordinals)
+                    by_vector.update_pair_vector(
+                        chunks[k].unified(0, arena),
+                        chunks[k].unified(1, arena),
+                        n,
+                        x.dtype(),
+                        y.dtype(),
+                        ordinals,
+                    )
+                    at += n
+                _assert_same(by_vector, by_column)
+            _ = arena^
+
+
+def test_grouped_ordered_buffer_from_vectors_keeps_the_rows() raises:
+    """Rows by group ordinal, some joining no group, from vectors and as
+    columns: the same values, sequence numbers and rows by group."""
+    var columns = _columns()
+    var taken = 0
+    for dictionary in [False, True]:
+        for c in range(len(columns)):
+            var dtype = columns[c].dtype()
+            var arena = ColumnArena()
+            var handle = arena.add(columns[c])
+            var chunks = _chunks(arena, [handle], dictionary)
+            var storage = storage_physical(columns[c])
+            var by_column = _OrderedBuffer()
+            var by_vector = _OrderedBuffer()
+            var sequence = 0
+            for k in range(len(chunks)):
+                var n = chunks[k].count
+                var ordinals = _ordinals(n, sequence, True)
+                var column = to_series(chunks[k], 0, arena, "", dtype)
+                by_column.add(column, ordinals, sequence, _GROUPS)
+                if by_vector.add_vector(
+                    chunks[k].unified(0, arena),
+                    n,
+                    dtype,
+                    storage,
+                    sequence,
+                    ordinals,
+                    _GROUPS,
+                ):
+                    taken += 1
+                else:
+                    by_vector.add(column, ordinals, sequence, _GROUPS)
+                sequence += n
+            by_column.prepare()
+            by_vector.prepare()
+            var left = by_vector.values.value().copy()
+            var right = by_column.values.value().copy()
+            assert_true(left.dtype() == right.dtype())
+            assert_equal(len(left), len(right))
+            for r in range(len(right)):
+                assert_value(left.get(r), right.get(r))
+            assert_equal(by_vector.ordinals, by_column.ordinals)
+            assert_equal(by_vector.sequences, by_column.sequences)
+            assert_equal(by_vector.starts, by_column.starts)
+            assert_equal(by_vector.rows, by_column.rows)
+            _ = arena^
+    assert_true(taken > 0)
 
 
 def test_pair_vector_update_matches_column_update() raises:
