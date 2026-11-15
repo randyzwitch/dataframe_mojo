@@ -45,7 +45,7 @@ from dataframe.join_type import (
     JOIN_SEMI,
     join_emits_build_rows,
 )
-from dataframe.kernels.partition import _hash_column
+from dataframe.kernels.partition import _hash_column, _row_at
 from dataframe.kernels.runtime_filter import (
     KeyBloom,
     bloom_blocks_for,
@@ -289,7 +289,9 @@ def _field_kind(key: Series) -> Int:
     return _FIX
 
 
-def _write_native(
+def _write_native[
+    selected: Bool = False
+](
     key: Series,
     start: Int,
     count: Int,
@@ -297,22 +299,27 @@ def _write_native(
     stride: Int,
     valid: Int,
     valid_stride: Int,
+    selection: Int = 0,
 ) raises:
     """Rows [start, start + count) of an unchunked key as the row field
     TupleDataCollection's scatter writes: row i's field at `base + i *
     stride`, its validity ANDed into the byte at `valid + i *
-    valid_stride`. A null row's field is left undefined."""
+    valid_stride`. A null row's field is left undefined. With `selected`,
+    row i is the one the UInt32 selection at `selection` holds at i."""
+    var rows = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=selection)
     var bits = _validity(key)
     if bits[0] != 0:
         var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bits[0])
         for i in range(count):
-            if not _validity_at(bitmap, bits[1] + start + i):
+            if not _validity_at(
+                bitmap, bits[1] + _row_at[selected](rows, start, i)
+            ):
                 _store8(valid + i * valid_stride, 0)
     if key._data.isa[StringColumn]():
         var strings = _StringBytes(key._data[StringColumn])
         for i in range(count):
             var at = base + i * stride
-            var found = strings.at(start + i)
+            var found = strings.at(_row_at[selected](rows, start, i))
             var length = found[1]
             _store64(at, UInt64(length))
             _store64(at + 8, 0)
@@ -343,7 +350,8 @@ def _write_native(
         var values = key._data[Column[Int128]]._ptr()
         for i in range(count):
             _store_as[DType.int128](
-                base + i * stride, values[unsafe_offset=start + i]
+                base + i * stride,
+                values[unsafe_offset=_row_at[selected](rows, start, i)],
             )
         return
     if key._data.isa[BoolColumn]():
@@ -351,7 +359,9 @@ def _write_native(
         for i in range(count):
             _store8(
                 base + i * stride,
-                UInt8(1) if bools._get(start + i) else UInt8(0),
+                UInt8(1) if bools._get(
+                    _row_at[selected](rows, start, i)
+                ) else UInt8(0),
             )
         return
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -359,7 +369,10 @@ def _write_native(
         if key._data.isa[Column[Scalar[D]]]():
             var values = key._data[Column[Scalar[D]]]._ptr()
             for i in range(count):
-                _store_as[D](base + i * stride, values[unsafe_offset=start + i])
+                _store_as[D](
+                    base + i * stride,
+                    values[unsafe_offset=_row_at[selected](rows, start, i)],
+                )
             return
     raise Error("unsupported join key type: " + key.dtype().name())
 
@@ -1345,7 +1358,9 @@ def _perfect_slots(
     return None
 
 
-def _perfect_heads(
+def _perfect_heads[
+    selected: Bool = False
+](
     key: Series,
     start: Int,
     count: Int,
@@ -1354,10 +1369,13 @@ def _perfect_heads(
     slots: Int,
     slot_bits: Int,
     heads: Int,
+    selection: Int = 0,
 ):
     """Each probe row's build row plus one (0 for none), looked up by `key -
     base`: the key's offset in the build range is its slot, so there is no
-    hashing and no key comparison."""
+    hashing and no key comparison. With `selected`, probe row i reads the
+    key at the row the UInt32 selection at `selection` holds at i."""
+    var rows = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=selection)
     var valid = _validity(key)
     var bitmap = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid[0])
     var set = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=slot_bits)
@@ -1369,12 +1387,11 @@ def _perfect_heads(
             if key._data.isa[Column[Scalar[D]]]():
                 var values = key._data[Column[Scalar[D]]]._ptr()
                 for i in range(count):
-                    var at = _word[D](values[unsafe_offset=start + i]) - base
+                    var r = _row_at[selected](rows, start, i)
+                    var at = _word[D](values[unsafe_offset=r]) - base
                     if at > limit:
                         continue
-                    if valid[0] != 0 and not _validity_at(
-                        bitmap, valid[1] + start + i
-                    ):
+                    if valid[0] != 0 and not _validity_at(bitmap, valid[1] + r):
                         continue
                     var slot = Int(at)
                     if (set[unsafe_offset=slot >> 3] >> UInt8(slot & 7)) & 1:
@@ -2110,55 +2127,137 @@ struct ScanStructure(Movable):
         """Probe rows [start, start + count) of the unchunked `keys` (at most
         STANDARD_VECTOR_SIZE rows): each row's first candidate entry, followed
         by `next` to find its matches."""
+        self._begin(count)
+        if self.table.perfect:
+            self._perfect(keys[0], start, 0, count)
+            return
+        for k in range(len(keys)):
+            self._key(k, keys[k], start, 0, count)
+        self._find(count)
+
+    def probe_selected(
+        mut self,
+        keys: List[Series],
+        starts: List[Int],
+        selections: List[Int],
+        count: Int,
+    ) raises:
+        """Probe `count` rows (at most STANDARD_VECTOR_SIZE) whose key `k`
+        is read from the unchunked `keys[k]` in place: through the UInt32
+        selection at address `selections[k]` (row i at its entry i), or,
+        when that is 0, rows [starts[k], starts[k] + count). Rows kept by an
+        earlier filter or join are probed where they are, with no gather."""
+        self._begin(count)
+        if self.table.perfect:
+            self._perfect(keys[0], starts[0], selections[0], count)
+            return
+        for k in range(len(keys)):
+            self._key(k, keys[k], starts[k], selections[k], count)
+        self._find(count)
+
+    def _begin(mut self, count: Int):
         self.count = count
         self.row = 0
         self.cursor = 0
         self.started = False
         self.finished = False
-        ref layout = self.table.layout
         var heads = self.heads.unsafe_ptr()
         for i in range(count):
             heads[unsafe_offset=i] = 0
-        if self.table.perfect:
-            # The key's slot holds its build row, emitted by `next` with no
-            # chain to walk.
-            _perfect_heads(
-                keys[0],
+        if not self.table.perfect:
+            var valid = self.valid.unsafe_ptr()
+            for i in range(count):
+                valid[unsafe_offset=i] = 1
+
+    def _perfect(mut self, key: Series, start: Int, selection: Int, count: Int):
+        """The key's slot holds its build row, emitted by `next` with no
+        chain to walk."""
+        var heads = Int(self.heads.unsafe_ptr())
+        var slots = Int(self.table.data[].slots.unsafe_ptr())
+        var bits = Int(self.table.data[].slot_bits.unsafe_ptr())
+        if selection != 0:
+            _perfect_heads[True](
+                key,
                 start,
                 count,
                 self.table.perfect_base,
                 self.table.perfect_span,
-                Int(self.table.data[].slots.unsafe_ptr()),
-                Int(self.table.data[].slot_bits.unsafe_ptr()),
-                Int(heads),
+                slots,
+                bits,
+                heads,
+                selection,
             )
-            return
-        var valid = self.valid.unsafe_ptr()
-        for i in range(count):
-            valid[unsafe_offset=i] = 1
+        else:
+            _perfect_heads(
+                key,
+                start,
+                count,
+                self.table.perfect_base,
+                self.table.perfect_span,
+                slots,
+                bits,
+                heads,
+            )
+
+    def _key(
+        mut self,
+        k: Int,
+        key: Series,
+        start: Int,
+        selection: Int,
+        count: Int,
+    ) raises:
+        """Key column `k` of the chunk's rows into the probe records, and
+        its hash combined into the rows' hashes."""
+        ref layout = self.table.layout
         var records = Int(self.records.unsafe_ptr())
-        var key_bytes = layout.key_bytes
-        for k in range(len(keys)):
-            _write_native(
-                keys[k],
+        var valid = Int(self.valid.unsafe_ptr())
+        var hashes = Int(self.hashes.unsafe_ptr())
+        if selection != 0:
+            _write_native[True](
+                key,
                 start,
                 count,
                 records + layout.offsets[k],
-                key_bytes,
-                Int(valid),
+                layout.key_bytes,
+                valid,
                 1,
+                selection,
             )
-            _hash_column(
-                keys[k],
+            _hash_column[True](
+                key,
                 start,
                 start + count,
-                Int(self.hashes.unsafe_ptr()),
+                hashes,
                 k == 0,
                 output_offset=start,
+                selection=selection,
             )
+            return
+        _write_native(
+            key,
+            start,
+            count,
+            records + layout.offsets[k],
+            layout.key_bytes,
+            valid,
+            1,
+        )
+        _hash_column(
+            key,
+            start,
+            start + count,
+            hashes,
+            k == 0,
+            output_offset=start,
+        )
+
+    def _find(mut self, count: Int):
+        """Each row with no null key's chain (`_row_pointers`)."""
         if self.table.inserted == 0:
             return
         # Rows with a null key match nothing.
+        var valid = self.valid.unsafe_ptr()
         var todo = self.todo.unsafe_ptr()
         var pending = 0
         for i in range(count):
