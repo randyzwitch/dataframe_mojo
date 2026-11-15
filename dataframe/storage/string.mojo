@@ -17,6 +17,8 @@ from dataframe.storage.string_view import (
     StringView,
     StringViewStorage,
     STRING_VIEW_INLINE_BYTES,
+    _external_view,
+    _inline_view,
 )
 from dataframe.dtype import DataType
 from dataframe.storage.column import (
@@ -196,6 +198,123 @@ struct StringColumn(Copyable, Sized):
         result._offset = offset
         result._length = length
         return result^
+
+    @staticmethod
+    def _repeated(
+        text: Span[UInt8, ImmutAnyOrigin], length: Int, valid: Bool
+    ) -> Self:
+        """`length` rows that all hold `text` (or are all null), kept as one
+        value: a constant column (see `Column._repeated`). A valid value is
+        one view descriptor repeated, over one copy of the bytes when they
+        do not fit inline; null rows are an all-zero offsets buffer with no
+        bytes."""
+        if not valid:
+            var nulls = Self(
+                bytes=List[UInt8](),
+                offsets=List[Int64](),
+                bits=List[UInt8](),
+                length=0,
+            )
+            nulls._offsets = _Buffer[Int64].repeating(Int64(0), length + 1)
+            nulls._bits = _Buffer[UInt8].repeating(UInt8(0), (length + 7) // 8)
+            nulls._length = length
+            return nulls^
+        var buffers = List[_Buffer[UInt8]]()
+        var view: StringView
+        if len(text) <= STRING_VIEW_INLINE_BYTES:
+            view = _inline_view(text)
+        else:
+            var bytes = List[UInt8](capacity=len(text))
+            bytes.extend(text)
+            buffers.append(_Buffer(bytes^))
+            view = _external_view(text, 0, 0)
+        var held = len(text) if len(buffers) > 0 else 0
+        return Self(
+            StringViewStorage(
+                views=_Buffer[StringView].repeating(view^, length),
+                buffers=buffers^,
+                bits=_Buffer(List[UInt8]()),
+                length=length,
+                total_buffer_bytes=held,
+            )
+        )
+
+    def is_constant(self) -> Bool:
+        """Whether every row holds one value, or every row is null, kept as
+        that value (`_repeated`)."""
+        if len(self._bits[]) != 0 and not self._bits.repeats():
+            return False
+        if self._is_view_storage():
+            return self._view_storage.value()._views.repeats()
+        # Every offset the same: every row is empty (or null).
+        return self._offsets.repeats()
+
+    def constant_valid(self) -> Bool:
+        """Whether a constant column's rows are valid; only when
+        `is_constant()`."""
+        return len(self._bits[]) == 0 or self._bits.repeated() != 0
+
+    def constant_bytes(self) -> Span[UInt8, ImmutAnyOrigin]:
+        """A constant column's value (empty when its rows are null); only
+        when `is_constant()`."""
+        if not self._is_view_storage():
+            return Span[UInt8, ImmutAnyOrigin]()
+        ref storage = self._view_storage.value()
+        ref view = storage._views.repeated()
+        var length = Int(view.length)
+        if view.is_inline():
+            return Span[UInt8, ImmutAnyOrigin](
+                unsafe_ptr=Pointer(to=view)
+                .unsafe_bitcast[UInt8]()
+                .unsafe_offset(4)
+                .unsafe_origin_cast[ImmutAnyOrigin](),
+                length=length,
+            )
+        ref buffer = storage._buffers[][Int(view.buffer_index)]
+        return Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=buffer.unsafe_ptr()
+            .unsafe_offset(Int(view.offset))
+            .unsafe_mut_cast[False]()
+            .unsafe_origin_cast[ImmutAnyOrigin](),
+            length=length,
+        )
+
+    def _resized(self, length: Int) -> Self:
+        """This constant column's value over `length` rows."""
+        var valid = self.constant_valid()
+        if not valid or not self._is_view_storage():
+            return Self._repeated(self.constant_bytes(), length, valid)
+        # The same descriptor over the same bytes: nothing copied.
+        ref storage = self._view_storage.value()
+        var result = Self(
+            StringViewStorage(
+                views=_Buffer[StringView].repeating(
+                    storage._views.repeated().copy(), length
+                ),
+                buffers=List[_Buffer[UInt8]](),
+                bits=_Buffer(List[UInt8]()),
+                length=length,
+                total_buffer_bytes=storage._total_buffer_bytes,
+            )
+        )
+        result._view_storage.value()._buffers = storage._buffers.copy()
+        return result^
+
+    def _same_constant(self, other: Self) -> Bool:
+        """Whether two constant columns hold the same value."""
+        var valid = self.constant_valid()
+        if valid != other.constant_valid():
+            return False
+        if not valid:
+            return True
+        var a = self.constant_bytes()
+        var b = other.constant_bytes()
+        if len(a) != len(b):
+            return False
+        for i in range(len(a)):
+            if a[i] != b[i]:
+                return False
+        return True
 
     def __len__(self) -> Int:
         return self._length
@@ -515,6 +634,10 @@ struct StringColumn(Copyable, Sized):
         result._codes = ArcPointer(StringCodes(_Buffer(codes^), held.dtype))
 
     def take(self, indices: List[Int]) raises -> Self:
+        if self.is_constant():
+            for i in indices:
+                self._check_index(i)
+            return self._resized(len(indices))
         if self._is_view_storage():
             for i in indices:
                 self._check_index(i)
@@ -748,6 +871,8 @@ struct StringColumn(Copyable, Sized):
             or length > self._length - offset
         ):
             raise Error("Invalid column slice")
+        if self.is_constant() and length != self._length:
+            return self._resized(length)
         var result = self.copy()
         result._offset = self._offset + offset
         result._length = length
@@ -818,9 +943,17 @@ struct StringColumn(Copyable, Sized):
         return self._gather_views(rows, 0, self._length, False)
 
     def _append_column(mut self, other: Self):
-        """Append rows in bulk, retaining native view payload blocks when possible."""
+        """Append rows in bulk, retaining native view payload blocks when
+        possible. Two constants with the same value stay one constant."""
         # Codes cover the rows before the append only.
         self._codes = None
+        if other.is_constant():
+            if self._length == 0:
+                self = other.copy()
+                return
+            if self.is_constant() and self._same_constant(other):
+                self = self._resized(self._length + other._length)
+                return
         if self._is_view_storage() or other._is_view_storage():
             # Views are the canonical layout: a mixed pair becomes views
             # (descriptors over the offsets side's own bytes), never the
@@ -909,12 +1042,8 @@ struct StringColumn(Copyable, Sized):
     def _broadcast(self, length: Int) raises -> Self:
         if self._length != 1 or length < 0:
             raise Error("Only a scalar result can broadcast")
-        if not self._valid(0):
-            return Self._nulls(length)
-        var builder = StringBuilder(length, length * self._byte_length(0))
-        for _ in range(length):
-            builder._append_row(self, 0)
-        return builder^.finish()
+        # The value is kept once, not written to every row (`_repeated`).
+        return Self._repeated(self._get(0).as_bytes(), length, self._valid(0))
 
 
 struct StringBuilder(Copyable):

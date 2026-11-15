@@ -2,6 +2,12 @@ Measurements in this note were taken at commit 54495318 (2026-10-15); they are a
 
 # Worker-count and machine calibration (#273)
 
+> **Superseded (2026-11).** The 65,536-row minimum per worker, the sorted-gather
+> part cap and its rows-per-job floor are gone: a kernel now runs one task per
+> thread, each at least one 2,048-row vector (`parallel.task_count`). Threads come
+> from the shared crew, so the per-call thread start these sweeps priced is no
+> longer paid.
+
 > **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `8a50a95` to rerun them.
 
 ## Machines and method

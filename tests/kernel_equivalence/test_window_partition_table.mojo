@@ -1,7 +1,8 @@
 """Window partitions against a scalar model: string keys short, long, empty,
 Unicode and null, with equal strings read at the end of their byte buffer
 (by bytes) and inside it (by masked word loads), an integer key with nulls,
-and a mean over a partition and a rank within one."""
+a mean over a partition and a rank within one, and a rank over one string
+key on several workers, where the gathered key is in several pieces."""
 # contract-group: expr.order_windows
 from std.testing import assert_equal, assert_true
 
@@ -106,4 +107,75 @@ def test_mean_and_rank_over_string_partitions_match_scalar_values() raises:
             rank.uint32()
         )
         assert_equal(r, below + 1)
+    _ = workers^
+
+
+comptime WIDE_ROWS = 300_000
+comptime WIDE_PARTS = 37
+comptime WIDE_VALUES = 1_000
+
+
+def wide_part(row: Int) -> Int:
+    return (row * 13) % WIDE_PARTS
+
+
+def wide_value(row: Int) -> Int:
+    return (row * 7919) % WIDE_VALUES
+
+
+def wide_key(row: Int) -> String:
+    var p = wide_part(row)
+    return "t:" + text_of(p) if text_valid(p) else String("null")
+
+
+def test_rank_over_one_string_key_with_nulls_on_many_workers() raises:
+    # Enough rows that gathering the key splits it into several pieces, one
+    # per worker, and partitions are numbered by tasks whose row ranges
+    # cross those pieces: every key comparison must read the right piece.
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var texts = List[String](capacity=WIDE_ROWS)
+    var valid = List[Bool](capacity=WIDE_ROWS)
+    var values = List[Int64](capacity=WIDE_ROWS)
+    for row in range(WIDE_ROWS):
+        var p = wide_part(row)
+        texts.append(text_of(p))
+        valid.append(text_valid(p))
+        values.append(Int64(wide_value(row)))
+    var data = DataFrame(
+        [
+            Series("t", Column[String](texts^, valid)),
+            Series("v", Column[Int64](values^)),
+        ]
+    )
+    # Rank "min", descending: one plus the partition's values above the
+    # row's. Partitions are the key strings (several parts share one), and
+    # nulls form one partition.
+    var above = Dict[String, List[Int]]()
+    for row in range(WIDE_ROWS):
+        var key = wide_key(row)
+        if key not in above:
+            above[key] = List[Int](length=WIDE_VALUES + 1, fill=0)
+        above[key][wide_value(row)] += 1
+    var keys = List[String]()
+    for key in above.keys():
+        keys.append(key)
+    for key in keys:
+        ref counts = above[key]
+        var total = 0
+        for v in range(WIDE_VALUES, -1, -1):
+            var here = counts[v]
+            counts[v] = total
+            total += here
+    var expression = (
+        col("v").rank(method="min", descending=True).over("t").alias("rank")
+    )
+    var eager = data.with_columns([expression.copy()])
+    var lazy = data.lazy().with_columns([expression.copy()]).collect()
+    for result in [eager.copy(), lazy.copy()]:
+        var ranks = result.column("rank").cast(DataType.INT64)
+        for row in range(WIDE_ROWS):
+            assert_equal(
+                Int(ranks[row].int64()),
+                above[wide_key(row)][wide_value(row)] + 1,
+            )
     _ = workers^
