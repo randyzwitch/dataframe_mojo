@@ -304,6 +304,9 @@ struct _StreamInputs(Movable):
 
     var metas: List[MetaPipeline]
     var wanted: List[Int]
+    # The join each input is the build side of; -1 for an input that is
+    # not a join's (a union child, the probe's own source).
+    var joins: List[Int]
     var keys: List[List[String]]
     var hows: List[Int]
     var coalesces: List[Bool]
@@ -318,6 +321,7 @@ struct _StreamInputs(Movable):
         self.build_filtered = List[Bool]()
         self.metas = List[MetaPipeline]()
         self.wanted = List[Int]()
+        self.joins = List[Int]()
         self.keys = List[List[String]]()
         self.hows = List[Int]()
 
@@ -344,6 +348,7 @@ def plan_schedule_inputs(
         elif _stream_join(step):
             if step.right not in ahead[]:
                 inputs.wanted.append(step.right)
+                inputs.joins.append(probe)
                 if step.how != JOIN_CROSS and len(step.names) > 0:
                     inputs.keys.append(step.right_keys.copy())
                 else:
@@ -370,6 +375,7 @@ def plan_schedule_inputs(
             if child in ahead[] or child in inputs.wanted:
                 continue
             inputs.wanted.append(child)
+            inputs.joins.append(-1)
             inputs.keys.append(List[String]())
             inputs.hows.append(JOIN_CROSS)
             inputs.coalesces.append(True)
@@ -386,6 +392,7 @@ def plan_schedule_inputs(
         and probe not in ahead[]
     ):
         inputs.wanted.append(probe)
+        inputs.joins.append(-1)
         inputs.keys.append(List[String]())
         inputs.hows.append(JOIN_CROSS)
         inputs.coalesces.append(True)
