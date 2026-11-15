@@ -178,3 +178,60 @@ def test_a_bloom_filter_never_loses_a_key() raises:
         if bloom.contains(Int64(SPAN + 1 + k)):
             false_hits += 1
     assert_true(false_hits < 500)
+
+
+def test_a_perfect_hash_build_hands_the_probe_a_bloom_filter() raises:
+    # Unique build keys over a narrow range join through a perfect hash
+    # table, which never fills a filter while it finalizes; the probe still
+    # gets one, built from the keys, and drops the rows in that range that
+    # match no key.
+    for threads in [1, 8]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
+        var probe_ids = List[Int64]()
+        var probe_keys = List[Int64]()
+        var valid = List[Bool]()
+        for row in range(ROWS):
+            probe_ids.append(Int64(row))
+            probe_keys.append(Int64((row * 7) % 20_000))
+            valid.append(key_valid(row))
+        var source = DataFrame(
+            [
+                Series("id", Column[Int64](probe_ids^)),
+                Series("k", Column[Int64](probe_keys^, valid)),
+            ]
+        )
+        var keys = List[Int64]()
+        var payload = List[Int64]()
+        for m in range(0, 20_000, 50):
+            keys.append(Int64(m))
+            payload.append(Int64(m // 50))
+        var dimension = DataFrame(
+            [
+                Series("d", Column[Int64](keys^)),
+                Series("d_v", Column[Int64](payload^)),
+            ]
+        )
+        var expected = List[Int]()
+        for row in range(ROWS):
+            if key_valid(row) and ((row * 7) % 20_000) % 50 == 0:
+                expected.append(row)
+        var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+        var observed = StrategyTrace()
+        var result = (
+            source.lazy()
+            .join(dimension.lazy(), left_on=["k"], right_on=["d"])
+            .collect()
+        )
+        var text = observed.text()
+        _ = observed^
+        _ = trace^
+        assert_true(
+            "dataframe-path: join.perfect_hash\n" in text,
+            "the build did not take a perfect hash table",
+        )
+        assert_true(
+            "dataframe-path: pipeline.join_bloom\n" in text,
+            "no bloom filter was built",
+        )
+        assert_equal(ids(result), expected)
+        _ = workers^

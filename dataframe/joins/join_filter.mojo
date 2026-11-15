@@ -361,13 +361,24 @@ def _finalize(
             scan.push_dynamic(probe_column, lower.value())
             scan.push_dynamic(probe_column, upper.value())
     var bloom = Optional[ArcPointer[KeyBloom]]()
-    if key.table:
+    var perfect = Bool(key.table) and key.table.value().perfect
+    if key.table and not perfect:
         # A hash table fills its filter from its rows' hashes while it
         # finalizes, when the rule held then.
         bloom = key.table.value().bloom.copy()
+    elif perfect and Int64(build_count) - 1 == high - low:
+        # A perfect hash table's keys are unique, so as many keys as the
+        # range is wide fill it: the range filter above already drops
+        # every row the bloom filter would.
+        pass
     elif can_use_bloom_filter(
         equalities, build_count, probe_rows, build_filtered
     ):
+        # A perfect hash table indexes its keys' slots directly and never
+        # runs the finalize that fills a filter, so its filter is built
+        # from the key values here, as for a build without a table: its
+        # keys lie in a narrow range, but the probe can hold many values
+        # in that range that no build row has.
         bloom = build_bloom(key.column(), build_count)
     return JoinFilter(probe_column, step, True, False, 0, bloom^)
 
