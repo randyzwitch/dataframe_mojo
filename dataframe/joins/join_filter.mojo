@@ -387,59 +387,56 @@ def keep_rows(
     filter: JoinFilter,
     key: Series,
     start: Int,
-    end: Int,
-    mut keep: List[UInt8],
-) -> Tuple[Int, Int]:
-    """AND rows [start, end) of an unchunked integer key that `filter` keeps
-    into `keep` (indexed from `start`): its equality, or its bloom filter.
-    Returns the rows looked at (those `keep` still held) and those kept."""
-    var at = keep.unsafe_ptr()
-    var looked = 0
+    count: Int,
+    rows: Int,
+    dense: Bool,
+) -> Int:
+    """Narrow a selection to the rows of an unchunked integer key that
+    `filter` keeps (its equality, or its bloom filter).
+
+    The selection is `count` UInt32 row numbers of `key` at address `rows`;
+    when `dense` it is rows [start, start + count) and is not read, only
+    written. The kept rows are written in order to the selection's front
+    (in place: a row is written no later than it is read), and their number
+    returned. Each filter reads only the rows the ones before it kept, and
+    no row is copied: what passes on is the selection."""
+    if key.dtype().physical() == DataType.INT64:
+        return _keep_rows(
+            filter, key._data[Column[Int64]], start, count, rows, dense
+        )
+    return _keep_rows(
+        filter, key._data[Column[Int32]], start, count, rows, dense
+    )
+
+
+def _keep_rows[
+    D: DType
+](
+    filter: JoinFilter,
+    column: Column[Scalar[D]],
+    start: Int,
+    count: Int,
+    rows: Int,
+    dense: Bool,
+) -> Int:
+    var sel = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=rows)
+    var values = column._ptr()
+    var all_valid = column.null_count() == 0
+    var bits = column.unsafe_validity()
+    var offset = column._offset
     var kept = 0
-    var physical = key.dtype().physical()
-    var offset = 0
-    var all_valid = key.null_count() == 0
-    if physical == DataType.INT64:
-        ref column = key._data[Column[Int64]]
-        var bits = column.unsafe_validity()
-        if not all_valid:
-            offset = column._offset
-        var values = column._ptr()
-        for i in range(start, end):
-            var k = i - start
-            if at[unsafe_offset=k] == 0:
-                continue
-            looked += 1
-            var ok = all_valid or _validity_at(bits, offset + i)
-            if ok:
-                var v = values[unsafe_offset=i]
-                if filter.equal:
-                    ok = v == filter.value
-                else:
-                    ok = filter.bloom.value()[].contains(v)
-            at[unsafe_offset=k] = UInt8(1) if ok else UInt8(0)
-            kept += Int(ok)
-    else:
-        ref column = key._data[Column[Int32]]
-        var bits = column.unsafe_validity()
-        if not all_valid:
-            offset = column._offset
-        var values = column._ptr()
-        for i in range(start, end):
-            var k = i - start
-            if at[unsafe_offset=k] == 0:
-                continue
-            looked += 1
-            var ok = all_valid or _validity_at(bits, offset + i)
-            if ok:
-                var v = Int64(values[unsafe_offset=i])
-                if filter.equal:
-                    ok = v == filter.value
-                else:
-                    ok = filter.bloom.value()[].contains(v)
-            at[unsafe_offset=k] = UInt8(1) if ok else UInt8(0)
-            kept += Int(ok)
-    return (looked, kept)
+    for i in range(count):
+        var row = start + i if dense else Int(sel[unsafe_offset=i])
+        var ok = all_valid or _validity_at(bits, offset + row)
+        if ok:
+            var v = Int64(values[unsafe_offset=row])
+            if filter.equal:
+                ok = v == filter.value
+            else:
+                ok = filter.bloom.value()[].contains(v)
+        sel[unsafe_offset=kept] = UInt32(row)
+        kept += Int(ok)
+    return kept
 
 
 @fieldwise_init
