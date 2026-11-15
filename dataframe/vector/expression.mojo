@@ -504,7 +504,9 @@ struct VectorExpression(Copyable, Movable):
             self.children[i] = flat^
 
     def _flatten(self, index: Int, op: Int, mut out: List[Int]):
-        """The children of a chain of `op` conjunctions, left to right."""
+        """The children of a chain of `op` conjunctions, left to right. A
+        lower and an upper bound on one column stay one child, a range
+        selected in one pass over the column (`_select_range_of`)."""
         for child in [
             self.bound.expr._nodes[index].left,
             self.bound.expr._nodes[index].right,
@@ -512,6 +514,7 @@ struct VectorExpression(Copyable, Movable):
             if (
                 self.kinds[child] == _KIND_LANE
                 and self.bound.expr._nodes[child].op == op
+                and not (op == AND and self.ranges[child] >= 0)
             ):
                 self._flatten(child, op, out)
             else:
@@ -1008,7 +1011,10 @@ struct VectorExpression(Copyable, Movable):
         var left = node.left
         var right = node.right
         if node.op == WHEN:
-            self._when(index, node, input, arena, rows, count)
+            if self._blends(index, node):
+                self._blend(index, node, input, arena, rows, count)
+            else:
+                self._when(index, node, input, arena, rows, count)
             return
         self._evaluate(left, input, arena, rows, count)
         if right >= 0:
@@ -1384,6 +1390,96 @@ struct VectorExpression(Copyable, Movable):
             tail_valid &= valid
             k += 1
         self.whole[index] = all_valid.reduce_and() == 1 and tail_valid == 1
+
+    def _blends(self, index: Int, node: _Shape) -> Bool:
+        """Whether a CASE WHEN is computed by blending: a result of numbers
+        or Booleans, and branches that cannot raise, so computing each on
+        every row observes nothing the rows' own branch would not."""
+        var lane = self.lanes[index]
+        if lane == _LANE_STRING or lane == _LANE_ANY or lane == _LANE_NONE:
+            return False
+        if self._can_throw(node.right):
+            return False
+        return node.extra < 0 or not self._can_throw(node.extra)
+
+    def _blend(
+        mut self,
+        index: Int,
+        node: _Shape,
+        mut input: DataChunk,
+        mut arena: ColumnArena,
+        rows: SelectionVector,
+        count: Int,
+    ) raises:
+        """CASE WHEN by blending: the predicate and each branch over every
+        row, then each row's value and validity taken from the branch its
+        predicate picks (a null predicate picks the otherwise, and no
+        otherwise is null), in one pass with no split of the rows."""
+        self._evaluate(node.left, input, arena, rows, count)
+        self._evaluate(node.right, input, arena, rows, count)
+        var other = node.extra >= 0
+        if other:
+            self._evaluate(node.extra, input, arena, rows, count)
+        var take = Int(self.lane_bools[node.left].unsafe_ptr())
+        var take_valid = 0 if self.whole[node.left] else Int(
+            self.valid[node.left].unsafe_ptr()
+        )
+        var lane = self.lanes[index]
+        if lane == _LANE_BOOL:
+            _blend_values[DType.uint8](
+                take,
+                take_valid,
+                Int(self.lane_bools[node.right].unsafe_ptr()),
+                Int(self.lane_bools[node.extra].unsafe_ptr()) if other else 0,
+                Int(self.lane_bools[index].unsafe_ptr()),
+                count,
+            )
+        elif lane == _LANE_FLOAT:
+            _blend_values[DType.float64](
+                take,
+                take_valid,
+                Int(self.lane_floats[node.right].unsafe_ptr()),
+                Int(self.lane_floats[node.extra].unsafe_ptr()) if other else 0,
+                Int(self.lane_floats[index].unsafe_ptr()),
+                count,
+            )
+        elif lane == _LANE_DECIMAL:
+            _blend_values[DType.int128](
+                take,
+                take_valid,
+                Int(self.lane_decimals[node.right].unsafe_ptr()),
+                Int(
+                    self.lane_decimals[node.extra].unsafe_ptr()
+                ) if other else 0,
+                Int(self.lane_decimals[index].unsafe_ptr()),
+                count,
+            )
+        else:
+            _blend_values[DType.int64](
+                take,
+                take_valid,
+                Int(self.lane_ints[node.right].unsafe_ptr()),
+                Int(self.lane_ints[node.extra].unsafe_ptr()) if other else 0,
+                Int(self.lane_ints[index].unsafe_ptr()),
+                count,
+            )
+        # Validity: the picked branch's, or null where no otherwise is.
+        var then_valid = 0 if self.whole[node.right] else Int(
+            self.valid[node.right].unsafe_ptr()
+        )
+        var other_valid = -1
+        if other:
+            other_valid = 0 if self.whole[node.extra] else Int(
+                self.valid[node.extra].unsafe_ptr()
+            )
+        self.whole[index] = _blend_validity(
+            take,
+            take_valid,
+            then_valid,
+            other_valid,
+            Int(self.valid[index].unsafe_ptr()),
+            count,
+        )
 
     def _when(
         mut self,
@@ -2631,6 +2727,33 @@ struct VectorExpression(Copyable, Movable):
         if kind == _KIND_FALLBACK:
             output.reference(column, self.constant_vectors[root])
             return
+        self._store_root(output, column, count)
+
+    def computes_rows(self) -> Bool:
+        """Whether the root is computed in lanes, so `write_rows` can compute
+        it over some rows only; a column, a constant or an at-rest
+        evaluation is read whole."""
+        return self.kinds[self.root] == _KIND_LANE
+
+    def write_rows(
+        mut self,
+        mut input: DataChunk,
+        mut arena: ColumnArena,
+        mut output: DataChunk,
+        column: Int,
+        rows: SelectionVector,
+        count: Int,
+    ) raises:
+        """The expression over the `count` chunk rows `rows` selects, as the
+        first `count` values of column `column` of `output`, in selection
+        order. The root must compute in lanes (`computes_rows`). No other
+        row is evaluated, so none can raise."""
+        self.evaluate(input, arena, rows, count)
+        self._store_root(output, column, count)
+
+    def _store_root(mut self, mut output: DataChunk, column: Int, count: Int):
+        """The root's first `count` lane values into `output`'s column."""
+        var root = self.root
         var lane = self.lanes[root]
         var dtype = self.bound.dtypes[root]
         var physical = _physical(dtype)
@@ -2672,7 +2795,16 @@ struct VectorExpression(Copyable, Movable):
         if not self.whole[root]:
             var bits = output.validity_bits(column)
             var flags = self.valid[root].unsafe_ptr()
-            for k in range(count):
+            # Eight validity bytes to one bitmap byte at a time.
+            var weights = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
+            var at = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bits)
+            var whole_bytes = count >> 3
+            for j in range(whole_bytes):
+                var x = flags.unsafe_offset(8 * j).unsafe_load[width=8]()
+                at[unsafe_offset=j] = (
+                    x.ne(0).cast[DType.uint8]() * weights
+                ).reduce_add()
+            for k in range(8 * whole_bytes, count):
                 if flags[unsafe_offset=k] == 0:
                     set_invalid(bits, k)
 
@@ -2770,6 +2902,100 @@ def _like_match(data: Int, length: Int, segments: List[String]) -> Bool:
             return False
         at = found + size
     return True
+
+
+@always_inline
+def _picks[W: Int](take: Int, take_valid: Int, k: Int) -> SIMD[DType.bool, W]:
+    """Which of rows k..k+W take the then branch: predicate true and
+    valid (`take_valid` 0 when every row is)."""
+    var t = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=take)
+    var picked = t.unsafe_offset(k).unsafe_load[width=W]().ne(0)
+    if take_valid != 0:
+        var v = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=take_valid)
+        picked = picked & v.unsafe_offset(k).unsafe_load[width=W]().ne(0)
+    return picked
+
+
+def _blend_values[
+    T: DType
+](take: Int, take_valid: Int, then: Int, other: Int, target: Int, count: Int):
+    """Each row's value from `then` where it takes the then branch, else
+    from `other` (0 when there is none: the row is null)."""
+    comptime W = 8
+    var a = Pointer[Scalar[T], MutAnyOrigin](unsafe_from_address=then)
+    var b = Pointer[Scalar[T], MutAnyOrigin](unsafe_from_address=other)
+    var o = Pointer[Scalar[T], MutAnyOrigin](unsafe_from_address=target)
+    var k = 0
+    while k + W <= count:
+        var x = a.unsafe_offset(k).unsafe_load[width=W]()
+        var y = SIMD[T, W](0)
+        if other != 0:
+            y = b.unsafe_offset(k).unsafe_load[width=W]()
+        o.unsafe_offset(k).unsafe_store(
+            _picks[W](take, take_valid, k).select(x, y)
+        )
+        k += W
+    while k < count:
+        var y = b[unsafe_offset=k] if other != 0 else Scalar[T](0)
+        o[unsafe_offset=k] = a[unsafe_offset=k] if _picks[1](
+            take, take_valid, k
+        )[0] else y
+        k += 1
+
+
+def _blend_validity(
+    take: Int,
+    take_valid: Int,
+    then_valid: Int,
+    other_valid: Int,
+    target: Int,
+    count: Int,
+) -> Bool:
+    """Each row's validity byte from its picked branch (`then_valid` /
+    `other_valid` 0 when every row of that branch is valid, `other_valid`
+    -1 when there is no otherwise, which is null); whether every row is
+    valid."""
+    comptime W = 8
+    var tv = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=then_valid)
+    var ov = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=other_valid)
+    var o = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=target)
+    var one = SIMD[DType.uint8, W](1)
+    var zero = SIMD[DType.uint8, W](0)
+    var nulls = SIMD[DType.uint8, W](0)
+    var k = 0
+    while k + W <= count:
+        var x = one if then_valid == 0 else tv.unsafe_offset(k).unsafe_load[
+            width=W
+        ]().ne(0).select(one, zero)
+        var y = zero
+        if other_valid == 0:
+            y = one
+        elif other_valid > 0:
+            y = (
+                ov.unsafe_offset(k)
+                .unsafe_load[width=W]()
+                .ne(0)
+                .select(one, zero)
+            )
+        var v = _picks[W](take, take_valid, k).select(x, y)
+        o.unsafe_offset(k).unsafe_store(v)
+        nulls |= one - v
+        k += W
+    var whole = nulls.reduce_or() == 0
+    while k < count:
+        var x = UInt8(1) if then_valid == 0 else UInt8(
+            Int(tv[unsafe_offset=k] != 0)
+        )
+        var y = UInt8(0)
+        if other_valid == 0:
+            y = 1
+        elif other_valid > 0:
+            y = UInt8(Int(ov[unsafe_offset=k] != 0))
+        var v = x if _picks[1](take, take_valid, k)[0] else y
+        o[unsafe_offset=k] = v
+        whole = whole and v != 0
+        k += 1
+    return whole
 
 
 def _scatter_values[
@@ -3058,6 +3284,71 @@ def _emit(
         at += 1
         m &= m - 1
     return at
+
+
+def select_true(format: UnifiedVectorFormat, count: Int, target: Int) -> Int:
+    """The positions among `count` rows of a Boolean vector whose value is
+    true and valid, written to `target` in order; how many. A flat vector
+    is read 64 rows at a time: its bytes compared at once into a bit
+    mask, the validity word ANDed in, the set bits written out."""
+    var flags = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=format.data)
+    var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=target)
+    var nullable = not format.validity.all_valid()
+    var bits = Pointer[UInt8, MutAnyOrigin](
+        unsafe_from_address=format.validity.bits
+    )
+    var offset = format.validity.offset
+    var kept = 0
+    if format.sel.is_set():
+        for k in range(count):
+            var r = format.sel.get_index(k)
+            var keep = flags[unsafe_offset=r] != 0
+            if nullable:
+                var c = offset + r
+                keep = (
+                    keep
+                    and (bits[unsafe_offset=c >> 3] >> UInt8(c & 7)) & 1 != 0
+                )
+            out[unsafe_offset=kept] = UInt32(k)
+            kept += Int(keep)
+        return kept
+    var weights = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
+    var k = 0
+    while k < count:
+        var n = min(64, count - k)
+        var mask = UInt64(0)
+        if n == 64:
+            comptime for g in range(8):
+                var x = flags.unsafe_offset(k + 8 * g).unsafe_load[width=8]()
+                var byte = (x.ne(0).cast[DType.uint8]() * weights).reduce_add()
+                mask |= UInt64(byte) << UInt64(8 * g)
+        else:
+            for j in range(n):
+                mask |= UInt64(Int(flags[unsafe_offset=k + j] != 0)) << UInt64(
+                    j
+                )
+        if nullable:
+            var b = offset + k
+            if b & 7 == 0 and n == 64:
+                var v = UInt64(0)
+                comptime for g in range(8):
+                    v |= UInt64(bits[unsafe_offset=(b >> 3) + g]) << UInt64(
+                        8 * g
+                    )
+                mask &= v
+            else:
+                for j in range(n):
+                    var c = b + j
+                    mask &= ~(
+                        UInt64(
+                            1
+                            - ((bits[unsafe_offset=c >> 3] >> UInt8(c & 7)) & 1)
+                        )
+                        << UInt64(j)
+                    )
+        kept = _emit(mask, n, k, SelectionVector(), out, kept)
+        k += 64
+    return kept
 
 
 def _write_rows(rows: SelectionVector, count: Int, target: Int):

@@ -305,9 +305,10 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     def _broadcast(self, length: Int) raises -> Self:
         if self._length != 1 or length < 0:
             raise Error("Only a scalar result can broadcast")
-        var values = List[Self.T](length=length, fill=self._get(0).copy())
-        var valid = List[Bool](length=length, fill=self._valid(0))
-        return Self(values^, valid)
+        if not self._valid(0):
+            return Self._nulls(length, self._get(0).copy())
+        # A valid value repeated: every row is valid, so no bitmap.
+        return Self(List[Self.T](length=length, fill=self._get(0).copy()))
 
 
 # Validity bitmaps: LSB-first bytes, 1 = valid, as in Arrow. Bits past a
