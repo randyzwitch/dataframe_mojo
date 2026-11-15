@@ -350,6 +350,41 @@ def _output_seed(
 def _binary_op[
     width: Int
 ](op: Int, left: Series, right: Series, mask: List[Bool]) raises -> Series:
+    """Map a runtime opcode to its compile-time specialized kernel. A
+    constant operand (`Series.is_constant`) enters the kernel as its one
+    value, as a literal does, so it is never written out; two constants
+    make a constant."""
+    var left_constant = left.is_constant() and len(left) > 1
+    var right_constant = right.is_constant() and len(right) > 1
+    if left_constant or right_constant:
+        var n = max(len(left), len(right))
+        var scalar_left = left_constant or len(left) == 1
+        var scalar_right = right_constant or len(right) == 1
+        if scalar_left and scalar_right:
+            if len(mask) == 0:
+                var one = _binary_kernel[width](
+                    op,
+                    left._constant_resized(1) if left_constant else left.copy(),
+                    right._constant_resized(1) if right_constant else (
+                        right.copy()
+                    ),
+                    mask,
+                )
+                return one._broadcast(n) if len(one) == 1 else one^
+        elif left_constant and len(right) == len(left):
+            return _binary_kernel[width](
+                op, left._constant_resized(1), right, mask
+            )
+        elif right_constant and len(right) == len(left):
+            return _binary_kernel[width](
+                op, left, right._constant_resized(1), mask
+            )
+    return _binary_kernel[width](op, left, right, mask)
+
+
+def _binary_kernel[
+    width: Int
+](op: Int, left: Series, right: Series, mask: List[Bool]) raises -> Series:
     """Map a runtime opcode to its compile-time specialized kernel."""
     if op == ADD:
         return binary[ADD, width](left, right, mask)

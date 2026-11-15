@@ -324,6 +324,61 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     def is_chunked(self) -> Bool:
         return True if self._chunked else False
 
+    def is_constant(self) -> Bool:
+        """Whether every row holds one value, or every row is null, kept as
+        that one value rather than written to every row (a scalar spread
+        over a frame's rows). Its values are written out the first time a
+        reader needs them in memory, once; operations that only need the
+        value (slices, gathers, filters, arithmetic with it, concatenation
+        with the same value) keep it a constant."""
+        if self.is_chunked():
+            return False
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
+            if self._data.isa[Column[E]]():
+                return self._data[Column[E]].is_constant()
+        if self._data.isa[BoolColumn]():
+            return self._data[BoolColumn].is_constant()
+        if self._data.isa[StringColumn]():
+            return self._data[StringColumn].is_constant()
+        return False
+
+    def _constant_resized(self, length: Int) -> Self:
+        """This constant series' value over `length` rows, still a constant
+        (only when `is_constant()`)."""
+        var storage: Storage
+        if self._data.isa[BoolColumn]():
+            storage = Storage(self._data[BoolColumn]._resized(length))
+        elif self._data.isa[StringColumn]():
+            storage = Storage(self._data[StringColumn]._resized(length))
+        else:
+            storage = self._data.copy()
+            comptime for i in range(len(FixedElements.Ts)):
+                comptime E: Copyable & Deinitable = FixedElements.Ts[i]
+                if self._data.isa[Column[E]]():
+                    storage = Storage(self._data[Column[E]]._resized(length))
+        return Self(self._name, storage^, self._dtype, self._field_metadata)
+
+    def _same_constant(self, other: Self) -> Bool:
+        """Whether two constant series of one dtype hold the same value."""
+        if self._dtype != other._dtype:
+            return False
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
+            if self._data.isa[Column[E]]():
+                return other._data.isa[Column[E]]() and self._data[
+                    Column[E]
+                ]._same_constant(other._data[Column[E]])
+        if self._data.isa[BoolColumn]():
+            return other._data.isa[BoolColumn]() and self._data[
+                BoolColumn
+            ]._same_constant(other._data[BoolColumn])
+        if self._data.isa[StringColumn]():
+            return other._data.isa[StringColumn]() and self._data[
+                StringColumn
+            ]._same_constant(other._data[StringColumn])
+        return False
+
     def n_chunks(self) -> Int:
         """Number of physical Arrow arrays backing this series."""
         return len(self._chunked.value()[].arrays) if self.is_chunked() else 1
@@ -375,6 +430,29 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         """Append array references without copying values or validity bits."""
         if len(parts) == 0:
             raise Error("Chunked series requires at least one array")
+        # Pieces that are all one constant (a scalar's rows, collected a
+        # morsel at a time) are that constant over all their rows.
+        var first = -1
+        var total = 0
+        for k in range(len(parts)):
+            if len(parts[k]) == 0:
+                continue
+            if not parts[k].is_constant() or (
+                first >= 0 and not parts[first]._same_constant(parts[k])
+            ):
+                first = -2
+                break
+            if first < 0:
+                first = k
+            total += len(parts[k])
+        if first >= 0:
+            for part in parts:
+                parts[first]._check_metadata(part)
+                if part.dtype() != parts[first].dtype():
+                    raise Error(
+                        "Chunked series arrays must have the same dtype"
+                    )
+            return parts[0]._constant_like(parts[first], total)
         var result = parts[0].copy()
         result._chunked = None
         var arrays = List[Storage]()
@@ -484,6 +562,15 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         from dataframe.storage.nested_merge import concatenate_nested
 
         var result = parts[0].copy()
+        if result.is_constant():
+            # Pieces that are all one constant join as that constant.
+            var same = True
+            for i in range(1, len(parts)):
+                same = same and (
+                    parts[i].is_constant() and result._same_constant(parts[i])
+                )
+            if same:
+                return self._constant_like(result, len(self))
         if self.dtype().is_nested():
             var merged = concatenate_nested(parts)
             merged._field_metadata = self._field_metadata
@@ -540,6 +627,15 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         result._reserve_rows(len(self), self._text_bytes())
         for i in range(1, len(parts)):
             result._append_series(parts[i])
+        return result^
+
+    def _constant_like(self, part: Self, length: Int) -> Self:
+        """`part`'s constant over `length` rows, under this series' name,
+        dtype and metadata."""
+        var result = part._constant_resized(length)
+        result._name = self._name
+        result._dtype = self._dtype
+        result._field_metadata = self._field_metadata
         return result^
 
     def _chunk_at(self, row: Int) raises -> Tuple[Self, Int]:
@@ -1297,6 +1393,11 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         return self._data[StructColumn].copy()
 
     def take(self, indices: List[Int]) raises -> Self:
+        if self.is_constant():
+            for index in indices:
+                if index < 0 or index >= len(self):
+                    raise Error("Column index out of bounds")
+            return self._constant_resized(len(indices))
         if self.is_chunked():
             if len(indices) * 8 < len(self):
                 return self._take_from_chunks(indices)
@@ -1367,6 +1468,8 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         (#328), or None for storage without one. A physical chunk of a
         larger column uses it to read its share of shared filter indices
         without copying them."""
+        if self.is_constant():
+            return self._constant_resized(last - first)
         comptime for i in range(len(SCALAR_DTYPES)):
             comptime D = SCALAR_DTYPES[i]
             if self._data.isa[Column[Scalar[D]]]():
@@ -1584,6 +1687,10 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             or length > len(self) - offset
         ):
             raise Error("Invalid column slice")
+        if length != len(self) and self.is_constant():
+            # The value over fewer rows: a reader of the window writes out
+            # only its own rows.
+            return self._constant_resized(length)
         # A fixed-width or Boolean window: one copy of the series, its
         # window moved in place (no new series, type or metadata built).
         comptime for i in range(len(FixedElements.Ts)):
@@ -1613,6 +1720,8 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         share dtype and metadata, so no fallible validation is needed.
         """
         assert offset >= 0 and length >= 0 and offset <= len(self) - length
+        if length != len(self) and self.is_constant():
+            return self._constant_resized(length)
         if self.is_chunked():
             ref source = self._chunked.value()[]
             if length == 0:

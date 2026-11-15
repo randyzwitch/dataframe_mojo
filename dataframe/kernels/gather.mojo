@@ -810,6 +810,31 @@ def take_parallel(
     With `or_null`, a negative index yields a null instead of a row, which
     is how a join names the side that has no matching row.
     """
+    if not or_null:
+        # A constant gathers as the same value over the gathered rows; only
+        # the other columns are gathered.
+        var constants = 0
+        for column in columns:
+            if column.is_constant():
+                constants += 1
+        if constants > 0:
+            var m = len(indices)
+            var others = List[Series](capacity=len(columns) - constants)
+            for column in columns:
+                if not column.is_constant():
+                    others.append(column.copy())
+            var gathered = List[Series]()
+            if len(others) > 0:
+                gathered = take_parallel(others, indices^, workers)
+            var result = List[Series](capacity=len(columns))
+            var next = 0
+            for column in columns:
+                if column.is_constant():
+                    result.append(column._constant_resized(m))
+                else:
+                    result.append(gathered[next].copy())
+                    next += 1
+            return result^
     # List and struct columns gather through their own take; the payload
     # scatter below only knows fixed-width and string buffers.
     for column in columns:
