@@ -2003,24 +2003,27 @@ struct _PipelineJob(Job):
         """The scan's row filters and their first order: the join filters
         applied to rows, then the source's filter step when there is one
         and some join filter is applied to rows (a single filter has no
-        order to adapt). The cheapest per row runs first: comparing a key
-        with one value costs about as much as a simple comparison, and a
-        bloom filter or key bitmap probe as much as a function call; the
-        source's filter is costed from its expression. Measured time then
+        order to adapt). The cheapest per row runs first, each costed by its
+        work per row on the scale of `VectorExpression.cost`: comparing a key
+        with one value or testing its bit in a key bitmap costs about a
+        comparison, a bloom filter a hash and a probe; the source's filter is
+        costed from its expression. Measured time then
         adapts the order, unless the source's filter can raise: its rows
         are then those the first order gives it."""
         self.scan_ready = True
         var costs = List[Int]()
         for k in range(len(self.join_filters)):
             ref f = self.join_filters[k]
-            if f.equal:
+            if f.equal or f.bitmap:
                 self.scan_entries.append(k)
-                # A key column read, a comparison and a constant.
+                # A key column read, then a comparison with a constant, or
+                # a subtraction and one bit's test: about a comparison.
                 costs.append(8 + 5 + 1)
-            elif f.bloom or f.bitmap:
+            elif f.bloom:
                 self.scan_entries.append(k)
-                # A key column read and a function of it.
-                costs.append(8 + 1000)
+                # A key column read, a multiplying hash and one probe of
+                # the filter's bits.
+                costs.append(8 + 10 + 5)
         var can_throw = False
         if (
             len(self.scan_entries) > 0
