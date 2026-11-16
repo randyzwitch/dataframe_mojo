@@ -132,7 +132,7 @@ from dataframe.expr import (
     COV,
     LEN,
 )
-from dataframe.storage.allocation import huge_list, huge_uninit
+from dataframe.storage.allocation import huge_list, huge_uninit, release_huge
 from dataframe.storage.nested import _leak, _reclaim
 from dataframe.parallel import (
     Job,
@@ -278,6 +278,12 @@ struct _Partitioned(Movable):
         self.arenas = List[List[UInt8]]()
         self.arena_next = 0
         self.arena_end = 0
+
+    def __deinit__(deinit self):
+        # Nothing reads the rows once their table is gone: keep the
+        # arenas' pages for the next table rather than faulting fresh ones.
+        while len(self.arenas) > 0:
+            release_huge(self.arenas.pop())
 
     @no_inline
     def _new_block(mut self, p: Int):
@@ -1604,6 +1610,11 @@ struct AggregateSink(Movable):
                     )
                 )
 
+    def __deinit__(deinit self):
+        # The entries are scratch over this worker's rows: keep their pages
+        # for the next table rather than faulting fresh ones in.
+        release_huge(self.entries^)
+
     @always_inline
     def _ensure_table(mut self):
         """The table's entries, made at the first probe."""
@@ -1621,6 +1632,7 @@ struct AggregateSink(Movable):
         if self.grow:
             while 3 * (self.live + count) >= 2 * self.capacity:
                 self.capacity *= 2
+            release_huge(self.entries^)
             self.entries = huge_list(self.capacity, UInt64(0))
             self._reinsert()
             return
@@ -1640,6 +1652,7 @@ struct AggregateSink(Movable):
             )
         if grown > 0:
             self.capacity = grown
+            release_huge(self.entries^)
             self.entries = huge_list(self.capacity, UInt64(0))
         else:
             if (
@@ -2973,7 +2986,7 @@ struct _FinishJob(Job):
                     head[best] = _next_first(
                         parts, p, block[best], row_in[best]
                     )
-            _ = entries^
+            release_huge(entries^)
         # Groups in no order skip the output order: a distinct table's
         # (keys, value) groups (`rows_only`), only counted into the main
         # table, and a group-by's without maintain_order.
@@ -3105,7 +3118,7 @@ def _scan_groups(
             )
         )
         w += _width(key_templates[c])
-    firsts_out = List[Int](unsafe_uninit_length=count)
+    firsts_out = huge_uninit[Int](count)
     var firsts = firsts_out.unsafe_ptr()
     for lo in range(0, count, _BATCH):
         var hi = min(count, lo + _BATCH)

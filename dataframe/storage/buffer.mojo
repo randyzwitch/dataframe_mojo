@@ -4,6 +4,7 @@ from std.collections import Optional
 from std.ffi import external_call
 from std.sys import size_of
 from std.memory import ArcPointer, Pointer, Layout, Allocation, alloc, dealloc
+from dataframe.storage.allocation import release_huge
 from dataframe.storage.statistics import BaseStatistics
 from dataframe.storage.residence import (
     _DeviceResidence,
@@ -183,6 +184,9 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
 
     def __deinit__(deinit self):
         _drop_statistics(Int(self._stats.load()))
+        # A large column's storage is kept for the next large table or
+        # column (`release_huge`) rather than returned to the kernel.
+        release_huge(self.values^)
 
     def statistics(self) -> Optional[ArcPointer[_StatsRecord]]:
         """The published statistics, if any."""

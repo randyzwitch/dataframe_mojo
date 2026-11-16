@@ -48,6 +48,7 @@ from dataframe.kernels.hashing import (
 )
 from dataframe.storage.allocation import (
     huge_list,
+    release_huge,
 )
 from dataframe.parallel import (
     Job,
@@ -177,11 +178,15 @@ struct _KeyIndex(Movable):
         for row in range(n):
             _ = self.find_or_insert(distinct, row)
 
+    def __deinit__(deinit self):
+        release_huge(self.slots^)
+
     def count(self) -> Int:
         return len(self.hashes)
 
     def _grow(mut self):
         var capacity = max(1024, 2 * len(self.slots))
+        release_huge(self.slots^)
         self.slots = huge_list(capacity, -1)
         var mask = capacity - 1
         for id in range(len(self.hashes)):
