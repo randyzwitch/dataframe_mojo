@@ -42,6 +42,8 @@ from dataframe.join_type import (
 )
 from dataframe.planning.context import (
     QueryContext,
+    plan_shared_id,
+    plan_slot_table,
 )
 from dataframe.query_execution.materialize import (
     _stack_union,
@@ -196,6 +198,11 @@ def plan_execute_node(
             if node.source_failure:
                 raise Error(node.source_failure)
             node._record_execution()
+        if not empty and plan_shared_id(self, node.source_slot()) >= 0:
+            var result = plan_slot_table(self, node.source_slot())
+            if len(node.scan_projection()) > 0:
+                return result.select(node.scan_projection())
+            return result^
         # A projection selects from the shared table without copying
         # all of it first.
         ref table = self._frames[node.source_slot()]

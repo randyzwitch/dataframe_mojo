@@ -23,7 +23,11 @@ from dataframe.join_type import (
     JOIN_SEMI,
 )
 from dataframe.kernels.segment_statistics import series_statistics
-from dataframe.planning.context import QueryContext
+from dataframe.planning.context import (
+    QueryContext,
+    plan_shared_id,
+    plan_slot_rows,
+)
 from dataframe.planning.graph import plan_names_of
 from dataframe.planning.model import (
     AGG,
@@ -152,7 +156,12 @@ def _scan_under_filters(self: QueryContext, index: Int) -> Int:
     var cursor = index
     while cursor >= 0 and self._nodes[cursor].kind == FILTER:
         cursor = self._nodes[cursor].left
-    if cursor >= 0 and self._nodes[cursor].kind == SCAN_FRAME:
+    # A shared subplan's result has no rows to read statistics from.
+    if (
+        cursor >= 0
+        and self._nodes[cursor].kind == SCAN_FRAME
+        and plan_shared_id(self, self._nodes[cursor].source_slot()) < 0
+    ):
         return cursor
     return -1
 
@@ -264,7 +273,7 @@ def _cardinality(
     ref node = self._nodes[index]
     var kind = node.kind
     if kind == SCAN_FRAME:
-        return self._frames[node.source_slot()].height()
+        return plan_slot_rows(self, node.source_slot())
     if kind == FILTER:
         var scan = _scan_under_filters(self, index)
         if scan >= 0:
@@ -442,6 +451,18 @@ def _scan_distinct(
     ref table = self._frames[slot]
     if name not in table.columns():
         return DistinctCount.unknown()
+    if plan_shared_id(self, slot) >= 0:
+        # A shared subplan's result: the counts estimated for its
+        # definition hold for every scan of it, as do its rows.
+        var rows = plan_slot_rows(self, slot)
+        if rows < 0:
+            return DistinctCount.unknown()
+        var known = self._materialized_distinct.get(slot)
+        if known:
+            var count = known.value().get(name, -1)
+            if count > 0:
+                return DistinctCount(min(count, rows), COUNT_HLL)
+        return DistinctCount(rows, COUNT_CARDINALITY)
     var rows = table.height()
     var count = table._distinct_count(name)
     if count < 0 and slot in self._materialized_distinct:

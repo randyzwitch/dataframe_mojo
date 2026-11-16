@@ -16,15 +16,13 @@ from dataframe.scheduler import (
     META_JOIN_BUILD,
     META_REGULAR,
     MetaPipeline,
-    SchedulablePipeline,
-    run_pipelines,
 )
 from dataframe.planning.context import (
     QueryContext,
+    SharedResults,
     _ReadyIndex,
 )
 from dataframe.planning.graph import (
-    plan_aggregated,
     plan_class_refs,
     plan_compact_scan_slots,
     plan_cover,
@@ -38,8 +36,11 @@ from dataframe.planning.graph import (
     plan_subplan,
     plan_subplan_classes,
 )
-from dataframe.planning.inputs import (
-    _SubplanPipeline,
+from dataframe.planning.physical import (
+    plan_order_joins,
+)
+from dataframe.optimizer.partial_aggregates import (
+    plan_push_partial_aggregates,
 )
 from dataframe.planning.statistics import (
     PlanStatistics,
@@ -51,9 +52,6 @@ from dataframe.planning.properties import (
     _stream_join,
     _stream_rows,
 )
-from dataframe.series import (
-    Series,
-)
 from dataframe.trace import (
     trace_path,
 )
@@ -64,29 +62,36 @@ from std.collections import (
     Dict,
     Optional,
 )
+from std.memory import (
+    ArcPointer,
+)
 
 
 def plan_share_subplans(
     mut self: QueryContext, streaming: Bool, batch_size: Int
-) raises:
-    """Execute eligible repeated subplans once and replace their readers with
-    scans of the retained result. Process the largest eligible subtree
-    first, then disjoint repeated subtrees. Sharing avoids repeated blocking
-    work or selective multi-table computation. A simple filter/projection
-    over one table stays in each scan, retaining scan pruning without an
-    extra intermediate result."""
+) raises -> List[QueryContext]:
+    """Plan eligible repeated subplans to run once, replacing their
+    readers with scans of the retained result, and return the plans of
+    those subplans by id (`plan_run_shared` runs them as pipelines of the
+    query's schedule). Process the largest eligible subtree first, then
+    disjoint repeated subtrees. Sharing avoids repeated blocking work or
+    selective multi-table computation. A simple filter/projection over one
+    table stays in each scan, retaining scan pruning without an extra
+    intermediate result. Nothing runs: the consumers are planned from the
+    estimates made for each subplan's definition, which hold for every
+    scan of its result."""
+    var shared = List[QueryContext]()
     var computed = plan_subplan_classes(self)
     ref classes = computed[0]
     ref sizes = computed[1]
     # Nodes under a shared subtree are replaced with it.
     var covered = List[Bool](length=len(self._nodes), fill=False)
-    var shared = False
     var done = False
     while not done:
         # Nodes change between rounds, so each has its own memo.
         var stats = PlanStatistics()
         # This round's shared subtrees, largest first, and the copies each
-        # replaces. None holds another's copy, so they run at once.
+        # replaces. None holds another's copy.
         var picks = List[Int]()
         var copies = List[List[Int]]()
         var pending = List[Bool](length=len(self._nodes), fill=False)
@@ -128,29 +133,85 @@ def plan_share_subplans(
             copies.append(held^)
         if len(picks) == 0:
             break
+        if not self._shared:
+            self._shared = ArcPointer(SharedResults())
         var origins = List[Int](capacity=len(picks))
         for best in picks:
             trace_path("lazy.shared_subplan")
             origins.append(plan_spine_rows(self, best))
-        var counts = List[Dict[String, Int]]()
-        var frames = plan_collect_shared(
-            self, picks, origins, streaming, batch_size, counts
-        )
+        var defined = List[_SharedDefinition](capacity=len(picks))
+        for best in picks:
+            defined.append(
+                _define_shared(self, best, streaming, batch_size, shared)
+            )
         for k in range(len(picks)):
-            self._frames.append(frames[k].copy())
+            self._frames.append(defined[k].columns.copy())
             self._schemas.append(Optional[CsvSchema]())
             var slot = len(self._frames) - 1
-            if len(counts[k]) > 0:
-                self._materialized_distinct[slot] = counts[k].copy()
+            self._shared_slots[slot] = defined[k].id
+            if len(defined[k].counts) > 0:
+                self._materialized_distinct[slot] = defined[k].counts.copy()
             var origin = origins[k]
             if origin > 0:
                 self._origin_rows[slot] = origin
             for j in copies[k]:
                 self._nodes[j] = _frame_scan_node(slot=slot)
-        shared = True
-    if shared:
+    if len(shared) > 0:
         plan_reorder(self)
         plan_compact_scan_slots(self)
+    return shared^
+
+
+struct _SharedDefinition(Movable):
+    """A shared subplan as its scans see it: its id, its result's columns
+    (no rows) and the distinct counts estimated for them."""
+
+    var id: Int
+    var columns: DataFrame
+    var counts: Dict[String, Int]
+
+    def __init__(
+        out self, id: Int, var columns: DataFrame, var counts: Dict[String, Int]
+    ):
+        self.id = id
+        self.columns = columns^
+        self.counts = counts^
+
+
+def _define_shared(
+    self: QueryContext,
+    index: Int,
+    streaming: Bool,
+    batch_size: Int,
+    mut shared: List[QueryContext],
+) raises -> _SharedDefinition:
+    """Plan the subtree at `index` as a shared subplan of its own, the way
+    the query is planned (its own repeated subtrees shared, its joins
+    ordered, partial aggregates pushed), add its plan to `shared` after
+    those of the subplans it reads, and estimate its result. The rows and
+    distinct counts estimated for the definition hold for every scan of
+    its result, since it runs once."""
+    var sub = plan_subplan(self, index)
+    sub._optimized = True
+    shared.extend(plan_share_subplans(sub, streaming, batch_size))
+    plan_order_joins(sub, streaming, batch_size)
+    plan_push_partial_aggregates(sub)
+    var top = len(sub._nodes) - 1
+    var columns = sub._execute(top, True, streaming, batch_size)
+    var stats = PlanStatistics()
+    var rows = plan_cardinality(sub, stats, top)
+    var counts = Dict[String, Int]()
+    for name in columns.columns():
+        var count = plan_distinct(sub, stats, top, name)
+        if count.known():
+            counts[name] = count.count
+    ref results = self._shared.value()[]
+    var id = len(results.frames)
+    results.frames.append(columns.copy())
+    results.rows.append(rows)
+    results.ready.append(False)
+    shared.append(sub^)
+    return _SharedDefinition(id, columns^, counts^)
 
 
 def _relation_stats(
@@ -201,101 +262,6 @@ def _holds(self: QueryContext, index: Int, marked: List[Bool]) -> Bool:
             if child >= 0:
                 stack.append(child)
     return False
-
-
-struct _SharedPipeline(SchedulablePipeline):
-    """Collect a shared subtree from its own plan copy as an independently
-    scheduled pipeline. Retain the result until all readers finish."""
-
-    var plan: QueryContext
-    var aggregated: Bool
-    var origin: Int
-    var streaming: Bool
-    var batch_size: Int
-    var result: DataFrame
-    var distinct_counts: Dict[String, Int]
-
-    def __init__(
-        out self,
-        var plan: QueryContext,
-        aggregated: Bool,
-        origin: Int,
-        streaming: Bool,
-        batch_size: Int,
-    ) raises:
-        self.plan = plan^
-        self.aggregated = aggregated
-        self.origin = origin
-        self.streaming = streaming
-        self.batch_size = batch_size
-        self.result = DataFrame(List[Series]())
-        self.distinct_counts = Dict[String, Int]()
-
-    def initialize(mut self) raises:
-        pass
-
-    def max_execute_tasks(self) -> Int:
-        return 1
-
-    def execute_tasks(mut self) raises -> Int:
-        return 1
-
-    def execute(mut self, task: Int) raises:
-        self.result = self.plan._collect(
-            optimize=True, streaming=self.streaming, batch_size=self.batch_size
-        )
-
-    def prepare_finalize(mut self) raises:
-        pass
-
-    def finalize(mut self) raises:
-        # Preserve a materialized result's estimated distinct counts. For
-        # aggregate outputs, count their own result columns before downstream
-        # planning.
-        if self.aggregated:
-            self.result = self.result^._with_statistics()
-            return
-        var stats = PlanStatistics()
-        var top = len(self.plan._nodes) - 1
-        for name in self.result.columns():
-            var count = plan_distinct(self.plan, stats, top, name)
-            if count.known():
-                self.distinct_counts[name] = count.count
-
-
-def plan_collect_shared(
-    self: QueryContext,
-    picks: List[Int],
-    origins: List[Int],
-    streaming: Bool,
-    batch_size: Int,
-    mut distinct_counts: List[Dict[String, Int]],
-) raises -> List[DataFrame]:
-    """Collect independent shared subtrees concurrently as scheduled pipelines.
-    This lets one subtree's serial planning or final assembly overlap
-    another's parallel work. Retain their results for the surrounding plan
-    instead of recomputing them at every reference."""
-    var jobs = List[_SharedPipeline](capacity=len(picks))
-    var metas = List[MetaPipeline](capacity=len(picks))
-    for k in range(len(picks)):
-        var sub = plan_subplan(self, picks[k])
-        sub._optimized = True
-        jobs.append(
-            _SharedPipeline(
-                sub^,
-                plan_aggregated(self, picks[k]),
-                origins[k],
-                streaming,
-                batch_size,
-            )
-        )
-        metas.append(MetaPipeline(META_REGULAR))
-    run_pipelines(jobs, metas, parallel=not self._report)
-    var frames = List[DataFrame](capacity=len(jobs))
-    for k in range(len(jobs)):
-        frames.append(jobs[k].result.copy())
-        distinct_counts.append(jobs[k].distinct_counts.copy())
-    return frames^
 
 
 struct _StreamInputs(Movable):

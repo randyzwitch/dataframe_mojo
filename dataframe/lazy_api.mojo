@@ -270,6 +270,7 @@ from dataframe.query_execution.operators import (
     plan_join_frames,
 )
 from dataframe.query_execution.pipeline import (
+    plan_run_shared,
     plan_stream_execute,
 )
 from dataframe.query_execution.placement import (
@@ -1636,8 +1637,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var plan = self._optimized() if optimize else self.copy()
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
+        var shared = List[QueryContext]()
         if optimize:
-            plan._share_subplans(True, batch_size)
+            shared = plan._share_subplans(True, batch_size)
             plan._order_joins(True, batch_size)
             plan._push_partial_aggregates()
         plan._plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
@@ -1659,9 +1661,20 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             line_terminator=line_terminator,
             buffer_size=buffer_size,
         )
-        var final = plan_stream_execute(
-            plan._plan, index, batch_size, Int(Pointer(to=output))
-        )
+        var final = Optional[DataFrame]()
+        if len(shared) > 0:
+            final = plan_run_shared(
+                plan._plan,
+                shared,
+                index,
+                True,
+                batch_size,
+                Int(Pointer(to=output)),
+            )
+        else:
+            final = plan_stream_execute(
+                plan._plan, index, batch_size, Int(Pointer(to=output))
+            )
         var frame = final.take() if final else plan._execute(
             index, False, True, batch_size
         )
@@ -1874,15 +1887,24 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var plan = self._optimized() if optimize else self.copy()
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
+        var shared = List[QueryContext]()
         if optimize:
-            plan._share_subplans(streaming, batch_size)
+            shared = plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
             plan._push_partial_aggregates()
+        # The report counts the query's own nodes: a shared subplan's
+        # nodes are numbered in its own plan.
         plan._plan._report = Optional(ArcPointer(ExecutionReport()))
         if engine == "auto" and _automatic_handoff():
             plan._plan._handoff = HANDOFF_AUTO
-        var result = plan._execute(
-            len(plan._plan._nodes) - 1, False, streaming, batch_size
+            for k in range(len(shared)):
+                shared[k]._handoff = HANDOFF_AUTO
+        var result = _run_query(
+            plan._plan,
+            shared,
+            len(plan._plan._nodes) - 1,
+            streaming,
+            batch_size,
         )
         var report = plan._plan._report.value()[].frame()
         return (result^, report^)
@@ -2021,16 +2043,21 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
+        var shared = List[QueryContext]()
         if optimize:
-            plan._share_subplans(streaming, batch_size)
+            shared = plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
             plan._push_partial_aggregates()
         plan._plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
         plan._plan._prefetched_indexes = Optional(
             ArcPointer(Dict[Int, _ReadyIndex]())
         )
-        return plan._execute(
-            len(plan._plan._nodes) - 1, False, streaming, batch_size
+        return _run_query(
+            plan._plan,
+            shared,
+            len(plan._plan._nodes) - 1,
+            streaming,
+            batch_size,
         )
 
     def collect_schema(self) raises -> List[String]:
@@ -2142,8 +2169,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
     def _fold_casts(mut self) raises:
         plan_fold_casts(self._plan)
 
-    def _share_subplans(mut self, streaming: Bool, batch_size: Int) raises:
-        plan_share_subplans(
+    def _share_subplans(
+        mut self, streaming: Bool, batch_size: Int
+    ) raises -> List[QueryContext]:
+        return plan_share_subplans(
             self._plan, streaming=streaming, batch_size=batch_size
         )
 
@@ -3438,6 +3467,20 @@ def _estimate_context(plan: QueryContext, rows: Int) -> Tuple[String, Float64]:
 
 def _handoff_context(plan: QueryContext) raises -> DataFrame:
     return _handoff_execute(_from_context(plan.copy()))
+
+
+def _run_query(
+    plan: QueryContext,
+    shared: List[QueryContext],
+    index: Int,
+    streaming: Bool,
+    batch_size: Int,
+) raises -> DataFrame:
+    """The query at node `index`, with the shared subplans it reads made
+    by pipelines of its own schedule (`plan_run_shared`)."""
+    if len(shared) == 0:
+        return plan._execute(index, False, streaming, batch_size)
+    return plan_run_shared(plan, shared, index, streaming, batch_size)
 
 
 def _from_context(var context: QueryContext) -> LazyFrame:
