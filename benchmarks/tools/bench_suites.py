@@ -1012,6 +1012,14 @@ def evaluate(result):
     whose hash-pinned bytes were already compared with the same oracle reuses
     that verdict (DuckDB's own answers are checked for every engine, and
     repetitions often write identical files).
+
+    The oracle is trusted only while more than half of DuckDB's own timed
+    answers, written by separate worker processes, agree with it. A DuckDB
+    answer that disagrees is DuckDB's wrong answer; it makes another engine's
+    cell unverified only when it leaves the oracle without that majority, and
+    never makes another engine's answer wrong. A comparison that finds a
+    difference is repeated from the files on disk with a fresh checker, and
+    a difference the repeat does not reproduce is reported as unverified.
     """
     grouped = {}
     for run in result["runs"]:
@@ -1031,7 +1039,21 @@ def evaluate(result):
             raise ValueError("missing or duplicate complete answer repetitions")
         yield from records
 
-    def compare(record, suite, query, oracle_key, check):
+    def fresh_compare(record, suite, query, oracle_record):
+        # Everything rebuilt from the hash-pinned files: oracle, policy,
+        # prepared pools and the comparison connection.
+        oracle = suite_schema.normalize(
+            suite_answers.load_answer(oracle_record), suite, query
+        )
+        tolerant = suite_answers.tolerant_columns(suite, query, oracle)
+        ranks = suite_answers.tolerant_ranks(suite, query, oracle, tolerant)
+        answer = suite_schema.normalize(
+            suite_answers.load_answer(record), suite, query
+        )
+        with suite_answers.OracleCheck(oracle, tolerant, ranks) as check:
+            return check.compare(answer)
+
+    def compare(record, suite, query, oracle_key, check, oracle_record):
         # The verdict depends only on the Parquet bytes, which the info's
         # hash names once a check confirms it: a reused answer still gets
         # every hash and sidecar check, a new one is loaded (and checked).
@@ -1042,7 +1064,20 @@ def evaluate(result):
             answer = suite_schema.normalize(
                 suite_answers.load_answer(record), suite, query
             )
-            verdicts[key] = check.compare(answer)
+            verdict = check.compare(answer)
+            answer = None
+            if verdict["status"] == "different":
+                # The same bytes must give the same verdict. A difference
+                # found once but not again came from the checking process,
+                # not from the answer, so nothing can be concluded.
+                repeat = fresh_compare(record, suite, query, oracle_record)
+                if repeat != verdict:
+                    verdict = {
+                        "status": "unverified",
+                        "reason": "verdict_not_reproducible: "
+                        f"{verdict['reason']} then {repeat['reason']}",
+                    }
+            verdicts[key] = verdict
         return verdicts[key]
 
     cells = dict.fromkeys(grouped)
@@ -1116,10 +1151,34 @@ def evaluate(result):
                     oracle = None
                     verdicts.clear()
                 check = prepared[1]
-                checked_runs = runs if engine == "duckdb" else runs + reference_runs
-                for record in (r for run in checked_runs for r in answers(run)):
+                verdict_key = (oracle_key, tuple(check.tolerant))
+                if engine != "duckdb":
+                    # The oracle stands only if DuckDB's own timed answers
+                    # reproduce it in most runs; otherwise the reference
+                    # itself is in doubt and this engine cannot be judged.
+                    reference = [
+                        compare(
+                            record, suite, query, verdict_key, check,
+                            records[0],
+                        )
+                        for run in reference_runs
+                        for record in answers(run)
+                    ]
+                    agree = sum(c["status"] == "equal" for c in reference)
+                    if 2 * agree <= len(reference):
+                        cell.update(
+                            status="unverified",
+                            reason="reference_answers_disagree: "
+                            f"{agree} of {len(reference)} DuckDB answers"
+                            " match the oracle",
+                        )
+                for record in (
+                    r
+                    for run in (runs if cell["status"] == "ok" else [])
+                    for r in answers(run)
+                ):
                     comparison = compare(
-                        record, suite, query, (oracle_key, tuple(check.tolerant)), check
+                        record, suite, query, verdict_key, check, records[0]
                     )
                     if comparison["status"] != "equal":
                         cell.update(
