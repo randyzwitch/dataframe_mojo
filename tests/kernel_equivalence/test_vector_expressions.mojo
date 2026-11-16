@@ -6,10 +6,16 @@ the at-rest evaluator, over flat chunks and over dictionaries through a
 selection, with nulls. A filter's selection and a projection's column equal
 filtering and projecting the frame eagerly."""
 # contract-group: expr.vectors
+from std.collections import Dict
+from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Expr, Series, StringColumn
 from dataframe import col, concat_str, lit, when
+from dataframe.categorical import decode_contiguous
+from dataframe.dtype import CategoricalDictionary
+from dataframe.storage.buffer import _Buffer
+from dataframe.storage.string import StringCodes
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
@@ -57,6 +63,86 @@ def frame() raises -> DataFrame:
             ),
         ]
     )
+
+
+def coded(values: List[String], valid: List[Bool]) raises -> Series:
+    """Strings carrying codes into a dictionary of their distinct values,
+    as a Parquet column chunk with a dictionary page loads. A null row's
+    code points past the dictionary: it is never read."""
+    var dictionary = CategoricalDictionary()
+    var seen = Dict[String, Int]()
+    var codes = List[UInt32]()
+    for i in range(len(values)):
+        if not valid[i]:
+            codes.append(UInt32(1000))
+            continue
+        if values[i] not in seen:
+            seen[values[i]] = len(seen)
+            dictionary.append(values[i])
+        codes.append(UInt32(seen[values[i]]))
+    var dtype = DataType.categorical(dictionary^)
+    var shared = codes.copy()
+    var strings = decode_contiguous(
+        Series("s", Column[UInt32](codes^, valid)).with_dtype(dtype)
+    )
+    strings._data[StringColumn]._codes = ArcPointer(
+        StringCodes(_Buffer(shared^), dtype)
+    )
+    return strings^
+
+
+def test_coded_strings_select_what_the_eager_filter_keeps() raises:
+    # The string predicates answered through the column's dictionary, each
+    # value once, over flat chunks and through selections, nulls included.
+    var values = List[String]()
+    var valid = List[Bool]()
+    var other = List[Int64]()
+    for row in range(ROWS):
+        values.append(
+            "k"
+            + String(row % 9) if row % 3 else "a longer key "
+            + String(row % 5)
+        )
+        valid.append(row % 11 != 6)
+        other.append(Int64(row % 7))
+    var source = DataFrame(
+        [coded(values, valid), Series("a", Column[Int64](other^))]
+    )
+    var schema = source.clear()._columns.copy()
+    var cases: List[Expr] = [
+        col("s") == lit("k4"),
+        col("s") != lit("a longer key 2"),
+        col("s") >= lit("k5"),
+        col("s").is_in(["k1", "a longer key 3", "absent"]),
+        col("s").str().starts_with("a long") | (col("s") == lit("k2")),
+        col("s").str().like("%key%2"),
+        col("s").is_null(),
+        col("s").fill_null(lit("k1")) == lit("k1"),
+        (col("s") == lit("k7")) & (col("a") > lit(Int64(2))),
+        (col("s") == lit("k8")) | (col("a") == lit(Int64(0))),
+    ]
+    for keep_every in [1, 3]:
+        for offset in [0, 61, 2900]:
+            var arena = ColumnArena()
+            var chunk = chunk_of(source, arena, offset, 2048, keep_every)
+            var rows = expected_rows(source, offset, 2048, keep_every)
+            for p in cases:
+                var compiled = VectorExpression(p, schema)
+                var out = DataChunk()
+                var target = out.new_selection()
+                var kept = compiled.select(
+                    chunk, arena, SelectionVector(), chunk.count, target
+                )
+                var picked = List[Int]()
+                for k in range(kept):
+                    picked.append(target.get_index(k))
+                assert_frame(rows.take(picked), rows.filter(p))
+                # The answers came from the dictionary.
+                var answered = False
+                for known in compiled.coded_dictionaries:
+                    answered = answered or Bool(known)
+                assert_true(answered)
+                _ = out^
 
 
 def predicates() raises -> List[Expr]:
