@@ -2284,18 +2284,14 @@ struct _Finalizer(Movable):
         var direct = self.mode >= _F_COUNTS and self.mode < _F_VALUE
         var integer = self.mode == _F_COUNTS or self.mode == _F_INT_SUM
         var wide = self.mode == _F_DECIMAL_SUM or self.mode == _F_WIDE
-        self.ints = List[Int64](
-            unsafe_uninit_length=n if direct and integer else 0
+        self.ints = huge_uninit[Int64](n if direct and integer else 0)
+        self.floats = huge_uninit[Float64](
+            n if direct and not integer and not wide else 0
         )
-        self.floats = List[Float64](
-            unsafe_uninit_length=n if direct and not integer and not wide else 0
-        )
-        self.wides = List[Int128](unsafe_uninit_length=n if wide else 0)
-        self.bools = List[Bool](
-            unsafe_uninit_length=n if self.mode == _F_LOGIC else 0
-        )
-        self.valid = List[Bool](
-            unsafe_uninit_length=n if (direct and self.mode != _F_COUNTS)
+        self.wides = huge_uninit[Int128](n if wide else 0)
+        self.bools = huge_uninit[Bool](n if self.mode == _F_LOGIC else 0)
+        self.valid = huge_uninit[Bool](
+            n if (direct and self.mode != _F_COUNTS)
             or (self.mode >= _F_LOGIC and self.mode < _F_PICK) else 0
         )
         self.pick_owners = List[Int]()
@@ -2828,7 +2824,7 @@ struct _ValueColumn(Movable):
         self.dtype = dtype
         self.kind = kind
         self.n = n
-        self.valid = List[Bool](unsafe_uninit_length=n)
+        self.valid = huge_uninit[Bool](n)
         self.nulls = False
         self.bools = List[Bool]()
         self.views = List[StringView]()
@@ -2840,23 +2836,21 @@ struct _ValueColumn(Movable):
         self.series = Series(self.name, Column[Int64](List[Int64]()))
         self.values = 0
         if kind == _VALUE_STRING:
-            self.views = List[StringView](unsafe_uninit_length=n)
+            self.views = huge_uninit[StringView](n)
             self.local = List[Int](length=len(held.buffers), fill=-1)
             return
         if kind == _VALUE_BOOL:
-            self.bools = List[Bool](unsafe_uninit_length=n)
+            self.bools = huge_uninit[Bool](n)
             return
         if kind == _VALUE_WIDE:
-            var column = Column[Int128](List[Int128](unsafe_uninit_length=n))
+            var column = Column[Int128](huge_uninit[Int128](n))
             self.values = Int(column._ptr())
             self.series = Series(self.name, column^)
             return
         comptime for d in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[d]
             if kind == d:
-                var column = Column[Scalar[D]](
-                    List[Scalar[D]](unsafe_uninit_length=n)
-                )
+                var column = Column[Scalar[D]](huge_uninit[Scalar[D]](n))
                 self.values = Int(column._ptr())
                 self.series = Series(self.name, column^)
                 return
