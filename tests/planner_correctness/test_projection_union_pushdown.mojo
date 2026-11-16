@@ -242,10 +242,9 @@ def test_a_filter_on_join_keys_also_filters_the_other_input() raises:
 
 
 def test_unique_over_every_column_runs_as_a_group_by() raises:
-    """A unique keeping any or the first row over all its columns runs as
-    an aggregation, with the same rows (and the same order when it keeps
-    order); other uniques are left alone. Nulls in a key and a string key
-    included."""
+    """Every unique runs as an aggregation, optimized or not, with the
+    same rows (and the same order when it keeps order). Nulls in a key and
+    a string key included."""
     var source = (
         sales(3)
         .lazy()
@@ -271,8 +270,4 @@ def test_unique_over_every_column_runs_as_a_group_by() raises:
                     assert_frame(fast, plain)
                 else:
                     assert_frame(ordered(fast), ordered(plain))
-                var grouped = len(rows_into(plan, "GROUP_BY")) > 0
-                var eligible = len(subset) != 1 and (
-                    keep == "any" or keep == "first"
-                )
-                assert_equal(grouped, eligible)
+                assert_true(len(rows_into(plan, "GROUP_BY")) > 0)

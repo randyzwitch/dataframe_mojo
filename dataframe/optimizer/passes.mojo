@@ -3,7 +3,9 @@ from dataframe.planning.node_builders import (
     _aggregate_node,
     _filter_node,
     _frame_scan_node,
+    _row_index_node,
     _select_node,
+    _sort_node,
     _with_columns_node,
 )
 from dataframe.expr import (
@@ -15,6 +17,7 @@ from dataframe.expr import (
     Node,
     SELECTOR,
     col,
+    lit,
     subtree,
 )
 from dataframe.frame import (
@@ -296,47 +299,110 @@ def plan_fold_casts(mut self: QueryContext) raises:
 
 
 def plan_unique_as_aggregate(mut self: QueryContext) raises:
-    """A unique over every column keeps one row per set of equal rows
-    (or the first in input order). Implement it as a group_by on all
-    columns and run it through the parallel aggregate table rather
-    than deduplicating collected rows. The table needs one aggregate,
-    so add and then drop a row count."""
+    """Every unique as a grouping on its subset (every column when none is
+    named), so that its rows run through the parallel aggregate table
+    instead of being deduplicated after they are collected. Two rows are
+    duplicates exactly when they fall in one group, and the row kept for
+    a group is the group's first or last row, so each other column is
+    that row's value: its `first` or `last` in the group. keep='none'
+    keeps the groups of one row, counted by a `len`. The table orders
+    groups by their first row, which is the kept row's position for every
+    keep but 'last'; an ordered keep='last' numbers the rows and sorts the
+    groups by their last row's number instead. A float key comes out as the
+    kept row's own value (-0.0 and 0.0, or two NaNs, are one group).
+    A select restores the input's column order.
+
+    Run whether or not the plan is optimized: no other route runs a
+    unique."""
     var count = len(self._nodes)
     var changed = False
     var owned = plan_remember_schemas(self)
     for i in range(count):
-        ref node = self._nodes[i]
-        if node.kind != UNIQUE or node.left < 0:
+        if self._nodes[i].kind != UNIQUE or self._nodes[i].left < 0:
             continue
-        if node.text != "any" and node.text != "first":
-            continue
-        var columns = plan_columns_of(self, node.left)
-        if len(columns) == 0:
-            continue
-        if len(node.names) > 0:
-            # A subset naming every column, in any order.
-            if len(node.names) != len(columns):
-                continue
-            var every = True
+        var node = self._nodes[i].copy()
+        var keep = node.text
+        if (
+            keep != "any"
+            and keep != "first"
+            and keep != "last"
+            and keep != "none"
+        ):
+            raise Error("keep must be 'any', 'first', 'last', or 'none'")
+        var schema = self._execute(node.left, True)
+        # Raises for a missing or repeated subset column, or none at all.
+        for key in schema._subset_keys(node.names):
+            if key.dtype().is_nested():
+                raise Error(
+                    "list and struct columns cannot be keys yet: " + key.name()
+                )
+        var columns = schema.columns()
+        var keys = node.names.copy() if len(node.names) > 0 else (
+            columns.copy()
+        )
+        var hidden = "__unique"
+        var clash = True
+        while clash:
+            clash = False
             for c in columns:
-                if c not in node.names:
-                    every = False
-            if not every:
-                continue
-        var counted = "__unique_rows"
-        while counted in columns:
-            counted += "_"
+                if c.startswith(hidden):
+                    clash = True
+            if clash:
+                hidden += "_"
+        var last = keep == "last"
+        var by_last_row = last and node.maintain_order
+        var input = node.left
+        var row = hidden + "_row"
+        if by_last_row:
+            self._nodes.append(_row_index_node(row, 0, left=input))
+            input = len(self._nodes) - 1
+        var aggregates = List[Expr]()
+        var shown = List[Expr](capacity=len(columns))
+        for c in columns:
+            var value = col(c).last() if last else col(c).first()
+            var dtype = schema.column(c).dtype()
+            if dtype.is_categorical():
+                # Expressions read a categorical as its labels: the kept
+                # label goes back into the column's own dictionary.
+                value = value.cast(dtype)
+            if c not in keys:
+                aggregates.append(value.alias(c))
+                shown.append(col(c))
+            elif dtype.is_float():
+                var name = hidden + "_key_" + String(len(aggregates))
+                aggregates.append(value.alias(name))
+                shown.append(col(name).alias(c))
+            else:
+                shown.append(col(c))
+        var counted = hidden + "_rows"
+        if keep == "none" or len(aggregates) == 0:
+            aggregates.append(col(keys[0]).len().alias(counted))
+        if by_last_row:
+            aggregates.append(col(row).last().alias(row))
         self._nodes.append(
             _aggregate_node(
-                left=node.left,
-                exprs=[col(columns[0]).len().alias(counted)],
-                keys=columns,
-                maintain_order=node.maintain_order,
+                left=input,
+                exprs=aggregates,
+                keys=keys,
+                maintain_order=node.maintain_order and not by_last_row,
             )
         )
-        var shown = List[Expr]()
-        for c in columns:
-            shown.append(col(c))
+        if keep == "none":
+            self._nodes.append(
+                _filter_node(
+                    left=len(self._nodes) - 1,
+                    exprs=[col(counted) == lit(Int64(1))],
+                )
+            )
+        if by_last_row:
+            self._nodes.append(
+                _sort_node(
+                    keys=[row],
+                    descending=[False],
+                    nulls_last=[False],
+                    left=len(self._nodes) - 1,
+                )
+            )
         self._nodes[i] = _select_node(left=len(self._nodes) - 1, exprs=shown)
         changed = True
     if owned:

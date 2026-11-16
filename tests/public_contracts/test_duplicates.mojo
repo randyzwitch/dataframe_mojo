@@ -1,7 +1,7 @@
 """Distinct row membership and multiplicity follow scalar key equality."""
 # contract-group: table.sets_reshape
 from std.testing import assert_equal, assert_raises
-from dataframe import DataFrame
+from dataframe import DataFrame, col
 from tests.support.reference_model import (
     generated_model,
     reference_groups,
@@ -39,6 +39,16 @@ def assert_distinct_contract(
             frame.unique(subset, keep=keep, maintain_order=False),
             model.take(indices),
         )
+        # Every route runs the same plan: unoptimized, and planned
+        # under a filter that keeps every row.
+        for optimize in [False, True]:
+            assert_model(
+                frame.lazy()
+                .filter(col("i").is_null() | col("i").is_not_null())
+                .unique(subset, keep=keep, maintain_order=True)
+                .collect(optimize=optimize),
+                model.take(indices),
+            )
 
 
 def test_distinct_keep_policies_and_duplicate_flags_match_scalar_groups() raises:

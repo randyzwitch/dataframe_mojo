@@ -1298,6 +1298,63 @@ def _run_on_crew[
     return True
 
 
+trait Rounds:
+    """Work done as rounds of tasks: the tasks of a round may all run at
+    the same time, each on its own thread, and a round starts only once
+    the one before has ended. A pipeline's finish runs them as tasks of
+    its schedule; work no schedule runs uses `run_rounds`."""
+
+    def next_round(mut self) raises -> Int:
+        """The serial step before each round, called first and again
+        after the last task of each round: how many tasks the next round
+        splits into (at most `configured_workers()`), 0 when the work is
+        done."""
+        ...
+
+    def round_task(mut self, task: Int) raises:
+        """Task `task` of the current round."""
+        ...
+
+
+struct _RoundTask[R: Rounds](Job):
+    """One task of a round of the `Rounds` at `rounds`."""
+
+    var rounds: Int
+    var task: Int
+
+    def __init__(out self, rounds: Int, task: Int):
+        self.rounds = rounds
+        self.task = task
+
+    def run(mut self) raises:
+        Pointer[Self.R, MutAnyOrigin](
+            unsafe_from_address=self.rounds
+        )[].round_task(self.task)
+
+
+def run_rounds[R: Rounds](mut rounds: R) raises:
+    """Every round of `rounds`, one after another, for work no schedule
+    runs: a round of one task runs here, a larger one as jobs."""
+    while True:
+        var tasks = rounds.next_round()
+        if tasks == 0:
+            return
+        if tasks == 1:
+            rounds.round_task(0)
+            continue
+        var jobs = List[_RoundTask[R]](capacity=tasks)
+        for t in range(tasks):
+            jobs.append(_RoundTask[R](Int(Pointer(to=rounds)), t))
+        run_jobs(jobs)
+
+
+def round_width(jobs: Int) -> Int:
+    """The tasks a round of `jobs` pieces of work splits into: one per
+    piece, at most one per worker (task t then takes pieces t, t + width,
+    ...)."""
+    return min(jobs, max(1, configured_workers()))
+
+
 def run_jobs[J: Job](mut jobs: List[J]) raises:
     """Run every job and return them, in order, with their results.
 

@@ -2078,7 +2078,7 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def tail(self, n: Int = Int(5)) -> Self`
 - `def sort(self, descending: Bool = False, nulls_last: Bool = True) -> Self`
 - `def unique(self, maintain_order: Bool = False) -> Self`
-  Distinct values, null counted once.
+  Distinct values, null counted once, in first-occurrence order (which also satisfies maintain_order=False).
 - `def value_counts(self, sort: Bool = True, name: String = "count") -> DataFrame`
   Distinct values and their row counts (nulls included), most frequent first when sort=True; ties keep first-occurrence order.
 - `def to_values(self) -> List[AnyValue]`

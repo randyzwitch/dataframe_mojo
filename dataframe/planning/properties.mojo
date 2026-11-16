@@ -223,6 +223,15 @@ def _bare_column(expr: Expr) -> Bool:
     )
 
 
+def _column_projection(node: PlanNode) -> Bool:
+    """A projection whose every expression is one column, under any
+    name: it reorders and renames columns, computing nothing."""
+    for expression in node.exprs:
+        if len(expression._nodes) != 1 or expression._nodes[0].op != COL:
+            return False
+    return True
+
+
 def _schema_of(node: PlanNode, input: DataFrame) -> Optional[DataFrame]:
     """A filter's, select's or with_columns' result on a zero-row `input`,
     derived from the bound expression types. Return None when this cannot
