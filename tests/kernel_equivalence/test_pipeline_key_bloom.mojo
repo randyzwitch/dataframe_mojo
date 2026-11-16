@@ -304,11 +304,11 @@ def test_a_source_filter_runs_among_the_join_filters() raises:
                 Series("d_v", Column[Int64](payload^)),
             ]
         )
-        for case in range(3):
+        for shape in range(3):
             var filtered = source.lazy()
-            if case == 0:
+            if shape == 0:
                 filtered = filtered.filter(col("m").is_null())
-            elif case == 1:
+            elif shape == 1:
                 filtered = filtered.filter(col("m") != 4)
             else:
                 filtered = filtered.filter((col("id") + 1) % 3 != 0)
@@ -317,11 +317,11 @@ def test_a_source_filter_runs_among_the_join_filters() raises:
                 if perfect_probe_key(row) % 50 != 0:
                     continue
                 var mark_valid = row % 23 != 0
-                if case == 0 and mark_valid:
+                if shape == 0 and mark_valid:
                     continue
-                if case == 1 and (not mark_valid or row % 11 == 4):
+                if shape == 1 and (not mark_valid or row % 11 == 4):
                     continue
-                if case == 2 and (row + 1) % 3 == 0:
+                if shape == 2 and (row + 1) % 3 == 0:
                     continue
                 expected.append(row)
             var result = filtered.join(
