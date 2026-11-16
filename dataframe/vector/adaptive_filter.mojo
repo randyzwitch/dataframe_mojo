@@ -44,6 +44,22 @@ struct AdaptiveFilter(Copyable, Movable):
         self.right_random_border = 100 * max(conjuncts - 1, 0)
         self.random = Random(seed=0x9E3779B97F4A7C15)
 
+    @staticmethod
+    def by_cost(costs: List[Int], can_throw: Bool) -> Self:
+        """A filter over `len(costs)` predicates whose first order runs the
+        cheapest first (by the estimated cost per row), ties in their given
+        order; measured time then adapts it as for any filter."""
+        var result = Self(len(costs), can_throw)
+        # Insertion sort: stable, and a scan has a handful of filters.
+        for i in range(1, len(costs)):
+            var held = result.permutation[i]
+            var j = i
+            while j > 0 and costs[result.permutation[j - 1]] > costs[held]:
+                result.permutation[j] = result.permutation[j - 1]
+                j -= 1
+            result.permutation[j] = held
+        return result^
+
     def begin(self) -> Int:
         """The start time, 0 when the order never changes."""
         if self.disabled:

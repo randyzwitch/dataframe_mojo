@@ -44,3 +44,14 @@ def test_adaptive_filter_random_stream_is_owned_and_copyable() raises:
     for _ in range(100):
         assert_equal(first._random(0, 699), copied._random(0, 699))
     assert_equal(first._random(7, 7), 7)
+
+
+def test_adaptive_filter_by_cost_runs_the_cheapest_first() raises:
+    var adaptive = AdaptiveFilter.by_cost([1008, 14, 13, 14], False)
+    assert_equal(adaptive.permutation, [2, 1, 3, 0])
+    assert_true(not adaptive.disabled)
+    # A filter that can raise keeps the first order: no timing, no swap.
+    var fixed = AdaptiveFilter.by_cost([1008, 13], True)
+    assert_equal(fixed.permutation, [1, 0])
+    assert_true(fixed.disabled)
+    assert_equal(fixed.begin(), 0)

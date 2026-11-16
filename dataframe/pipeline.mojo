@@ -189,6 +189,7 @@ from dataframe.vector.data_chunk import (
     flat_over,
     to_series,
 )
+from dataframe.vector.adaptive_filter import AdaptiveFilter
 from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
@@ -626,17 +627,14 @@ struct _Columns(Copyable, Movable):
         result.height = frame.height()
         return result^
 
-    @staticmethod
-    def selected(
-        mut arena: ColumnArena, frame: DataFrame, var rows: List[UInt32]
-    ) raises -> _Columns:
-        """Every column of `frame` read through one selection, `rows` (row
-        numbers of `frame`): each column a dictionary over its values sharing
-        that one row list, so the rows a filter kept travel on with nothing
-        copied."""
+    def through_rows(self, var rows: List[UInt32]) -> _Columns:
+        """These columns (each read whole from row 0) read through one
+        selection, `rows` (row numbers of the columns): each column a
+        dictionary over its values sharing that one row list, so the rows a
+        filter kept travel on with nothing copied."""
         var result = _Columns()
-        for column in frame._columns:
-            result.handles.append(arena.add(column))
+        for c in range(self.width()):
+            result.handles.append(self.handles[c])
             result.starts.append(0)
             result.lists.append(0)
         result.height = len(rows)
@@ -1906,6 +1904,19 @@ struct _PipelineJob(Job):
     var join_filters: List[JoinFilter]
     var join_stats: List[SelectivityStats]
     var join_scan: Optional[ArcPointer[ScanFilterInfo]]
+    # The scan's row filters, run vector by vector in the order this
+    # worker's `scan_order` adapts to their measured time: per filter the
+    # join filter it is (an index of `join_filters`), or -1 for the source's
+    # own filter step when it runs among them (`predicate`; the steps then
+    # start after it). Set at the first morsel (`_scan_filters`).
+    var scan_entries: List[Int]
+    var scan_order: AdaptiveFilter
+    var scan_ready: Bool
+    var predicate: Bool
+    # The source's filter reads a vector through `scan_chunk`, its
+    # selection rebased to the vector in `scan_local` (input, then output).
+    var scan_chunk: DataChunk
+    var scan_local: List[UInt32]
     # The step the morsels enter at (0: the source's; past an outer join
     # step for the build rows it emits after its probe), and the number
     # of the frame's first morsel among all the morsels sunk.
@@ -1958,6 +1969,12 @@ struct _PipelineJob(Job):
             fill=SelectivityStats.of(BF_CHECK_N, BF_THRESHOLD),
         )
         self.join_scan = join_scan
+        self.scan_entries = List[Int]()
+        self.scan_order = AdaptiveFilter(0, True)
+        self.scan_ready = False
+        self.predicate = False
+        self.scan_chunk = DataChunk()
+        self.scan_local = List[UInt32]()
         self.first_step = 0
         self.first_morsel = 0
         self.finishes = True
@@ -1982,19 +1999,126 @@ struct _PipelineJob(Job):
         # busy nanoseconds on this worker.
         self.counts = List[Int](length=3 * len(steps[]) + 1, fill=0)
 
+    def _scan_filters(mut self) raises:
+        """The scan's row filters and their first order: the join filters
+        applied to rows, then the source's filter step when there is one
+        and some join filter is applied to rows (a single filter has no
+        order to adapt). The cheapest per row runs first: comparing a key
+        with one value costs about as much as a simple comparison, and a
+        bloom filter or key bitmap probe as much as a function call; the
+        source's filter is costed from its expression. Measured time then
+        adapts the order, unless the source's filter can raise: its rows
+        are then those the first order gives it."""
+        self.scan_ready = True
+        var costs = List[Int]()
+        for k in range(len(self.join_filters)):
+            ref f = self.join_filters[k]
+            if f.equal:
+                self.scan_entries.append(k)
+                # A key column read, a comparison and a constant.
+                costs.append(8 + 5 + 1)
+            elif f.bloom or f.bitmap:
+                self.scan_entries.append(k)
+                # A key column read and a function of it.
+                costs.append(8 + 1000)
+        var can_throw = False
+        if (
+            len(self.scan_entries) > 0
+            and len(self.steps[]) > 0
+            and self.steps[][0].kind == STEP_FILTER
+        ):
+            self.runner._compiled(0)
+            ref step = self.runner.compiled[0].value()
+            if len(step.expressions) > 0:
+                self.predicate = True
+                self.scan_entries.append(-1)
+                costs.append(step.expressions[0].cost())
+                can_throw = step.expressions[0]._can_throw(
+                    step.expressions[0].root
+                )
+                self.scan_local = List[UInt32](
+                    unsafe_uninit_length=2 * STANDARD_VECTOR_SIZE
+                )
+        self.scan_order = AdaptiveFilter.by_cost(costs, can_throw)
+
+    def _select_source(
+        mut self,
+        columns: _Columns,
+        bases: List[Vector],
+        mut rows: List[UInt32],
+        used: Int,
+        start: Int,
+        end: Int,
+        count: Int,
+        dense: Bool,
+    ) raises -> Int:
+        """The source's filter step over one vector (morsel rows [start,
+        end)): of its `count` selected rows (at `used` in `rows`, or the
+        whole vector when `dense`), how many it keeps, written over them in
+        order unless it keeps them all."""
+        var n = len(self.steps[])
+        var compiled = Pointer[Optional[_VectorStep], MutAnyOrigin](
+            unsafe_from_address=Int(self.runner.compiled.unsafe_ptr())
+        )
+        var chunk = Pointer[DataChunk, MutAnyOrigin](
+            unsafe_from_address=Int(Pointer(to=self.scan_chunk))
+        )
+        var began = Int(perf_counter_ns())
+        columns.fill(bases, self.runner.arena, chunk[], start, end - start)
+        var local_at = Int(self.scan_local.unsafe_ptr())
+        var out_at = local_at + 4 * STANDARD_VECTOR_SIZE
+        var local = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=local_at)
+        var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=out_at)
+        var base = Pointer[UInt32, MutAnyOrigin](
+            unsafe_from_address=Int(rows.unsafe_ptr()) + 4 * used
+        )
+        var sel = SelectionVector()
+        if not dense:
+            for i in range(count):
+                local[unsafe_offset=i] = base[unsafe_offset=i] - UInt32(start)
+            sel = SelectionVector(local_at)
+        var kept = (
+            compiled[unsafe_offset=0]
+            .value()
+            .expressions[0]
+            .select(
+                chunk[],
+                self.runner.arena,
+                sel,
+                count,
+                SelectionVector(out_at),
+            )
+        )
+        if kept < count:
+            for i in range(kept):
+                base[unsafe_offset=i] = out[unsafe_offset=i] + UInt32(start)
+        self.runner.counts[1] += count
+        self.runner.counts[2] += kept
+        self.runner.counts[2 * n + 1] += Int(perf_counter_ns()) - began
+        return kept
+
     def _join_rows(
-        mut self, frame: DataFrame, offset: Int, length: Int
+        mut self, frame: DataFrame, offset: Int, length: Int, columns: _Columns
     ) raises -> Tuple[Bool, Optional[List[UInt32]]]:
-        """The rows of a fresh morsel (`frame`, at source row `offset`) the join
-        filters keep: False when none is, else their selection (None: every
-        row). Vectors the statistics filters rule out are not read; the row
-        filters run vector by vector, each narrowing the vector's selection in
-        turn (a bloom filter or key bitmap only while its selectivity keeps it
-        active), and the morsel's selection is the vectors' selections end to
-        end."""
+        """The rows of a fresh morsel (`frame`, at source row `offset`) the
+        scan's filters keep: False when none is, else their selection (None:
+        every row). Vectors the statistics filters rule out are not read; the
+        row filters run vector by vector, each narrowing the vector's
+        selection in turn (a bloom filter or key bitmap only while its
+        selectivity keeps it active), and the morsel's selection is the
+        vectors' selections end to end.
+
+        The row filters are the join filters and, when `predicate`, the
+        source's filter step (over `columns`, the morsel's columns). They run
+        in this worker's adaptive order: each vector's filtering is timed,
+        and every so often two neighbouring filters are swapped and the swap
+        kept only if vectors got faster, so a filter that removes many rows
+        cheaply comes to run first and the others see only what it keeps."""
         for f in self.join_filters:
             if not f.any:
                 return (False, None)
+        if not self.scan_ready:
+            self._scan_filters()
         var vectors = Optional[List[Int]]()
         if self.join_scan:
             vectors = _vectors_kept(self.join_scan.value()[], offset, length)
@@ -2003,10 +2127,20 @@ struct _PipelineJob(Job):
                 if len(vectors.value()) == 0:
                     trace_path("pipeline.join_filter_skip")
                     return (False, None)
-        var rowwise = False
-        for f in self.join_filters:
-            rowwise = rowwise or f.equal or Bool(f.bloom) or Bool(f.bitmap)
-        if not rowwise:
+        if self.predicate and self.runner.scan and not self.source:
+            # The source filter's statistics: as its step runs here, its
+            # vectors are ruled out here too.
+            var ruled = _vectors_kept(
+                self.runner.scan.value()[], offset, length
+            )
+            if ruled:
+                trace_path("scan.vector_skip")
+                if vectors:
+                    ruled = _common_vectors(vectors.value(), ruled.value())
+                vectors = ruled^
+                if len(vectors.value()) == 0:
+                    return (False, None)
+        if len(self.scan_entries) == 0:
             if not vectors:
                 return (True, None)
             return (True, _rows_in_vectors(None, vectors.value(), length))
@@ -2020,6 +2154,9 @@ struct _PipelineJob(Job):
             else:
                 keys.append(Series("", Column[Int64](List[Int64]())))
                 valid.append(True)
+        var bases = List[Vector]()
+        if self.predicate:
+            bases = columns.bases(self.runner.arena)
         var starts = List[Int]()
         if vectors:
             starts = vectors.value().copy()
@@ -2028,9 +2165,9 @@ struct _PipelineJob(Job):
                 starts.append(at)
         # Room for every row: each vector's selection is written after the
         # ones before it, then narrowed in place. A vector no row filter
-        # narrows (all paused) keeps every row; its identity selection is
-        # written only once some vector is narrowed, as until then the
-        # selection is the vectors themselves.
+        # narrows (all paused, or keeping every row) keeps every row; its
+        # identity selection is written only once some vector is narrowed,
+        # as until then the selection is the vectors themselves.
         var rows = List[UInt32](unsafe_uninit_length=length)
         var used = 0
         var listed = False
@@ -2039,10 +2176,23 @@ struct _PipelineJob(Job):
             var end = min(length, start + STATISTICS_VECTOR_SIZE)
             var count = end - start
             var dense = True
-            for k in range(len(self.join_filters)):
-                ref f = self.join_filters[k]
-                if not f.equal and not f.bloom and not f.bitmap:
+            var started = self.scan_order.begin()
+            for i in range(len(self.scan_entries)):
+                if count == 0:
+                    break
+                var k = self.scan_entries[self.scan_order.permutation[i]]
+                if k < 0:
+                    var kept = self._select_source(
+                        columns, bases, rows, used, start, end, count, dense
+                    )
+                    if kept < count:
+                        if not listed:
+                            _identity_rows(rows, starts, v, length)
+                            listed = True
+                        dense = False
+                        count = kept
                     continue
+                ref f = self.join_filters[k]
                 if not f.equal and not self.join_stats[k].active:
                     self.join_stats[k].update(0, 0)
                     continue
@@ -2057,6 +2207,7 @@ struct _PipelineJob(Job):
                     self.join_stats[k].update(kept, count)
                 dense = False
                 count = kept
+            self.scan_order.end(started)
             if dense and listed:
                 _fill_identity(rows, used, start, count)
             used += count
@@ -2142,7 +2293,13 @@ struct _PipelineJob(Job):
             if vectors and len(vectors.value()) == 0:
                 trace_path("pipeline.top_dynamic_skip")
                 return
-        var keyed = self._join_rows(morsel, offset, length)
+        if not self.scan_ready:
+            self._scan_filters()
+        # When the source's filter step runs among the scan's filters, it
+        # reads the morsel's columns there and the steps start after it.
+        var columns = _Columns.of_frame(self.runner.arena, morsel)
+        var first = 1 if self.predicate else 0
+        var keyed = self._join_rows(morsel, offset, length, columns)
         if not keyed[0]:
             return
         var rows = keyed[1].copy()
@@ -2155,22 +2312,22 @@ struct _PipelineJob(Job):
             trace_path("pipeline.join_filter_selection")
             # A top-N maps its chunks back to source rows through them.
             var kept = rows.value().copy() if self._chunk_top() else rows.take()
-            source = _Columns.selected(self.runner.arena, morsel, kept^)
+            source = columns.through_rows(kept^)
         else:
-            source = _Columns.of_frame(self.runner.arena, morsel)
+            source = columns^
             self.runner.scan_offset = offset
         if self._chunk_top():
-            self._top_chunks(source^, rows, k, offset, 0)
+            self._top_chunks(source^, rows, k, offset, first, True)
             self.runner.scan_offset = -1
             return
-        _ = self.runner.run(source^, 0)
+        _ = self.runner.run(source^, first)
         self.runner.scan_offset = -1
 
     def _sink_from(mut self, var columns: _Columns, k: Int, offset: Int) raises:
         """An outer join's unmatched build rows (or a morsel of them past
         its step) through the steps after `first_step` into the sink."""
         if self._chunk_top():
-            self._top_chunks(columns^, None, k, offset, self.first_step)
+            self._top_chunks(columns^, None, k, offset, self.first_step, False)
         else:
             _ = self.runner.run(columns^, self.first_step)
 
@@ -2185,15 +2342,17 @@ struct _PipelineJob(Job):
         k: Int,
         offset: Int,
         first_step: Int,
+        scanned: Bool,
     ) raises:
         """Feed a morsel into the top-N sink one chunk at a time from
         first_step. Recheck the dynamic boundary before reading each vector:
-        earlier chunks may have tightened it enough to skip later vectors."""
+        earlier chunks may have tightened it enough to skip later vectors.
+        `scanned`: the columns are the source's rows (through `rows`)."""
         var ran = self.runner.run_to_last(source^, first_step)
         var columns = ran[0].copy()
         var first = ran[1]
         # The vectors map to source rows only before any join.
-        var direct = first == 0
+        var direct = scanned and first == first_step
         var bases = columns.bases(self.runner.arena)
         var made = 0
         var skipped = 0
@@ -2478,6 +2637,18 @@ def _vectors_kept(
     if not ruled_out:
         return None
     return kept^
+
+
+def _common_vectors(a: List[Int], b: List[Int]) -> List[Int]:
+    """The vector starts in both ascending lists."""
+    var out = List[Int]()
+    var j = 0
+    for start in a:
+        while j < len(b) and b[j] < start:
+            j += 1
+        if j < len(b) and b[j] == start:
+            out.append(start)
+    return out^
 
 
 def _rows_in_vectors(

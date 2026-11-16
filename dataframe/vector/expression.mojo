@@ -34,6 +34,7 @@ from dataframe.expr import (
     DT_MONTH,
     DT_YEAR,
     EQ,
+    EQ_MISSING,
     FILL_NULL,
     FLOOR,
     GE,
@@ -43,8 +44,10 @@ from dataframe.expr import (
     IS_NULL,
     LE,
     LT,
+    MOD,
     MUL,
     NE,
+    NE_MISSING,
     NOT,
     OR,
     ROUND,
@@ -1003,6 +1006,84 @@ struct VectorExpression(Copyable, Movable):
             if self._can_throw(child):
                 return True
         return False
+
+    def cost(self) raises -> Int:
+        """An estimate of the work per row of evaluating this expression,
+        to order filters before any is timed: a column read costs more
+        than a constant, a string more than a float more than an integer;
+        a comparison, null test or arithmetic adds little to its operands,
+        an IN list grows with its values, and pattern matching, string
+        building or any other function costs much more."""
+        return self._cost(self.root)
+
+    def _cost(self, index: Int) raises -> Int:
+        ref node = self.bound.expr._nodes[index]
+        var dtype = self.bound.dtypes[index]
+        var width = 1
+        if dtype == DataType.STRING or dtype == DataType.BINARY:
+            width = 5
+        elif dtype.is_float():
+            width = 2
+        if node.op == COL:
+            return 8 * width
+        if self.kinds[index] == _KIND_CONSTANT:
+            return width
+        var children = 0
+        for child in node_children(node):
+            children += self._cost(child)
+        var op = node.op
+        if (
+            op == EQ
+            or op == NE
+            or op == LT
+            or op == LE
+            or op == GT
+            or op == GE
+            or op == EQ_MISSING
+            or op == NE_MISSING
+            or op == AND
+            or op == OR
+            or op == IS_NULL
+            or op == IS_NOT_NULL
+            or op == ADD
+            or op == SUB
+            or op == ABS
+        ):
+            return children + 5
+        if op == NOT:
+            return children + 10
+        if op == MUL or op == MOD:
+            return children + 10
+        if op == DIV:
+            return children + 15
+        if op == INT_IS_IN:
+            var values = 0
+            if node.text.byte_length() > 0:
+                values = len(node.text.split(","))
+            return children + 100 * values
+        if op == STR_IS_IN:
+            return children + 100 * len(decode_values(node.text))
+        if op == WHEN:
+            return children
+        if op == CAST:
+            if node.left < 0:
+                return children + 5
+            var source = self.bound.dtypes[node.left]
+            if source == dtype:
+                return children
+            if (
+                source == DataType.STRING
+                or dtype == DataType.STRING
+                or source == DataType.BINARY
+                or dtype == DataType.BINARY
+            ):
+                return children + 200
+            return children + 5
+        if op == ROUND:
+            return children + 100
+        if op == STR_LIKE or op == STR_CONCAT:
+            return children + 200
+        return children + 1000
 
     def root_kind(self) -> Int:
         return self.kinds[self.root]
