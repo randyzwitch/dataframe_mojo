@@ -151,9 +151,9 @@ def test_parallel_whole_row_unique_no_aggregate_route_preserves_complete_null_na
 
 
 def test_parallel_subset_unique_keeps_input_order_and_exact_key_counts() raises:
-    # A high-cardinality subset on several workers encodes one hash bucket
-    # at a time. Every keep mode, n_unique and is_duplicated must still
-    # match a scalar reference, with surviving rows in input order. Rows
+    # A high-cardinality subset on several workers. Every keep mode,
+    # n_unique and is_duplicated must still match a scalar reference, with
+    # surviving rows in input order when the order is kept. Rows
     # r and r + 150,000 repeat a key; one key column has nulls.
     var setting = WorkerSetting(4)
     var n = 196609
@@ -204,6 +204,9 @@ def test_parallel_subset_unique_keeps_input_order_and_exact_key_counts() raises:
             var actual = frame.unique(
                 subset.copy(), keep=modes[m], maintain_order=maintain_order
             )
+            if not maintain_order:
+                # Rows come in no particular order: compare them sorted.
+                actual = actual.sort("row")
             assert_equal(actual.height(), len(expected))
             ref rows = actual.column("row")._data[Column[Int64]]
             for i in range(len(expected)):

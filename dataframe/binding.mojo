@@ -737,6 +737,9 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
         return DataType.list(input)
     if op == COUNT or op == NULL_COUNT or op == LEN:
         return DataType.INT64
+    if op == FIRST or op == LAST:
+        # A value taken as it is: any type, list and struct included.
+        return input
     if input.is_nested():
         raise Error(
             op_name(op)

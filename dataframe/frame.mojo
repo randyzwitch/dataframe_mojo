@@ -2589,76 +2589,41 @@ struct DataFrame(Copyable, Sized, Writable):
         duplicated row). Nulls equal nulls; NaN equals NaN; -0.0 equals 0.0.
         Output order is unspecified unless maintain_order=True, which keeps
         surviving rows in input order.
+
+        Runs as the lazy plan's unique does: a grouping on the subset
+        through the parallel aggregate table.
         """
-        if (
-            keep != "any"
-            and keep != "first"
-            and keep != "last"
-            and keep != "none"
-        ):
-            raise Error("keep must be 'any', 'first', 'last', or 'none'")
-        var whole_rows = len(subset) == 0
-        if not whole_rows:
-            whole_rows = True
-            for name in self.columns():
-                whole_rows = whole_rows and name in subset
-        if (
-            keep == "any"
-            and not maintain_order
-            and whole_rows
-            and worker_count(self._height) > 1
-        ):
-            # Distinct whole rows in any order are a group_by on every column
-            # with no aggregates, which encodes on every worker instead of
-            # building one dictionary on one thread.
-            return self.group_by(self.columns()).agg(List[Expr]())
-        if keep == "any" or keep == "first":
-            # Each key's first row is its id's representative. One worker
-            # numbers ids by first occurrence, so those rows are already in
-            # input order; bucketed ids are not, and the rows are put back in
-            # input order by marking them. No counts or second pass over the
-            # ids.
-            var encoded = self._subset_row_keys(subset)
-            ref firsts = encoded.representatives
-            var ordered = True
-            for g in range(1, len(firsts)):
-                if firsts[g] < firsts[g - 1]:
-                    ordered = False
-                    break
-            if ordered:
-                return self.take(firsts)
-            var chosen = List[Bool](length=self._height, fill=False)
-            for row in firsts:
-                chosen[row] = True
-            var rows = List[Int](capacity=len(firsts))
-            for i in range(self._height):
-                if chosen[i]:
-                    rows.append(i)
-            return self.take(rows)
-        var keyed = self._key_counts(subset)
-        ref ids = keyed[0]
-        ref counts = keyed[1]
-        var rows = List[Int]()
-        if keep == "none":
-            for i in range(len(ids)):
-                if counts[ids[i]] == 1:
-                    rows.append(i)
-        elif keep == "last":
-            var last = List[Int](length=len(counts), fill=-1)
-            for i in range(len(ids)):
-                last[ids[i]] = i
-            var chosen = List[Bool](length=len(ids), fill=False)
-            for row in last:
-                chosen[row] = True
-            for i in range(len(ids)):
-                if chosen[i]:
-                    rows.append(i)
-        else:
-            var seen = List[Bool](length=len(counts), fill=False)
-            for i in range(len(ids)):
-                if not seen[ids[i]]:
-                    seen[ids[i]] = True
-                    rows.append(i)
+        return (
+            self.lazy()
+            .unique(subset, keep=keep, maintain_order=maintain_order)
+            ._collect(optimize=False, streaming=True, batch_size=65536)
+        )
+
+    def _first_rows(self) raises -> Self:
+        """The first row of each set of equal rows (every column compared),
+        in input order: a column's distinct values,
+        found directly where one column's values are wanted (a
+        value-level unique, which may run once per group)."""
+        # Each key's first row is its id's representative. One worker
+        # numbers ids by first occurrence, so those rows are already in
+        # input order; bucketed ids are not, and the rows are put back in
+        # input order by marking them.
+        var encoded = self._subset_row_keys(List[String]())
+        ref firsts = encoded.representatives
+        var ordered = True
+        for g in range(1, len(firsts)):
+            if firsts[g] < firsts[g - 1]:
+                ordered = False
+                break
+        if ordered:
+            return self.take(firsts)
+        var chosen = List[Bool](length=self._height, fill=False)
+        for row in firsts:
+            chosen[row] = True
+        var rows = List[Int](capacity=len(firsts))
+        for i in range(self._height):
+            if chosen[i]:
+                rows.append(i)
         return self.take(rows)
 
     def n_unique(self, subset: List[String] = List[String]()) raises -> Int:

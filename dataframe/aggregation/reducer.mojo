@@ -1247,6 +1247,12 @@ struct Reducer(Movable):
     var decimals: List[Int128]
     var bools: List[Bool]
     var strings: List[String]
+    # A first or last of list or struct values: the rows picked, each as
+    # (chunk index << 32) | row into `nested_chunks` (-1 for none), read out
+    # whole at the finish.
+    var nested_chunks: List[Series]
+    var nested_picks: List[Int]
+    var nested_base: Int
     var int_sets: List[Dict[Int64, Bool]]
     var float_sets: List[Dict[UInt64, Bool]]
     # A group's first distinct number is held here, and its set is used only
@@ -1380,6 +1386,13 @@ struct Reducer(Movable):
             length=n if picking
             and input_dtype.physical() == DataType.STRING else 0,
             fill="",
+        )
+        self.nested_chunks = List[Series]()
+        self.nested_base = 0
+        self.nested_picks = List[Int](
+            length=n if (op == FIRST or op == LAST)
+            and self.logical.is_nested() else 0,
+            fill=-1,
         )
         self.int_sets = List[Dict[Int64, Bool]](
             length=n if distinct and is_int else 0, fill=Dict[Int64, Bool]()
@@ -2370,6 +2383,18 @@ struct Reducer(Movable):
                     self.seen,
                     self.strings,
                 )
+        elif (op == FIRST or op == LAST) and self.logical.is_nested():
+            var last = op == LAST
+            var at = len(self.nested_chunks)
+            var used = False
+            for i in range(len(chunk)):
+                var g = _group(grouped, groups, offset + i)
+                if last or not self.seen[g]:
+                    self.seen[g] = True
+                    self.nested_picks[g] = (at << 32) | i
+                    used = True
+            if used:
+                self.nested_chunks.append(chunk.copy())
         elif op == FIRST or op == LAST:
             var last = op == LAST
             if chunk._data.isa[Column[Int128]]():
@@ -2698,6 +2723,11 @@ struct Reducer(Movable):
             self.dtype.precision()
         ) if self.dtype.is_decimal() else Int128(0)
         var steps = len(sources) if len(sources) else other.group_count
+        if len(self.nested_picks) > 0:
+            # Other's picked chunks are shared (not copied) after this one's.
+            self.nested_base = len(self.nested_chunks)
+            for chunk in other.nested_chunks:
+                self.nested_chunks.append(chunk.copy())
         for step in range(steps):
             var source = sources[step] if len(sources) else step
             var g: Int
@@ -2861,6 +2891,12 @@ struct Reducer(Movable):
 
     def _take_value(mut self, other: Self, g: Int, source: Int):
         self.seen[g] = True
+        if len(self.nested_picks) > 0:
+            # Other's chunks follow this one's from `nested_base` (`merge`).
+            self.nested_picks[g] = other.nested_picks[source] + (
+                self.nested_base << 32
+            )
+            return
         if self.dtype.is_decimal():
             self.decimals[g] = other.decimals[source]
         elif self.dtype == DataType.INT64:
@@ -2910,6 +2946,7 @@ struct Reducer(Movable):
         self.decimals.extend(added.decimals.copy())
         self.bools.extend(added.bools.copy())
         self.strings.extend(added.strings.copy())
+        self.nested_picks.extend(added.nested_picks.copy())
         self.int_sets.extend(added.int_sets.copy())
         self.float_sets.extend(added.float_sets.copy())
         self.distinct_first.extend(added.distinct_first.copy())
@@ -2945,6 +2982,36 @@ struct Reducer(Movable):
                     List[Int64](length=self.group_count + 1, fill=0), child^
                 ),
             )
+        if (self.op == FIRST or self.op == LAST) and self.logical.is_nested():
+            # Each group's picked row, read out of its chunk; null where
+            # no row reached the group.
+            if len(self.nested_chunks) == 0:
+                return Series.full_null("", self.logical, self.group_count)
+            # Only the chunks some group picked from are joined.
+            var starts = List[Int](length=len(self.nested_chunks), fill=-1)
+            var used = List[Series]()
+            var total = 0
+            var rows = List[Int](capacity=self.group_count)
+            for g in range(self.group_count):
+                var pick = (
+                    self.nested_picks[g] if g < len(self.nested_picks) else -1
+                )
+                if pick < 0:
+                    rows.append(-1)
+                    continue
+                var c = pick >> 32
+                if starts[c] < 0:
+                    starts[c] = total
+                    total += len(self.nested_chunks[c])
+                    used.append(self.nested_chunks[c].copy())
+                rows.append(starts[c] + (pick & 0xFFFFFFFF))
+            if len(used) == 0:
+                return Series.full_null("", self.logical, self.group_count)
+            var values = (
+                Series._from_chunks(used).rechunk() if len(used)
+                > 1 else used[0].copy()
+            )
+            return values.take_or_null(rows).renamed("")
         var op = self.op
         if op == APPROX_N_UNIQUE:
             var counts = List[UInt32](capacity=self.group_count)

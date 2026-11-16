@@ -714,6 +714,66 @@ def test_struct_key_equality_and_supported_join_kinds() raises:
                 _ = source.join(right, on="key", how=how)
 
 
+def test_grouped_first_last_and_unique_keep_nested_values_whole() raises:
+    # Groups by id parity, even ids first. Lists: rows 0, 2, 4 and 1, 3
+    # (row 3's list is null); records: rows 0, 2 and 1, 3.
+    var lists = integer_lists()
+    var records = struct_frame().rename({"before": "id", "record": "xs"})
+    for frame in [lists.copy(), records.select(["id", "xs"])]:
+        var last_rows: List[Int] = [4, 3] if frame.height() == 5 else [2, 3]
+        var ordered_last: List[Int] = [3, 4] if frame.height() == 5 else [
+            2,
+            3,
+        ]
+        for layout in range(3):
+            var source = layout_for_nested(frame, layout).with_columns(
+                [(col("id") % lit(Int64(2))).alias("parity")]
+            )
+            var exprs: List[Expr] = [
+                col("xs").first().alias("first"),
+                col("xs").last().alias("last"),
+            ]
+            var eager = source.group_by("parity", maintain_order=True).agg(
+                exprs
+            )
+            var lazy = (
+                source.lazy()
+                .group_by("parity", maintain_order=True)
+                .agg(exprs)
+                .collect()
+            )
+            assert_true(eager.equals(lazy))
+            var values = source.column("xs")
+            assert_true(eager.column("first").equals(values.take([0, 1])))
+            assert_true(eager.column("last").equals(values.take(last_rows)))
+            # Ungrouped, eager and planned.
+            var n = source.height()
+            var whole = source.select_exprs(exprs)
+            assert_true(
+                whole.equals(source.lazy().select_exprs(exprs).collect())
+            )
+            assert_true(whole.column("first").equals(values.slice(0, 1)))
+            assert_true(whole.column("last").equals(values.slice(n - 1, 1)))
+            # Each keep's surviving rows, the nested column carried whole;
+            # an ordered keep='last' is in the kept rows' order.
+            for keep in ["first", "last", "none", "any"]:
+                var rows: List[Int] = [0, 1]
+                if keep == "last":
+                    rows = ordered_last.copy()
+                elif keep == "none":
+                    rows = List[Int]()
+                var kept = source.unique(
+                    ["parity"], keep=keep, maintain_order=True
+                )
+                assert_true(kept.equals(source.take(rows)))
+                var planned = (
+                    source.lazy()
+                    .unique(["parity"], keep=keep, maintain_order=True)
+                    .collect(optimize=False)
+                )
+                assert_true(planned.equals(kept))
+
+
 def test_nested_unsupported_operations_fail_for_nonempty_and_empty_inputs() raises:
     var lists = integer_lists().select(["xs"])
     var records = struct_frame().select(["record"]).rename({"record": "xs"})
