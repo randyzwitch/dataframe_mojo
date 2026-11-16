@@ -248,6 +248,15 @@ from std.time import (
 def plan_stream_execute(
     self: QueryContext, index: Int, batch_size: Int, sink: Int = 0
 ) raises -> Optional[DataFrame]:
+    if not self._prefetched or not self._prefetched_indexes:
+        # A stream reads what its input pipelines made from a memo: a
+        # plan with none runs on a copy that has one.
+        var plan = self.copy()
+        plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
+        plan._prefetched_indexes = Optional(
+            ArcPointer(Dict[Int, _ReadyIndex]())
+        )
+        return plan_stream_execute(plan, index, batch_size, sink)
     var outcome = _stream_head(self, index, batch_size, sink)
     if len(outcome.plan) > 0:
         return _stream_after_materialization(
@@ -256,8 +265,6 @@ def plan_stream_execute(
     if len(outcome.head) == 0:
         return None
     var head = outcome.head.pop()
-    if not self._prefetched:
-        return _stream_probe(self, index, batch_size, sink, head^)
     # Schedule computed inputs as child pipelines. The probe depends on all
     # child completions, allowing independent builds to overlap. An input
     # that is a stream itself adds its own pipelines (its builds, probe and
@@ -376,31 +383,36 @@ def _scheduled_inputs(
     batch_size: Int,
     sink: Int,
 ) raises -> _StreamInputs:
-    """`plan_schedule_inputs`, each node's schema derived once. A computed
-    source is scheduled too, unless it is an aggregate whose finish takes
-    the row steps above it (`FinishAbove`) and no build runs beside it."""
+    """`plan_schedule_inputs`, each node's schema derived once. When the
+    computed source is an aggregate under only row-local steps, its input
+    pipeline's finish runs those steps too (`FinishAbove`): its rows are
+    then the stream's result."""
     var first = head.cursor
     while first >= 0 and (
         _stream_rows(self._nodes[first]) or _stream_join(self._nodes[first])
     ):
         first = self._nodes[first].left
-    var finish_above = (
+    var above = List[Int]()
+    if (
         first >= 0
         and first != terminal
         and head.top < 0
         and head.limit < 0
         and head.skip == 0
-        and len(
-            _row_steps_above(self, terminal, first, sink, len(head.expressions))
+    ):
+        above = _row_steps_above(
+            self, terminal, first, sink, len(head.expressions)
         )
-        > 0
-    )
     var owned = _remembering(self)
     try:
         var inputs = plan_schedule_inputs(
-            self, terminal, head.cursor, batch_size, finish_above
+            self, terminal, head.cursor, batch_size
         )
         _forgetting(self, owned)
+        if len(above) > 0 and first in inputs.wanted:
+            inputs.finish = ArcPointer(
+                FinishAbove(first, self._nodes[first].names.copy(), above^)
+            )
         return inputs^
     except e:
         _forgetting(self, owned)
@@ -630,6 +642,9 @@ def _add_stream(
             inputs.probe_estimates[k],
             inputs.build_filtered[k],
         )
+        var finish = Optional[ArcPointer[FinishAbove]]()
+        if inputs.finish and inputs.finish.value()[].node == inputs.wanted[k]:
+            finish = inputs.finish
         at.append(
             _add_input(
                 schedule,
@@ -638,6 +653,7 @@ def _add_stream(
                 batch_size,
                 builds^,
                 inputs.metas[k].type,
+                finish=finish,
             )
         )
     if self._pushed_filters:
@@ -682,6 +698,7 @@ def _add_stream(
             )
         )
     )
+    schedule.pipelines[probe].probe[0].finish_above = inputs.finish
     # Schedule unmatched build-row scans after the probe in operator order,
     # sharing its downstream sink so outer-join rows receive the same later
     # processing.
@@ -715,15 +732,18 @@ def _add_input(
     type: Int,
     streaming: Bool = True,
     sink: Int = 0,
+    finish: Optional[ArcPointer[FinishAbove]] = None,
 ) raises -> Int:
     """Add input `index` of a stream on `self` to `schedule` and return the
     pipeline that makes its result: the input's own stream when it is one
     (on a copy of the plan with a memo of its own), else an operator
     pipeline that runs its node over whole inputs, those inputs added
     before it as pipelines of the same schedule. `sink` receives a
-    stream's rows."""
+    stream's rows. `finish`: the row steps above this input, an
+    aggregate, that its finish may run for the stream reading it."""
     if streaming and self._handoff == HANDOFF_OFF:
         var sub = self.copy()
+        sub._finish_above = finish
         # Filters pushed into this input arrive when its builds finish
         # (`_StreamProbe.tasks`); the input plans its own below it.
         sub._pushed_filters = None
@@ -1066,6 +1086,15 @@ struct _StreamProbe(Movable):
     # Whether the current round fills the built table's pointer table.
     var filling: Bool
     var result: Optional[DataFrame]
+    # The row steps above the aggregate input this stream reads, which
+    # that input's finish runs when it can (`FinishAbove`).
+    var finish_above: Optional[ArcPointer[FinishAbove]]
+    # When the node declined to stream at run time: the plan it declined
+    # on, when not this one (its computed source is a frame there), and
+    # the node below it whose rows this pipeline makes instead (-1 for
+    # none), which the node then runs over (`_decline`).
+    var declined: List[QueryContext]
+    var below: Int
 
     def __init__(
         out self,
@@ -1103,6 +1132,9 @@ struct _StreamProbe(Movable):
         self.round = 0
         self.filling = False
         self.result = None
+        self.finish_above = None
+        self.declined = List[QueryContext]()
+        self.below = -1
 
     def initialize(mut self):
         """The probe's setup that reads no input's rows, made as the
@@ -1163,18 +1195,62 @@ struct _StreamProbe(Movable):
             )
         var types = Optional[_ProbeTypes]()
         swap(types, self.types)
-        self.started.append(
-            _probe_start(
-                plan,
-                self.index,
-                self.batch_size,
-                self.sink,
-                self.head.pop(0),
-                self.build,
-                types^,
-            )
+        var head = self.head.pop(0)
+        var below = _rows_below(head)
+        var started = _probe_start(
+            plan,
+            self.index,
+            self.batch_size,
+            self.sink,
+            head^,
+            self.build,
+            types^,
+            self.finish_above,
         )
+        if not started.runs() and not started.result:
+            started = self._decline(started^, below^)
+        self.started.append(started^)
         return self._execute_tasks(plan)
+
+    def _on(self) -> Int:
+        """The address of the plan the node runs on after declining."""
+        if len(self.declined) > 0:
+            return Int(Pointer(to=self.declined[0]))
+        return self.plan
+
+    def _decline(
+        mut self, var started: _ProbeStart, var below: _StreamHead
+    ) raises -> _ProbeStart:
+        """The node declined to stream once its inputs were known (a
+        strategy or column types its pipeline does not take): this
+        pipeline makes the rows of the steps and joins below the node
+        instead, and the node runs over them as it completes. The stream
+        at the schedule's top, on its own plan, hands the node back to
+        its caller."""
+        if len(started.declined) > 0:
+            self.declined.append(started.declined.pop())
+            # Estimates on that plan differ: its source is a frame.
+            below.probe_estimates = Dict[Int, Int]()
+            below.build_filtered = Dict[Int, Bool]()
+        if not self.is_input and len(self.declined) == 0:
+            return started^
+        ref on = Pointer[QueryContext, MutAnyOrigin](
+            unsafe_from_address=self._on()
+        )[]
+        var cursor = below.cursor
+        if (
+            cursor < 0
+            or cursor == self.index
+            or _is_scan(on._nodes[cursor].kind)
+        ):
+            # Nothing streams below the node: it reads its source itself.
+            return started^
+        var rows = _probe_start(on, cursor, self.batch_size, 0, below^)
+        if rows.runs() or rows.result:
+            trace_path("stream.declined_rows_below")
+            self.below = cursor
+            return rows^
+        return started^
 
     def _execute_tasks(self, plan: QueryContext) -> Int:
         """A task per morsel worker, or one for a probe with no morsel
@@ -1264,13 +1340,20 @@ struct _StreamProbe(Movable):
                 return
         elif len(started.batch) > 0:
             self.result = started.batch[0].result(plan)
-        if not self.result and self.is_input:
-            # The stream declined: the input's operator runs on its own,
-            # as `plan_execute` runs a node no stream takes.
-            plan._declined = self.index
-            self.result = plan._execute(
-                self.index, False, True, self.batch_size
-            )
+        ref on = Pointer[QueryContext, MutAnyOrigin](
+            unsafe_from_address=self._on()
+        )[]
+        if self.below >= 0 and self.result:
+            # The node declined, and this pipeline made the rows below
+            # it: the node runs over them, as an operator over a frame.
+            on._prefetched.value()[][self.below] = self.result.take()
+            on._declined = self.index
+            self.result = on._execute(self.index, False, True, self.batch_size)
+        elif not self.result and (self.is_input or len(self.declined) > 0):
+            # The node declined over its source alone: it runs on its
+            # own, as `plan_execute` runs a node no stream takes.
+            on._declined = self.index
+            self.result = on._execute(self.index, False, True, self.batch_size)
         if len(self.build.keys) > 0 and self.result:
             # A result made as a frame (the stream ran no pipeline, or its
             # columns' types keep the build on one): its table from it.
@@ -1587,13 +1670,16 @@ def _probe_start(
     var head: _StreamHead,
     build: _BuildFor = _BuildFor(),
     var types: Optional[_ProbeTypes] = None,
+    finish_above: Optional[ArcPointer[FinishAbove]] = None,
 ) raises -> _ProbeStart:
     """The stream's probe pipeline set up, once its inputs are done: its morsel
     workers, not yet run, or its result when it ran here (a batch stream, or no
     pipeline at all). `build`: the join this stream's rows are the build side of; a
     pipeline whose rows are the result sinks them into that join's hash
     table. `types`: the setup made from the plan alone (`_probe_types`),
-    used where the inputs' results have the columns it was made for."""
+    used where the inputs' results have the columns it was made for.
+    `finish_above`: the row steps above the aggregate source that its
+    input pipeline's finish ran when it could."""
     var cursor = head.cursor
     var expressions = head.expressions.copy()
     var keys = head.keys.copy()
@@ -1645,25 +1731,17 @@ def _probe_start(
         plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
         return _probe_restart(plan^, index, batch_size, sink, head^, build)
     if first >= 0 and first != index and not _is_scan(self._nodes[first].kind):
-        # Run row-local steps during each worker's aggregate scan. Discard
-        # rejected groups before assembling a frame, avoiding an additional
-        # scan of materialized groups.
-        var above = _row_steps_above(self, index, first, sink, len(expressions))
-        if len(above) > 0 and top < 0 and limit < 0 and skip == 0:
-            var plan = self.copy()
-            var finish = ArcPointer(
-                FinishAbove(first, self._nodes[first].names.copy(), above^)
-            )
-            plan._finish_above = Optional(finish)
-            var aggregated = plan._execute(first, False, True, batch_size)
-            if finish[].applied:
-                return _ProbeStart(aggregated^)
-            plan._finish_above = None
-            plan._frames.append(aggregated^)
-            plan._schemas.append(Optional[CsvSchema]())
-            plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
-            return _probe_restart(plan^, index, batch_size, sink, head^, build)
+        # The computed source, made by an input pipeline of this stream's
+        # schedule (`plan_schedule_inputs`). An aggregate's finish that ran
+        # the row-local steps above it, rejecting groups before any frame
+        # of them was assembled, made this stream's result.
         var computed = self._execute(first, False, True, batch_size)
+        if (
+            finish_above
+            and finish_above.value()[].node == first
+            and finish_above.value()[].applied
+        ):
+            return _ProbeStart(computed^)
         var plan = self.copy()
         plan._frames.append(computed^)
         plan._schemas.append(Optional[CsvSchema]())
@@ -1789,9 +1867,10 @@ def _probe_start(
         cursor = node.left
     if cursor < 0 or cursor == index and not _is_scan(self._nodes[cursor].kind):
         return _ProbeStart(None)
-    if cursor == index and self._nodes[cursor].kind != SCAN_FRAME and sink == 0:
-        # A file with nothing to apply is read whole by its parallel
-        # reader; only a file sink streams it.
+    if cursor == index and sink == 0:
+        # A scan with nothing to apply is read as it is: a file whole by
+        # its parallel reader, a frame as the frame. Only a file sink
+        # streams it.
         return _ProbeStart(None)
     operations.reverse()
     operation_nodes.reverse()
@@ -2869,6 +2948,12 @@ def _stream_probe(
     set up here, and, when that leaves work to run, scheduled with its
     outer scans so its execute and finish tasks share one queue."""
     var start = _probe_start(self, index, batch_size, sink, head.copy())
+    if not start.runs() and len(start.declined) > 0 and not start.result:
+        # Declined on a plan whose computed source is a frame: the node
+        # runs there.
+        ref plan = start.declined[0]
+        plan._declined = index
+        return plan._execute(index, False, True, batch_size)
     if not start.runs():
         var result = Optional[DataFrame]()
         swap(result, start.result)
@@ -3126,23 +3211,29 @@ struct _ProbeStart(Movable):
     var result: Optional[DataFrame]
     var piped: List[_PipedProbe]
     var batch: List[_BatchStream]
+    # The plan the node declined on, when the probe was set up again on
+    # one whose input is a frame (`_probe_restart`).
+    var declined: List[QueryContext]
 
     def __init__(out self, var result: Optional[DataFrame]):
         self.result = result^
         self.piped = List[_PipedProbe]()
         self.batch = List[_BatchStream]()
+        self.declined = List[QueryContext]()
 
     def __init__(out self, var piped: _PipedProbe):
         self.result = None
         self.piped = List[_PipedProbe]()
         self.piped.append(piped^)
         self.batch = List[_BatchStream]()
+        self.declined = List[QueryContext]()
 
     def __init__(out self, var batch: _BatchStream):
         self.result = None
         self.piped = List[_PipedProbe]()
         self.batch = List[_BatchStream]()
         self.batch.append(batch^)
+        self.declined = List[QueryContext]()
 
     def runs(self) -> Bool:
         """Whether a probe is set up to run, rather than a result made."""
@@ -3190,17 +3281,41 @@ def _probe_restart(
     frame (a union's children, the aggregate below it): the same head, its
     sides and filters already decided, the same join whose build side its
     rows are (`build`), and this pipeline of the same schedule, not a new
-    stream with a schedule of its own. A declined stream runs the node on
-    `plan`."""
+    stream with a schedule of its own. A declined stream hands `plan`
+    back, where the node then runs (`_StreamProbe._decline`)."""
     # The plan's estimates for it changed with its inputs: they are
     # taken from `plan`.
     head.probe_estimates = Dict[Int, Int]()
     head.build_filtered = Dict[Int, Bool]()
     var started = _probe_start(plan, index, batch_size, sink, head^, build)
-    if len(started.piped) > 0 or started.result:
+    if started.runs() or started.result:
         return started^
-    plan._declined = index
-    return _ProbeStart(plan._execute(index, False, True, batch_size))
+    var declined = _ProbeStart(None)
+    declined.declined.append(plan^)
+    return declined^
+
+
+def _rows_below(head: _StreamHead) -> _StreamHead:
+    """A head that makes the rows of `head`'s steps and joins as they
+    are, with no terminal above them: what a stream whose node declined
+    makes instead."""
+    return _StreamHead(
+        head.cursor,
+        List[Expr](),
+        List[String](),
+        False,
+        0,
+        -1,
+        False,
+        -1,
+        -1,
+        False,
+        List[String](),
+        List[Bool](),
+        List[Bool](),
+        head.probe_estimates.copy(),
+        head.build_filtered.copy(),
+    )
 
 
 def _stream_after_materialization(
