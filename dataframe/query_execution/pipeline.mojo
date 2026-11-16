@@ -94,6 +94,7 @@ from dataframe.joins.join_filter import (
 from dataframe.parallel import (
     Job,
     configured_workers,
+    run_rounds,
 )
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
@@ -980,7 +981,16 @@ struct _StreamProbe(Movable):
         if len(started.piped) > 0:
             ref piped = started.piped[0]
             self.finish.append(finish_pipeline(piped.run))
-            self.round = self.finish[0].next_round()
+            if Pointer[QueryContext, MutAnyOrigin](
+                unsafe_from_address=self.plan
+            )[]._report:
+                # An execution report's schedule runs on one thread: the
+                # finish's rounds run here, each as jobs, as its execute
+                # task runs the workers.
+                run_rounds(self.finish[0])
+                self.round = 0
+            else:
+                self.round = self.finish[0].next_round()
         elif len(started.batch) > 0:
             self.round = started.batch[0].advance()
         else:
