@@ -119,7 +119,6 @@ from .expr import (
     horizontal_inputs,
 )
 from dataframe.kernels.horizontal import horizontal
-from dataframe.window_mapping import assemble_window_mapping
 from dataframe.text.kernels import string_op, concat_strings
 from dataframe.text.functions import text_function
 from dataframe.kernels.binary import integer_is_in
@@ -3486,21 +3485,7 @@ def _over_constant[
     var cache = Pointer[WindowLayouts, MutAnyOrigin](
         unsafe_from_address=cache_address
     )
-    var at = -1
-    for k in range(len(cache[].id_keys)):
-        if cache[].id_keys[k] == node.text2:
-            at = k
-    if at < 0:
-        var keys = _partition_keys(node, columns, cache_address)
-        var made: GroupRows
-        if len(keys) == 0:
-            made = consecutive_group_rows([0, height], height)
-        else:
-            made = partition_groups(keys, height)
-        cache[].id_keys.append(node.text2)
-        cache[].groups.append(ArcPointer(made^))
-        cache[].ids.append(List[Int]())
-        at = len(cache[].id_keys) - 1
+    var at = _partition_rows(node, columns, height, cache_address)
     var groups = cache[].groups[at]
     var values = evaluate[width](
         local,
@@ -3785,7 +3770,31 @@ def _row_local_nodes(expr: Expr) -> List[Bool]:
     return local^
 
 
-def _over_mapped[
+def _partition_rows(
+    node: Node, columns: List[Series], height: Int, cache_address: Int
+) raises -> Int:
+    """The index in the cache at `cache_address` of the rows of each of
+    `node`'s partitions (by its partition keys alone), found on first use
+    by hashing the keys."""
+    var cache = Pointer[WindowLayouts, MutAnyOrigin](
+        unsafe_from_address=cache_address
+    )
+    for k in range(len(cache[].id_keys)):
+        if cache[].id_keys[k] == node.text2:
+            return k
+    var keys = _partition_keys(node, columns, cache_address)
+    var made: GroupRows
+    if len(keys) == 0:
+        made = consecutive_group_rows([0, height], height)
+    else:
+        made = partition_groups(keys, height)
+    cache[].id_keys.append(node.text2)
+    cache[].groups.append(ArcPointer(made^))
+    cache[].ids.append(List[Int]())
+    return len(cache[].id_keys) - 1
+
+
+def _over_mapping[
     width: Int
 ](
     bound: BoundExpr,
@@ -3793,57 +3802,137 @@ def _over_mapped[
     index: Int,
     height: Int,
     batch_size: Int,
-    layout: WindowLayout,
+    cache_address: Int,
 ) raises -> Series:
-    """over() with the join or explode mapping: each partition's result in
-    the order partitions first appear in the input."""
+    """over() with the join or explode mapping.
+
+    The expression is evaluated once per partition as a grouped aggregate:
+    one that already gives a value per group is used as is, and a
+    row-shaped one collects each partition's values into a list, in the
+    partition's order. Join then gives every row its partition's value (a
+    list, for a row-shaped expression); explode concatenates the
+    partitions' values in the order the partitions first appear in the
+    input. Each partition's rows come from hashing its keys; with order
+    keys, from the window layout, which also orders them, and the columns
+    the expression reads are gathered into that order once."""
     ref node = bound.expr._nodes[index]
     var inner = bind(subtree(bound.expr, node.left), columns)
-    var gathered = columns.copy() if layout.in_place else take_parallel(
-        columns, layout.order.copy(), configured_workers()
+    var root = len(inner.expr._nodes) - 1
+    var join = (node.integer & OVER_JOIN) != 0
+    var rows_shaped = inner.shape() == ROWS
+    var expr = inner.expr.implode() if rows_shaped else inner.expr.copy()
+    var cache = Pointer[WindowLayouts, MutAnyOrigin](
+        unsafe_from_address=cache_address
     )
-    # Partitions by their first input row.
-    var first = List[Int](length=height, fill=-1)
-    for p in range(layout.count):
-        var lowest = height
-        for k in range(layout.starts[p], layout.starts[p + 1]):
-            lowest = min(lowest, layout.order[k])
-        first[lowest] = p
-    var appearance = List[Int](length=layout.count, fill=0)
-    var sequence = List[Int](capacity=layout.count)
-    for row in range(height):
-        if first[row] >= 0:
-            appearance[first[row]] = len(sequence)
-            sequence.append(first[row])
-    var parts = List[Series](capacity=layout.count)
-    for p in sequence:
-        var lo = layout.starts[p]
-        var rows = layout.starts[p + 1] - lo
-        var input = List[Series](capacity=len(gathered))
-        for column in gathered:
-            input.append(column.slice(lo, rows))
-        var local = bind(subtree(bound.expr, node.left), input)
-        var value = evaluate[width](local, input, rows, batch_size=batch_size)
-        if value.dtype() != bound.dtypes[node.left]:
-            value = value.cast(bound.dtypes[node.left])
-        parts.append(value^)
-    var row_partitions = layout.row_partitions()
-    var ids = List[Int](capacity=height)
-    for row in range(height):
-        ids.append(appearance[row_partitions[row]])
-    var prototype = parts[0].slice(0, 0) if len(parts) > 0 else _empty_output(
-        inner, columns, len(inner.expr._nodes) - 1
+    var input: List[Series]
+    var groups: ArcPointer[GroupRows]
+    # Each partition's first input row: the partition order for explode.
+    var firsts: List[Int]
+    var layout_at = -1
+    var part_at = -1
+    if height == 0:
+        input = columns.copy()
+        groups = ArcPointer(GroupRows())
+        firsts = List[Int]()
+    elif node.min_count == 0:
+        # Hash partitions hold their rows ascending: the first is the
+        # partition's first input row.
+        input = columns.copy()
+        part_at = _partition_rows(node, columns, height, cache_address)
+        groups = cache[].groups[part_at]
+        var count = groups[].count()
+        firsts = List[Int](capacity=count)
+        if groups[].wide:
+            for g in range(count):
+                firsts.append(Int(groups[].wide_rows[groups[].offset(g)]))
+        else:
+            for g in range(count):
+                firsts.append(Int(groups[].rows[groups[].offset(g)]))
+    else:
+        layout_at = _layout_index(node, columns, height, cache_address)
+        ref layout = cache[].layouts[layout_at]
+        var used = _used_columns(expr, columns)
+        input = List[Series]()
+        for c in range(len(columns)):
+            if used[c]:
+                input.append(columns[c].copy())
+        if not layout.in_place:
+            input = take_parallel(
+                input, layout.order.copy(), configured_workers()
+            )
+        groups = ArcPointer(
+            consecutive_group_rows(layout.starts.copy(), height)
+        )
+        firsts = List[Int](capacity=layout.count)
+        for p in range(layout.count):
+            var lowest = height
+            for k in range(layout.starts[p], layout.starts[p + 1]):
+                lowest = min(lowest, layout.order[k])
+            firsts.append(lowest)
+    var count = groups[].count()
+    var dtype = bound.dtypes[node.left]
+    var values: Series
+    if count == 0:
+        # No partitions: an empty result that keeps the expression's field
+        # metadata, which nothing evaluated can carry.
+        values = _empty_output(inner, columns, root)
+        if values.dtype() != dtype:
+            values = values.cast(dtype)
+        if rows_shaped and join:
+            values = Series("", ListColumn([Int64(0)], values.renamed("item")))
+        return values.renamed(bound.expr._name)
+    # A nested over() with the same partition keys reads these partitions.
+    var known = WindowLayouts()
+    known.id_keys.append(node.text2)
+    known.groups.append(groups)
+    known.ids.append(List[Int]())
+    values = evaluate[width](
+        bind(expr, input),
+        input,
+        height,
+        batch_size=batch_size,
+        grouped=True,
+        group_count=count,
+        layouts=Int(Pointer(to=known)),
+        group_rows=groups,
     )
-    if prototype.dtype() != bound.dtypes[node.left]:
-        prototype = prototype.cast(bound.dtypes[node.left])
-    prototype._name = bound.expr._name
-    return assemble_window_mapping(
-        parts,
-        ids,
-        "join" if (node.integer & OVER_JOIN) != 0 else "explode",
-        inner.shape() != ROWS,
-        prototype,
-    )
+    _ = known^
+    if len(values) == 1 and count > 1:
+        # A scalar expression: the same value for every partition.
+        values = values._broadcast(count)
+    var result: Series
+    if join:
+        # Each row's partition.
+        var rows: List[Int]
+        if layout_at >= 0:
+            rows = cache[].layouts[layout_at].row_partitions()
+        else:
+            if len(cache[].ids[part_at]) != height:
+                cache[].ids[part_at] = group_ids(
+                    groups[], height, worker_count(height)
+                )
+            rows = cache[].ids[part_at].copy()
+        result = take_parallel([values^], rows^, configured_workers())[0].copy()
+        if not rows_shaped and result.dtype() != dtype:
+            result = result.cast(dtype)
+    else:
+        # Partitions in order of their first input row.
+        var by_row = List[Int](length=height, fill=-1)
+        for g in range(count):
+            by_row[firsts[g]] = g
+        var order = List[Int](capacity=count)
+        for row in range(height):
+            if by_row[row] >= 0:
+                order.append(by_row[row])
+        result = values.take(order)
+        if rows_shaped:
+            var lists = result.list_column()
+            var lo = lists._start(0)
+            result = lists.child().slice(lo, lists._end(len(lists) - 1) - lo)
+        if result.dtype() != dtype:
+            result = result.cast(dtype)
+    result._name = bound.expr._name
+    return result^
 
 
 def _over[
@@ -3862,8 +3951,15 @@ def _over[
     scatter results back to original row positions."""
     ref node = bound.expr._nodes[index]
     var inner = bind(subtree(bound.expr, node.left), columns)
-    var mapped = (node.integer & OVER_MAPPING_MASK) != 0
-    if inner.shape() == SCALAR and not mapped:
+    var owned = WindowLayouts()
+    var cache_address = layouts if layouts != 0 else Int(Pointer(to=owned))
+    if (node.integer & OVER_MAPPING_MASK) != 0:
+        var mapped = _over_mapping[width](
+            bound, columns, index, height, batch_size, cache_address
+        )
+        _ = owned^
+        return mapped^
+    if inner.shape() == SCALAR:
         var scalar = evaluate[width](
             inner, columns, height, batch_size=batch_size
         )
@@ -3871,37 +3967,31 @@ def _over[
     # Evaluate argument expressions in input order before partitioning so
     # checked-expression faults are observed before window execution.
     var inputs = columns.copy()
-    var argument_expr = inner.expr.copy()
-    if not mapped:
-        var nodes = List[Node]()
-        _ = _project_arguments[width](
-            inner,
-            len(inner.expr._nodes) - 1,
-            _row_local_nodes(inner.expr),
-            columns,
-            inputs,
-            nodes,
-            height,
-            batch_size,
-        )
-        argument_expr = Expr(nodes^, inner.expr._name)
-    var owned = WindowLayouts()
-    var cache_address = layouts if layouts != 0 else Int(Pointer(to=owned))
-    if not mapped:
-        ref root = argument_expr._nodes[len(argument_expr._nodes) - 1]
-        if (
-            root.op == RANK
-            and node.min_count == 0
-            and argument_expr._nodes[root.left].op == COL
-        ):
-            var ranked = _over_rank(
-                node, argument_expr, inputs, columns, height, cache_address
-            )
-            _ = owned^
-            return ranked^
+    var nodes = List[Node]()
+    _ = _project_arguments[width](
+        inner,
+        len(inner.expr._nodes) - 1,
+        _row_local_nodes(inner.expr),
+        columns,
+        inputs,
+        nodes,
+        height,
+        batch_size,
+    )
+    var argument_expr = Expr(nodes^, inner.expr._name)
+    ref root = argument_expr._nodes[len(argument_expr._nodes) - 1]
     if (
-        not mapped
+        root.op == RANK
         and node.min_count == 0
+        and argument_expr._nodes[root.left].op == COL
+    ):
+        var ranked = _over_rank(
+            node, argument_expr, inputs, columns, height, cache_address
+        )
+        _ = owned^
+        return ranked^
+    if (
+        node.min_count == 0
         and inner.shape() != ROWS
         and not _has_windows(argument_expr)
     ):
@@ -3921,12 +4011,6 @@ def _over[
         unsafe_from_address=cache_address
     )
     ref layout = cache[].layouts[at]
-    if mapped:
-        var result = _over_mapped[width](
-            bound, columns, index, height, batch_size, layout
-        )
-        _ = owned^
-        return result^
     var lanes = configured_workers()
     var used = _used_columns(argument_expr, inputs)
     var reads = List[Series]()

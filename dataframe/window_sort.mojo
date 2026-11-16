@@ -72,15 +72,6 @@ struct WindowLayout(Movable):
                 rp[unsafe_offset=op[unsafe_offset=k]] = p
         return rows^
 
-    def partition_ids(self) -> List[Int]:
-        """Each sorted position's partition index."""
-        var ids = List[Int](unsafe_uninit_length=len(self.order))
-        var p = ids.unsafe_ptr()
-        for g in range(self.count):
-            for k in range(self.starts[g], self.starts[g + 1]):
-                p[k] = g
-        return ids^
-
 
 @always_inline
 def _row_at(rows: Int, k: Int) -> Int:
