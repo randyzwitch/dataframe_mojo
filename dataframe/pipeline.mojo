@@ -183,7 +183,12 @@ from dataframe.storage.string import StringColumn
 from .trace import trace_path
 from .selectors import expand
 from .expr import LIT_BOOL, conjuncts
-from dataframe.aggregation.expressions import _bind_all, _row_local
+from dataframe.aggregation.expressions import (
+    _bind_all,
+    _row_local,
+    aggregate_filter,
+    without_filters,
+)
 from dataframe.vector.data_chunk import (
     ColumnArena,
     DataChunk,
@@ -343,10 +348,15 @@ def _extract_aggregate_inputs(
             # its condition, which every row evaluates. Its value stays in
             # the reduction: the sink computes it at the rows the condition
             # keeps, so no other row is evaluated or can raise.
+            # An aggregate filter projects its values and its predicate;
+            # the reduction keeps the filter over those columns.
             var targets = List[Int]()
             for child in node_children(nodes[i]):
                 if nodes[child].op == WHEN and nodes[child].extra < 0:
                     targets.append(nodes[child].left)
+                elif aggregate_filter(e, child):
+                    for part in node_children(nodes[child]):
+                        targets.append(part)
                 else:
                     targets.append(child)
             for child in targets:
@@ -3581,7 +3591,11 @@ def pipeline_types(
             var empty_keys = List[Series](capacity=len(keys))
             for name in keys:
                 empty_keys.append(empty.column(name))
-            var reduction = _StreamReduction(empty, expressions, keys)
+            # An aggregate filter drops rows, not types: the states are
+            # the unfiltered reductions'.
+            var reduction = _StreamReduction(
+                empty, without_filters(expressions), keys
+            )
             layout.append(
                 aggregate_layout(
                     empty_keys,
