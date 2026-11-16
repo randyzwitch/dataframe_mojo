@@ -21,6 +21,7 @@ from dataframe.aggregation.hash_table import (
     aggregate_layout,
     layout_widths,
 )
+from dataframe.aggregation.expressions import aggregate_filter, filter_value
 from dataframe.dtype import DataType
 from dataframe.expr import COL, CORR, COV, Expr, LEN, is_reduction, subtree
 from dataframe.frame import DataFrame
@@ -79,9 +80,17 @@ struct TableSinkLayout(Copyable, Movable):
     # `as_vectors`, as the chunk's vector.
     var as_columns: List[Bool]
     var as_vectors: List[Bool]
+    # Per reduction with an aggregate filter (`aggregate_filter`), its
+    # predicate as a column of the input (-1 when compiled) or a compiled
+    # expression; -1 and None for every other reduction, and both empty
+    # when no reduction has one.
+    var filter_columns: List[Int]
+    var filters: List[Optional[VectorExpression]]
 
     def __init__(out self, *, copy: Self):
         self.layout = copy.layout.copy()
+        self.filter_columns = copy.filter_columns.copy()
+        self.filters = copy.filters.copy()
         self.keys = copy.keys.copy()
         self.key_types = copy.key_types.copy()
         self.key_physical = copy.key_physical.copy()
@@ -115,16 +124,23 @@ struct TableSinkLayout(Copyable, Movable):
             self.key_physical.append(storage_physical(empty._columns[at]))
         # In `table_inputs`' order: each reduction's input, then the
         # second input of each correlation or covariance.
+        # An aggregate filter's input is the values it filters, its
+        # predicate the reduction's filter.
         var given = List[Optional[Expr]]()
         var seconds = List[Optional[Expr]]()
+        var predicates = List[Optional[Expr]]()
         for expression in expressions:
             for node in expression._nodes:
                 if not is_reduction(node.op):
                     continue
+                var predicate = aggregate_filter(expression, node.left)
                 if node.left < 0:
                     given.append(None)
                 else:
-                    given.append(subtree(expression, node.left))
+                    given.append(
+                        subtree(expression, filter_value(expression, node.left))
+                    )
+                predicates.append(predicate^)
                 if node.op == CORR or node.op == COV:
                     seconds.append(subtree(expression, node.right))
         for second in seconds:
@@ -159,6 +175,34 @@ struct TableSinkLayout(Copyable, Movable):
             self.expressions.append(VectorExpression(value, empty._columns))
         self.as_columns = _as_columns(layout, len(given))
         self.as_vectors = _as_vectors(layout, len(given))
+        var filter_columns = List[Int]()
+        var filters = List[Optional[VectorExpression]]()
+        var filtered = List[Bool](length=len(predicates), fill=False)
+        var any = False
+        for r in range(len(predicates)):
+            if predicates[r]:
+                filtered[r] = True
+                any = True
+        if any:
+            for r in range(len(predicates)):
+                filter_columns.append(-1)
+                filters.append(None)
+                if not predicates[r]:
+                    continue
+                ref predicate = predicates[r].value()
+                if (
+                    len(predicate._nodes) == 1
+                    and predicate._nodes[0].op == COL
+                    and predicate._nodes[0].text in empty.columns()
+                ):
+                    filter_columns[r] = empty._index(predicate._nodes[0].text)
+                else:
+                    filters[r] = VectorExpression(predicate, empty._columns)
+            var marked = layout.copy()
+            marked.filtered = filtered^
+            self.layout = marked^
+        self.filter_columns = filter_columns^
+        self.filters = filters^
 
     def __init__(
         out self,
@@ -193,6 +237,8 @@ struct TableSinkLayout(Copyable, Movable):
             self.reads.append(reads)
         self.as_columns = _as_columns(layout, len(inputs))
         self.as_vectors = _as_vectors(layout, len(inputs))
+        self.filter_columns = List[Int]()
+        self.filters = List[Optional[VectorExpression]]()
 
 
 def _as_columns(layout: AggregateLayout, inputs: Int) -> List[Bool]:
@@ -253,6 +299,12 @@ struct TableSinkInputs(Movable):
     # The arena columns this morsel's key and input vectors read that the
     # table holds already (`hold` names each once a morsel).
     var held: List[Int]
+    # The aggregate filters (`TableSinkLayout.filters`), and per reduction
+    # its filter's Boolean vector over the last chunk's rows (`read_inputs`),
+    # the table's `filters`; empty when no reduction has one.
+    var filter_columns: List[Int]
+    var filters: List[Optional[VectorExpression]]
+    var filter_vectors: List[UnifiedVectorFormat]
 
     def __init__(out self, shared: TableSinkLayout):
         self.keys = shared.keys.copy()
@@ -268,7 +320,11 @@ struct TableSinkInputs(Movable):
         self.read = List[Series](capacity=len(self.columns))
         for _ in range(len(self.columns)):
             self.read.append(Series("", Column[Int64](List[Int64]())))
-        self.output = DataChunk(len(shared.expressions))
+        self.filter_columns = shared.filter_columns.copy()
+        self.filters = shared.filters.copy()
+        self.filter_vectors = List[UnifiedVectorFormat]()
+        # The compiled filters write after the inputs.
+        self.output = DataChunk(len(shared.expressions) + len(shared.filters))
         self.maps = List[List[UInt32]](capacity=len(self.keys))
         self.codes = List[List[UInt32]](capacity=len(self.keys))
         for k in range(len(self.keys)):
@@ -425,11 +481,30 @@ struct TableSinkInputs(Movable):
                 inputs.append(self.output.unified(i, arena))
             else:
                 inputs.append(UnifiedVectorFormat())
+        # Each aggregate filter's predicate over the chunk's rows: every row
+        # is evaluated, as every row's input is.
+        self.filter_vectors.clear()
+        for r in range(len(self.filters)):
+            if self.filter_columns[r] >= 0:
+                self.filter_vectors.append(
+                    chunk.unified(self.filter_columns[r], arena)
+                )
+            elif self.filters[r]:
+                if not computed:
+                    self.output.reset()
+                    self.output.count = chunk.count
+                    computed = True
+                var at = len(self.columns) + r
+                self.filters[r].value().write(chunk, arena, self.output, at)
+                self.filter_vectors.append(self.output.unified(at, arena))
+            else:
+                self.filter_vectors.append(UnifiedVectorFormat())
         return inputs^
 
     def release(mut self):
         """Only sinking reads the expressions."""
         self.expressions = List[Optional[VectorExpression]]()
+        self.filters = List[Optional[VectorExpression]]()
         self.output = DataChunk()
 
 
@@ -509,7 +584,13 @@ def sink_frame(
         var key_vectors = reader.read_keys(chunk, arena, hold)
         var input_vectors = reader.read_inputs(chunk, arena, hold)
         table.sink_vectors(
-            key_vectors, input_vectors, hold, first + lo, n, reader.read
+            key_vectors,
+            input_vectors,
+            hold,
+            first + lo,
+            n,
+            reader.read,
+            reader.filter_vectors,
         )
     _ = chunk^
     _ = arena^
@@ -672,7 +753,13 @@ struct TableSink(Sink):
         var keys = self.inputs.read_keys(chunk, arena, hold)
         var inputs = self.inputs.read_inputs(chunk, arena, hold)
         self.table.sink_vectors(
-            keys, inputs, hold, self.sequence, n, self.inputs.read
+            keys,
+            inputs,
+            hold,
+            self.sequence,
+            n,
+            self.inputs.read,
+            self.inputs.filter_vectors,
         )
         self.sequence += n
 

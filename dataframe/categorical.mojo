@@ -15,6 +15,7 @@ Joining or concatenating columns with different dictionaries first moves
 them onto the union of both (`unify`), in which the first dictionary's codes
 are unchanged.
 """
+from dataframe.storage.allocation import huge_capacity
 from dataframe.storage.buffer import _Buffer
 from std.collections import Dict
 from std.memory import ArcPointer
@@ -95,7 +96,7 @@ def decode(values: Series) raises -> Series:
         else:
             table.append(_external_view(text, 0, UInt32(start)))
     var n = len(column)
-    var views = List[StringView](capacity=n)
+    var views = huge_capacity[StringView](n)
     var data = column._ptr()
     var nulls = column.null_count() > 0
     for i in range(n):

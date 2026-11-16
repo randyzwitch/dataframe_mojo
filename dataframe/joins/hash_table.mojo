@@ -60,7 +60,7 @@ from dataframe.parallel import (
     worker_count,
 )
 from dataframe.series import Series
-from dataframe.storage.allocation import huge_uninit
+from dataframe.storage.allocation import huge_uninit, release_huge
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.buffer import _Buffer
 from dataframe.storage.column import Column, _validity_at
@@ -563,6 +563,11 @@ struct _TableData(Movable):
         self.null_row = List[UInt8](length=layout.row_width(), fill=0)
         self.heaps = TupleDataHeaps()
         self.pending = List[_FinalizeJob]()
+
+    def __deinit__(deinit self):
+        # The pointer table is the table's largest scratch: keep its pages
+        # for the next build rather than faulting fresh ones in.
+        release_huge(self.entries^)
 
 
 def _integer_physical(physical: Int) -> Bool:
