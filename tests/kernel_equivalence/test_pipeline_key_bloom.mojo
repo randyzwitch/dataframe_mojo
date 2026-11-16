@@ -267,3 +267,65 @@ def test_a_perfect_hash_build_hands_the_probe_its_key_bitmap() raises:
                 assert_equal(Int(got_keys.get(r).int64()), key)
                 assert_equal(Int(got_payload.get(r).int64()), key // 50)
             _ = workers^
+
+
+def test_a_source_filter_runs_among_the_join_filters() raises:
+    # The probe's own filter runs in the scan beside the join's key bitmap,
+    # cheapest first: whichever runs first, the rows kept are those both
+    # keep. A filter keeping few rows (a null test, before the bitmap), one
+    # keeping most, and one that can raise (arithmetic, after the bitmap)
+    # each give the scalar model's rows.
+    for threads in [1, 8]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
+        var probe_ids = List[Int64]()
+        var probe_keys = List[Int64]()
+        var marks = List[Int64]()
+        var marked = List[Bool]()
+        for row in range(ROWS):
+            probe_ids.append(Int64(row))
+            probe_keys.append(Int64(perfect_probe_key(row)))
+            marks.append(Int64(row % 11))
+            marked.append(row % 23 != 0)
+        var source = DataFrame(
+            [
+                Series("id", Column[Int64](probe_ids^)),
+                Series("k", Column[Int64](probe_keys^)),
+                Series("m", Column[Int64](marks^, marked^)),
+            ]
+        )
+        var keys = List[Int64]()
+        var payload = List[Int64]()
+        for m in range(0, 20_000, 50):
+            keys.append(Int64(m))
+            payload.append(Int64(m // 50))
+        var dimension = DataFrame(
+            [
+                Series("d", Column[Int64](keys^)),
+                Series("d_v", Column[Int64](payload^)),
+            ]
+        )
+        for shape in range(3):
+            var filtered = source.lazy()
+            if shape == 0:
+                filtered = filtered.filter(col("m").is_null())
+            elif shape == 1:
+                filtered = filtered.filter(col("m") != 4)
+            else:
+                filtered = filtered.filter((col("id") + 1) % 3 != 0)
+            var expected = List[Int]()
+            for row in range(ROWS):
+                if perfect_probe_key(row) % 50 != 0:
+                    continue
+                var mark_valid = row % 23 != 0
+                if shape == 0 and mark_valid:
+                    continue
+                if shape == 1 and (not mark_valid or row % 11 == 4):
+                    continue
+                if shape == 2 and (row + 1) % 3 == 0:
+                    continue
+                expected.append(row)
+            var result = filtered.join(
+                dimension.lazy(), left_on=["k"], right_on=["d"]
+            ).collect()
+            assert_equal(ids(result), expected)
+        _ = workers^
