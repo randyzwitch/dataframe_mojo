@@ -1245,12 +1245,9 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         return self.take(self.argsort(descending, nulls_last))
 
     def unique(self, maintain_order: Bool = False) raises -> Self:
-        """Distinct values, null counted once."""
-        return (
-            self._frame()
-            .unique(keep="first", maintain_order=maintain_order)
-            .column(self._name)
-        )
+        """Distinct values, null counted once, in first-occurrence order
+        (which also satisfies maintain_order=False)."""
+        return self._frame()._first_rows().column(self._name)
 
     def value_counts(
         self, sort: Bool = True, name: String = "count"

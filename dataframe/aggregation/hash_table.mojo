@@ -132,9 +132,15 @@ from dataframe.expr import (
     COV,
     LEN,
 )
-from dataframe.storage.allocation import huge_list, huge_uninit
+from dataframe.storage.allocation import huge_list, huge_uninit, release_huge
 from dataframe.storage.nested import _leak, _reclaim
-from dataframe.parallel import Job, configured_workers, run_jobs
+from dataframe.parallel import (
+    Job,
+    Rounds,
+    configured_workers,
+    round_width,
+    run_rounds,
+)
 from dataframe.kernels.partition import (
     _NULL_KEY,
     _combine as _hash_combine,
@@ -272,6 +278,12 @@ struct _Partitioned(Movable):
         self.arenas = List[List[UInt8]]()
         self.arena_next = 0
         self.arena_end = 0
+
+    def __deinit__(deinit self):
+        # Nothing reads the rows once their table is gone: keep the
+        # arenas' pages for the next table rather than faulting fresh ones.
+        while len(self.arenas) > 0:
+            release_huge(self.arenas.pop())
 
     @no_inline
     def _new_block(mut self, p: Int):
@@ -633,6 +645,9 @@ struct AggregateLayout(Copyable, Movable):
     var input_types: List[DataType]
     var input_storage: List[Int]
     var vectors: List[Bool]
+    # Per reduction, whether an aggregate filter keeps some of its rows
+    # (`sink_vectors`' `filters`); empty when none does.
+    var filtered: List[Bool]
 
     def use_perfect_hash(mut self, keys: List[Series]) raises:
         """Use direct-address slots when the bounded domains are small enough
@@ -664,6 +679,7 @@ struct AggregateLayout(Copyable, Movable):
             PerfectHash.none(),
             List[DataType](),
             List[Int](),
+            List[Bool](),
             List[Bool](),
         )
 
@@ -787,6 +803,7 @@ def aggregate_layout(
         input_types^,
         input_storage^,
         vectors^,
+        List[Bool](),
     )
 
 
@@ -1458,6 +1475,18 @@ struct AggregateSink(Movable):
     var kernels: List[Bool]
     var skip_addresses: Bool
     var offsets: List[UInt64]
+    # Per reduction, whether an aggregate filter keeps some of its rows
+    # (`AggregateLayout.filtered`), and then the addresses its update reads:
+    # each kept row's group row, the `discard` row for every other. The
+    # reductions the shared update leaves alone (run kernels' and filtered
+    # ones), and per filtered reduction, every reduction but it. The
+    # chunk's filters, a Boolean vector per filtered reduction.
+    var filtered: List[Bool]
+    var any_filtered: Bool
+    var filter_rows: List[List[Int]]
+    var shared_skip: List[Bool]
+    var alone: List[List[Bool]]
+    var filters: List[UnifiedVectorFormat]
 
     def __init__(
         out self,
@@ -1527,15 +1556,38 @@ struct AggregateSink(Movable):
         self.clustered = ClusteredAggrState()
         self.kernels = List[Bool](capacity=len(layout.slots))
         self.offsets = List[UInt64]()
+        self.filtered = List[Bool](length=len(layout.slots), fill=False)
+        self.any_filtered = False
+        self.filter_rows = List[List[Int]](capacity=len(layout.slots))
+        self.alone = List[List[Bool]](capacity=len(layout.slots))
+        self.filters = List[UnifiedVectorFormat]()
+        for s in range(len(layout.slots)):
+            var filtered = s < len(layout.filtered) and layout.filtered[s]
+            self.filtered[s] = filtered
+            self.any_filtered = self.any_filtered or filtered
+            self.filter_rows.append(
+                List[Int](length=_BATCH, fill=0) if filtered else List[Int]()
+            )
+            var others = List[Bool]()
+            if filtered:
+                others = List[Bool](length=len(layout.slots), fill=True)
+                others[s] = False
+            self.alone.append(others^)
         var n_clustered = 0
         var n_kernels = 0
         for s in range(len(layout.slots)):
             var op = layout.templates[s].op
             var kind = layout.slots[s].kind
             n_clustered += Int(cluster_update(op, kind))
-            var kernel = cluster_kernel(op, kind)
+            # A run of a filtered reduction's rows may hold rows its filter
+            # drops: its update reads each row's own address.
+            var kernel = cluster_kernel(op, kind) and not self.filtered[s]
             n_kernels += Int(kernel)
             self.kernels.append(kernel)
+        self.shared_skip = List[Bool]()
+        if self.any_filtered:
+            for s in range(len(layout.slots)):
+                self.shared_skip.append(self.kernels[s] or self.filtered[s])
         self.skip_addresses = len(layout.slots) > 0 and n_kernels == len(
             layout.slots
         )
@@ -1558,6 +1610,11 @@ struct AggregateSink(Movable):
                     )
                 )
 
+    def __deinit__(deinit self):
+        # The entries are scratch over this worker's rows: keep their pages
+        # for the next table rather than faulting fresh ones in.
+        release_huge(self.entries^)
+
     @always_inline
     def _ensure_table(mut self):
         """The table's entries, made at the first probe."""
@@ -1575,6 +1632,7 @@ struct AggregateSink(Movable):
         if self.grow:
             while 3 * (self.live + count) >= 2 * self.capacity:
                 self.capacity *= 2
+            release_huge(self.entries^)
             self.entries = huge_list(self.capacity, UInt64(0))
             self._reinsert()
             return
@@ -1594,6 +1652,7 @@ struct AggregateSink(Movable):
             )
         if grown > 0:
             self.capacity = grown
+            release_huge(self.entries^)
             self.entries = huge_list(self.capacity, UInt64(0))
         else:
             if (
@@ -1645,6 +1704,7 @@ struct AggregateSink(Movable):
         first: Int,
         count: Int,
         columns: List[Series] = List[Series](),
+        filters: List[UnifiedVectorFormat] = List[UnifiedVectorFormat](),
     ) raises:
         """A data chunk's `count` rows (at most a batch) into the table: each
         row's group from the group chunk's vectors `keys`, then the payload
@@ -1662,11 +1722,20 @@ struct AggregateSink(Movable):
 
         When every reduction is a distinct count, only the distinct tables take
         the chunk: the main table's groups and counts all come from their
-        finished groups, so sinking into it too would be wasted."""
+        finished groups, so sinking into it too would be wasted.
+
+        A filtered reduction (`filtered`) reads its Boolean vector in
+        `filters` (one a reduction, in order): every row finds its group,
+        but only the rows whose filter is true and valid update that
+        reduction's state."""
         if len(keys) == 0:
             raise Error("aggregate table: no keys")
         if count > _BATCH:
             raise Error("aggregate table: a chunk is at most a batch")
+        if self.any_filtered:
+            if len(filters) != len(self.slots):
+                raise Error("aggregate table: a filtered reduction's filter")
+            self.filters = filters.copy()
         if len(self.distinct_slots) > 0 and len(self.distinct_slots) == len(
             self.slots
         ):
@@ -1807,8 +1876,9 @@ struct AggregateSink(Movable):
                 ),
                 Int(self.discard.unsafe_ptr()),
                 Int(self.scratch.unsafe_ptr()),
-                skip=self.kernels,
+                skip=self.shared_skip if self.any_filtered else self.kernels,
             )
+            self._update_filtered(inputs, first, count)
             if len(self.by_address) > 0:
                 self._update_by_address(inputs, columns, first, count)
         self.sunk += count
@@ -1836,7 +1906,10 @@ struct AggregateSink(Movable):
             Int(self.discard.unsafe_ptr()),
             Int(self.scratch.unsafe_ptr()),
             self.only,
+            skip=self.shared_skip,
         )
+        if self.only < 0:
+            self._update_filtered(inputs, first, count)
         if len(self.by_address) > 0 and self.only < 0:
             self._update_by_address(inputs, columns, first, count)
         self.sunk += count
@@ -1903,6 +1976,54 @@ struct AggregateSink(Movable):
                 row[unsafe_offset=2] = UInt64(first + k)
             groups[unsafe_offset=k] = at
 
+    def _update_filtered(
+        mut self, inputs: List[UnifiedVectorFormat], first: Int, count: Int
+    ) raises:
+        """Each filtered reduction's addresses for the chunk, then its
+        update: a row whose filter is true and valid reads its group's row
+        (in `groups`), any other the `discard` row, which nothing reads. So
+        a dropped row changes no group's state, and every group, kept rows
+        or none, has its row. States by address are updated after
+        (`_update_by_address`), from the same addresses."""
+        if not self.any_filtered:
+            return
+        var groups = self.groups.unsafe_ptr()
+        var discard = Int(self.discard.unsafe_ptr())
+        for s in range(len(self.slots)):
+            if not self.filtered[s]:
+                continue
+            ref filter = self.filters[s]
+            var flags = Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=filter.data
+            )
+            var nulls = not filter.validity.all_valid()
+            var rows = self.filter_rows[s].unsafe_ptr()
+            for k in range(count):
+                var i = filter.sel.get_index(k)
+                var keep = flags[unsafe_offset=i] != 0
+                if nulls:
+                    keep = keep and filter.validity.row_is_valid_unsafe(i)
+                rows[unsafe_offset=k] = groups[
+                    unsafe_offset=k
+                ] if keep else discard
+            if self.slots[s].by_address():
+                continue
+            _update_states(
+                self.slots,
+                inputs,
+                0,
+                count,
+                rows,
+                self.parts.states_at,
+                first,
+                Pointer[_ValueArena, MutAnyOrigin](
+                    unsafe_from_address=Int(Pointer(to=self.values))
+                ),
+                discard,
+                Int(self.scratch.unsafe_ptr()),
+                skip=self.alone[s],
+            )
+
     def _update_by_address(
         mut self,
         inputs: List[UnifiedVectorFormat],
@@ -1919,9 +2040,13 @@ struct AggregateSink(Movable):
         (`vectors`) takes its input's vector in `inputs` where it is; the
         others read their input as a column of the batch's rows in
         `columns`."""
-        var rows = self.groups.unsafe_ptr()
         var discard = Int(self.discard.unsafe_ptr())
         for s in self.by_address:
+            # A filtered reduction's rows the filter drops read `discard`.
+            var at = Int(self.groups.unsafe_ptr())
+            if self.filtered[s]:
+                at = Int(self.filter_rows[s].unsafe_ptr())
+            var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=at)
             ref slot = self.slots[s]
             var base = 8 * (self.parts.states_at + slot.offset)
             var ordered = slot.kind == _K_ORDERED
@@ -2861,7 +2986,7 @@ struct _FinishJob(Job):
                     head[best] = _next_first(
                         parts, p, block[best], row_in[best]
                     )
-            _ = entries^
+            release_huge(entries^)
         # Groups in no order skip the output order: a distinct table's
         # (keys, value) groups (`rows_only`), only counted into the main
         # table, and a group-by's without maintain_order.
@@ -2993,7 +3118,7 @@ def _scan_groups(
             )
         )
         w += _width(key_templates[c])
-    firsts_out = List[Int](unsafe_uninit_length=count)
+    firsts_out = huge_uninit[Int](count)
     var firsts = firsts_out.unsafe_ptr()
     for lo in range(0, count, _BATCH):
         var hi = min(count, lo + _BATCH)
@@ -3067,57 +3192,6 @@ struct _DistinctJob(Job):
                 self.nulls,
             )
         self.sinks.append(sink^)
-
-
-def _finalize_distinct(
-    mut sinks: List[AggregateSink], layout: AggregateLayout
-) raises:
-    """Finalize distinct counts: each reduction's tables (one per worker) merged
-    into their (keys, value) groups, whose rows are sunk into new sinks of the
-    main table, on their own threads: as many as there are runs, at most one per
-    worker, each taking every run its task scans. Those sinks join `sinks`, and
-    the main finish merges their counts into the groups. The long strings their
-    keys point at stay in the tables' held columns, which the new sinks hold
-    too."""
-    # The workers' sinks; the new sinks join the list after them.
-    var workers = len(sinks)
-    for d in range(len(layout.distinct)):
-        var slot = layout.distinct[d]
-        var tables = List[AggregateSink](capacity=workers)
-        for j in range(workers):
-            tables.append(sinks[j].distinct.take(d))
-        var table_layout = layout.distinct_layout(d)
-        var pairs = aggregate_finish(
-            tables, table_layout, rows_only=True, ordered=False
-        )
-        var widths = layout_widths(table_layout)
-        var nulls = layout.templates[slot].integer == 0
-        var runs = List[Int]()
-        for p in range(len(pairs.rows)):
-            if pairs.rows[p].count() > 0:
-                runs.append(Int(Pointer(to=pairs.rows[p])))
-        var tasks = min(len(runs), workers)
-        var jobs = List[_DistinctJob](capacity=tasks)
-        for t in range(tasks):
-            var share = List[Int]()
-            for r in range(t, len(runs), tasks):
-                share.append(runs[r])
-            jobs.append(
-                _DistinctJob(share, widths, slot, nulls, layout, workers)
-            )
-        run_jobs(jobs)
-        var held = List[Series]()
-        for j in range(len(tables)):
-            for column in tables[j].held:
-                held.append(column.copy())
-        for j in range(len(jobs)):
-            while len(jobs[j].sinks) > 0:
-                var sink = jobs[j].sinks.pop()
-                for column in held:
-                    sink.held.append(column.copy())
-                sinks.append(sink^)
-        _ = pairs^
-        _ = tables^
 
 
 struct _PerfectScanJob(Job):
@@ -3237,24 +3311,18 @@ struct _PerfectScanJob(Job):
         )
 
 
-def _perfect_finish(
+def _perfect_scans(
     mut sinks: List[AggregateSink],
     layout: AggregateLayout,
     filter: Optional[GroupFilter],
-) raises -> AggregateResult:
-    """The perfect hash table's finish: the group slots cut into ranges holding
-    about an equal share of what finishing reads (each occupied slot's rows and
-    the values of its quantile states, as `aggregate_finish` cuts partitions),
-    and each range combined and read out on its own thread, one chunk of the
-    result each, in slot order."""
-    var result = AggregateResult()
-    for j in range(len(sinks)):
-        sinks[j].prepare_ordered()
-    var columns = List[List[Series]](capacity=len(sinks))
-    for j in range(len(sinks)):
-        columns.append(sinks[j].held.copy())
-    var held = _HeldBuffers(columns)
-    _ = columns^
+    held: Int,
+) raises -> List[_PerfectScanJob]:
+    """The perfect hash table's finish jobs: the group slots cut into
+    ranges holding about an equal share of what finishing reads (each
+    occupied slot's rows and the values of its quantile states, as the
+    hashed table's partitions are cut), each range combined and read out
+    by its own job, one chunk of the result each, in slot order. `held`
+    is the address of the sinks' `_HeldBuffers`."""
     var stride = sinks[0].parts.stride
     var counted = List[Int]()
     for slot in layout.slots:
@@ -3286,80 +3354,32 @@ def _perfect_finish(
             if job > 0:
                 jobs.append(
                     _PerfectScanJob(
-                        Int(Pointer(to=sinks)),
-                        Int(Pointer(to=held)),
-                        lo,
-                        g + 1,
-                        layout,
-                        filter,
+                        Int(Pointer(to=sinks)), held, lo, g + 1, layout, filter
                     )
                 )
             lo = g + 1
             job = 0
-    run_jobs(jobs)
-    _ = held^
-    for p in range(len(jobs)):
-        var firsts = List[Int]()
-        var states = List[Reducer]()
-        var keys_out = List[Series]()
-        result.top_rows.extend(Span(jobs[p].top_rows))
-        result.merged += jobs[p].merged
-        swap(firsts, jobs[p].firsts)
-        swap(states, jobs[p].states)
-        swap(keys_out, jobs[p].keys)
-        result.firsts.append(firsts^)
-        result.states.append(states^)
-        result.keys.append(keys_out^)
-    return result^
+    return jobs^
 
 
-def aggregate_finish(
+def _finish_jobs(
     mut sinks: List[AggregateSink],
     layout: AggregateLayout,
-    filter: Optional[GroupFilter] = None,
-    rows_only: Bool = False,
-    *,
+    filter: Optional[GroupFilter],
+    rows_only: Bool,
     ordered: Bool,
-) raises -> AggregateResult:
-    """Phase 2 over every worker's sink: runs of consecutive partitions
-    holding about half a 256 KiB block of rows each. This bounds each
-    working set so its table and rows can stay in cache while runs merge
-    on separate threads. With `filter`, only the groups it keeps come
-    out (`GroupFilter`); the result's `merged` counts them all. With
-    `ordered`, each partition's groups come out in first-row order (by
-    partition at the most bits the sinks could reach, then first row),
-    which `table_frame` merges into first-occurrence order; otherwise in
-    no particular order."""
-    var result = AggregateResult()
-    if len(sinks) == 0:
-        return result^
-    if layout.perfect.used():
-        return _perfect_finish(sinks, layout, filter)
-    if len(layout.distinct) > 0:
-        _finalize_distinct(sinks, layout)
-    for j in range(len(sinks)):
-        sinks[j].prepare_ordered()
-    # Every sink's rows at the shared bits first, each on its own thread
-    # Repartition to the shared radix depth before merging.
+    held: Int,
+) raises -> List[_FinishJob]:
+    """The hashed table's finish jobs, once every sink's rows are at the
+    shared partition bits. Runs: consecutive partitions holding about
+    half a 256 KiB block of rows, each merged in its own cache-sized
+    table. Jobs: consecutive runs holding about an equal share of the
+    rows per worker, and at least a run's, each one chunk of the result,
+    so each thread finishes separate partitions (a chunk per run made
+    later steps pay their per-chunk cost hundreds of times). `held` is
+    the address of the sinks' `_HeldBuffers`."""
     var bits = Int(layout.radix[].bits.load())
-    var combines = List[_CombineJob]()
-    for j in range(len(sinks)):
-        if sinks[j].parts.bits < bits:
-            combines.append(_CombineJob(Int(Pointer(to=sinks)), j, bits))
-    if len(combines) > 0:
-        run_jobs(combines)
     var stride = sinks[0].parts.stride
-    var columns = List[List[Series]](capacity=len(sinks))
-    for j in range(len(sinks)):
-        columns.append(sinks[j].held.copy())
-    var held = _HeldBuffers(columns)
-    _ = columns^
-    # Runs: consecutive partitions holding about half a 256 KiB block of
-    # rows, each merged in its own cache-sized table. Jobs: consecutive
-    # runs holding about an equal share of the rows per worker, and at
-    # least a run's, each one chunk of the result, so each thread can finish a separate partition (a
-    # chunk per run made later steps pay their per-chunk cost hundreds of
-    # times).
     var per_run = max(1, _PARTITION_BYTES // (8 * stride))
     var parts = 1 << bits
     var rows = List[Int](length=parts, fill=0)
@@ -3377,11 +3397,11 @@ def aggregate_finish(
     for p in range(parts):
         for j in range(len(sinks)):
             for b in range(len(sinks[j].parts.blocks[p])):
-                var held = sinks[j].parts.rows_in(p, b)
-                rows[p] += held
+                var block_rows = sinks[j].parts.rows_in(p, b)
+                rows[p] += block_rows
                 if len(counted) > 0:
                     var at = sinks[j].parts.blocks[p][b]
-                    for _ in range(held):
+                    for _ in range(block_rows):
                         for w in counted:
                             weight[p] += 8 * Int(_words_at(at)[unsafe_offset=w])
                         at += 8 * stride
@@ -3414,7 +3434,7 @@ def aggregate_finish(
                 finishes.append(
                     _FinishJob(
                         Int(Pointer(to=sinks)),
-                        Int(Pointer(to=held)),
+                        held,
                         lo,
                         p + 1,
                         job_rows,
@@ -3435,22 +3455,347 @@ def aggregate_finish(
             lo = p + 1
             job = 0
             job_rows = 0
-    run_jobs(finishes)
-    _ = held^
-    for p in range(len(finishes)):
-        var firsts = List[Int]()
-        var states = List[Reducer]()
-        var keys_out = List[Series]()
-        while len(finishes[p].rows) > 0:
-            result.rows.append(finishes[p].rows.pop())
-        result.top_rows.extend(Span(finishes[p].top_rows))
-        result.merged += finishes[p].merged
-        swap(firsts, finishes[p].firsts)
-        swap(states, finishes[p].states)
-        swap(keys_out, finishes[p].keys)
-        result.firsts.append(firsts^)
-        result.states.append(states^)
-        result.keys.append(keys_out^)
+    return finishes^
+
+
+struct _TableFinish(Movable):
+    """One table's phase 2 over every worker's sink, as rounds
+    (`next_round`, `round_task`). A hashed table: first every sink's rows
+    moved to the shared partition bits, a task per sink; then runs of
+    partitions merged and read out (`_finish_jobs`). A perfect hash
+    table: its slot ranges combined and read out in one round
+    (`_perfect_scans`). The sinks stay here, and their long key strings
+    with them, until the caller takes them back."""
+
+    var sinks: List[AggregateSink]
+    var layout: AggregateLayout
+    var filter: Optional[GroupFilter]
+    var rows_only: Bool
+    var ordered: Bool
+    # The round under way: 0 before the first, 1 the moves to the shared
+    # bits, 2 the read-outs, 3 once the result is made.
+    var stage: Int
+    var width: Int
+    var combines: List[_CombineJob]
+    var finishes: List[_FinishJob]
+    var scans: List[_PerfectScanJob]
+    # The sinks' held columns, which the read-outs read long strings
+    # from: one entry while they run.
+    var held: List[_HeldBuffers]
+    var result: AggregateResult
+
+    def __init__(
+        out self,
+        var sinks: List[AggregateSink],
+        layout: AggregateLayout,
+        filter: Optional[GroupFilter],
+        rows_only: Bool,
+        ordered: Bool,
+    ):
+        self.sinks = sinks^
+        self.layout = layout.copy()
+        self.filter = filter.copy()
+        self.rows_only = rows_only
+        self.ordered = ordered
+        self.stage = 0
+        self.width = 0
+        self.combines = List[_CombineJob]()
+        self.finishes = List[_FinishJob]()
+        self.scans = List[_PerfectScanJob]()
+        self.held = List[_HeldBuffers]()
+        self.result = AggregateResult()
+
+    def _hold(mut self):
+        var columns = List[List[Series]](capacity=len(self.sinks))
+        for j in range(len(self.sinks)):
+            columns.append(self.sinks[j].held.copy())
+        self.held.append(_HeldBuffers(columns))
+
+    def next_round(mut self) raises -> Int:
+        while True:
+            if self.stage == 0:
+                self.stage = 1
+                if len(self.sinks) == 0:
+                    self.stage = 3
+                    return 0
+                for j in range(len(self.sinks)):
+                    self.sinks[j].prepare_ordered()
+                if self.layout.perfect.used():
+                    self._hold()
+                    self.scans = _perfect_scans(
+                        self.sinks,
+                        self.layout,
+                        self.filter,
+                        Int(Pointer(to=self.held[0])),
+                    )
+                    self.stage = 2
+                    self.width = round_width(len(self.scans))
+                else:
+                    var bits = Int(self.layout.radix[].bits.load())
+                    var sinks = Int(Pointer(to=self.sinks))
+                    for j in range(len(self.sinks)):
+                        if self.sinks[j].parts.bits < bits:
+                            self.combines.append(_CombineJob(sinks, j, bits))
+                    self.width = round_width(len(self.combines))
+            elif self.stage == 1:
+                self.combines = List[_CombineJob]()
+                self._hold()
+                self.finishes = _finish_jobs(
+                    self.sinks,
+                    self.layout,
+                    self.filter,
+                    self.rows_only,
+                    self.ordered,
+                    Int(Pointer(to=self.held[0])),
+                )
+                self.stage = 2
+                self.width = round_width(len(self.finishes))
+            elif self.stage == 2:
+                self._collect()
+                self.stage = 3
+                return 0
+            else:
+                return 0
+            if self.width > 0:
+                return self.width
+
+    def round_task(mut self, task: Int) raises:
+        var j = task
+        if self.stage == 1:
+            while j < len(self.combines):
+                self.combines[j].run()
+                j += self.width
+        elif len(self.scans) > 0:
+            while j < len(self.scans):
+                self.scans[j].run()
+                j += self.width
+        else:
+            while j < len(self.finishes):
+                self.finishes[j].run()
+                j += self.width
+
+    def _collect(mut self):
+        """Each read-out's chunk of groups into the result, in order."""
+        self.held = List[_HeldBuffers]()
+        for p in range(len(self.scans)):
+            var firsts = List[Int]()
+            var states = List[Reducer]()
+            var keys_out = List[Series]()
+            self.result.top_rows.extend(Span(self.scans[p].top_rows))
+            self.result.merged += self.scans[p].merged
+            swap(firsts, self.scans[p].firsts)
+            swap(states, self.scans[p].states)
+            swap(keys_out, self.scans[p].keys)
+            self.result.firsts.append(firsts^)
+            self.result.states.append(states^)
+            self.result.keys.append(keys_out^)
+        for p in range(len(self.finishes)):
+            var firsts = List[Int]()
+            var states = List[Reducer]()
+            var keys_out = List[Series]()
+            while len(self.finishes[p].rows) > 0:
+                self.result.rows.append(self.finishes[p].rows.pop())
+            self.result.top_rows.extend(Span(self.finishes[p].top_rows))
+            self.result.merged += self.finishes[p].merged
+            swap(firsts, self.finishes[p].firsts)
+            swap(states, self.finishes[p].states)
+            swap(keys_out, self.finishes[p].keys)
+            self.result.firsts.append(firsts^)
+            self.result.states.append(states^)
+            self.result.keys.append(keys_out^)
+        self.scans = List[_PerfectScanJob]()
+        self.finishes = List[_FinishJob]()
+
+
+struct AggregateFinish(Movable, Rounds):
+    """Phase 2 over every worker's sink, as rounds of tasks (`next_round`,
+    `round_task`): what `aggregate_finish` returns, made by a schedule's
+    finish event or by `run_rounds`. Distinct counts come first, one
+    after another: each reduction's tables (one per worker) finished into
+    their merged (keys, value) groups, then those groups sunk into new
+    sinks of the main table, a task per share of the runs, each adding
+    one to its group's distinct count; the new sinks join `sinks`, and the
+    main table's finish merges their counts into the groups. The long
+    strings their keys point at stay in the tables' held columns, which
+    the new sinks hold too. Then the main table's finish (`_TableFinish`).
+    Once done, `result` is the result and `sinks` the sinks, whose heaps
+    hold the long key strings the result points at."""
+
+    var sinks: List[AggregateSink]
+    var layout: AggregateLayout
+    var filter: Optional[GroupFilter]
+    var rows_only: Bool
+    var ordered: Bool
+    var result: AggregateResult
+    # 0 before the first round, 1 while a table's finish runs, 2 while a
+    # distinct count's new sinks are made, 3 once done.
+    var stage: Int
+    # The distinct count whose rounds are under way; the number of
+    # distinct counts for the main table's.
+    var at: Int
+    # The workers' sinks, which hold the distinct tables.
+    var workers: Int
+    var table: List[_TableFinish]
+    # A distinct count's finished tables and their merged groups, while
+    # its new sinks are made.
+    var tables: List[AggregateSink]
+    var pairs: AggregateResult
+    var counts: List[_DistinctJob]
+
+    def __init__(
+        out self,
+        var sinks: List[AggregateSink],
+        layout: AggregateLayout,
+        filter: Optional[GroupFilter] = None,
+        rows_only: Bool = False,
+        *,
+        ordered: Bool,
+    ):
+        self.sinks = sinks^
+        self.layout = layout.copy()
+        self.filter = filter.copy()
+        self.rows_only = rows_only
+        self.ordered = ordered
+        self.result = AggregateResult()
+        self.stage = 0
+        self.at = 0
+        self.workers = 0
+        self.table = List[_TableFinish]()
+        self.tables = List[AggregateSink]()
+        self.pairs = AggregateResult()
+        self.counts = List[_DistinctJob]()
+
+    def _begin_table(mut self) raises:
+        """The finish of the next distinct count's tables, or of the main
+        table once none is left."""
+        self.stage = 1
+        if self.at < len(self.layout.distinct):
+            var tables = List[AggregateSink](capacity=self.workers)
+            for j in range(self.workers):
+                tables.append(self.sinks[j].distinct.take(self.at))
+            self.table.append(
+                _TableFinish(
+                    tables^,
+                    self.layout.distinct_layout(self.at),
+                    None,
+                    True,
+                    False,
+                )
+            )
+            return
+        var sinks = List[AggregateSink]()
+        swap(sinks, self.sinks)
+        self.table.append(
+            _TableFinish(
+                sinks^, self.layout, self.filter, self.rows_only, self.ordered
+            )
+        )
+
+    def _begin_counts(mut self) raises -> Int:
+        """The distinct count's merged groups as tasks, as many as there
+        are runs and at most one per worker, each sinking every run it
+        takes into a new sink."""
+        var slot = self.layout.distinct[self.at]
+        var table_layout = self.layout.distinct_layout(self.at)
+        var widths = layout_widths(table_layout)
+        var nulls = self.layout.templates[slot].integer == 0
+        var runs = List[Int]()
+        for p in range(len(self.pairs.rows)):
+            if self.pairs.rows[p].count() > 0:
+                runs.append(Int(Pointer(to=self.pairs.rows[p])))
+        var tasks = min(len(runs), round_width(self.workers))
+        for t in range(tasks):
+            var share = List[Int]()
+            for r in range(t, len(runs), tasks):
+                share.append(runs[r])
+            self.counts.append(
+                _DistinctJob(
+                    share, widths, slot, nulls, self.layout, self.workers
+                )
+            )
+        self.stage = 2
+        return tasks
+
+    def _end_counts(mut self):
+        """The new sinks join the main table's, holding the tables' long
+        strings."""
+        var held = List[Series]()
+        for j in range(len(self.tables)):
+            for column in self.tables[j].held:
+                held.append(column.copy())
+        for j in range(len(self.counts)):
+            while len(self.counts[j].sinks) > 0:
+                var sink = self.counts[j].sinks.pop()
+                for column in held:
+                    sink.held.append(column.copy())
+                self.sinks.append(sink^)
+        self.counts = List[_DistinctJob]()
+        self.pairs = AggregateResult()
+        self.tables = List[AggregateSink]()
+        self.at += 1
+
+    def next_round(mut self) raises -> Int:
+        while True:
+            if self.stage == 0:
+                self.workers = len(self.sinks)
+                if len(self.sinks) == 0 or self.layout.perfect.used():
+                    self.at = len(self.layout.distinct)
+                self._begin_table()
+            elif self.stage == 2:
+                self._end_counts()
+                self._begin_table()
+            elif self.stage == 1:
+                var tasks = self.table[0].next_round()
+                if tasks > 0:
+                    return tasks
+                var done = self.table.pop()
+                if self.at == len(self.layout.distinct):
+                    swap(self.sinks, done.sinks)
+                    swap(self.result, done.result)
+                    self.stage = 3
+                    return 0
+                swap(self.tables, done.sinks)
+                swap(self.pairs, done.result)
+                var counts = self._begin_counts()
+                if counts > 0:
+                    return counts
+            else:
+                return 0
+
+    def round_task(mut self, task: Int) raises:
+        if self.stage == 2:
+            self.counts[task].run()
+        else:
+            self.table[0].round_task(task)
+
+
+def aggregate_finish(
+    mut sinks: List[AggregateSink],
+    layout: AggregateLayout,
+    filter: Optional[GroupFilter] = None,
+    rows_only: Bool = False,
+    *,
+    ordered: Bool,
+) raises -> AggregateResult:
+    """Phase 2 over every worker's sink, its rounds run here
+    (`AggregateFinish`): runs of consecutive partitions holding about
+    half a 256 KiB block of rows each. This bounds each working set so
+    its table and rows can stay in cache while runs merge on separate
+    threads. With `filter`, only the groups it keeps come out
+    (`GroupFilter`); the result's `merged` counts them all. With
+    `ordered`, each partition's groups come out in first-row order (by
+    partition at the most bits the sinks could reach, then first row),
+    which `table_frame` merges into first-occurrence order; otherwise in
+    no particular order. A distinct count's new sinks join `sinks`."""
+    var owned = List[AggregateSink]()
+    swap(owned, sinks)
+    var finish = AggregateFinish(
+        owned^, layout, filter, rows_only, ordered=ordered
+    )
+    run_rounds(finish)
+    swap(sinks, finish.sinks)
+    var result = AggregateResult()
+    swap(result, finish.result)
     return result^
 
 

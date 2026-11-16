@@ -1636,6 +1636,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var plan = self._optimized() if optimize else self.copy()
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
+            plan_unique_as_aggregate(plan._plan)
         if optimize:
             plan._share_subplans(True, batch_size)
             plan._order_joins(True, batch_size)
@@ -1874,6 +1875,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var plan = self._optimized() if optimize else self.copy()
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
+            plan_unique_as_aggregate(plan._plan)
         if optimize:
             plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
@@ -1955,6 +1957,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var plan = self._optimized() if optimize else self.copy()
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
+            plan_unique_as_aggregate(plan._plan)
         var out = String()
         if engine != "cpu":
             out = backend.describe()
@@ -2021,6 +2024,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
+            plan_unique_as_aggregate(plan._plan)
         if optimize:
             plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
@@ -2716,6 +2720,8 @@ def _collect_placed[
     if len(found) == 0:
         return None
     var plan = query._optimized() if optimize else query.copy()
+    if not optimize:
+        plan_unique_as_aggregate(plan._plan)
     var solved = _solve_devices(plan, backend, found^)
     var chosen = solved.placement.devices.copy()
     var any_device = False

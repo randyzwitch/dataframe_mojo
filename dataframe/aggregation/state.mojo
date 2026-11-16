@@ -12,6 +12,9 @@ from dataframe.aggregation.hash_table import (
 )
 from dataframe.aggregation.expressions import (
     _stream_reductions,
+    aggregate_filter,
+    filter_value,
+    without_filters,
 )
 from dataframe.aggregation.keys import (
     _group_keys,
@@ -45,10 +48,13 @@ from dataframe.kernels.hashing import (
 )
 from dataframe.storage.allocation import (
     huge_list,
+    release_huge,
 )
 from dataframe.parallel import (
     Job,
-    run_jobs,
+    Rounds,
+    round_width,
+    run_rounds,
     worker_count,
 )
 from dataframe.kernels.partition import (
@@ -172,11 +178,15 @@ struct _KeyIndex(Movable):
         for row in range(n):
             _ = self.find_or_insert(distinct, row)
 
+    def __deinit__(deinit self):
+        release_huge(self.slots^)
+
     def count(self) -> Int:
         return len(self.hashes)
 
     def _grow(mut self):
         var capacity = max(1024, 2 * len(self.slots))
+        release_huge(self.slots^)
         self.slots = huge_list(capacity, -1)
         var mask = capacity - 1
         for id in range(len(self.hashes)):
@@ -312,81 +322,160 @@ def _merge_ascending_runs(values: List[Int], runs: List[Int]) -> List[Int]:
     return order^
 
 
+struct PartsFinish(Movable, Rounds):
+    """Hash parts finished into one frame as a round of tasks
+    (`next_round`, `round_task`): each part's states finished into its
+    frame by the task that takes it. After the round, the frames are the
+    chunks of one frame, or, when `ordered`, their groups interleaved by
+    first occurrence, the order a single state would have produced: each
+    part's groups are already in first-occurrence order, so the
+    interleave is a k-way merge on `firsts` with a binary heap of part
+    cursors. `frame` is the result once `next_round` returns 0."""
+
+    var jobs: List[_FinishJob]
+    # Each part's first-occurrence rows, when `ordered`.
+    var firsts: List[List[Int]]
+    var ordered: Bool
+    var width: Int
+    # Whether the round has run, and whether the frame is made.
+    var ran: Bool
+    var done: Bool
+    var frame: DataFrame
+
+    def __init__(
+        out self, var parts: List[_StreamReduction], ordered: Bool
+    ) raises:
+        self.jobs = List[_FinishJob](capacity=len(parts))
+        self.firsts = List[List[Int]]()
+        self.ordered = ordered
+        self.width = 0
+        self.ran = False
+        self.done = False
+        self.frame = DataFrame(List[Series](), height=0)
+        while len(parts) > 0:
+            var part = parts.pop(0)
+            if ordered:
+                self.firsts.append(part.firsts.copy())
+            self.jobs.append(_FinishJob(part^))
+
+    @staticmethod
+    def of_table(
+        template: _StreamReduction, var result: AggregateResult, ordered: Bool
+    ) raises -> Self:
+        """The aggregate table's partitions finished into a frame: each
+        part's states loaded into a `_StreamReduction` like `template`,
+        each output column keeping the parts as its chunks; in
+        first-occurrence order when `ordered`."""
+        var parts = table_parts(template, result^)
+        if len(parts) == 0:
+            var empty = Self(parts^, False)
+            empty.frame = template.finish()
+            empty.done = True
+            return empty^
+        if ordered:
+            for p in range(len(parts)):
+                parts[p].order_by_firsts()
+        return Self(parts^, ordered)
+
+    def next_round(mut self) raises -> Int:
+        if self.done:
+            return 0
+        if not self.ran:
+            self.ran = True
+            self.width = round_width(len(self.jobs))
+            if self.width > 0:
+                return self.width
+        self.done = True
+        if self.ordered:
+            self.frame = self._interleaved()
+        elif len(self.jobs) == 1:
+            self.frame = self.jobs[0].frame.copy()
+        else:
+            var frames = List[DataFrame](capacity=len(self.jobs))
+            for j in range(len(self.jobs)):
+                frames.append(self.jobs[j].frame.copy())
+            self.frame = chunks_frame(frames)
+        self.jobs = List[_FinishJob]()
+        return 0
+
+    def round_task(mut self, task: Int) raises:
+        var j = task
+        while j < len(self.jobs):
+            self.jobs[j].run()
+            j += self.width
+
+    def _interleaved(self) raises -> DataFrame:
+        """The parts' frames merged into first-occurrence order."""
+        var bases = List[Int](capacity=len(self.firsts))
+        var total = 0
+        for p in range(len(self.firsts)):
+            bases.append(total)
+            total += len(self.firsts[p])
+        ref firsts = self.firsts
+        var frames = List[DataFrame](capacity=len(self.jobs))
+        for j in range(len(self.jobs)):
+            frames.append(self.jobs[j].frame.copy())
+        var sizes = List[Int](capacity=len(firsts))
+        for p in range(len(firsts)):
+            sizes.append(len(firsts[p]))
+        # Heap entries: the part and its next first-occurrence row, cached
+        # so a comparison reads two flat lists.
+        var heap_part = List[Int]()
+        var heap_key = List[Int]()
+        var cursor = List[Int](length=len(sizes), fill=0)
+        for p in range(len(sizes)):
+            if sizes[p] > 0:
+                heap_part.append(p)
+                heap_key.append(firsts[p][0])
+        var size = len(heap_part)
+
+        @always_inline
+        def sift_down(
+            mut part: List[Int], mut keys: List[Int], size: Int, start: Int
+        ):
+            var i = start
+            while True:
+                var smallest = i
+                var left = 2 * i + 1
+                var right = left + 1
+                if left < size and keys[left] < keys[smallest]:
+                    smallest = left
+                if right < size and keys[right] < keys[smallest]:
+                    smallest = right
+                if smallest == i:
+                    return
+                var swap_key = keys[i]
+                keys[i] = keys[smallest]
+                keys[smallest] = swap_key
+                var swap_part = part[i]
+                part[i] = part[smallest]
+                part[smallest] = swap_part
+                i = smallest
+
+        for i in range(size // 2 - 1, -1, -1):
+            sift_down(heap_part, heap_key, size, i)
+        var order = List[Int](capacity=total)
+        while size > 0:
+            var part = heap_part[0]
+            order.append(bases[part] + cursor[part])
+            cursor[part] += 1
+            if cursor[part] == sizes[part]:
+                size -= 1
+                heap_part[0] = heap_part[size]
+                heap_key[0] = heap_key[size]
+            else:
+                heap_key[0] = firsts[part][cursor[part]]
+            sift_down(heap_part, heap_key, size, 0)
+        return concat(frames).rechunk().take(order)
+
+
 def _finish_parts(var parts: List[_StreamReduction]) raises -> DataFrame:
     """Finish every hash part and interleave their groups by first
-    occurrence, the order a single state would have produced.
-
-    Parts finish on their own threads. Each part's groups are already in
-    first-occurrence order, so the interleave is a k-way merge on `firsts`
-    with a binary heap of part cursors.
-    """
-    var bases = List[Int](capacity=len(parts))
-    var total = 0
-    for p in range(len(parts)):
-        bases.append(total)
-        total += parts[p].group_count()
-    var firsts = List[List[Int]](capacity=len(parts))
-    var jobs = List[_FinishJob](capacity=len(parts))
-    while len(parts) > 0:
-        var part = parts.pop(0)
-        firsts.append(part.firsts.copy())
-        jobs.append(_FinishJob(part^))
-    run_jobs(jobs)
-    var frames = List[DataFrame](capacity=len(jobs))
-    for j in range(len(jobs)):
-        frames.append(jobs[j].frame.copy())
-    var sizes = List[Int](capacity=len(firsts))
-    for p in range(len(firsts)):
-        sizes.append(len(firsts[p]))
-    # Heap entries: the part and its next first-occurrence row, cached so a
-    # comparison reads two flat lists.
-    var heap_part = List[Int]()
-    var heap_key = List[Int]()
-    var cursor = List[Int](length=len(sizes), fill=0)
-    for p in range(len(sizes)):
-        if sizes[p] > 0:
-            heap_part.append(p)
-            heap_key.append(firsts[p][0])
-    var size = len(heap_part)
-
-    @always_inline
-    def sift_down(
-        mut part: List[Int], mut keys: List[Int], size: Int, start: Int
-    ):
-        var i = start
-        while True:
-            var smallest = i
-            var left = 2 * i + 1
-            var right = left + 1
-            if left < size and keys[left] < keys[smallest]:
-                smallest = left
-            if right < size and keys[right] < keys[smallest]:
-                smallest = right
-            if smallest == i:
-                return
-            var swap_key = keys[i]
-            keys[i] = keys[smallest]
-            keys[smallest] = swap_key
-            var swap_part = part[i]
-            part[i] = part[smallest]
-            part[smallest] = swap_part
-            i = smallest
-
-    for i in range(size // 2 - 1, -1, -1):
-        sift_down(heap_part, heap_key, size, i)
-    var order = List[Int](capacity=total)
-    while size > 0:
-        var part = heap_part[0]
-        order.append(bases[part] + cursor[part])
-        cursor[part] += 1
-        if cursor[part] == sizes[part]:
-            size -= 1
-            heap_part[0] = heap_part[size]
-            heap_key[0] = heap_key[size]
-        else:
-            heap_key[0] = firsts[part][cursor[part]]
-        sift_down(heap_part, heap_key, size, 0)
-    return concat(frames).rechunk().take(order)
+    occurrence, the order a single state would have produced; the
+    parts finish on their own threads (`PartsFinish`)."""
+    var finish = PartsFinish(parts^, True)
+    run_rounds(finish)
+    return finish.frame.copy()
 
 
 def table_specs(template: _StreamReduction) -> List[ReducerSpec]:
@@ -425,18 +514,38 @@ def _table_input(
     frame: DataFrame, keys: List[Series], expression: Expr, at: Int
 ) raises -> Series:
     """The column of the expression's node `at` over every row of `frame`
-    (a row count, with none, reads the first key)."""
+    (a row count, with none, reads the first key). An aggregate filter's
+    input is the values it filters."""
     if at < 0:
         return keys[0].copy()
+    var value = filter_value(expression, at)
     if (
-        expression._nodes[at].op == COL
-        and expression._nodes[at].text in frame.columns()
+        expression._nodes[value].op == COL
+        and expression._nodes[value].text in frame.columns()
     ):
-        return frame.column(expression._nodes[at].text)
+        return frame.column(expression._nodes[value].text)
     var evaluated = frame.select_exprs(
-        [subtree(expression, at).alias("__input")]
+        [subtree(expression, value).alias("__input")]
     )
     return evaluated._columns[0].copy()
+
+
+def filters_supported(
+    empty: DataFrame, keys: List[Series], expressions: List[Expr]
+) raises -> Bool:
+    """Whether the aggregate table applies every aggregate filter of
+    `expressions` over a frame typed as `empty`: the values each filters
+    are not nested (the table's predicate reads no nested validity)."""
+    for expression in expressions:
+        for node in expression._nodes:
+            if not is_reduction(node.op) or node.left < 0:
+                continue
+            if not aggregate_filter(expression, node.left):
+                continue
+            var value = _table_input(empty, keys, expression, node.left)
+            if value.dtype().is_nested():
+                return False
+    return True
 
 
 def table_supported(
@@ -444,8 +553,9 @@ def table_supported(
 ) raises -> Bool:
     """Whether the aggregate table groups `frame` (empty is enough: only
     types are read) by `keys` and holds every reduction's state of
-    `expressions`, inline or by address."""
-    if len(keys) == 0 or not _stream_reductions(expressions, True, True):
+    `expressions`, inline or by address, aggregate filters applied per
+    reduction."""
+    if len(keys) == 0 or not _stream_reductions(expressions, True, True, True):
         return False
     for expression in expressions:
         for node in expression._nodes:
@@ -459,7 +569,11 @@ def table_supported(
         if not key_supported(column):
             return False
         columns.append(column^)
-    var template = _StreamReduction(frame.clear(), expressions, keys)
+    if not filters_supported(frame.clear(), columns, expressions):
+        return False
+    var template = _StreamReduction(
+        frame.clear(), without_filters(expressions), keys
+    )
     return table_states_supported(
         table_specs(template), table_inputs(frame, columns, expressions)
     )
@@ -468,29 +582,11 @@ def table_supported(
 def table_frame(
     template: _StreamReduction, var result: AggregateResult, ordered: Bool
 ) raises -> DataFrame:
-    """The aggregate table's partitions finished into a frame: each part's
-    states loaded into a `_StreamReduction` like `template`, finished on
-    its own thread, each
-    output column keeping the parts as its chunks; in first-occurrence
-    order when `ordered`."""
-    var parts = table_parts(template, result^)
-    if len(parts) == 0:
-        return template.finish()
-    if ordered:
-        for p in range(len(parts)):
-            parts[p].order_by_firsts()
-        return _finish_parts(parts^)
-    var count = len(parts)
-    var jobs = List[_FinishJob](capacity=count)
-    while len(parts) > 0:
-        jobs.append(_FinishJob(parts.pop(0)))
-    run_jobs(jobs)
-    if count == 1:
-        return jobs[0].frame.copy()
-    var frames = List[DataFrame](capacity=count)
-    for j in range(count):
-        frames.append(jobs[j].frame.copy())
-    return chunks_frame(frames)
+    """The aggregate table's partitions finished into a frame
+    (`PartsFinish.of_table`), each part on its own thread."""
+    var finish = PartsFinish.of_table(template, result^, ordered)
+    run_rounds(finish)
+    return finish.frame.copy()
 
 
 def chunks_frame(frames: List[DataFrame]) raises -> DataFrame:

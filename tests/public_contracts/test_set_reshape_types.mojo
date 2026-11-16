@@ -444,28 +444,35 @@ def test_pivot_count_nullable_decimal128_uses_parent_validity() raises:
     nullable_pivot_count(16)
 
 
-def test_pivot_nested_reductions_reject_explicitly_before_execution() raises:
+def test_pivot_nested_first_last_keep_values_whole() raises:
     for kind in [26, 27]:
         for n in [0, 9]:
+            var value = selection_column(kind, n, 7, 1).renamed("value")
             var source = DataFrame(
                 [
                     Series(
                         "label",
                         Column[String](List[String](length=n, fill="a")),
                     ),
-                    selection_column(kind, n, 7, 1).renamed("value"),
+                    value.copy(),
                 ]
             )
             for function in ["first", "last"]:
-                with assert_raises(
-                    contains="does not support list or struct expressions yet"
-                ):
-                    _ = source.pivot(
-                        "label",
-                        index=List[String](),
-                        values="value",
-                        aggregate_function=function,
+                var pivoted = source.pivot(
+                    "label",
+                    index=List[String](),
+                    values="value",
+                    aggregate_function=function,
+                )
+                if n == 0:
+                    assert_equal(pivoted.height(), 0)
+                    continue
+                assert_equal(pivoted.height(), 1)
+                assert_true(
+                    pivoted.column("a").equals(
+                        value.slice(0 if function == "first" else n - 1, 1)
                     )
+                )
 
 
 def test_pivot_nested_counts_use_parent_validity_and_lengths() raises:

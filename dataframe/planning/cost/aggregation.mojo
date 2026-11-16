@@ -1,4 +1,5 @@
 """Central streaming-reduction strategy selection and cost preferences."""
+from dataframe.aggregation.expressions import has_aggregate_filter
 from dataframe.expr import (
     Expr,
 )
@@ -60,7 +61,9 @@ def select_aggregation_strategy(
     if inline_table_eligible:
         choice.choose(TABLE_PIPELINE, "inline_aggregate_states")
     if not choice.uses_aggregate_table() and (
-        grouping or _has_quantile(expressions)
+        grouping
+        or _has_quantile(expressions)
+        or has_aggregate_filter(expressions)
     ):
         choice.choose(EAGER_FRAME, "inline_table_required")
         return choice^

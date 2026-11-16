@@ -12,7 +12,7 @@ from std.sys import size_of
 from dataframe.aggregation.reducer import float_key
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column, _validity_at
-from dataframe.storage.allocation import huge_list
+from dataframe.storage.allocation import huge_list, release_huge
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.storage.string import StringColumn
 from dataframe.series import Series
@@ -72,6 +72,9 @@ struct _U64Codes(Movable):
         self.count = 0
         self.shift = 64 - 10
 
+    def __deinit__(deinit self):
+        release_huge(self.slots^)
+
     @always_inline
     def code(mut self, key: UInt64) -> Int:
         """`key`'s code, assigning the next one to a new key."""
@@ -93,6 +96,7 @@ struct _U64Codes(Movable):
     def _grow(mut self):
         var size = 2 * len(self.slots)
         self.shift -= 1
+        release_huge(self.slots^)
         self.slots = huge_list(size, Int32(-1))
         for at in range(self.count):
             var slot = Int((self.keys[at] * 0x9E3779B97F4A7C15) >> self.shift)

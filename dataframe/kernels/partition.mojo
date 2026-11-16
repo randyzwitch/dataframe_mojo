@@ -26,7 +26,11 @@ from dataframe.aggregation.reducer import float_key
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column, _validity_at
 from dataframe.dtype import NUMERIC_DTYPES
-from dataframe.storage.allocation import huge_list, huge_uninit
+from dataframe.storage.allocation import (
+    huge_list,
+    huge_uninit,
+    release_huge,
+)
 from dataframe.kernels.gather import take_parallel
 from dataframe.kernels.hashing import RowKeys, encode_rows
 from dataframe.parallel import Job, partitions, run_jobs
@@ -394,6 +398,12 @@ struct Partitioned(Movable):
     # Each row's key word in the same order, when words were given.
     var words: List[UInt64]
 
+    def __deinit__(deinit self):
+        # Per-row scratch: keep its pages for the next large table.
+        release_huge(self.order^)
+        release_huge(self.hashes^)
+        release_huge(self.words^)
+
     def buckets(self) -> Int:
         return len(self.bounds) - 1
 
@@ -441,6 +451,9 @@ struct Partitioner(Movable):
             for s in range(_SLOTS):
                 self.histogram[s] += counts[s]
             self.worker_histograms.append(counts^)
+
+    def __deinit__(deinit self):
+        release_huge(self.hashes^)
 
     def into_hashes(deinit self) -> List[UInt64]:
         """The row hashes, moved out (no 8-bytes-a-row copy)."""

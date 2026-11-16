@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "benchmarks/tools"))
@@ -13,6 +14,7 @@ sys.path.insert(0, str(ROOT / "tests/tooling"))
 import suite_answers as answers
 import bench_suites as bench
 import suite_schema
+from suite_answer_fixture import export_fixture
 from suite_answer_fixture import rows_answer as answer
 
 
@@ -321,6 +323,92 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(bench.evaluate(result)[key]["status"], "ok")
         Path(second["schema_path"]).write_text("{}")
         self.assertEqual(bench.evaluate(result)[key]["status"], "unverified")
+
+    def rounds(self, oracle, duckdb, mojo):
+        """One run per round and engine; every file in its own directory."""
+        def columns(rows):
+            return {
+                "id6": [r[0] for r in rows],
+                "largest2_v3": [r[1] for r in rows],
+            }
+
+        base = {
+            "suite": "fixture",
+            "variant": "base",
+            "query": "q1",
+            "status": "ok",
+            "times": [10],
+        }
+        runs = [
+            dict(
+                base,
+                engine="duckdb",
+                round=k,
+                answers=[export_fixture(columns(rows))],
+                oracles=[export_fixture(columns(oracle), oracle=True)],
+            )
+            for k, rows in enumerate(duckdb)
+        ]
+        runs += [
+            dict(
+                base,
+                engine="mojo",
+                round=k,
+                answers=[export_fixture(columns(rows))],
+            )
+            for k, rows in enumerate(mojo)
+        ]
+        cells = bench.evaluate({"runs": runs})
+        return (
+            cells[("fixture", "base", "q1", "duckdb")],
+            cells[("fixture", "base", "q1", "mojo")],
+        )
+
+    def test_one_wrong_reference_answer_is_not_another_engines_error(self):
+        # One DuckDB run writes a value with one exponent bit set; the
+        # other runs and the oracle agree, so only DuckDB is wrong.
+        good = [(1, 94.241451), (1, 78.280001), (2, 64.051905)]
+        bad = [(1, 94.241451), (1, 2.663730402285343e40), (2, 64.051905)]
+        duckdb, mojo = self.rounds(good, [good, good, bad], [good] * 3)
+        self.assertEqual(duckdb["status"], "wrong answer")
+        self.assertEqual(mojo["status"], "ok")
+        # The check still catches the other engine's own wrong answers.
+        for wrong in (
+            [(1, 94.241451), (1, 78.29), (2, 64.051905)],  # changed value
+            good[:2],  # dropped row
+            good + [good[0]],  # duplicated row
+        ):
+            with self.subTest(wrong=wrong):
+                _, mojo = self.rounds(
+                    good, [good, good, bad], [good, wrong, good]
+                )
+                self.assertEqual(mojo["status"], "wrong answer")
+
+    def test_reference_without_a_majority_leaves_others_unverified(self):
+        good = [(1, 1.5), (2, 2.5)]
+        bad = [(1, 1.5), (2, 9.5)]
+        duckdb, mojo = self.rounds(good, [good, bad], [good, good])
+        self.assertEqual(duckdb["status"], "wrong answer")
+        self.assertEqual(mojo["status"], "unverified")
+        self.assertIn("reference_answers_disagree", mojo["reason"])
+
+    def test_unreproducible_difference_is_unverified(self):
+        good = [(1, 1.5), (2, 2.5)]
+        different = {"status": "different", "reason": "exact_key_mismatch"}
+        verdicts = iter([{"status": "equal", "reason": None}, different])
+        real = answers.OracleCheck.compare
+
+        def flaky(check, actual):
+            # The DuckDB answer passes; the other engine's answer differs
+            # once, then agrees when rechecked from its files.
+            return next(verdicts, None) or real(check, actual)
+
+        # Reordered rows: different bytes, so no verdict is reused.
+        with mock.patch.object(answers.OracleCheck, "compare", flaky):
+            duckdb, mojo = self.rounds(good, [good], [good[::-1]])
+        self.assertEqual(duckdb["status"], "ok")
+        self.assertEqual(mojo["status"], "unverified")
+        self.assertIn("verdict_not_reproducible", mojo["reason"])
 
     def test_missing_round_is_not_a_successful_measurement(self):
         first = self.export([1])
