@@ -107,6 +107,22 @@ struct _ReadyIndex(Copyable, Movable):
         self.rows_only = rows_only
 
 
+struct SharedResults(Movable):
+    """The results of a query's shared subplans, by id. A shared
+    subplan's pipeline writes its result once, and every pipeline that
+    scans it depends on that pipeline, so no scan reads one early.
+    Planning never reads a result: only the rows estimated for it."""
+
+    var frames: List[DataFrame]
+    var rows: List[Int]
+    var ready: List[Bool]
+
+    def __init__(out self):
+        self.frames = List[DataFrame]()
+        self.rows = List[Int]()
+        self.ready = List[Bool]()
+
+
 struct QueryContext(Copyable, Deinitable, Movable):
     """Plan storage and per-run state, with explicit runtime ports."""
 
@@ -124,6 +140,12 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # materialized subplan. Preserve these estimates so consumers can plan
     # without scanning the retained result.
     var _materialized_distinct: Dict[Int, Dict[String, Int]]
+    # The query's shared subplan results, shared by every copy of the
+    # plan made while it runs; None when nothing is shared.
+    var _shared: Optional[ArcPointer[SharedResults]]
+    # For a frame slot standing for a shared subplan's result: its id in
+    # `_shared`. The slot itself holds the result's columns with no rows.
+    var _shared_slots: Dict[Int, Int]
     # Provider-neutral envelope on dispatch copies; user plans stay unchanged.
     var _accelerator_settings: Optional[ExecutionSettings]
     # Memoize empty schemas while optimizer passes inspect names and types.
@@ -183,6 +205,8 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._report = None
         self._origin_rows = Dict[Int, Int]()
         self._materialized_distinct = Dict[Int, Dict[String, Int]]()
+        self._shared = None
+        self._shared_slots = Dict[Int, Int]()
         self._accelerator_settings = None
         self._schema_memo = None
         self._prefetched = None
@@ -233,6 +257,36 @@ struct QueryContext(Copyable, Deinitable, Movable):
         batch_size: Int,
     ) raises -> DataFrame:
         return self._collector(self, optimize, streaming, batch_size)
+
+
+def plan_shared_id(self: QueryContext, slot: Int) -> Int:
+    """The shared subplan whose result frame slot `slot` stands for; -1
+    for a slot holding a table."""
+    if len(self._shared_slots) == 0:
+        return -1
+    return self._shared_slots.get(slot, -1)
+
+
+def plan_slot_rows(self: QueryContext, slot: Int) -> Int:
+    """Rows of the table in `slot` as planning knows them: a table's
+    height, or the rows estimated for a shared subplan's result (-1
+    when there is no estimate), which is not computed while planning."""
+    var id = plan_shared_id(self, slot)
+    if id >= 0:
+        return self._shared.value()[].rows[id]
+    return self._frames[slot].height()
+
+
+def plan_slot_table(self: QueryContext, slot: Int) raises -> DataFrame:
+    """The table a scan of `slot` reads when it runs: a shared subplan's
+    result once its pipeline has written it."""
+    var id = plan_shared_id(self, slot)
+    if id < 0:
+        return self._frames[slot].copy()
+    ref results = self._shared.value()[]
+    if not results.ready[id]:
+        raise Error("a shared subplan's result was read before it was made")
+    return results.frames[id].copy()
 
 
 def _context_supports(plan: QueryContext) -> Bool:

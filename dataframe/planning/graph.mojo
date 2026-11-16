@@ -37,6 +37,8 @@ from dataframe.join_type import (
 from dataframe.planning.context import (
     FrameSlots,
     QueryContext,
+    plan_shared_id,
+    plan_slot_rows,
 )
 from dataframe.planning.model import (
     AGG,
@@ -94,6 +96,9 @@ def plan_height_bound(self: QueryContext, index: Int) -> Int:
     rows; -1 when unknown (joins, aggregations, file scans)."""
     ref node = self._nodes[index]
     if node.kind == SCAN_FRAME:
+        # A shared subplan's result has an estimate, which bounds nothing.
+        if plan_shared_id(self, node.source_slot()) >= 0:
+            return -1
         return self._frames[node.source_slot()].height()
     if (
         node.kind == FILTER
@@ -201,6 +206,8 @@ def plan_key_source(
     while at >= 0:
         ref node = self._nodes[at]
         if node.kind == SCAN_FRAME:
+            if plan_shared_id(self, node.source_slot()) >= 0:
+                return None
             ref frame = self._frames[node.source_slot()]
             if key in frame.columns():
                 return frame.column(key)
@@ -602,7 +609,17 @@ def plan_canonical_frames(self: QueryContext) -> List[Int]:
     var canonical = List[Int](capacity=len(self._frames))
     # The first slot of each distinct frame, by shape.
     var heads = Dict[Int, List[Int]]()
+    # A shared subplan's slot holds no rows yet: it is the first slot
+    # standing for the same result, never a table's.
+    var results = Dict[Int, Int]()
     for f in range(len(self._frames)):
+        var id = plan_shared_id(self, f)
+        if id >= 0:
+            var first = results.get(id)
+            if not first:
+                results[id] = f
+            canonical.append(first.value() if first else f)
+            continue
         ref frame = self._frames[f]
         var shape = frame.height() * 4099 + frame.width()
         var first = f
@@ -843,7 +860,7 @@ def plan_largest_scan(self: QueryContext, index: Int) -> Int:
         var i = stack.pop()
         ref node = self._nodes[i]
         if node.kind == SCAN_FRAME:
-            largest = max(largest, self._frames[node.source_slot()].height())
+            largest = max(largest, plan_slot_rows(self, node.source_slot()))
         if node.left >= 0:
             stack.append(node.left)
         if node.right >= 0:
@@ -946,7 +963,7 @@ def plan_estimated_rows(self: QueryContext, index: Int) raises -> Int:
     prefix would misjudge."""
     ref node = self._nodes[index]
     if node.kind == SCAN_FRAME:
-        return self._frames[node.source_slot()].height()
+        return plan_slot_rows(self, node.source_slot())
     if node.kind == DROP or (
         (node.kind == SELECT or node.kind == WITH_COLUMNS)
         and _stream_rows(node)
@@ -955,7 +972,10 @@ def plan_estimated_rows(self: QueryContext, index: Int) raises -> Int:
     if node.kind != FILTER or not _row_local(node.exprs):
         return -1
     ref source = self._nodes[node.left]
-    if source.kind != SCAN_FRAME:
+    if (
+        source.kind != SCAN_FRAME
+        or plan_shared_id(self, source.source_slot()) >= 0
+    ):
         return -1
     var height = self._frames[source.source_slot()].height()
     var runs = 64
@@ -1102,6 +1122,8 @@ def plan_spine_source(
         if node.kind == SCAN_FRAME:
             if column not in self._frames[node.source_slot()].columns():
                 return None
+            if plan_shared_id(self, node.source_slot()) >= 0:
+                return None
             return Optional((node.source_slot(), column))
         if (node.kind == SELECT or node.kind == WITH_COLUMNS) and _stream_rows(
             node
@@ -1142,6 +1164,8 @@ def plan_spine_frame(self: QueryContext, index: Int) -> Optional[DataFrame]:
     while cursor >= 0:
         ref node = self._nodes[cursor]
         if node.kind == SCAN_FRAME:
+            if plan_shared_id(self, node.source_slot()) >= 0:
+                return None
             return Optional(self._frames[node.source_slot()].copy())
         if (
             node.kind == FILTER
@@ -1285,7 +1309,7 @@ def plan_spine_rows(self: QueryContext, index: Int) -> Int:
             var origin = self._origin_rows.get(node.source_slot(), -1)
             if origin > 0:
                 return origin
-            return self._frames[node.source_slot()].height()
+            return plan_slot_rows(self, node.source_slot())
         if (
             node.kind == FILTER
             or node.kind == DROP
@@ -1323,6 +1347,11 @@ def plan_compact_scan_slots(mut self: QueryContext):
     for entry in self._materialized_distinct.items():
         if slots[entry.key] >= 0:
             counts[slots[entry.key]] = entry.value.copy()
+    var shared = Dict[Int, Int]()
+    for entry in self._shared_slots.items():
+        if slots[entry.key] >= 0:
+            shared[slots[entry.key]] = entry.value
+    self._shared_slots = shared^
     self._frames = FrameSlots(frames^)
     self._schemas = schemas^
     self._origin_rows = origins^
@@ -1441,6 +1470,10 @@ def plan_subplan(self: QueryContext, root: Int) -> QueryContext:
     for entry in self._materialized_distinct.items():
         if slots[entry.key] >= 0:
             sub._materialized_distinct[slots[entry.key]] = entry.value.copy()
+    sub._shared = self._shared
+    for entry in self._shared_slots.items():
+        if slots[entry.key] >= 0:
+            sub._shared_slots[slots[entry.key]] = entry.value
     return sub^
 
 
