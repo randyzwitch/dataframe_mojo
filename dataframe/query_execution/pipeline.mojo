@@ -979,10 +979,8 @@ struct _StreamProbe(Movable):
         ref started = self.started[0]
         if len(started.piped) > 0:
             ref piped = started.piped[0]
-            self.finish.append(
-                finish_pipeline(piped.run, piped.counts, piped.set_frames)
-            )
-            self.round = self.finish[0].tasks()
+            self.finish.append(finish_pipeline(piped.run))
+            self.round = self.finish[0].next_round()
         elif len(started.batch) > 0:
             self.round = started.batch[0].advance()
         else:
@@ -997,7 +995,7 @@ struct _StreamProbe(Movable):
         if self.filling:
             self.built.value().finalize_task(task)
         elif len(self.finish) > 0:
-            self.finish[0].run_task(task)
+            self.finish[0].round_task(task)
         else:
             self.started[0].batch[0].run_task(task)
 
@@ -1009,7 +1007,9 @@ struct _StreamProbe(Movable):
             self.filling = False
             self.round = 0
             return
-        if len(self.started[0].batch) > 0:
+        if len(self.finish) > 0:
+            self.round = self.finish[0].next_round()
+        elif len(self.started[0].batch) > 0:
             self.round = self.started[0].batch[0].advance()
         else:
             self.round = 0
@@ -2413,7 +2413,7 @@ def _probe_finish(
     var top_node = piped.top_node
     var began = piped.began
     ref finish_nodes = piped.finish_nodes
-    var piped_result = done.result(piped_counts)
+    var piped_result = done.result(piped_counts, set_frames)
     if finish:
         finish.value()[].applied = True
     if grouping:

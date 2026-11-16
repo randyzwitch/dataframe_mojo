@@ -9,7 +9,7 @@ in parallel.
 from std.memory import Pointer, unsafe_memcpy
 
 from dataframe.frame import DataFrame, concat
-from dataframe.parallel import Job, run_jobs
+from dataframe.parallel import Job, Rounds, round_width, run_rounds
 from dataframe.series import Series
 from dataframe.storage.column import Column
 from dataframe.dtype import DataType
@@ -447,44 +447,93 @@ struct _FrameJob(Job):
         )[].frame()
 
 
+struct MaterializeFinish(Movable, Rounds):
+    """Every worker's batches as one frame, in batch index order, one
+    chunk each, as a round of tasks (`next_round`, `round_task`): each
+    batch's columns copied out of its collection by the task that takes
+    it, avoiding a serial pass over every result row. The workers'
+    batches are each in the order the worker took them, so a merge by
+    batch index over the workers orders all. `frame` is the result once
+    `next_round` returns 0."""
+
+    var sinks: List[MaterializeSink]
+    var schema: DataFrame
+    var jobs: List[_FrameJob]
+    var width: Int
+    var ran: Bool
+    var done: Bool
+    var frame: DataFrame
+
+    def __init__(out self, var sinks: List[MaterializeSink], schema: DataFrame):
+        self.sinks = sinks^
+        self.schema = schema.copy()
+        self.jobs = List[_FrameJob]()
+        self.width = 0
+        self.ran = False
+        self.done = False
+        self.frame = schema.copy()
+
+    def next_round(mut self) raises -> Int:
+        if self.done:
+            return 0
+        if not self.ran:
+            self.ran = True
+            var next = List[Int](length=len(self.sinks), fill=0)
+            while True:
+                var best = -1
+                var best_batch = 0
+                for j in range(len(self.sinks)):
+                    if next[j] < len(self.sinks[j].batches):
+                        var batch = self.sinks[j].batches[next[j]]
+                        if best < 0 or batch < best_batch:
+                            best = j
+                            best_batch = batch
+                if best < 0:
+                    break
+                self.jobs.append(
+                    _FrameJob(
+                        Int(
+                            Pointer(to=self.sinks[best].collections[next[best]])
+                        ),
+                        self.schema,
+                    )
+                )
+                next[best] += 1
+            self.width = round_width(len(self.jobs))
+            if self.width > 0:
+                return self.width
+        self.done = True
+        if len(self.jobs) == 1:
+            self.frame = self.jobs[0].frame.copy()
+        elif len(self.jobs) > 1:
+            var parts = List[DataFrame](capacity=len(self.jobs))
+            for k in range(len(self.jobs)):
+                parts.append(self.jobs[k].frame.copy())
+            # Batches whose columns are consecutive windows of one stored
+            # column (a column no step changed) join back into one window
+            # of it.
+            var whole = concat(parts)
+            for c in range(whole.width()):
+                whole._columns[c] = whole._columns[c]._joined_windows()
+            self.frame = whole^
+        self.jobs = List[_FrameJob]()
+        return 0
+
+    def round_task(mut self, task: Int) raises:
+        var j = task
+        while j < len(self.jobs):
+            self.jobs[j].run()
+            j += self.width
+
+
 def materialize_finish(
     mut sinks: List[MaterializeSink], schema: DataFrame
 ) raises -> DataFrame:
-    """Every batch in batch index order, one chunk each (the workers'
-    batches are each in the order the worker took them, so a merge by
-    batch index over the workers orders all)."""
-    var jobs = List[_FrameJob]()
-    var next = List[Int](length=len(sinks), fill=0)
-    while True:
-        var best = -1
-        var best_batch = 0
-        for j in range(len(sinks)):
-            if next[j] < len(sinks[j].batches):
-                var batch = sinks[j].batches[next[j]]
-                if best < 0 or batch < best_batch:
-                    best = j
-                    best_batch = batch
-        if best < 0:
-            break
-        jobs.append(
-            _FrameJob(
-                Int(Pointer(to=sinks[best].collections[next[best]])),
-                schema,
-            )
-        )
-        next[best] += 1
-    if len(jobs) == 0:
-        return schema.copy()
-    if len(jobs) == 1:
-        jobs[0].run()
-        return jobs[0].frame.copy()
-    run_jobs(jobs)
-    var parts = List[DataFrame](capacity=len(jobs))
-    for k in range(len(jobs)):
-        parts.append(jobs[k].frame.copy())
-    # Batches whose columns are consecutive windows of one stored column
-    # (a column no step changed) join back into one window of it.
-    var whole = concat(parts)
-    for c in range(whole.width()):
-        whole._columns[c] = whole._columns[c]._joined_windows()
-    return whole^
+    """Every batch in batch index order, one chunk each
+    (`MaterializeFinish`), its round run here."""
+    var owned = List[MaterializeSink]()
+    swap(owned, sinks)
+    var finish = MaterializeFinish(owned^, schema)
+    run_rounds(finish)
+    swap(sinks, finish.sinks)
+    return finish.frame.copy()

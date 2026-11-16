@@ -68,7 +68,8 @@ from dataframe.aggregation.hash_table import (
     AggregateLayout,
     AggregateSink,
     GroupFilter,
-    aggregate_finish,
+    AggregateFinish,
+    AggregateResult,
     aggregate_layout,
     layout_widths,
     reaggregable,
@@ -94,6 +95,7 @@ from dataframe.aggregation.ungrouped import (
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
 from dataframe.vector.column_data_collection import (
+    MaterializeFinish,
     MaterializeSink,
     append_raw,
     materialize_finish,
@@ -116,14 +118,13 @@ from dataframe.table_scan import ScanFilterInfo
 from dataframe.io.scan_source import ScanSource
 from dataframe.aggregation.state import (
     _StreamReduction,
+    PartsFinish,
     chunks_frame,
-    table_frame,
     table_parts,
     table_inputs,
     table_specs,
     table_supported,
     _equality_words,
-    _finish_parts,
     _word_hash,
 )
 from dataframe.aggregation.keys import (
@@ -169,7 +170,7 @@ from dataframe.kernels.gather import (
 )
 from dataframe.storage.allocation import huge_list
 from dataframe.kernels.mask_filter import filter_columns
-from .parallel import Job, morsel_ranges, run_jobs, source_tasks
+from .parallel import Job, Rounds, morsel_ranges, run_jobs, source_tasks
 from .series import Series
 from dataframe.kernels.segment_statistics import (
     ensure_statistics,
@@ -2584,32 +2585,221 @@ def _morsel_ranges(frame: DataFrame, workers: Int) -> List[Int]:
     return morsel_ranges(ends, max(1, workers))
 
 
-def finish_pipeline(
-    mut run: PipelineRun,
-    mut counts: List[Int],
-    mut set_frames: List[DataFrame],
-) raises -> PipelineFinish:
-    """`run`'s sink finished once its execute tasks are done: the counts
-    of rows fed and of each step's input and output rows in `counts`, the
-    finished frames of grouping sets in `set_frames` (set order, the
-    grand total's with its one row) and the finish steps' parallel work
-    still to run (`PipelineFinish`), whose `result` is the output."""
-    var finish = PipelineFinish()
-    var finish_counts = List[Int]()
-    var result = _finish_pipeline(
-        run, counts, set_frames, finish_counts, finish
-    )
-    finish.counts = finish_counts^
-    if (
-        len(run.finish_steps) > 0
-        and len(finish.parts) == 0
-        and len(finish.counts) == 0
-    ):
-        # The sink finished the output whole: the steps run over it as
-        # a pipeline of their own, morsels on every worker.
-        finish.second.append(
+def finish_pipeline(mut run: PipelineRun) raises -> PipelineFinish:
+    """`run`'s finish once its execute tasks are done, as rounds of tasks
+    (`PipelineFinish`). `run` must stay where it is until the finish's
+    `result`."""
+    return PipelineFinish(Int(Pointer(to=run)))
+
+
+# The finish's stages (`PipelineFinish.stage`).
+# The sink's finish.
+comptime _FINISH_SINK = 0
+# The finish steps run on the aggregate table's finished parts.
+comptime _FINISH_PARTS = 1
+# The finish steps' second pipeline: its execute tasks, then its sink's
+# finish.
+comptime _FINISH_SECOND = 2
+comptime _FINISH_SECOND_SINK = 3
+comptime _FINISH_DONE = 4
+
+# The stages of a sink's finish (`PipelineFinish.sink`).
+comptime _SINK_BEGIN = 0
+# A grouping set's aggregate table finishing, then its parts finishing
+# into its frame.
+comptime _SINK_SET_TABLE = 1
+comptime _SINK_SET_FRAME = 2
+# The aggregate table finishing, then its parts finishing into the
+# output.
+comptime _SINK_TABLE = 3
+comptime _SINK_FRAME = 4
+# The workers' batches copied into the output.
+comptime _SINK_BATCHES = 5
+comptime _SINK_DONE = 6
+
+
+struct PipelineFinish(Movable, Rounds):
+    """A pipeline's finish once its execute tasks are done, as rounds of
+    tasks (`next_round`, `round_task`), the result once they are done
+    (`result`). The tasks of a round run at the same time; the serial
+    work between rounds is small (combining the workers' sink states,
+    setting up the next round).
+
+    First the sink's finish: an aggregate table's phase 2
+    (`AggregateFinish`) and its parts finished into frames
+    (`PartsFinish`), for each grouping set in turn; or the workers'
+    batches copied out (`MaterializeFinish`). Then the row-local steps
+    above an aggregate: run on each finished part of the aggregate table
+    by the task that takes the part (`parts`), or, when the sink
+    finished its output whole, as a second pipeline over it (`second`),
+    a task per worker, whose own sink then finishes. Either way each row
+    runs through the steps on one thread, and no thread waits on another
+    while a round runs."""
+
+    # The address of the pipeline's `PipelineRun`.
+    var run: Int
+    var stage: Int
+    var sink: Int
+    # The sink's output, or the result once no work is left.
+    var frame: DataFrame
+    # The rows fed and each step's input and output rows, of the sink
+    # finishing (`sink_counts`) and of the pipeline (`run_counts`).
+    var sink_counts: List[Int]
+    var run_counts: List[Int]
+    # The finished frames of grouping sets (set order, the grand total's
+    # with its one row).
+    var set_frames: List[DataFrame]
+    # The finish steps' input and output rows counted so far.
+    var counts: List[Int]
+    var parts: List[_FinishStepsJob]
+    var second: List[PipelineRun]
+    # The steps the parts or the second pipeline run.
+    var steps: Int
+    # Tasks for the parts: task t runs parts t, t + stride, ...
+    var stride: Int
+    # The aggregate table's sinks, whose heaps hold the long key strings
+    # of its finished groups until they are read out.
+    var held: List[AggregateSink]
+    # The sink's finish under way: one entry at most in each.
+    var table: List[AggregateFinish]
+    var frames: List[PartsFinish]
+    var batches: List[MaterializeFinish]
+    # The filter the aggregate table's finish runs (`GroupFilter` points
+    # at it), and the finish steps left after it.
+    var having: List[_HavingFilter]
+    var rest: List[Step]
+    # Grouping sets: the combined sinks, the sets in finish order, the
+    # set finishing (`order[next]`), each set's place among the sets
+    # still held, and the frames finished so far.
+    var grouped: List[GroupingSetsSink]
+    var order: List[Int]
+    var next: Int
+    var remaining: List[Int]
+    var finished_sets: List[DataFrame]
+
+    def __init__(out self, run: Int) raises:
+        self.run = run
+        self.stage = _FINISH_SINK
+        self.sink = _SINK_BEGIN
+        self.frame = DataFrame(List[Series](), height=0)
+        self.sink_counts = List[Int]()
+        self.run_counts = List[Int]()
+        self.set_frames = List[DataFrame]()
+        self.counts = List[Int]()
+        self.parts = List[_FinishStepsJob]()
+        self.second = List[PipelineRun]()
+        self.steps = 0
+        self.stride = 0
+        self.held = List[AggregateSink]()
+        self.table = List[AggregateFinish]()
+        self.frames = List[PartsFinish]()
+        self.batches = List[MaterializeFinish]()
+        self.having = List[_HavingFilter]()
+        self.rest = List[Step]()
+        self.grouped = List[GroupingSetsSink]()
+        self.order = List[Int]()
+        self.next = 0
+        self.remaining = List[Int]()
+        self.finished_sets = List[DataFrame]()
+
+    def next_round(mut self) raises -> Int:
+        """The tasks of the next round, 0 when the output is ready."""
+        while True:
+            if self.stage == _FINISH_SINK:
+                var tasks = self._sink_round(self.run)
+                if tasks > 0:
+                    return tasks
+                swap(self.run_counts, self.sink_counts)
+                self._after_sink()
+                if len(self.parts) > 0:
+                    self.stage = _FINISH_PARTS
+                    return self.stride
+                if len(self.second) > 0:
+                    self.stage = _FINISH_SECOND
+                    if self.second[0].tasks() > 0:
+                        return self.second[0].tasks()
+                    continue
+                self.stage = _FINISH_DONE
+            elif self.stage == _FINISH_PARTS:
+                self._end_parts()
+                self.stage = _FINISH_DONE
+            elif self.stage == _FINISH_SECOND:
+                self.sink = _SINK_BEGIN
+                self.stage = _FINISH_SECOND_SINK
+            elif self.stage == _FINISH_SECOND_SINK:
+                var tasks = self._sink_round(Int(Pointer(to=self.second[0])))
+                if tasks > 0:
+                    return tasks
+                for k in range(self.steps):
+                    self.counts.append(self.sink_counts[2 * k + 1])
+                    self.counts.append(self.sink_counts[2 * k + 2])
+                self.second = List[PipelineRun]()
+                self.stage = _FINISH_DONE
+            else:
+                return 0
+
+    def round_task(mut self, task: Int) raises:
+        if self.stage == _FINISH_PARTS:
+            var p = task
+            while p < len(self.parts):
+                self.parts[p].run()
+                p += self.stride
+        elif self.stage == _FINISH_SECOND:
+            self.second[0].execute(task)
+        elif len(self.table) > 0:
+            self.table[0].round_task(task)
+        elif len(self.frames) > 0:
+            self.frames[0].round_task(task)
+        else:
+            self.batches[0].round_task(task)
+
+    def result(
+        mut self, mut counts: List[Int], mut set_frames: List[DataFrame]
+    ) raises -> DataFrame:
+        """The output, once `next_round` returned 0: the rows fed and each
+        step's input and output rows in `counts`, then the finish steps'
+        input and output rows; the grouping sets' frames in
+        `set_frames`."""
+        counts = self.run_counts.copy()
+        counts.extend(Span(self.counts))
+        set_frames = self.set_frames.copy()
+        return self.frame.copy()
+
+    def release(mut self):
+        """Free the second pipeline's shared state, for a finish that
+        failed before its result."""
+        if len(self.second) > 0:
+            self.second[0].release()
+
+    def _end_parts(mut self) raises:
+        """The parts' frames as the result's chunks."""
+        var frames = List[DataFrame](capacity=len(self.parts))
+        var rest = List[Int](length=2 * self.steps, fill=0)
+        for j in range(len(self.parts)):
+            frames.append(self.parts[j].frame.copy())
+            for k in range(len(rest)):
+                rest[k] += self.parts[j].counts[k]
+        self.frame = chunks_frame(frames)
+        self.counts.extend(Span(rest))
+        self.parts = List[_FinishStepsJob]()
+        self.stride = 0
+        self.held = List[AggregateSink]()
+
+    def _after_sink(mut self) raises:
+        """Once the sink finished its output whole: the finish steps over
+        it as a pipeline of their own, morsels on every worker."""
+        ref run = Pointer[PipelineRun, MutAnyOrigin](
+            unsafe_from_address=self.run
+        )[]
+        if (
+            len(run.finish_steps) == 0
+            or len(self.parts) > 0
+            or len(self.counts) > 0
+        ):
+            return
+        self.second.append(
             begin_pipeline(
-                result,
+                self.frame,
                 run.finish_steps,
                 run.joins,
                 run.indexes,
@@ -2632,94 +2822,322 @@ def finish_pipeline(
                 List[PushedJoinFilter](),
             )
         )
-        finish.steps = len(run.finish_steps)
-    finish.frame = result^
-    return finish^
+        self.steps = len(run.finish_steps)
 
+    def _sink_round(mut self, at: Int) raises -> Int:
+        """The tasks of the next round of the sink's finish of the run at
+        `at`, 0 once its output is in `frame` (and, for the aggregate
+        table's finished parts that the finish steps run on, in
+        `parts`)."""
+        ref run = Pointer[PipelineRun, MutAnyOrigin](unsafe_from_address=at)[]
+        while True:
+            if self.sink == _SINK_BEGIN:
+                self._begin_sink(run)
+            elif self.sink == _SINK_SET_TABLE:
+                var tasks = self.table[0].next_round()
+                if tasks > 0:
+                    return tasks
+                var done = self.table.pop()
+                swap(self.held, done.sinks)
+                var result = AggregateResult()
+                swap(result, done.result)
+                var s = self.order[self.next]
+                self.frames.append(
+                    PartsFinish.of_table(run.template[s], result^, False)
+                )
+                self.sink = _SINK_SET_FRAME
+            elif self.sink == _SINK_SET_FRAME:
+                var tasks = self.frames[0].next_round()
+                if tasks > 0:
+                    return tasks
+                var finished = self.frames.pop().frame.copy()
+                self.held = List[AggregateSink]()
+                var s = self.order[self.next]
+                if len(run.sets[s]) == 0:
+                    if finished.height() == 0:
+                        # No rows: the grand total is still one row.
+                        finished = run.set_empty[0].select_exprs(
+                            run.expressions
+                        )
+                    else:
+                        finished = finished.drop([_TOTAL_KEY])
+                self.finished_sets[s] = finished^
+                self.next += 1
+                if self.next < len(self.order):
+                    self._begin_set(run)
+                else:
+                    for t in range(len(run.sets)):
+                        self.set_frames.append(self.finished_sets[t].copy())
+                    self.finished_sets = List[DataFrame]()
+                    self.grouped = List[GroupingSetsSink]()
+                    # An empty frame of the steps' output types the
+                    # caller's null keys.
+                    self.frame = run.set_empty[0].copy()
+                    self.sink = _SINK_DONE
+            elif self.sink == _SINK_TABLE:
+                var tasks = self.table[0].next_round()
+                if tasks > 0:
+                    return tasks
+                self._end_table(run)
+            elif self.sink == _SINK_FRAME:
+                var tasks = self.frames[0].next_round()
+                if tasks > 0:
+                    return tasks
+                var finished = self.frames.pop().frame.copy()
+                if len(run.finish_steps) > 0:
+                    # The groups in first-occurrence order, then the steps
+                    # over them.
+                    finished = _steps_over_frame(
+                        finished,
+                        run.finish_steps,
+                        run.joins,
+                        run.indexes,
+                        self.counts,
+                    )
+                self.held = List[AggregateSink]()
+                self.frame = finished^
+                self.sink = _SINK_DONE
+            elif self.sink == _SINK_BATCHES:
+                var tasks = self.batches[0].next_round()
+                if tasks > 0:
+                    return tasks
+                var whole = self.batches.pop().frame.copy()
+                if run.collects:
+                    if len(run.keys) == 0:
+                        whole = whole.select_exprs(run.expressions)
+                    else:
+                        whole = whole.group_by(
+                            run.keys, maintain_order=run.ordered
+                        ).agg(run.expressions)
+                self.frame = whole^
+                self.sink = _SINK_DONE
+            else:
+                return 0
 
-struct PipelineFinish(Movable):
-    """The parallel work of a pipeline's finish after its sink finished,
-    as tasks that run at the same time (`tasks`, `run_task`), and the
-    output once they are done (`result`). The work is the row-local
-    steps above an aggregate: run on each finished part of the aggregate
-    table by the task that takes the part (`parts`), or, when the sink
-    finished its output whole, as a second pipeline over it (`second`),
-    a task per worker. Either way each row runs through the steps on one
-    thread, and no thread waits on another while they run."""
-
-    # The sink's output, or the result when no work is left.
-    var frame: DataFrame
-    # The finish steps' input and output rows counted so far.
-    var counts: List[Int]
-    var parts: List[_FinishStepsJob]
-    var second: List[PipelineRun]
-    # The steps the parts or the second pipeline run.
-    var steps: Int
-    # Tasks for the parts: task t runs parts t, t + stride, ...
-    var stride: Int
-    # The aggregate table's sinks, whose heaps hold the parts' long key
-    # strings until the parts are finished.
-    var held: List[AggregateSink]
-
-    def __init__(out self) raises:
-        self.frame = DataFrame(List[Series](), height=0)
-        self.counts = List[Int]()
-        self.parts = List[_FinishStepsJob]()
-        self.second = List[PipelineRun]()
-        self.steps = 0
-        self.stride = 0
-        self.held = List[AggregateSink]()
-
-    def tasks(self) -> Int:
-        """The tasks left to run, 0 when the output is ready."""
-        if len(self.second) > 0:
-            return self.second[0].tasks()
-        return self.stride
-
-    def run_task(mut self, task: Int) raises:
-        if len(self.second) > 0:
-            self.second[0].execute(task)
-            return
-        var p = task
-        while p < len(self.parts):
-            self.parts[p].run()
-            p += self.stride
-
-    def result(mut self, mut counts: List[Int]) raises -> DataFrame:
-        """The output, after every task; the finish steps' input and
-        output rows are appended to `counts`."""
-        if len(self.second) > 0:
-            var inner = List[Int]()
-            var none = List[DataFrame]()
-            var unused = List[Int]()
-            var later = PipelineFinish()
-            self.frame = _finish_pipeline(
-                self.second[0], inner, none, unused, later
+    def _begin_sink(mut self, mut run: PipelineRun) raises:
+        """The sink's serial start: the rounds no schedule ran
+        (`begin_round`), the counts, the workers' sink states combined,
+        and the first round of the sink's finish set up, or the output
+        made here when the sink has no parallel finish."""
+        ref jobs = run.jobs
+        ref steps = run.steps
+        ref layout = run.layout
+        ref sets = run.sets
+        var planned = run.planned
+        while run.begin_round():
+            run.execute_all()
+        run.release()
+        var counts = List[Int](length=3 * len(steps) + 1, fill=0)
+        for j in range(len(jobs)):
+            for i in range(len(counts)):
+                counts[i] += jobs[j].counts[i]
+        if len(steps) != planned:
+            # The aggregate inputs' projection has no plan node: the
+            # counts are the planned steps'.
+            var n = len(steps)
+            var kept = List[Int](capacity=3 * planned + 1)
+            for i in range(2 * planned + 1):
+                kept.append(counts[i])
+            for i in range(planned):
+                kept.append(counts[2 * n + 1 + i])
+            counts = kept^
+        self.sink_counts = counts^
+        self.sink = _SINK_DONE
+        if len(layout) > 0 and len(sets) > 0:
+            # Derived sets finish first: their rows point at key bytes the
+            # source set's sinks hold. A worker's sinks are in set order,
+            # so a set's is found by its place among those still held.
+            self.order = List[Int]()
+            for back in range(len(sets)):
+                var t = len(sets) - 1 - back
+                if run.derived_from[t] >= 0:
+                    self.order.append(t)
+            for back in range(len(sets)):
+                var t = len(sets) - 1 - back
+                if run.derived_from[t] < 0:
+                    self.order.append(t)
+            self.remaining = List[Int]()
+            for t in range(len(sets)):
+                self.remaining.append(t)
+            self.finished_sets = List[DataFrame](
+                length=len(sets), fill=run.frame.clear()
             )
-            for k in range(self.steps):
-                self.counts.append(inner[2 * k + 1])
-                self.counts.append(inner[2 * k + 2])
-            self.second = List[PipelineRun]()
-        elif len(self.parts) > 0:
-            var frames = List[DataFrame](capacity=len(self.parts))
-            var rest = List[Int](length=2 * self.steps, fill=0)
-            for j in range(len(self.parts)):
-                frames.append(self.parts[j].frame.copy())
-                for k in range(len(rest)):
-                    rest[k] += self.parts[j].counts[k]
-            self.frame = chunks_frame(frames)
-            self.counts.extend(Span(rest))
-            self.parts = List[_FinishStepsJob]()
-            self.stride = 0
-            self.held = List[AggregateSink]()
-        counts.extend(Span(self.counts))
-        return self.frame.copy()
+            var locals = List[GroupingSetsSink]()
+            for j in range(len(jobs)):
+                if len(jobs[j].runner.sets) > 0:
+                    locals.append(jobs[j].runner.sets.pop())
+            self.grouped = _combined(locals^)
+            self.next = 0
+            self._begin_set(run)
+            return
+        if len(layout) > 0:
+            self._begin_table(run)
+            return
+        if run.collects or (
+            len(run.ungrouped) == 0 and not run.build_layout and run.top <= 0
+        ):
+            # The workers' batches in source order.
+            var locals = List[MaterializeSink]()
+            for j in range(len(jobs)):
+                if len(jobs[j].runner.materialize) > 0:
+                    locals.append(jobs[j].runner.materialize.pop())
+            var combined = _combined(locals^)
+            self.batches.append(
+                MaterializeFinish(combined^, run.schemas[][len(steps)].clear())
+            )
+            self.sink = _SINK_BATCHES
+            return
+        self.frame = _finish_here(run)
 
-    def release(mut self):
-        """Free the second pipeline's shared state, for a finish that
-        failed before its result."""
-        if len(self.second) > 0:
-            self.second[0].release()
+    def _begin_set(mut self, mut run: PipelineRun) raises:
+        """The aggregate table of the next set in finish order."""
+        var s = self.order[self.next]
+        var place = self.remaining.index(s)
+        var sinks = List[AggregateSink]()
+        for j in range(len(self.grouped)):
+            sinks.append(self.grouped[j].tables.pop(place))
+        _ = self.remaining.pop(place)
+        self.table.append(AggregateFinish(sinks^, run.layout[s], ordered=False))
+        self.sink = _SINK_SET_TABLE
+
+    def _begin_table(mut self, mut run: PipelineRun) raises:
+        """The aggregate table's finish. Long key strings live in the
+        sinks' heaps until the finish has read them out."""
+        ref jobs = run.jobs
+        var locals = List[TableSink]()
+        for j in range(len(jobs)):
+            if len(jobs[j].runner.table) > 0:
+                locals.append(jobs[j].runner.table.pop())
+        var combined = _combined(locals^)
+        var sinks = List[AggregateSink](capacity=len(combined))
+        while len(combined) > 0:
+            sinks.append(combined.pop(0).take_table())
+        self.sink = _SINK_TABLE
+        if len(run.finish_steps) == 0 or run.ordered:
+            # With steps, the groups in first-occurrence order (each
+            # group row's first sequence number), then the steps over
+            # them.
+            self.table.append(
+                AggregateFinish(sinks^, run.layout[0], ordered=run.ordered)
+            )
+            return
+        # Run an initial filter on reduction outputs during aggregate
+        # finalization, before rejected groups enter output columns. Apply
+        # remaining row steps only to surviving groups.
+        var having = _having(
+            run.template[0], run.finish_steps[0], run.keys, run.batch_size
+        )
+        self.rest = run.finish_steps.copy()
+        var filter = Optional[GroupFilter]()
+        if having:
+            trace_path("pipeline.aggregate_finish_filter")
+            _ = self.rest.pop(0)
+            self.having.append(having.take())
+            filter = GroupFilter(
+                self.having[0].slots.copy(),
+                Int(Pointer(to=self.having[0])),
+                _having_keep,
+            )
+        self.table.append(
+            AggregateFinish(sinks^, run.layout[0], filter, ordered=False)
+        )
+
+    def _end_table(mut self, mut run: PipelineRun) raises:
+        """The aggregate table finished: its parts finished into the
+        output, or, with finish steps and no order, handed to the finish
+        steps' tasks."""
+        var done = self.table.pop()
+        swap(self.held, done.sinks)
+        var result = AggregateResult()
+        swap(result, done.result)
+        if len(run.finish_steps) == 0 or run.ordered:
+            self.frames.append(
+                PartsFinish.of_table(run.template[0], result^, run.ordered)
+            )
+            self.sink = _SINK_FRAME
+            return
+        var filtered = len(self.having) > 0
+        self.having = List[_HavingFilter]()
+        var merged = result.merged
+        var kept = 0
+        for p in range(len(result.firsts)):
+            kept += len(result.firsts[p])
+        var parts = table_parts(run.template[0], result^)
+        if filtered:
+            self.counts.append(merged)
+            self.counts.append(kept)
+        self.sink = _SINK_DONE
+        if len(parts) == 0:
+            # No group: the steps over the empty result, for its columns.
+            var rest_counts = List[Int]()
+            self.frame = _steps_over_frame(
+                run.template[0].finish(),
+                self.rest,
+                run.joins,
+                run.indexes,
+                rest_counts,
+            )
+            self.counts.extend(Span(rest_counts))
+            self.held = List[AggregateSink]()
+            return
+        # Each part finished and run through the steps by the task that
+        # takes it, the kept rows of each a chunk of the result. The
+        # parts' key strings still point into the sinks' heaps.
+        trace_path("pipeline.aggregate_finish_steps")
+        while len(parts) > 0:
+            self.parts.append(
+                _FinishStepsJob(
+                    parts.pop(0),
+                    self.rest,
+                    run.joins,
+                    run.indexes,
+                    run.batch_size,
+                )
+            )
+        self.steps = len(self.rest)
+        self.stride = min(len(self.parts), max(1, run.workers))
+        self.frame = run.frame.clear()
+
+
+def _finish_here(mut run: PipelineRun) raises -> DataFrame:
+    """The output of a sink whose finish has no parallel work: ungrouped
+    reductions, a join's build side, or a top-N."""
+    ref jobs = run.jobs
+    ref steps = run.steps
+    ref schemas = run.schemas
+    if len(run.ungrouped) > 0:
+        var sinks = List[UngroupedSink](capacity=len(jobs))
+        for j in range(len(jobs)):
+            if len(jobs[j].runner.ungrouped) > 0:
+                sinks.append(jobs[j].runner.ungrouped.pop())
+        var combined = _combined(sinks^)
+        return ungrouped_finish(run.ungrouped[0][], combined)
+    if run.build_layout:
+        # A join's build side: the workers' rows combined into its table,
+        # whose finalize tasks the caller's finish event runs. The result
+        # is the build's columns, empty.
+        var locals = List[JoinBuildSink]()
+        for j in range(len(jobs)):
+            if len(jobs[j].runner.build) > 0:
+                locals.append(jobs[j].runner.build.pop())
+        var combined = _combined(locals^)
+        run.built = JoinHashTable(
+            run.build_layout.value(), combined^, defer_finalize=True
+        )
+        return schemas[][len(steps)].clear()
+    # A top-N's workers' heaps, combined into one, sorted (Finalize).
+    var locals = List[TopNSink]()
+    for j in range(len(jobs)):
+        if len(jobs[j].topn) > 0:
+            locals.append(jobs[j].topn.pop())
+    var heaps = _combined(locals^)
+    if len(heaps) == 0 or heaps[0].heap.size == 0:
+        var empty = schemas[][len(steps)].copy()
+        return empty^
+    var merged = heaps[0].finish()
+    if run.top_maintain_order:
+        merged = merged.drop([_ORDER_COLUMN])
+    return merged^
 
 
 struct _FinishStepsJob(Job):
@@ -3566,237 +3984,3 @@ def begin_pipeline(
     run.source = source
     run.build_layout = build_layout^
     return run^
-
-
-def _finish_pipeline(
-    mut run: PipelineRun,
-    mut counts: List[Int],
-    mut set_frames: List[DataFrame],
-    mut finish_counts: List[Int],
-    mut finish: PipelineFinish,
-) raises -> DataFrame:
-    """The sink's result, after every execute task of `run`: the rows no
-    probe matched (`begin_round`), then the workers' sinks combined and
-    finished. `counts` and `set_frames` are `finish_pipeline`'s;
-    `finish_counts` receives each finish step's input and output rows when
-    the aggregate table's finish ran them, and stays empty otherwise. When
-    the finish steps run on the aggregate table's finished parts, those
-    parts are left in `finish` for its tasks."""
-    ref jobs = run.jobs
-    ref steps = run.steps
-    ref joins = run.joins
-    ref indexes = run.indexes
-    ref expressions = run.expressions
-    ref keys = run.keys
-    var ordered = run.ordered
-    var batch_size = run.batch_size
-    ref sets = run.sets
-    var top = run.top
-    ref top_names = run.top_names
-    ref top_descending = run.top_descending
-    ref top_nulls_last = run.top_nulls_last
-    var top_maintain_order = run.top_maintain_order
-    ref layout = run.layout
-    ref template = run.template
-    ref set_empty = run.set_empty
-    ref derived_from = run.derived_from
-    ref schemas = run.schemas
-    var collects = run.collects
-    ref ungrouped = run.ungrouped
-    ref finish_steps = run.finish_steps
-    ref frame = run.frame
-    var planned = run.planned
-    # The rounds no schedule ran (`begin_round`).
-    while run.begin_round():
-        run.execute_all()
-    run.release()
-    counts = List[Int](length=3 * len(steps) + 1, fill=0)
-    for j in range(len(jobs)):
-        for i in range(len(counts)):
-            counts[i] += jobs[j].counts[i]
-    if len(steps) != planned:
-        # The aggregate inputs' projection has no plan node: the counts
-        # are the planned steps'.
-        var n = len(steps)
-        var kept = List[Int](capacity=3 * planned + 1)
-        for i in range(2 * planned + 1):
-            kept.append(counts[i])
-        for i in range(planned):
-            kept.append(counts[2 * n + 1 + i])
-        counts = kept^
-    if len(layout) > 0 and len(sets) > 0:
-        # Derived sets finish first: their rows point at key bytes the
-        # source set's sinks hold. A worker's sinks are in set order, so a
-        # set's is found by its place among those still held.
-        var finish_order = List[Int]()
-        for back in range(len(sets)):
-            var t = len(sets) - 1 - back
-            if derived_from[t] >= 0:
-                finish_order.append(t)
-        for back in range(len(sets)):
-            var t = len(sets) - 1 - back
-            if derived_from[t] < 0:
-                finish_order.append(t)
-        var remaining = List[Int]()
-        for t in range(len(sets)):
-            remaining.append(t)
-        var finished_sets = List[DataFrame](
-            length=len(sets), fill=frame.clear()
-        )
-        var locals = List[GroupingSetsSink]()
-        for j in range(len(jobs)):
-            if len(jobs[j].runner.sets) > 0:
-                locals.append(jobs[j].runner.sets.pop())
-        var combined = _combined(locals^)
-        for s in finish_order:
-            var place = remaining.index(s)
-            var sinks = List[AggregateSink]()
-            for j in range(len(combined)):
-                sinks.append(combined[j].tables.pop(place))
-            _ = remaining.pop(place)
-            var result = aggregate_finish(sinks, layout[s], ordered=False)
-            var finished = table_frame(template[s], result^, False)
-            if len(sets[s]) == 0:
-                if finished.height() == 0:
-                    # No rows: the grand total is still one row.
-                    finished = set_empty[0].select_exprs(expressions)
-                else:
-                    finished = finished.drop([_TOTAL_KEY])
-            finished_sets[s] = finished^
-            _ = sinks^
-        for s in range(len(sets)):
-            set_frames.append(finished_sets[s].copy())
-        # An empty frame of the steps' output types the caller's null keys.
-        return set_empty[0].copy()
-    if len(layout) > 0:
-        var locals = List[TableSink]()
-        for j in range(len(jobs)):
-            if len(jobs[j].runner.table) > 0:
-                locals.append(jobs[j].runner.table.pop())
-        var combined = _combined(locals^)
-        var sinks = List[AggregateSink](capacity=len(combined))
-        while len(combined) > 0:
-            sinks.append(combined.pop(0).take_table())
-        # Long key strings live in the sinks' heaps until the finish has
-        # read them out.
-        var finished: DataFrame
-        if len(finish_steps) == 0:
-            var result = aggregate_finish(sinks, layout[0], ordered=ordered)
-            finished = table_frame(template[0], result^, ordered)
-        elif ordered:
-            # The groups in first-occurrence order (each group row's first
-            # sequence number), then the steps over them.
-            var result = aggregate_finish(sinks, layout[0], ordered=True)
-            finished = _steps_over_frame(
-                table_frame(template[0], result^, True),
-                finish_steps,
-                joins,
-                indexes,
-                finish_counts,
-            )
-        else:
-            # Run an initial filter on reduction outputs during aggregate
-            # finalization, before rejected groups enter output columns. Apply
-            # remaining row steps only to surviving groups.
-            var having = _having(template[0], finish_steps[0], keys, batch_size)
-            var rest = finish_steps.copy()
-            var filter = Optional[GroupFilter]()
-            if having:
-                trace_path("pipeline.aggregate_finish_filter")
-                _ = rest.pop(0)
-                filter = GroupFilter(
-                    having.value().slots.copy(),
-                    Int(Pointer(to=having.value())),
-                    _having_keep,
-                )
-            var result = aggregate_finish(
-                sinks, layout[0], filter, ordered=False
-            )
-            _ = having^
-            var merged = result.merged
-            var kept = 0
-            for p in range(len(result.firsts)):
-                kept += len(result.firsts[p])
-            var parts = table_parts(template[0], result^)
-            if filter:
-                finish_counts.append(merged)
-                finish_counts.append(kept)
-            if len(parts) == 0:
-                # No group: the steps over the empty result, for its
-                # columns.
-                var rest_counts = List[Int]()
-                finished = _steps_over_frame(
-                    template[0].finish(), rest, joins, indexes, rest_counts
-                )
-                finish_counts.extend(Span(rest_counts))
-            else:
-                # Each part finished and run through the steps by the task
-                # that takes it, the kept rows of each a chunk of the
-                # result.
-                trace_path("pipeline.aggregate_finish_steps")
-                while len(parts) > 0:
-                    finish.parts.append(
-                        _FinishStepsJob(
-                            parts.pop(0), rest, joins, indexes, batch_size
-                        )
-                    )
-                finish.steps = len(rest)
-                finish.stride = min(len(finish.parts), max(1, run.workers))
-                finished = frame.clear()
-        if len(finish.parts) > 0:
-            # The parts' key strings still point into the sinks' heaps.
-            finish.held = sinks^
-        else:
-            _ = sinks^
-        return finished^
-    if collects:
-        var locals = List[MaterializeSink]()
-        for j in range(len(jobs)):
-            if len(jobs[j].runner.materialize) > 0:
-                locals.append(jobs[j].runner.materialize.pop())
-        var combined = _combined(locals^)
-        var whole = materialize_finish(combined, schemas[][len(steps)].clear())
-        if len(keys) == 0:
-            return whole.select_exprs(expressions)
-        return whole.group_by(keys, maintain_order=ordered).agg(expressions)
-    if len(ungrouped) > 0:
-        var sinks = List[UngroupedSink](capacity=len(jobs))
-        for j in range(len(jobs)):
-            if len(jobs[j].runner.ungrouped) > 0:
-                sinks.append(jobs[j].runner.ungrouped.pop())
-        var combined = _combined(sinks^)
-        return ungrouped_finish(ungrouped[0][], combined)
-    if run.build_layout:
-        # A join's build side: the workers' rows combined into its table,
-        # whose finalize tasks the caller's finish event runs. The result
-        # is the build's columns, empty.
-        var locals = List[JoinBuildSink]()
-        for j in range(len(jobs)):
-            if len(jobs[j].runner.build) > 0:
-                locals.append(jobs[j].runner.build.pop())
-        var combined = _combined(locals^)
-        run.built = JoinHashTable(
-            run.build_layout.value(), combined^, defer_finalize=True
-        )
-        return schemas[][len(steps)].clear()
-    if top <= 0:
-        # The workers' batches in source order.
-        var locals = List[MaterializeSink]()
-        for j in range(len(jobs)):
-            if len(jobs[j].runner.materialize) > 0:
-                locals.append(jobs[j].runner.materialize.pop())
-        var combined = _combined(locals^)
-        return materialize_finish(combined, schemas[][len(steps)].clear())
-    # A top-N's workers' heaps, combined into one, sorted (Finalize).
-    var locals = List[TopNSink]()
-    for j in range(len(jobs)):
-        if len(jobs[j].topn) > 0:
-            locals.append(jobs[j].topn.pop())
-    var heaps = _combined(locals^)
-    if len(heaps) == 0 or heaps[0].heap.size == 0:
-        var empty = schemas[][len(steps)].copy()
-        return empty^
-    var merged = heaps[0].finish()
-    if top_maintain_order:
-        merged = merged.drop([_ORDER_COLUMN])
-    return merged^
