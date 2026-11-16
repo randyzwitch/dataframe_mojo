@@ -28,7 +28,6 @@ from dataframe.planning.graph import (
     plan_class_refs,
     plan_compact_scan_slots,
     plan_cover,
-    plan_ends_in_breaker,
     plan_filtered_scan,
     plan_height_bound,
     plan_is_filtering,
@@ -38,15 +37,13 @@ from dataframe.planning.graph import (
     plan_subplan,
     plan_subplan_classes,
 )
-from dataframe.planning.inputs import (
-    _SubplanPipeline,
-)
 from dataframe.planning.statistics import (
     PlanStatistics,
     plan_cardinality,
     plan_distinct,
 )
 from dataframe.planning.properties import (
+    _is_scan,
     _pinned,
     _stream_join,
     _stream_rows,
@@ -327,7 +324,11 @@ struct _StreamInputs(Movable):
 
 
 def plan_schedule_inputs(
-    self: QueryContext, terminal: Int, top: Int, batch_size: Int
+    self: QueryContext,
+    terminal: Int,
+    top: Int,
+    batch_size: Int,
+    finish_above: Bool = False,
 ) raises -> _StreamInputs:
     """Schedule computed join inputs as children of the probe pipeline. Each
     build finishes its columns and hash index in its finish event. The probe
@@ -382,13 +383,15 @@ def plan_schedule_inputs(
             inputs.probe_estimates.append(-1)
             inputs.build_filtered.append(False)
             inputs.metas.append(MetaPipeline(META_REGULAR))
-    # With no build to overlap, the stream runs its source itself, where
-    # an aggregate's finish can take the steps above it (`FinishAbove`).
+    # A computed source the stream reads is a pipeline of the schedule
+    # too, so it runs as no schedule of its own. With no build to overlap,
+    # an aggregate source whose finish can take the row steps above it
+    # (`finish_above`) is left to the stream, which runs it with them.
     elif (
-        len(inputs.wanted) > 0
-        and probe >= 0
+        probe >= 0
         and probe != top
-        and plan_ends_in_breaker(self, probe)
+        and not _is_scan(self._nodes[probe].kind)
+        and (len(inputs.wanted) > 0 or not finish_above)
         and probe not in ahead[]
     ):
         inputs.wanted.append(probe)

@@ -4,7 +4,6 @@ from dataframe.io.csv_types import _CsvScanOptions, CsvSchema
 from dataframe.io.csv_reader import _open_csv_batches
 
 from dataframe.expr import (
-    COL,
     Expr,
 )
 from dataframe.frame import (
@@ -82,6 +81,7 @@ from dataframe.planning.model import (
     WITH_COLUMNS,
 )
 from dataframe.planning.properties import (
+    _column_projection,
     _is_scan,
     _is_time_window,
     _schema_of,
@@ -310,12 +310,7 @@ def plan_execute_node(
     if node.kind == SELECT and not empty:
         ref sorted = self._nodes[node.left]
         if sorted.kind == SORT:
-            var plain = True
-            for expression in node.exprs:
-                plain = plain and len(expression._nodes) == 1
-                if len(expression._nodes) == 1:
-                    plain = plain and expression._nodes[0].op == COL
-            if plain:
+            if _column_projection(node):
                 var source = self._execute(
                     sorted.left, False, streaming, batch_size
                 )

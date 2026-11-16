@@ -343,3 +343,52 @@ def test_in_memory_build_sides_run_ahead_as_scheduled_pipelines() raises:
         .sort(["s"])
     )
     assert_frame(streamed, eager)
+
+
+def test_operator_build_sides_schedule_their_own_inputs() raises:
+    """A build side that is an operator over whole inputs (here a sort of
+    a grouped stream) is a pipeline of the probe's schedule, and so is
+    the stream it reads: no schedule runs inside another's task. The sums
+    are what joining the inputs eagerly gives."""
+    var frame = source()
+    var first = part(frame, 0)
+    var second = part(frame, 1)
+    var probe = frame.lazy().filter(col("v") > lit(Int64(-400)))
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var streamed = (
+        probe.join(first, ["k"], how="left")
+        .join(second, ["k"], how="left")
+        .group_by("s")
+        .agg(
+            [
+                col("total").sum().alias("t0"),
+                col("total_right").sum().alias("t1"),
+            ]
+        )
+        .sort("s")
+        .collect(optimize=False)
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "stream.operator_inputs" in paths,
+        "the operator's inputs were not scheduled",
+    )
+    var eager = (
+        probe.collect()
+        .join(first.collect(), on=["k"], how="left")
+        .join(second.collect(), on=["k"], how="left")
+        .group_by(["s"])
+        .agg(
+            [
+                col("total").sum().alias("t0"),
+                col("total_right").sum().alias("t1"),
+            ]
+        )
+        .sort(["s"])
+    )
+    assert_frame(streamed, eager)
