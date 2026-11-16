@@ -122,7 +122,10 @@ from dataframe.pipeline import (
 from dataframe.planning.context import (
     FinishAbove,
     QueryContext,
+    SharedResults,
     _ReadyIndex,
+    plan_shared_id,
+    plan_slot_table,
 )
 from dataframe.planning.inputs import (
     finish_build,
@@ -536,15 +539,19 @@ struct _StreamSchedule(Movable):
     var pipelines: List[_StreamPipeline]
     var metas: List[MetaPipeline]
     var plans: List[ArcPointer[QueryContext]]
+    # The pipeline writing each shared subplan's result, by its id, for
+    # the shared subplans this schedule makes (`plan_run_shared`).
+    var shared: Dict[Int, Int]
 
     def __init__(out self):
         self.pipelines = List[_StreamPipeline]()
         self.metas = List[MetaPipeline]()
         self.plans = List[ArcPointer[QueryContext]]()
+        self.shared = Dict[Int, Int]()
 
     def bind(mut self):
-        """Point every probe, outer scan and operator at the pipeline list,
-        now that it no longer grows."""
+        """Point every probe, outer scan, operator and shared result's sink
+        at the pipeline list, now that it no longer grows."""
         var address = Int(Pointer(to=self.pipelines))
         for p in range(len(self.pipelines)):
             if len(self.pipelines[p].probe) > 0:
@@ -553,6 +560,32 @@ struct _StreamSchedule(Movable):
                 self.pipelines[p].outer[0].siblings = address
             if len(self.pipelines[p].input) > 0:
                 self.pipelines[p].input[0].siblings = address
+            if len(self.pipelines[p].shared) > 0:
+                self.pipelines[p].shared[0].siblings = address
+
+    def reads(self, plan: QueryContext, index: Int) -> List[Int]:
+        """The pipelines writing the shared subplan results that the
+        subtree at `index` of `plan` scans, which a pipeline running that
+        subtree depends on. A subtree runs in the pipeline that makes it
+        or in the ones it depends on, so the pipeline at its top waits for
+        every result scanned below it."""
+        var found = List[Int]()
+        if len(self.shared) == 0 or len(plan._shared_slots) == 0:
+            return found^
+        var stack: List[Int] = [index]
+        while len(stack) > 0:
+            ref node = plan._nodes[stack.pop()]
+            if node.kind == SCAN_FRAME:
+                var at = self.shared.get(
+                    plan_shared_id(plan, node.source_slot())
+                )
+                if at and at.value() not in found:
+                    found.append(at.value())
+            if node.left >= 0:
+                stack.append(node.left)
+            if node.right >= 0:
+                stack.append(node.right)
+        return found^
 
     def release(mut self):
         for p in range(len(self.pipelines)):
@@ -633,7 +666,9 @@ def _add_stream(
     var probe = len(schedule.pipelines)
     for k in range(count):
         schedule.metas[at[k]].parent = probe
-    schedule.metas.append(MetaPipeline(type, -1, at))
+    var waits = at.copy()
+    waits.extend(schedule.reads(self, index))
+    schedule.metas.append(MetaPipeline(type, -1, waits))
     schedule.pipelines.append(
         _StreamPipeline(
             _StreamProbe(
@@ -683,12 +718,14 @@ def _add_input(
     var build: _BuildFor,
     type: Int,
     streaming: Bool = True,
+    sink: Int = 0,
 ) raises -> Int:
     """Add input `index` of a stream on `self` to `schedule` and return the
     pipeline that makes its result: the input's own stream when it is one
     (on a copy of the plan with a memo of its own), else an operator
     pipeline that runs its node over whole inputs, those inputs added
-    before it as pipelines of the same schedule."""
+    before it as pipelines of the same schedule. `sink` receives a
+    stream's rows."""
     if streaming and self._handoff == HANDOFF_OFF:
         var sub = self.copy()
         # Filters pushed into this input arrive when its builds finish
@@ -696,12 +733,12 @@ def _add_input(
         sub._pushed_filters = None
         sub._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
         sub._prefetched_indexes = Optional(ArcPointer(Dict[Int, _ReadyIndex]()))
-        var outcome = _stream_head(sub, index, batch_size, 0)
+        var outcome = _stream_head(sub, index, batch_size, sink)
         while len(outcome.plan) > 0:
             # Build sides chosen (or filters pushed): the input streams on
             # the plan that made, still in this schedule.
             sub = outcome.plan.pop()
-            outcome = _stream_head(sub, index, batch_size, 0)
+            outcome = _stream_head(sub, index, batch_size, sink)
         if len(outcome.head) > 0 and not _operator_only(
             sub, index, outcome.head[0]
         ):
@@ -716,7 +753,7 @@ def _add_input(
                 address,
                 index,
                 batch_size,
-                0,
+                sink,
                 head^,
                 inputs^,
                 build^,
@@ -741,7 +778,12 @@ def _add_input(
     var operator = len(schedule.pipelines)
     for p in at:
         schedule.metas[p].parent = operator
-    schedule.metas.append(MetaPipeline(type, -1, at))
+    # It also waits for the shared results its subtree scans.
+    var deps = at.copy()
+    for p in schedule.reads(self, index):
+        if p not in deps:
+            deps.append(p)
+    schedule.metas.append(MetaPipeline(type, -1, deps^))
     schedule.pipelines.append(
         _StreamPipeline(
             _OperatorPipeline(
@@ -869,6 +911,87 @@ def plan_union(
     for child in children:
         frames.append(got[child].copy())
     return _stack_union(frames)
+
+
+def plan_run_shared(
+    self: QueryContext,
+    shared: List[QueryContext],
+    index: Int,
+    streaming: Bool,
+    batch_size: Int,
+    sink: Int = 0,
+) raises -> DataFrame:
+    """Node `index` (the query) with the shared subplans it reads, as
+    pipelines of one schedule. `shared[k]` is the plan of shared subplan
+    `k`, whose result it reads from slots of its own when it scans
+    another (always one with a smaller id). Each subplan's pipelines end
+    in a sink that keeps its result for the scans of it, and every
+    pipeline scanning one depends on that sink, so the query's other
+    pipelines run while it is made. `sink` receives the query's rows
+    when it streams."""
+    # The subplans the query reads, directly or through others'.
+    var needed = List[Bool](length=len(shared), fill=False)
+    _mark_shared_reads(self, index, needed)
+    for back in range(len(shared)):
+        var id = len(shared) - 1 - back
+        if needed[id]:
+            _mark_shared_reads(shared[id], len(shared[id]._nodes) - 1, needed)
+    var schedule = _StreamSchedule()
+    for id in range(len(shared)):
+        if not needed[id]:
+            continue
+        trace_path("stream.shared_pipeline")
+        ref plan = shared[id]
+        var made = _add_input(
+            schedule,
+            plan,
+            len(plan._nodes) - 1,
+            batch_size,
+            _BuildFor(),
+            META_REGULAR,
+            streaming,
+        )
+        schedule.metas.append(MetaPipeline(META_REGULAR, -1, [made]))
+        schedule.pipelines.append(
+            _StreamPipeline(_SharedSink(made, id, self._shared.value()))
+        )
+        schedule.shared[id] = len(schedule.pipelines) - 1
+    var top = _add_input(
+        schedule,
+        self,
+        index,
+        batch_size,
+        _BuildFor(),
+        META_REGULAR,
+        streaming,
+        sink,
+    )
+    schedule.bind()
+    try:
+        run_pipelines(
+            schedule.pipelines, schedule.metas, parallel=not self._report
+        )
+    except e:
+        schedule.release()
+        raise e^
+    return schedule.pipelines[top].result()
+
+
+def _mark_shared_reads(self: QueryContext, index: Int, mut needed: List[Bool]):
+    """Mark the shared subplans the subtree at `index` scans."""
+    if len(self._shared_slots) == 0:
+        return
+    var stack: List[Int] = [index]
+    while len(stack) > 0:
+        ref node = self._nodes[stack.pop()]
+        if node.kind == SCAN_FRAME:
+            var id = plan_shared_id(self, node.source_slot())
+            if id >= 0:
+                needed[id] = True
+        if node.left >= 0:
+            stack.append(node.left)
+        if node.right >= 0:
+            stack.append(node.right)
 
 
 @fieldwise_init
@@ -1219,6 +1342,34 @@ struct _OuterScan(Movable):
             self._run()[].execute(task)
 
 
+struct _SharedSink(Movable):
+    """The sink of a shared subplan's pipelines: once the pipeline making
+    its result completes, the result goes where every scan of it reads it
+    (`SharedResults`). Each pipeline scanning it depends on this one."""
+
+    var source: Int
+    var id: Int
+    var results: ArcPointer[SharedResults]
+    # The schedule's List[_StreamPipeline].
+    var siblings: Int
+
+    def __init__(
+        out self, source: Int, id: Int, results: ArcPointer[SharedResults]
+    ):
+        self.source = source
+        self.id = id
+        self.results = results
+        self.siblings = 0
+
+    def execute(mut self) raises:
+        ref pipelines = Pointer[List[_StreamPipeline], MutAnyOrigin](
+            unsafe_from_address=self.siblings
+        )[]
+        ref results = self.results[]
+        results.frames[self.id] = pipelines[self.source].result()
+        results.ready[self.id] = True
+
+
 struct _OperatorPipeline(Movable):
     """An operator that reads whole inputs (a sort, a window, a pivot...)
     as a pipeline of the schedule: its computed inputs are pipelines it
@@ -1309,29 +1460,41 @@ struct _OperatorPipeline(Movable):
 
 struct _StreamPipeline(SchedulablePipeline):
     """A stream's schedule holds its inputs, its probe and the outer scans
-    of its right and full joins."""
+    of its right and full joins, and the sinks of the shared subplans it
+    makes."""
 
     var input: List[_OperatorPipeline]
     var probe: List[_StreamProbe]
     var outer: List[_OuterScan]
+    var shared: List[_SharedSink]
 
     def __init__(out self, var input: _OperatorPipeline):
         self.input = List[_OperatorPipeline]()
         self.input.append(input^)
         self.probe = List[_StreamProbe]()
         self.outer = List[_OuterScan]()
+        self.shared = List[_SharedSink]()
 
     def __init__(out self, var probe: _StreamProbe):
         self.input = List[_OperatorPipeline]()
         self.probe = List[_StreamProbe]()
         self.probe.append(probe^)
         self.outer = List[_OuterScan]()
+        self.shared = List[_SharedSink]()
 
     def __init__(out self, var outer: _OuterScan):
         self.input = List[_OperatorPipeline]()
         self.probe = List[_StreamProbe]()
         self.outer = List[_OuterScan]()
         self.outer.append(outer^)
+        self.shared = List[_SharedSink]()
+
+    def __init__(out self, var shared: _SharedSink):
+        self.input = List[_OperatorPipeline]()
+        self.probe = List[_StreamProbe]()
+        self.outer = List[_OuterScan]()
+        self.shared = List[_SharedSink]()
+        self.shared.append(shared^)
 
     def take_result(mut self) raises -> DataFrame:
         """The input's result, once this input's pipeline completed,
@@ -1360,7 +1523,10 @@ struct _StreamPipeline(SchedulablePipeline):
             self.probe[0].initialize()
 
     def max_execute_tasks(self) -> Int:
-        return configured_workers() if len(self.input) == 0 else 1
+        return (
+            configured_workers() if len(self.probe) > 0
+            or len(self.outer) > 0 else 1
+        )
 
     def execute_tasks(mut self) raises -> Int:
         if len(self.probe) > 0:
@@ -1374,6 +1540,8 @@ struct _StreamPipeline(SchedulablePipeline):
             self.probe[0].execute(task)
         elif len(self.outer) > 0:
             self.outer[0].execute(task)
+        elif len(self.shared) > 0:
+            self.shared[0].execute()
         else:
             self.input[0].execute()
 
@@ -1405,7 +1573,7 @@ struct _StreamPipeline(SchedulablePipeline):
     def finalize_task(mut self, task: Int) raises:
         if len(self.input) > 0:
             self.input[0].finalize_task(task)
-        else:
+        elif len(self.probe) > 0:
             self.probe[0].finalize_task(task)
 
     def finish_finalize(mut self) raises:
@@ -1703,7 +1871,7 @@ def _probe_start(
             elif empty_source:
                 empty = empty_source.value().copy()
             else:
-                empty = self._frames[source.source_slot()].clear()
+                empty = plan_slot_table(self, source.source_slot()).clear()
                 if len(source.names):
                     empty = empty.select(source.names)
             var typed = _step_schemas(empty, _steps_of(operations), joins)
@@ -1755,7 +1923,7 @@ def _probe_start(
             operations[0].exprs = types.value().filter.value().copy()
     else:
         source._record_execution()
-        input = self._frames[source.source_slot()].copy()
+        input = plan_slot_table(self, source.source_slot())
         if len(source.names):
             input = input.select(source.names)
         # Apply the first row-local filter as a scan filter. Skip vectors
@@ -2870,6 +3038,13 @@ def _probe_types(
         return None
     operations.reverse()
     ref source = self._nodes[cursor]
+    if (
+        source.kind == SCAN_FRAME
+        and plan_shared_id(self, source.source_slot()) >= 0
+    ):
+        # A shared subplan's result, which another pipeline is still
+        # making: the setup reads it once the probe's inputs are done.
+        return None
     var empty: DataFrame
     var input = Optional[DataFrame]()
     var filter = Optional[List[Expr]]()

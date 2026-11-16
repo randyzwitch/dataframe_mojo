@@ -45,6 +45,7 @@ from dataframe.optimizer.passes import (
 )
 from dataframe.planning.context import (
     QueryContext,
+    plan_slot_rows,
 )
 from dataframe.planning.graph import (
     GraphJoin,
@@ -135,7 +136,7 @@ def _filter_target_rows(
         if found[0] < 0:
             continue
         most = max(
-            most, self._frames[self._nodes[found[0]].source_slot()].height()
+            most, plan_slot_rows(self, self._nodes[found[0]].source_slot())
         )
     return most
 

@@ -370,8 +370,9 @@ def test_aggregations_apart_by_one_literal_are_not_shared() raises:
 
 def test_two_independent_shared_aggregations_each_run_once() raises:
     """Two different aggregations, each read twice, are both shared: they
-    hold no copy of each other, so they are collected at once, and every
-    reader still reads its own aggregation's values."""
+    hold no copy of each other, so each is made by pipelines of the
+    query's own schedule, and every reader still reads its own
+    aggregation's values."""
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var frame = sales()
     var per_item = (
@@ -402,6 +403,13 @@ def test_two_independent_shared_aggregations_each_run_once() raises:
                 >= 2,
                 "both aggregations were not shared",
             )
+            assert_true(
+                observed.text().count(
+                    "dataframe-path: stream.shared_pipeline\n"
+                )
+                >= 2,
+                "the aggregations did not run in the query's schedule",
+            )
         _ = observed^
         var totals = Dict[Int, Int128]()
         var counts = Dict[Int, Int128]()
@@ -419,3 +427,31 @@ def test_two_independent_shared_aggregations_each_run_once() raises:
             assert_equal(integer(actual.item(r, "n")), counts[store])
             assert_equal(integer(actual.item(r, "m")), counts[store])
     _ = trace^
+
+
+def test_sharing_plans_without_running_the_shared_subplan() raises:
+    """Planning a shared aggregation runs nothing: its scans hold its
+    columns with no rows, and the plan keeps the rows estimated for its
+    definition, which every scan of it is planned from."""
+    var frame = sales()
+    var per_item = (
+        frame.lazy().group_by(["ss_item"]).agg([col("qty").sum().alias("t")])
+    )
+    var query = per_item.join(
+        per_item.select_exprs([col("ss_item").alias("k"), col("t").alias("u")]),
+        left_on=["ss_item"],
+        right_on=["k"],
+    )
+    var plan = query._optimized()
+    var shared = plan._share_subplans(True, 65536)
+    assert_equal(len(shared), 1)
+    assert_equal(len(plan._plan._shared_slots), 1)
+    for entry in plan._plan._shared_slots.items():
+        assert_equal(plan._plan._frames[entry.key].height(), 0)
+        ref definition = shared[entry.value]
+        var columns = definition._execute(len(definition._nodes) - 1, True)
+        assert_equal(
+            String(",").join(plan._plan._frames[entry.key].columns()),
+            String(",").join(columns.columns()),
+        )
+        assert_equal(plan._plan._shared.value()[].ready[entry.value], False)

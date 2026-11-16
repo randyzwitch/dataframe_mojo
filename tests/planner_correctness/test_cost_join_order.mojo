@@ -679,7 +679,7 @@ def test_one_table_slices_are_not_shared() raises:
     var query = channels[0].concat(channels[1])
     var plan = query._optimized()
     var nodes = len(plan._plan._nodes)
-    plan._share_subplans(True, 65536)
+    _ = plan._share_subplans(True, 65536)
     assert_equal(len(plan._plan._nodes), nodes)
     for i in range(len(plan._plan._nodes)):
         ref node = plan._plan._nodes[i]
