@@ -400,8 +400,12 @@ def _decide_head(
     elif terminal.kind == AGG or terminal.kind == SELECT:
         # A grouped median or quantile streams only into the aggregate
         # table (checked below): its other routes keep no such state.
+        # So does a grouped reduction of an aggregate filter.
         if _stream_reductions(
-            terminal.exprs, terminal.kind == AGG, terminal.kind == AGG
+            terminal.exprs,
+            terminal.kind == AGG,
+            terminal.kind == AGG,
+            terminal.kind == AGG,
         ):
             expressions = terminal.exprs.copy()
             if terminal.kind == AGG:

@@ -12,6 +12,8 @@ from dataframe.expr import (
     CORR,
     COUNT,
     COV,
+    DROP_NULLS,
+    EXPR_FILTER,
     Expr,
     FIRST,
     IMPLODE,
@@ -51,6 +53,7 @@ from dataframe.series import (
 )
 from std.collections import (
     Dict,
+    Optional,
 )
 
 
@@ -126,12 +129,83 @@ def _row_local(exprs: List[Expr]) -> Bool:
     return True
 
 
+def filter_value(expression: Expr, at: Int) -> Int:
+    """The node a reduction's input node `at` takes its values from: the
+    filtered values of an aggregate filter (`aggregate_filter`), else `at`
+    itself."""
+    if at >= 0 and aggregate_filter(expression, at):
+        return expression._nodes[at].left
+    return at
+
+
+def aggregate_filter(expression: Expr, at: Int) -> Optional[Expr]:
+    """The predicate of an aggregate filter: a reduction's input node `at`
+    that keeps some rows of row-local values, `x.filter(p)` (the rows where
+    `p` is true) or `x.drop_nulls()` (where `x` is not null). Reducing it
+    is reducing `x` over only those rows, so every row still finds its
+    group and the reduction's state skips the rows the predicate drops.
+    None for any other input."""
+    if at < 0:
+        return None
+    ref node = expression._nodes[at]
+    if node.op == EXPR_FILTER:
+        var value = subtree(expression, node.left)
+        var predicate = subtree(expression, node.right)
+        if not _row_local([value.copy()]) or not _row_local([predicate.copy()]):
+            return None
+        return predicate^
+    if node.op == DROP_NULLS:
+        var value = subtree(expression, node.left)
+        if not _row_local([value.copy()]):
+            return None
+        return value.is_not_null()
+    return None
+
+
+def without_filters(expressions: List[Expr]) -> List[Expr]:
+    """`expressions` with each aggregate filter replaced by the values it
+    filters: the same reductions, of the same types, over every row."""
+    var result = List[Expr](capacity=len(expressions))
+    for expression in expressions:
+        var nodes = expression._nodes.copy()
+        var changed = False
+        for i in range(len(nodes)):
+            if not is_reduction(nodes[i].op) or nodes[i].left < 0:
+                continue
+            if aggregate_filter(expression, nodes[i].left):
+                nodes[i].left = filter_value(expression, nodes[i].left)
+                changed = True
+        if changed:
+            var compact = Expr(nodes^, expression._name)
+            result.append(subtree(compact, len(compact._nodes) - 1))
+        else:
+            result.append(expression.copy())
+    return result^
+
+
+def has_aggregate_filter(expressions: List[Expr]) -> Bool:
+    """Whether some reduction reads an aggregate filter."""
+    for expression in expressions:
+        for node in expression._nodes:
+            if is_reduction(node.op) and aggregate_filter(
+                expression, node.left
+            ):
+                return True
+    return False
+
+
 def _stream_reductions(
-    expressions: List[Expr], holistic: Bool = False, listed: Bool = False
+    expressions: List[Expr],
+    holistic: Bool = False,
+    listed: Bool = False,
+    filtered: Bool = False,
 ) -> Bool:
     """Whether every expression is reductions of row-local inputs, combined
     row by row. `holistic` admits medians and quantiles; `listed` also
-    mode and implode, whose states the aggregate table holds by address."""
+    mode and implode, whose states the aggregate table holds by address;
+    `filtered` also a one-input reduction (no distinct count) of an
+    aggregate filter (`aggregate_filter`), which the aggregate table
+    applies per reduction."""
     if len(expressions) == 0:
         return False
     for expression in expressions:
@@ -139,9 +213,14 @@ def _stream_reductions(
         var reachable = List[Bool](length=len(nodes), fill=False)
         reachable[len(nodes) - 1] = True
         var saw_reduction = False
+        # The aggregate filters admitted, each below its reduction (seen
+        # first: a node's children precede it).
+        var filters = List[Int]()
         for reverse in range(len(nodes)):
             var i = len(nodes) - 1 - reverse
             ref node = nodes[i]
+            if i in filters:
+                continue
             if (
                 is_window(node.op)
                 or is_sequence(node.op)
@@ -180,6 +259,15 @@ def _stream_reductions(
                     PRODUCT,
                 ]:
                     return False
+                if (
+                    filtered
+                    and node.right < 0
+                    and node.op not in [N_UNIQUE, CORR, COV]
+                    and aggregate_filter(expression, node.left)
+                ):
+                    filters.append(node.left)
+                    saw_reduction = True
+                    continue
                 # Reduction inputs must be row-local; reduction-of-reduction
                 # and windows retain the materializing evaluator.
                 if not _row_local([subtree(expression, node.left)]):

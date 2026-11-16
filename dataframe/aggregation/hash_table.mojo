@@ -633,6 +633,9 @@ struct AggregateLayout(Copyable, Movable):
     var input_types: List[DataType]
     var input_storage: List[Int]
     var vectors: List[Bool]
+    # Per reduction, whether an aggregate filter keeps some of its rows
+    # (`sink_vectors`' `filters`); empty when none does.
+    var filtered: List[Bool]
 
     def use_perfect_hash(mut self, keys: List[Series]) raises:
         """Use direct-address slots when the bounded domains are small enough
@@ -664,6 +667,7 @@ struct AggregateLayout(Copyable, Movable):
             PerfectHash.none(),
             List[DataType](),
             List[Int](),
+            List[Bool](),
             List[Bool](),
         )
 
@@ -787,6 +791,7 @@ def aggregate_layout(
         input_types^,
         input_storage^,
         vectors^,
+        List[Bool](),
     )
 
 
@@ -1458,6 +1463,18 @@ struct AggregateSink(Movable):
     var kernels: List[Bool]
     var skip_addresses: Bool
     var offsets: List[UInt64]
+    # Per reduction, whether an aggregate filter keeps some of its rows
+    # (`AggregateLayout.filtered`), and then the addresses its update reads:
+    # each kept row's group row, the `discard` row for every other. The
+    # reductions the shared update leaves alone (run kernels' and filtered
+    # ones), and per filtered reduction, every reduction but it. The
+    # chunk's filters, a Boolean vector per filtered reduction.
+    var filtered: List[Bool]
+    var any_filtered: Bool
+    var filter_rows: List[List[Int]]
+    var shared_skip: List[Bool]
+    var alone: List[List[Bool]]
+    var filters: List[UnifiedVectorFormat]
 
     def __init__(
         out self,
@@ -1527,15 +1544,38 @@ struct AggregateSink(Movable):
         self.clustered = ClusteredAggrState()
         self.kernels = List[Bool](capacity=len(layout.slots))
         self.offsets = List[UInt64]()
+        self.filtered = List[Bool](length=len(layout.slots), fill=False)
+        self.any_filtered = False
+        self.filter_rows = List[List[Int]](capacity=len(layout.slots))
+        self.alone = List[List[Bool]](capacity=len(layout.slots))
+        self.filters = List[UnifiedVectorFormat]()
+        for s in range(len(layout.slots)):
+            var filtered = s < len(layout.filtered) and layout.filtered[s]
+            self.filtered[s] = filtered
+            self.any_filtered = self.any_filtered or filtered
+            self.filter_rows.append(
+                List[Int](length=_BATCH, fill=0) if filtered else List[Int]()
+            )
+            var others = List[Bool]()
+            if filtered:
+                others = List[Bool](length=len(layout.slots), fill=True)
+                others[s] = False
+            self.alone.append(others^)
         var n_clustered = 0
         var n_kernels = 0
         for s in range(len(layout.slots)):
             var op = layout.templates[s].op
             var kind = layout.slots[s].kind
             n_clustered += Int(cluster_update(op, kind))
-            var kernel = cluster_kernel(op, kind)
+            # A run of a filtered reduction's rows may hold rows its filter
+            # drops: its update reads each row's own address.
+            var kernel = cluster_kernel(op, kind) and not self.filtered[s]
             n_kernels += Int(kernel)
             self.kernels.append(kernel)
+        self.shared_skip = List[Bool]()
+        if self.any_filtered:
+            for s in range(len(layout.slots)):
+                self.shared_skip.append(self.kernels[s] or self.filtered[s])
         self.skip_addresses = len(layout.slots) > 0 and n_kernels == len(
             layout.slots
         )
@@ -1645,6 +1685,7 @@ struct AggregateSink(Movable):
         first: Int,
         count: Int,
         columns: List[Series] = List[Series](),
+        filters: List[UnifiedVectorFormat] = List[UnifiedVectorFormat](),
     ) raises:
         """A data chunk's `count` rows (at most a batch) into the table: each
         row's group from the group chunk's vectors `keys`, then the payload
@@ -1662,11 +1703,20 @@ struct AggregateSink(Movable):
 
         When every reduction is a distinct count, only the distinct tables take
         the chunk: the main table's groups and counts all come from their
-        finished groups, so sinking into it too would be wasted."""
+        finished groups, so sinking into it too would be wasted.
+
+        A filtered reduction (`filtered`) reads its Boolean vector in
+        `filters` (one a reduction, in order): every row finds its group,
+        but only the rows whose filter is true and valid update that
+        reduction's state."""
         if len(keys) == 0:
             raise Error("aggregate table: no keys")
         if count > _BATCH:
             raise Error("aggregate table: a chunk is at most a batch")
+        if self.any_filtered:
+            if len(filters) != len(self.slots):
+                raise Error("aggregate table: a filtered reduction's filter")
+            self.filters = filters.copy()
         if len(self.distinct_slots) > 0 and len(self.distinct_slots) == len(
             self.slots
         ):
@@ -1807,8 +1857,9 @@ struct AggregateSink(Movable):
                 ),
                 Int(self.discard.unsafe_ptr()),
                 Int(self.scratch.unsafe_ptr()),
-                skip=self.kernels,
+                skip=self.shared_skip if self.any_filtered else self.kernels,
             )
+            self._update_filtered(inputs, first, count)
             if len(self.by_address) > 0:
                 self._update_by_address(inputs, columns, first, count)
         self.sunk += count
@@ -1836,7 +1887,10 @@ struct AggregateSink(Movable):
             Int(self.discard.unsafe_ptr()),
             Int(self.scratch.unsafe_ptr()),
             self.only,
+            skip=self.shared_skip,
         )
+        if self.only < 0:
+            self._update_filtered(inputs, first, count)
         if len(self.by_address) > 0 and self.only < 0:
             self._update_by_address(inputs, columns, first, count)
         self.sunk += count
@@ -1903,6 +1957,54 @@ struct AggregateSink(Movable):
                 row[unsafe_offset=2] = UInt64(first + k)
             groups[unsafe_offset=k] = at
 
+    def _update_filtered(
+        mut self, inputs: List[UnifiedVectorFormat], first: Int, count: Int
+    ) raises:
+        """Each filtered reduction's addresses for the chunk, then its
+        update: a row whose filter is true and valid reads its group's row
+        (in `groups`), any other the `discard` row, which nothing reads. So
+        a dropped row changes no group's state, and every group, kept rows
+        or none, has its row. States by address are updated after
+        (`_update_by_address`), from the same addresses."""
+        if not self.any_filtered:
+            return
+        var groups = self.groups.unsafe_ptr()
+        var discard = Int(self.discard.unsafe_ptr())
+        for s in range(len(self.slots)):
+            if not self.filtered[s]:
+                continue
+            ref filter = self.filters[s]
+            var flags = Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=filter.data
+            )
+            var nulls = not filter.validity.all_valid()
+            var rows = self.filter_rows[s].unsafe_ptr()
+            for k in range(count):
+                var i = filter.sel.get_index(k)
+                var keep = flags[unsafe_offset=i] != 0
+                if nulls:
+                    keep = keep and filter.validity.row_is_valid_unsafe(i)
+                rows[unsafe_offset=k] = groups[
+                    unsafe_offset=k
+                ] if keep else discard
+            if self.slots[s].by_address():
+                continue
+            _update_states(
+                self.slots,
+                inputs,
+                0,
+                count,
+                rows,
+                self.parts.states_at,
+                first,
+                Pointer[_ValueArena, MutAnyOrigin](
+                    unsafe_from_address=Int(Pointer(to=self.values))
+                ),
+                discard,
+                Int(self.scratch.unsafe_ptr()),
+                skip=self.alone[s],
+            )
+
     def _update_by_address(
         mut self,
         inputs: List[UnifiedVectorFormat],
@@ -1919,9 +2021,13 @@ struct AggregateSink(Movable):
         (`vectors`) takes its input's vector in `inputs` where it is; the
         others read their input as a column of the batch's rows in
         `columns`."""
-        var rows = self.groups.unsafe_ptr()
         var discard = Int(self.discard.unsafe_ptr())
         for s in self.by_address:
+            # A filtered reduction's rows the filter drops read `discard`.
+            var at = Int(self.groups.unsafe_ptr())
+            if self.filtered[s]:
+                at = Int(self.filter_rows[s].unsafe_ptr())
+            var rows = Pointer[Int, MutAnyOrigin](unsafe_from_address=at)
             ref slot = self.slots[s]
             var base = 8 * (self.parts.states_at + slot.offset)
             var ordered = slot.kind == _K_ORDERED

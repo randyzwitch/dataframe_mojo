@@ -12,6 +12,8 @@ from dataframe.aggregation.hash_table import (
 )
 from dataframe.aggregation.expressions import (
     _stream_reductions,
+    filter_value,
+    without_filters,
 )
 from dataframe.aggregation.keys import (
     _group_keys,
@@ -425,16 +427,18 @@ def _table_input(
     frame: DataFrame, keys: List[Series], expression: Expr, at: Int
 ) raises -> Series:
     """The column of the expression's node `at` over every row of `frame`
-    (a row count, with none, reads the first key)."""
+    (a row count, with none, reads the first key). An aggregate filter's
+    input is the values it filters."""
     if at < 0:
         return keys[0].copy()
+    var value = filter_value(expression, at)
     if (
-        expression._nodes[at].op == COL
-        and expression._nodes[at].text in frame.columns()
+        expression._nodes[value].op == COL
+        and expression._nodes[value].text in frame.columns()
     ):
-        return frame.column(expression._nodes[at].text)
+        return frame.column(expression._nodes[value].text)
     var evaluated = frame.select_exprs(
-        [subtree(expression, at).alias("__input")]
+        [subtree(expression, value).alias("__input")]
     )
     return evaluated._columns[0].copy()
 
@@ -444,8 +448,9 @@ def table_supported(
 ) raises -> Bool:
     """Whether the aggregate table groups `frame` (empty is enough: only
     types are read) by `keys` and holds every reduction's state of
-    `expressions`, inline or by address."""
-    if len(keys) == 0 or not _stream_reductions(expressions, True, True):
+    `expressions`, inline or by address, aggregate filters applied per
+    reduction."""
+    if len(keys) == 0 or not _stream_reductions(expressions, True, True, True):
         return False
     for expression in expressions:
         for node in expression._nodes:
@@ -459,7 +464,9 @@ def table_supported(
         if not key_supported(column):
             return False
         columns.append(column^)
-    var template = _StreamReduction(frame.clear(), expressions, keys)
+    var template = _StreamReduction(
+        frame.clear(), without_filters(expressions), keys
+    )
     return table_states_supported(
         table_specs(template), table_inputs(frame, columns, expressions)
     )

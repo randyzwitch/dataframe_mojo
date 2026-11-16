@@ -20,6 +20,7 @@ from dataframe.aggregation.expressions import (
     count_rows_by,
     _bind_all,
     _stream_reductions,
+    without_filters,
 )
 from dataframe.aggregation.keys import (
     _key_prefix,
@@ -227,7 +228,9 @@ struct _BatchSinkJob(Job):
         self.failure = String()
 
     def run(mut self) raises:
-        var sink = AggregateSink(self.layout, self.workers)
+        # The shared layout's: it marks the reductions with an aggregate
+        # filter.
+        var sink = AggregateSink(self.shared.layout, self.workers)
         var reader = TableSinkInputs(self.shared)
         var morsels = len(self.ranges) // 2
         while True:
@@ -394,8 +397,10 @@ struct GroupBy(Copyable):
     def _table_supported(self, expressions: List[Expr]) raises -> Bool:
         """Whether the aggregate table (`aggregate_table.mojo`) groups these
         keys and reduces these expressions."""
-        if len(self._keys) == 0 or not _stream_reductions(
-            expressions, True, True
+        # No expressions is the groups alone: a table of no states.
+        if len(self._keys) == 0 or (
+            len(expressions) > 0
+            and not _stream_reductions(expressions, True, True, True)
         ):
             return False
         for expression in expressions:
@@ -454,8 +459,13 @@ struct GroupBy(Copyable):
         var empty_keys = List[Series](capacity=len(self._keys))
         for key in self._keys:
             empty_keys.append(key.slice(0, 0))
+        # The states' types are the unfiltered reductions': an aggregate
+        # filter only drops rows (`_agg_batches` applies it).
         var template = _StreamReduction(
-            self._frame.clear(), expressions, empty_keys, self._key_names()
+            self._frame.clear(),
+            without_filters(expressions),
+            empty_keys,
+            self._key_names(),
         )
         var specs = table_specs(template)
         var empty = table_inputs(self._frame.clear(), empty_keys, expressions)
