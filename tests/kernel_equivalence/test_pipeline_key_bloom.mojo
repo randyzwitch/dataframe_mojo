@@ -271,10 +271,10 @@ def test_a_perfect_hash_build_hands_the_probe_its_key_bitmap() raises:
 
 def test_a_source_filter_runs_among_the_join_filters() raises:
     # The probe's own filter runs in the scan beside the join's key bitmap,
-    # in an order each worker adapts to their measured time: whichever runs
-    # first, the rows kept are those both keep. A filter keeping few rows
-    # (a null test), one keeping most, and one that can raise (arithmetic,
-    # whose order is then fixed) each give the scalar model's rows.
+    # cheapest first: whichever runs first, the rows kept are those both
+    # keep. A filter keeping few rows (a null test, before the bitmap), one
+    # keeping most, and one that can raise (arithmetic, after the bitmap)
+    # each give the scalar model's rows.
     for threads in [1, 8]:
         var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
         var probe_ids = List[Int64]()

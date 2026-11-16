@@ -195,7 +195,6 @@ from dataframe.vector.data_chunk import (
     flat_over,
     to_series,
 )
-from dataframe.vector.adaptive_filter import AdaptiveFilter
 from dataframe.vector.expression import VectorExpression, _KIND_COLUMN
 from dataframe.vector.types import (
     PHYSICAL_BOOL,
@@ -1915,13 +1914,12 @@ struct _PipelineJob(Job):
     var join_filters: List[JoinFilter]
     var join_stats: List[SelectivityStats]
     var join_scan: Optional[ArcPointer[ScanFilterInfo]]
-    # The scan's row filters, run vector by vector in the order this
-    # worker's `scan_order` adapts to their measured time: per filter the
-    # join filter it is (an index of `join_filters`), or -1 for the source's
-    # own filter step when it runs among them (`predicate`; the steps then
-    # start after it). Set at the first morsel (`_scan_filters`).
+    # The scan's row filters, run vector by vector in `scan_order`: per
+    # filter the join filter it is (an index of `join_filters`), or -1 for
+    # the source's own filter step when it runs among them (`predicate`; the
+    # steps then start after it). Set at the first morsel (`_scan_filters`).
     var scan_entries: List[Int]
-    var scan_order: AdaptiveFilter
+    var scan_order: List[Int]
     var scan_ready: Bool
     var predicate: Bool
     # The source's filter reads a vector through `scan_chunk`, its
@@ -1981,7 +1979,7 @@ struct _PipelineJob(Job):
         )
         self.join_scan = join_scan
         self.scan_entries = List[Int]()
-        self.scan_order = AdaptiveFilter(0, True)
+        self.scan_order = List[Int]()
         self.scan_ready = False
         self.predicate = False
         self.scan_chunk = DataChunk()
@@ -2013,14 +2011,17 @@ struct _PipelineJob(Job):
     def _scan_filters(mut self) raises:
         """The scan's row filters and their first order: the join filters
         applied to rows, then the source's filter step when there is one
-        and some join filter is applied to rows (a single filter has no
-        order to adapt). The cheapest per row runs first, each costed by its
-        work per row on the scale of `VectorExpression.cost`: comparing a key
-        with one value or testing its bit in a key bitmap costs about a
+        and some join filter is applied to rows (alone it has nothing to be
+        ordered against). The cheapest per row runs first, each costed by
+        its work per row on the scale of `VectorExpression.cost`: comparing
+        a key with one value or testing its bit in a key bitmap costs about a
         comparison, a bloom filter a hash and a probe; the source's filter is
-        costed from its expression. Measured time then
-        adapts the order, unless the source's filter can raise: its rows
-        are then those the first order gives it."""
+        costed from its expression.
+
+        The order is not adapted to measured time. Trying another order
+        means running some vectors in a worse one until the measurement says
+        so, and a worker's share of one scan is too few vectors for a better
+        order found that way to win back what the trials cost."""
         self.scan_ready = True
         var costs = List[Int]()
         for k in range(len(self.join_filters)):
@@ -2035,7 +2036,6 @@ struct _PipelineJob(Job):
                 # A key column read, a multiplying hash and one probe of
                 # the filter's bits.
                 costs.append(8 + 10 + 5)
-        var can_throw = False
         if (
             len(self.scan_entries) > 0
             and len(self.steps[]) > 0
@@ -2047,13 +2047,10 @@ struct _PipelineJob(Job):
                 self.predicate = True
                 self.scan_entries.append(-1)
                 costs.append(step.expressions[0].cost())
-                can_throw = step.expressions[0]._can_throw(
-                    step.expressions[0].root
-                )
                 self.scan_local = List[UInt32](
                     unsafe_uninit_length=2 * STANDARD_VECTOR_SIZE
                 )
-        self.scan_order = AdaptiveFilter.by_cost(costs, can_throw)
+        self.scan_order = _cheapest_first(costs)
 
     def _select_source(
         mut self,
@@ -2124,10 +2121,8 @@ struct _PipelineJob(Job):
 
         The row filters are the join filters and, when `predicate`, the
         source's filter step (over `columns`, the morsel's columns). They run
-        in this worker's adaptive order: each vector's filtering is timed,
-        and every so often two neighbouring filters are swapped and the swap
-        kept only if vectors got faster, so a filter that removes many rows
-        cheaply comes to run first and the others see only what it keeps."""
+        cheapest first (`_scan_filters`), each on the rows the ones before it
+        kept."""
         for f in self.join_filters:
             if not f.any:
                 return (False, None)
@@ -2190,11 +2185,10 @@ struct _PipelineJob(Job):
             var end = min(length, start + STATISTICS_VECTOR_SIZE)
             var count = end - start
             var dense = True
-            var started = self.scan_order.begin()
             for i in range(len(self.scan_entries)):
                 if count == 0:
                     break
-                var k = self.scan_entries[self.scan_order.permutation[i]]
+                var k = self.scan_entries[self.scan_order[i]]
                 if k < 0:
                     var kept = self._select_source(
                         columns, bases, rows, used, start, end, count, dense
@@ -2221,7 +2215,6 @@ struct _PipelineJob(Job):
                     self.join_stats[k].update(kept, count)
                 dense = False
                 count = kept
-            self.scan_order.end(started)
             if dense and listed:
                 _fill_identity(rows, used, start, count)
             used += count
@@ -2651,6 +2644,21 @@ def _vectors_kept(
     if not ruled_out:
         return None
     return kept^
+
+
+def _cheapest_first(costs: List[Int]) -> List[Int]:
+    """The positions of `costs` from the lowest cost up, ties in their given
+    order."""
+    var order = List[Int](capacity=len(costs))
+    for i in range(len(costs)):
+        # Insertion sort: stable, and a scan has a handful of filters.
+        var j = len(order)
+        order.append(i)
+        while j > 0 and costs[order[j - 1]] > costs[i]:
+            order[j] = order[j - 1]
+            j -= 1
+        order[j] = i
+    return order^
 
 
 def _common_vectors(a: List[Int], b: List[Int]) -> List[Int]:
