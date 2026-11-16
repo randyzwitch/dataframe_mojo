@@ -16,16 +16,17 @@ much as the build's own stores. The next operator, or the next run of the
 same query, then asks for a table of about the same size and pays again.
 
 So freed large tables do not go back to the runtime's allocator at once.
-`release_huge` hands a table's storage to a process-wide pool of retained
-blocks, still mapped and already faulted in; `huge_list`, `huge_uninit`
-and `huge_capacity` take a retained block that fits before asking for
-fresh memory. A block left unused for `RETAIN_NANOSECONDS` is freed, so an
-idle process gives its memory back, and the pool never holds more than
-`_retain_limit` bytes. Tables that are never released (columns handed to a
-result) are freed the ordinary way: the pool is an optimization that a
-caller can always skip.
+`huge_list`, `huge_uninit` and `huge_capacity` take a retained block that
+fits before asking for fresh memory, and `release_huge` (also run when a
+column's buffer is dropped) hands storage they gave out back to a
+process-wide pool of retained blocks, still mapped and already faulted in.
+A block left unused for `RETAIN_NANOSECONDS` is freed, so an idle process
+gives its memory back, and the pool never holds more than `_retain_limit`
+bytes. Storage that is never released is freed the ordinary way: the pool
+is an optimization that a caller can always skip.
 """
 from std.atomic import Atomic
+from std.collections import Dict
 from std.ffi import _get_global, external_call
 from std.math import align_down, align_up
 from std.memory import Allocation, Layout, Pointer, alloc, dealloc
@@ -99,18 +100,29 @@ def _free_block(address: Int, bytes: Int):
 
 
 struct _BlockPool(Movable):
-    """Retained blocks and a spin lock over them. A block is a whole table,
-    taken and freed a few times per operator rather than per row, so one
-    short critical section serves every thread."""
+    """Retained blocks, the live blocks handed out, and a spin lock over
+    them. A block is a whole table, taken and freed a few times per
+    operator rather than per row, so one short critical section serves
+    every thread.
+
+    Only storage that `huge_list`, `huge_uninit` or `huge_capacity` handed
+    out comes back (`owned`): those are the requests that look here first,
+    so what is retained is what the next request of the same kind reuses.
+    Retaining storage that ordinary allocations would have reused instead
+    takes it from the runtime's allocator, which then faults fresh pages
+    in for them."""
 
     var lock: Atomic[Int64]
     var blocks: List[_Retained]
+    # Address to bytes of every live block handed out.
+    var owned: Dict[Int, Int]
     var retained: Int
     var limit: Int
 
     def __init__(out self):
         self.lock = Atomic[Int64](0)
         self.blocks = List[_Retained]()
+        self.owned = Dict[Int, Int]()
         self.retained = 0
         self.limit = _retain_limit()
 
@@ -165,16 +177,27 @@ struct _BlockPool(Movable):
         if best >= 0:
             found = self.blocks.pop(best)
             self.retained -= found.bytes
+            self.owned[found.address] = found.bytes
         self._release()
         for block in expired:
             _free_block(block.address, block.bytes)
         return found
 
-    def give(mut self, address: Int, bytes: Int):
-        """Retain a freed block; the oldest blocks are freed when the pool
-        would exceed its limit."""
+    def hand_out(mut self, address: Int, bytes: Int):
+        """Record fresh storage handed out, to retain once freed."""
+        self._acquire()
+        self.owned[address] = bytes
+        self._release()
+
+    def give(mut self, address: Int, bytes: Int) -> Bool:
+        """Retain a freed block this pool handed out, and whether it did;
+        the oldest blocks are freed when the pool would exceed its limit.
+        """
         var expired = List[_Retained]()
         self._acquire()
+        if self.owned.pop(address, 0) == 0:
+            self._release()
+            return False
         var now = monotonic()
         self._expire(now, expired)
         if bytes > self.limit:
@@ -191,6 +214,7 @@ struct _BlockPool(Movable):
         self._release()
         for block in expired:
             _free_block(block.address, block.bytes)
+        return True
 
 
 def _pool_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
@@ -231,15 +255,26 @@ def _adopt[T: Copyable](block: _Retained, length: Int) -> List[T]:
 
 
 def release_huge[T: Copyable & Deinitable](var table: List[T]):
-    """Done with `table`: destroy its elements and keep its storage for
-    the next large table instead of freeing it. Storage of less than a
-    huge page is freed as usual."""
+    """Done with `table`: destroy its elements and, when its storage came
+    from `huge_list`, `huge_uninit` or `huge_capacity`, keep it for the
+    next such request instead of freeing it. Other storage is freed as
+    usual."""
     var bytes = table.capacity() * size_of[T]()
     if bytes < _HUGE_PAGE:
         return
     table.clear()
-    var storage = table.unsafe_take_allocation()
-    _block_pool().give(Int(storage^.unsafe_leak()), bytes)
+    if _block_pool().give(Int(table.unsafe_ptr()), bytes):
+        # The pool owns the storage now; the list must not free it.
+        _ = table.unsafe_take_allocation().unsafe_leak()
+
+
+def _fresh(address: Int, bytes: Int):
+    """Fresh storage of `bytes` at `address`: ask for huge pages before
+    its first touch, and record it for retaining once freed."""
+    if bytes < _HUGE_PAGE:
+        return
+    advise_huge_pages(address, bytes)
+    _block_pool().hand_out(address, bytes)
 
 
 def huge_list[T: Copyable](length: Int, fill: T) -> List[T]:
@@ -263,7 +298,7 @@ def huge_uninit[T: Copyable](length: Int) -> List[T]:
     if block.address != 0:
         return _adopt[T](block, length)
     var out = List[T](unsafe_uninit_length=length)
-    advise_huge_pages(Int(out.unsafe_ptr()), bytes)
+    _fresh(Int(out.unsafe_ptr()), out.capacity() * size_of[T]())
     return out^
 
 
@@ -278,5 +313,5 @@ def huge_capacity[T: Copyable](length: Int) -> List[T]:
     if block.address != 0:
         return _adopt[T](block, 0)
     var out = List[T](capacity=length)
-    advise_huge_pages(Int(out.unsafe_ptr()), bytes)
+    _fresh(Int(out.unsafe_ptr()), out.capacity() * size_of[T]())
     return out^
