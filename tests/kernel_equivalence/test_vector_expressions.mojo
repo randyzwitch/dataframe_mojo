@@ -65,12 +65,18 @@ def frame() raises -> DataFrame:
     )
 
 
-def coded(values: List[String], valid: List[Bool]) raises -> Series:
-    """Strings carrying codes into a dictionary of their distinct values,
-    as a Parquet column chunk with a dictionary page loads. A null row's
-    code points past the dictionary: it is never read."""
+def coded(
+    values: List[String], valid: List[Bool], unused: List[String] = []
+) raises -> Series:
+    """Strings carrying codes into a dictionary of their distinct values
+    (after `unused`, values no row holds), as a Parquet column chunk with a
+    dictionary page loads. A null row's code points past the dictionary: it
+    is never read."""
     var dictionary = CategoricalDictionary()
     var seen = Dict[String, Int]()
+    for value in unused:
+        seen[value] = len(seen)
+        dictionary.append(value)
     var codes = List[UInt32]()
     for i in range(len(values)):
         if not valid[i]:
@@ -143,6 +149,99 @@ def test_coded_strings_select_what_the_eager_filter_keeps() raises:
                     answered = answered or Bool(known)
                 assert_true(answered)
                 _ = out^
+
+
+def test_coded_strings_compute_what_the_eager_projection_does() raises:
+    # Booleans and strings over one coded column, answered through its
+    # dictionary inside projections and CASE WHEN conditions whose branches
+    # read other columns, equal the eager columns: nulls, null codes, a
+    # dictionary value no row holds, flat chunks and selections, and
+    # several workers each computing from its own copy.
+    var values = List[String]()
+    var valid = List[Bool]()
+    var other = List[Int64]()
+    var other_valid = List[Bool]()
+    var text = List[String]()
+    for row in range(ROWS):
+        values.append(
+            "PROMO "
+            + String(row % 4) if row % 3 else "a longer key "
+            + String(row % 5)
+        )
+        valid.append(row % 11 != 6)
+        other.append(Int64(row % 7) - 2)
+        other_valid.append(row % 13 != 5)
+        text.append("t" + String(row % 6))
+    var source = DataFrame(
+        [
+            coded(values, valid, ["never used value", "Sunday"]),
+            Series("a", Column[Int64](other^, other_valid)),
+            Series("t", StringColumn(text, List[Bool](length=ROWS, fill=True))),
+        ]
+    )
+    var schema = source.clear()._columns.copy()
+    var cases: List[Expr] = [
+        (col("s").str().starts_with("PROMO")).alias("e"),
+        when(col("s").str().like("PROMO%"))
+        .then(col("a") * lit(Int64(3)))
+        .otherwise(lit(Int64(0)))
+        .alias("e"),
+        when(col("s") == lit("PROMO 2")).then(col("a")).alias("e"),
+        when(col("s").is_in(["PROMO 1", "a longer key 3"]))
+        .then(col("t"))
+        .otherwise(col("s"))
+        .alias("e"),
+        when(col("s").is_null())
+        .then(lit("none"))
+        .otherwise(col("s").str().slice(2, 12))
+        .alias("e"),
+        col("s").str().slice(1, 14).alias("e"),
+        concat_str([col("s"), lit("-"), col("s").str().slice(0, 3)], "/").alias(
+            "e"
+        ),
+        concat_str(
+            [col("t"), col("s").str().slice(0, 13), col("s")], "|"
+        ).alias("e"),
+        ((col("s") != lit("PROMO 0")) & (col("a") > lit(Int64(0)))).alias("e"),
+        (col("s").str().slice(0, 5) == col("t")).alias("e"),
+    ]
+    for keep_every in [1, 3]:
+        for offset in [0, 61, 2900]:
+            var arena = ColumnArena()
+            var chunk = chunk_of(source, arena, offset, 2048, keep_every)
+            var rows = expected_rows(source, offset, 2048, keep_every)
+            for e in cases:
+                var template = VectorExpression(e, schema)
+                var expected = rows.with_columns([e.copy()]).select([e._name])
+                # Workers each run their own copy: a fresh one, then copies
+                # of a worker that has computed its answers, made after
+                # that worker is gone.
+                var fresh = template.copy()
+                var copied = Optional[VectorExpression]()
+                for w in range(3):
+                    if w == 1:
+                        copied = Optional(fresh.copy())
+                        fresh = template.copy()
+                    var compiled = copied.value().copy() if w > 0 else (
+                        fresh.copy()
+                    )
+                    var out = DataChunk(1)
+                    out.count = chunk.count
+                    compiled.write(chunk, arena, out, 0)
+                    var got = to_series(
+                        out,
+                        0,
+                        arena,
+                        expected._columns[0].name(),
+                        expected._columns[0].dtype(),
+                    )
+                    assert_frame(DataFrame([got^]), expected)
+                    var answered = False
+                    for known in compiled.coded_dictionaries:
+                        answered = answered or Bool(known)
+                    assert_true(answered)
+                    if w == 0:
+                        fresh = compiled^
 
 
 def predicates() raises -> List[Expr]:
