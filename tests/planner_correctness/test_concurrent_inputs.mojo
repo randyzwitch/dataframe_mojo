@@ -5,7 +5,16 @@ and breaker source, which run ahead of it as scheduled pipelines. Results match 
 any input reaches the caller."""
 # contract-group: planner.relational
 from std.testing import assert_equal, assert_raises, assert_true
-from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col, lit
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    Expr,
+    LazyFrame,
+    Series,
+    col,
+    lit,
+)
 from dataframe.frame import concat
 from tests.support.coverage_compare import assert_frame
 from tests.support.group_strategy_reference import (
@@ -570,3 +579,87 @@ def test_a_profiled_query_runs_its_events_in_the_one_schedule() raises:
     )
     assert_true(profiled[1].height() > 0, "the report recorded no node")
     assert_frame(profiled[0], query.collect())
+
+
+def windows() -> List[Expr]:
+    """Windows that all partition by `k`, alone or with `s`: ranks, sums,
+    running sums, shifts, a string and a boolean result, nulls in `v`."""
+    return [
+        col("v").rank("min").over("k").alias("rank"),
+        col("v").sum().over("k").alias("total"),
+        col("v").cum_sum().over(["k", "s"], order_by="v").alias("running"),
+        col("v").shift(1).over("k").alias("before"),
+        col("s").first().over("k").alias("first_s"),
+        (col("v").mean().over("k") > lit(Float64(0.0))).alias("above"),
+        (col("v") * lit(Int64(2))).alias("double"),
+    ]
+
+
+def test_windows_over_shared_keys_run_as_rounds_of_the_schedule() raises:
+    """A projection whose windows share a partition key, computed as an
+    input of the query's schedule (here the source a filter streams), runs
+    as rounds of tasks of that schedule: rows are split into bins by that
+    key, each bin evaluated by one task, and the results written back to
+    the rows they came from. No task starts parallel work of its own, and
+    every column equals the eager projection's, row for row."""
+    var frame = source().head(20_000).with_row_index("row")
+    var keep = col("row") >= lit(Int64(0))
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var added = (
+        frame.lazy()
+        .with_columns(windows())
+        .filter(keep)
+        .collect(optimize=False)
+        .sort("row")
+    )
+    var exprs = windows()
+    exprs.insert(0, col("row"))
+    var selected = (
+        frame.lazy()
+        .select_exprs(exprs)
+        .filter(keep)
+        .collect(optimize=False)
+        .sort("row")
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "window.partitioned_sink" in paths,
+        "the windows did not run as a partitioned sink",
+    )
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    var eager_added = frame.with_columns(windows())
+    var eager_selected = frame.select_exprs(exprs)
+    assert_equal(added.columns(), eager_added.columns())
+    assert_equal(selected.columns(), eager_selected.columns())
+    for name in eager_added.columns():
+        assert_true(
+            added[name].equals(eager_added[name]), "column differs: " + name
+        )
+    for name in eager_selected.columns():
+        assert_true(
+            selected[name].equals(eager_selected[name]),
+            "column differs: " + name,
+        )
+
+
+def test_windows_without_a_shared_key_keep_the_whole_input() raises:
+    """Windows with no key in common (or over all rows) run over the whole
+    input, as the eager projection does."""
+    var frame = source().head(20_000)
+    var exprs: List[Expr] = [
+        col("v").sum().over("k").alias("by_k"),
+        col("v").sum().over("s").alias("by_s"),
+        col("v").cum_sum().over(order_by="k").alias("all"),
+    ]
+    var lazy = frame.lazy().with_columns(exprs).collect(optimize=False)
+    var eager = frame.with_columns(exprs)
+    for name in eager.columns():
+        assert_true(lazy[name].equals(eager[name]), "column differs: " + name)

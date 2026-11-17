@@ -131,6 +131,10 @@ from dataframe.planning.inputs import (
     BuildFinish,
     finish_build,
 )
+from dataframe.query_execution.window_sink import (
+    WindowSink,
+    shared_partition_keys,
+)
 from dataframe.scheduler import (
     META_REGULAR,
     MetaPipeline,
@@ -1457,7 +1461,12 @@ struct _OperatorPipeline(Movable):
     as a pipeline of the schedule: its computed inputs are pipelines it
     depends on, their results handed to its plan's memo as its one task
     starts, and its finish makes the hash table when its result is a
-    join's build side."""
+    join's build side.
+
+    A projection whose windows all partition by some shared keys runs in
+    its finish instead (`WindowSink`): its one task computes its input,
+    and the finish splits the rows by those keys and evaluates the bins
+    as rounds of tasks, before any table is made from the result."""
 
     var plan: QueryContext
     var index: Int
@@ -1476,6 +1485,12 @@ struct _OperatorPipeline(Movable):
     var building: List[BuildFinish]
     var filled: Bool
     var filling: Bool
+    # The keys every window of the projection partitions by (empty when
+    # it does not run as a `WindowSink`), the sink while its rounds run,
+    # and when its task started.
+    var window_keys: List[String]
+    var window: List[WindowSink]
+    var began: Int
 
     def __init__(
         out self,
@@ -1506,6 +1521,16 @@ struct _OperatorPipeline(Movable):
         self.building = List[BuildFinish]()
         self.filled = False
         self.filling = False
+        self.window_keys = List[String]()
+        self.window = List[WindowSink]()
+        self.began = 0
+        ref node = self.plan._nodes[index]
+        if (
+            streaming
+            and self.plan._handoff == HANDOFF_OFF
+            and (node.kind == SELECT or node.kind == WITH_COLUMNS)
+        ):
+            self.window_keys = shared_partition_keys(node.exprs)
 
     def execute(mut self) raises:
         if len(self.wanted) > 0:
@@ -1515,13 +1540,32 @@ struct _OperatorPipeline(Movable):
             var ahead = self.plan._prefetched.value()
             for k in range(len(self.wanted)):
                 ahead[][self.wanted[k]] = pipelines[self.at[k]].take_result()
+        if len(self.window_keys) > 0:
+            ref node = self.plan._nodes[self.index]
+            self.began = Int(perf_counter_ns())
+            var input = self.plan._execute(
+                node.left, False, self.streaming, self.batch_size
+            )
+            trace_path("window.partitioned_sink")
+            self.window.append(
+                WindowSink(
+                    input^,
+                    node.exprs.copy(),
+                    node.kind == SELECT,
+                    self.window_keys.copy(),
+                )
+            )
+            return
         self.result = self.plan._execute(
             self.index, False, self.streaming, self.batch_size
         )
 
     def finalize(mut self) raises:
         """A build side's table from the result, then its fill, as
-        rounds of finalize tasks (`finalize_tasks`)."""
+        rounds of finalize tasks (`finalize_tasks`); a window sink's
+        rounds come first, and the table is made from their result."""
+        if len(self.window) > 0:
+            return
         if len(self.build.keys) > 0:
             self.building.append(
                 BuildFinish(
@@ -1535,9 +1579,28 @@ struct _OperatorPipeline(Movable):
             )
 
     def max_finalize_tasks(self) -> Int:
-        return configured_workers() if len(self.build.keys) > 0 else 0
+        return (
+            configured_workers() if len(self.build.keys) > 0
+            or len(self.window_keys) > 0 else 0
+        )
 
     def finalize_tasks(mut self) raises -> Int:
+        if len(self.window) > 0:
+            var tasks = self.window[0].next_round()
+            if tasks > 0:
+                return tasks
+            var rows = self.window[0].height
+            self.result = self.window[0].take_result()
+            _ = self.window.pop()
+            plan_record(
+                self.plan,
+                self.index,
+                "window",
+                rows,
+                self.result.height(),
+                wall_ns=Int(perf_counter_ns()) - self.began,
+            )
+            self.finalize()
         if len(self.building) > 0:
             var tasks = self.building[0].next_round()
             if tasks > 0:
@@ -1553,7 +1616,9 @@ struct _OperatorPipeline(Movable):
         return tasks
 
     def finalize_task(mut self, task: Int) raises:
-        if len(self.building) > 0:
+        if len(self.window) > 0:
+            self.window[0].round_task(task)
+        elif len(self.building) > 0:
             self.building[0].round_task(task)
         else:
             self.built.value().finalize_task(task)
