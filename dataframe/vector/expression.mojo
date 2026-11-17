@@ -9,6 +9,7 @@ null behavior and checked-expression errors.
 from std.bit import count_trailing_zeros, pop_count
 from std.math import ceil, floor
 from std.memory import (
+    ArcPointer,
     Pointer,
     unsafe_memcpy,
     unsafe_memcmp,
@@ -20,7 +21,7 @@ from std.sys import stderr
 from std.os import getenv
 from dataframe.binding import BoundExpr, bind, op_name
 from dataframe.decimal import divide_half_even, pow10, precision_limit
-from dataframe.dtype import DataType
+from dataframe.dtype import CategoricalDictionary, DataType
 from dataframe.execution import evaluate
 from dataframe.expr import (
     ABS,
@@ -70,12 +71,13 @@ from dataframe.kernels.binary import (
     _round_half_away,
 )
 from dataframe.time.calendar import civil_from_days
+from dataframe.trace import trace_path
 from dataframe.series import Series
 from dataframe.text.bytes import _find_bytes
 from dataframe.text.predicates import decode_values
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
-from dataframe.storage.string import StringColumn
+from dataframe.storage.string import StringBuilder, StringColumn
 from dataframe.vector.adaptive_filter import AdaptiveFilter
 from dataframe.vector.data_chunk import (
     ColumnArena,
@@ -426,6 +428,14 @@ struct VectorExpression(Copyable, Movable):
     # Per AND / OR node, adapt child order to measured evaluation time;
     # disabled for other node kinds.
     var adaptive: List[AdaptiveFilter]
+    # Per Boolean node whose subtree reads one String column and cannot
+    # raise: that input column (-1 otherwise), and, once a dictionary-coded
+    # vector of the column was selected, the node's answer for each
+    # dictionary value (and, last, for null) with the dictionary it was
+    # computed for.
+    var coded: List[Int]
+    var coded_answers: List[List[UInt8]]
+    var coded_dictionaries: List[Optional[ArcPointer[CategoricalDictionary]]]
     var scratch: DataChunk
 
     def __init__(out self, expr: Expr, schema: List[Series]) raises:
@@ -474,6 +484,11 @@ struct VectorExpression(Copyable, Movable):
         self.adaptive = List[AdaptiveFilter](
             length=n, fill=AdaptiveFilter(0, True)
         )
+        self.coded = List[Int](length=n, fill=-1)
+        self.coded_answers = List[List[UInt8]](length=n, fill=List[UInt8]())
+        self.coded_dictionaries = List[
+            Optional[ArcPointer[CategoricalDictionary]]
+        ](length=n, fill=None)
         self.scratch = DataChunk(n)
         # Lane buffers are made by each worker's copy when it first
         # evaluates (`_allocate`): the compiled template stays small to copy.
@@ -489,6 +504,44 @@ struct VectorExpression(Copyable, Movable):
         self._narrow_decimals()
         self._share_columns()
         self._plan_direct()
+        self._plan_coded()
+
+    def _plan_coded(mut self):
+        """The Boolean nodes Select may answer through a String column's
+        dictionary: each reads one String column and nothing else and
+        cannot raise, so its answer for a row depends only on that row's
+        value, and computing it for a value no selected row holds has no
+        effect. Children precede their parents, so one pass finds the
+        columns each node reads."""
+        var n = len(self.kinds)
+        # Per node: the one input column its subtree reads, -1 for none,
+        # -2 for more than one.
+        var reads = List[Int](length=n, fill=-1)
+        for i in range(n):
+            var kind = self.kinds[i]
+            if kind == _KIND_COLUMN:
+                reads[i] = self.bound.sources[i]
+                continue
+            if kind != _KIND_LANE and kind != _KIND_FALLBACK:
+                continue
+            var one = -1
+            for child in node_children(self.bound.expr._nodes[i]):
+                var r = reads[child]
+                if r == -1:
+                    continue
+                if r == -2 or (one >= 0 and one != r):
+                    one = -2
+                    break
+                one = r
+            reads[i] = one
+            if (
+                kind == _KIND_LANE
+                and one >= 0
+                and self.bound.dtypes[i] == DataType.BOOL
+                and self.schema[one].dtype() == DataType.STRING
+                and not self._can_throw(i)
+            ):
+                self.coded[i] = one
 
     def _share_columns(mut self):
         """Point every node reading a column at one node per column and
@@ -2960,6 +3013,12 @@ struct VectorExpression(Copyable, Movable):
         kept."""
         if count == 0:
             return 0
+        if self.coded[index] >= 0:
+            var coded = self._select_coded(
+                index, input, arena, rows, count, target, false_target
+            )
+            if coded >= 0:
+                return coded
         var op = self.bound.expr._nodes[index].op
         if self.kinds[index] == _KIND_LANE and (op == AND or op == OR):
             if op == AND and self.ranges[index] >= 0:
@@ -3051,6 +3110,123 @@ struct VectorExpression(Copyable, Movable):
         self.generation += 1
         self._evaluate(index, input, arena, rows, count)
         return self._true_rows(index, rows, count, target, false_target)
+
+    def _select_coded(
+        mut self,
+        index: Int,
+        mut input: DataChunk,
+        mut arena: ColumnArena,
+        rows: SelectionVector,
+        count: Int,
+        target: SelectionVector,
+        false_target: Int = 0,
+    ) raises -> Int:
+        """Select node `index` through its String column's dictionary: the
+        node is computed once for each distinct value the column's source
+        stored (and for null), then each row keeps that value's answer, read
+        by the row's code. The strings themselves are never read row by row.
+        -1 when the column's vector is not over dictionary codes, or its
+        dictionary has more values than the column has rows (computing every
+        value would then cost more than computing every row)."""
+        var v = input.data[self.coded[index]]
+        if not v.encoded() or v.physical != PHYSICAL_VARCHAR:
+            return -1
+        ref series = arena.columns[v.source]
+        if series.is_chunked() or not series._data.isa[StringColumn]():
+            return -1
+        ref strings = series._data[StringColumn]
+        if not strings._codes:
+            return -1
+        ref held = strings._codes.value()[]
+        if held.rows:
+            # Gathered codes are read through a row list: not read here.
+            return -1
+        var dictionary = held.dtype.dictionary()
+        var size = len(dictionary[])
+        if size > len(strings):
+            return -1
+        # The codes live in their own buffer, which the arena's column keeps
+        # alive: the address holds while the arena grows below.
+        var codes = (
+            held.codes[]
+            .unsafe_ptr()
+            .unsafe_offset(strings._offset + v.source_offset)
+        )
+        var known = self.coded_dictionaries[index]
+        if not known or Int(known.value()[].offsets.unsafe_ptr()) != Int(
+            dictionary[].offsets.unsafe_ptr()
+        ):
+            self._answer_dictionary(index, dictionary, arena)
+        var answers = self.coded_answers[index].unsafe_ptr()
+        var through_sel = v.vector_type == DICTIONARY_VECTOR
+        var validity = v.validity
+        var whole = validity.all_valid()
+        var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=target.data)
+        var other = Pointer[UInt32, MutAnyOrigin](
+            unsafe_from_address=false_target
+        )
+        var from_rows = Pointer[UInt32, MutAnyOrigin](
+            unsafe_from_address=rows.data
+        )
+        var through_rows = rows.is_set()
+        var kept = 0
+        var dropped = 0
+        for k in range(count):
+            var row = Int(from_rows[unsafe_offset=k]) if through_rows else k
+            var entry = v.sel.get_index_unsafe(row) if through_sel else row
+            # A null row's code is unspecified: it reads the null answer.
+            var slot = size
+            if whole or validity.row_is_valid_unsafe(entry):
+                slot = Int(codes[unsafe_offset=entry])
+            var keep = Int(answers[unsafe_offset=slot])
+            out[unsafe_offset=kept] = UInt32(row)
+            kept += keep
+            if false_target != 0:
+                other[unsafe_offset=dropped] = UInt32(row)
+                dropped += 1 - keep
+        return kept
+
+    def _answer_dictionary(
+        mut self,
+        index: Int,
+        dictionary: ArcPointer[CategoricalDictionary],
+        mut arena: ColumnArena,
+    ) raises:
+        """Node `index`'s answer (1 for true, 0 for false or null) for
+        each value of `dictionary` and, last, for null: the node computed
+        over chunks whose column holds those values."""
+        var size = len(dictionary[])
+        var values = StringBuilder(size + 1)
+        for code in range(size):
+            values.append(dictionary[].get(code))
+        values.append_null()
+        var column = self.coded[index]
+        var handle = arena.add(
+            Series(self.schema[column].name(), values^.finish())
+        )
+        var answers = List[UInt8](length=size + 1, fill=0)
+        var chunk = DataChunk(len(self.schema))
+        var start = 0
+        while start < size + 1:
+            var count = min(STANDARD_VECTOR_SIZE, size + 1 - start)
+            chunk.reference(column, flat_over(arena, handle, start))
+            chunk.count = count
+            # A fresh generation: no column node reuses another chunk's.
+            self.generation += 1
+            self._evaluate(index, chunk, arena, SelectionVector(), count)
+            var held = self._u8(index)
+            var flags = self.valid[index].unsafe_ptr()
+            var whole = self.whole[index]
+            for k in range(count):
+                var keep = held[unsafe_offset=k]
+                if not whole:
+                    keep &= flags[unsafe_offset=k]
+                answers[start + k] = keep
+            start += count
+        self.generation += 1
+        self.coded_answers[index] = answers^
+        self.coded_dictionaries[index] = Optional(dictionary)
+        trace_path("vector.string_dictionary")
 
     def _bound_of(self, index: Int) -> Tuple[Int, Int]:
         """A direct comparison as (op with the column on the left, the

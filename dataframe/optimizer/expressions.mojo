@@ -19,6 +19,8 @@ from dataframe.expr import (
     DIV,
     MEAN,
     MUL,
+    STD,
+    VAR,
     NEG,
     SUB,
     SUM,
@@ -157,7 +159,8 @@ def _cannot_raise(bound: BoundExpr) -> Bool:
     """Whether every operation of a bound expression is total for the
     types it was bound to: the untyped total operations; float addition,
     subtraction, multiplication, division and negation; sums and means of
-    floats; and casts that are defined for every value (to the same type,
+    floats; standard deviations and variances of integers or floats; and
+    casts that are defined for every value (to the same type,
     between numeric types when not strict, or strict into a type that
     holds every source value). Decimal targets are excluded: a decimal
     cast can overflow its precision."""
@@ -176,6 +179,15 @@ def _cannot_raise(bound: BoundExpr) -> Bool:
             continue
         if op == SUM or op == MEAN:
             if node.left < 0 or not bound.dtypes[node.left].is_float():
+                return False
+            continue
+        if op == STD or op == VAR:
+            # Running moments are kept in floats whatever the integer
+            # or float input, and a group with too few values is null.
+            if node.left < 0:
+                return False
+            var source = bound.dtypes[node.left]
+            if not (source.is_float() or source.is_integer()):
                 return False
             continue
         if op == CAST and node.left >= 0:

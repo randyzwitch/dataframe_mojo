@@ -128,6 +128,7 @@ from dataframe.planning.context import (
     plan_slot_table,
 )
 from dataframe.planning.inputs import (
+    BuildFinish,
     finish_build,
 )
 from dataframe.scheduler import (
@@ -225,8 +226,8 @@ from dataframe.series import (
 )
 from dataframe.table_scan import conjunction, scan_filtered
 from dataframe.aggregation.state import (
+    PartsFinish,
     _StreamReduction,
-    _finish_parts,
 )
 from dataframe.trace import (
     trace_path,
@@ -300,7 +301,7 @@ def _run_schedule(
     schedule.bind()
     try:
         run_pipelines(
-            schedule.pipelines, schedule.metas, parallel=not self._report
+            schedule.pipelines, schedule.metas, one_event=Bool(self._report)
         )
     except e:
         # A failed schedule never reaches the probes' finish.
@@ -891,7 +892,7 @@ def plan_execute_inputs(
     schedule.bind()
     try:
         run_pipelines(
-            schedule.pipelines, schedule.metas, parallel=not self._report
+            schedule.pipelines, schedule.metas, one_event=Bool(self._report)
         )
     except e:
         schedule.release()
@@ -907,9 +908,8 @@ def plan_union(
 ) raises -> DataFrame:
     """The union at node `index` with its children computed as pipelines of
     one schedule (every child is a pipeline of that schedule, none
-    nested in another's, so all of them share the threads at once), or
-    one after the other on this plan when an execution report is kept.
-    A child a stream already ran (`plan_schedule_inputs`) is taken."""
+    nested in another's, so all of them share the threads at once). A
+    child a stream already ran (`plan_schedule_inputs`) is taken."""
     var children = plan_union_children(self, index)
     var got = Dict[Int, DataFrame]()
     var wanted = List[Int]()
@@ -919,8 +919,6 @@ def plan_union(
         var ready = plan_take_prefetched(self, child)
         if ready:
             got[child] = ready.take()
-        elif self._report:
-            got[child] = self._execute(child, False, streaming, batch_size)
         else:
             wanted.append(child)
     if len(wanted) > 0:
@@ -989,7 +987,7 @@ def plan_run_shared(
     schedule.bind()
     try:
         run_pipelines(
-            schedule.pipelines, schedule.metas, parallel=not self._report
+            schedule.pipelines, schedule.metas, one_event=Bool(self._report)
         )
     except e:
         schedule.release()
@@ -1099,6 +1097,8 @@ struct _StreamProbe(Movable):
     # none), which the node then runs over (`_decline`).
     var declined: List[QueryContext]
     var below: Int
+    # The build side's table made from its result frame, as rounds.
+    var building: List[BuildFinish]
 
     def __init__(
         out self,
@@ -1139,6 +1139,7 @@ struct _StreamProbe(Movable):
         self.finish_above = None
         self.declined = List[QueryContext]()
         self.below = -1
+        self.building = List[BuildFinish]()
 
     def initialize(mut self):
         """The probe's setup that reads no input's rows, made as the
@@ -1162,9 +1163,7 @@ struct _StreamProbe(Movable):
 
     def tasks(mut self) raises -> Int:
         """Called once every input is complete: its results in the memo (written
-        by this one thread), the probe set up, and a task per morsel worker. An
-        execution report runs them as one task (its schedule is on one thread),
-        the workers within it as jobs."""
+        by this one thread), the probe set up, and a task per morsel worker."""
         ref plan = Pointer[QueryContext, MutAnyOrigin](
             unsafe_from_address=self.plan
         )[]
@@ -1259,19 +1258,14 @@ struct _StreamProbe(Movable):
     def _execute_tasks(self, plan: QueryContext) -> Int:
         """A task per morsel worker, or one for a probe with no morsel
         pipeline (a batch stream runs in its finish's rounds)."""
-        if len(self.started[0].piped) == 0 or plan._report:
+        if len(self.started[0].piped) == 0:
             return 1
         return self.started[0].piped[0].run.tasks()
 
     def execute(mut self, task: Int) raises:
         if len(self.started[0].piped) == 0:
             return
-        if Pointer[QueryContext, MutAnyOrigin](
-            unsafe_from_address=self.plan
-        )[]._report:
-            self.started[0].piped[0].run.execute_all()
-        else:
-            self.started[0].piped[0].run.execute(task)
+        self.started[0].piped[0].run.execute(task)
 
     def finalize(mut self) raises:
         """The sink's finish: its parallel work as rounds of tasks
@@ -1281,16 +1275,7 @@ struct _StreamProbe(Movable):
         if len(started.piped) > 0:
             ref piped = started.piped[0]
             self.finish.append(finish_pipeline(piped.run))
-            if Pointer[QueryContext, MutAnyOrigin](
-                unsafe_from_address=self.plan
-            )[]._report:
-                # An execution report's schedule runs on one thread: the
-                # finish's rounds run here, each as jobs, as its execute
-                # task runs the workers.
-                run_rounds(self.finish[0])
-                self.round = 0
-            else:
-                self.round = self.finish[0].next_round()
+            self.round = self.finish[0].next_round()
         elif len(started.batch) > 0:
             self.round = started.batch[0].advance()
         else:
@@ -1302,7 +1287,9 @@ struct _StreamProbe(Movable):
             self._complete()
 
     def finalize_task(mut self, task: Int) raises:
-        if self.filling:
+        if len(self.building) > 0:
+            self.building[0].round_task(task)
+        elif self.filling:
             self.built.value().finalize_task(task)
         elif len(self.finish) > 0:
             self.finish[0].round_task(task)
@@ -1312,6 +1299,9 @@ struct _StreamProbe(Movable):
     def finish_finalize(mut self) raises:
         """A round of finalize tasks has ended: the next round, or the
         result. The build table's fill is the last round."""
+        if len(self.building) > 0:
+            self._build_round()
+            return
         if self.filling:
             self.built.value().finish_finalize()
             self.filling = False
@@ -1360,20 +1350,31 @@ struct _StreamProbe(Movable):
             self.result = on._execute(self.index, False, True, self.batch_size)
         if len(self.build.keys) > 0 and self.result:
             # A result made as a frame (the stream ran no pipeline, or its
-            # columns' types keep the build on one): its table from it.
-            var frame = self.result.take()
-            self.built = finish_build(
-                frame,
-                self.build.keys,
-                self.build.how,
-                self.build.coalesce,
-                self.build.probe_estimate,
-                self.build.build_filtered,
-                defer_finalize=True,
+            # columns' types keep the build on one): its table from it,
+            # as rounds of this finish.
+            self.building.append(
+                BuildFinish(
+                    self.result.take(),
+                    self.build.keys,
+                    self.build.how,
+                    self.build.coalesce,
+                    self.build.probe_estimate,
+                    self.build.build_filtered,
+                )
             )
-            self.result = frame^
-            if self.built:
-                self._fill_table()
+            self._build_round()
+
+    def _build_round(mut self) raises:
+        """The next round of the build side's table, or, once it is
+        made, its fill."""
+        self.round = self.building[0].next_round()
+        if self.round > 0:
+            return
+        var done = self.building.pop()
+        self.result = done.frame.copy()
+        swap(self.built, done.table)
+        if self.built:
+            self._fill_table()
 
     def _fill_table(mut self) raises:
         """The built table's pointer table filled as one more round of
@@ -1412,10 +1413,7 @@ struct _OuterScan(Movable):
             unsafe_from_address=self.siblings
         )[]
         ref probe = pipelines[self.probe].probe[0]
-        ref plan = Pointer[QueryContext, MutAnyOrigin](
-            unsafe_from_address=probe.plan
-        )[]
-        if len(probe.started[0].piped) == 0 or plan._report:
+        if len(probe.started[0].piped) == 0:
             return 1
         ref run = self._run()[]
         self.active = run.begin_round()
@@ -1474,6 +1472,10 @@ struct _OperatorPipeline(Movable):
     var siblings: Int
     var result: DataFrame
     var built: Optional[JoinHashTable]
+    # The table made from the result, as rounds; then its fill.
+    var building: List[BuildFinish]
+    var filled: Bool
+    var filling: Bool
 
     def __init__(
         out self,
@@ -1501,6 +1503,9 @@ struct _OperatorPipeline(Movable):
         self.siblings = 0
         self.result = DataFrame(List[Series]())
         self.built = None
+        self.building = List[BuildFinish]()
+        self.filled = False
+        self.filling = False
 
     def execute(mut self) raises:
         if len(self.wanted) > 0:
@@ -1515,31 +1520,48 @@ struct _OperatorPipeline(Movable):
         )
 
     def finalize(mut self) raises:
+        """A build side's table from the result, then its fill, as
+        rounds of finalize tasks (`finalize_tasks`)."""
         if len(self.build.keys) > 0:
-            self.built = finish_build(
-                self.result,
-                self.build.keys,
-                self.build.how,
-                self.build.coalesce,
-                self.build.probe_estimate,
-                self.build.build_filtered,
-                defer_finalize=True,
+            self.building.append(
+                BuildFinish(
+                    self.result.copy(),
+                    self.build.keys,
+                    self.build.how,
+                    self.build.coalesce,
+                    self.build.probe_estimate,
+                    self.build.build_filtered,
+                )
             )
 
     def max_finalize_tasks(self) -> Int:
         return configured_workers() if len(self.build.keys) > 0 else 0
 
     def finalize_tasks(mut self) raises -> Int:
-        if not self.built:
+        if len(self.building) > 0:
+            var tasks = self.building[0].next_round()
+            if tasks > 0:
+                return tasks
+            var done = self.building.pop()
+            swap(self.result, done.frame)
+            swap(self.built, done.table)
+        if not self.built or self.filled:
             return 0
-        return self.built.value().finalize_tasks()
+        self.filled = True
+        var tasks = self.built.value().finalize_tasks()
+        self.filling = tasks > 0
+        return tasks
 
     def finalize_task(mut self, task: Int) raises:
-        self.built.value().finalize_task(task)
+        if len(self.building) > 0:
+            self.building[0].round_task(task)
+        else:
+            self.built.value().finalize_task(task)
 
     def finish_finalize(mut self) raises:
-        if self.built:
+        if self.filling:
             self.built.value().finish_finalize()
+            self.filling = False
 
 
 struct _StreamPipeline(SchedulablePipeline):
@@ -2318,6 +2340,8 @@ def _probe_start(
 comptime _ROUND_NONE = 0
 comptime _ROUND_BATCHES = 1
 comptime _ROUND_MERGE = 2
+# The reduction's hash parts finished into the result (`PartsFinish`).
+comptime _ROUND_PARTS = 3
 
 
 struct _BatchStream(Movable):
@@ -2356,6 +2380,8 @@ struct _BatchStream(Movable):
     var workers: Int
     var jobs: List[_StreamJob]
     var acc: _StateAccumulator
+    # The finish of the reduction's hash parts, once every batch merged.
+    var parts: List[PartsFinish]
     var counting: Bool
     var collecting: Bool
     var projection: List[String]
@@ -2440,6 +2466,7 @@ struct _BatchStream(Movable):
         self.workers = max(1, workers)
         self.jobs = List[_StreamJob]()
         self.acc = acc^
+        self.parts = List[PartsFinish]()
         self.counting = counting
         self.collecting = collecting
         self.projection = projection^
@@ -2481,7 +2508,9 @@ struct _BatchStream(Movable):
             self.acc.end_merge()
             self.round = _ROUND_NONE
             if self.finishing:
-                return 0
+                return self._parts_round()
+        elif self.round == _ROUND_PARTS:
+            return self._parts_round()
         if not self.ended:
             var batches = self._take_batches()
             if batches > 0:
@@ -2498,12 +2527,36 @@ struct _BatchStream(Movable):
         var merges = self.acc.begin_merge(True)
         if merges > 0:
             self.round = _ROUND_MERGE
-        return merges
+            return merges
+        return self._parts_round()
+
+    def _parts_round(mut self) raises -> Int:
+        """Once every part merged: the reduction's hash parts, when it
+        has more than one, finished into its frame as rounds of tasks,
+        each part on the task that takes it (`PartsFinish`); 0 once
+        done."""
+        if (
+            self.round != _ROUND_PARTS
+            and not self.collecting
+            and len(self.acc.states) > 1
+        ):
+            var parts = List[_StreamReduction]()
+            swap(parts, self.acc.states)
+            self.parts.append(PartsFinish(parts^, True))
+            self.round = _ROUND_PARTS
+        if self.round != _ROUND_PARTS:
+            return 0
+        var tasks = self.parts[0].next_round()
+        if tasks == 0:
+            self.round = _ROUND_NONE
+        return tasks
 
     def run_task(mut self, task: Int) raises:
         """Task `task` of the round under way; they run at the same time."""
         if self.round == _ROUND_BATCHES:
             self.jobs[task].run()
+        elif self.round == _ROUND_PARTS:
+            self.parts[0].round_task(task)
         else:
             self.acc.merge_task(task)
 
@@ -2685,15 +2738,13 @@ struct _BatchStream(Movable):
                 self.acc.pending[0].append(part^)
             _ = self.acc.begin_merge(True)
             result = self.acc.states[0].finish()
+        elif len(self.parts) > 0:
+            # The hash parts, finished in the last rounds.
+            result = self.parts[0].frame.copy()
         elif len(self.acc.states):
             # Every part merged in the last round: one state merges here.
             _ = self.acc.begin_merge(True)
-            if len(self.acc.states) == 1:
-                result = self.acc.states[0].finish()
-            else:
-                var parts = List[_StreamReduction]()
-                swap(parts, self.acc.states)
-                result = _finish_parts(parts^)
+            result = self.acc.states[0].finish()
         elif self.top >= 0:
             if len(self.topn) > 0:
                 var best = self.topn[0].finish()
