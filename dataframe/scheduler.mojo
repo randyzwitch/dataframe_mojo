@@ -45,7 +45,10 @@ from dataframe.parallel import (
     _Crew,
     _Entry,
     _current_crew,
+    _running_schedules,
     configured_workers,
+    in_shared_task,
+    set_shared_task,
 )
 from dataframe.trace import trace_path
 
@@ -290,6 +293,8 @@ struct _Executor[P: SchedulablePipeline](Movable):
     var parents: List[List[Int]]
     var total_dependencies: List[Int]
     var total_tasks: List[Int]
+    # A finish event's current round of finalize tasks.
+    var round_tasks: List[Int]
     # Each pipeline's `max_execute_tasks`, asked once when the queue is
     # sized.
     var max_execute: List[Int]
@@ -316,6 +321,13 @@ struct _Executor[P: SchedulablePipeline](Movable):
     # When the schedule began: orders it against schedules nested in its
     # tasks (`_Crew.step`).
     var stamp: Int
+    # Events one at a time (`run_pipelines`' `one_event`): the event
+    # whose tasks may run (-1 for none), the events ready after it in the
+    # order they became ready, and the spin lock over both.
+    var one_event: Bool
+    var turn: Int
+    var waiting: List[Int]
+    var gate: Atomic[Int64]
 
     def __init__(
         out self,
@@ -329,6 +341,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
         self.total_dependencies = List[Int](capacity=len(stages))
         self.total_tasks = List[Int](capacity=len(stages))
         self.max_execute = List[Int](capacity=len(pipelines))
+        self.round_tasks = List[Int](length=len(stages), fill=0)
         for p in range(len(pipelines)):
             self.max_execute.append(max(1, pipelines[p].max_execute_tasks()))
         for s in stages:
@@ -367,6 +380,10 @@ struct _Executor[P: SchedulablePipeline](Movable):
         self.failed = Atomic[Int64](0)
         self.error = String()
         self.stamp = Int(perf_counter_ns())
+        self.one_event = False
+        self.turn = -1
+        self.waiting = List[Int]()
+        self.gate = Atomic[Int64](0)
 
     def _pipelines(self) -> ref[MutAnyOrigin] List[Self.P]:
         return Pointer[List[Self.P], MutAnyOrigin](
@@ -387,7 +404,43 @@ struct _Executor[P: SchedulablePipeline](Movable):
             or self.failed.load() != 0
         )
 
+    def _lock(mut self):
+        while True:
+            var free = Int64(0)
+            if self.gate.compare_exchange(free, Int64(1)):
+                return
+            _ = external_call["sched_yield", Int32]()
+
+    def _unlock(mut self):
+        self.gate.store(0)
+
     def _schedule(mut self, event: Int):
+        """Queue the event's tasks once its turn comes (at once unless
+        events run one at a time)."""
+        if self.one_event:
+            self._lock()
+            if self.turn >= 0:
+                self.waiting.append(event)
+                self._unlock()
+                return
+            self.turn = event
+            self._unlock()
+        self._queue_event(event)
+
+    def _next_turn(mut self):
+        """The event holding the turn finished: the one ready longest
+        takes it."""
+        self._lock()
+        if len(self.waiting) == 0:
+            self.turn = -1
+            self._unlock()
+            return
+        var next = self.waiting.pop(0)
+        self.turn = next
+        self._unlock()
+        self._queue_event(next)
+
+    def _queue_event(mut self, event: Int):
         """Queue the event's tasks; an event without tasks finishes now, since
         nothing would ever finish it otherwise."""
         var tasks = self.total_tasks[event]
@@ -443,6 +496,9 @@ struct _Executor[P: SchedulablePipeline](Movable):
             self._complete_dependency(parent)
         if self.stage[event] == STAGE_COMPLETE:
             _ = self.completed_pipelines.fetch_add(1)
+        if self.one_event:
+            # Its parents became ready while it held the turn.
+            self._next_turn()
 
     def _finish_task(mut self, event: Int):
         """Count a finished task; the event's last task finishes it. A
@@ -478,6 +534,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
         # Set before any is queued: no task of this round can finish
         # before the count includes it.
         self.total_tasks[event] += tasks
+        self.round_tasks[event] = tasks
         for t in range(tasks):
             if not self._push((event << _TASK_BITS) | (t + 1)):
                 return True
@@ -507,6 +564,16 @@ struct _Executor[P: SchedulablePipeline](Movable):
         var task = record & ((1 << _TASK_BITS) - 1)
         ref pipeline = self._pipelines()[self.pipeline[event]]
         var stage = self.stage[event]
+        # One of several tasks of its event (an execute task, or a task of
+        # a finalize round): the work it starts stays on this thread.
+        var was = in_shared_task()
+        var shared = (
+            stage == STAGE_EXECUTE and self.total_tasks[event] > 1
+        ) or (
+            stage == STAGE_FINISH and task > 0 and self.round_tasks[event] > 1
+        )
+        if shared != was:
+            set_shared_task(shared)
         try:
             if stage == STAGE_INITIALIZE:
                 pipeline.initialize()
@@ -520,8 +587,12 @@ struct _Executor[P: SchedulablePipeline](Movable):
                 pipeline.finalize()
                 _ = self._insert_finalize_tasks(event)
         except e:
+            if shared != was:
+                set_shared_task(was)
             self._fail(e)
             return
+        if shared != was:
+            set_shared_task(was)
         self._finish_task(event)
 
     def _fail(mut self, e: Error):
@@ -574,44 +645,29 @@ def _queued[P: SchedulablePipeline](address: Int) abi("C") -> Int:
     return 1 if executor.tail.load() > executor.head.load() else 0
 
 
-def _running_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
-    var pointer = alloc(Layout[Atomic[Int64]](length=1)).unsafe_leak()
-    pointer.unsafe_write(Atomic[Int64](0))
-    return pointer.unsafe_bitcast[NoneType]()
-
-
-def _running_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
-    pass
-
-
-def _running_schedules() -> ref[MutAnyOrigin] Atomic[Int64]:
-    """How many schedules are running in the process."""
-    var address = _get_global[
-        "DATAFRAME_RUNNING_SCHEDULES", _running_init, _running_keep
-    ]()
-    return Pointer[Atomic[Int64], MutAnyOrigin](
-        unsafe_from_address=Int(address.value())
-    )[]
-
-
 def run_pipelines[
     P: SchedulablePipeline
 ](
     mut pipelines: List[P],
     metas: List[MetaPipeline],
     parallel: Bool = True,
+    one_event: Bool = False,
 ) raises:
     """Schedule `pipelines` (pipeline p is MetaPipeline `metas[p]`) as
     events and run their tasks on the crew's threads and the caller
     until every pipeline completes; re-raise the first task error.
     `parallel=False` runs every task on the caller, in the order the
-    events schedule them (an execution report records one at a time)."""
+    events schedule them. `one_event` runs one event at a time, its tasks
+    on every thread, the others waiting their turn in the order they
+    became ready: what one pipeline does is then all that runs, as an
+    execution report records it."""
     if len(pipelines) != len(metas):
         raise Error("one MetaPipeline per pipeline")
     if len(pipelines) == 0:
         return
     var stages = build_pipeline_schedule(metas)
     var executor = _Executor[P](pipelines, stages)
+    executor.one_event = one_event
     # A query runs its schedules one after another: one starting while
     # another runs was started inside that one's task, whose thread then
     # waits on it.

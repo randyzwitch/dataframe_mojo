@@ -394,6 +394,42 @@ def test_key_filter_moves_below_aggregates_that_cannot_raise_for_their_types() r
     assert_true(not _filter_below(counted, "GROUP_BY"))
 
 
+def test_key_filter_moves_below_standard_deviations_and_variances() raises:
+    """A standard deviation or variance keeps its running moments in
+    floats for integer and float inputs alike, so it never raises:
+    the key filter moves below the aggregate and the kept group's values
+    stay the same."""
+    var source = DataFrame(
+        [
+            Series("g", Column[Int64]([0, 0, 0, 1, 1])),
+            Series("x", Column[Float64]([1.0, 3.0, 5.0, 1.0e308, -1.0e308])),
+            Series("i", Column[Int32]([1, 3, 5, Int32.MAX, Int32.MIN])),
+        ]
+    )
+    var plan = (
+        source.lazy()
+        .group_by("g")
+        .agg([col("x").std().alias("sd"), col("i").var().alias("v")])
+        .filter(col("g") == 0)
+    )
+    assert_true(_filter_below(plan, "GROUP_BY"))
+    var expected = DataFrame(
+        [
+            Series("g", Column[Int64]([0])),
+            Series("sd", Column[Float64]([2.0])),
+            Series("v", Column[Float64]([4.0])),
+        ]
+    )
+    for optimize in [False, True]:
+        for streaming in [False, True]:
+            assert_frame(
+                plan.collect(
+                    optimize=optimize, streaming=streaming, engine="cpu"
+                ),
+                expected,
+            )
+
+
 def test_typed_filters_move_but_raising_casts_stay_in_place() raises:
     """A strict cast from Float64 to Float64 is total and the filter using
     it moves below the projection; a strict cast from text to Int64 can
