@@ -394,10 +394,22 @@ def test_distinct_rows_and_counts_of_nested_values() raises:
         var classes = 0
         for c in kase.classes:
             classes = max(classes, c + 1)
-        # Every class appears among the picks.
+        # Every class appears among the keys; `nk` picks some of them.
+        var hit = List[Bool](length=classes, fill=False)
+        for row in range(rows):
+            hit[kase.classes[other_of(row, len(kase.classes))]] = True
+        var picked = 0
+        for one in hit:
+            if one:
+                picked += 1
         assert_equal(
             source.select(col("key").n_unique()).item(0, "key").int64(),
             Int64(classes),
+            kase.name,
+        )
+        assert_equal(
+            source.select(col("nk").n_unique()).item(0, "nk").int64(),
+            Int64(picked),
             kase.name,
         )
         assert_equal(
@@ -406,7 +418,7 @@ def test_distinct_rows_and_counts_of_nested_values() raises:
             .collect()
             .item(0, "nk")
             .int64(),
-            Int64(classes),
+            Int64(picked),
             kase.name,
         )
         assert_equal(

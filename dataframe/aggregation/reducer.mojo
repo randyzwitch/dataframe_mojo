@@ -15,7 +15,7 @@ from dataframe.kernels.nested_keys import encode_nested_keys
 from dataframe.storage.boolean import BoolColumn, true_count
 from dataframe.storage.column import Column, _validity_at
 from dataframe.storage.column import _count_valid as _valid_count
-from dataframe.storage.string import StringColumn
+from dataframe.storage.string import StringColumn, escape_bytes
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.decimal import (
     check_limit,
@@ -1673,8 +1673,20 @@ struct Reducer(Movable):
             return
         if self.op == N_UNIQUE and chunk.dtype().is_nested():
             # Lists and structs are counted by their key bytes, equal
-            # exactly when the values are.
-            self._update(encode_nested_keys(chunk), offset, grouped, groups)
+            # exactly when the values are, written as printable text so a
+            # string set holds them whole.
+            var keys = encode_nested_keys(chunk)
+            ref bytes = keys._data[StringColumn]
+            var text = List[String](capacity=len(bytes))
+            var valid = List[Bool](capacity=len(bytes))
+            for i in range(len(bytes)):
+                valid.append(bytes._valid(i))
+                text.append(
+                    escape_bytes(bytes._row_bytes(i)) if valid[i] else ""
+                )
+            self._update(
+                Series("", StringColumn(text, valid)), offset, grouped, groups
+            )
             return
         if (
             (self.op == SUM or self.op == MEAN)
