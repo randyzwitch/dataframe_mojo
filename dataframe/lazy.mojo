@@ -96,7 +96,6 @@ from dataframe.planning.properties import (
     _mix_text,
     _order_free_reductions,
     _order_insensitive,
-    _order_sensitive,
     _output_names,
     _partitioned_order_free,
     _pinned,

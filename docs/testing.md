@@ -49,10 +49,12 @@ Native Metal contracts run on a local Apple silicon Mac through
 device, so CI reports those contracts as capability skips. Extreme
 Date calendar fields are checked against an independent Int128 Gregorian model,
 including the complete signed day-storage endpoints.
-Capability skips do not establish GPU parity. Multiworker positional global
-FIRST/LAST and ARGMIN/ARGMAX also remain a known coverage limit: schedule-dependent results were
-observed, so their deterministic assertions currently use one worker. No flaky
-expected-failure test substitutes for a deterministic regression.
+Capability skips do not establish GPU parity. Global FIRST/LAST and
+ARGMIN/ARGMAX number each worker's rows from their morsel's, so their answers
+are the source order's on any number of workers;
+`tests/planner_correctness/test_positional_reductions.mojo` checks them on
+several. No flaky expected-failure test substitutes for a deterministic
+regression.
 
 ## Interchange and native interfaces
 
