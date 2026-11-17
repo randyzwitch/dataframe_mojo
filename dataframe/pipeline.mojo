@@ -88,13 +88,14 @@ from dataframe.aggregation.table_sink import (
 )
 from dataframe.aggregation.ungrouped import (
     UngroupedLayout,
+    UngroupedFinish,
     UngroupedSink,
-    ungrouped_finish,
     ungrouped_layout,
 )
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
 from dataframe.vector.column_data_collection import (
+    LimitBound,
     MaterializeFinish,
     MaterializeSink,
     append_raw,
@@ -1314,6 +1315,10 @@ struct _ChunkRunner(Movable):
     # its result, or the input of a reduction no aggregate sink takes.
     var materialize: List[MaterializeSink]
     var materializes: Bool
+    # A limited materialize sink: the first rows in source order it keeps
+    # (-1: every row), and the last morsel any worker still needs.
+    var limit: Int
+    var limit_bound: LimitBound
     # A join build sink (`JoinBuildSink`), when the pipeline's rows are a
     # hash join's build side: the chunks go into the worker's own rows,
     # which become the join's table, and nothing is collected.
@@ -1363,6 +1368,8 @@ struct _ChunkRunner(Movable):
         self.sets_layout = List[ArcPointer[GroupingSetsLayout]]()
         self.materialize = List[MaterializeSink]()
         self.materializes = False
+        self.limit = -1
+        self.limit_bound = LimitBound.none()
         self.build = List[JoinBuildSink]()
         self.build_layout = List[ArcPointer[JoinBuildLayout]]()
         self.scan = None
@@ -1438,9 +1445,18 @@ struct _ChunkRunner(Movable):
         elif self.materializes:
             if len(self.materialize) == 0:
                 self.materialize.append(
-                    MaterializeSink(self.output_schema().clear())
+                    MaterializeSink(
+                        self.output_schema().clear(),
+                        limit=self.limit,
+                        bound=self.limit_bound,
+                    )
                 )
             self.materialize[0].begin(morsel)
+
+    def sink_full(self) -> Bool:
+        """Whether the worker's limited sink holds all the rows it can use:
+        nothing it would sink from here on is wanted."""
+        return len(self.materialize) > 0 and self.materialize[0].full()
 
     def release_sink(mut self) raises:
         """The worker's run is over: only its sink's states outlive it. A
@@ -1632,6 +1648,8 @@ struct _ChunkRunner(Movable):
                 continue
             if sinking:
                 self._sink(input[])
+                if self.sink_full():
+                    break
             else:
                 collector[0].append(input[], self.arena)
         if sinking:
@@ -1825,8 +1843,9 @@ def _steps_over_frame(
     indexes: ArcPointer[List[Optional[JoinHashTable]]],
     mut counts: List[Int],
 ) raises -> DataFrame:
-    """`steps` over all of `frame` on this thread, chunk by chunk; `counts`
-    receives each step's input and output rows."""
+    """`steps` over all of `frame` on this thread, chunk by chunk, its
+    rows copied out here too: it is one task's share of a parallel step.
+    `counts` receives each step's input and output rows."""
     var schemas = ArcPointer(_step_schemas(frame, steps, joins[]))
     var runner = _ChunkRunner(
         ArcPointer(steps.copy()), schemas, joins, indexes, False
@@ -1841,7 +1860,7 @@ def _steps_over_frame(
         counts.append(runner.counts[2 * i + 1])
         counts.append(runner.counts[2 * i + 2])
     return materialize_finish(
-        runner.materialize, runner.output_schema().clear()
+        runner.materialize, runner.output_schema().clear(), serial=True
     )
 
 
@@ -1946,6 +1965,9 @@ struct _PipelineJob(Job):
     # A file source's shared scan state: its batches are the morsels,
     # and `frame` and `ranges` are unused.
     var source: Optional[ArcPointer[ScanSource]]
+    # Under a limit, the last morsel any worker still needs: a morsel
+    # numbered past it is not read.
+    var bound: LimitBound
 
     def __init__(
         out self,
@@ -1972,6 +1994,7 @@ struct _PipelineJob(Job):
             steps, schemas, joins, indexes, True, templates
         )
         self.source = None
+        self.bound = LimitBound.none()
         self.join_filters = join_filters.copy()
         self.join_stats = List[SelectivityStats](
             length=len(join_filters),
@@ -2233,7 +2256,7 @@ struct _PipelineJob(Job):
         var cursor = _Cursor(self.cursor)
         while True:
             var taken = cursor.take(1)
-            if taken >= count:
+            if taken >= count or self.first_morsel + taken > self.bound.last():
                 self.counts = self.runner.counts.copy()
                 if not self.finishes:
                     return
@@ -2268,7 +2291,7 @@ struct _PipelineJob(Job):
         the source's lock and decoded on this thread, then runs as a morsel
         numbered by its place in the file."""
         while True:
-            var next = self.source.value()[].take()
+            var next = self.source.value()[].take(self.bound.last())
             if not next:
                 break
             var batch = next.take()
@@ -2808,6 +2831,11 @@ comptime _SINK_FRAME = 4
 # The workers' batches copied into the output.
 comptime _SINK_BATCHES = 5
 comptime _SINK_DONE = 6
+# A round of a right or full join's unmatched build rows that no
+# pipeline of the schedule scanned (`PipelineRun.begin_round`).
+comptime _SINK_OUTER = 7
+# The ungrouped reductions' finish (`UngroupedFinish`).
+comptime _SINK_UNGROUPED = 8
 
 
 struct PipelineFinish(Movable, Rounds):
@@ -2856,6 +2884,9 @@ struct PipelineFinish(Movable, Rounds):
     var table: List[AggregateFinish]
     var frames: List[PartsFinish]
     var batches: List[MaterializeFinish]
+    var ungrouped: List[UngroupedFinish]
+    # The run whose unmatched build rows the round under way scans.
+    var outer: Int
     # The filter the aggregate table's finish runs (`GroupFilter` points
     # at it), and the finish steps left after it.
     var having: List[_HavingFilter]
@@ -2886,6 +2917,8 @@ struct PipelineFinish(Movable, Rounds):
         self.table = List[AggregateFinish]()
         self.frames = List[PartsFinish]()
         self.batches = List[MaterializeFinish]()
+        self.ungrouped = List[UngroupedFinish]()
+        self.outer = 0
         self.having = List[_HavingFilter]()
         self.rest = List[Step]()
         self.grouped = List[GroupingSetsSink]()
@@ -2931,7 +2964,11 @@ struct PipelineFinish(Movable, Rounds):
                 return 0
 
     def round_task(mut self, task: Int) raises:
-        if self.stage == _FINISH_PARTS:
+        if self.sink == _SINK_OUTER:
+            Pointer[PipelineRun, MutAnyOrigin](
+                unsafe_from_address=self.outer
+            )[].execute(task)
+        elif self.stage == _FINISH_PARTS:
             var p = task
             while p < len(self.parts):
                 self.parts[p].run()
@@ -2942,6 +2979,8 @@ struct PipelineFinish(Movable, Rounds):
             self.table[0].round_task(task)
         elif len(self.frames) > 0:
             self.frames[0].round_task(task)
+        elif len(self.ungrouped) > 0:
+            self.ungrouped[0].round_task(task)
         else:
             self.batches[0].round_task(task)
 
@@ -3024,7 +3063,22 @@ struct PipelineFinish(Movable, Rounds):
         ref run = Pointer[PipelineRun, MutAnyOrigin](unsafe_from_address=at)[]
         while True:
             if self.sink == _SINK_BEGIN:
+                if run.begin_round():
+                    # A round of the unmatched build rows, a task per
+                    # worker, before the sink combines the workers'
+                    # states.
+                    self.outer = at
+                    self.sink = _SINK_OUTER
+                    return run.tasks()
                 self._begin_sink(run)
+            elif self.sink == _SINK_OUTER:
+                self.sink = _SINK_BEGIN
+            elif self.sink == _SINK_UNGROUPED:
+                var tasks = self.ungrouped[0].next_round()
+                if tasks > 0:
+                    return tasks
+                self.frame = self.ungrouped.pop().frame.copy()
+                self.sink = _SINK_DONE
             elif self.sink == _SINK_SET_TABLE:
                 var tasks = self.table[0].next_round()
                 if tasks > 0:
@@ -3107,17 +3161,15 @@ struct PipelineFinish(Movable, Rounds):
                 return 0
 
     def _begin_sink(mut self, mut run: PipelineRun) raises:
-        """The sink's serial start: the rounds no schedule ran
-        (`begin_round`), the counts, the workers' sink states combined,
-        and the first round of the sink's finish set up, or the output
-        made here when the sink has no parallel finish."""
+        """The sink's serial start, once the unmatched build rows' rounds
+        ran: the counts, the workers' sink states combined, and the first
+        round of the sink's finish set up, or the output made here when
+        the sink has no parallel finish."""
         ref jobs = run.jobs
         ref steps = run.steps
         ref layout = run.layout
         ref sets = run.sets
         var planned = run.planned
-        while run.begin_round():
-            run.execute_all()
         run.release()
         var counts = List[Int](length=3 * len(steps) + 1, fill=0)
         for j in range(len(jobs)):
@@ -3175,9 +3227,21 @@ struct PipelineFinish(Movable, Rounds):
                     locals.append(jobs[j].runner.materialize.pop())
             var combined = _combined(locals^)
             self.batches.append(
-                MaterializeFinish(combined^, run.schemas[][len(steps)].clear())
+                MaterializeFinish(
+                    combined^,
+                    run.schemas[][len(steps)].clear(),
+                    limit=-1 if run.collects else run.limit,
+                )
             )
             self.sink = _SINK_BATCHES
+            return
+        if len(run.ungrouped) > 0:
+            var sinks = List[UngroupedSink](capacity=len(jobs))
+            for j in range(len(jobs)):
+                if len(jobs[j].runner.ungrouped) > 0:
+                    sinks.append(jobs[j].runner.ungrouped.pop())
+            self.ungrouped.append(UngroupedFinish(run.ungrouped[0], sinks^))
+            self.sink = _SINK_UNGROUPED
             return
         self.frame = _finish_here(run)
 
@@ -3292,18 +3356,11 @@ struct PipelineFinish(Movable, Rounds):
 
 
 def _finish_here(mut run: PipelineRun) raises -> DataFrame:
-    """The output of a sink whose finish has no parallel work: ungrouped
-    reductions, a join's build side, or a top-N."""
+    """The output of a sink whose finish has no parallel work: a join's
+    build side, or a top-N."""
     ref jobs = run.jobs
     ref steps = run.steps
     ref schemas = run.schemas
-    if len(run.ungrouped) > 0:
-        var sinks = List[UngroupedSink](capacity=len(jobs))
-        for j in range(len(jobs)):
-            if len(jobs[j].runner.ungrouped) > 0:
-                sinks.append(jobs[j].runner.ungrouped.pop())
-        var combined = _combined(sinks^)
-        return ungrouped_finish(run.ungrouped[0][], combined)
     if run.build_layout:
         # A join's build side: the workers' rows combined into its table,
         # whose finalize tasks the caller's finish event runs. The result
@@ -3519,6 +3576,10 @@ struct PipelineRun(Movable):
     # the table the finish makes of them (its finalize tasks not yet run).
     var build_layout: Optional[ArcPointer[JoinBuildLayout]]
     var built: Optional[JoinHashTable]
+    # A limited materialize sink's row count (-1: none) and the last
+    # morsel its workers still need.
+    var limit: Int
+    var bound: LimitBound
 
     def __init__(
         out self,
@@ -3590,15 +3651,14 @@ struct PipelineRun(Movable):
         self.source = None
         self.build_layout = None
         self.built = None
+        self.limit = -1
+        self.bound = LimitBound.none()
 
     def tasks(self) -> Int:
         return len(self.jobs)
 
     def execute(mut self, task: Int) raises:
         self.jobs[task].run()
-
-    def execute_all(mut self) raises:
-        run_jobs(self.jobs)
 
     def begin_round(mut self) raises -> Bool:
         """After probing, partition the build table's rows among workers and
@@ -3663,6 +3723,7 @@ struct PipelineRun(Movable):
         self.end_round()
         self.cursor.free()
         self.boundary.free()
+        self.bound.free()
         if self.source:
             try:
                 self.source.value()[].finish()
@@ -3827,6 +3888,7 @@ def begin_pipeline(
     build_probe_estimate: Int = -1,
     build_filtered: Bool = False,
     var types: Optional[PipelineTypes] = None,
+    limit: Int = -1,
 ) raises -> PipelineRun:
     """`run_pipeline` up to its workers' jobs, not yet run: its execute stage is
     the jobs, one task per thread; `finish_pipeline` is its finish, after the
@@ -3841,7 +3903,8 @@ def begin_pipeline(
     keeps the build on a frame (`join_build_layout`). `types`: the steps
     typed and compiled and the table's layout (`pipeline_types`), when
     the caller made them already for `given_steps` over `frame`'s
-    columns."""
+    columns. `limit`: only the first that many rows in source order are
+    the result (-1: every row), when the rows are materialized."""
     trace_path("pipeline.run")
     # The steps typed and compiled and the table's layout, unless the
     # caller made them already for these steps and columns.
@@ -4136,6 +4199,20 @@ def begin_pipeline(
     if ((len(expressions) == 0 and top <= 0) or collects) and not build_layout:
         for w in range(len(jobs)):
             jobs[w].runner.materializes = True
+    # A limit over the materialized rows: each worker keeps at most that
+    # many of its own first rows, and the workers stop at the last morsel
+    # the first rows can come from (`LimitBound`).
+    var bound = LimitBound.none()
+    if limit >= 0 and len(expressions) == 0 and top <= 0 and not build_layout:
+        trace_path("pipeline.limit_sink")
+        bound = LimitBound.new()
+        if limit == 0:
+            # No row is wanted: no morsel is read.
+            bound.lower(-1)
+        for w in range(len(jobs)):
+            jobs[w].runner.limit = limit
+            jobs[w].runner.limit_bound = bound
+            jobs[w].bound = bound
     if scan:
         var shared_scan = ArcPointer(scan.take())
         for w in range(len(jobs)):
@@ -4179,4 +4256,7 @@ def begin_pipeline(
     )
     run.source = source
     run.build_layout = build_layout^
+    if bound.address != 0:
+        run.limit = limit
+        run.bound = bound
     return run^

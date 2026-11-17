@@ -6,10 +6,24 @@ and join once when producing a frame, avoiding quadratic copying as the
 result grows. Batch collections can transfer independent pieces to output
 in parallel.
 """
-from std.memory import Pointer, unsafe_memcpy
+from std.atomic import Atomic
+from std.memory import (
+    Allocation,
+    Layout,
+    Pointer,
+    alloc,
+    dealloc,
+    unsafe_memcpy,
+)
 
 from dataframe.frame import DataFrame, concat
-from dataframe.parallel import Job, Rounds, round_width, run_rounds
+from dataframe.parallel import (
+    Job,
+    Rounds,
+    round_width,
+    run_rounds,
+    run_rounds_serially,
+)
 from dataframe.series import Series
 from dataframe.storage.column import Column
 from dataframe.dtype import DataType
@@ -386,30 +400,116 @@ struct ColumnDataCollection(Movable):
         return DataFrame(columns^, height=self.count)
 
 
+struct LimitBound(ImplicitlyCopyable, Movable):
+    """The last morsel a limited pipeline still needs, shared by every
+    worker by address (0: no limit). Workers take morsels in increasing
+    number, so once one worker holds the limit's rows from morsels up to
+    `b`, the first rows in source order are all in morsels up to `b`:
+    no later morsel can hold one, and no worker needs to read it."""
+
+    var address: Int
+
+    def __init__(out self, address: Int):
+        self.address = address
+
+    @staticmethod
+    def new() -> LimitBound:
+        var pointer = alloc(Layout[Atomic[Int64]](length=1)).unsafe_leak()
+        pointer.unsafe_write(Atomic[Int64](Int64.MAX))
+        return LimitBound(Int(pointer))
+
+    @staticmethod
+    def none() -> LimitBound:
+        return LimitBound(0)
+
+    def free(self):
+        if self.address == 0:
+            return
+        dealloc(
+            Allocation[Atomic[Int64]](
+                unsafe_owned_ptr=Pointer[Atomic[Int64], MutUntrackedOrigin](
+                    unsafe_from_address=self.address
+                ),
+                layout=Layout[Atomic[Int64]](length=1),
+            )
+        )
+
+    @always_inline
+    def _cell(self) -> ref[MutAnyOrigin] Atomic[Int64]:
+        return Pointer[Atomic[Int64], MutAnyOrigin](
+            unsafe_from_address=self.address
+        )[]
+
+    def last(self) -> Int:
+        """The last morsel still needed (`Int64.MAX` while every morsel
+        may be)."""
+        if self.address == 0:
+            return Int(Int64.MAX)
+        return Int(self._cell().load())
+
+    def lower(self, morsel: Int):
+        """No morsel after `morsel` is needed."""
+        if self.address == 0:
+            return
+        var current = self._cell().load()
+        while Int64(morsel) < current:
+            if self._cell().compare_exchange(current, Int64(morsel)):
+                return
+
+
 struct MaterializeSink(Sink):
     """One worker's materialize sink state: a collection per batch index, the
     morsel the rows come from, so the finish puts every worker's rows back in
-    source order."""
+    source order.
+
+    With a `limit`, only the first `limit` rows in source order are wanted.
+    A worker takes morsels in increasing number, so its own rows are in
+    source order too, and once it holds `limit` rows none it would sink
+    later can be among the first `limit`: it keeps at most that many,
+    says it is `full`, and lowers the shared `bound` to its morsel so no
+    worker reads past it."""
 
     var schema: DataFrame
     var capacity: Int
     var batches: List[Int]
     var collections: List[ColumnDataCollection]
     var batch: Int
+    var limit: Int
+    var kept: Int
+    var bound: LimitBound
 
-    def __init__(out self, schema: DataFrame, capacity: Int = 0):
+    def __init__(
+        out self,
+        schema: DataFrame,
+        capacity: Int = 0,
+        limit: Int = -1,
+        bound: LimitBound = LimitBound.none(),
+    ):
         self.schema = schema.copy()
         self.capacity = capacity
         self.batches = List[Int]()
         self.collections = List[ColumnDataCollection]()
         self.batch = -1
+        self.limit = limit
+        self.kept = 0
+        self.bound = bound
 
     def begin(mut self, morsel: Int):
         self.batch = morsel
 
+    def full(self) -> Bool:
+        """Whether no row sunk from here on can be among the first
+        `limit`."""
+        return self.limit >= 0 and self.kept >= self.limit
+
     def sink(mut self, mut chunk: DataChunk, mut arena: ColumnArena) raises:
-        if chunk.count == 0:
+        if chunk.count == 0 or self.full():
             return
+        var count = chunk.count
+        if self.limit >= 0:
+            # The chunk's first rows, up to the limit.
+            chunk.count = min(count, self.limit - self.kept)
+            self.kept += chunk.count
         var last = len(self.batches) - 1
         if last < 0 or self.batches[last] != self.batch:
             self.batches.append(self.batch)
@@ -418,6 +518,9 @@ struct MaterializeSink(Sink):
             )
             last += 1
         self.collections[last].append(chunk, arena)
+        chunk.count = count
+        if self.full():
+            self.bound.lower(self.batch)
 
     def release(mut self):
         pass
@@ -454,7 +557,8 @@ struct MaterializeFinish(Movable, Rounds):
     it, avoiding a serial pass over every result row. The workers'
     batches are each in the order the worker took them, so a merge by
     batch index over the workers orders all. `frame` is the result once
-    `next_round` returns 0."""
+    `next_round` returns 0. With a `limit`, the batches stop once they
+    hold that many rows: later batches hold none of the first rows."""
 
     var sinks: List[MaterializeSink]
     var schema: DataFrame
@@ -463,8 +567,14 @@ struct MaterializeFinish(Movable, Rounds):
     var ran: Bool
     var done: Bool
     var frame: DataFrame
+    var limit: Int
 
-    def __init__(out self, var sinks: List[MaterializeSink], schema: DataFrame):
+    def __init__(
+        out self,
+        var sinks: List[MaterializeSink],
+        schema: DataFrame,
+        limit: Int = -1,
+    ):
         self.sinks = sinks^
         self.schema = schema.copy()
         self.jobs = List[_FrameJob]()
@@ -472,6 +582,7 @@ struct MaterializeFinish(Movable, Rounds):
         self.ran = False
         self.done = False
         self.frame = schema.copy()
+        self.limit = limit
 
     def next_round(mut self) raises -> Int:
         if self.done:
@@ -479,7 +590,8 @@ struct MaterializeFinish(Movable, Rounds):
         if not self.ran:
             self.ran = True
             var next = List[Int](length=len(self.sinks), fill=0)
-            while True:
+            var rows = 0
+            while self.limit < 0 or rows < self.limit:
                 var best = -1
                 var best_batch = 0
                 for j in range(len(self.sinks)):
@@ -490,6 +602,7 @@ struct MaterializeFinish(Movable, Rounds):
                             best_batch = batch
                 if best < 0:
                     break
+                rows += self.sinks[best].collections[next[best]].count
                 self.jobs.append(
                     _FrameJob(
                         Int(
@@ -516,6 +629,8 @@ struct MaterializeFinish(Movable, Rounds):
             for c in range(whole.width()):
                 whole._columns[c] = whole._columns[c]._joined_windows()
             self.frame = whole^
+        if self.limit >= 0 and self.frame.height() > self.limit:
+            self.frame = self.frame.slice(0, self.limit)
         self.jobs = List[_FrameJob]()
         return 0
 
@@ -527,13 +642,17 @@ struct MaterializeFinish(Movable, Rounds):
 
 
 def materialize_finish(
-    mut sinks: List[MaterializeSink], schema: DataFrame
+    mut sinks: List[MaterializeSink], schema: DataFrame, serial: Bool = False
 ) raises -> DataFrame:
     """Every batch in batch index order, one chunk each
-    (`MaterializeFinish`), its round run here."""
+    (`MaterializeFinish`), its round run here: on this thread alone when
+    `serial` (work that is one task's share of a parallel step)."""
     var owned = List[MaterializeSink]()
     swap(owned, sinks)
     var finish = MaterializeFinish(owned^, schema)
-    run_rounds(finish)
+    if serial:
+        run_rounds_serially(finish)
+    else:
+        run_rounds(finish)
     swap(sinks, finish.sinks)
     return finish.frame.copy()

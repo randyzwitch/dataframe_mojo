@@ -502,3 +502,71 @@ def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
         .sort(["s"])
     )
     assert_frame(streamed, eager)
+
+
+def test_ungrouped_distinct_counts_finish_as_rounds_of_the_schedule() raises:
+    """An ungrouped stream's distinct counts finish as rounds of tasks of
+    the query's schedule, every count's tables merged in its own rounds:
+    no task starts parallel work of its own. The counts are what the
+    eager reductions give."""
+    var frame = source()
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var streamed = (
+        frame.lazy()
+        .filter(col("v") > lit(Int64(-400)))
+        .select_exprs(
+            [
+                col("k").n_unique().alias("keys"),
+                col("s").n_unique().alias("texts"),
+                col("v").sum().alias("total"),
+            ]
+        )
+        .collect(optimize=False)
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    var eager = frame.filter(col("v") > lit(Int64(-400))).select_exprs(
+        [
+            col("k").n_unique().alias("keys"),
+            col("s").n_unique().alias("texts"),
+            col("v").sum().alias("total"),
+        ]
+    )
+    assert_frame(streamed, eager)
+
+
+def test_a_profiled_query_runs_its_events_in_the_one_schedule() raises:
+    """With an execution report, the query's schedule runs one event at a
+    time, each event's tasks on every thread, rather than its probes'
+    workers and finish rounds as parallel work inside one task. The rows
+    are what collecting the query gives."""
+    var frame = source()
+    var first = part(frame, 0)
+    var probe = frame.lazy().filter(col("v") > lit(Int64(-400)))
+    var query = (
+        probe.join(first, ["k"])
+        .group_by("s")
+        .agg([col("v").sum().alias("v"), col("total").sum().alias("t")])
+        .sort("s")
+    )
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var profiled = query.profile()
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "schedule.nested" not in paths, "a schedule ran inside another's task"
+    )
+    assert_true(profiled[1].height() > 0, "the report recorded no node")
+    assert_frame(profiled[0], query.collect())
