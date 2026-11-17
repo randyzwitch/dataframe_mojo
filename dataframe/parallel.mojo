@@ -1353,6 +1353,18 @@ def run_rounds[R: Rounds](mut rounds: R) raises:
         run_jobs(jobs)
 
 
+def run_rounds_serially[R: Rounds](mut rounds: R) raises:
+    """Every round of `rounds` on this thread, each round's tasks one
+    after another: for work that is already one task's share of a
+    parallel step, whose other tasks keep the other threads busy."""
+    while True:
+        var tasks = rounds.next_round()
+        if tasks == 0:
+            return
+        for t in range(tasks):
+            rounds.round_task(t)
+
+
 def round_width(jobs: Int) -> Int:
     """The tasks a round of `jobs` pieces of work splits into: one per
     piece, at most one per worker (task t then takes pieces t, t + width,
@@ -1380,13 +1392,49 @@ def _running_schedules() -> ref[MutAnyOrigin] Atomic[Int64]:
     )[]
 
 
+def _task_key_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    var pointer = alloc(Layout[UInt32](length=1)).unsafe_leak()
+    pointer.unsafe_write(UInt32(0))
+    _ = external_call["pthread_key_create", Int32](Int(pointer), 0)
+    return pointer.unsafe_bitcast[NoneType]()
+
+
+def _task_key() -> UInt32:
+    """The thread-specific key that marks a thread running a shared task."""
+    var address = _get_global[
+        "DATAFRAME_SHARED_TASK_KEY", _task_key_init, _running_keep
+    ]()
+    return Pointer[UInt32, MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+
+
+def in_shared_task() -> Bool:
+    """Whether this thread runs one of several tasks of a schedule's event
+    (`set_shared_task`)."""
+    return external_call["pthread_getspecific", Int](_task_key()) != 0
+
+
+def set_shared_task(shared: Bool):
+    """Mark this thread as running one of several tasks of a schedule's
+    event, or not. The other tasks of that event keep the other threads
+    busy, so the task's own share of the work runs on its thread: jobs it
+    starts run here, one after another, rather than as work no schedule
+    sees."""
+    _ = external_call["pthread_setspecific", Int32](
+        _task_key(), 1 if shared else 0
+    )
+
+
 def _trace_nested[J: Job]():
     """Trace jobs started inside a schedule's task: work no schedule
     sees."""
     if _running_schedules().load() > 0:
-        trace_path("schedule.nested_jobs")
+        trace_path("parallel.jobs_in_task")
         if getenv("DATAFRAME_TRACE_NESTED_JOBS"):
-            print("dataframe-path: jobs.", reflect[J].name(), file=stderr, sep="")
+            print(
+                "dataframe-path: jobs.", reflect[J].name(), file=stderr, sep=""
+            )
 
 
 def run_jobs[J: Job](mut jobs: List[J]) raises:
@@ -1406,6 +1454,11 @@ def run_jobs[J: Job](mut jobs: List[J]) raises:
 def _run_jobs[J: Job](mut jobs: List[J], limit: Int) raises:
     """`run_jobs` on at most `limit` threads, the caller included."""
     if len(jobs) == 0:
+        return
+    if len(jobs) > 1 and in_shared_task():
+        # One task's share of a schedule's event: the jobs run here.
+        for j in range(len(jobs)):
+            jobs[j].run()
         return
     if len(jobs) > 1:
         _trace_nested[J]()

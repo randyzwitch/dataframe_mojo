@@ -341,3 +341,34 @@ def test_serial_scheduling_runs_every_stage_on_the_caller() raises:
     for p in range(len(pipelines)):
         assert_true(pipelines[p].finalized >= 0)
     assert_equal(Int(clock[].tick.load()), 3 * 3 + 3 * 2)
+
+
+def test_one_event_at_a_time_runs_no_two_events_together() raises:
+    """With `one_event`, an event's tasks run on every thread while no
+    other event's do, as an execution report records them: one
+    pipeline's execute tasks all end before another's start."""
+    var clock = ArcPointer(Clock())
+    var pipelines = List[Recorded]()
+    var metas = List[MetaPipeline]()
+    for _ in range(3):
+        pipelines.append(Recorded(clock, tasks=4))
+        metas.append(MetaPipeline(META_REGULAR))
+    run_pipelines(pipelines, metas, one_event=True)
+    for a in range(len(pipelines)):
+        assert_true(pipelines[a].finalized >= 0)
+        for b in range(len(pipelines)):
+            if a == b:
+                continue
+            ref one = pipelines[a].executed
+            ref other = pipelines[b].executed
+            var one_first = one[0]
+            var one_last = one[0]
+            var other_first = other[0]
+            var other_last = other[0]
+            for t in range(len(one)):
+                one_first = min(one_first, one[t])
+                one_last = max(one_last, one[t])
+            for t in range(len(other)):
+                other_first = min(other_first, other[t])
+                other_last = max(other_last, other[t])
+            assert_true(one_last < other_first or other_last < one_first)

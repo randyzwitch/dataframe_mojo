@@ -545,11 +545,11 @@ def plan_both_inputs(
     batch_size: Int,
 ) raises -> Tuple[DataFrame, DataFrame]:
     """A two-input node's inputs, executed at once as pipelines of one
-    schedule (`plan_execute_inputs`) outside the empty-schema run and
-    when no execution report is kept, else one after the other. An input a stream already ran ahead
+    schedule (`plan_execute_inputs`) outside the empty-schema run, else
+    one after the other. An input a stream already ran ahead
     (`plan_schedule_inputs`) is taken, not run again."""
     ref node = self._nodes[index]
-    if not empty and not self._report:
+    if not empty:
         var ready = List[Optional[DataFrame]]()
         ready.append(plan_take_prefetched(self, node.left))
         ready.append(plan_take_prefetched(self, node.right))

@@ -9,7 +9,13 @@ in parallel.
 from std.memory import Pointer, unsafe_memcpy
 
 from dataframe.frame import DataFrame, concat
-from dataframe.parallel import Job, Rounds, round_width, run_rounds
+from dataframe.parallel import (
+    Job,
+    Rounds,
+    round_width,
+    run_rounds,
+    run_rounds_serially,
+)
 from dataframe.series import Series
 from dataframe.storage.column import Column
 from dataframe.dtype import DataType
@@ -527,13 +533,17 @@ struct MaterializeFinish(Movable, Rounds):
 
 
 def materialize_finish(
-    mut sinks: List[MaterializeSink], schema: DataFrame
+    mut sinks: List[MaterializeSink], schema: DataFrame, serial: Bool = False
 ) raises -> DataFrame:
     """Every batch in batch index order, one chunk each
-    (`MaterializeFinish`), its round run here."""
+    (`MaterializeFinish`), its round run here: on this thread alone when
+    `serial` (work that is one task's share of a parallel step)."""
     var owned = List[MaterializeSink]()
     swap(owned, sinks)
     var finish = MaterializeFinish(owned^, schema)
-    run_rounds(finish)
+    if serial:
+        run_rounds_serially(finish)
+    else:
+        run_rounds(finish)
     swap(sinks, finish.sinks)
     return finish.frame.copy()
