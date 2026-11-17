@@ -10,7 +10,7 @@ counted only once. Empty and null results follow each reduction's contract.
 """
 from std.math import isnan
 from std.sys import size_of
-from std.memory import Pointer, bitcast
+from std.memory import ArcPointer, Pointer, bitcast
 
 from dataframe.aggregation.function import (
     AggregateFunction,
@@ -40,7 +40,9 @@ from dataframe.aggregation.function import (
     table_states_supported,
 )
 from dataframe.aggregation.hash_table import (
+    AggregateFinish,
     AggregateLayout,
+    AggregateResult,
     AggregateSink,
     KeyVector,
     aggregate_finish,
@@ -48,8 +50,10 @@ from dataframe.aggregation.hash_table import (
 )
 from dataframe.aggregation.table_sink import _sink_jobs, input_vector
 from dataframe.parallel import (
+    Rounds,
     configured_workers,
     morsel_ranges,
+    run_rounds,
     source_tasks,
 )
 from dataframe.aggregation.expressions import _stream_reductions
@@ -828,36 +832,32 @@ struct UngroupedSink(Sink):
                 combined[0].kept_buffered.append(buffered^)
                 return
 
-    def finalize_distinct(mut self, layout: AggregateLayout) raises:
-        """Finalize the global distinct state: each distinct
-        count's tables (every worker's) merged into the input's distinct
-        values, whose number (less a null's, when nulls are ignored) is
-        written into the count's state."""
-        var count = len(layout.distinct)
-        var state = self.groups.at(0) + 8 * self.groups.states_at
-        for d in range(count):
-            # Every worker's tables are in worker order, `count - d` of
-            # them each: this count's is each worker's first.
-            var tables = List[AggregateSink]()
-            var rest = List[AggregateSink]()
-            var i = 0
-            while len(self.distinct) > 0:
-                if i % (count - d) == 0:
-                    tables.append(self.distinct.pop(0))
-                else:
-                    rest.append(self.distinct.pop(0))
-                i += 1
-            swap(self.distinct, rest)
+    def distinct_tables(
+        mut self, d: Int, count: Int
+    ) raises -> List[AggregateSink]:
+        """Distinct count `d`'s tables, every worker's, taken out of the
+        global distinct state, which holds `count - d` tables per worker
+        (the earlier counts' already taken): this count's is each
+        worker's first. The first holds the sink's long strings too."""
+        var tables = List[AggregateSink]()
+        var rest = List[AggregateSink]()
+        var i = 0
+        while len(self.distinct) > 0:
+            if i % (count - d) == 0:
+                tables.append(self.distinct.pop(0))
+            else:
+                rest.append(self.distinct.pop(0))
+            i += 1
+        swap(self.distinct, rest)
+        if len(tables) > 0:
             for column in self.held:
                 tables[0].held.append(column.copy())
-            var slot = layout.distinct[d]
-            var values = distinct_values(
-                tables,
-                layout.distinct_layout(d),
-                layout.templates[slot].integer != 0,
-            )
-            _words(state + 8 * self.slots[slot].offset)[] = UInt64(values)
-            _ = tables^
+        return tables^
+
+    def set_distinct(mut self, slot: Int, values: Int):
+        """Write a distinct count's number of values into its state."""
+        var state = self.groups.at(0) + 8 * self.groups.states_at
+        _words(state + 8 * self.slots[slot].offset)[] = UInt64(values)
 
 
 def distinct_values(
@@ -869,6 +869,12 @@ def distinct_values(
     value its one key) holds together: their groups merged, a null value
     left out when `ignore_nulls`."""
     var groups = aggregate_finish(tables, layout, rows_only=True, ordered=False)
+    return _counted_values(groups, ignore_nulls)
+
+
+def _counted_values(groups: AggregateResult, ignore_nulls: Bool) -> Int:
+    """The groups of a distinct table's finish, a null value left out when
+    `ignore_nulls`."""
     var values = 0
     for p in range(len(groups.rows)):
         ref part = groups.rows[p]
@@ -938,17 +944,86 @@ def distinct_counts(
     return counts^
 
 
+struct UngroupedFinish(Movable, Rounds):
+    """The ungrouped reductions' finish as rounds of tasks (`next_round`,
+    `round_task`): every worker's states combined into the global ones,
+    then each distinct count's tables (every worker's) finished into the
+    input's distinct values, one count after another, each an aggregate
+    table's finish (`AggregateFinish`) whose groups are the values, and
+    the one row made from the states once `next_round` returns 0
+    (`frame`)."""
+
+    var shared: ArcPointer[UngroupedLayout]
+    var sinks: List[UngroupedSink]
+    # The distinct count whose table finishes (`table`), and how many.
+    var at: Int
+    var count: Int
+    var table: List[AggregateFinish]
+    var frame: DataFrame
+
+    def __init__(
+        out self,
+        shared: ArcPointer[UngroupedLayout],
+        var sinks: List[UngroupedSink],
+    ) raises:
+        self.shared = shared
+        self.sinks = List[UngroupedSink]()
+        while len(sinks) > 0:
+            sinks.pop(0).combine(self.sinks)
+        self.at = 0
+        self.count = len(shared[].layout.distinct)
+        self.table = List[AggregateFinish]()
+        self.frame = DataFrame(List[Series](), height=0)
+
+    def next_round(mut self) raises -> Int:
+        ref layout = self.shared[].layout
+        while len(self.sinks) > 0 and self.at < self.count:
+            if len(self.table) == 0:
+                self.table.append(
+                    AggregateFinish(
+                        self.sinks[0].distinct_tables(self.at, self.count),
+                        layout.distinct_layout(self.at),
+                        rows_only=True,
+                        ordered=False,
+                    )
+                )
+            var tasks = self.table[0].next_round()
+            if tasks > 0:
+                return tasks
+            var done = self.table.pop()
+            var slot = layout.distinct[self.at]
+            self.sinks[0].set_distinct(
+                slot,
+                _counted_values(
+                    done.result, layout.templates[slot].integer != 0
+                ),
+            )
+            _ = done^
+            self.at += 1
+        self.frame = _ungrouped_row(self.shared[], self.sinks)
+        self.sinks = List[UngroupedSink]()
+        return 0
+
+    def round_task(mut self, task: Int) raises:
+        self.table[0].round_task(task)
+
+
 def ungrouped_finish(
+    shared: ArcPointer[UngroupedLayout], var sinks: List[UngroupedSink]
+) raises -> DataFrame:
+    """Every worker's states combined and finalized into one row, the
+    finish's rounds run here (`UngroupedFinish`)."""
+    var finish = UngroupedFinish(shared, sinks^)
+    run_rounds(finish)
+    return finish.frame.copy()
+
+
+def _ungrouped_row(
     shared: UngroupedLayout, mut sinks: List[UngroupedSink]
 ) raises -> DataFrame:
-    """Every worker's states combined and finalized into one row."""
-    var combined = List[UngroupedSink]()
-    while len(sinks) > 0:
-        sinks.pop(0).combine(combined)
-    if len(combined) == 0:
+    """The one row of the combined states, their distinct counts written."""
+    if len(sinks) == 0:
         return shared.template().finish()
-    sinks = combined^
-    sinks[0].finalize_distinct(shared.layout)
     if sinks[0].count == 0:
         # No row survived: the reductions of an empty frame.
         return shared.template().finish()

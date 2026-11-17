@@ -906,7 +906,12 @@ def take_parallel(
                     share_validity and skip_validity[c],
                 )
             )
-    run_jobs(jobs)
+    if active_workers == 1:
+        # Rows for one task at most: every column gathers on this thread.
+        for j in range(len(jobs)):
+            jobs[j].run()
+    else:
+        run_jobs(jobs)
     var result = List[Series](capacity=len(columns))
     for c in range(len(columns)):
         if columns[c]._data.isa[StringColumn]():
