@@ -456,36 +456,40 @@ def _filtered_table(self: QueryContext, index: Int) -> Bool:
     )
 
 
-def _builds_on_left_rows(
+def _builds_on(
     self: QueryContext,
     mut stats: PlanStatistics,
     at: Int,
+    side: Int,
     rows: Int,
     batch_size: Int,
 ) raises -> Bool:
-    """Whether the join at `at` builds on its left input with that input
-    taken to have `rows` rows. `stats` is one memo for every such question:
-    the choice reads only the two inputs' estimates, the left's set here."""
-    stats.rows[self._nodes[at].left] = rows
-    return _builds_on_left(self, stats, at, batch_size)
+    """Whether the join at `at` builds on its input `side` (its left or
+    right) with that input taken to have `rows` rows. `stats` is one memo
+    for every such question: the choice reads only the two inputs'
+    estimates, the side's set here."""
+    stats.rows[side] = rows
+    var left = _builds_on_left(self, stats, at, batch_size)
+    return left if side == self._nodes[at].left else not left
 
 
-def _run_filtered_source(
-    self: QueryContext, at: Int, batch_size: Int
+def _run_filtered_input(
+    self: QueryContext, at: Int, side: Int, batch_size: Int
 ) raises -> Optional[DataFrame]:
-    """The rows of the filtered table on the left of the join at `at`, run
-    while the join could still build on them: None when it would not build
-    on even an empty left, or once the rows kept, or those rows scaled from
-    the part of the table read to all of it, are more than it would build
-    on. The table runs in consecutive parts, each twice the last from one
-    batch: the share a filter keeps in the rows read so far shows early
-    whether its rows are many, so a large input stops after a little of its
-    table, while one the join builds on reads its table once."""
+    """The rows of the filtered table `side`, an input of the join at `at`,
+    run while the join would still build on them: None when it would not
+    build on even an empty input, or once the rows kept, or those rows
+    scaled from the part of the table read to all of it, are more than it
+    would build on. An input that probes streams from its table instead,
+    where the build's keys can filter it as it is read. The table runs in
+    consecutive parts, each twice the last from one batch: the share a
+    filter keeps in the rows read so far shows early whether its rows are
+    many, so a large input stops after a little of its table, while one the
+    join builds on reads its table once."""
     var stats = PlanStatistics()
-    if not _builds_on_left_rows(self, stats, at, 0, batch_size):
+    if not _builds_on(self, stats, at, side, 0, batch_size):
         return None
-    var index = self._nodes[at].left
-    var cursor = index
+    var cursor = side
     while self._nodes[cursor].kind != SCAN_FRAME:
         cursor = self._nodes[cursor].left
     var slot = self._nodes[cursor].source_slot()
@@ -505,14 +509,14 @@ def _run_filtered_source(
         part._nodes[cursor].set_source_slot(len(part._frames) - 1)
         # The first part is one batch, run as it is: a stream's workers pay
         # off only over the larger parts after it.
-        var made = part._execute(index, False, offset > 0, batch_size)
+        var made = part._execute(side, False, offset > 0, batch_size)
         kept += made.height()
         offset = min(offset + length, rows)
-        if not _builds_on_left_rows(self, stats, at, kept, batch_size):
+        if not _builds_on(self, stats, at, side, kept, batch_size):
             return None
         if offset < rows:
             var scaled = Int(Float64(kept) * Float64(rows) / Float64(offset))
-            if not _builds_on_left_rows(self, stats, at, scaled, batch_size):
+            if not _builds_on(self, stats, at, side, scaled, batch_size):
                 return None
         parts.append(made^)
         length *= 2
@@ -568,12 +572,11 @@ def plan_build_probe_sides(
     var stats = PlanStatistics()
     var flips = _flips(self, stats, spine, batch_size)
     # Inputs whose counts are guesses (filtered tables) and that a choice
-    # here would move. A join's right input is read whole whether it builds
-    # or not, so a flipping join's is counted in full. The stream's source
-    # is read whole only if it builds: it is counted while it stays under
-    # the most rows at which the lowest join would build on it, and left to
-    # stream, its partial count dropped, once it passes them. Inputs on a
-    # join's left above the lowest are joins, made by the stream itself.
+    # here would move: a flipping join's right input, and the stream's
+    # source. Each is counted while its join would still build on it, and
+    # left to stream, its partial count dropped, once it passes the rows it
+    # would build on. Inputs on a join's left above the lowest are joins,
+    # made by the stream itself.
     var counted = List[Int]()
     var frames = List[DataFrame]()
     if self._prefetched:
@@ -585,15 +588,17 @@ def plan_build_probe_sides(
                 continue
             if not _filtered_table(self, right):
                 continue
-            trace_path("lazy.count_filtered_build_input")
-            frames.append(self._execute(right, False, True, batch_size))
-            counted.append(right)
+            var frame = _run_filtered_input(self, at, right, batch_size)
+            if frame:
+                trace_path("lazy.count_filtered_build_input")
+                frames.append(frame.take())
+                counted.append(right)
         if (
             source not in counted
             and source not in self._prefetched.value()[]
             and _filtered_table(self, source)
         ):
-            var frame = _run_filtered_source(self, bottom, batch_size)
+            var frame = _run_filtered_input(self, bottom, source, batch_size)
             if frame:
                 trace_path("lazy.count_filtered_build_input")
                 frames.append(frame.take())
