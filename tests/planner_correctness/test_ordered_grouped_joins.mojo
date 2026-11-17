@@ -36,8 +36,8 @@ def _source(nulls: Bool) raises -> DataFrame:
     return DataFrame(
         [
             Series("k", Column[Int64](keys^)),
-            Series("g", Column[Int64](groups^, group_valid^)),
-            Series("v", Column[Int64](values^, value_valid^)),
+            Series("g", Column[Int64](groups^, group_valid)),
+            Series("v", Column[Int64](values^, value_valid)),
             Series("s", Column[String](text^)),
         ]
     )
