@@ -1,7 +1,6 @@
 """Expression and operation properties shared by planning and execution."""
 from dataframe.planning.cost.eligibility import (
     _counts_distinct,
-    _order_sensitive,
     _has_quantile,
     _row_steps_only,
     _filters,
