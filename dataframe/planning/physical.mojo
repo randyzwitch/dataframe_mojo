@@ -1,5 +1,6 @@
-"""Join order and build sides, chosen from plan statistics before anything
-runs."""
+"""Join order, chosen from plan statistics before anything runs, and build
+sides, chosen from them as a stream starts, a filtered input counted first
+where a guess would move it."""
 from dataframe.planning.node_builders import (
     _frame_scan_node,
     _join_node,
@@ -13,6 +14,7 @@ from dataframe.expr import (
 )
 
 
+from dataframe.frame import DataFrame, concat
 from dataframe.io.csv import (
     CsvSchema,
 )
@@ -45,6 +47,7 @@ from dataframe.optimizer.passes import (
 )
 from dataframe.planning.context import (
     QueryContext,
+    plan_shared_id,
     plan_slot_rows,
 )
 from dataframe.planning.graph import (
@@ -67,8 +70,13 @@ from dataframe.planning.statistics import (
     plan_distinct,
 )
 from dataframe.planning.model import (
+    DROP,
+    FILTER,
     JOIN,
     PlanNode,
+    SCAN_FRAME,
+    SELECT,
+    WITH_COLUMNS,
 )
 from dataframe.planning.properties import (
     _comparison_edge,
@@ -422,14 +430,139 @@ def _flip_semi_join(
     return True
 
 
+def _filtered_table(self: QueryContext, index: Int) -> Bool:
+    """Whether the subplan at `index` is one in-memory table's rows under
+    row-local filters and projections, at least one of them a filter: an
+    input whose row count is a guess until it runs, and whose run is a
+    single pass over its table."""
+    var cursor = index
+    var filtered = False
+    while cursor >= 0:
+        ref node = self._nodes[cursor]
+        if node.kind == FILTER or node.kind == SELECT or node.kind == DROP:
+            if not _stream_rows(node):
+                return False
+            filtered = filtered or node.kind == FILTER
+            cursor = node.left
+        elif node.kind == WITH_COLUMNS and _stream_rows(node):
+            cursor = node.left
+        else:
+            break
+    return (
+        filtered
+        and cursor >= 0
+        and self._nodes[cursor].kind == SCAN_FRAME
+        and plan_shared_id(self, self._nodes[cursor].source_slot()) < 0
+    )
+
+
+def _most_left_rows_to_build(
+    self: QueryContext, at: Int, batch_size: Int
+) raises -> Int:
+    """The most rows the left input of the join at `at` (a filtered table)
+    may have for the join to build on it, its right input's estimate as it
+    is; -1 when it would not build on even an empty left. A side's cost
+    grows with its rows, so the choice changes once, found by halving the
+    span between no rows and its whole table."""
+    ref node = self._nodes[at]
+    var cursor = node.left
+    while self._nodes[cursor].kind != SCAN_FRAME:
+        cursor = self._nodes[cursor].left
+    var low = 0
+    var high = plan_slot_rows(self, self._nodes[cursor].source_slot())
+    # One memo throughout: the decision reads only the two inputs'
+    # estimates, and the left's is set before each.
+    var stats = PlanStatistics()
+    stats.rows[node.left] = low
+    if not _builds_on_left(self, stats, at, batch_size):
+        return -1
+    stats.rows[node.left] = high
+    if _builds_on_left(self, stats, at, batch_size):
+        return high
+    # Builds on `low` rows, not on `high`.
+    while high - low > 1:
+        var middle = low + (high - low) // 2
+        stats.rows[node.left] = middle
+        if _builds_on_left(self, stats, at, batch_size):
+            low = middle
+        else:
+            high = middle
+    return low
+
+
+def _run_filtered_table(
+    self: QueryContext, index: Int, most: Int, batch_size: Int
+) raises -> Optional[DataFrame]:
+    """The rows of the filtered table at `index`, or None once they pass
+    `most` or the rows kept so far, scaled to the whole table, would. The
+    table runs in consecutive parts, each twice the last from one batch:
+    a filter's share in the rows read so far tells early whether its rows
+    are many, so a large input stops after a little of its table, while
+    one that ends up kept reads its table once."""
+    var cursor = index
+    while self._nodes[cursor].kind != SCAN_FRAME:
+        cursor = self._nodes[cursor].left
+    var slot = self._nodes[cursor].source_slot()
+    var table = self._frames[slot].copy()
+    var rows = table.height()
+    var part = self.copy()
+    # A probe of the input, not an operator of the query: its runs stay out
+    # of the query's execution report.
+    part._report = None
+    var parts = List[DataFrame]()
+    var kept = 0
+    var offset = 0
+    var length = max(batch_size, 1)
+    while offset < rows or len(parts) == 0:
+        # A slot of its own: plan copies share their table slots.
+        part._frames.append(table.slice(offset, length))
+        part._nodes[cursor].set_source_slot(len(part._frames) - 1)
+        var made = part._execute(index, False, True, batch_size)
+        kept += made.height()
+        offset = min(offset + length, rows)
+        if kept > most or (
+            offset < rows
+            and Float64(kept) * Float64(rows) > Float64(most) * Float64(offset)
+        ):
+            return None
+        parts.append(made^)
+        length *= 2
+    if len(parts) == 1:
+        return Optional(parts.pop())
+    return Optional(concat(parts))
+
+
+def _flips(
+    self: QueryContext,
+    mut stats: PlanStatistics,
+    spine: List[Int],
+    batch_size: Int,
+) raises -> List[Int]:
+    """The joins of `spine` (top first) that build on their left input,
+    visited children first; a flip leaves every other join's inputs, their
+    estimates and schemas as they were."""
+    var flips = List[Int]()
+    for k in range(len(spine) - 1, -1, -1):
+        if _builds_on_left(self, stats, spine[k], batch_size):
+            flips.append(spine[k])
+    return flips^
+
+
 def plan_build_probe_sides(
     self: QueryContext, top: Int, batch_size: Int
 ) raises -> Optional[QueryContext]:
-    """Choose build sides from estimated input cardinalities before scheduling.
-    Flip inner joins to probe the chosen build, exchange left/right outer
-    kinds, and use build-side semi/anti kinds as needed. Mark each choice
-    fixed so later cardinality observations cannot repeatedly reverse it.
-    Return None when all joins keep their sides."""
+    """Choose build sides from input cardinalities before scheduling. Flip
+    inner joins to probe the chosen build, exchange left/right outer kinds,
+    and use build-side semi/anti kinds as needed. Mark each choice fixed so
+    later cardinality observations cannot repeatedly reverse it. Return None
+    when all joins keep their sides and nothing ran.
+
+    Estimates choose, but the share of rows a filter keeps is a guess, often
+    off by tens of times, and acting on it can hash the larger side. So an
+    input that is a filtered table, and that a choice here would move, runs
+    first and its exact count decides; its rows then serve the join from
+    memory, as its build or as the stream's source. The joins of a stream
+    that counted hold their sides whatever the counts chose."""
     var spine = List[Int]()
     var cursor = top
     while cursor >= 0:
@@ -441,17 +574,56 @@ def plan_build_probe_sides(
             cursor = step.left
         else:
             break
-    # Children first, as the optimizer visits them; a flip leaves every
-    # other join's inputs, their estimates and schemas as they were.
-    var flips = List[Int]()
+    if len(spine) == 0:
+        return None
     var stats = PlanStatistics()
-    for k in range(len(spine) - 1, -1, -1):
-        if _builds_on_left(self, stats, spine[k], batch_size):
-            flips.append(spine[k])
-    if len(flips) == 0:
+    var flips = _flips(self, stats, spine, batch_size)
+    # Inputs whose counts are guesses (filtered tables) and that a choice
+    # here would move. A join's right input is read whole whether it builds
+    # or not, so a flipping join's is counted in full. The stream's source
+    # is read whole only if it builds: it is counted while it stays under
+    # the most rows at which the lowest join would build on it, and left to
+    # stream, its partial count dropped, once it passes them. Inputs on a
+    # join's left above the lowest are joins, made by the stream itself.
+    var counted = List[Int]()
+    var frames = List[DataFrame]()
+    if self._prefetched:
+        var bottom = spine[len(spine) - 1]
+        var source = self._nodes[bottom].left
+        for at in flips:
+            var right = self._nodes[at].right
+            if right in counted or right in self._prefetched.value()[]:
+                continue
+            if not _filtered_table(self, right):
+                continue
+            trace_path("lazy.count_filtered_build_input")
+            frames.append(self._execute(right, False, True, batch_size))
+            counted.append(right)
+        if (
+            source not in counted
+            and source not in self._prefetched.value()[]
+            and _filtered_table(self, source)
+        ):
+            var most = _most_left_rows_to_build(self, bottom, batch_size)
+            if most >= 0:
+                var frame = _run_filtered_table(self, source, most, batch_size)
+                if frame:
+                    trace_path("lazy.count_filtered_build_input")
+                    frames.append(frame.take())
+                    counted.append(source)
+    if len(counted) > 0:
+        stats = PlanStatistics()
+        for i in range(len(counted)):
+            stats.rows[counted[i]] = frames[i].height()
+        flips = _flips(self, stats, spine, batch_size)
+    if len(flips) == 0 and len(counted) == 0:
         return None
     var plan = self.copy()
-    var changed = False
+    var changed = len(counted) > 0
+    if changed:
+        # Every join here was decided on what the counts showed.
+        for at in spine:
+            plan._nodes[at].sides_fixed = True
     for at in flips:
         var how = plan._nodes[at].how
         if how == JOIN_INNER:
@@ -467,6 +639,29 @@ def plan_build_probe_sides(
             changed = True
     if not changed:
         return None
+    if len(counted) > 0:
+        # A counted input the stream reads through, its source after the
+        # flips, becomes a scan of its rows; one that is a build waits in
+        # the memo of computed inputs, where the build reads it.
+        var through = List[Int]()
+        cursor = top
+        while cursor >= 0:
+            ref step = plan._nodes[cursor]
+            if not _stream_rows(step) and not _stream_join(step):
+                break
+            through.append(cursor)
+            cursor = step.left
+        if cursor >= 0:
+            through.append(cursor)
+        for i in range(len(counted)):
+            if counted[i] in through:
+                plan._frames.append(frames[i].copy())
+                plan._schemas.append(Optional[CsvSchema]())
+                plan._nodes[counted[i]] = _frame_scan_node(
+                    slot=len(plan._frames) - 1
+                )
+            else:
+                plan._prefetched.value()[][counted[i]] = frames[i].copy()
     return Optional(plan^)
 
 

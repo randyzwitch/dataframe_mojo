@@ -138,6 +138,81 @@ def test_a_left_that_cannot_be_smaller_builds_on_the_right() raises:
     )
 
 
+def test_a_filtered_right_counted_small_keeps_building_on_the_right() raises:
+    # 4K parts against the stock rows whose cost is above 985, about 300
+    # of 60K. A range filter's share is a guess (a fifth), which makes the
+    # parts the smaller side; the filtered stock is counted before the
+    # join flips, and its few rows stay the build. For a semi and an anti
+    # join the result is the eager join's.
+    var t = frames()
+    for how in [String("semi"), String("anti")]:
+        var right = t[1].filter(col("s_cost") > lit(Int64(985)))
+        var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+        var observed = StrategyTrace()
+        var rows = (
+            t[0]
+            .join(right, left_on=["p_key"], right_on=["s_part"], how=how)
+            .collect()
+        )
+        var text = observed.text()
+        assert_true(
+            "dataframe-path: lazy.count_filtered_build_input\n" in text,
+            "the filtered right side was not counted",
+        )
+        assert_true(
+            "dataframe-path: lazy.swap_semi_join_sides\n" not in text,
+            "the join built on the larger side",
+        )
+        _ = observed^
+        _ = trace^
+        var eager = (
+            t[0]
+            .collect()
+            .join(
+                right.collect(),
+                left_on=["p_key"],
+                right_on=["s_part"],
+                how=how,
+            )
+        )
+        assert_true(eager.height() > 0)
+        assert_frame_unordered(rows, eager)
+
+
+def test_a_filtered_source_counted_small_builds_the_join() raises:
+    # The same 300 of 60K stock rows left-joined to the 4K parts: guessed
+    # at a fifth of the stock, they would stream through the parts; counted
+    # first, they are the smaller side and build, the parts probing. A
+    # filter that keeps most stock rows stops the count early and streams.
+    var t = frames()
+    for threshold in [Int64(985), Int64(5)]:
+        var left = t[1].filter(col("s_cost") > lit(threshold))
+        var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+        var observed = StrategyTrace()
+        var rows = left.join(
+            t[0], left_on=["s_part"], right_on=["p_key"], how="left"
+        ).collect()
+        var text = observed.text()
+        var built = "dataframe-path: lazy.swap_left_join_sides\n" in text
+        var counted = (
+            "dataframe-path: lazy.count_filtered_build_input\n" in text
+        )
+        if threshold == 985:
+            assert_true(counted and built, "the small source did not build")
+        else:
+            assert_true(not counted and not built, "the large source was built")
+        _ = observed^
+        _ = trace^
+        var eager = left.collect().join(
+            t[0].collect(), left_on=["s_part"], right_on=["p_key"], how="left"
+        )
+        assert_true(eager.height() > 0)
+        # Each stock row is one output row: sorted on all of them, the two
+        # results line up.
+        var order: List[String] = ["s_part", "s_cost", "s_qty", "s_site"]
+        assert_frame(rows.sort(order), eager.sort(order))
+
+
 def _dimension(rows: Int, repeat: Int) raises -> DataFrame:
     # Names repeat every `repeat` rows (rows i and i + repeat hold the same
     # values), with a null name and a null region among them.
