@@ -69,6 +69,10 @@ from dataframe.expr import (
 )
 from dataframe.aggregation.selected_rows import _canonical_int
 from dataframe.storage.allocation import huge_uninit
+from dataframe.kernels.nested_keys import (
+    decode_nested_keys,
+    nested_key_supported,
+)
 from dataframe.kernels.rank import _key
 from dataframe.series import Series
 from dataframe.text.bytes import _Bytes
@@ -578,7 +582,12 @@ def _slot_kind(spec: ReducerSpec, input: Series) -> Int:
         # A count reads only validity, whatever the values' type.
         return _K_COUNT if spec.op == COUNT else _K_NULLS
     if spec.op == N_UNIQUE:
-        return _K_DISTINCT if storage != _VALUE_NONE else -1
+        # A list or struct value is counted by its bytes, as a key is.
+        if storage != _VALUE_NONE or (
+            input.dtype().is_nested() and nested_key_supported(input.dtype())
+        ):
+            return _K_DISTINCT
+        return -1
     if input.dtype().is_categorical():
         return -1
     if (spec.op == FIRST or spec.op == LAST) and storage != _VALUE_NONE:
@@ -3017,6 +3026,9 @@ struct _KeyColumn(Movable):
     var bit: UInt64
     # The key's source field metadata, which its groups' column keeps.
     var metadata: Optional[ArcPointer[List[UInt8]]]
+    # A list or struct key's type: its words are its value's bytes as a
+    # string's, read as strings and then decoded.
+    var nested: Optional[DataType]
 
     def __init__(
         out self,
@@ -3026,9 +3038,20 @@ struct _KeyColumn(Movable):
         n: Int,
         held: _HeldBuffers,
     ) raises:
-        self.values = _ValueColumn(
-            template.name(), template.dtype(), _storage_kind(template), n, held
-        )
+        self.nested = None
+        if template.dtype().is_nested():
+            self.nested = template.dtype()
+            self.values = _ValueColumn(
+                template.name(), DataType.STRING, _VALUE_STRING, n, held
+            )
+        else:
+            self.values = _ValueColumn(
+                template.name(),
+                template.dtype(),
+                _storage_kind(template),
+                n,
+                held,
+            )
         self.w = w
         self.bit = bit
         self.metadata = template._field_metadata
@@ -3047,6 +3070,9 @@ struct _KeyColumn(Movable):
     def column(deinit self) raises -> Series:
         """The finished key column, with its source's field metadata."""
         var metadata = self.metadata
+        var nested = self.nested
         var column = self.values^.column()
+        if nested:
+            column = decode_nested_keys(column, nested.value())
         column._field_metadata = metadata
         return column^

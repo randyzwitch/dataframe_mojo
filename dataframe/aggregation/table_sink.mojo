@@ -26,6 +26,7 @@ from dataframe.dtype import DataType
 from dataframe.expr import COL, CORR, COV, Expr, LEN, is_reduction, subtree
 from dataframe.frame import DataFrame
 from dataframe.kernels.canonical_labels import canonical_code_map
+from dataframe.kernels.nested_keys import encode_nested_keys
 from dataframe.series import Series
 from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
@@ -305,6 +306,11 @@ struct TableSinkInputs(Movable):
     var filter_columns: List[Int]
     var filters: List[Optional[VectorExpression]]
     var filter_vectors: List[UnifiedVectorFormat]
+    # The key bytes of the last chunk's list and struct keys, then of its
+    # list and struct inputs to distinct counts (`nested_vector`), each in
+    # its own column: the key's place, then the keys' count plus the
+    # input's.
+    var encoded: DataChunk
 
     def __init__(out self, shared: TableSinkLayout):
         self.keys = shared.keys.copy()
@@ -325,6 +331,7 @@ struct TableSinkInputs(Movable):
         self.filter_vectors = List[UnifiedVectorFormat]()
         # The compiled filters write after the inputs.
         self.output = DataChunk(len(shared.expressions) + len(shared.filters))
+        self.encoded = DataChunk(len(shared.keys) + len(shared.columns))
         self.maps = List[List[UInt32]](capacity=len(self.keys))
         self.codes = List[List[UInt32]](capacity=len(self.keys))
         for k in range(len(self.keys)):
@@ -359,6 +366,14 @@ struct TableSinkInputs(Movable):
         var keys = List[KeyVector](capacity=len(self.keys))
         for k in range(len(self.keys)):
             var c = self.keys[k]
+            if self.key_types[k].is_nested():
+                var dtype = self.key_types[k]
+                var handle = nested_vector(
+                    chunk, c, arena, dtype, self.encoded, k
+                )
+                self._hold(arena, handle, hold)
+                keys.append(KeyVector.of(self.encoded.unified(k, arena)))
+                continue
             var v = chunk.data[c]
             if v.physical != self.key_physical[k] or (
                 v.physical == PHYSICAL_VARCHAR and v.source < 0
@@ -464,6 +479,28 @@ struct TableSinkInputs(Movable):
                     )
                     self.read[i] = to_series(self.output, i, arena, "", dtype)
                 inputs.append(UnifiedVectorFormat())
+            elif dtype.is_nested() and (at >= 0 or self.expressions[i]):
+                # A distinct count of lists or structs counts their key
+                # bytes.
+                var to = len(self.keys) + i
+                var handle: Int
+                if at >= 0:
+                    handle = nested_vector(
+                        chunk, at, arena, dtype, self.encoded, to
+                    )
+                else:
+                    if not computed:
+                        self.output.reset()
+                        self.output.count = chunk.count
+                        computed = True
+                    self.expressions[i].value().write(
+                        chunk, arena, self.output, i
+                    )
+                    handle = nested_vector(
+                        self.output, i, arena, dtype, self.encoded, to
+                    )
+                self._hold(arena, handle, hold)
+                inputs.append(self.encoded.unified(to, arena))
             elif at >= 0:
                 var v = input_vector(chunk, at, arena, physical, dtype)
                 if v.physical == PHYSICAL_VARCHAR:
@@ -506,6 +543,27 @@ struct TableSinkInputs(Movable):
         self.expressions = List[Optional[VectorExpression]]()
         self.filters = List[Optional[VectorExpression]]()
         self.output = DataChunk()
+        self.encoded = DataChunk()
+
+
+def nested_vector(
+    mut chunk: DataChunk,
+    c: Int,
+    mut arena: ColumnArena,
+    dtype: DataType,
+    mut into: DataChunk,
+    at: Int,
+) raises -> Int:
+    """Column `c` of `chunk`, lists or structs typed `dtype`, as its rows'
+    key bytes (`encode_nested_keys`): a string vector in column `at` of
+    `into`, over a new arena column, whose handle is returned so the
+    caller holds it as a string key's column is held, and a group's key
+    bytes outlive the chunk."""
+    var values = to_series(chunk, c, arena, "", dtype)
+    var handle = arena.add(encode_nested_keys(values))
+    into.count = chunk.count
+    into.data[at] = flat_over(arena, handle, 0)
+    return handle
 
 
 def _chunk_codes(

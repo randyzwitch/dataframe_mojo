@@ -18,7 +18,6 @@ from dataframe.aggregation.expressions import (
 )
 from dataframe.aggregation.keys import (
     _group_keys,
-    _pack_struct_keys,
 )
 from dataframe.binding import (
     AGGREGATE,
@@ -1049,4 +1048,4 @@ struct _StreamReduction(Movable):
         var columns = self.keys._columns.copy()
         for column in values._columns:
             columns.append(column.copy())
-        return _pack_struct_keys(DataFrame(columns^, height=self.keys.height()))
+        return DataFrame(columns^, height=self.keys.height())
