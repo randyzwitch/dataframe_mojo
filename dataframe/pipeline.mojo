@@ -37,7 +37,17 @@ from std.time import perf_counter_ns
 
 from dataframe.kernels.canonical_labels import canonical_labels
 from dataframe.storage.boolean import BoolColumn
-from .expr import COL, SELECTOR, WHEN, Expr
+from .expr import (
+    ARG_MAX,
+    ARG_MIN,
+    COL,
+    FIRST,
+    IMPLODE,
+    LAST,
+    SELECTOR,
+    WHEN,
+    Expr,
+)
 from dataframe.aggregation.reducer import Reducer
 from .binding import BoundExpr, bind
 from dataframe.storage.column import Column, _copy_validity
@@ -264,6 +274,17 @@ def _cross_step(step: Step) -> Bool:
     """Whether a step is a cross product: every probe row paired with
     every row of its collected build."""
     return step.kind == STEP_JOIN and step.how == JOIN_CROSS
+
+
+def _order_dependent(expressions: List[Expr]) -> Bool:
+    """Whether a reduction's answer depends on the order its rows come in:
+    a first or last, the position of a minimum or maximum, a list of the
+    values."""
+    for expression in expressions:
+        for node in expression._nodes:
+            if node.op in [FIRST, LAST, ARG_MIN, ARG_MAX, IMPLODE]:
+                return True
+    return False
 
 
 def _reads(exprs: List[Expr]) -> Optional[List[String]]:
@@ -1390,6 +1411,11 @@ struct _ChunkRunner(Movable):
     # source offset.
     var scan: Optional[ArcPointer[ScanFilterInfo]]
     var scan_offset: Int
+    # Whether the sink's answer depends on the order its rows come in (a
+    # first or last, the position of an extreme, groups in first-appearance
+    # order): a cross product then makes its pairs in the join's order, each
+    # probe row with every build row in turn (`cross_piece`).
+    var ordered_pairs: Bool
 
     def __init__(
         out self,
@@ -1435,6 +1461,7 @@ struct _ChunkRunner(Movable):
         self.build_layout = List[ArcPointer[JoinBuildLayout]]()
         self.scan = None
         self.scan_offset = -1
+        self.ordered_pairs = False
 
     def begin_morsel(mut self) raises:
         """Drop the previous morsel's columns. At a worker's first morsel,
@@ -1683,11 +1710,14 @@ struct _ChunkRunner(Movable):
         is paired with the whole larger one, so a piece has as many rows as
         the larger chunk and reads both sides in place: the larger chunk as
         it is, the one row through a row list repeating it. The probe
-        columns come first, then the build's."""
+        columns come first, then the build's. With `ordered_pairs` the
+        pieces are the pairs in order instead (`_ordered_cross_piece`)."""
         var n = columns.height
         var m = self.joins[][self.steps[][s].join].height()
         if n == 0 or m == 0:
             return None
+        if self.ordered_pairs:
+            return self._ordered_cross_piece(columns, s, at, n, m)
         while True:
             if at.probe >= n:
                 return None
@@ -1769,6 +1799,59 @@ struct _ChunkRunner(Movable):
                     piece.lists.append(repeated)
             at.row += 1
             return piece^
+
+    def _ordered_cross_piece(
+        self, columns: _Columns, s: Int, mut at: _CrossAt, n: Int, m: Int
+    ) -> Optional[_Columns]:
+        """The next STANDARD_VECTOR_SIZE pairs of the cross product in its
+        order (probe row by probe row, each with every build row in turn),
+        pair `at.row` first: pair p is probe row p / m with build row p % m,
+        both sides read through row lists."""
+        if at.row >= n * m:
+            return None
+        var piece = _Columns()
+        piece.height = min(STANDARD_VECTOR_SIZE, n * m - at.row)
+        var first = at.row
+        # Probe columns reading the same rows share a list: the same row
+        # list, or the same start of an at-rest range.
+        var made_lists = List[Int]()
+        var made_starts = List[Int]()
+        var made = List[Int]()
+        for c in range(columns.width()):
+            var l = columns.lists[c]
+            var start = columns.starts[c] if l < 0 else 0
+            var list = -1
+            for k in range(len(made)):
+                if made_lists[k] == l and made_starts[k] == start:
+                    list = made[k]
+            if list < 0:
+                var rows = List[UInt32](capacity=piece.height)
+                for p in range(first, first + piece.height):
+                    var probe = p // m
+                    if l >= 0:
+                        rows.append(columns.row_lists[l][probe])
+                    else:
+                        rows.append(UInt32(start + probe))
+                list = len(piece.row_lists)
+                piece.row_lists.append(rows^)
+                made_lists.append(l)
+                made_starts.append(start)
+                made.append(list)
+            piece.handles.append(columns.handles[c])
+            piece.starts.append(0)
+            piece.lists.append(list)
+        var builds = List[UInt32](capacity=piece.height)
+        for p in range(first, first + piece.height):
+            builds.append(UInt32(p % m))
+        var list = len(piece.row_lists)
+        piece.row_lists.append(builds^)
+        ref handles = self.builds[s]
+        for c in range(len(handles)):
+            piece.handles.append(handles[c])
+            piece.starts.append(0)
+            piece.lists.append(list)
+        at.row = first + piece.height
+        return piece^
 
     def chunk(
         mut self,
@@ -4332,6 +4415,9 @@ def begin_pipeline(
         trace_path("pipeline.ungrouped_sink")
         for w in range(len(jobs)):
             jobs[w].runner.ungrouped_layout.append(ungrouped[0])
+    if _order_dependent(expressions):
+        for w in range(len(jobs)):
+            jobs[w].runner.ordered_pairs = True
     # The aggregate table (one grouping): each worker's table takes the last
     # step's chunks, so workers never share a table while sinking.
     if len(layout) > 0 and len(sets) == 0:

@@ -165,3 +165,40 @@ def test_positional_reductions_of_empty_input() raises:
     assert_equal(expected.height(), 1)
     assert_true(expected.item(0, "x_first").is_null())
     assert_true(expected.item(0, "x_arg_min").is_null())
+
+
+def test_positional_reductions_over_cross_products() raises:
+    # The product's pairs come probe row by probe row, each with every
+    # build row: ties in x repeat across build rows, so the position of an
+    # extreme counts them in that order. Builds smaller and larger than a
+    # chunk of probe rows.
+    var reductions = _reductions()
+    reductions.append(col("b").first().alias("b_first"))
+    reductions.append(col("b").last().alias("b_last"))
+    reductions.append(col("b").arg_max().alias("b_arg_max"))
+    for size in [3, 2500]:
+        var values = List[Int64]()
+        for row in range(size):
+            values.append(Int64((row * 5) % 7))
+        var build = DataFrame([Series("b", Column[Int64](values^))])
+        var frame = _source(True)
+        if size > 3:
+            frame = frame.slice(0, 7)
+        var filters: List[Expr] = [
+            col("v") >= 0,
+            (col("b") == 6) & (col("k") > 40),
+        ]
+        for predicate in filters:
+            var query = (
+                frame.lazy()
+                .join(build.lazy(), how="cross")
+                .filter(predicate)
+                .select_exprs(reductions)
+            )
+            _assert_pipelined(query)
+            _check(
+                query,
+                frame.join(build, how="cross")
+                .filter(predicate)
+                .select_exprs(reductions),
+            )
