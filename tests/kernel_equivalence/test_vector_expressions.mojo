@@ -117,7 +117,7 @@ def test_coded_strings_select_what_the_eager_filter_keeps() raises:
         col("s").str().starts_with("a long") | (col("s") == lit("k2")),
         col("s").str().like("%key%2"),
         col("s").is_null(),
-        col("s").fill_null(lit("k1")) == lit("k1"),
+        ~(col("s") == lit("k3")) | col("s").is_null(),
         (col("s") == lit("k7")) & (col("a") > lit(Int64(2))),
         (col("s") == lit("k8")) | (col("a") == lit(Int64(0))),
     ]
