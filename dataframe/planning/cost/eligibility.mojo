@@ -30,6 +30,7 @@ from dataframe.joins.hash_table import (
 )
 from dataframe.join_type import (
     JOIN_ANTI,
+    JOIN_CROSS,
     JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
@@ -37,6 +38,7 @@ from dataframe.join_type import (
     JOIN_RIGHT_ANTI,
     JOIN_RIGHT_SEMI,
     JOIN_SEMI,
+    join_emits_build_rows,
 )
 from dataframe.planning.cost.model import (
     PipelineEligibility,
@@ -46,10 +48,12 @@ from dataframe.planning.expression_inputs import (
 )
 from dataframe.planning.model import (
     DROP,
+    EXPLODE,
     FILTER,
     JOIN,
     PlanNode,
     SELECT,
+    UNNEST,
     WITH_COLUMNS,
 )
 from std.collections import (
@@ -60,10 +64,15 @@ from std.collections import (
 def _pipeline_steps(
     operations: List[PlanNode], indexes: List[Optional[JoinHashTable]]
 ) -> Bool:
-    """Whether every operation is a step a pipeline runs: a row-local
-    step, or an inner, left, semi, anti, full or (uncoalesced) right join whose
-    build index was prepared (its morsels probe the shared index on their
-    own worker)."""
+    """Whether every operation is a step a pipeline runs: a row-local step,
+    an explode or unnest (each morsel's rows through the operator), a cross
+    product with its collected build, or a join probing its build. A join's
+    morsels probe the shared hash index on their own worker; with no index
+    (keys the table does not hold, such as nested values) each morsel
+    joins the build's rows on its own, which serves every join that emits
+    only probe-side matches. A right, full, right-semi or right-anti join
+    also emits build rows by whether any morsel matched them, flags only
+    the shared index keeps."""
     for node in operations:
         if (
             node.kind == FILTER
@@ -73,30 +82,29 @@ def _pipeline_steps(
             if not _row_local(node.exprs):
                 return False
         elif node.kind == JOIN:
-            if node.how == JOIN_RIGHT:
-                # Only without coalescing: its unmatched build rows come
-                # out as a final morsel with the probe columns null.
-                if node.coalesce:
-                    return False
-            elif node.how == JOIN_FULL:
-                # Probed as a left join; its unmatched build rows come
-                # out as a final morsel, as a right join's do.
-                pass
-            elif node.how not in [
+            if node.how == JOIN_CROSS:
+                continue
+            if node.how == JOIN_RIGHT and node.coalesce:
+                # Its keys take the build rows' values, which a probe
+                # step does not write.
+                return False
+            if node.how not in [
                 JOIN_INNER,
                 JOIN_LEFT,
                 JOIN_SEMI,
                 JOIN_ANTI,
+                JOIN_RIGHT,
+                JOIN_FULL,
                 JOIN_RIGHT_SEMI,
                 JOIN_RIGHT_ANTI,
             ]:
                 return False
-            if (
-                node.join_build_slot() >= len(indexes)
-                or not indexes[node.join_build_slot()]
-            ):
+            var prepared = node.join_build_slot() < len(indexes) and Bool(
+                indexes[node.join_build_slot()]
+            )
+            if not prepared and join_emits_build_rows(node.how):
                 return False
-        elif node.kind != DROP:
+        elif node.kind not in [DROP, EXPLODE, UNNEST]:
             return False
     return True
 
@@ -119,7 +127,7 @@ def pipeline_eligibility(
     if top == 0:
         return PipelineEligibility(False, "empty_top_requires_batches")
     if not _pipeline_steps(operations, indexes):
-        return PipelineEligibility(False, "operation_requires_batches")
+        return PipelineEligibility(False, "build_rows_need_table")
     if not (join_count == 0 or key_count == 0 or not ordered):
         return PipelineEligibility(False, "ordered_grouped_join")
     if not (key_count > 0 or not _order_sensitive(expressions)):
