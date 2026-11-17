@@ -34,7 +34,7 @@ def _probe(rows: Int) raises -> DataFrame:
     return DataFrame(
         [
             Series("k", Column[Int64](keys^)),
-            Series("v", Column[Int64](values^, valid^)),
+            Series("v", Column[Int64](values^, valid)),
             Series("s", Column[String](text^)),
         ]
     )
@@ -52,7 +52,7 @@ def _build(rows: Int) raises -> DataFrame:
         labels.append("b" + String(row % 11))
     return DataFrame(
         [
-            Series("v", Column[Int64](values^, valid^)),
+            Series("v", Column[Int64](values^, valid)),
             Series("b", Column[String](labels^)),
         ]
     )
@@ -241,13 +241,13 @@ def _lists(rows: Int) raises -> DataFrame:
         for e in range(row % 4):
             values.append(Int64(row + e))
             present.append((row + e) % 5 != 0)
-        items.append(Series("item", Column[Int64](values^, present^)))
+        items.append(Series("item", Column[Int64](values^, present)))
         valid.append(row % 9 != 4)
         keys.append(Int64(row % 6))
     return DataFrame(
         [
             Series("k", Column[Int64](keys^)),
-            Series("xs", ListColumn.from_lists(items, DataType.INT64, valid^)),
+            Series("xs", ListColumn.from_lists(items, DataType.INT64, valid)),
         ]
     )
 
