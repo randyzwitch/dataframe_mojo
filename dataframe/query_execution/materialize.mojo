@@ -18,6 +18,7 @@ from dataframe.scheduler import (
     MetaPipeline,
 )
 from dataframe.planning.context import (
+    FinishAbove,
     QueryContext,
     SharedResults,
     _ReadyIndex,
@@ -280,8 +281,12 @@ struct _StreamInputs(Movable):
     # Whether each build side filters its rows (the join filters' bloom
     # rule reads it).
     var build_filtered: List[Bool]
+    # The row steps above the aggregate the stream reads, for that input's
+    # finish to run (`FinishAbove`), when it can.
+    var finish: Optional[ArcPointer[FinishAbove]]
 
     def __init__(out self):
+        self.finish = None
         self.coalesces = List[Bool]()
         self.probe_estimates = List[Int]()
         self.build_filtered = List[Bool]()
@@ -297,7 +302,6 @@ def plan_schedule_inputs(
     terminal: Int,
     top: Int,
     batch_size: Int,
-    finish_above: Bool = False,
 ) raises -> _StreamInputs:
     """Schedule computed join inputs as children of the probe pipeline. Each
     build finishes its columns and hash index in its finish event. The probe
@@ -353,14 +357,12 @@ def plan_schedule_inputs(
             inputs.build_filtered.append(False)
             inputs.metas.append(MetaPipeline(META_REGULAR))
     # A computed source the stream reads is a pipeline of the schedule
-    # too, so it runs as no schedule of its own. With no build to overlap,
-    # an aggregate source whose finish can take the row steps above it
-    # (`finish_above`) is left to the stream, which runs it with them.
+    # too, so it runs as no schedule of its own: also when the stream's
+    # terminal reads it directly, with no step or join between.
     elif (
         probe >= 0
-        and probe != top
+        and probe != terminal
         and not _is_scan(self._nodes[probe].kind)
-        and (len(inputs.wanted) > 0 or not finish_above)
         and probe not in ahead[]
     ):
         inputs.wanted.append(probe)

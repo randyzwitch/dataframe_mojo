@@ -392,3 +392,113 @@ def test_operator_build_sides_schedule_their_own_inputs() raises:
         .sort(["s"])
     )
     assert_frame(streamed, eager)
+
+
+def test_aggregate_build_sides_finish_with_the_steps_above_them() raises:
+    """A build side that filters and projects an aggregate's groups is an
+    aggregate input of the schedule whose finish runs those steps: the
+    stream reading it takes that result as its own, and no schedule runs
+    inside another's task. The sums are what joining the inputs eagerly
+    gives."""
+    var frame = source()
+    var groups = (
+        frame.lazy()
+        .group_by("k")
+        .agg([col("v").sum().alias("total"), col("v").count().alias("n")])
+        .filter(col("total") > lit(Int64(0)))
+        .select(["k", "total"])
+    )
+    var probe = frame.lazy().filter(col("v") > lit(Int64(-400)))
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var streamed = (
+        probe.join(groups, ["k"])
+        .group_by("s")
+        .agg([col("v").sum().alias("v"), col("total").sum().alias("t")])
+        .sort("s")
+        .collect(optimize=False)
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "pipeline.aggregate_finish_filter" in paths,
+        "the aggregate's finish did not filter its groups",
+    )
+    assert_true(
+        "schedule.nested" not in paths, "a schedule ran inside another's task"
+    )
+    var eager = (
+        probe.collect()
+        .join(groups.collect(), on=["k"])
+        .group_by(["s"])
+        .agg([col("v").sum().alias("v"), col("total").sum().alias("t")])
+        .sort(["s"])
+    )
+    assert_frame(streamed, eager)
+
+
+def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
+    """A build side whose aggregate the stream declines once its inputs
+    are known (an ordered grouping over a join with a median: no
+    pipeline keeps those states in order) still runs in the schedule:
+    its pipeline makes the joined rows, and the aggregate runs over them
+    as an operator, with no schedule inside another's task. The result
+    is what the eager steps give."""
+    var frame = source()
+    var weights = List[Int64]()
+    var keys = List[Int64]()
+    for k in range(997):
+        keys.append(Int64(k))
+        weights.append(Int64(k % 13))
+    var dim = DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("w", Column[Int64](weights^)),
+        ]
+    ).lazy()
+    var probe = frame.lazy().filter(col("v") > lit(Int64(-400)))
+    var grouped = (
+        probe.join(dim, ["k"])
+        .group_by("s", maintain_order=True)
+        .agg([col("v").median().alias("m"), col("w").sum().alias("t")])
+    )
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var streamed = (
+        frame.lazy()
+        .select(["s", "k"])
+        .join(grouped, ["s"])
+        .group_by("s")
+        .agg([col("m").max().alias("m"), col("t").max().alias("t")])
+        .sort("s")
+        .collect(optimize=False)
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "stream.declined_rows_below" in paths,
+        "the declined aggregate's input rows were not streamed",
+    )
+    assert_true(
+        "schedule.nested" not in paths, "a schedule ran inside another's task"
+    )
+    var eager_grouped = (
+        frame.filter(col("v") > lit(Int64(-400)))
+        .join(dim.collect(), on=["k"])
+        .group_by(["s"], maintain_order=True)
+        .agg([col("v").median().alias("m"), col("w").sum().alias("t")])
+    )
+    var eager = (
+        frame.select(["s", "k"])
+        .join(eager_grouped, on=["s"])
+        .group_by(["s"])
+        .agg([col("m").max().alias("m"), col("t").max().alias("t")])
+        .sort(["s"])
+    )
+    assert_frame(streamed, eager)

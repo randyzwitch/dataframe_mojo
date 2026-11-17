@@ -36,8 +36,8 @@ so a finish of any number of parallel rounds never waits on a nested
 run.
 """
 from std.atomic import Atomic
-from std.ffi import external_call
-from std.memory import Pointer
+from std.ffi import _get_global, external_call
+from std.memory import Layout, Pointer, alloc
 from std.time import perf_counter_ns
 
 from dataframe.parallel import (
@@ -47,6 +47,7 @@ from dataframe.parallel import (
     _current_crew,
     configured_workers,
 )
+from dataframe.trace import trace_path
 
 # The five events of a pipeline, in the order each depends on the last.
 comptime STAGE_INITIALIZE = 0
@@ -573,6 +574,26 @@ def _queued[P: SchedulablePipeline](address: Int) abi("C") -> Int:
     return 1 if executor.tail.load() > executor.head.load() else 0
 
 
+def _running_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    var pointer = alloc(Layout[Atomic[Int64]](length=1)).unsafe_leak()
+    pointer.unsafe_write(Atomic[Int64](0))
+    return pointer.unsafe_bitcast[NoneType]()
+
+
+def _running_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
+    pass
+
+
+def _running_schedules() -> ref[MutAnyOrigin] Atomic[Int64]:
+    """How many schedules are running in the process."""
+    var address = _get_global[
+        "DATAFRAME_RUNNING_SCHEDULES", _running_init, _running_keep
+    ]()
+    return Pointer[Atomic[Int64], MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+
+
 def run_pipelines[
     P: SchedulablePipeline
 ](
@@ -591,6 +612,11 @@ def run_pipelines[
         return
     var stages = build_pipeline_schedule(metas)
     var executor = _Executor[P](pipelines, stages)
+    # A query runs its schedules one after another: one starting while
+    # another runs was started inside that one's task, whose thread then
+    # waits on it.
+    if _running_schedules().fetch_add(1) > 0:
+        trace_path("schedule.nested")
     executor.schedule_events()
     if not parallel or configured_workers() <= 1:
         executor.work_on_tasks()
@@ -621,6 +647,7 @@ def run_pipelines[
                 unsafe_from_address=crew
             )[].close_schedule(slot)
         borrowed.release()
+    _ = _running_schedules().fetch_sub(1)
     if executor.failed.load() != 0:
         raise Error(executor.error)
     if executor.completed_pipelines.load() < Int64(len(pipelines)):
