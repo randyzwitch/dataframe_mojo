@@ -4415,7 +4415,7 @@ def begin_pipeline(
         trace_path("pipeline.ungrouped_sink")
         for w in range(len(jobs)):
             jobs[w].runner.ungrouped_layout.append(ungrouped[0])
-    if _order_dependent(expressions):
+    if _order_dependent(expressions) or (ordered and len(keys) > 0):
         for w in range(len(jobs)):
             jobs[w].runner.ordered_pairs = True
     # The aggregate table (one grouping): each worker's table takes the last
