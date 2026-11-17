@@ -40,7 +40,10 @@ from std.ffi import _get_global, external_call
 from std.memory import Layout, OwnedPointer, Pointer, alloc
 from std.os import getenv
 from std.time import perf_counter_ns
-from std.sys import num_performance_cores, num_physical_cores, size_of
+from std.reflection import reflect
+from std.sys import num_performance_cores, num_physical_cores, size_of, stderr
+
+from .trace import trace_path
 
 from .vector.types import STANDARD_VECTOR_SIZE
 
@@ -589,6 +592,8 @@ struct Pool(Movable):
         """
         if len(jobs) == 0:
             return
+        if len(jobs) > 1:
+            _trace_nested[J]()
         if self.address == 0 and self._on_crew > 1:
             _run_jobs(jobs, self._on_crew)
             return
@@ -1355,6 +1360,35 @@ def round_width(jobs: Int) -> Int:
     return min(jobs, max(1, configured_workers()))
 
 
+def _running_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    var pointer = alloc(Layout[Atomic[Int64]](length=1)).unsafe_leak()
+    pointer.unsafe_write(Atomic[Int64](0))
+    return pointer.unsafe_bitcast[NoneType]()
+
+
+def _running_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
+    pass
+
+
+def _running_schedules() -> ref[MutAnyOrigin] Atomic[Int64]:
+    """How many schedules are running in the process."""
+    var address = _get_global[
+        "DATAFRAME_RUNNING_SCHEDULES", _running_init, _running_keep
+    ]()
+    return Pointer[Atomic[Int64], MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+
+
+def _trace_nested[J: Job]():
+    """Trace jobs started inside a schedule's task: work no schedule
+    sees."""
+    if _running_schedules().load() > 0:
+        trace_path("schedule.nested_jobs")
+        if getenv("DATAFRAME_TRACE_NESTED_JOBS"):
+            print("dataframe-path: jobs.", reflect[J].name(), file=stderr, sep="")
+
+
 def run_jobs[J: Job](mut jobs: List[J]) raises:
     """Run every job and return them, in order, with their results.
 
@@ -1373,6 +1407,8 @@ def _run_jobs[J: Job](mut jobs: List[J], limit: Int) raises:
     """`run_jobs` on at most `limit` threads, the caller included."""
     if len(jobs) == 0:
         return
+    if len(jobs) > 1:
+        _trace_nested[J]()
     if len(jobs) > 1 and limit > 1 and _current_crew().load() == 0:
         # An eager call outside any operation borrows the parked crew for
         # this call, by reusing the process-wide worker

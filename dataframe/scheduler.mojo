@@ -45,6 +45,7 @@ from dataframe.parallel import (
     _Crew,
     _Entry,
     _current_crew,
+    _running_schedules,
     configured_workers,
 )
 from dataframe.trace import trace_path
@@ -572,26 +573,6 @@ def _queued[P: SchedulablePipeline](address: Int) abi("C") -> Int:
         unsafe_from_address=address
     )[]
     return 1 if executor.tail.load() > executor.head.load() else 0
-
-
-def _running_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
-    var pointer = alloc(Layout[Atomic[Int64]](length=1)).unsafe_leak()
-    pointer.unsafe_write(Atomic[Int64](0))
-    return pointer.unsafe_bitcast[NoneType]()
-
-
-def _running_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
-    pass
-
-
-def _running_schedules() -> ref[MutAnyOrigin] Atomic[Int64]:
-    """How many schedules are running in the process."""
-    var address = _get_global[
-        "DATAFRAME_RUNNING_SCHEDULES", _running_init, _running_keep
-    ]()
-    return Pointer[Atomic[Int64], MutAnyOrigin](
-        unsafe_from_address=Int(address.value())
-    )[]
 
 
 def run_pipelines[
