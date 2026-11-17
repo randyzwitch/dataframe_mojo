@@ -95,8 +95,12 @@ struct MetalRuntime(AcceleratorBackend):
 
     def describe(self, query: LazyFrame) -> String:
         """Which nodes Metal runs; the CPU runs the rest."""
+        from .selection_reduce import selection_supports
+
         try:
-            var nodes = query._handoff_nodes()
+            var offered = query.copy()
+            offered._plan._selection_supports = selection_supports
+            var nodes = offered._handoff_nodes()
             if len(nodes) == 0:
                 return (
                     "ENGINE accel: CPU executor; Metal supports no node of"
@@ -168,6 +172,10 @@ struct MetalRuntime(AcceleratorBackend):
                         offered = normalized.take()
                         optimize = False
         var plan = offered._with_handoff()
+        from .selection_reduce import selection_supports, selection_execute
+
+        plan._plan._selection_supports = selection_supports
+        plan._plan._selection_execute = selection_execute
         if profiling:
             return plan.profile(
                 engine="cpu",

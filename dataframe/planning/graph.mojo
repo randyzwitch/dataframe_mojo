@@ -1464,6 +1464,8 @@ def plan_subplan(self: QueryContext, root: Int) -> QueryContext:
     sub._report = self._report
     sub._accelerator_settings = self._accelerator_settings.copy()
     sub._handoff = self._handoff
+    sub._selection_supports = self._selection_supports
+    sub._selection_execute = self._selection_execute
     for entry in self._origin_rows.items():
         if slots[entry.key] >= 0:
             sub._origin_rows[slots[entry.key]] = entry.value
