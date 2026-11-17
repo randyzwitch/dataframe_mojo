@@ -154,6 +154,7 @@ from dataframe.joins.join_filter import (
 from dataframe.table_filter import TableFilterSet
 from .join_type import (
     JOIN_ANTI,
+    JOIN_CROSS,
     JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
@@ -220,6 +221,12 @@ comptime STEP_DROP = 3
 # A hash join against a build frame prepared before the pipeline runs
 # (the index is shared by every worker): the morsel is the probe side.
 comptime STEP_JOIN = 4
+# An explode of list columns (`names`) or an unnest of a struct column
+# (`names[0]`): rows multiply, or a column becomes its fields, so each
+# morsel's rows go through the operator whole and the next steps cut
+# chunks from its output, as they do from a join's.
+comptime STEP_EXPLODE = 5
+comptime STEP_UNNEST = 6
 # The column a top-k sink adds as its last key when the sort keeps input
 # order: the row's place in the source's order (morsel sequence, then row
 # within the morsel's output), so ties come out as a stable sort of the
@@ -245,6 +252,18 @@ struct Step(Copyable, Movable):
     var how: Int
     var suffix: String
     var coalesce: Bool
+
+
+def _frame_step(kind: Int) -> Bool:
+    """Whether a step reads a morsel's rows whole (a join, an explode or
+    an unnest) rather than one chunk at a time."""
+    return kind == STEP_JOIN or kind == STEP_EXPLODE or kind == STEP_UNNEST
+
+
+def _cross_step(step: Step) -> Bool:
+    """Whether a step is a cross product: every probe row paired with
+    every row of its collected build."""
+    return step.kind == STEP_JOIN and step.how == JOIN_CROSS
 
 
 def _reads(exprs: List[Expr]) -> Optional[List[String]]:
@@ -296,9 +315,18 @@ def _key_statistics(
             # The build side is the output: no probe column stays.
             names = List[String]()
             sources = List[String]()
-        elif step.kind == STEP_DROP or (
-            step.kind == STEP_JOIN
-            and (step.how == JOIN_RIGHT or step.how == JOIN_FULL)
+        elif step.kind == STEP_UNNEST:
+            # A struct's fields may take the names of other columns.
+            return List[Series]()
+        elif (
+            step.kind == STEP_DROP
+            # An exploded column holds its lists' elements, which the
+            # source's statistics do not describe.
+            or step.kind == STEP_EXPLODE
+            or (
+                step.kind == STEP_JOIN
+                and (step.how == JOIN_RIGHT or step.how == JOIN_FULL)
+            )
         ):
             var kept = List[String]()
             var kept_sources = List[String]()
@@ -586,6 +614,15 @@ def _join_filters(
             for e in step.exprs:
                 if e._name in source:
                     _ = source.pop(e._name)
+        elif step.kind == STEP_EXPLODE:
+            # Each row repeats once per element, the other columns
+            # unchanged: only the exploded ones stop being the source's.
+            for name in step.names:
+                if name in source:
+                    _ = source.pop(name)
+        elif step.kind == STEP_UNNEST:
+            # A struct's fields may take the names of source columns.
+            source = Dict[String, String]()
     for p in pushed:
         var probe = source.get(p.column)
         if not probe:
@@ -835,6 +872,22 @@ comptime _COLLECT_VALUES = 3
 # Values a step computed, as raw fixed-width bytes and a packed validity
 # bitmap, appended a chunk at a time and made a column once.
 comptime _COLLECT_RAW = 4
+
+
+struct _CrossAt(Copyable, Movable):
+    """Where a cross product's pieces over one morsel have got to: the
+    probe chunk and the build chunk starting at rows `probe` and `build`,
+    and the row of the smaller of the two that the next piece pairs with
+    the larger."""
+
+    var probe: Int
+    var build: Int
+    var row: Int
+
+    def __init__(out self):
+        self.probe = 0
+        self.build = 0
+        self.row = 0
 
 
 struct _Collector(Movable):
@@ -1228,6 +1281,14 @@ def _step_schemas(
             current = current.select_exprs(step.exprs)
         elif step.kind == STEP_WITH_COLUMNS:
             current = current.with_columns(step.exprs)
+        elif _cross_step(step):
+            current = current.join(
+                joins[step.join].clear(), how="cross", suffix=step.suffix
+            )
+        elif step.kind == STEP_EXPLODE:
+            current = current.explode(step.names)
+        elif step.kind == STEP_UNNEST:
+            current = current.unnest(step.names[0])
         elif step.kind == STEP_JOIN:
             current = current._join_impl(
                 joins[step.join].clear(),
@@ -1255,7 +1316,7 @@ def _compile_steps(
     """Every row-local step compiled for its input columns."""
     var compiled = List[Optional[_VectorStep]](capacity=len(steps))
     for s in range(len(steps)):
-        if steps[s].kind == STEP_JOIN:
+        if _frame_step(steps[s].kind):
             compiled.append(None)
         else:
             compiled.append(_VectorStep(steps[s], schemas[s], schemas[s + 1]))
@@ -1384,7 +1445,12 @@ struct _ChunkRunner(Movable):
             self.builds = List[List[Int]](capacity=len(self.steps[]))
             for step in self.steps[]:
                 var handles = List[Int]()
-                if step.kind == STEP_JOIN:
+                if _cross_step(step):
+                    # The build's columns, which every piece of the cross
+                    # product reads in place (`cross_piece`).
+                    for column in self.joins[][step.join]._columns:
+                        handles.append(self.arena.add(column))
+                elif step.kind == STEP_JOIN:
                     if (
                         self.indexes[][step.join]
                         and self.indexes[][step.join].value().use_dictionary
@@ -1511,16 +1577,22 @@ struct _ChunkRunner(Movable):
     ) raises -> Tuple[_Columns, Int]:
         """The steps from `first` up to the last row-local segment: the
         columns that segment reads and the step it starts at (the step
-        count when the last step is a join). The segment then runs one
-        chunk at a time through `chunk`, so a sink takes each chunk as it
-        is made."""
+        count when the last step reads its rows whole). The segment then
+        runs one chunk at a time through `chunk`, so a sink takes each chunk
+        as it is made. When the last such step is a cross product, the
+        columns are its probe rows and the step returned is the cross
+        product's: its pieces (`cross_piece`) are the chunks the steps after
+        it take."""
         var n = len(self.steps[])
         var last = n
-        while last > first and self.steps[][last - 1].kind != STEP_JOIN:
+        while last > first and not _frame_step(self.steps[][last - 1].kind):
+            last -= 1
+        var cross = last > first and _cross_step(self.steps[][last - 1])
+        if cross:
             last -= 1
         if last > first:
             columns = self.run_until(columns^, first, last)
-        for s in range(last, n):
+        for s in range(last + 1 if cross else last, n):
             self._compiled(s)
         return (columns^, last)
 
@@ -1536,16 +1608,29 @@ struct _ChunkRunner(Movable):
         while at < stop:
             if self.stop_empty and columns.height == 0:
                 return columns^
-            if self.steps[][at].kind == STEP_JOIN:
+            var kind = self.steps[][at].kind
+            if (
+                _cross_step(self.steps[][at])
+                and stop == n
+                and self.sinks_chunks()
+            ):
+                # The product is never held: each piece runs through the
+                # steps after it into the sink.
+                self._cross_into_sink(columns, at)
+                return _Columns()
+            if _frame_step(kind):
                 self.counts[2 * at + 1] += columns.height
                 var began = Int(perf_counter_ns())
-                columns = self._join(columns, at)
+                if kind == STEP_JOIN:
+                    columns = self._join(columns, at)
+                else:
+                    columns = self._reshape(columns, at)
                 self.counts[2 * n + 1 + at] += Int(perf_counter_ns()) - began
                 self.counts[2 * at + 2] += columns.height
                 at += 1
                 continue
             var end = at
-            while end < stop and self.steps[][end].kind != STEP_JOIN:
+            while end < stop and not _frame_step(self.steps[][end].kind):
                 end += 1
             columns = self._vector_steps(columns, at, end)
             at = end
@@ -1558,6 +1643,132 @@ struct _ChunkRunner(Movable):
             # chunks for the sink.
             columns = self._vector_steps(columns, n, n)
         return columns^
+
+    def _reshape(mut self, columns: _Columns, s: Int) raises -> _Columns:
+        """An explode or unnest step over a morsel's collected columns: the
+        operator over them as a frame, its output the columns the next
+        steps read."""
+        ref step = self.steps[][s]
+        var frame = columns.whole(self.arena, self.schemas[][s])
+        if step.kind == STEP_EXPLODE:
+            frame = frame.explode(step.names)
+        else:
+            frame = frame.unnest(step.names[0])
+        return _Columns.of_frame(self.arena, frame)
+
+    def _cross_into_sink(mut self, columns: _Columns, s: Int) raises:
+        """Cross product step `s` over a morsel's probe rows, a piece at a
+        time through the steps after it into the sink."""
+        var n = len(self.steps[])
+        self.counts[2 * s + 1] += columns.height
+        var at = _CrossAt()
+        while True:
+            var began = Int(perf_counter_ns())
+            var piece = self.cross_piece(columns, s, at)
+            self.counts[2 * n + 1 + s] += Int(perf_counter_ns()) - began
+            if not piece:
+                return
+            self.counts[2 * s + 2] += piece.value().height
+            _ = self.run_until(piece.take(), s + 1, n)
+            if self.sink_full():
+                return
+
+    def cross_piece(
+        self, columns: _Columns, s: Int, mut at: _CrossAt
+    ) -> Optional[_Columns]:
+        """The next piece of cross product step `s` over the probe rows
+        `columns`, or None once every pair is made. The probe rows and the
+        build rows are each taken a chunk (STANDARD_VECTOR_SIZE rows) at a
+        time; for each pair of chunks, every row of the smaller one in turn
+        is paired with the whole larger one, so a piece has as many rows as
+        the larger chunk and reads both sides in place: the larger chunk as
+        it is, the one row through a row list repeating it. The probe
+        columns come first, then the build's."""
+        var n = columns.height
+        var m = self.joins[][self.steps[][s].join].height()
+        if n == 0 or m == 0:
+            return None
+        while True:
+            if at.probe >= n:
+                return None
+            var probe_count = min(STANDARD_VECTOR_SIZE, n - at.probe)
+            var build_count = min(STANDARD_VECTOR_SIZE, m - at.build)
+            # The smaller chunk is the one read a row at a time.
+            var probe_rows = probe_count < build_count
+            if at.row >= (probe_count if probe_rows else build_count):
+                at.row = 0
+                at.build += STANDARD_VECTOR_SIZE
+                if at.build >= m:
+                    at.build = 0
+                    at.probe += STANDARD_VECTOR_SIZE
+                continue
+            var piece = _Columns()
+            piece.height = build_count if probe_rows else probe_count
+            ref handles = self.builds[s]
+            if probe_rows:
+                var probe = at.probe + at.row
+                # Probe columns reading the same at-rest row share a list.
+                var made_rows = List[Int]()
+                var made_lists = List[Int]()
+                for c in range(columns.width()):
+                    var row = columns.starts[c] + probe
+                    if columns.lists[c] >= 0:
+                        row = Int(columns.row_lists[columns.lists[c]][probe])
+                    var list = -1
+                    for k in range(len(made_rows)):
+                        if made_rows[k] == row:
+                            list = made_lists[k]
+                    if list < 0:
+                        list = len(piece.row_lists)
+                        piece.row_lists.append(
+                            List[UInt32](length=piece.height, fill=UInt32(row))
+                        )
+                        made_rows.append(row)
+                        made_lists.append(list)
+                    piece.handles.append(columns.handles[c])
+                    piece.starts.append(0)
+                    piece.lists.append(list)
+                for c in range(len(handles)):
+                    piece.handles.append(handles[c])
+                    piece.starts.append(at.build)
+                    piece.lists.append(-1)
+            else:
+                var build = at.build + at.row
+                # Probe columns sharing a row list share its window.
+                var from_lists = List[Int]()
+                var to_lists = List[Int]()
+                for c in range(columns.width()):
+                    piece.handles.append(columns.handles[c])
+                    var l = columns.lists[c]
+                    if l < 0:
+                        piece.starts.append(columns.starts[c] + at.probe)
+                        piece.lists.append(-1)
+                        continue
+                    var list = -1
+                    for k in range(len(from_lists)):
+                        if from_lists[k] == l:
+                            list = to_lists[k]
+                    if list < 0:
+                        ref rows = columns.row_lists[l]
+                        var window = List[UInt32](capacity=piece.height)
+                        for r in range(at.probe, at.probe + piece.height):
+                            window.append(rows[r])
+                        list = len(piece.row_lists)
+                        piece.row_lists.append(window^)
+                        from_lists.append(l)
+                        to_lists.append(list)
+                    piece.starts.append(0)
+                    piece.lists.append(list)
+                var repeated = len(piece.row_lists)
+                piece.row_lists.append(
+                    List[UInt32](length=piece.height, fill=UInt32(build))
+                )
+                for c in range(len(handles)):
+                    piece.handles.append(handles[c])
+                    piece.starts.append(0)
+                    piece.lists.append(repeated)
+            at.row += 1
+            return piece^
 
     def chunk(
         mut self,
@@ -1676,6 +1887,12 @@ struct _ChunkRunner(Movable):
                 var rt = right.column(step.right_keys[i]).dtype()
                 if lt != rt or lt.is_nested():
                     direct = False
+        if _cross_step(step):
+            # Where its output is collected for a later join: the morsel's
+            # whole product.
+            var frame = columns.whole(self.arena, input)
+            var crossed = frame.join(right, how="cross", suffix=step.suffix)
+            return _Columns.of_frame(self.arena, crossed)
         if not direct:
             var frame = columns.whole(self.arena, input)
             var joined = frame._join_impl(
@@ -2380,13 +2597,31 @@ struct _PipelineJob(Job):
         var ran = self.runner.run_to_last(source^, first_step)
         var columns = ran[0].copy()
         var first = ran[1]
+        var made = 0
+        if len(self.topn) > 0:
+            self.topn[0].begin(k)
+        if first < len(self.runner.steps[]) and _cross_step(
+            self.runner.steps[][first]
+        ):
+            # A cross product's pieces, each one chunk through the steps
+            # after it.
+            var at = _CrossAt()
+            self.runner.counts[2 * first + 1] += columns.height
+            while True:
+                var piece = self.runner.cross_piece(columns, first, at)
+                if not piece:
+                    break
+                self.runner.counts[2 * first + 2] += piece.value().height
+                var bases = piece.value().bases(self.runner.arena)
+                var address = self.runner.chunk(
+                    piece.value(), bases, 0, piece.value().height, first + 1
+                )
+                made = self._take_top(address, k, offset, made)
+            return
         # The vectors map to source rows only before any join.
         var direct = scanned and first == first_step
         var bases = columns.bases(self.runner.arena)
-        var made = 0
         var skipped = 0
-        if len(self.topn) > 0:
-            self.topn[0].begin(k)
         for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
             var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
             if direct and (self.top_filter.info or self.runner.scan):
@@ -2406,22 +2641,29 @@ struct _PipelineJob(Job):
                     skipped += 1
                     continue
             var address = self.runner.chunk(columns, bases, low, count, first)
-            if address == 0:
-                continue
-            var chunk = Pointer[DataChunk, MutAnyOrigin](
-                unsafe_from_address=address
-            )
-            if len(self.topn) == 0:
-                self._make_top()
-            if self.top_maintain_order:
-                var height = chunk[].count
-                self._sink_ordered_top(chunk[], k, offset, made)
-                made += height
-                continue
-            _sink_chunk(self.topn[0], chunk[], self.runner.arena)
+            made = self._take_top(address, k, offset, made)
         if skipped > 0:
             # Once a morsel: tracing reads the environment.
             trace_path("pipeline.top_dynamic_skip_vector")
+
+    def _take_top(
+        mut self, address: Int, k: Int, offset: Int, made: Int
+    ) raises -> Int:
+        """The chunk at `address` (0: none) into this worker's top-N heap,
+        `made` rows of morsel `k` before it; the rows made with it."""
+        if address == 0:
+            return made
+        var chunk = Pointer[DataChunk, MutAnyOrigin](
+            unsafe_from_address=address
+        )
+        if len(self.topn) == 0:
+            self._make_top()
+        if self.top_maintain_order:
+            var height = chunk[].count
+            self._sink_ordered_top(chunk[], k, offset, made)
+            return made + height
+        _sink_chunk(self.topn[0], chunk[], self.runner.arena)
+        return made
 
     def _make_top(mut self) raises:
         """This worker's top-N heap over the output schema; an order

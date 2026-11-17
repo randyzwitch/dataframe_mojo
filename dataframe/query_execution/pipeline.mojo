@@ -1372,7 +1372,8 @@ struct _StreamProbe(Movable):
                 defer_finalize=True,
             )
             self.result = frame^
-            self._fill_table()
+            if self.built:
+                self._fill_table()
 
     def _fill_table(mut self) raises:
         """The built table's pointer table filled as one more round of
@@ -1786,6 +1787,7 @@ def _probe_start(
                 build_rows = built.height()
             if build_rows == 0 and (
                 node.how == JOIN_INNER
+                or node.how == JOIN_CROSS
                 or node.how == JOIN_SEMI
                 or node.how == JOIN_RIGHT
                 or node.how == JOIN_RIGHT_SEMI

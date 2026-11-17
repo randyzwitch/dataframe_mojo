@@ -30,9 +30,11 @@ from dataframe.parallel import (
 )
 from dataframe.pipeline import (
     STEP_DROP,
+    STEP_EXPLODE,
     STEP_FILTER,
     STEP_JOIN,
     STEP_SELECT,
+    STEP_UNNEST,
     STEP_WITH_COLUMNS,
     Step,
     _steps_over_frame,
@@ -351,11 +353,15 @@ def _steps_of(operations: List[PlanNode]) -> List[Step]:
             kind = STEP_WITH_COLUMNS
         elif node.kind == JOIN:
             kind = STEP_JOIN
+        elif node.kind == EXPLODE:
+            kind = STEP_EXPLODE
+        elif node.kind == UNNEST:
+            kind = STEP_UNNEST
         steps.append(
             Step(
                 kind,
                 node.exprs.copy(),
-                node.names.copy(),
+                [node.text] if node.kind == UNNEST else node.names.copy(),
                 node.join_build_slot(),
                 node.right_keys.copy(),
                 node.how,
