@@ -95,6 +95,7 @@ from dataframe.aggregation.ungrouped import (
 from dataframe.sorting.top_n import TopNBoundary
 from dataframe.sorting.top_n_sink import TopNSink
 from dataframe.vector.column_data_collection import (
+    LimitBound,
     MaterializeFinish,
     MaterializeSink,
     append_raw,
@@ -1314,6 +1315,10 @@ struct _ChunkRunner(Movable):
     # its result, or the input of a reduction no aggregate sink takes.
     var materialize: List[MaterializeSink]
     var materializes: Bool
+    # A limited materialize sink: the first rows in source order it keeps
+    # (-1: every row), and the last morsel any worker still needs.
+    var limit: Int
+    var limit_bound: LimitBound
     # A join build sink (`JoinBuildSink`), when the pipeline's rows are a
     # hash join's build side: the chunks go into the worker's own rows,
     # which become the join's table, and nothing is collected.
@@ -1363,6 +1368,8 @@ struct _ChunkRunner(Movable):
         self.sets_layout = List[ArcPointer[GroupingSetsLayout]]()
         self.materialize = List[MaterializeSink]()
         self.materializes = False
+        self.limit = -1
+        self.limit_bound = LimitBound.none()
         self.build = List[JoinBuildSink]()
         self.build_layout = List[ArcPointer[JoinBuildLayout]]()
         self.scan = None
@@ -1438,9 +1445,18 @@ struct _ChunkRunner(Movable):
         elif self.materializes:
             if len(self.materialize) == 0:
                 self.materialize.append(
-                    MaterializeSink(self.output_schema().clear())
+                    MaterializeSink(
+                        self.output_schema().clear(),
+                        limit=self.limit,
+                        bound=self.limit_bound,
+                    )
                 )
             self.materialize[0].begin(morsel)
+
+    def sink_full(self) -> Bool:
+        """Whether the worker's limited sink holds all the rows it can use:
+        nothing it would sink from here on is wanted."""
+        return len(self.materialize) > 0 and self.materialize[0].full()
 
     def release_sink(mut self) raises:
         """The worker's run is over: only its sink's states outlive it. A
@@ -1632,6 +1648,8 @@ struct _ChunkRunner(Movable):
                 continue
             if sinking:
                 self._sink(input[])
+                if self.sink_full():
+                    break
             else:
                 collector[0].append(input[], self.arena)
         if sinking:
@@ -1947,6 +1965,9 @@ struct _PipelineJob(Job):
     # A file source's shared scan state: its batches are the morsels,
     # and `frame` and `ranges` are unused.
     var source: Optional[ArcPointer[ScanSource]]
+    # Under a limit, the last morsel any worker still needs: a morsel
+    # numbered past it is not read.
+    var bound: LimitBound
 
     def __init__(
         out self,
@@ -1973,6 +1994,7 @@ struct _PipelineJob(Job):
             steps, schemas, joins, indexes, True, templates
         )
         self.source = None
+        self.bound = LimitBound.none()
         self.join_filters = join_filters.copy()
         self.join_stats = List[SelectivityStats](
             length=len(join_filters),
@@ -2234,7 +2256,7 @@ struct _PipelineJob(Job):
         var cursor = _Cursor(self.cursor)
         while True:
             var taken = cursor.take(1)
-            if taken >= count:
+            if taken >= count or self.first_morsel + taken > self.bound.last():
                 self.counts = self.runner.counts.copy()
                 if not self.finishes:
                     return
@@ -2269,7 +2291,7 @@ struct _PipelineJob(Job):
         the source's lock and decoded on this thread, then runs as a morsel
         numbered by its place in the file."""
         while True:
-            var next = self.source.value()[].take()
+            var next = self.source.value()[].take(self.bound.last())
             if not next:
                 break
             var batch = next.take()
@@ -3205,7 +3227,11 @@ struct PipelineFinish(Movable, Rounds):
                     locals.append(jobs[j].runner.materialize.pop())
             var combined = _combined(locals^)
             self.batches.append(
-                MaterializeFinish(combined^, run.schemas[][len(steps)].clear())
+                MaterializeFinish(
+                    combined^,
+                    run.schemas[][len(steps)].clear(),
+                    limit=-1 if run.collects else run.limit,
+                )
             )
             self.sink = _SINK_BATCHES
             return
@@ -3550,6 +3576,10 @@ struct PipelineRun(Movable):
     # the table the finish makes of them (its finalize tasks not yet run).
     var build_layout: Optional[ArcPointer[JoinBuildLayout]]
     var built: Optional[JoinHashTable]
+    # A limited materialize sink's row count (-1: none) and the last
+    # morsel its workers still need.
+    var limit: Int
+    var bound: LimitBound
 
     def __init__(
         out self,
@@ -3621,6 +3651,8 @@ struct PipelineRun(Movable):
         self.source = None
         self.build_layout = None
         self.built = None
+        self.limit = -1
+        self.bound = LimitBound.none()
 
     def tasks(self) -> Int:
         return len(self.jobs)
@@ -3691,6 +3723,7 @@ struct PipelineRun(Movable):
         self.end_round()
         self.cursor.free()
         self.boundary.free()
+        self.bound.free()
         if self.source:
             try:
                 self.source.value()[].finish()
@@ -3855,6 +3888,7 @@ def begin_pipeline(
     build_probe_estimate: Int = -1,
     build_filtered: Bool = False,
     var types: Optional[PipelineTypes] = None,
+    limit: Int = -1,
 ) raises -> PipelineRun:
     """`run_pipeline` up to its workers' jobs, not yet run: its execute stage is
     the jobs, one task per thread; `finish_pipeline` is its finish, after the
@@ -3869,7 +3903,8 @@ def begin_pipeline(
     keeps the build on a frame (`join_build_layout`). `types`: the steps
     typed and compiled and the table's layout (`pipeline_types`), when
     the caller made them already for `given_steps` over `frame`'s
-    columns."""
+    columns. `limit`: only the first that many rows in source order are
+    the result (-1: every row), when the rows are materialized."""
     trace_path("pipeline.run")
     # The steps typed and compiled and the table's layout, unless the
     # caller made them already for these steps and columns.
@@ -4164,6 +4199,20 @@ def begin_pipeline(
     if ((len(expressions) == 0 and top <= 0) or collects) and not build_layout:
         for w in range(len(jobs)):
             jobs[w].runner.materializes = True
+    # A limit over the materialized rows: each worker keeps at most that
+    # many of its own first rows, and the workers stop at the last morsel
+    # the first rows can come from (`LimitBound`).
+    var bound = LimitBound.none()
+    if limit >= 0 and len(expressions) == 0 and top <= 0 and not build_layout:
+        trace_path("pipeline.limit_sink")
+        bound = LimitBound.new()
+        if limit == 0:
+            # No row is wanted: no morsel is read.
+            bound.lower(-1)
+        for w in range(len(jobs)):
+            jobs[w].runner.limit = limit
+            jobs[w].runner.limit_bound = bound
+            jobs[w].bound = bound
     if scan:
         var shared_scan = ArcPointer(scan.take())
         for w in range(len(jobs)):
@@ -4207,4 +4256,7 @@ def begin_pipeline(
     )
     run.source = source
     run.build_layout = build_layout^
+    if bound.address != 0:
+        run.limit = limit
+        run.bound = bound
     return run^

@@ -103,8 +103,6 @@ def _pipeline_steps(
 
 def pipeline_eligibility(
     top: Int,
-    limit: Int,
-    skip: Int,
     operations: List[PlanNode],
     indexes: List[Optional[JoinHashTable]],
     distinct: Bool,
@@ -115,9 +113,11 @@ def pipeline_eligibility(
 ) -> PipelineEligibility:
     """Apply the original pipeline guards in their original short-circuit
     order. Any scan is a pipeline's source: an in-memory frame's morsels,
-    or a file's batches (`ScanSource`)."""
-    if not (top < 0 and limit < 0 and skip == 0 or top > 0):
-        return PipelineEligibility(False, "ordered_slice_requires_batches")
+    or a file's batches (`ScanSource`). A slice runs in the pipeline's
+    limited sink, a sort's first rows in its top-N sink; a top-N of no rows
+    keeps no heap for the pipeline's sink to fill."""
+    if top == 0:
+        return PipelineEligibility(False, "empty_top_requires_batches")
     if not _pipeline_steps(operations, indexes):
         return PipelineEligibility(False, "operation_requires_batches")
     if not (join_count == 0 or key_count == 0 or not ordered):
