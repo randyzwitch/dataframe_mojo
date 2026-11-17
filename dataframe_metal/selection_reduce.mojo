@@ -17,7 +17,7 @@ from .accelerator.gpu.numeric_view import NumericView
 from .accelerator.gpu.selection_inputs import (
     SelectionGroup,
     map_selection_owner,
-    selection_inputs,
+    _validated_selection_inputs,
     selection_inputs_supported,
 )
 from .accelerator.gpu.selection_reduce import (
@@ -276,13 +276,23 @@ def execute_selection_timed(
     if not matched:
         raise Error("Metal selection reduction was not accepted")
     var plan = matched.take()
+    var started = Int(perf_counter_ns())
+    batches.validate()
+    var validation_ns = Int(perf_counter_ns()) - started
+    return _execute_selection_validated(plan, batches, validation_ns)
+
+
+def _execute_selection_validated(
+    plan: SelectionReduction, batches: SelectionBatches, validation_ns: Int
+) raises -> Tuple[DataFrame, HandoffTimings]:
+    # Both public entry points validate once before reaching this path.
     var timings = HandoffTimings()
     var totals = List[_Total]()
     for _ in plan.fields:
         totals.append(_Total())
     var started = Int(perf_counter_ns())
-    var inputs = selection_inputs(plan, batches)
-    timings.upload_ns = Int(perf_counter_ns()) - started
+    var inputs = _validated_selection_inputs(plan, batches)
+    timings.upload_ns = validation_ns + Int(perf_counter_ns()) - started
     if inputs.partials == 0:
         return (_finish(plan, totals), timings^)
     comptime if not METAL_TARGET:
@@ -434,8 +444,12 @@ def execute_selection_timed(
 def selection_execute(
     region: QueryContext, batches: SelectionBatches
 ) raises -> Optional[DataFrame]:
+    var started = Int(perf_counter_ns())
     batches.validate()
+    var validation_ns = Int(perf_counter_ns()) - started
     var matched = plan_selection(region)
     if not matched or not selection_inputs_supported(matched.value(), batches):
         return None
-    return execute_selection_timed(region, batches)[0].copy()
+    return _execute_selection_validated(
+        matched.value(), batches, validation_ns
+    )[0].copy()

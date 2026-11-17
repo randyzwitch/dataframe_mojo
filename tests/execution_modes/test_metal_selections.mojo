@@ -6,7 +6,10 @@ from dataframe import Column, DataFrame, Expr, Series, col
 from dataframe.vector.selection_batches import SelectionBatch, SelectionBatches
 from dataframe.query_execution.pipeline import plan_selection_batches
 from dataframe_metal.selection_plan import plan_selection
-from dataframe_metal.selection_reduce import execute_selection_timed
+from dataframe_metal.selection_reduce import (
+    execute_selection_timed,
+    selection_execute,
+)
 from dataframe_metal.accelerator.gpu.selection_inputs import (
     selection_inputs,
     selection_inputs_supported,
@@ -89,6 +92,25 @@ def test_metal_selection_input_owners_and_shared_row_lists() raises:
         ref batch = batches.batches[batch_index]
         assert_equal(batch.copied_columns, 0)
         assert_true(batch.columns[3].is_constant())
+
+
+def test_metal_selection_entrypoints_reject_invalid_maps_before_submission() raises:
+    for malformed_dimensions in [False, True]:
+        var batches = _batches(False)
+        var region = batches.schema.lazy().select_exprs(_expressions())
+        var matched = plan_selection(region._plan)
+        var expected = "outside its source column"
+        if malformed_dimensions:
+            batches.batches[0].starts = List[Int]()
+            expected = "inconsistent dimensions"
+        else:
+            batches.batches[0].rows[0][0] = UInt32(120)
+        with assert_raises(contains=expected):
+            _ = selection_inputs(matched.value(), batches)
+        with assert_raises(contains=expected):
+            _ = execute_selection_timed(region._plan, batches)
+        with assert_raises(contains=expected):
+            _ = selection_execute(region._plan, batches)
 
 
 # requires: metal

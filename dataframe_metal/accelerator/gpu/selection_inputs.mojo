@@ -136,6 +136,13 @@ def selection_inputs(
     plan: SelectionReduction, batches: SelectionBatches
 ) raises -> SelectionInputs:
     batches.validate()
+    return _validated_selection_inputs(plan, batches)
+
+
+def _validated_selection_inputs(
+    plan: SelectionReduction, batches: SelectionBatches
+) raises -> SelectionInputs:
+    # Callers validate before inspecting or packing any source mapping.
     if batches.rows >= Int(Int32.MAX):
         raise Error("Metal selection reduction requires fewer than 2**31 rows")
     var result = SelectionInputs()
