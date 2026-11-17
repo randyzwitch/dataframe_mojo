@@ -253,7 +253,7 @@ def plan_describe(
         elif node.kind == SORT and node.sort_limit() >= 0:
             label += " [stream top-k state]"
         elif node.kind == SLICE and node.slice_offset() >= 0:
-            label += " [ordered slice]"
+            label += " [stream limit sink]"
         else:
             label += " [materialize]"
     out += pad + label + "\n"

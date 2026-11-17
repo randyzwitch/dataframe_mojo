@@ -1897,8 +1897,6 @@ def _probe_start(
     var distinct = _counts_distinct(expressions)
     var eligibility = pipeline_eligibility(
         top,
-        limit,
-        skip,
         operations,
         indexes,
         distinct,
@@ -2248,6 +2246,9 @@ def _probe_start(
             # Made ahead for the same steps over the same columns, unless
             # late materialization changed them.
             types=pipeline_ahead^,
+            # A slice's rows are the first `skip + limit` in source order,
+            # less the first `skip`.
+            limit=_slice_end(skip, limit) if top < 0 else -1,
         )
         return _ProbeStart(
             _PipedProbe(
@@ -2842,6 +2843,14 @@ def _open_scan_source(
     )
 
 
+def _slice_end(skip: Int, limit: Int) -> Int:
+    """The rows a slice of `limit` rows (-1: to the end) after the first
+    `skip` reads from the start: -1 when it reads to the end."""
+    if limit < 0 or skip > Int.MAX - limit:
+        return -1
+    return skip + limit
+
+
 def _probe_finish(
     self: QueryContext, mut piped: _PipedProbe, mut done: PipelineFinish
 ) raises -> Optional[DataFrame]:
@@ -2890,7 +2899,7 @@ def _probe_finish(
                 _set_rows(terminal, set_frames[k].copy(), members[k], dtypes)
             )
         piped_result = concat(parts)
-    if top > 0:
+    if top > 0 or skip > 0 or limit >= 0:
         piped_result = piped_result.slice(skip, limit)
     if late_operations:
         piped_result = late_fetch(input, piped_result, late_operations.value())

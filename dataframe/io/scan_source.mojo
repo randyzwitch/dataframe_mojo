@@ -144,12 +144,20 @@ struct ScanSource(Movable):
         self.taken += 1
         return batch^
 
-    def take(mut self) raises -> Optional[ScanBatch]:
+    def take(mut self, last: Int = Int.MAX) raises -> Optional[ScanBatch]:
         """The next batch in source order, for any thread; None once the
-        source is done. Decoding a byte range is left to the caller."""
+        source is done, or when the next batch would be numbered past
+        `last` (a limit's rows are all in the batches before it). Decoding
+        a byte range is left to the caller."""
         var owner = Int(Pointer(to=self))
         self.lock.lock(owner)
         try:
+            var number = self.ahead[len(self.ahead) - 1].number if len(
+                self.ahead
+            ) else self.taken
+            if number > last:
+                _ = self.lock.unlock(owner)
+                return None
             var batch = self._next()
             _ = self.lock.unlock(owner)
             return batch^
