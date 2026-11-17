@@ -429,12 +429,11 @@ struct VectorExpression(Copyable, Movable):
     # disabled for other node kinds.
     var adaptive: List[AdaptiveFilter]
     # Per Boolean node whose subtree reads one String column and cannot
-    # raise: that column node (-1 otherwise), the subtree bound to the
-    # column alone, and, once a dictionary-coded vector of the column was
-    # selected, the node's answer for each dictionary value (and, last, for
-    # null) with the dictionary it was computed for.
+    # raise: that input column (-1 otherwise), and, once a dictionary-coded
+    # vector of the column was selected, the node's answer for each
+    # dictionary value (and, last, for null) with the dictionary it was
+    # computed for.
     var coded: List[Int]
-    var coded_bound: List[Optional[BoundExpr]]
     var coded_answers: List[List[UInt8]]
     var coded_dictionaries: List[Optional[ArcPointer[CategoricalDictionary]]]
     var scratch: DataChunk
@@ -486,7 +485,6 @@ struct VectorExpression(Copyable, Movable):
             length=n, fill=AdaptiveFilter(0, True)
         )
         self.coded = List[Int](length=n, fill=-1)
-        self.coded_bound = List[Optional[BoundExpr]](length=n, fill=None)
         self.coded_answers = List[List[UInt8]](length=n, fill=List[UInt8]())
         self.coded_dictionaries = List[
             Optional[ArcPointer[CategoricalDictionary]]
@@ -508,38 +506,42 @@ struct VectorExpression(Copyable, Movable):
         self._plan_direct()
         self._plan_coded()
 
-    def _plan_coded(mut self) raises:
+    def _plan_coded(mut self):
         """The Boolean nodes Select may answer through a String column's
         dictionary: each reads one String column and nothing else and
         cannot raise, so its answer for a row depends only on that row's
         value, and computing it for a value no selected row holds has no
-        effect."""
-        for i in range(len(self.kinds)):
-            if self.kinds[i] != _KIND_LANE or self._can_throw(i):
+        effect. Children precede their parents, so one pass finds the
+        columns each node reads."""
+        var n = len(self.kinds)
+        # Per node: the one input column its subtree reads, -1 for none,
+        # -2 for more than one.
+        var reads = List[Int](length=n, fill=-1)
+        for i in range(n):
+            var kind = self.kinds[i]
+            if kind == _KIND_COLUMN:
+                reads[i] = self.bound.sources[i]
                 continue
-            if self.bound.dtypes[i] != DataType.BOOL:
+            if kind != _KIND_LANE and kind != _KIND_FALLBACK:
                 continue
-            var reads = List[Int]()
-            _subtree_columns(self.bound, i, self.schema, reads)
-            if len(reads) != 1:
-                continue
-            ref column = self.schema[reads[0]]
-            if column.dtype() != DataType.STRING:
-                continue
-            var node = -1
-            for j in range(i):
-                if (
-                    self.kinds[j] == _KIND_COLUMN
-                    and self.bound.sources[j] == reads[0]
-                ):
-                    node = j
+            var one = -1
+            for child in node_children(self.bound.expr._nodes[i]):
+                var r = reads[child]
+                if r == -1:
+                    continue
+                if r == -2 or (one >= 0 and one != r):
+                    one = -2
                     break
-            if node < 0:
-                continue
-            self.coded[i] = node
-            var alone = List[Series]()
-            alone.append(column.copy())
-            self.coded_bound[i] = bind(subtree(self.bound.expr, i), alone)
+                one = r
+            reads[i] = one
+            if (
+                kind == _KIND_LANE
+                and one >= 0
+                and self.bound.dtypes[i] == DataType.BOOL
+                and self.schema[one].dtype() == DataType.STRING
+                and not self._can_throw(i)
+            ):
+                self.coded[i] = one
 
     def _share_columns(mut self):
         """Point every node reading a column at one node per column and
@@ -3126,8 +3128,7 @@ struct VectorExpression(Copyable, Movable):
         -1 when the column's vector is not over dictionary codes, or its
         dictionary has more values than the column has rows (computing every
         value would then cost more than computing every row)."""
-        var column = self.coded[index]
-        var v = input.data[self.bound.sources[column]]
+        var v = input.data[self.coded[index]]
         if not v.encoded() or v.physical != PHYSICAL_VARCHAR:
             return -1
         ref series = arena.columns[v.source]
@@ -3144,17 +3145,19 @@ struct VectorExpression(Copyable, Movable):
         var size = len(dictionary[])
         if size > len(strings):
             return -1
-        var known = self.coded_dictionaries[index]
-        if not known or Int(known.value()[].offsets.unsafe_ptr()) != Int(
-            dictionary[].offsets.unsafe_ptr()
-        ):
-            self._answer_dictionary(index, dictionary)
-        var answers = self.coded_answers[index].unsafe_ptr()
+        # The codes live in their own buffer, which the arena's column keeps
+        # alive: the address holds while the arena grows below.
         var codes = (
             held.codes[]
             .unsafe_ptr()
             .unsafe_offset(strings._offset + v.source_offset)
         )
+        var known = self.coded_dictionaries[index]
+        if not known or Int(known.value()[].offsets.unsafe_ptr()) != Int(
+            dictionary[].offsets.unsafe_ptr()
+        ):
+            self._answer_dictionary(index, dictionary, arena)
+        var answers = self.coded_answers[index].unsafe_ptr()
         var through_sel = v.vector_type == DICTIONARY_VECTOR
         var validity = v.validity
         var whole = validity.all_valid()
@@ -3184,29 +3187,43 @@ struct VectorExpression(Copyable, Movable):
         return kept
 
     def _answer_dictionary(
-        mut self, index: Int, dictionary: ArcPointer[CategoricalDictionary]
+        mut self,
+        index: Int,
+        dictionary: ArcPointer[CategoricalDictionary],
+        mut arena: ColumnArena,
     ) raises:
         """Node `index`'s answer (1 for true, 0 for false or null) for
-        each value of `dictionary` and, last, for null."""
+        each value of `dictionary` and, last, for null: the node computed
+        over chunks whose column holds those values."""
         var size = len(dictionary[])
         var values = StringBuilder(size + 1)
         for code in range(size):
             values.append(dictionary[].get(code))
         values.append_null()
-        var name = self.schema[self.bound.sources[self.coded[index]]].name()
-        var columns = List[Series]()
-        columns.append(Series(name, values^.finish()))
-        var result = evaluate(
-            self.coded_bound[index].value(), columns, size + 1
+        var column = self.coded[index]
+        var handle = arena.add(
+            Series(self.schema[column].name(), values^.finish())
         )
-        if len(result) == 1 and size + 1 > 1:
-            result = result._broadcast(size + 1)
-        var flat = result.rechunk() if result.is_chunked() else result^
-        ref bools = flat._data[BoolColumn]
         var answers = List[UInt8](length=size + 1, fill=0)
-        for code in range(size + 1):
-            if bools._valid(code) and bools._get(code):
-                answers[code] = 1
+        var chunk = DataChunk(len(self.schema))
+        var start = 0
+        while start < size + 1:
+            var count = min(STANDARD_VECTOR_SIZE, size + 1 - start)
+            chunk.reference(column, flat_over(arena, handle, start))
+            chunk.count = count
+            # A fresh generation: no column node reuses another chunk's.
+            self.generation += 1
+            self._evaluate(index, chunk, arena, SelectionVector(), count)
+            var held = self._u8(index)
+            var flags = self.valid[index].unsafe_ptr()
+            var whole = self.whole[index]
+            for k in range(count):
+                var keep = held[unsafe_offset=k]
+                if not whole:
+                    keep &= flags[unsafe_offset=k]
+                answers[start + k] = keep
+            start += count
+        self.generation += 1
         self.coded_answers[index] = answers^
         self.coded_dictionaries[index] = Optional(dictionary)
         trace_path("vector.string_dictionary")
