@@ -456,49 +456,35 @@ def _filtered_table(self: QueryContext, index: Int) -> Bool:
     )
 
 
-def _most_left_rows_to_build(
+def _builds_on_left_rows(
+    self: QueryContext,
+    mut stats: PlanStatistics,
+    at: Int,
+    rows: Int,
+    batch_size: Int,
+) raises -> Bool:
+    """Whether the join at `at` builds on its left input with that input
+    taken to have `rows` rows. `stats` is one memo for every such question:
+    the choice reads only the two inputs' estimates, the left's set here."""
+    stats.rows[self._nodes[at].left] = rows
+    return _builds_on_left(self, stats, at, batch_size)
+
+
+def _run_filtered_source(
     self: QueryContext, at: Int, batch_size: Int
-) raises -> Int:
-    """The most rows the left input of the join at `at` (a filtered table)
-    may have for the join to build on it, its right input's estimate as it
-    is; -1 when it would not build on even an empty left. A side's cost
-    grows with its rows, so the choice changes once, found by halving the
-    span between no rows and its whole table."""
-    ref node = self._nodes[at]
-    var cursor = node.left
-    while self._nodes[cursor].kind != SCAN_FRAME:
-        cursor = self._nodes[cursor].left
-    var low = 0
-    var high = plan_slot_rows(self, self._nodes[cursor].source_slot())
-    # One memo throughout: the decision reads only the two inputs'
-    # estimates, and the left's is set before each.
-    var stats = PlanStatistics()
-    stats.rows[node.left] = low
-    if not _builds_on_left(self, stats, at, batch_size):
-        return -1
-    stats.rows[node.left] = high
-    if _builds_on_left(self, stats, at, batch_size):
-        return high
-    # Builds on `low` rows, not on `high`.
-    while high - low > 1:
-        var middle = low + (high - low) // 2
-        stats.rows[node.left] = middle
-        if _builds_on_left(self, stats, at, batch_size):
-            low = middle
-        else:
-            high = middle
-    return low
-
-
-def _run_filtered_table(
-    self: QueryContext, index: Int, most: Int, batch_size: Int
 ) raises -> Optional[DataFrame]:
-    """The rows of the filtered table at `index`, or None once they pass
-    `most` or the rows kept so far, scaled to the whole table, would. The
-    table runs in consecutive parts, each twice the last from one batch:
-    a filter's share in the rows read so far tells early whether its rows
-    are many, so a large input stops after a little of its table, while
-    one that ends up kept reads its table once."""
+    """The rows of the filtered table on the left of the join at `at`, run
+    while the join could still build on them: None when it would not build
+    on even an empty left, or once the rows kept, or those rows scaled from
+    the part of the table read to all of it, are more than it would build
+    on. The table runs in consecutive parts, each twice the last from one
+    batch: the share a filter keeps in the rows read so far shows early
+    whether its rows are many, so a large input stops after a little of its
+    table, while one the join builds on reads its table once."""
+    var stats = PlanStatistics()
+    if not _builds_on_left_rows(self, stats, at, 0, batch_size):
+        return None
+    var index = self._nodes[at].left
     var cursor = index
     while self._nodes[cursor].kind != SCAN_FRAME:
         cursor = self._nodes[cursor].left
@@ -517,14 +503,17 @@ def _run_filtered_table(
         # A slot of its own: plan copies share their table slots.
         part._frames.append(table.slice(offset, length))
         part._nodes[cursor].set_source_slot(len(part._frames) - 1)
-        var made = part._execute(index, False, True, batch_size)
+        # The first part is one batch, run as it is: a stream's workers pay
+        # off only over the larger parts after it.
+        var made = part._execute(index, False, offset > 0, batch_size)
         kept += made.height()
         offset = min(offset + length, rows)
-        if kept > most or (
-            offset < rows
-            and Float64(kept) * Float64(rows) > Float64(most) * Float64(offset)
-        ):
+        if not _builds_on_left_rows(self, stats, at, kept, batch_size):
             return None
+        if offset < rows:
+            var scaled = Int(Float64(kept) * Float64(rows) / Float64(offset))
+            if not _builds_on_left_rows(self, stats, at, scaled, batch_size):
+                return None
         parts.append(made^)
         length *= 2
     if len(parts) == 1:
@@ -604,13 +593,11 @@ def plan_build_probe_sides(
             and source not in self._prefetched.value()[]
             and _filtered_table(self, source)
         ):
-            var most = _most_left_rows_to_build(self, bottom, batch_size)
-            if most >= 0:
-                var frame = _run_filtered_table(self, source, most, batch_size)
-                if frame:
-                    trace_path("lazy.count_filtered_build_input")
-                    frames.append(frame.take())
-                    counted.append(source)
+            var frame = _run_filtered_source(self, bottom, batch_size)
+            if frame:
+                trace_path("lazy.count_filtered_build_input")
+                frames.append(frame.take())
+                counted.append(source)
     if len(counted) > 0:
         stats = PlanStatistics()
         for i in range(len(counted)):
