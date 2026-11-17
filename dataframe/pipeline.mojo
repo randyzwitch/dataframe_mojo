@@ -3107,11 +3107,19 @@ struct PipelineFinish(Movable, Rounds):
                 var tasks = self.frames[0].next_round()
                 if tasks > 0:
                     return tasks
-                # The groups in first-occurrence order; finish steps run
-                # over them as a second pipeline (`_after_sink`), which
-                # keeps their order.
+                var finished = self.frames.pop().frame.copy()
+                if len(run.finish_steps) > 0:
+                    # The groups in first-occurrence order, then the steps
+                    # over them.
+                    finished = _steps_over_frame(
+                        finished,
+                        run.finish_steps,
+                        run.joins,
+                        run.indexes,
+                        self.counts,
+                    )
                 self.held = List[AggregateSink]()
-                self.frame = self.frames.pop().frame.copy()
+                self.frame = finished^
                 self.sink = _SINK_DONE
             elif self.sink == _SINK_BATCHES:
                 var tasks = self.batches[0].next_round()
