@@ -47,9 +47,8 @@ if its prerequisites are absent. Hosted macOS CI has no usable Metal device;
 `scripts/test_metal_local.sh` runs the native contracts on an Apple silicon
 Mac. Extreme Date fields are checked against an independent Int128
 Gregorian model across the signed day-storage domain.
-Multiworker global positional reductions also remain a known
-limit: deterministic FIRST/LAST/ARGMIN/ARGMAX assertions currently use one worker
-because schedule-dependent results were observed.
+Global FIRST/LAST/ARGMIN/ARGMAX are checked on several workers against the
+eager answer (`planner_correctness/test_positional_reductions.mojo`).
 
 Semantic tests, generators, comparisons and runner checks use Mojo. Python is
 limited to independent external format adapters and tests of Python benchmark,

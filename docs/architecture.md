@@ -189,8 +189,7 @@ thresholds, state layouts, allocation, ownership and worker behavior.
 
 `planning/cost/eligibility.mojo` owns semantic permission for morsel execution:
 row-local operations, explodes and unnests, cross products, join kinds and
-whether their build rows need a prepared table, ordered joins and positional
-global reductions. It also owns the expression/operation predicates used by these
+whether their build rows need a prepared table, and ordered joins. It also owns the expression/operation predicates used by these
 checks. It does not import sampling or cost policy. Expression input references
 live below both eligibility and observations in `planning/expression_inputs.mojo`.
 
