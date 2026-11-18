@@ -2552,7 +2552,9 @@ struct DataFrame(Copyable, Sized, Writable):
                 raise Error("Column listed twice in subset: " + name)
             seen[name] = True
             keys.append(self._columns[self._index(name)].copy())
-        return _expand_struct_keys(keys)
+        # A list or struct key stays whole: `encode_rows` and the aggregate
+        # table compare it by value.
+        return keys^
 
     def _subset_row_keys(self, subset: List[String]) raises -> RowKeys:
         """Ids for subset's distinct rows, with each id's representative its

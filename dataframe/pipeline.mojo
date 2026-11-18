@@ -138,10 +138,6 @@ from dataframe.aggregation.state import (
     _equality_words,
     _word_hash,
 )
-from dataframe.aggregation.keys import (
-    _expand_struct_keys,
-    _group_keys,
-)
 from dataframe.aggregation.selected_rows import _reduce_floats, _reduce_ints
 from dataframe.joins.hash_table import (
     JoinBuildLayout,
@@ -2607,7 +2603,7 @@ struct _PipelineJob(Job):
                 break
             var batch = next.take()
             var k = batch.number
-            var morsel = batch^.into_frame()
+            var morsel = self.source.value()[].frame(batch^)
             var length = morsel.height()
             self.runner.begin_sink(k, 0, length)
             self.runner.begin_morsel()
@@ -3140,6 +3136,10 @@ def finish_pipeline(mut run: PipelineRun) raises -> PipelineFinish:
     """`run`'s finish once its execute tasks are done, as rounds of tasks
     (`PipelineFinish`). `run` must stay where it is until the finish's
     `result`."""
+    if run.source:
+        # Every batch is read: the schema's categorical dictionaries take
+        # every value the batches' codes index.
+        run.source.value()[].settle()
     return PipelineFinish(Int(Pointer(to=run)))
 
 

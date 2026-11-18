@@ -157,6 +157,7 @@ from dataframe.kernels.binary import (
 )
 from dataframe.aggregation.reducer import Reducer, _sum_bools, _variance_blocks
 from dataframe.aggregation.ungrouped import distinct_count, distinct_counts
+from dataframe.kernels.nested_keys import nested_key_supported
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from dataframe.kernels.group_rows import (
@@ -2907,11 +2908,12 @@ def _on_dictionary[
 
 
 def _distinct_in_table(bound: BoundExpr, node: Node) -> Bool:
-    """Whether `n_unique` counts its input in an aggregate table: every input the table groups by, which leaves out
-    nested ones."""
+    """Whether `n_unique` counts its input in an aggregate table: every
+    input the table groups by, lists and structs by their key bytes."""
     if node.op != N_UNIQUE:
         return False
-    return not bound.dtypes[node.left].is_nested()
+    var dtype = bound.dtypes[node.left]
+    return not dtype.is_nested() or nested_key_supported(dtype)
 
 
 def _n_unique_table[

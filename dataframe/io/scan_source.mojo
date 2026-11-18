@@ -14,6 +14,8 @@ from std.collections import Optional
 from std.memory import Pointer
 from std.utils.lock import BlockingSpinLock
 
+from dataframe.categorical import ScanDictionary, recode_codes
+from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
 from dataframe.series import Series
 from .csv_reader import _CsvBatches, _DecodeJob
@@ -67,6 +69,10 @@ struct ScanSource(Movable):
     # A batch `schema` read ahead to learn the source's columns, handed
     # out first.
     var ahead: List[ScanBatch]
+    # Each categorical column's dictionary over the whole scan, by name,
+    # once `share_dictionaries` set them up; added to under `lock`.
+    var dictionary_names: List[String]
+    var dictionaries: List[ScanDictionary]
 
     def __init__(out self):
         self.csv = List[_CsvBatches]()
@@ -78,6 +84,8 @@ struct ScanSource(Movable):
         self.taken = 0
         self.ended = False
         self.ahead = List[ScanBatch]()
+        self.dictionary_names = List[String]()
+        self.dictionaries = List[ScanDictionary]()
 
     @staticmethod
     def of(var csv: _CsvBatches) -> Self:
@@ -191,6 +199,71 @@ struct ScanSource(Movable):
         var columns = first.frame.clear()
         self.ahead.append(first^)
         return columns^
+
+    def share_dictionaries(mut self, mut columns: DataFrame) raises -> Bool:
+        """Give each categorical column of the source's `columns` (its
+        `schema`) one dictionary over the whole scan: `frame` moves every
+        batch's codes onto it, and `columns` are typed by it from here on.
+        Before any batch is handed out. Whether any column is categorical.
+        """
+        for c in range(columns.width()):
+            ref column = columns._columns[c]
+            if not column.dtype().is_categorical():
+                continue
+            if column.name() in self.dictionary_names:
+                continue
+            var shared = ScanDictionary()
+            var typed = column.with_dtype(shared.schema_type())
+            columns._columns[c] = typed^
+            self.dictionary_names.append(column.name())
+            self.dictionaries.append(shared^)
+        return len(self.dictionaries) > 0
+
+    def frame(mut self, var batch: ScanBatch) raises -> DataFrame:
+        """The batch's rows (`ScanBatch.into_frame`), with each categorical
+        column's codes moved onto its dictionary over the scan when
+        `share_dictionaries` set one up. Any thread."""
+        var frame = batch^.into_frame()
+        if len(self.dictionaries) == 0:
+            return frame^
+        for c in range(frame.width()):
+            ref column = frame._columns[c]
+            if (
+                not column.dtype().is_categorical()
+                or not column.dtype().has_dictionary()
+            ):
+                continue
+            var at = -1
+            for d in range(len(self.dictionary_names)):
+                if self.dictionary_names[d] == column.name():
+                    at = d
+                    break
+            if at < 0:
+                continue
+            var codes = List[UInt32]()
+            var dtype = DataType.NULL
+            var owner = Int(Pointer(to=self))
+            self.lock.lock(owner)
+            try:
+                var added = self.dictionaries[at].add(
+                    column.dtype().dictionary()
+                )
+                codes = added[0].copy()
+                dtype = added[1]
+            except e:
+                _ = self.lock.unlock(owner)
+                raise e^
+            _ = self.lock.unlock(owner)
+            var recoded = recode_codes(column, codes, dtype)
+            frame._columns[c] = recoded^
+        return frame^
+
+    def settle(mut self):
+        """Every value each scan dictionary holds into the schema's, once
+        no batch is being read: columns typed from the schema hold codes
+        from every batch."""
+        for d in range(len(self.dictionaries)):
+            self.dictionaries[d].settle()
 
     def batches(self) -> Int:
         """The batches handed out so far."""

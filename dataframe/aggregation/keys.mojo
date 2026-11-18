@@ -23,7 +23,7 @@ from dataframe.series import (
 )
 
 
-# A struct key groups, joins and deduplicates by its fields plus its own
+# A struct key joins by its fields plus its own
 # validity, so a null struct is one group and a struct of nulls another.
 # The expanded columns are named this separator, the struct's name, the
 # separator again, and the field name (or _KEY_VALID), the names escaped
@@ -50,13 +50,6 @@ def _expand_struct_keys(columns: List[Series]) raises -> List[Series]:
             var field = structs.field(i)
             if len(visible):
                 field = field.take_or_null(visible)
-            if field.dtype().is_nested():
-                raise Error(
-                    "struct keys with nested fields are not supported yet: "
-                    + column.name()
-                    + "."
-                    + field.name()
-                )
             out.append(
                 field.renamed(
                     _KEY_SEP
@@ -75,10 +68,11 @@ def _expand_struct_keys(columns: List[Series]) raises -> List[Series]:
 
 
 def _group_keys(columns: List[Series]) raises -> List[Series]:
-    """`_expand_struct_keys` for a grouping. A categorical key whose
-    dictionary repeats a label has its codes made canonical, so equal labels
-    are equal groups (#943)."""
-    var out = _expand_struct_keys(columns)
+    """A grouping's key columns. A list or struct key stays whole: the
+    aggregate table and `encode_rows` compare it by value. A categorical key
+    whose dictionary repeats a label has its codes made canonical, so equal
+    labels are equal groups (#943)."""
+    var out = columns.copy()
     for i in range(len(out)):
         out[i] = canonical_labels(out[i])
     return out^

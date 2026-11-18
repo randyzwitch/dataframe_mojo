@@ -1795,8 +1795,9 @@ def _probe_start(
     var indexes = List[Optional[JoinHashTable]]()
     # Set once an inner, semi or right join's build is empty: no row of the
     # source can reach the sink, so the pipeline is set up as usual but its
-    # source yields nothing and the sink finalizes over no rows.
-    var no_output = False
+    # source yields nothing and the sink finalizes over no rows. A sort's
+    # first no rows keep no row either.
+    var no_output = top == 0
     # Estimates the schedule did not already give, from one memo: the
     # joins' probe sides nest, so each estimate reuses the one below it.
     var stats = PlanStatistics()
@@ -1985,7 +1986,6 @@ def _probe_start(
     var source_columns = Optional[DataFrame]()
     var distinct = _counts_distinct(expressions)
     var eligibility = pipeline_eligibility(
-        top,
         operations,
         indexes,
         distinct,
@@ -2008,15 +2008,12 @@ def _probe_start(
             types.value().source, source_columns.value()
         ):
             ahead = False
-        for column in source_columns.value()._columns:
-            if column.dtype().is_categorical():
-                # Each batch may carry its own dictionary (Arrow
-                # dictionary deltas), which steps compiled once against
-                # the first batch's columns would not read: the batches
-                # are evaluated one by one.
-                eligibility = PipelineEligibility(False, "batch_dictionaries")
-                source_columns = None
-                break
+        # Each batch may carry its own dictionary (Arrow dictionary
+        # deltas, a CSV byte range's values): the source moves every
+        # batch's codes onto one dictionary per column over the scan, which
+        # the steps and sinks are typed by, not a setup made ahead.
+        if file_scan.value()[].share_dictionaries(source_columns.value()):
+            ahead = False
     var inline_table_eligible = False
     if not frame_source and not source_columns:
         # A file read batch by batch: no setup is made for its steps.
@@ -2220,7 +2217,7 @@ def _probe_start(
         # A top-k's TOP_K node was appended to the operations for the
         # stream's per-batch selection; the pipeline's sink keeps the
         # k best itself, so the steps stop before it.
-        var step_count = len(operations) - 1 if top > 0 else len(operations)
+        var step_count = len(operations) - 1 if top >= 0 else len(operations)
         var step_nodes = List[PlanNode](capacity=step_count)
         for k in range(step_count):
             step_nodes.append(operations[k].copy())

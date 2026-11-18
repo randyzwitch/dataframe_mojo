@@ -86,8 +86,6 @@ def test_set_equality_survivors_and_explode_positions_have_literal_anchors() rai
 
 def test_unique_extended_keys_preserve_complete_payloads_keep_policies_and_boolean_flags() raises:
     for kind in range(SELECTION_TYPES):
-        if kind == 26:
-            continue
         for n in [0, 1, 9, 65]:
             for mode in range(3):
                 if kind == 27 and mode != 0:
@@ -167,19 +165,35 @@ def test_struct_unique_null_parents_ignore_every_hidden_field_payload() raises:
     )
 
 
-def test_unique_rejects_list_keys_and_preserves_nested_values_as_payloads() raises:
-    for n in [0, 9]:
-        var source = selection_frame(n, 7, 1)
-        for keep in ["any", "first", "last", "none"]:
-            with assert_raises():
-                _ = source.unique(["v26"], keep=keep)
-        with assert_raises():
-            _ = source.is_duplicated(["v26"])
-        with assert_raises():
-            _ = source.is_unique(["v26"])
-        if n > 0:
-            with assert_raises():
-                _ = source.n_unique(["v26"])
+def test_unique_groups_list_keys_and_preserves_nested_values_as_payloads() raises:
+    # List keys compare elementwise, a null element equal to a null and a
+    # null list equal to a null list; every other column comes through
+    # whole.
+    for n in [0, 9, 65]:
+        for mode in range(3):
+            var source = selection_frame(n, 7, mode, n == 65)
+            var rows = literal_rows(n)
+            var subset: List[String] = ["v26"]
+            var counts = set_counts(26, rows, mode, False)
+            var first = set_survivors(26, rows, mode, False, "first")
+            assert_equal(source.n_unique(subset), len(first))
+            var duplicated = source.is_duplicated(subset)
+            var unique = source.is_unique(subset)
+            for i in range(n):
+                assert_equal(duplicated.get(i).bool(), counts[i] > 1)
+                assert_equal(unique.get(i).bool(), counts[i] == 1)
+            for keep in ["first", "last", "none", "any"]:
+                var expected = set_survivors(26, rows, mode, False, keep)
+                assert_selected_frame(
+                    source.unique(subset, keep=keep, maintain_order=True),
+                    expected,
+                    mode,
+                )
+                assert_set_unordered(
+                    source.unique(subset, keep=keep, maintain_order=False),
+                    expected,
+                    mode,
+                )
 
 
 def test_unpivot_preserves_all_logical_value_types_nested_cells_and_column_major_order() raises:

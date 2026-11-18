@@ -793,18 +793,7 @@ def test_nested_unsupported_operations_fail_for_nonempty_and_empty_inputs() rais
                 )
     for source in [lists.copy(), lists.clear()]:
         with assert_raises():
-            _ = source.group_by("xs").agg(col("xs").implode())
-        with assert_raises():
-            _ = source.unique(["xs"])
-        with assert_raises():
             _ = source.join(source, on="xs")
-    var inner = integer_lists().column("xs")
-    var nested_keys = DataFrame([Series("key", StructColumn([inner.copy()]))])
-    for source in [nested_keys.copy(), nested_keys.clear()]:
-        with assert_raises():
-            _ = source.group_by("key").agg(List[Expr]())
-        with assert_raises():
-            _ = source.join(source, on="key")
 
 
 def test_nested_constructors_and_expression_validation_reject_malformed_inputs() raises:

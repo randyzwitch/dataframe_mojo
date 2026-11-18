@@ -141,6 +141,7 @@ from dataframe.parallel import (
     round_width,
     run_rounds,
 )
+from dataframe.kernels.nested_keys import nested_key_supported
 from dataframe.kernels.partition import (
     _NULL_KEY,
     _combine as _hash_combine,
@@ -206,9 +207,10 @@ def _stride(hash: UInt64) -> Int:
 def key_supported(column: Series) -> Bool:
     """Whether a key column's storage has key words here: any integer,
     float, boolean or string column (temporal, decimal and categorical keys
-    included, by their storage)."""
+    included, by their storage), or a list or struct of those, held as its
+    value's bytes (`nested_keys.mojo`)."""
     if column.dtype().is_nested():
-        return False
+        return nested_key_supported(column.dtype())
     if column.is_chunked():
         return key_supported(column.chunks()[0])
     if column._data.isa[StringColumn]() or column._data.isa[BoolColumn]():
@@ -231,7 +233,10 @@ def layout_widths(layout: AggregateLayout) -> List[Int]:
 
 
 def _width(column: Series) -> Int:
-    """Key words a column takes: two for a string or a 128-bit decimal."""
+    """Key words a column takes: two for a string, a 128-bit decimal or a
+    list or struct (its bytes, as a string's)."""
+    if column.dtype().is_nested():
+        return 2
     var part = column.chunks()[
         0
     ].copy() if column.is_chunked() else column.copy()
@@ -694,7 +699,7 @@ def aggregate_layout(
     var addressed = List[Bool]()
     for key in keys:
         var part = key.chunks()[0].copy() if key.is_chunked() else key.copy()
-        var strings = part._data.isa[StringColumn]()
+        var strings = part._data.isa[StringColumn]() or part.dtype().is_nested()
         if _width(key) == 2:
             addressed.append(False)
             addressed.append(strings)
@@ -781,7 +786,9 @@ def aggregate_layout(
                 .is_chunked() else inputs[s]
                 .copy()
             )
-            words.append(part._data.isa[StringColumn]())
+            words.append(
+                part._data.isa[StringColumn]() or part.dtype().is_nested()
+            )
         if len(words) > 64:
             raise Error("aggregate table: more than 64 key words")
         distinct.append(s)
