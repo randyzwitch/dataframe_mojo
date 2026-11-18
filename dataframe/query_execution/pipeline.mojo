@@ -2986,7 +2986,9 @@ def _probe_finish(
         piped.run.selection_output.value()[].rows if piped.run.selection_output else piped_result.height()
     )
     if counting:
-        plan_record(self, cursor, "pipeline", 0, piped_counts[0])
+        plan_record(
+            self, cursor, "pipeline", 0, piped_counts[0], pipeline=index
+        )
         var into_terminal = piped_counts[0]
         for k in range(step_count):
             plan_record(
@@ -2996,6 +2998,7 @@ def _probe_finish(
                 piped_counts[2 * k + 1],
                 piped_counts[2 * k + 2],
                 busy_ns=piped_counts[2 * step_count + 1 + k],
+                pipeline=index,
             )
             into_terminal = piped_counts[2 * k + 2]
         if top > 0:
@@ -3005,6 +3008,7 @@ def _probe_finish(
                 "pipeline",
                 into_terminal,
                 output_rows,
+                pipeline=index,
             )
         var wall = Int(perf_counter_ns()) - began
         if index != cursor and (index not in operation_nodes):
@@ -3015,10 +3019,18 @@ def _probe_finish(
                 into_terminal,
                 output_rows,
                 wall_ns=wall,
+                pipeline=index,
             )
         else:
             plan_record(
-                self, index, "pipeline", 0, 0, executions=0, wall_ns=wall
+                self,
+                index,
+                "pipeline",
+                0,
+                0,
+                executions=0,
+                wall_ns=wall,
+                pipeline=index,
             )
         var base = 3 * step_count + 1
         for k in range(len(finish_nodes)):
@@ -3028,6 +3040,7 @@ def _probe_finish(
                 "pipeline",
                 piped_counts[base + 2 * k],
                 piped_counts[base + 2 * k + 1],
+                pipeline=index,
             )
     return piped_result^
 

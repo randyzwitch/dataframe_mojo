@@ -1,6 +1,7 @@
 """Native reductions consume retained CPU row mappings without payload gathers."""
 # contract-group: execution.backends
-from std.memory import bitcast
+from std.memory import bitcast, ArcPointer
+from dataframe.execution_observation import DeviceObservation
 from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import Column, DataFrame, Expr, Series, col
 from dataframe.vector.selection_batches import SelectionBatch, SelectionBatches
@@ -98,6 +99,8 @@ def test_metal_selection_entrypoints_reject_invalid_maps_before_submission() rai
     for malformed_dimensions in [False, True]:
         var batches = _batches(False)
         var region = batches.schema.lazy().select_exprs(_expressions())
+        var observation = ArcPointer(DeviceObservation())
+        region._plan._device_observation = observation
         var matched = plan_selection(region._plan)
         var expected = "outside its source column"
         if malformed_dimensions:
@@ -111,6 +114,8 @@ def test_metal_selection_entrypoints_reject_invalid_maps_before_submission() rai
             _ = execute_selection_timed(region._plan, batches)
         with assert_raises(contains=expected):
             _ = selection_execute(region._plan, batches)
+        assert_equal(observation[].launches.load(), Int64(0))
+        assert_equal(observation[].completed_launches.load(), Int64(0))
 
 
 # requires: metal

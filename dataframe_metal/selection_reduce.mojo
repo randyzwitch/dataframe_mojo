@@ -1,5 +1,6 @@
 """One queue of native reductions over the CPU schedule's retained batches."""
-from std.memory import bitcast
+from std.memory import bitcast, ArcPointer
+from dataframe.execution_observation import DeviceObservation
 from std.time import perf_counter_ns
 from max.gpu.host import DeviceBuffer
 from dataframe.dtype import DataType
@@ -279,11 +280,16 @@ def execute_selection_timed(
     var started = Int(perf_counter_ns())
     batches.validate()
     var validation_ns = Int(perf_counter_ns()) - started
-    return _execute_selection_validated(plan, batches, validation_ns)
+    return _execute_selection_validated(
+        plan, batches, validation_ns, region._device_observation
+    )
 
 
 def _execute_selection_validated(
-    plan: SelectionReduction, batches: SelectionBatches, validation_ns: Int
+    plan: SelectionReduction,
+    batches: SelectionBatches,
+    validation_ns: Int,
+    observation: Optional[ArcPointer[DeviceObservation]],
 ) raises -> Tuple[DataFrame, HandoffTimings]:
     # Both public entry points validate once before reaching this path.
     var timings = HandoffTimings()
@@ -294,11 +300,14 @@ def _execute_selection_validated(
     var inputs = _validated_selection_inputs(plan, batches)
     timings.upload_ns = validation_ns + Int(perf_counter_ns()) - started
     if inputs.partials == 0:
-        return (_finish(plan, totals), timings^)
+        started = Int(perf_counter_ns())
+        var result = _finish(plan, totals)
+        timings.finish_ns = Int(perf_counter_ns()) - started
+        return (result^, timings^)
     comptime if not METAL_TARGET:
         raise Error("Metal selection reduction requires an Apple target")
     else:
-        var scope = Scope(service=shared_service())
+        var scope = Scope(service=shared_service(), observation=observation)
         started = Int(perf_counter_ns())
         var ctx = scope.context()
         timings.context_ns = Int(perf_counter_ns()) - started
@@ -450,6 +459,10 @@ def selection_execute(
     var matched = plan_selection(region)
     if not matched or not selection_inputs_supported(matched.value(), batches):
         return None
-    return _execute_selection_validated(
-        matched.value(), batches, validation_ns
-    )[0].copy()
+    if region._device_observation:
+        region._device_observation.value()[].provider = "metal"
+    var result = _execute_selection_validated(
+        matched.value(), batches, validation_ns, region._device_observation
+    )
+    result[1].record(region._device_observation)
+    return result[0].copy()

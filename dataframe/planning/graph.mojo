@@ -1462,6 +1462,8 @@ def plan_subplan(self: QueryContext, root: Int) -> QueryContext:
         self._handoff_execute,
     )
     sub._report = self._report
+    sub._report_node_base = self._report_node_base
+    sub._device_observation = self._device_observation
     sub._accelerator_settings = self._accelerator_settings.copy()
     sub._handoff = self._handoff
     sub._selection_supports = self._selection_supports

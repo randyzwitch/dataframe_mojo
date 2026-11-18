@@ -44,14 +44,17 @@ def execute_distinct(
         ].copy()
         var timings = HandoffTimings()
         if frame.height() == 0:
-            return (
-                finish_distinct(
-                    plan, frame, List[UInt32](), List[UInt32](), List[UInt32]()
-                ),
-                timings^,
+            var started = Int(perf_counter_ns())
+            var result = finish_distinct(
+                plan, frame, List[UInt32](), List[UInt32](), List[UInt32]()
             )
+            timings.finish_ns = Int(perf_counter_ns()) - started
+            return (result^, timings^)
         var started = Int(perf_counter_ns())
-        var scope = Scope(service=shared_service())
+        var scope = Scope(
+            service=shared_service(),
+            observation=region._plan._device_observation,
+        )
         var ctx = scope.context()
         timings.context_ns = Int(perf_counter_ns()) - started
         started = Int(perf_counter_ns())
@@ -147,6 +150,7 @@ def execute_distinct(
                     grid_dim=(layout.words() + 255) // 256,
                     block_dim=256,
                 )
+                scope.record_launches(1)
                 ctx.enqueue_function[distinct_partials](
                     inputs[0].values,
                     inputs[1].values,
@@ -179,7 +183,7 @@ def execute_distinct(
                     grid_dim=blocks,
                     block_dim=256,
                 )
-                scope.record_launches(2)
+                scope.record_launches(1)
                 ctx.enqueue_copy(
                     control.unsafe_ptr(),
                     scratch.create_sub_buffer[DType.uint32](0, len(control)),

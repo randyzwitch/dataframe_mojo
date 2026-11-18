@@ -284,10 +284,11 @@ def run(repetitions: Int, sizes: List[Int]) raises:
 
 
 def audit(sizes: List[Int]) raises:
-    """Audit actual auto collection; profile() uses a different placement path.
+    """Audit actual automatic collection and its placement.
 
     Set DATAFRAME_HANDOFF_CALIBRATION and DATAFRAME_METAL_PLACEMENT_TRACE
-    externally. The trace distinguishes native completion from adjudication.
+    externally. Completed launch counts distinguish native work from CPU
+    adjudication; profile(engine="auto") follows the same placement policy.
     """
     print('{"calibration_status":' + json_quote(calibration_status()) + "}")
     for rows in sizes:

@@ -1913,7 +1913,9 @@ struct AggregateSink(Movable):
             Int(self.discard.unsafe_ptr()),
             Int(self.scratch.unsafe_ptr()),
             self.only,
-            skip=self.shared_skip,
+            # No clustered update ran for this chunk. Only filtered states
+            # are updated separately below; every other state must scatter.
+            skip=self.filtered if self.any_filtered else self.shared_skip,
         )
         if self.only < 0:
             self._update_filtered(inputs, first, count)

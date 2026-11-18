@@ -270,13 +270,35 @@ Unmeasured region layouts remain on CPU even when their pipeline key matches.
 
 `explain(engine="auto")` shows actual placement in its `PIPELINE` lines.
 The older `PLACE` lines describe a separate schema-only handoff mechanism;
-versioned profiles do not supply costs to it. The current CPU `profile()`
-entry point uses that older mechanism, so it does not audit pipeline
-placement. To audit automatic collection, set
-`DATAFRAME_METAL_PLACEMENT_TRACE` to a writable JSONL path. The Metal provider
-appends a record after a pipeline finishes on Metal, or `cpu-adjudication`
-when input values require CPU evaluation. With tracing unset it writes
-nothing. Capture timings always use direct GPU completion checks instead.
+versioned profiles do not supply costs to it. `profile(engine="auto")` now
+executes the same placement policy as `collect(engine="auto")`.
+
+Execution reports identify each pipeline by its terminal node and record
+`result_device`, `device_status`, `fallback_reason`, submitted and completed
+GPU launches, transfer bytes and synchronization waits. A Metal result requires
+completed kernel evidence. Empty reductions report `no_device_work`, with zero
+launches, and CPU fallbacks include their reason. A CPU producer feeding Metal
+remains visible as a separate CPU pipeline. A pipeline that adjudicates a device
+fault on CPU retains its launch counts and records `result_device="cpu"`.
+Whole-query retries retain the discarded attempt with `result_used=False` and
+identify the CPU result as another `execution_attempt` under the same `query_id`.
+Shared subplan producers retain their own pipeline records, with node IDs after
+the consumer plan's range, so reused CPU work is included without ID collisions.
+`plan_id` is zero for the consumer and distinct for each shared producer.
+
+Set `DATAFRAME_EXECUTION_TRACE` to a writable JSONL path to append one record
+per executed pipeline, including CPU pipelines, for automatic or explicit
+execution. Records use `dataframe-pipeline-observation-v1`; `query_status`
+identifies successful or failed collection. `context_wall_ms`, `input_wall_ms`,
+`device_work_wall_ms` and `finish_wall_ms` are host elapsed phases.
+`device_work_wall_ms` includes submission, copies and synchronization; it is
+not GPU-only kernel time. `synchronize_wall_ms` overlaps the device-work phase.
+Unavailable phases have value -1 and `phase_timing_kind="unavailable"`.
+
+The legacy `DATAFRAME_METAL_PLACEMENT_TRACE` remains a partial trace of provider
+handoffs. Coverage receipts retain detailed pipeline evidence; an absent
+CPU-adjudication marker or a placement label alone does not prove GPU execution.
+Capture timings continue to use direct GPU completion checks.
 
 Pipeline data faults retain CPU semantics: overflow, non-finite compensated
 partials and gradual-underflow cases are adjudicated on CPU. Hardware and
