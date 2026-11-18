@@ -171,6 +171,7 @@ def scan_general_groups[
                 grid_dim=(layout.words() + 255) // 256,
                 block_dim=256,
             )
+            scope.record_launches(1)
             # Int64 extrema reevaluate winning expressions under a ticket lock.
             # Compile those paths only when a moment query requests MIN/MAX.
             # Ordinary grouped kernels retain their existing specialization.
@@ -222,7 +223,7 @@ def scan_general_groups[
                         grid_dim=blocks,
                         block_dim=256,
                     )
-            scope.record_launches(2)
+                    scope.record_launches(1)
             if needs_resolver:
                 ctx.enqueue_function[
                     resolve_general_int64[

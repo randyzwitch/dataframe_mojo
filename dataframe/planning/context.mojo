@@ -5,12 +5,14 @@ from dataframe.planning.node_builders import (
 from dataframe.execution_report import (
     ExecutionReport,
 )
+from dataframe.execution_observation import DeviceObservation
 from dataframe.execution_settings import (
     ExecutionSettings,
 )
 from dataframe.frame import (
     DataFrame,
 )
+from dataframe.vector.selection_batches import SelectionBatches
 from dataframe.io.csv import (
     CsvSchema,
 )
@@ -197,6 +199,9 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # Observed execution counters (#439), attached by `profile` and shared
     # by every copy of the plan made while it runs; None otherwise.
     var _report: Optional[ArcPointer[ExecutionReport]]
+    var _report_node_base: Int
+    var _device_observation: Optional[ArcPointer[DeviceObservation]]
+    var _reported_materializations: List[Int]
     # For a frame slot holding a shared subplan's result: the rows of the
     # table that subplan narrowed, so the join order still sees how
     # selective it is (`_spine_rows`, `_selectivity`).
@@ -250,6 +255,14 @@ struct QueryContext(Copyable, Deinitable, Movable):
     var _supports: def(QueryContext) thin -> Bool
     var _estimate: def(QueryContext, Int) thin -> Tuple[String, Float64]
     var _handoff_execute: def(QueryContext) raises thin -> DataFrame
+    # Optional runtime ports for an owned batch handoff. A runtime installs
+    # these on its dispatch copy; other providers keep the column ports.
+    var _selection_supports: def(QueryContext) thin -> Bool
+    var _selection_execute: def(
+        QueryContext, SelectionBatches
+    ) raises thin -> Optional[DataFrame]
+    var _selection_node: Int
+    var _selection_output: Optional[ArcPointer[SelectionBatches]]
 
     def __init__(
         out self,
@@ -268,6 +281,9 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._frames = FrameSlots(frames^)
         self._schemas = schemas^
         self._report = None
+        self._report_node_base = 0
+        self._device_observation = None
+        self._reported_materializations = List[Int]()
         self._origin_rows = Dict[Int, Int]()
         self._materialized_distinct = Dict[Int, Dict[String, Int]]()
         self._shared = None
@@ -286,9 +302,13 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._supports = supports
         self._estimate = estimate
         self._handoff_execute = handoff_execute
+        self._selection_supports = _no_selection_supports
+        self._selection_execute = _no_selection_execute
+        self._selection_node = -1
+        self._selection_output = None
 
     def with_input(self, frame: DataFrame) -> Self:
-        return Self(
+        var result = Self(
             [_frame_scan_node(slot=0)],
             [frame.copy()],
             [Optional[CsvSchema]()],
@@ -298,6 +318,10 @@ struct QueryContext(Copyable, Deinitable, Movable):
             self._estimate,
             self._handoff_execute,
         )
+        result._selection_supports = self._selection_supports
+        result._selection_execute = self._selection_execute
+        result._device_observation = self._device_observation
+        return result^
 
     def push(self, var node: PlanNode) -> Self:
         var result = self.copy()
@@ -322,6 +346,19 @@ struct QueryContext(Copyable, Deinitable, Movable):
         batch_size: Int,
     ) raises -> DataFrame:
         return self._collector(self, optimize, streaming, batch_size)
+
+
+def _no_selection_supports(plan: QueryContext) -> Bool:
+    _ = plan
+    return False
+
+
+def _no_selection_execute(
+    plan: QueryContext, batches: SelectionBatches
+) raises -> Optional[DataFrame]:
+    _ = plan
+    _ = batches
+    return None
 
 
 def plan_shared_id(self: QueryContext, slot: Int) -> Int:

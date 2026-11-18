@@ -8,6 +8,8 @@ stdout contains only capture records for scripts/metal_calibration.py.
 from std.sys import argv
 from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col
 from dataframe_metal.calibration_capture import capture
+from dataframe_metal.calibration import calibration_status
+from dataframe.json.value import json_quote
 
 
 def _table(rows: Int, nulls: Bool) raises -> DataFrame:
@@ -257,14 +259,7 @@ def _query(frame: DataFrame, mode: Int) raises -> LazyFrame:
     return offered.select_exprs(_expressions(mode))
 
 
-def main() raises:
-    var args = argv()
-    var repetitions = Int(String(args[1])) if len(args) > 1 else 5
-    var sizes = List[Int]()
-    for i in range(2, len(args)):
-        sizes.append(Int(String(args[i])))
-    if not sizes:
-        sizes = [50_000_000, 75_000_000, 100_000_000]
+def run(repetitions: Int, sizes: List[Int]) raises:
     if len(sizes) < 3 or repetitions < 3:
         raise Error("Measure at least three sizes and three repetitions")
     for rows in sizes:
@@ -286,3 +281,60 @@ def main() raises:
                             Bool((mode + chunks) % 2),
                         )
                     )
+
+
+def audit(sizes: List[Int]) raises:
+    """Audit actual automatic collection and its placement.
+
+    Set DATAFRAME_HANDOFF_CALIBRATION and DATAFRAME_METAL_PLACEMENT_TRACE
+    externally. Completed launch counts distinguish native work from CPU
+    adjudication; profile(engine="auto") follows the same placement policy.
+    """
+    print('{"calibration_status":' + json_quote(calibration_status()) + "}")
+    for rows in sizes:
+        if rows < 32 or rows > 100_000_000:
+            raise Error("Audit corpus supports 32 through 100M rows")
+        for nulls in [False, True]:
+            var base = _table(rows, nulls)
+            for chunks in [1, 8]:
+                var frame = _chunks(base, chunks)
+                for mode in range(11):
+                    var plan = _query(frame, mode)
+                    var explanation = plan.explain(engine="auto")
+                    var result = plan.collect(engine="auto")
+                    if not result.equals(_reference(rows, nulls, mode)):
+                        raise Error(
+                            "Automatic collection differs from scalar oracle"
+                        )
+                    print(
+                        '{"rows":'
+                        + String(rows)
+                        + ',"nulls":'
+                        + ("true" if nulls else "false")
+                        + ',"chunks":'
+                        + String(chunks)
+                        + ',"mode":'
+                        + String(mode)
+                        + ',"verified":true,"explain":'
+                        + json_quote(explanation)
+                        + "}"
+                    )
+
+
+def main() raises:
+    var args = argv()
+    if len(args) > 1 and String(args[1]) == "audit":
+        var sizes = List[Int]()
+        for i in range(2, len(args)):
+            sizes.append(Int(String(args[i])))
+        if not sizes:
+            raise Error("Usage: metal-calibration audit ROWS [ROWS ...]")
+        audit(sizes)
+        return
+    var repetitions = Int(String(args[1])) if len(args) > 1 else 5
+    var sizes = List[Int]()
+    for i in range(2, len(args)):
+        sizes.append(Int(String(args[i])))
+    if not sizes:
+        sizes = [50_000_000, 75_000_000, 100_000_000]
+    run(repetitions, sizes)

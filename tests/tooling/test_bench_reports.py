@@ -181,6 +181,23 @@ class BenchmarkReports(unittest.TestCase):
         self.assertIn('<a href="#joins">joins</a>', page)
         self.assertIn("<td>JOIN inner on k = k</td>", page)
 
+    def test_operator_reports_retain_pipeline_execution_evidence(self):
+        values = {
+            "operator": "AGGREGATE", "executor": "pipeline",
+            "result_device": "metal", "device_status": "completed",
+            "phase_timing_kind": "host_wall", "result_used": "true",
+            "algorithm": "handoff metal", "build_side": "", "fallback_reason": "",
+            "gpu_launches": "2", "gpu_completed_launches": "2",
+        }
+        cells = [values.get(name, "1") for name in bench.OPERATOR_COLUMNS]
+        stderr = "dataframe-query: q1\ndataframe-operator:\tbuild-id\t" + "\t".join(cells)
+        row = bench.operator_reports(stderr)["q1"][0]
+        self.assertEqual(row["gpu_completed_launches"], 2)
+        self.assertEqual(row["pipeline"], 1)
+        self.assertEqual(row["phase_timing_kind"], "host_wall")
+        self.assertEqual(row["device_work_wall_ms"], 1.0)
+        self.assertIs(row["result_used"], True)
+
     def test_legacy_rerender_preserves_raw_samples_and_warns(self):
         result = fixture()
         # Include an actual timing cell so immutability covers timing samples.

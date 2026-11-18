@@ -706,6 +706,25 @@ def test_metal_automatic_placement_follows_measured_costs() raises:
         with open(trace_path, "r") as source:
             traced = source.read()
         assert_true(('"engine":"metal"' in traced) == accel_cheaper, traced)
+        var profiled = plan.profile(engine="auto")
+        assert_true(profiled[0].equals(expected))
+        var launched = False
+        var cpu_placement = False
+        for row in range(profiled[1].height()):
+            var launches = profiled[1].item(row, "gpu_launches").int64()
+            if launches > 0:
+                launched = True
+                assert_equal(
+                    profiled[1].item(row, "gpu_completed_launches").int64(),
+                    launches,
+                )
+            if (
+                profiled[1].item(row, "fallback_reason").string()
+                == "cost_model_prefers_cpu"
+            ):
+                cpu_placement = True
+        assert_equal(launched, accel_cheaper)
+        assert_equal(cpu_placement, not accel_cheaper)
         var plain = frame.lazy().select(col("i").sum())
         assert_false("; on metal:0" in plain.explain(engine="auto"))
         _ = trace^
@@ -1203,6 +1222,7 @@ def test_metal_calibration_rejects_overwritten_cached_models_and_outside_rows() 
 def test_metal_pipeline_adjudicates_changed_float_values_on_cpu() raises:
     _ = require_metal()
     from dataframe_metal.accelerator.gpu.identity import runtime_build_id
+    from dataframe.json.value import JsonValue
 
     if not runtime_build_id().startswith("dataframe-mojo-metal-v2;cpu="):
         return
@@ -1228,6 +1248,12 @@ def test_metal_pipeline_adjudicates_changed_float_values_on_cpu() raises:
     with open(trace_path, "w") as target:
         target.write("")
     var trace = ScopedEnvironment("DATAFRAME_METAL_PLACEMENT_TRACE", trace_path)
+    var detailed_path = String(
+        "build/test-handoff-adjudication-pipelines.jsonl"
+    )
+    with open(detailed_path, "w") as target:
+        target.write("")
+    var detailed = ScopedEnvironment("DATAFRAME_EXECUTION_TRACE", detailed_path)
     var actual = plan.collect(engine="auto")
     assert_true(actual.equals(expected))
     assert_equal(
@@ -1238,6 +1264,37 @@ def test_metal_pipeline_adjudicates_changed_float_values_on_cpu() raises:
         traced = source.read()
     assert_true('"engine":"cpu-adjudication"' in traced, traced)
     assert_false('"engine":"metal"' in traced, traced)
+    var profiled = plan.profile(engine="auto")
+    assert_true(profiled[0].equals(expected))
+    var adjudicated = False
+    for row in range(profiled[1].height()):
+        if (
+            profiled[1].item(row, "fallback_reason").string()
+            != "data_fault_adjudication"
+        ):
+            continue
+        adjudicated = True
+        assert_equal(profiled[1].item(row, "result_device").string(), "cpu")
+        assert_equal(
+            profiled[1].item(row, "device_status").string(), "cpu_fallback"
+        )
+        var launches = profiled[1].item(row, "gpu_launches").int64()
+        assert_true(launches > 0)
+        assert_equal(
+            profiled[1].item(row, "gpu_completed_launches").int64(), launches
+        )
+        assert_true(profiled[1].item(row, "result_used").bool())
+    assert_true(adjudicated)
+    var query_ids = List[Int]()
+    with open(detailed_path, "r") as source:
+        for line in source.read().splitlines():
+            var record = JsonValue(String(line))
+            var id = Int(record.get("query_id").text)
+            if id not in query_ids:
+                query_ids.append(id)
+    # collect and profile each own one trace; their CPU retries are internal.
+    assert_equal(len(query_ids), 2)
+    _ = detailed^
     _ = trace^
     _ = configured^
 

@@ -187,6 +187,27 @@ Batched and ordinary compositions use separate compile-time kernel variants.
 The ordinary variant removes the batch-table lookup and row-base pointer
 arithmetic; both variants preserve the original per-segment reduction grids.
 
+**CPU selections.** With streaming and forced Metal execution, global
+SUM/COUNT/MEAN/MIN/MAX over Int32, Int64 and Float32 columns can consume the
+CPU schedule's retained output. This lets a CPU filter, including a string
+predicate, or a join feed the reducer through row indices. The GPU reads the
+source values and validity in place. Duplicate join rows remain distinct,
+and joined columns can use different row mappings.
+
+The batches own their source columns and row lists until the device queue
+finishes. Values computed in worker caches are copied into owned batch
+storage before those caches are reused. The final handoff does not gather
+selected source payloads into full intermediate columns. Join construction
+and decoding still contribute to producer time.
+
+A storage layout the selected-input reducer cannot bind uses the already
+completed batches through the ordinary column path. The CPU producer runs
+once for this layout fallback. Profiles identify a native selected-input
+submission as `handoff selections`; data-fault adjudication retains the CPU
+policy described below. Automatic placement currently uses its calibrated
+ordinary-column interface; selected-input costs are not inferred from those
+profiles.
+
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
 every node it supports. `engine="auto"` places supported pipelines by measured
 cost when `DATAFRAME_HANDOFF_CALIBRATION` names a calibration file, and
@@ -249,17 +270,85 @@ Unmeasured region layouts remain on CPU even when their pipeline key matches.
 
 `explain(engine="auto")` shows actual placement in its `PIPELINE` lines.
 The older `PLACE` lines describe a separate schema-only handoff mechanism;
-versioned profiles do not supply costs to it. The current CPU `profile()`
-entry point uses that older mechanism, so it does not audit pipeline
-placement. To audit automatic collection, set
-`DATAFRAME_METAL_PLACEMENT_TRACE` to a writable JSONL path. The Metal provider
-appends a record after a pipeline finishes on Metal, or `cpu-adjudication`
-when input values require CPU evaluation. With tracing unset it writes
-nothing. Capture timings always use direct GPU completion checks instead.
+versioned profiles do not supply costs to it. `profile(engine="auto")` now
+executes the same placement policy as `collect(engine="auto")`.
+
+Execution reports identify each pipeline by its terminal node and record
+`result_device`, `device_status`, `fallback_reason`, submitted and completed
+GPU launches, transfer bytes and synchronization waits. A Metal result requires
+completed kernel evidence. Empty reductions report `no_device_work`, with zero
+launches, and CPU fallbacks include their reason. A CPU producer feeding Metal
+remains visible as a separate CPU pipeline. A pipeline that adjudicates a device
+fault on CPU retains its launch counts and records `result_device="cpu"`.
+Whole-query retries retain the discarded attempt with `result_used=False` and
+identify the CPU result as another `execution_attempt` under the same `query_id`.
+Shared subplan producers retain their own pipeline records, with node IDs after
+the consumer plan's range, so reused CPU work is included without ID collisions.
+`plan_id` is zero for the consumer and distinct for each shared producer.
+
+Set `DATAFRAME_EXECUTION_TRACE` to a writable JSONL path to append one record
+per executed pipeline, including CPU pipelines, for automatic or explicit
+execution. Records use `dataframe-pipeline-observation-v1`; `query_status`
+identifies successful or failed collection. `context_wall_ms`, `input_wall_ms`,
+`device_work_wall_ms` and `finish_wall_ms` are host elapsed phases.
+`device_work_wall_ms` includes submission, copies and synchronization; it is
+not GPU-only kernel time. `synchronize_wall_ms` overlaps the device-work phase.
+Unavailable phases have value -1 and `phase_timing_kind="unavailable"`.
+
+The legacy `DATAFRAME_METAL_PLACEMENT_TRACE` remains a partial trace of provider
+handoffs. Coverage receipts retain detailed pipeline evidence; an absent
+CPU-adjudication marker or a placement label alone does not prove GPU execution.
+Capture timings continue to use direct GPU completion checks.
 
 Pipeline data faults retain CPU semantics: overflow, non-finite compensated
 partials and gradual-underflow cases are adjudicated on CPU. Hardware and
 allocation failures propagate as errors.
+
+### Selection handoff measurements on November 17, 2026
+
+Measured on an Apple M1 with eight CPU workers at source revision
+`f533fcc04da81e8fb634f205b3f2059203e05f70`. Each row below compares the same
+CPU producer and compiled binary across three execution paths. Values are
+median milliseconds over five repetitions, with complete result checks.
+
+| Input rows | CPU | Materialized Metal | Retained selections |
+| --- | ---: | ---: | ---: |
+| 1M | 6.597 | 13.509 | 13.741 |
+| 5M | 26.661 | 50.483 | 48.629 |
+| 10M | 51.156 | 97.874 | 91.192 |
+
+Retained selections reduced elapsed time versus materialized Metal by
+about 3.7% at 5M and 6.8% at 10M, but took 1.7% longer at 1M. CPU was
+faster in all three cases. The calibration belongs to the measured packaged
+build; source or compiler changes require a matching new capture.
+
+A separate direct-GPU calibration covers 44 layouts at each size. The
+counts below indicate where the measured Metal median was below the CPU
+median; they are not universal placement thresholds. Automatic placement
+uses the identity-matched profile for the application and its hardware.
+
+| Input rows | Layouts faster on Metal |
+| --- | ---: |
+| 1M | 3/44 |
+| 5M | 16/44 |
+| 10M | 23/44 |
+| 25M | 25/44 |
+| 50M | 23/44 |
+
+The representative suite comparison used H2O inputs with 10 million rows
+and PDS-H SF1 with 6,001,215 lineitem rows. MetalRuntime-requested execution
+had a narrowly lower median in one of 21 cases (PDS-H base q6, about 0.6%);
+CPU had the lower median in the other 20. These are
+end-to-end runtime comparisons: unsupported work can remain on CPU, and
+the collection audit does not certify a GPU launch for every query. All
+measured answers were checked against DuckDB. This report tier is below
+the repository's 100M/SF10 large tier; these results do not establish a
+historical large-query performance reversal.
+
+Native validation recorded 241 passing contracts and 2 failures, with
+all 16 native probes passing. Empty copied packed-logical input and
+grouped ordered FIRST/LAST parity also fail on the pre-selection baseline.
+Those failures remain recorded separately from the passing selection tests.
 
 ### Historical measurements on an M1 Mac mini
 
@@ -345,8 +434,10 @@ the CPU, in the same query.
   opt-in JSONL trace records automatic GPU completion. Profiles with an
   explicit `MetalRuntime` show forced handoffs.
 
-The provider contract stays vendor-neutral: columns in and out, and the core
-never imports a backend. A discrete GPU (NVIDIA, AMD) is a separate provider
+The provider contract stays vendor-neutral: its ordinary ports take columns
+in and out, and the core never imports a backend. A runtime can also install
+optional query ports that accept owned source columns and row mappings from
+the CPU schedule; a runtime without these ports keeps the ordinary path. A discrete GPU (NVIDIA, AMD) is a separate provider
 that keeps data on the device and runs whole queries or large regions. The
 same cost-based placement decides both, with the cost of moving data
 included.
@@ -365,6 +456,13 @@ scripts/test_metal_local.sh
 
 `pixi run -e oracle report-apple` times CPU against forced Metal on the
 benchmark suites. Cases outside the accepted regions report `unsupported`.
+
+`benchmarks/bench_metal_selections.mojo` compares the same filtered join and
+reductions on the CPU, through ordinary materialized handoff ports, and
+through the runtime's retained-selection ports. Every result is checked
+against an independent scalar answer, the execution report must show the
+selection handoff, and timing order rotates across the three paths. Compile
+with the Metal provider and `-O3`; its arguments are rows and repetitions.
 
 ### Property-matched placement costs
 

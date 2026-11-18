@@ -113,6 +113,7 @@ from dataframe.vector.column_data_collection import (
     raw_series,
 )
 from dataframe.vector.sink import Sink
+from dataframe.vector.selection_batches import SelectionBatch, SelectionBatches
 from dataframe.storage.statistics import (
     STATISTICS_VECTOR_SIZE,
     COMPARE_GREATERTHAN,
@@ -1404,6 +1405,12 @@ struct _ChunkRunner(Movable):
     # its result, or the input of a reduction no aggregate sink takes.
     var materialize: List[MaterializeSink]
     var materializes: Bool
+    # A provider that reads row mappings receives the collector's owned
+    # sources and selections at each morsel boundary.
+    var retains: Bool
+    var retained: List[_Collector]
+    var retained_batches: List[SelectionBatch]
+    var retained_morsel: Int
     # A limited materialize sink: the first rows in source order it keeps
     # (-1: every row), and the last morsel any worker still needs.
     var limit: Int
@@ -1462,6 +1469,10 @@ struct _ChunkRunner(Movable):
         self.sets_layout = List[ArcPointer[GroupingSetsLayout]]()
         self.materialize = List[MaterializeSink]()
         self.materializes = False
+        self.retains = False
+        self.retained = List[_Collector]()
+        self.retained_batches = List[SelectionBatch]()
+        self.retained_morsel = 0
         self.limit = -1
         self.limit_bound = LimitBound.none()
         self.build = List[JoinBuildSink]()
@@ -1513,6 +1524,7 @@ struct _ChunkRunner(Movable):
             or len(self.sets) > 0
             or len(self.materialize) > 0
             or len(self.build) > 0
+            or len(self.retained) > 0
         )
 
     def begin_sink(
@@ -1542,6 +1554,10 @@ struct _ChunkRunner(Movable):
             if len(self.build) == 0:
                 self.build.append(JoinBuildSink(self.build_layout[0]))
             self.build[0].begin(morsel)
+        elif self.retains:
+            self._retain_morsel()
+            self.retained_morsel = morsel
+            self.retained.append(_Collector(self.output_schema(), length))
         elif self.materializes:
             if len(self.materialize) == 0:
                 self.materialize.append(
@@ -1573,6 +1589,33 @@ struct _ChunkRunner(Movable):
             self.materialize[0].release()
         if len(self.build) > 0:
             self.build[0].release()
+        self._retain_morsel()
+
+    def _retain_morsel(mut self) raises:
+        """Own the last morsel before its arena or chunk caches are reused."""
+        if len(self.retained) == 0:
+            return
+        var collector = self.retained.pop()
+        if collector.height == 0:
+            return
+        var batch = SelectionBatch()
+        batch.morsel = self.retained_morsel
+        for mode in collector.modes:
+            batch.copied_columns += Int(
+                mode == _COLLECT_RAW or mode == _COLLECT_VALUES
+            )
+        var columns = collector.finish(self.arena)
+        batch.count = columns.height
+        for c in range(columns.width()):
+            batch.columns.append(
+                self.arena.columns[columns.handles[c]].renamed(
+                    collector.schema._columns[c].name()
+                )
+            )
+        swap(batch.starts, columns.starts)
+        swap(batch.lists, columns.lists)
+        swap(batch.rows, columns.row_lists)
+        self.retained_batches.append(batch^)
 
     def release_local(mut self):
         """Release worker-local compiled steps on the worker that used them.
@@ -1592,6 +1635,23 @@ struct _ChunkRunner(Movable):
             _sink_chunk(self.sets[0], chunk, self.arena)
         elif len(self.build) > 0:
             _sink_chunk(self.build[0], chunk, self.arena)
+        elif len(self.retained) > 0:
+            # A join can switch source columns within one morsel. Finish the
+            # current references before the collector would gather them to
+            # append values from a different source.
+            var changes_source = False
+            for c in range(len(chunk.data)):
+                var mode = self.retained[0].modes[c]
+                if mode == _COLLECT_RANGE or mode == _COLLECT_ROWS:
+                    changes_source |= not self.retained[0]._listed(
+                        c, chunk.data[c]
+                    )
+                elif mode == _COLLECT_RAW or mode == _COLLECT_VALUES:
+                    changes_source |= chunk.data[c].source >= 0
+            if changes_source:
+                self._retain_morsel()
+                self.retained.append(_Collector(self.output_schema()))
+            self.retained[0].append(chunk, self.arena)
         else:
             _sink_chunk(self.materialize[0], chunk, self.arena)
 
@@ -3523,6 +3583,30 @@ struct PipelineFinish(Movable, Rounds):
             counts = kept^
         self.sink_counts = counts^
         self.sink = _SINK_DONE
+        if run.selection_output:
+            ref output = run.selection_output.value()[]
+            # Each worker's morsels are ordered. Merge them in source order,
+            # moving the owners and row lists without copying their contents.
+            var next = List[Int](length=len(jobs), fill=0)
+            while True:
+                var best = -1
+                var first = 0
+                for j in range(len(jobs)):
+                    ref batches = jobs[j].runner.retained_batches
+                    if next[j] < len(batches):
+                        var morsel = batches[next[j]].morsel
+                        if best < 0 or morsel < first:
+                            best = j
+                            first = morsel
+                if best < 0:
+                    break
+                var batch = SelectionBatch()
+                swap(batch, jobs[best].runner.retained_batches[next[best]])
+                output.append(batch^)
+                next[best] += 1
+            output.ready = True
+            self.frame = output.schema.copy()
+            return
         if len(layout) > 0 and len(sets) > 0:
             # Derived sets finish first: their rows point at key bytes the
             # source set's sinks hold. A worker's sinks are in set order,
@@ -3912,6 +3996,7 @@ struct PipelineRun(Movable):
     # the table the finish makes of them (its finalize tasks not yet run).
     var build_layout: Optional[ArcPointer[JoinBuildLayout]]
     var built: Optional[JoinHashTable]
+    var selection_output: Optional[ArcPointer[SelectionBatches]]
     # A limited materialize sink's row count (-1: none) and the last
     # morsel its workers still need.
     var limit: Int
@@ -3987,6 +4072,7 @@ struct PipelineRun(Movable):
         self.source = None
         self.build_layout = None
         self.built = None
+        self.selection_output = None
         self.limit = -1
         self.bound = LimitBound.none()
 
@@ -4225,6 +4311,7 @@ def begin_pipeline(
     build_filtered: Bool = False,
     var types: Optional[PipelineTypes] = None,
     limit: Int = -1,
+    selection_output: Optional[ArcPointer[SelectionBatches]] = None,
 ) raises -> PipelineRun:
     """`run_pipeline` up to its workers' jobs, not yet run: its execute stage is
     the jobs, one task per thread; `finish_pipeline` is its finish, after the
@@ -4538,6 +4625,19 @@ def begin_pipeline(
     if ((len(expressions) == 0 and top <= 0) or collects) and not build_layout:
         for w in range(len(jobs)):
             jobs[w].runner.materializes = True
+    var retains = (
+        Bool(selection_output)
+        and len(expressions) == 0
+        and top <= 0
+        and not build_layout
+        and limit < 0
+        and len(finish_steps) == 0
+    )
+    if retains:
+        trace_path("pipeline.selection_sink")
+        for w in range(len(jobs)):
+            jobs[w].runner.materializes = False
+            jobs[w].runner.retains = True
     # A limit over the materialized rows: each worker keeps at most that
     # many of its own first rows, and the workers stop at the last morsel
     # the first rows can come from (`LimitBound`).
@@ -4601,6 +4701,8 @@ def begin_pipeline(
     )
     run.source = source
     run.build_layout = build_layout^
+    if retains:
+        run.selection_output = selection_output
     if bound.address != 0:
         run.limit = limit
         run.bound = bound
