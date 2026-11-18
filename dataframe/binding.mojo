@@ -740,6 +740,9 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
     if op == FIRST or op == LAST:
         # A value taken as it is: any type, list and struct included.
         return input
+    if op == N_UNIQUE and input.is_nested():
+        # Lists and structs are counted by value, as keys compare them.
+        return DataType.INT64
     if input.is_nested():
         raise Error(
             op_name(op)
