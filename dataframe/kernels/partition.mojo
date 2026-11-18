@@ -33,6 +33,7 @@ from dataframe.storage.allocation import (
 )
 from dataframe.kernels.gather import take_parallel
 from dataframe.kernels.hashing import RowKeys, encode_rows
+from dataframe.kernels.nested_keys import encode_nested_keys
 from dataframe.parallel import Job, partitions, run_jobs
 from dataframe.series import Series
 from dataframe.storage.string import StringColumn
@@ -420,14 +421,15 @@ struct Partitioner(Movable):
     var keys: List[Series]
 
     def __init__(out self, keys: List[Series], workers: Int) raises:
-        for key in keys:
-            if key.dtype().is_nested():
-                raise Error(
-                    "list and struct columns cannot be keys yet: " + key.name()
-                )
         var contiguous = List[Series](capacity=len(keys))
         for key in keys:
-            contiguous.append(key.rechunk() if key.is_chunked() else key.copy())
+            if key.dtype().is_nested():
+                # By its value's bytes, as `encode_rows` compares it.
+                contiguous.append(encode_nested_keys(key))
+            else:
+                contiguous.append(
+                    key.rechunk() if key.is_chunked() else key.copy()
+                )
         self.rows = len(contiguous[0])
         self.keys = contiguous.copy()
         # Every row's hash is written by exactly one _HashJob (#388).

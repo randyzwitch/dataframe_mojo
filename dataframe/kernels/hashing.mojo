@@ -14,6 +14,7 @@ from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column, _validity_at
 from dataframe.storage.allocation import huge_list, release_huge
 from dataframe.dtype import NUMERIC_DTYPES
+from dataframe.kernels.nested_keys import encode_nested_keys
 from dataframe.storage.string import StringColumn
 from dataframe.series import Series
 from dataframe.parallel import Job, partitions, run_jobs
@@ -746,9 +747,16 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     """
     for key in keys:
         if key.dtype().is_nested():
-            raise Error(
-                "list and struct columns cannot be keys yet: " + key.name()
-            )
+            # A list or struct compares by its value's bytes, equal exactly
+            # when the values are (`nested_keys.mojo`).
+            var flat = List[Series](capacity=len(keys))
+            for one in keys:
+                flat.append(
+                    encode_nested_keys(one) if one.dtype().is_nested() else (
+                        one.copy()
+                    )
+                )
+            return encode_rows(flat, nulls_equal)
     if len(keys) == 0:
         raise Error("Row keys require at least one column")
     if len(keys) == 1 and keys[0]._data.isa[StringColumn]():

@@ -331,11 +331,7 @@ def plan_unique_as_aggregate(mut self: QueryContext) raises:
             raise Error("keep must be 'any', 'first', 'last', or 'none'")
         var schema = self._execute(node.left, True)
         # Raises for a missing or repeated subset column, or none at all.
-        for key in schema._subset_keys(node.names):
-            if key.dtype().is_nested():
-                raise Error(
-                    "list and struct columns cannot be keys yet: " + key.name()
-                )
+        _ = schema._subset_keys(node.names)
         var columns = schema.columns()
         var keys = node.names.copy() if len(node.names) > 0 else (
             columns.copy()
@@ -731,7 +727,8 @@ def plan_pushdown_filter(
         and _pinned(self._nodes[left])
         and _row_local(self._nodes[left].exprs)
     ):
-        var merged = self._nodes[left].exprs[0] & self._nodes[index].exprs[0]
+        var below = self._nodes[left].exprs[0].copy()
+        var merged = below & self._nodes[index].exprs[0]
         self._nodes[index].exprs = [merged^]
         self._nodes[index].left = self._nodes[left].left
         plan_forget_schema(self, index)
