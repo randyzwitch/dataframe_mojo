@@ -9,6 +9,7 @@ holds more than `reduce_threshold()` rows it is cut down to the live entries
 without a heap test. `combine` merges each thread's heap and payload into one
 global heap; the finish sorts that heap and gathers the payload in order.
 """
+from dataframe.categorical import decode
 from dataframe.frame import DataFrame
 from dataframe.dtype import DataType
 from dataframe.series import Series
@@ -105,6 +106,12 @@ struct TopNSink(Sink):
     # are read as.
     var key_columns: List[Int]
     var key_physical: List[Int]
+    # Per key, whether it is a categorical ordered by its values rather
+    # than by its dictionary's ranks: a file scan's dictionary still takes
+    # values while rows enter the heap, so no rank holds for every row. Its
+    # values are read into `values`, one vector per key.
+    var by_value: List[Bool]
+    var values: DataChunk
 
     def __init__(
         out self,
@@ -118,8 +125,17 @@ struct TopNSink(Sink):
         dynamic_op: Int = 0,
     ) raises:
         var keys = List[Series](capacity=len(names))
+        self.by_value = List[Bool](capacity=len(names))
         for name in names:
-            keys.append(schema.column(name))
+            var key = schema.column(name)
+            var growing = (
+                key.dtype().is_categorical()
+                and key.dtype().has_dictionary()
+                and key.dtype().dictionary()[].grows
+            )
+            self.by_value.append(growing)
+            keys.append(decode(key) if growing else key^)
+        self.values = DataChunk(len(names))
         self.layout = SortKeyLayout(
             keys, descending, nulls_last, False, statistics=False
         )
@@ -137,10 +153,10 @@ struct TopNSink(Sink):
         self.dynamic_op = dynamic_op
         self.key_columns = List[Int](capacity=len(names))
         self.key_physical = List[Int](capacity=len(names))
-        for name in names:
-            var c = self.schema._index(name)
+        for k in range(len(names)):
+            var c = self.schema._index(names[k])
             self.key_columns.append(c)
-            self.key_physical.append(storage_physical(self.schema._columns[c]))
+            self.key_physical.append(storage_physical(keys[k]))
 
     def begin(mut self, morsel: Int):
         pass
@@ -197,8 +213,9 @@ struct TopNSink(Sink):
         if self.heap.heap_size == 0 or frame.height() == 0:
             return
         var keys = List[Series](capacity=len(self.names))
-        for name in self.names:
-            keys.append(frame.column(name))
+        for k in range(len(self.names)):
+            var key = frame.column(self.names[k])
+            keys.append(decode(key) if self.by_value[k] else key^)
         self.layout.rebind(keys)
         if self.layout.variable:
             self._sink[1, True](frame)
@@ -223,8 +240,23 @@ struct TopNSink(Sink):
         # whose physical type is not the key's (a column stored narrower than
         # the schema says) is cast first.
         var formats = List[UnifiedVectorFormat](capacity=len(self.names))
+        self.values.reset()
+        self.values.count = chunk.count
         for k in range(len(self.names)):
             var c = self.key_columns[k]
+            if self.by_value[k]:
+                var codes = to_series(
+                    chunk,
+                    c,
+                    arena,
+                    self.names[k],
+                    self.schema._columns[c].dtype(),
+                )
+                self.values.data[k] = flat_over(
+                    arena, arena.add(decode(codes)), 0
+                )
+                formats.append(self.values.unified(k, arena))
+                continue
             if chunk.data[c].physical != self.key_physical[k]:
                 var cast = to_series(
                     chunk,
