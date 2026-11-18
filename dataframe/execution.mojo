@@ -3537,6 +3537,7 @@ def _over_rank(
         value,
         rank.min_count == 1,
         rank.text,
+        _known_groups(node, cache_address),
     )
     result._name = argument_expr._name
     return result^
@@ -3570,10 +3571,33 @@ def _layout_index(
     cache[].keys.append(key)
     cache[].layouts.append(
         window_layout(
-            partition_keys, order_keys, descending, nulls_last, height
+            partition_keys,
+            order_keys,
+            descending,
+            nulls_last,
+            height,
+            known=_known_groups(node, cache_address),
         )
     )
     return len(cache[].layouts) - 1
+
+
+def _known_groups(
+    node: Node, cache_address: Int
+) -> Optional[ArcPointer[GroupRows]]:
+    """The groups of `node`'s partition keys when the cache at
+    `cache_address` already holds them (made for another window over the
+    same keys, or given by the caller), so a sorted window's layout does
+    not partition the rows again."""
+    if (node.integer & OVER_GLOBAL) != 0:
+        return None
+    var cache = Pointer[WindowLayouts, MutAnyOrigin](
+        unsafe_from_address=cache_address
+    )
+    for k in range(len(cache[].id_keys)):
+        if cache[].id_keys[k] == node.text2:
+            return cache[].groups[k]
+    return None
 
 
 def _crosses_partitions(bound: BoundExpr, keys: String) -> Bool:

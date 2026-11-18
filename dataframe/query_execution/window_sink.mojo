@@ -18,7 +18,11 @@ The work is three rounds:
    all over each column would read every part of it once per bin.
 2. Merge: each task takes whole bins, largest first, until none is left;
    it joins a bin's stretches from every sink task into one column each
-   and evaluates the projection over them. Everything the evaluation
+   and evaluates the projection over them. A bin is one hash partition of
+   the shared keys, so the windows over exactly those keys take their
+   partitions from it: the bin's keys are numbered into groups once (by
+   value for one integer key, else probing with the hashes the sink kept),
+   with no second hash pass or scatter. Everything the evaluation
    starts runs on the task's own thread, since the other tasks keep the
    other threads busy.
 3. Gather: each task fills the rows of its sink range in every output
@@ -29,9 +33,11 @@ rows in the same order as over the whole input, and the results equal the
 whole-input evaluation's.
 """
 from std.atomic import Atomic
-from std.memory import Pointer, unsafe_memcpy
+from std.memory import ArcPointer, Pointer, unsafe_memcpy
 
-from dataframe.execution import _used_columns
+from dataframe.aggregation.expressions import _bind_all
+from dataframe.binding import ROWS
+from dataframe.execution import WindowLayouts, _used_columns, evaluate
 from dataframe.expr import (
     Expr,
     COL,
@@ -61,6 +67,7 @@ from dataframe.series import Series
 from dataframe.sorting.sort_key import STANDARD_VECTOR_SIZE
 from dataframe.storage.allocation import huge_uninit, release_huge
 from dataframe.storage.column import Column
+from dataframe.window_sort import _integer_key, bin_partition_groups
 
 # The round that ran last.
 comptime _START = 0
@@ -383,6 +390,13 @@ struct WindowSink(Movable, Rounds):
     var placed_fixed: List[Bool]
     var placed_valid: List[List[UInt8]]
     var placed_rows: List[Int]
+    # The key hashes as the sink tasks placed them, when the keys are not
+    # one integer column; by shared key, its place among the read
+    # columns; the spellings of the over() partitions whose keys are
+    # exactly the shared keys.
+    var placed_hashes: List[UInt64]
+    var key_reads: List[Int]
+    var shared_texts: List[String]
     # By bin: its evaluated columns.
     var results: List[List[Series]]
     # The next bin of `order` a merge task takes.
@@ -434,6 +448,9 @@ struct WindowSink(Movable, Rounds):
         self.placed_fixed = List[Bool]()
         self.placed_valid = List[List[UInt8]]()
         self.placed_rows = List[Int]()
+        self.placed_hashes = List[UInt64]()
+        self.key_reads = List[Int]()
+        self.shared_texts = List[String]()
         self.results = List[List[Series]]()
         self.next = Atomic[Int64](0)
         self.outputs = List[Series]()
@@ -526,6 +543,26 @@ struct WindowSink(Movable, Rounds):
             )
         if rows_needed:
             self.placed_rows = huge_uninit[Int](self.height)
+        for key in self.keys:
+            self.key_reads.append(_column_at(self.reads, key))
+        for expr in self.evaluated:
+            for node in expr._nodes:
+                if node.op != OVER or node.text2 in self.shared_texts:
+                    continue
+                var names = List[String]()
+                for name in split_names(node.text2):
+                    if name.byte_length() > 0 and name not in names:
+                        names.append(name)
+                var same = len(names) == len(self.keys)
+                for name in names:
+                    same = same and name in self.keys
+                if same:
+                    self.shared_texts.append(node.text2)
+        var samples = List[Series](capacity=len(self.key_columns))
+        for key in self.key_columns:
+            samples.append(_contiguous(key, 0, 1))
+        if len(self.shared_texts) > 0 and not _integer_key(samples):
+            self.placed_hashes = huge_uninit[UInt64](self.height)
         while self.bits < _MOST_BITS and (self.height >> self.bits) > _BIN_ROWS:
             self.bits = min(self.bits + 2, _MOST_BITS)
         var blocks = (
@@ -577,6 +614,14 @@ struct WindowSink(Movable, Rounds):
         for b in range(bins):
             starts[b] = at
             at += counts[b]
+        if len(self.placed_hashes) > 0:
+            var placed = self.placed_hashes.unsafe_ptr()
+            for i in range(n):
+                var r = lo + i
+                placed[
+                    unsafe_offset=starts[Int(bin_of[unsafe_offset=r])]
+                    + Int(inverse[unsafe_offset=r])
+                ] = hash[unsafe_offset=i]
         if len(self.placed_rows) > 0:
             var rows = self.placed_rows.unsafe_ptr()
             for r in range(lo, hi):
@@ -658,18 +703,58 @@ struct WindowSink(Movable, Rounds):
                         for k in range(starts[t], starts[t] + counts[t]):
                             picks.append(self.placed_rows[k])
                     part.append(self.reads[c].take(picks))
-            var frame = DataFrame(part^, height=self.sizes[b])
-            var out = frame.select_exprs(self.evaluated)
-            var columns = List[Series](capacity=len(out._columns))
-            for column in out._columns:
-                columns.append(
-                    column.rechunk() if column.is_chunked() else column.copy()
+            var rows = self.sizes[b]
+            var layouts = WindowLayouts()
+            if len(self.shared_texts) > 0:
+                var keys = List[Series](capacity=len(self.key_reads))
+                for at in self.key_reads:
+                    keys.append(part[at].copy())
+                var hashes = List[UInt64]()
+                if len(self.placed_hashes) > 0:
+                    hashes = List[UInt64](unsafe_uninit_length=rows)
+                    var to = hashes.unsafe_ptr()
+                    var source = self.placed_hashes.unsafe_ptr()
+                    var at = 0
+                    for t in range(tasks):
+                        if counts[t] > 0:
+                            unsafe_memcpy(
+                                dest=to.unsafe_offset(at),
+                                src=source.unsafe_offset(starts[t]),
+                                count=counts[t],
+                            )
+                        at += counts[t]
+                var groups = ArcPointer(
+                    bin_partition_groups(keys, Int(hashes.unsafe_ptr()), rows)
                 )
+                _ = hashes^
+                for text in self.shared_texts:
+                    layouts.id_keys.append(text)
+                    layouts.groups.append(groups)
+                    layouts.ids.append(List[Int]())
+            var bound = _bind_all(self.evaluated, part)
+            var columns = List[Series](capacity=len(bound))
+            for expression in bound:
+                var value = evaluate(
+                    expression,
+                    part,
+                    rows,
+                    batch_size=8192,
+                    layouts=Int(Pointer(to=layouts)),
+                )
+                if expression.shape() != ROWS:
+                    value = value._broadcast(rows)
+                columns.append(
+                    value.rechunk() if value.is_chunked() else value^
+                )
+            _ = layouts^
             self.results[b] = columns^
 
     def _start_gather(mut self) raises -> Int:
         # The placed columns are no longer read.
         self.placed = List[Series]()
+        if len(self.placed_hashes) > 0:
+            release_huge(self.placed_hashes^)
+            self.placed_hashes = List[UInt64]()
         self.placed_valid = List[List[UInt8]]()
         var bins = 1 << self.bits
         # Each bin's first place among all rows in the order its results
