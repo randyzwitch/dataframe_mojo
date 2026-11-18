@@ -632,7 +632,7 @@ def _add_stream(
     join in the probe's finish group. `build` is the join this stream's
     result is the build side of, `type` its kind there
     (`META_REGULAR` or `META_JOIN_BUILD`)."""
-    ref self = Pointer[QueryContext, MutAnyOrigin](unsafe_from_address=plan)[]
+    ref self = Pointer[QueryContext, ImmutAnyOrigin](unsafe_from_address=plan)[]
     var count = len(inputs.wanted)
     for k in range(count):
         if inputs.joins[k] >= 0:
@@ -1237,7 +1237,7 @@ struct _StreamProbe(Movable):
             below.build_filtered = Dict[Int, Bool]()
         if not self.is_input and len(self.declined) == 0:
             return started^
-        ref on = Pointer[QueryContext, MutAnyOrigin](
+        ref on = Pointer[QueryContext, ImmutAnyOrigin](
             unsafe_from_address=self._on()
         )[]
         var cursor = below.cursor
@@ -1925,7 +1925,6 @@ def _probe_start(
         indexes,
         distinct,
         len(keys),
-        len(joins),
         ordered,
         expressions,
     )
