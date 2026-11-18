@@ -85,11 +85,13 @@ def test_ordered_groupings_take_the_inline_table() raises:
             )
 
 
-def test_positional_global_reduction_uses_ordered_batches() raises:
+def test_positional_global_reduction_takes_the_pipeline() raises:
+    # Each worker's rows are numbered from their morsel's, so first and last
+    # combine by source order.
     var frame = _source()
     var result = _run(
         frame.lazy().select(col("v").first()),
-        "batch_stream: positional_global_reduction",
+        "morsel_pipeline: row_local_frame_pipeline",
     )
     assert_equal(result.height(), 1)
     assert_equal(result.column("v").int64().value(0), Int64(0))

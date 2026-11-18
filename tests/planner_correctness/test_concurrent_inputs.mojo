@@ -451,8 +451,9 @@ def test_aggregate_build_sides_finish_with_the_steps_above_them() raises:
 
 def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
     """A build side whose aggregate the stream declines once its inputs
-    are known (an ordered grouping over a join with a median: no
-    pipeline keeps those states in order) still runs in the schedule:
+    are known (an ordered grouping over a right join, whose rows come in
+    its build side's order, which no pipeline keeps) still runs in the
+    schedule:
     its pipeline makes the joined rows, and the aggregate runs over them
     as an operator, with no schedule inside another's task. The result
     is what the eager steps give."""
@@ -470,7 +471,14 @@ def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
     ).lazy()
     var probe = frame.lazy().filter(col("v") > lit(Int64(-400)))
     var grouped = (
-        probe.join(dim, ["k"])
+        probe.join(
+            dim,
+            left_on=["k"],
+            right_on=["k"],
+            how="right",
+            suffix="_d",
+            coalesce=False,
+        )
         .group_by("s", maintain_order=True)
         .agg([col("v").median().alias("m"), col("w").sum().alias("t")])
     )
@@ -499,7 +507,14 @@ def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
     )
     var eager_grouped = (
         frame.filter(col("v") > lit(Int64(-400)))
-        .join(dim.collect(), on=["k"])
+        .join(
+            dim.collect(),
+            left_on=["k"],
+            right_on=["k"],
+            how="right",
+            suffix="_d",
+            coalesce=False,
+        )
         .group_by(["s"], maintain_order=True)
         .agg([col("v").median().alias("m"), col("w").sum().alias("t")])
     )

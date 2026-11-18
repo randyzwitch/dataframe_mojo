@@ -6,13 +6,9 @@ from dataframe.dtype import (
     DataType,
 )
 from dataframe.expr import (
-    ARG_MAX,
-    ARG_MIN,
     COL,
     Expr,
-    FIRST,
     IMPLODE,
-    LAST,
     MAX,
     MEDIAN,
     MIN,
@@ -115,7 +111,6 @@ def pipeline_eligibility(
     indexes: List[Optional[JoinHashTable]],
     distinct: Bool,
     key_count: Int,
-    join_count: Int,
     ordered: Bool,
     expressions: List[Expr],
 ) -> PipelineEligibility:
@@ -128,11 +123,21 @@ def pipeline_eligibility(
         return PipelineEligibility(False, "empty_top_requires_batches")
     if not _pipeline_steps(operations, indexes):
         return PipelineEligibility(False, "build_rows_need_table")
-    if not (join_count == 0 or key_count == 0 or not ordered):
-        return PipelineEligibility(False, "ordered_grouped_join")
-    if not (key_count > 0 or not _order_sensitive(expressions)):
-        return PipelineEligibility(False, "positional_global_reduction")
+    if ordered and key_count > 0 and _emits_build_rows(operations):
+        return PipelineEligibility(False, "ordered_groups_need_join_order")
     return PipelineEligibility(True, "row_local_frame_pipeline")
+
+
+def _emits_build_rows(operations: List[PlanNode]) -> Bool:
+    """Whether some join emits build rows: a right join's rows come in its
+    build side's order and a full join's unmatched build rows come after
+    its probe rows, while the pipeline emits a join's build rows after
+    every probe morsel, in the hash table's order. Groups kept in order of
+    first appearance need the join's own order."""
+    for node in operations:
+        if node.kind == JOIN and join_emits_build_rows(node.how):
+            return True
+    return False
 
 
 def consider_inline_table(
@@ -152,18 +157,6 @@ def _counts_distinct(expressions: List[Expr]) -> Bool:
     for expression in expressions:
         for node in expression._nodes:
             if node.op == N_UNIQUE:
-                return True
-    return False
-
-
-def _order_sensitive(expressions: List[Expr]) -> Bool:
-    """Whether a reduction's answer depends on the order rows arrive
-    (first, last, the position of a minimum or maximum): its states
-    merge by row order, which workers taking morsels from a shared
-    cursor do not keep."""
-    for expression in expressions:
-        for node in expression._nodes:
-            if node.op in [FIRST, LAST, ARG_MIN, ARG_MAX]:
                 return True
     return False
 
