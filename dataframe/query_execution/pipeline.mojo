@@ -1925,7 +1925,6 @@ def _probe_start(
         indexes,
         distinct,
         len(keys),
-        len(joins),
         ordered,
         expressions,
     )
