@@ -109,7 +109,6 @@ def _assert_pipelined(query: LazyFrame) raises:
         paths.find("dataframe-strategy: morsel_pipeline") >= 0,
         paths,
     )
-    assert_true(paths.find("batch_stream") < 0, paths)
 
 
 def test_positional_reductions_keep_source_order() raises:

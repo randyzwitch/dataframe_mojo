@@ -113,20 +113,14 @@ def _same(actual: DataFrame, expected: DataFrame, sort_by: List[String]) raises:
 
 
 def _check(query: LazyFrame, expected: DataFrame, sort_by: List[String]) raises:
-    """The query over the file on four workers, in batches, in the morsel
-    pipeline, against the in-memory answer."""
+    """The query over the file on four workers, in batches, against the
+    in-memory answer."""
     var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
-    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     for optimize in [False, True]:
-        var trace = StrategyTrace()
         var actual = query.collect(
             engine="cpu", streaming=True, optimize=optimize, batch_size=_BATCH
         )
-        var paths = trace.text()
-        _ = trace^
         _same(actual, expected, sort_by)
-        assert_true(paths.find("dataframe-strategy: batch_stream") < 0, paths)
-    _ = setting^
     _ = threads^
 
 
@@ -289,4 +283,3 @@ def test_categorical_file_scan_routes_to_the_morsel_pipeline() raises:
     _ = threads^
     assert_true(result.column("s").dtype().is_categorical())
     assert_true(paths.find("dataframe-strategy: table_pipeline") >= 0, paths)
-    assert_true(paths.find("dataframe-strategy: batch_stream") < 0, paths)

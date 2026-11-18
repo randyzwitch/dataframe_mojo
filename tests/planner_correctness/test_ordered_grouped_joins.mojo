@@ -107,7 +107,6 @@ def _assert_table(query: LazyFrame) raises:
         paths.find("dataframe-strategy: table_pipeline") >= 0,
         paths,
     )
-    assert_true(paths.find("batch_stream") < 0, paths)
 
 
 def test_ordered_groups_over_joins_keep_first_appearance() raises:

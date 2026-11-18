@@ -1571,10 +1571,13 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         batch_size: Int = 65536,
         optimize: Bool = True,
     ) raises:
-        """Execute batches into an atomic Parquet output without collecting them.
+        """Execute the query into an atomic Parquet output, rows in the
+        query's order.
 
-        Row groups span executor batches. Existing materializing operators
-        and aggregate states retain their usual memory requirements.
+        Rows straight from a scan's steps and joins are written as each
+        morsel completes, without collecting them. Row groups span batches.
+        Aggregates, sorts and other materializing operators keep their
+        usual memory requirements.
         """
         self._sink_file(
             path,
@@ -1598,7 +1601,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         batch_size: Int = 65536,
         optimize: Bool = True,
     ) raises:
-        """Execute ordered batches into CSV, publishing after successful close.
+        """Execute the query into CSV in the query's row order, publishing
+        after successful close.
 
         Formatting options match write_csv. One header is written, including
         for an empty result. A scan may safely replace its own source path.
@@ -1662,26 +1666,37 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             line_terminator=line_terminator,
             buffer_size=buffer_size,
         )
-        var final = Optional[DataFrame]()
-        if len(shared) > 0:
-            final = plan_run_shared(
-                plan._plan,
-                shared,
-                index,
-                True,
-                batch_size,
-                Int(Pointer(to=output)),
+        # The query runs as `collect` runs it, through the same sinks. When
+        # its rows come straight from a pipeline's materialized morsels,
+        # the workers write each morsel's batch as it completes, in source
+        # order (`FileSink.offer`), and the result left here has no rows;
+        # otherwise the result (an aggregate's, a top-N's, a slice's) is
+        # written here.
+        var crew = Crew.start()
+        try:
+            var final = Optional[DataFrame]()
+            if len(shared) > 0:
+                final = plan_run_shared(
+                    plan._plan,
+                    shared,
+                    index,
+                    True,
+                    batch_size,
+                    Int(Pointer(to=output)),
+                )
+            else:
+                final = plan_stream_execute(
+                    plan._plan, index, batch_size, Int(Pointer(to=output))
+                )
+            var frame = final.take() if final else plan._execute(
+                index, False, True, batch_size
             )
-        else:
-            final = plan_stream_execute(
-                plan._plan, index, batch_size, Int(Pointer(to=output))
-            )
-        var frame = final.take() if final else plan._execute(
-            index, False, True, batch_size
-        )
-        for offset in range(0, frame.height(), batch_size):
-            output.append(frame.slice(offset, batch_size))
-        output.finish()
+            output.write_frame(frame, batch_size)
+            output.finish()
+            crew.release()
+        except e:
+            crew.release()
+            raise e^
 
     def collect(
         self,
