@@ -155,6 +155,31 @@ def _storage_joined(a: Storage, b: Storage) -> Optional[Storage]:
     return None
 
 
+def _storage_same_view(a: Storage, b: Storage) -> Bool:
+    """The same visible rows, not merely the same backing allocations."""
+    if not _storage_shares_buffers(a, b):
+        return False
+    comptime for i in range(len(FixedElements.Ts)):
+        comptime E: Copyable & Deinitable = FixedElements.Ts[i]
+        if a.isa[Column[E]]():
+            ref x = a[Column[E]]
+            ref y = b[Column[E]]
+            return x._offset == y._offset and x._length == y._length
+    if a.isa[BoolColumn]():
+        ref x = a[BoolColumn]
+        ref y = b[BoolColumn]
+        return x._offset == y._offset and x._length == y._length
+    if a.isa[StringColumn]():
+        ref x = a[StringColumn]
+        ref y = b[StringColumn]
+        return (
+            x._offset == y._offset
+            and x._length == y._length
+            and x._bits.ptr() == y._bits.ptr()
+        )
+    return False
+
+
 struct _ChunkCodesJob(Job):
     """One string chunk's dictionary codes as a categorical chunk; a
     gathered chunk gathers its codes here. The caller has checked that the
@@ -809,16 +834,14 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         return len(self._data[StringColumn])
 
     def _shares_buffers_with(self, other: Self) -> Bool:
-        """Whether both series read the same Arrow buffers: the same
-        column, however many times copied. Chunked series share when
+        """Whether both series retain the same Arrow buffers; their row
+        windows and logical types may differ. Chunked series share when
         every chunk does; list and struct columns never report sharing."""
         if self.is_chunked() or other.is_chunked():
             if not (self.is_chunked() and other.is_chunked()):
                 return False
             # Copies of a chunked series share one array list; otherwise
-            # the arrays are compared in place, without a view per chunk
-            # (the planner compares scanned frames each time it classes
-            # a plan's subtrees).
+            # the arrays are compared in place, without a view per chunk.
             ref mine = self._chunked.value()
             ref theirs = other._chunked.value()
             if mine.ptr() == theirs.ptr():
@@ -832,6 +855,47 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                     return False
             return True
         return _storage_shares_buffers(self._data, other._data)
+
+    def _same_view_as(self, other: Self) -> Bool:
+        """Whether source reuse preserves the rows, logical type and metadata.
+
+        Buffer ownership alone does not identify a slice. Compare every
+        chunk's visible window; unknown storage layouts stay separate.
+        """
+        if self._dtype != other._dtype or len(self) != len(other):
+            return False
+        # Categorical schema compatibility also accepts missing dictionaries
+        # and growing prefixes. A reused source must keep its own mapping.
+        if self._dtype.has_dictionary() != other._dtype.has_dictionary():
+            return False
+        if self._dtype.has_dictionary() and (
+            self._dtype.dictionary().ptr() != other._dtype.dictionary().ptr()
+        ):
+            return False
+        if Bool(self._field_metadata) != Bool(other._field_metadata):
+            return False
+        if self._field_metadata and (
+            self._field_metadata.value().ptr()
+            != other._field_metadata.value().ptr()
+            and not _equal_metadata(
+                self._field_metadata.value()[], other._field_metadata.value()[]
+            )
+        ):
+            return False
+        if self.is_chunked() or other.is_chunked():
+            if not (self.is_chunked() and other.is_chunked()):
+                return False
+            ref mine = self._chunked.value()
+            ref theirs = other._chunked.value()
+            if mine.ptr() == theirs.ptr():
+                return True
+            if len(mine[].arrays) != len(theirs[].arrays):
+                return False
+            for i in range(len(mine[].arrays)):
+                if not _storage_same_view(mine[].arrays[i], theirs[].arrays[i]):
+                    return False
+            return True
+        return _storage_same_view(self._data, other._data)
 
     def null_count(self) -> Int:
         if self.is_chunked():
