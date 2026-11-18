@@ -15,6 +15,13 @@ from dataframe.execution_settings import ExecutionSettings
 from dataframe.frame import DataFrame
 from dataframe.lazy import AcceleratorBackend, LazyFrame
 from dataframe.series import Series
+from dataframe.frame import concat
+from dataframe.execution_report import (
+    ExecutionReport,
+    execution_trace_path,
+    trace_execution,
+)
+from std.memory import ArcPointer
 from .accelerator.faults import is_data_fault, DATA_FAULT
 from .accelerator.gpu.query_scope import DeviceService
 from .accelerator.gpu.target import METAL_TARGET
@@ -95,8 +102,12 @@ struct MetalRuntime(AcceleratorBackend):
 
     def describe(self, query: LazyFrame) -> String:
         """Which nodes Metal runs; the CPU runs the rest."""
+        from .selection_reduce import selection_supports
+
         try:
-            var nodes = query._handoff_nodes()
+            var offered = query.copy()
+            offered._plan._selection_supports = selection_supports
+            var nodes = offered._handoff_nodes()
             if len(nodes) == 0:
                 return (
                     "ENGINE accel: CPU executor; Metal supports no node of"
@@ -114,14 +125,25 @@ struct MetalRuntime(AcceleratorBackend):
     ) raises -> Tuple[DataFrame, DataFrame]:
         comptime if METAL_TARGET:
             var configured = self._configured(query)
+            var report = Optional[ArcPointer[ExecutionReport]]()
+            if profiling or execution_trace_path():
+                report = ArcPointer(ExecutionReport())
             var fault: String
             try:
-                return configured._run(query, profiling)
+                var result = configured._run(query, report)
+                if report:
+                    trace_execution(result[1])
+                return result^
             except error:
                 if not is_data_fault(error):
+                    if report:
+                        trace_execution(report.value()[].frame(), "failed")
                     raise error^
                 fault = String(error)
-            return configured._adjudicate(query, profiling, fault)
+            var result = configured._adjudicate(query, profiling, fault, report)
+            if report:
+                trace_execution(result[1], "cpu_adjudication")
+            return result^
         else:
             raise Error(
                 "Mojo Metal execution requires an Apple Metal compilation"
@@ -129,7 +151,7 @@ struct MetalRuntime(AcceleratorBackend):
             )
 
     def _run(
-        self, query: LazyFrame, profiling: Bool
+        self, query: LazyFrame, report: Optional[ArcPointer[ExecutionReport]]
     ) raises -> Tuple[DataFrame, DataFrame]:
         """Run `query` on the CPU executor, handing Metal the nodes it
         supports."""
@@ -168,23 +190,28 @@ struct MetalRuntime(AcceleratorBackend):
                         offered = normalized.take()
                         optimize = False
         var plan = offered._with_handoff()
-        if profiling:
-            return plan.profile(
-                engine="cpu",
-                optimize=optimize,
-                streaming=settings.streaming,
-                batch_size=settings.batch_size,
-            )
+        from .selection_reduce import selection_supports, selection_execute
+
+        plan._plan._selection_supports = selection_supports
+        plan._plan._selection_execute = selection_execute
+        plan._plan._report = report
         var result = plan.collect(
             engine="cpu",
             optimize=optimize,
             streaming=settings.streaming,
             batch_size=settings.batch_size,
         )
-        return (result^, DataFrame(List[Series]()))
+        return (
+            result^,
+            report.value()[].frame() if report else DataFrame(List[Series]()),
+        )
 
     def _adjudicate(
-        self, query: LazyFrame, profiling: Bool, fault: String
+        self,
+        query: LazyFrame,
+        profiling: Bool,
+        fault: String,
+        attempted: Optional[ArcPointer[ExecutionReport]],
     ) raises -> Tuple[DataFrame, DataFrame]:
         """Decide a query whose kernels observed a data fault on the CPU.
 
@@ -196,7 +223,7 @@ struct MetalRuntime(AcceleratorBackend):
         error keeps its message first, then names the Metal fault.
         """
         try:
-            return self._decide_on_cpu(query, profiling)
+            return self._decide_on_cpu(query, profiling, attempted)
         except cpu_error:
             var message = String(cpu_error)
             var observed = fault.replace(DATA_FAULT, "")
@@ -205,10 +232,13 @@ struct MetalRuntime(AcceleratorBackend):
             raise Error(message + " [Metal data fault: " + observed + "]")
 
     def _decide_on_cpu(
-        self, query: LazyFrame, profiling: Bool
+        self,
+        query: LazyFrame,
+        profiling: Bool,
+        attempted: Optional[ArcPointer[ExecutionReport]],
     ) raises -> Tuple[DataFrame, DataFrame]:
         var settings = self._execution_settings.copy()
-        if not profiling:
+        if not profiling and not attempted:
             var result = query.collect(
                 engine="cpu",
                 optimize=settings.optimize,
@@ -221,19 +251,87 @@ struct MetalRuntime(AcceleratorBackend):
                     [Series("fault_adjudication", Column[String](["cpu"]))]
                 ),
             )
-        var measured = query.profile(
-            engine="cpu",
-            optimize=settings.optimize,
-            streaming=settings.streaming,
-            batch_size=settings.batch_size,
+        var cpu_plan = query.copy()
+        var cpu_report = ArcPointer(ExecutionReport())
+        cpu_plan._plan._report = cpu_report
+        var cpu_result: DataFrame
+        try:
+            cpu_result = cpu_plan.collect(
+                engine="cpu",
+                optimize=settings.optimize,
+                streaming=settings.streaming,
+                batch_size=settings.batch_size,
+            )
+        except error:
+            trace_execution(
+                self._adjudication_report(cpu_report[].frame(), attempted),
+                "cpu_adjudication_failed",
+            )
+            raise error^
+        return (
+            cpu_result^,
+            self._adjudication_report(cpu_report[].frame(), attempted),
         )
+
+    def _adjudication_report(
+        self,
+        var report: DataFrame,
+        attempted: Optional[ArcPointer[ExecutionReport]],
+    ) raises -> DataFrame:
+        if attempted:
+            var discarded = attempted.value()[].frame()
+            discarded = discarded.with_column(
+                Series(
+                    "result_used",
+                    Column[Bool](
+                        List[Bool](length=discarded.height(), fill=False)
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "execution_attempt",
+                    Column[Int64](List[Int64](length=report.height(), fill=1)),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "query_id",
+                    Column[Int64](
+                        List[Int64](
+                            length=report.height(),
+                            fill=Int64(attempted.value()[].query_id),
+                        )
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "fallback_reason",
+                    Column[String](
+                        List[String](
+                            length=report.height(),
+                            fill="data_fault_adjudication",
+                        )
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "device_status",
+                    Column[String](
+                        List[String](
+                            length=report.height(), fill="cpu_fallback"
+                        )
+                    ),
+                )
+            )
+            report = concat([discarded^, report^])
         var marker = Series(
             "fault_adjudication",
-            Column[String](
-                List[String](length=measured[1].height(), fill="cpu")
-            ),
+            Column[String](List[String](length=report.height(), fill="cpu")),
         )
-        return (measured[0].copy(), measured[1].with_column(marker^))
+        return report.with_column(marker^)
 
     def _configured(self, query: LazyFrame) -> Self:
         var configured = self.copy()

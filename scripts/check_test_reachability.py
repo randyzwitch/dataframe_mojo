@@ -10,6 +10,7 @@ glob in CI, so they count as reachable. Files in the six area directories are
 found by the contract runner and are not checked.
 """
 
+import ast
 import re
 import subprocess
 import sys
@@ -74,6 +75,23 @@ def candidates():
     return result
 
 
+def sibling_python_imports(path, source):
+    """Resolve local imports made by Python test scripts run by filename."""
+    parent = Path(path).parent
+    imports = set()
+    for node in ast.walk(ast.parse(source)):
+        modules = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            modules = [node.module]
+        for module in modules:
+            target = str(parent / (module.replace(".", "/") + ".py"))
+            if target != path:
+                imports.add(target)
+    return imports
+
+
 def main():
     reference_text = ""
     for ref in REFERENCE_PATHS:
@@ -91,13 +109,17 @@ def main():
         if path.startswith(areas):
             reference_text += read(path) + "\n"
     import_lines = {}
+    sibling_imports = set()
     for path in all_tests:
         if Path(path).suffix not in {".mojo", ".py"}:
             continue
+        source = read(path)
         lines = [
-            line for line in read(path).splitlines() if IMPORT_LINE.match(line)
+            line for line in source.splitlines() if IMPORT_LINE.match(line)
         ]
         import_lines[path] = "\n".join(lines)
+        if Path(path).suffix == ".py":
+            sibling_imports.update(sibling_python_imports(path, source))
 
     def needles(path):
         suffix = Path(path).suffix
@@ -115,11 +137,15 @@ def main():
             ):
                 found = True
             else:
-                found = any(n in reference_text for n in needles(path)) or any(
-                    n in text
-                    for other, text in import_lines.items()
-                    if other != path
-                    for n in needles(path)
+                found = (
+                    path in sibling_imports
+                    or any(n in reference_text for n in needles(path))
+                    or any(
+                        n in text
+                        for other, text in import_lines.items()
+                        if other != path
+                        for n in needles(path)
+                    )
                 )
             if found:
                 pending.remove(path)

@@ -96,7 +96,10 @@ def execute_packed_logical(
             )
         var timings = HandoffTimings()
         var started = Int(perf_counter_ns())
-        var scope = Scope(service=shared_service())
+        var scope = Scope(
+            service=shared_service(),
+            observation=region._plan._device_observation,
+        )
         var ctx = scope.context()
         timings.context_ns = Int(perf_counter_ns()) - started
         started = Int(perf_counter_ns())
@@ -109,7 +112,9 @@ def execute_packed_logical(
         for field in range(len(plan.inputs)):
             sources.append(frame.column(plan.inputs[field]))
             var views: List[NumericView]
-            if zero_copy and not plan.values[field]:
+            if frame.height() == 0:
+                views = List[NumericView]()
+            elif zero_copy and not plan.values[field]:
                 if not plan.validity[field]:
                     views = [
                         NumericView(

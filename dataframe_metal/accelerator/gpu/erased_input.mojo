@@ -33,6 +33,8 @@ def _place[
     var chunks = _place_chunks[D](scope, source, zero_copy, coalesce=coalesce)
     var views = List[NumericView]()
     for chunk in chunks:
+        if chunk.length == 0:
+            continue
         owners.append(NativeColumnAny(chunk))
         var values = chunk.values().create_sub_buffer[DType.uint8](
             chunk.value_offset * size_of[Scalar[D]](),

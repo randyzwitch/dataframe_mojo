@@ -16,6 +16,7 @@ spec = importlib.util.spec_from_file_location(
 report = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(report)
 from suite_answer_fixture import export_fixture  # suite_answer_fixture.py
+from metal_execution_fixture import evidence
 
 
 def fixture():
@@ -53,6 +54,9 @@ def fixture():
             scale="default",
             repetitions=3,
             driver_sha256=report.collector.sha(report.collector.metal.__file__),
+            execution_audit_verifier_sha256=report.collector.sha(
+                report.collector.metal.metal_execution_audit.__file__
+            ),
             comparison="exact",
             original_source_sha256={
                 **sources,
@@ -67,6 +71,9 @@ def fixture():
                 ordered_equal=True,
                 collections=3,
                 output_rows=2,
+                runtime_execution=evidence(
+                    report.collector.metal.metal_execution_audit, 3
+                ),
                 runtime_adjudication=dict(
                     status="complete",
                     observed_calls=3,
@@ -218,6 +225,10 @@ class ApplePerformanceHTML(unittest.TestCase):
             ),
             lambda d, s: d["cases"][0]["strict_basis"].update(receipt_sha256="other"),
             lambda d, s: s["cases"][0].pop("runtime_adjudication"),
+            lambda d, s: s["cases"][0].pop("runtime_execution"),
+            lambda d, s: s["cases"][0]["runtime_execution"].update(
+                gpu_result_calls=9
+            ),
             lambda d, s: s["cases"][0]["runtime_adjudication"].update(
                 status="incomplete"
             ),

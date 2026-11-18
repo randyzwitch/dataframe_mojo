@@ -9,6 +9,7 @@ from std.time import perf_counter_ns
 from .target import METAL_TARGET
 from .target import MetalContext as DeviceContext
 from .scratch_pool import ScratchPool
+from dataframe.execution_observation import DeviceObservation
 
 comptime ContextCell = Optional[DeviceContext if METAL_TARGET else Int]
 
@@ -230,6 +231,8 @@ struct _ScopeState(Movable):
     var uploads: Atomic[Int64]
     var downloads: Atomic[Int64]
     var launches: Atomic[Int64]
+    var completed_launches: Atomic[Int64]
+    var observation: Optional[ArcPointer[DeviceObservation]]
     var waits: Atomic[Int64]
     var context_lock: Atomic[Int64]
     var context_ready: Atomic[Int64]
@@ -243,6 +246,7 @@ struct _ScopeState(Movable):
         budget: Int,
         profiling: Bool,
         service: Optional[DeviceService],
+        observation: Optional[ArcPointer[DeviceObservation]],
     ):
         self.context = None
         self.service = service.copy()
@@ -255,6 +259,10 @@ struct _ScopeState(Movable):
         self.uploads = Atomic[Int64](0)
         self.downloads = Atomic[Int64](0)
         self.launches = Atomic[Int64](0)
+        self.completed_launches = Atomic[Int64](0)
+        self.observation = observation
+        if observation:
+            observation.value()[].provider = "metal"
         self.waits = Atomic[Int64](0)
         self.context_lock = Atomic[Int64](0)
         self.context_ready = Atomic[Int64](0)
@@ -277,13 +285,14 @@ struct Scope(Copyable):
         *,
         profiling: Bool = False,
         service: Optional[DeviceService] = None,
+        observation: Optional[ArcPointer[DeviceObservation]] = None,
     ) raises:
         if device_id < 0 or budget < -1:
             raise Error("Mojo GPU resident device or budget is invalid")
         if service and service.value().device_id() != device_id:
             raise Error("Mojo GPU device service is for a different device")
         self._state = ArcPointer(
-            _ScopeState(device_id, budget, profiling, service)
+            _ScopeState(device_id, budget, profiling, service, observation)
         )
 
     @staticmethod
@@ -440,23 +449,63 @@ struct Scope(Copyable):
 
     def record_upload(self, bytes: Int):
         _ = self._state[].uploads.fetch_add(Int64(bytes))
+        if self._state[].observation:
+            _ = (
+                self._state[]
+                .observation.value()[]
+                .upload_bytes.fetch_add(Int64(bytes))
+            )
 
     def record_download(self, bytes: Int):
         _ = self._state[].downloads.fetch_add(Int64(bytes))
+        if self._state[].observation:
+            _ = (
+                self._state[]
+                .observation.value()[]
+                .download_bytes.fetch_add(Int64(bytes))
+            )
 
     def record_launches(self, count: Int = 1):
         _ = self._state[].launches.fetch_add(Int64(count))
+        if self._state[].observation:
+            _ = (
+                self._state[]
+                .observation.value()[]
+                .launches.fetch_add(Int64(count))
+            )
 
     def synchronize(self) raises:
         if self.initialized():
-            var started = Int(
-                perf_counter_ns()
-            ) if self._state[].profiling else 0
-            self.context().synchronize()
+            var observed = self._state[].observation
+            var measuring = self._state[].profiling or Bool(observed)
+            var started = Int(perf_counter_ns()) if measuring else 0
+            var submitted = (
+                self._state[].launches.load() if observed else Int64(0)
+            )
+            if observed:
+                _ = observed.value()[].waits.fetch_add(1)
+            try:
+                self.context().synchronize()
+            except error:
+                if observed:
+                    _ = observed.value()[].wait_ns.fetch_add(
+                        Int64(Int(perf_counter_ns()) - started)
+                    )
+                raise error^
+            var elapsed = Int(perf_counter_ns()) - started if measuring else 0
             if self._state[].profiling:
-                _ = self._state[].synchronization_ns.fetch_add(
-                    Int64(Int(perf_counter_ns()) - started)
-                )
+                _ = self._state[].synchronization_ns.fetch_add(Int64(elapsed))
+            if observed:
+                var previous = self._state[].completed_launches.load()
+                while submitted > previous:
+                    if self._state[].completed_launches.compare_exchange(
+                        previous, submitted
+                    ):
+                        _ = observed.value()[].completed_launches.fetch_add(
+                            submitted - previous
+                        )
+                        break
+                _ = observed.value()[].wait_ns.fetch_add(Int64(elapsed))
             _ = self._state[].waits.fetch_add(1)
 
     def timing_ns(self) -> Tuple[Int, Int]:

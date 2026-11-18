@@ -69,7 +69,10 @@ def execute_predicate_logical(
                 "Metal predicate logical reduction requires fewer than2**31 rows"
             )
         var started = Int(perf_counter_ns())
-        var scope = Scope(service=shared_service())
+        var scope = Scope(
+            service=shared_service(),
+            observation=region._plan._device_observation,
+        )
         var ctx = scope.context()
         timings.context_ns = Int(perf_counter_ns()) - started
         started = Int(perf_counter_ns())

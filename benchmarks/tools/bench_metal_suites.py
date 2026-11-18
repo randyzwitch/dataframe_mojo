@@ -30,6 +30,7 @@ import bench_policy
 import metal_query_report
 from metal_materialization_adapter import lift_scalar_selects
 from metal_answer_exports import parse_export, collect_exports
+import metal_execution_audit
 
 
 def sha(path):
@@ -202,17 +203,32 @@ def parse(output, query):
     diagnostics = {}
     exports = []
     runtime_events = []
+    runtime_calls = []
+    pending_pipelines = []
     for line in output.splitlines():
         fields = line.split("\t")
-        if fields[0] == "runtime_audit":
+        if fields[0] == "runtime_pipeline":
+            if len(fields) != 2:
+                raise ValueError("Malformed pipeline execution audit")
+            pending_pipelines.append(
+                metal_execution_audit.validate_pipeline(json.loads(fields[1]))
+            )
+        elif fields[0] == "runtime_audit":
             if len(fields) != 2 or fields[1] not in {
                 "cpu",
                 "no_marker",
                 "unknown",
                 "failed",
+                "gpu_observed",
+                "cpu_only",
+                "no_device_work",
             }:
                 raise ValueError("Malformed runtime adjudication audit")
             runtime_events.append(fields[1])
+            runtime_calls.append(
+                dict(status=fields[1], pipelines=pending_pipelines)
+            )
+            pending_pipelines = []
         elif fields[0] == "answer_export":
             if len(fields) != 2:
                 raise ValueError("Malformed answer export line")
@@ -307,6 +323,8 @@ def parse(output, query):
             diagnostics.setdefault("errors", []).append(
                 {"comparison": fields[1], "reason": fields[2]}
             )
+    if pending_pipelines:
+        raise ValueError("Pipeline execution records lack a collection outcome")
     if runtime_events:
         runtime = {
             "status": "complete",
@@ -324,6 +342,9 @@ def parse(output, query):
         if runtime["unknown_calls"] or runtime["failed_calls"]:
             runtime["status"] = "incomplete"
         result["runtime_adjudication"] = runtime
+        result["runtime_execution"] = metal_execution_audit.summarize(
+            runtime_calls, result.get("collections", 0)
+        )
     elif status == "ok":
         raise ValueError("Successful outcome lacks per-collection runtime audit")
     if status == "ok" and (
@@ -415,6 +436,7 @@ def command(args):
 def driver_provenance():
     return {
         "driver_sha256": sha(__file__),
+        "execution_audit_verifier_sha256": sha(metal_execution_audit.__file__),
         "answer_export_verifier_sha256": sha(
             Path(__file__).with_name("metal_answer_exports.py")
         ),

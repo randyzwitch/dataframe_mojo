@@ -9,12 +9,15 @@ from .typed_storage import (
 )
 from .query_scope import Scope
 from .filter_sum import BLOCK_SIZE
+from dataframe.execution_observation import DeviceObservation
+from std.memory import ArcPointer
 
 comptime MAX_PARTIALS = 1024
 
 
 struct HandoffTimings(Copyable, Movable):
-    """Where one hand-off spent its time, in nanoseconds."""
+    """Host wall time by phase, in nanoseconds. `kernel_ns` includes queue
+    submission, device work, copies and waits; it is not GPU-only time."""
 
     var context_ns: Int
     var upload_ns: Int
@@ -26,6 +29,13 @@ struct HandoffTimings(Copyable, Movable):
         self.upload_ns = 0
         self.kernel_ns = 0
         self.finish_ns = 0
+
+    def record(self, observation: Optional[ArcPointer[DeviceObservation]]):
+        if observation:
+            observation.value()[].provider = "metal"
+            observation.value()[].phases(
+                self.context_ns, self.upload_ns, self.kernel_ns, self.finish_ns
+            )
 
 
 def _place[

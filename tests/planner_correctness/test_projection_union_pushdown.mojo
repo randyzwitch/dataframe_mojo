@@ -76,23 +76,27 @@ def assert_same(plan: LazyFrame) raises:
 
 
 def rows_into(plan: LazyFrame, operator: String) raises -> List[Int]:
-    """The input rows of each node whose operator label starts with
+    """The input rows of each consumer-plan node whose label starts with
     `operator`, in the profile's order."""
     var report = plan.profile(engine="cpu")[1].copy()
     var out = List[Int]()
     for r in range(report.height()):
-        if report.item(r, "operator").string().startswith(operator):
+        if report.item(r, "plan_id").int64() == 0 and report.item(
+            r, "operator"
+        ).string().startswith(operator):
             out.append(Int(report.item(r, "input_rows").int64()))
     return out^
 
 
 def rows_from(plan: LazyFrame, operator: String) raises -> List[Int]:
-    """The output rows of each node whose operator label starts with
+    """The output rows of each consumer-plan node whose label starts with
     `operator`."""
     var report = plan.profile(engine="cpu")[1].copy()
     var out = List[Int]()
     for r in range(report.height()):
-        if report.item(r, "operator").string().startswith(operator):
+        if report.item(r, "plan_id").int64() == 0 and report.item(
+            r, "operator"
+        ).string().startswith(operator):
             out.append(Int(report.item(r, "output_rows").int64()))
     return out^
 

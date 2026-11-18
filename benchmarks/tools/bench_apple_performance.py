@@ -219,16 +219,22 @@ def strict_basis(case, receipts, engine, source_hashes, mojo, threads, metadata)
             measured, originals, metadata, provenance.get("derived_source_sha256", {})
         )
         runtime = measured.get("runtime_adjudication", {})
+        execution = measured.get("runtime_execution", {})
         runtime_verified = (
             runtime.get("status") == "complete"
             and runtime.get("observed_calls", 0) >= measured.get("collections", 0)
             and runtime.get("unknown_calls", 0) == 0
             and runtime.get("failed_calls", 0) == 0
+            and metal.metal_execution_audit.verified_summary(
+                execution, measured.get("collections", 0)
+            )
         )
         wrapper_path = "benchmarks/metal_coverage_audit.mojo"
         wrapper_pin_matches = (
             originals.get(wrapper_path) == sha(ROOT / wrapper_path)
             and provenance.get("driver_sha256") == sha(metal.__file__)
+            and provenance.get("execution_audit_verifier_sha256")
+            == sha(metal.metal_execution_audit.__file__)
         )
         return dict(
             receipt_sha256=receipt.get("receipt_sha256"),
@@ -236,6 +242,7 @@ def strict_basis(case, receipts, engine, source_hashes, mojo, threads, metadata)
             execution_boundary=audit["execution_boundary"],
             execution_audit=audit,
             runtime_adjudication=runtime,
+            runtime_execution=execution,
             runtime_audit_verified=(
                 runtime_verified
                 and wrapper_pin_matches
@@ -322,6 +329,15 @@ def ratio_basis(runs, strict, rounds, repetitions):
     runtime = strict.get("runtime_adjudication", {})
     if runtime.get("cpu_adjudicated_calls", 0) > 0:
         return "cpu_data_fault_adjudication_observed"
+    execution = strict.get("runtime_execution", {})
+    if not metal.metal_execution_audit.verified_summary(
+        execution, execution.get("observed_calls", 0)
+    ):
+        return "pipeline_execution_unverified"
+    if execution["cpu_fallback_calls"] or execution["cpu_compute_calls"]:
+        return "cpu_pipeline_work_observed"
+    if execution["gpu_result_calls"] != execution["observed_calls"]:
+        return "gpu_result_not_observed_for_every_collection"
     for engine in ENGINES:
         values = [r for r in runs if r["engine"] == engine]
         if len(values) != rounds or {r["round"] for r in values} != set(
@@ -430,6 +446,8 @@ def worker_environment(threads, inherited=None):
     for name in (
         "DATAFRAME_TRACE_PATHS",
         "DATAFRAME_EXECUTION_REPORT",
+        "DATAFRAME_EXECUTION_TRACE",
+        "DATAFRAME_METAL_PLACEMENT_TRACE",
         "DATAFRAME_BENCH_ANSWER_EXPORT_PREFIX",
     ):
         env.pop(name, None)
