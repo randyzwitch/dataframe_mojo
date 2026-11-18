@@ -282,6 +282,52 @@ Pipeline data faults retain CPU semantics: overflow, non-finite compensated
 partials and gradual-underflow cases are adjudicated on CPU. Hardware and
 allocation failures propagate as errors.
 
+### Selection handoff measurements on November 17, 2026
+
+Measured on an Apple M1 with eight CPU workers at source revision
+`f533fcc04da81e8fb634f205b3f2059203e05f70`. Each row below compares the same
+CPU producer and compiled binary across three execution paths. Values are
+median milliseconds over five repetitions, with complete result checks.
+
+| Input rows | CPU | Materialized Metal | Retained selections |
+| --- | ---: | ---: | ---: |
+| 1M | 6.597 | 13.509 | 13.741 |
+| 5M | 26.661 | 50.483 | 48.629 |
+| 10M | 51.156 | 97.874 | 91.192 |
+
+Retained selections reduced elapsed time versus materialized Metal by
+about 3.7% at 5M and 6.8% at 10M, but took 1.7% longer at 1M. CPU was
+faster in all three cases. The calibration belongs to the measured packaged
+build; source or compiler changes require a matching new capture.
+
+A separate direct-GPU calibration covers 44 layouts at each size. The
+counts below indicate where the measured Metal median was below the CPU
+median; they are not universal placement thresholds. Automatic placement
+uses the identity-matched profile for the application and its hardware.
+
+| Input rows | Layouts faster on Metal |
+| --- | ---: |
+| 1M | 3/44 |
+| 5M | 16/44 |
+| 10M | 23/44 |
+| 25M | 25/44 |
+| 50M | 23/44 |
+
+The representative suite comparison used H2O inputs with 10 million rows
+and PDS-H SF1 with 6,001,215 lineitem rows. MetalRuntime-requested execution
+had a narrowly lower median in one of 21 cases (PDS-H base q6, about 0.6%);
+CPU had the lower median in the other 20. These are
+end-to-end runtime comparisons: unsupported work can remain on CPU, and
+the collection audit does not certify a GPU launch for every query. All
+measured answers were checked against DuckDB. This report tier is below
+the repository's 100M/SF10 large tier; these results do not establish a
+historical large-query performance reversal.
+
+Native validation recorded 241 passing contracts and 2 failures, with
+all 16 native probes passing. Empty copied packed-logical input and
+grouped ordered FIRST/LAST parity also fail on the pre-selection baseline.
+Those failures remain recorded separately from the passing selection tests.
+
 ### Historical measurements on an M1 Mac mini
 
 These earlier, unversioned measurements are historical context and cannot
