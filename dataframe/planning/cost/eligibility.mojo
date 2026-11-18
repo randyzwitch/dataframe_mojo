@@ -106,27 +106,35 @@ def _pipeline_steps(
 
 
 def pipeline_eligibility(
-    top: Int,
     operations: List[PlanNode],
     indexes: List[Optional[JoinHashTable]],
     distinct: Bool,
     key_count: Int,
-    join_count: Int,
     ordered: Bool,
     expressions: List[Expr],
 ) -> PipelineEligibility:
     """Apply the original pipeline guards in their original short-circuit
     order. Any scan is a pipeline's source: an in-memory frame's morsels,
     or a file's batches (`ScanSource`). A slice runs in the pipeline's
-    limited sink, a sort's first rows in its top-N sink; a top-N of no rows
-    keeps no heap for the pipeline's sink to fill."""
-    if top == 0:
-        return PipelineEligibility(False, "empty_top_requires_batches")
+    limited sink, a sort's first rows in its top-N sink, and a sort's first
+    no rows over a source that yields none."""
     if not _pipeline_steps(operations, indexes):
         return PipelineEligibility(False, "build_rows_need_table")
-    if not (join_count == 0 or key_count == 0 or not ordered):
-        return PipelineEligibility(False, "ordered_grouped_join")
+    if ordered and key_count > 0 and _emits_build_rows(operations):
+        return PipelineEligibility(False, "ordered_groups_need_join_order")
     return PipelineEligibility(True, "row_local_frame_pipeline")
+
+
+def _emits_build_rows(operations: List[PlanNode]) -> Bool:
+    """Whether some join emits build rows: a right join's rows come in its
+    build side's order and a full join's unmatched build rows come after
+    its probe rows, while the pipeline emits a join's build rows after
+    every probe morsel, in the hash table's order. Groups kept in order of
+    first appearance need the join's own order."""
+    for node in operations:
+        if node.kind == JOIN and join_emits_build_rows(node.how):
+            return True
+    return False
 
 
 def consider_inline_table(

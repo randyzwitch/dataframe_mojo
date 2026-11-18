@@ -64,6 +64,71 @@ struct FrameSlots(Copyable, Movable, Sized):
         self._shared[].append(frame^)
 
 
+struct PlanNodes(Copyable, Movable, Sized):
+    """A plan's nodes, shared by its copies until one changes them.
+
+    Scheduling and running a query copies its plan many times, once per
+    pipeline that keeps its own memo or filters, while almost none of the
+    copies change a node. Copying every node (its expressions and names)
+    for each made those copies cost more than the planning they serve.
+    A copy shares the nodes instead; the first change made through a copy
+    whose nodes are still shared copies them for that copy alone. Any
+    access through a mutable plan counts as a change, so a read through a
+    `var` or `mut` plan may copy once; reads through a read-only plan never
+    do."""
+
+    var _shared: ArcPointer[List[PlanNode]]
+
+    @implicit
+    def __init__(out self, var nodes: List[PlanNode]):
+        self._shared = ArcPointer(nodes^)
+
+    def __init__(out self):
+        self._shared = ArcPointer(List[PlanNode]())
+
+    def __len__(self) -> Int:
+        return len(self._shared[])
+
+    def _own(mut self):
+        """Make the nodes this plan's alone before a change."""
+        if self._shared.count() > 1:
+            self._shared = ArcPointer(self._shared[].copy())
+
+    def __getitem__(ref self, index: Int) -> ref[self] PlanNode:
+        comptime if origin_of(self).mut:
+            Pointer[Self, MutAnyOrigin](
+                unsafe_from_address=Int(Pointer(to=self))
+            )[]._own()
+        debug_assert(0 <= index < len(self._shared[]), "plan node out of range")
+        return Pointer[PlanNode, origin_of(self)](
+            unsafe_from_address=Int(
+                self._shared[].unsafe_ptr().unsafe_offset(index)
+            )
+        )[]
+
+    def list(self) -> ref[ImmutAnyOrigin] List[PlanNode]:
+        """Every node, to read."""
+        return Pointer[List[PlanNode], ImmutAnyOrigin](
+            unsafe_from_address=Int(Pointer(to=self._shared[]))
+        )[]
+
+    def __iter__(self) -> type_of(self.list().__iter__()):
+        """The nodes in order, to read."""
+        return self.list().__iter__()
+
+    def append(mut self, var node: PlanNode):
+        self._own()
+        self._shared[].append(node^)
+
+    def pop(mut self) -> PlanNode:
+        self._own()
+        return self._shared[].pop()
+
+    def swap_elements(mut self, i: Int, j: Int):
+        self._own()
+        self._shared[].swap_elements(i, j)
+
+
 struct FinishAbove(Movable):
     """Row-local nodes over an aggregate, for its finish to run: `above`
     in plan order from the node reading the aggregate at `node` (grouped
@@ -127,7 +192,7 @@ struct SharedResults(Movable):
 struct QueryContext(Copyable, Deinitable, Movable):
     """Plan storage and per-run state, with explicit runtime ports."""
 
-    var _nodes: List[PlanNode]
+    var _nodes: PlanNodes
     var _frames: FrameSlots
     var _schemas: List[Optional[CsvSchema]]
     # Observed execution counters (#439), attached by `profile` and shared
@@ -208,7 +273,7 @@ struct QueryContext(Copyable, Deinitable, Movable):
         estimate: def(QueryContext, Int) thin -> Tuple[String, Float64],
         handoff_execute: def(QueryContext) raises thin -> DataFrame,
     ):
-        self._nodes = nodes^
+        self._nodes = PlanNodes(nodes^)
         self._frames = FrameSlots(frames^)
         self._schemas = schemas^
         self._report = None

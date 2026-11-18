@@ -48,7 +48,11 @@ from dataframe.aggregation.hash_table import (
     aggregate_finish,
     aggregate_layout,
 )
-from dataframe.aggregation.table_sink import _sink_jobs, input_vector
+from dataframe.aggregation.table_sink import (
+    _sink_jobs,
+    input_vector,
+    nested_vector,
+)
 from dataframe.parallel import (
     Rounds,
     configured_workers,
@@ -345,6 +349,8 @@ struct UngroupedSink(Sink):
     var filter_columns: List[Int]
     var types: List[Series]
     var output: DataChunk
+    # A list or struct input's key bytes over the last chunk's rows.
+    var encoded: DataChunk
     # A filter's kept rows, and those rows through the input's selection.
     var kept: List[UInt32]
     var through: List[UInt32]
@@ -407,6 +413,7 @@ struct UngroupedSink(Sink):
         self.selected_counts = List[Int]()
         self.selected_rows = List[List[UInt32]]()
         self.output = DataChunk(len(shared.expressions))
+        self.encoded = DataChunk(1)
         self.arena = _ValueArena()
         self.rows = List[Int](length=_BATCH, fill=self.groups.at(0))
         # Made by the first table update that needs it.
@@ -510,6 +517,18 @@ struct UngroupedSink(Sink):
         var physical = storage_physical(self.types[i])
         var dtype = self.types[i].dtype()
         var c = self.columns[i]
+        if dtype.is_nested():
+            # A distinct count of lists or structs counts their key bytes
+            # (`encode_nested_keys`), held as a string input's are.
+            var handle: Int
+            if c >= 0:
+                handle = nested_vector(chunk, c, arena, dtype, self.encoded, 0)
+            else:
+                handle = nested_vector(
+                    self.output, i, arena, dtype, self.encoded, 0
+                )
+            self.held.append(arena.columns[handle].copy())
+            return self.encoded.unified(0, arena)
         var v: Vector
         if c >= 0:
             v = input_vector(chunk, c, arena, physical, dtype)
