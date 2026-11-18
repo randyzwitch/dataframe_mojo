@@ -731,7 +731,8 @@ def plan_pushdown_filter(
         and _pinned(self._nodes[left])
         and _row_local(self._nodes[left].exprs)
     ):
-        var merged = self._nodes[left].exprs[0] & self._nodes[index].exprs[0]
+        var below = self._nodes[left].exprs[0].copy()
+        var merged = below & self._nodes[index].exprs[0]
         self._nodes[index].exprs = [merged^]
         self._nodes[index].left = self._nodes[left].left
         plan_forget_schema(self, index)
