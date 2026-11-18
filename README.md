@@ -1,390 +1,124 @@
 # dataframe_mojo
 
-An experimental, native CPU dataframe library for **Mojo**. Import it as
-`dataframe`. Storage and computation use Mojo and its standard library; there
-is no Python, pandas, Polars, or Arrow runtime dependency.
+Filter, join, and summarize tabular data directly in Mojo. Import `dataframe` to
+work with typed, nullable columns in memory or to build a query over local
+files. If you know Polars, expressions like `col("amount").sum()` will feel
+familiar. The query runs in your Mojo program without a Python runtime.
 
-This is a working first implementation, not a production engine or a portable
-backend facade. The API is provisional.
+## Try it
 
-Calendar-aware rolling and dynamic grouping are described in
-[Time windows](docs/time-windows.md). Ordered partitions, row numbers,
-mapping strategies and SQL ranking recipes are described in
-[Window functions](docs/window-functions.md).
-The Metal backend for Apple silicon is being rebuilt and runs no queries yet
-(see [Apple Metal](docs/apple-metal.md)).
-
-## Install
-
-Add it to another Pixi workspace straight from GitHub:
-
-```toml
-[workspace]
-preview = ["pixi-build"]
-
-[dependencies]
-mojo = ">=1.2,<1.3"
-dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.3.0" }
-```
-
-```mojo
-from dataframe import DataFrame, Series, Column, col
-```
-
-A compiled Mojo package only loads in the Mojo version that produced it, and
-pixi builds this package with the newest Mojo that `[package.host-dependencies]`
-in `pixi.toml` allows, so each tag targets one Mojo version. `v0.3.0` targets
-**1.2**; `v0.1.3` is the last tag for **1.1**.
-
-## Run
-
-With [Pixi 0.84.2](https://pixi.sh) installed, run these commands from this
-directory. Pixi fetches and builds
-[unicode_mojo](https://github.com/randyzwitch/unicode_mojo) from the Git revision
-pinned in `pixi.toml`.
+Start with the [v0.3.0 release](https://github.com/randyzwitch/dataframe_mojo/releases/tag/v0.3.0).
+Its lockfile installs Mojo 1.2.0 and the matching MAX SDK. The examples below
+run from a release checkout using [Pixi](https://pixi.sh/).
 
 ```bash
-pixi run -e native build-dfparquet # native dependency for interchange tests
-pixi run test           # maintained dataframe contract suite
-pixi run example
-pixi run build
-pixi run bench-csv      # CSV reader benchmark; docs/design/benchmarks.md covers the rest
-./build/sales
-
+git clone --branch v0.3.0 --depth 1 https://github.com/randyzwitch/dataframe_mojo.git
+cd dataframe_mojo
+pixi install --locked
 ```
 
-See the [testing guide](docs/testing.md) for native prerequisites, independent
-interchange consumers, case selection and explicit hardware capability skips.
-
-Mojo 1.2 is required from 0.2.0. Release `v0.3.0` is built and tested with
-**Mojo 1.2.0**. A compiled package loads only in the Mojo version that built
-it, so a consumer on 1.1 stays on 0.1.3.
-
-This development checkout pins **Mojo 1.3.0.dev2026111005** with the matching
-**MAX SDK (max-core) 26.8.0.dev2026111005** from the nightly channel. `pixi install`
-installs the compiler and SDK recorded in `pixi.lock`.
-
-Supported platforms are Linux x86-64 and macOS arm64 (both tested in CI) and
-Linux aarch64 (resolved in `pixi.lock`, not yet tested in CI). Windows waits on
-Mojo support. The library requires a little-endian target and checks this at
-compile time.
-The original sales example prints:
-
-```text
-east 90.0
-west 180.0
-```
-
-## Expressions
-
-Expressions describe work without executing it. `select`, `with_columns`,
-`filter`, and `group_by(...).agg(...)` bind them against the input schema before
-running any expression kernel. The eager evaluator operates on bounded batches.
+Suppose a sales report should exclude refunds and show gross sales by region.
+Save this as `sales.mojo` in the checkout and run `pixi run mojo run -I . sales.mojo`.
 
 ```mojo
-from dataframe import Column, DataFrame, Series, col, lit
+from dataframe import Column, DataFrame, Series, col
 
 
 def main() raises:
     var sales = DataFrame([
-        Series("region", Column[String](["east", "west", "east", "west", "north"])),
-        Series("amount", Column[Float64](
-            [100, 80, -20, 120, 999],
-            [True, True, True, True, False],
-        )),
+        Series("region", Column[String](["east", "west", "east", "west"])),
+        Series("amount", Column[Int64]([100, 80, -20, 120])),
     ])
-    var result = sales.filter(
-        col("amount") > 0
-    ).with_columns(
-        (col("amount") * 0.9).alias("net")
-    ).group_by("region", maintain_order=True).agg([
-        col("net").sum().alias("revenue"),
-        col("net").count().alias("sales"),
-    ])
-    print(result)
+    var totals = (
+        sales.filter(col("amount") > 0)
+        .group_by("region", maintain_order=True)
+        .agg(col("amount").sum().alias("gross_sales"))
+    )
+    print(totals)
 ```
 
-```text
-shape: (2, 3)
-┌────────┬─────────┬───────┐
-│ region ┆ revenue ┆ sales │
-│ ---    ┆ ---     ┆ ---   │
-│ str    ┆ f64     ┆ i64   │
-╞════════╪═════════╪═══════╡
-│ east   ┆ 90.0    ┆ 1     │
-│ west   ┆ 180.0   ┆ 2     │
-└────────┴─────────┴───────┘
-```
+| region | gross_sales |
+| --- | ---: |
+| east | 100 |
+| west | 200 |
 
-Run `pixi run example` to see the sales, expression, and CSV pipelines. `build/expressions` and `build/read_csv` are the
-compiled examples.
+The filter removes the `-20` refund before aggregation. The region that
+appears first in the input appears first in the result because
+`maintain_order=True`.
 
-## CSV ingestion
+## Query a file
 
-`read_csv` reads local UTF-8 CSV files without Python or another dataframe
-runtime. `read_csv(path)` infers a schema from a sample (identifiers such as
-`007` and integers beyond Int64 stay strings); an explicit schema pins every
-type:
+Use `scan_csv` when you want to describe the whole query before reading the
+result. This example finds the two largest sales in the
+[included CSV](examples/sales.csv). Save it as `top_sales.mojo` and run
+`pixi run mojo run -I . top_sales.mojo` from the same directory.
 
 ```mojo
-from dataframe import CsvField, CsvSchema, read_csv
+from dataframe import col, scan_csv
 
-var frame = read_csv(
-    "sales.csv",
-    CsvSchema([
-        CsvField.string("region", False),
-        CsvField.float64("amount"),
-    ]),
-)
+
+def main() raises:
+    var largest = (
+        scan_csv("examples/sales.csv")
+        .filter(col("amount") > 0)
+        .select(["region", "amount"])
+        .sort("amount", descending=True)
+        .head(2)
+    )
+    print(largest.explain())
+    print(largest.collect())
 ```
 
-It accepts LF or CRLF records, an optional UTF-8 BOM, quoted commas/newlines,
-and doubled quotes. Empty unquoted fields are null; quoted empty strings are
-values. Headers must exactly match the schema. Whitespace is preserved and
-typed fields do not trim it. Boolean values are exactly `true` or `false`.
-Float64 accepts the standard parser's values, including `nan`, and only explicit
-`inf`, `+inf`, `-inf`, `Infinity`, `+Infinity`, and `-Infinity` may be infinite.
+`explain()` shows the optimized plan. `collect()` runs it and returns a
+`DataFrame` with `west, 120` followed by `east, 100`. For a program that needs
+the entire CSV immediately, `read_csv(path)` returns a frame in one call.
 
-`write_csv(frame, path)` writes the inverse format: reading it back with
-`CsvSchema.of(frame)` reproduces the frame exactly.
+## What you can build on main
 
-## JSON and NDJSON
+| Task | What the library offers |
+| --- | --- |
+| Analyze tables | Use expressions to derive columns, combine tables with joins, and aggregate by one or more keys. Calculate ranks within partitions, roll up totals, or match a timestamp to a preceding observation. [Expressions](docs/expressions.md) · [Grouped aggregations](docs/group-expressions.md) · [Window functions](docs/window-functions.md) · [As-of joins](docs/join-asof.md) |
+| Query a local dataset | Scan CSV or Parquet across a glob, select the fields you need, and filter on Hive partition values. The optimizer can skip whole files and prune Parquet row groups. [Multiple files and partitions](docs/datasets.md) · [Lazy queries](docs/lazy.md) |
+| Keep domain types intact | Represent money with decimals, timestamps with time zones, and nested records with list and struct columns. Nulls have their own validity bits, so a missing float stays distinct from NaN. [Types and semantics](docs/semantics.md) · [Time windows](docs/time-windows.md) |
+| Exchange data with other tools | Share compatible column buffers through the Arrow C Data Interface. For files, read and write Parquet, Arrow IPC/Feather, and newline-delimited JSON. [Arrow interchange](docs/arrow.md) · [Parquet](docs/parquet.md) · [IPC](docs/ipc.md) · [JSON](docs/json.md) |
+| Work with geographic data | Read features from GeoJSON or a shapefile, filter on their attributes, and write GeoParquet with coordinate reference system metadata. [Geospatial guide](docs/geospatial.md) · [Shapefiles](docs/shapefile.md) |
 
-`read_ndjson` and `scan_ndjson` read newline-delimited objects with sampled
-schema inference or an explicit schema. `read_json` reads arrays of objects;
-`write_ndjson` and `write_json` handle nested columns and typed wire forms.
-See [JSON and NDJSON](docs/json.md) for conversion and round-trip rules.
+**Execution and memory.** The CPU executor can push filters, projections, and
+limits into supported scans. Some pipelines stream batches. Sorts, join build
+tables, group state, and collected results can still require substantial RAM.
+On Apple silicon, the Metal provider can run eligible reductions, including
+some filtered and grouped aggregations. Automatic GPU selection requires
+matching calibration data. [Lazy execution](docs/lazy.md) · [Apple Metal](docs/apple-metal.md)
 
-## Parquet reading and writing
+**File dependencies.** The examples above use plain CSV and need only the
+locked environment. Parquet, IPC, and compressed CSV on main use the optional
+Arrow C++ library `libdfparquet`. With a C++20 compiler available, build it
+from the repository root with `pixi run -e native build-dfparquet`.
+[CSV options](docs/csv.md) · [Parquet setup](docs/parquet.md)
 
-`read_parquet(path)` reads a local Parquet file; `columns=[...]` selects
-fields in the order given and `row_groups=[...]` selects row groups.
-Integer and float widths, strings, booleans, dates and timestamps carry
-over with their nulls. Dictionary columns arrive as plain strings, float16
-as float32, and a timestamp keeps its time zone. Lists and structs map recursively. Decimal128 columns map to `DataType.decimal(precision, scale)`; binary columns map to `DataType.BINARY`.
+## Use it in your own Mojo project
 
-```mojo
-from dataframe import read_parquet, scan_parquet, col, lit
+The v0.3.0 Pixi Git dependency omits a required provider. From the tagged
+checkout, run `pixi run package` to build the dataframe and its platform
+provider together in `dist/`. Then run your app from the same environment
+with that directory on the import path. [Packaging issue](https://github.com/randyzwitch/dataframe_mojo/issues/1384)
 
-var frame = read_parquet("sales.parquet", columns=["region", "amount"])
-var recent = (
-    scan_parquet("sales.parquet")
-    .filter(col("amount") > lit(1000.0))
-    .select(["region", "amount"])
-    .collect()
-)
+```bash
+pixi run mojo run -I dist /path/to/your/app.mojo
 ```
 
-`scan_parquet` defers the read to `collect()`: only the columns the plan
-uses are decoded, and a filter with constant bounds reads the footer's
-row-group statistics first and skips row groups that cannot match.
-`parquet_row_group_statistics(path)` returns those bounds as a frame.
+Compiled Mojo packages require the compiler version that built them. Release
+v0.3.0 uses Mojo 1.2.0. The development branch pins Mojo
+1.3.0.dev2026111005 and requires Pixi 0.84.2. To try the features on main,
+clone the default branch, run `pixi install --locked`, then `pixi run example`.
+The public API is experimental and may change between minor releases.
+[Release API](https://github.com/randyzwitch/dataframe_mojo/blob/v0.3.0/docs/api.md) · [Development API](docs/api.md) · [Stability policy](docs/stability.md)
 
-`write_parquet(frame, "sales.parquet", compression="zstd", row_group_size=1_000_000)`
-writes a local file, replacing an existing file at that path. Compression can
-be `zstd` (the default), `snappy` or `uncompressed`. All supported column types,
-including nested fields and temporal units, round-trip through Arrow schema
-metadata. Rebuild `libdfparquet` to add the writer entry point. See the
-[Parquet guide](docs/parquet.md) for behavior and validation.
+## Go further
 
-## Geospatial storage and import
+- **Coming from pandas or Polars?** Start with equivalent operations, dtype rules, and ordering guarantees in the [migration guide](docs/migration.md).
+- **Looking for working code?** Run `pixi run example` for the [sales report](examples/sales.mojo), [expression examples](examples/expressions.mojo), and [CSV reader](examples/read_csv.mojo).
+- **Evaluating a workload?** Use the repository’s benchmark suites and result checks to measure the operations you care about. [Benchmark guide](docs/design/benchmarks.md)
+- **Contributing?** The testing guide covers native dependencies, the CPU suite, and interchange checks. [Testing guide](docs/testing.md) · [Architecture](docs/architecture.md)
 
-Read GIS shapefiles with [read_shapefile](docs/shapefile.md), including Z/M
-coordinates, DBF attributes and CRS metadata.
-
-`read_geojson(path)` reads GeoJSON features into attribute columns and a
-`geometry` column. `read_parquet` / `scan_parquet` recognize WKB GeoParquet
-1.0 and 1.1 metadata; `write_geoparquet` writes GeoParquet 1.1.
-Rebuild `libdfparquet` for geospatial metadata support.
-
-```mojo
-from dataframe import read_geojson, write_geoparquet, scan_parquet
-
-var places = read_geojson("places.geojson")
-write_geoparquet(places, "places.parquet")
-var restored = scan_parquet("places.parquet").collect()
-```
-
-Geometry columns use validated ISO WKB with CRS and edge metadata, and
-interchange through the `geoarrow.wkb` Arrow extension. `from_wkb` and
-`to_wkb` share the existing binary buffers. Null and empty geometries are
-distinct. Spatial analysis and coordinate transformations are not yet
-implemented. See the [geospatial guide](docs/geospatial.md) for supported
-encodings, attribute handling, and metadata rules.
-
-## List and struct columns
-
-`DataType.list(inner)` holds a variable number of values per row and
-`DataType.struct(names, dtypes)` holds one value of each named field per row,
-in the Arrow `large_list` and `struct` layouts. They come out of
-`read_parquet` and Arrow import, from `str.split`, and from `pack_struct`.
-
-```mojo
-from dataframe import DataFrame, col
-
-var tags = frame.with_columns(col("tags").str().split(",").alias("tag"))
-var one_per_tag = tags.explode("tag")           # other columns repeat
-var counts = tags.select_exprs([col("tag").list().len().alias("n")])
-var packed = frame.pack_struct("point", ["x", "y"])
-var xs = packed.select_exprs([col("point").field("x")])
-var flat = packed.unnest("point")
-```
-
-The `.list()` namespace has `len`, `get(i)` (negative from the end, null when
-out of range), `first`, `last`, `contains(value)`, `join(separator)`, `sum`,
-`min`, `max` and `mean`; `field(name)` reads one struct field, null where the
-struct is null. `col(x).implode()` gathers a group's values into one list
-inside `agg` (or a whole column into one row), and `as_struct([...])` packs
-expressions into a struct column. Struct columns can be `group_by`, `unique`
-and inner/left/semi/anti join keys; they compare field by field, with a null
-struct distinct from a struct of nulls. `explode` and `unnest` also exist on
-`LazyFrame`. Nested columns take part in `select`, `filter`, `take`, `slice`,
-`concat`, `head`, `equals`, display, and Arrow export and import; they cannot
-yet be sort keys, list columns cannot be keys at all, and neither can be
-cast, reduced (other than `implode`), used in `when`/`then`, or written to
-CSV. Each of those raises a clear error.
-
-The reader is Arrow C++'s, built with only its Parquet parts and bundled
-codecs into `libdfparquet`, a 15 MB shared library with no dependencies
-beyond libc. It is loaded at run time, so nothing else in the package needs
-it. `pixi run -e native build-dfparquet` builds it into `build/dfparquet/`
-(a C++20 compiler, cmake and ninja are needed); `DATAFRAME_PARQUET_LIBRARY`
-points `read_parquet` at a library elsewhere. See `native/dfparquet/` and
-`dataframe/io/parquet.mojo` for the boundary a Mojo-native reader would replace.
-
-The reader consumes bounded file buffers and retains tokenizer state across
-them. Its scalar structural scanner is the correctness reference for later SIMD
-scanning and record-boundary-aware parallel decoding. See the complete
-[CSV contract](docs/csv.md).
-
-Use typed literals: there is no implicit Int64/Float64 promotion. Expressions
-support `+ - * / // % **`, comparisons `< <= > >=` plus `.eq()`/`.ne()`, unary
-`-`, `abs`, `sqrt`, `exp`, `log`, `floor`, `ceil`, `round`, `clip`, `.alias()`,
-Kleene `& | ^ ~`, `is_null`, `is_nan`, `fill_null`, `fill_nan`, `coalesce`,
-selectors (`all`, `col([...])`, `exclude`, `by_dtype`, `nth`), window
-operations (`cum_sum`, `shift`, `diff`, `rank`, `rolling_*`, `forward_fill`,
-`interpolate`, `interpolate_by`, `cut`, `qcut`, `over`), `is_in`,
-`is_between`, `cast`, `when(...).then(...).otherwise(...)`, a `.str()`
-namespace with `concat_str`, and the reductions `sum(min_count=0)`, `count`,
-`null_count`, `len`, `min`, `max`, `mean`, `first`, `last`, `n_unique`, `var`,
-`std`, `median`, `quantile`, `any`, `all`, `arg_min`, `arg_max`, `mode`,
-`value_counts`, `skew` and `kurtosis`, plus the two-column `corr` and `cov`. Equality is `==` (or `.eq()`), which
-builds an expression rather than a Bool. See the operator table in [expressions](docs/expressions.md).
-
-`select(expr)` selects one expression; `select_exprs([expr, ...])` selects several.
-`select(["name", ...])` remains the name-only projection API, with no ambiguous
-empty-list overload. `with_columns` and `agg` accept an expression or a list.
-Sibling expressions all see the original input, not each other's aliases.
-
-Expressions distinguish scalar, row-valued, and aggregate results. For example:
-
-```mojo
-var totals = sales.select(col("amount").sum())  # one row
-var repeated = sales.with_columns(col("amount").sum().alias("total"))
-var deviations = sales.select(col("amount") - col("amount").sum())
-```
-
-Expression sums return zero for empty/all-null input, or null when the valid
-count is below `min_count`, following Narwhals' default. Integer sums accumulate exactly in
-128 bits and check the final Int64 result, allowing parallel partial-state merging.
-Floating-point expression sums permit reassociation; bitwise reproducibility is
-not guaranteed. See [the expression contract](docs/expressions.md).
-
-## Implemented
-
-- Typed `Column[T]` with bit-packed validity and checked element access;
-  Booleans and strings use the Arrow bit-packed and UTF-8 layouts.
-- Heterogeneous `Series` and runtime-schema `DataFrame`: Int8–Int64,
-  UInt8–UInt64, Float32, Float64, Bool, String, Date, Datetime, Duration, and
-  Time. The runtime tag is per column, not per cell.
-- Schema inspection, projection, indexed gathering, nullable Boolean filtering,
-  and adding/replacing columns.
-- Vertical, diagonal, and horizontal `concat`, plus `vstack`/`hstack`.
-- `unique`, `n_unique`, `is_duplicated`, `drop_nulls`, and frame `fill_null`.
-- `pivot` and `unpivot` reshaping.
-- A `Series` API (operators, reductions, `value_counts`, `unique`, `sort`)
-  backed by the same expression kernels.
-- Lazy queries (`frame.lazy()`, `scan_csv`) with predicate, projection, and
-  slice pushdown and `explain()`; see [lazy queries](docs/lazy.md).
-- Bounded table display for `DataFrame` and `Series` (`print(frame)`,
-  `to_string(max_rows=..., ...)`, `glimpse()`).
-- `head`/`tail`/`slice`/`reverse`, `drop`/`rename`/`with_row_index`, row and
-  cell access through the tagged `AnyValue`, null counts, and structural `equals`.
-- Hash grouping by any number of columns or key expressions of any dtype.
-- Stable multi-column sorting with per-column direction and null placement,
-  plus `arg_sort`, `top_k`, and `bottom_k`.
-- [As-of joins](docs/join-asof.md) on numeric or temporal keys, including
-  grouped backward/forward/nearest matching and eager/lazy APIs.
-- Hash joins on any number of keys of any dtype: inner, left, right, full,
-  semi, anti, and cross, with `left_on`/`right_on`.
-- Expression IR, schema binding, scalar broadcasting, and grouped aggregates.
-- Explicit SIMD Float64 arithmetic/comparison kernels and mergeable reduction states.
-- Contract tests for validation, nulls, overflow, ordering, joins, empty shapes,
-  and scalar/SIMD agreement across batch boundaries.
-
-Useful calls:
-
-```mojo
-var selected = frame.select(["region", "amount"])
-var first = frame.head(3)
-var cleaned = frame.drop("notes").rename({"amount": "revenue"})
-var cell = frame.item(0, "region").string()
-var sampled = frame.take([3, 0, 3])
-var sorted = frame.sort(["region", "amount"], descending=[False, True], nulls_last=[True, True])
-var joined = frame.join(regions, on="region", how="left")
-```
-
-Operations return new dataframes. `column()` and typed extraction methods
-(`int64()`, `float64()`, `bool()`, and `string()`, which returns a
-`StringColumn`) return immutable columns that
-share buffers with the frame; no copy is made.
-An empty dataframe can retain its row count: `DataFrame([], height=10)`.
-
-## Deliberate limits
-
-Execution is eager. Reductions, row-wise expressions, and filters run on
-worker threads for large inputs (`DATAFRAME_THREADS` sets the limit; 1
-disables); hash grouping, joins, and sorting are single-threaded for now. Float64 expression arithmetic
-and comparisons use SIMD; checked integer arithmetic and reductions are currently
-scalar. Projections, slices, and column extraction share immutable buffers
-(zero-copy); computed results allocate new buffers, and unfused intermediates
-are still materialized per batch. String columns use the Arrow `large_utf8`
-layout (one UTF-8 buffer plus Int64 offsets). Frames export to and import from
-the Arrow C Data Interface (see [Arrow interchange](docs/arrow.md)); most
-dtypes export zero-copy. There are no performance claims yet.
-The underscore-prefixed fields are internal and must not be mutated by callers.
-
-There is no GPU execution, index
-alignment, implicit dtype coercion, or dataframe backend
-adapter. Build input columns in memory for this first version.
-
-## Using the package
-
-`pixi run package` precompiles the package for the platform you build on. On
-macOS arm64 `dist/` holds `dataframe.mojoc`, `dataframe_provider.mojoc` and
-`dataframe_metal.mojoc`; on Linux it holds `dataframe.mojoc` and the CPU-only
-`dataframe_provider.mojoc`, since Metal cannot run there. There is one artifact
-per platform. After `pixi install`, use the packages in that environment with
-`pixi run mojo run -I dist app.mojo`.
-EmberJSON and its EmberSerde dependency are installed through Pixi. Pixi
-resolves the pinned [EmberJSON fork](https://github.com/randyzwitch/EmberJson/tree/compat/dataframe-nightly)
-and its [EmberSerde dependency](https://github.com/randyzwitch/EmberSerde/tree/compat/dataframe-nightly),
-using their own package manifests. These revisions carry the compiler
-compatibility fixes and pin the same Mojo compiler as this project. The dataframe packages resolve these dependencies from the
-installed environment.
-Normalization, Unicode properties, case folding, title casing, and UTF-8
-counting, traversal, slicing, reversal, and trimming come from the standalone
-[unicode_mojo](https://github.com/randyzwitch/unicode_mojo) package, resolved
-through Pixi at a pinned Git revision. Its algorithms, generated tables,
-generators, and conformance fixtures live there. The standalone
-[regex_mojo](https://github.com/randyzwitch/regex_mojo) dependency owns the
-regex parser, matching engines, compiled-pattern cache, and engine tests.
-Dataframe retains storage, column/null handling, and execution adapters.
-Tagged releases attach the packages and a generated [API reference](docs/api.md) (`pixi run docs`). See the
-[testing guide](docs/testing.md), the [stability policy](docs/stability.md), and the
-[pandas/Polars migration guide](docs/migration.md).
-
-See [semantics](docs/semantics.md) for the behavior the tests promise and
-[architecture and next steps](docs/architecture.md) for the intended progression.
-Design notes and measurement records are in [docs/design/](docs/design/).
-Historical benchmarks and one-off experiments are in the [research wiki](https://github.com/randyzwitch/dataframe_mojo/wiki).
+[MIT license](LICENSE)
