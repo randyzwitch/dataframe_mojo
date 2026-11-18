@@ -17,7 +17,7 @@ are unchanged.
 """
 from dataframe.storage.allocation import huge_capacity
 from dataframe.storage.buffer import _Buffer
-from std.collections import Dict
+from std.collections import Dict, Optional
 from std.memory import ArcPointer
 
 from dataframe.storage.boolean import BoolColumn
@@ -478,3 +478,131 @@ def gather(per_value: Series, codes: Series) raises -> Series:
             rows[i] = Int(column._get(i))
     var gathered = take_parallel([table^], rows^, worker_count(n))
     return gathered.pop()
+
+
+def _scan_prefix(
+    values: CategoricalDictionary, token: ArcPointer[Int]
+) -> CategoricalDictionary:
+    """A scan's values so far, marked as the scan's and still growing."""
+    var prefix = values.copy_values()
+    prefix.scan = token
+    prefix.grows = True
+    return prefix^
+
+
+struct ScanDictionary(Movable):
+    """One categorical column's dictionary over a whole file scan. Each batch
+    of a file may carry its own dictionary, so the same code can mean
+    different values in two batches. Rows from many batches meet in one
+    hash table, one sorted heap or one output column, where a code must
+    mean one value: every batch's codes are moved onto this dictionary as
+    the batch is read, which only grows, so a code keeps its value for the
+    whole scan.
+
+    Batches read on many threads add values under the scan's lock
+    (`ScanSource`). A batch's column is typed by a copy of the values seen
+    so far (`snapshots`), made only when values were added, which no later
+    addition changes; the scan's schema is typed by `schema`. They share
+    one `token`, so their types compare equal: codes from any batch may be
+    held together. Once no batch is read any longer, `settle` gives each of
+    them every value, so a column typed by any of them reads its codes.
+    """
+
+    var values: CategoricalDictionary
+    var lookup: Dict[String, UInt32]
+    var token: ArcPointer[Int]
+    var schema: ArcPointer[CategoricalDictionary]
+    var snapshots: List[ArcPointer[CategoricalDictionary]]
+    # The batch dictionary mapped last and its codes' new codes: batches
+    # cut from one record batch share its dictionary.
+    var last: Optional[ArcPointer[CategoricalDictionary]]
+    var last_codes: List[UInt32]
+
+    def __init__(out self):
+        self.values = CategoricalDictionary()
+        self.lookup = Dict[String, UInt32]()
+        self.token = ArcPointer(0)
+        self.schema = ArcPointer(_scan_prefix(self.values, self.token))
+        self.snapshots = List[ArcPointer[CategoricalDictionary]]()
+        self.last = None
+        self.last_codes = List[UInt32]()
+
+    def schema_type(self) -> DataType:
+        return DataType.categorical(self.schema)
+
+    def add(
+        mut self, dictionary: ArcPointer[CategoricalDictionary]
+    ) raises -> Tuple[List[UInt32], DataType]:
+        """Each of `dictionary`'s codes as a code of this dictionary, adding
+        the values it lacks, and the type of a column of such codes. Called
+        under the scan's lock."""
+        if not self.last or self.last.value().ptr() != dictionary.ptr():
+            var codes = List[UInt32](capacity=len(dictionary[]))
+            for code in range(len(dictionary[])):
+                var value = String(dictionary[].get(code))
+                var found = self.lookup.get(value)
+                if found:
+                    codes.append(found.value())
+                    continue
+                if len(self.values) >= Int(UInt32.MAX):
+                    raise Error("categorical dictionary exceeds UInt32 codes")
+                var added = UInt32(len(self.values))
+                self.values.append(value)
+                self.lookup[value^] = added
+                codes.append(added)
+            self.last = dictionary
+            self.last_codes = codes^
+        var count = len(self.snapshots)
+        if count == 0 or len(self.snapshots[count - 1][]) != len(self.values):
+            self.snapshots.append(
+                ArcPointer(_scan_prefix(self.values, self.token))
+            )
+        return (
+            self.last_codes.copy(),
+            DataType.categorical(self.snapshots[len(self.snapshots) - 1]),
+        )
+
+    def settle(mut self):
+        """Every value into the schema's dictionary and each batch's, once
+        no batch is read or running any longer. They share one copy."""
+        var final = self.values.copy_values()
+        final.scan = self.token
+        self.schema[] = final.copy_values()
+        self.schema[].scan = self.token
+        for k in range(len(self.snapshots)):
+            self.snapshots[k][] = final.copy_values()
+            self.snapshots[k][].scan = self.token
+
+
+def recode_codes(
+    values: Series, codes: List[UInt32], dtype: DataType
+) raises -> Series:
+    """A categorical column with each code `c` replaced by `codes[c]`,
+    typed `dtype`; the codes as they are when `codes` maps each to itself.
+    """
+    var same = True
+    for c in range(len(codes)):
+        if codes[c] != UInt32(c):
+            same = False
+            break
+    if same:
+        return values.with_dtype(dtype)
+    var flat = values.rechunk() if values.is_chunked() else values.copy()
+    ref column = flat._data[Column[UInt32]]
+    var n = len(column)
+    var data = column._ptr()
+    var mapped = List[UInt32](unsafe_uninit_length=n)
+    var count = len(codes)
+    for i in range(n):
+        # A null row's code is any value: it maps to 0.
+        var code = Int(data[unsafe_offset=i])
+        mapped[i] = codes[code] if code < count else 0
+    var nulls = column.null_count() > 0
+    var bits = _copy_validity(
+        column._bits[], column._offset, n
+    ) if nulls else List[UInt8]()
+    var result = Series(
+        values.name(), Column[UInt32](values=mapped^, bits=bits^)
+    ).with_dtype(dtype)
+    result._field_metadata = values._field_metadata
+    return result^

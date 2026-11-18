@@ -79,21 +79,36 @@ struct CategoricalDictionary(Movable, Sized):
     # label repeats, which is every dictionary this library builds itself.
     # Set once by `DataType.categorical` (#943).
     var canonical: List[UInt32]
+    # Set on the dictionaries of one file scan's categorical column
+    # (`ScanDictionary`): each holds a prefix of the values the scan has
+    # seen, a code meaning the same value in every one, so columns typed by
+    # any of them hold comparable codes. Once every batch is read each
+    # holds them all.
+    var scan: Optional[ArcPointer[Int]]
+    # Set while that scan still adds values: anything that orders codes
+    # before then cannot rank them by this dictionary's values.
+    var grows: Bool
 
     def __init__(out self):
         self.bytes = _Buffer(List[UInt8]())
         self.offsets = _Buffer(List[Int64]([Int64(0)]))
         self.canonical = List[UInt32]()
+        self.scan = None
+        self.grows = False
 
     def __init__(out self, var bytes: List[UInt8], var offsets: List[Int64]):
         self.bytes = _Buffer(bytes^)
         self.offsets = _Buffer(offsets^)
         self.canonical = List[UInt32]()
+        self.scan = None
+        self.grows = False
 
     def __init__(out self, bytes: _Buffer[UInt8], offsets: _Buffer[Int64]):
         self.bytes = bytes.copy()
         self.offsets = offsets.copy()
         self.canonical = List[UInt32]()
+        self.scan = None
+        self.grows = False
 
     def find_repeated_labels(mut self):
         """Fill `canonical` if some label appears under two codes: Arrow and
@@ -401,6 +416,14 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         dtype._dictionary = ArcPointer(dictionary^)
         return dtype^
 
+    @staticmethod
+    def categorical(dictionary: ArcPointer[CategoricalDictionary]) -> DataType:
+        """A categorical whose codes index `dictionary`, shared rather than
+        copied: columns typed by it compare equal by pointer."""
+        var dtype = DataType(_CATEGORICAL, 0)
+        dtype._dictionary = dictionary
+        return dtype^
+
     def is_categorical(self) -> Bool:
         return self._code == _CATEGORICAL
 
@@ -619,6 +642,10 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
                 self._dictionary.value().ptr()
                 == other._dictionary.value().ptr()
             ):
+                return True
+            ref mine = self._dictionary.value()[].scan
+            ref theirs = other._dictionary.value()[].scan
+            if mine and theirs and mine.value().ptr() == theirs.value().ptr():
                 return True
             return self._dictionary.value()[].same_values(
                 other._dictionary.value()[]

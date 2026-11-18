@@ -746,6 +746,12 @@ struct VectorExpression(Copyable, Movable):
             if self.lanes[index] == _LANE_NONE:
                 self.lanes[index] = _LANE_ANY
             return
+        if self._reads_categorical(index):
+            # A categorical column's vector holds codes, which an
+            # expression reads as their values: the at-rest evaluator
+            # decodes them through the column's own dictionary.
+            self._fallback(index)
+            return
         if not _reads_column(self.bound, index):
             if self._constant(index):
                 return
@@ -785,6 +791,19 @@ struct VectorExpression(Copyable, Movable):
                     self.lanes[node.left] = _LANE_ANY
             return
         self._fallback(index)
+
+    def _reads_categorical(self, index: Int) -> Bool:
+        """Whether a child of node `index` is a categorical column."""
+        for child in node_children(self.bound.expr._nodes[index]):
+            if (
+                self.bound.expr._nodes[child].op == COL
+                and self.bound.sources[child] >= 0
+                and self.schema[self.bound.sources[child]]
+                .dtype()
+                .is_categorical()
+            ):
+                return True
+        return False
 
     def _native(self, index: Int) raises -> Bool:
         ref node = self.bound.expr._nodes[index]
