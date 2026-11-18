@@ -7,6 +7,15 @@ from tests.support.selection_types_reference import (
 
 
 def set_cell_equal(kind: Int, a: Int, b: Int, mode: Int) raises -> Bool:
+    if kind == 26:
+        # Lists compare elementwise: every fourth row is empty, every other
+        # valid row holds [row, null, -row], so it equals only itself.
+        var lv = selection_valid(a, mode)
+        if lv != selection_valid(b, mode):
+            return False
+        if not lv:
+            return True
+        return (a % 4 == 0 and b % 4 == 0) or a == b
     if kind != 27:
         return cell_equal(
             selection_key(kind, a, mode), selection_key(kind, b, mode)

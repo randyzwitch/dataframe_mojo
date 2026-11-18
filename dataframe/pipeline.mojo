@@ -139,10 +139,6 @@ from dataframe.aggregation.state import (
     _equality_words,
     _word_hash,
 )
-from dataframe.aggregation.keys import (
-    _expand_struct_keys,
-    _group_keys,
-)
 from dataframe.aggregation.selected_rows import _reduce_floats, _reduce_ints
 from dataframe.joins.hash_table import (
     JoinBuildLayout,

@@ -22,10 +22,6 @@ from dataframe.aggregation.expressions import (
     _stream_reductions,
     without_filters,
 )
-from dataframe.aggregation.keys import (
-    _key_prefix,
-    _pack_struct_keys,
-)
 from dataframe.aggregation.state import (
     _StreamReduction,
     _merge_ascending_runs,
@@ -323,8 +319,7 @@ struct GroupBy(Copyable):
     def _key_names(self) -> Dict[String, Bool]:
         var names = Dict[String, Bool]()
         for key in self._keys:
-            var prefix = _key_prefix(key.name())
-            names[prefix if prefix != "" else key.name()] = True
+            names[key.name()] = True
         return names^
 
     def agg(
@@ -392,8 +387,8 @@ struct GroupBy(Copyable):
         if self._table_supported(expressions):
             var table = self._agg_table(expressions, workers, batch_size)
             if table:
-                return _pack_struct_keys(table.value())
-        return _pack_struct_keys(self._agg_groups(bound, batch_size))
+                return table.take()
+        return self._agg_groups(bound, batch_size)
 
     def _table_supported(self, expressions: List[Expr]) raises -> Bool:
         """Whether the aggregate table (`aggregate_table.mojo`) groups these
@@ -659,7 +654,7 @@ struct GroupBy(Copyable):
             self._keys, groups.representatives.copy(), 1
         )
         columns.append(Series(name, Column[Int64](counts^)))
-        return _pack_struct_keys(DataFrame(columns^, height=groups.count()))
+        return DataFrame(columns^, height=groups.count())
 
     def _each(
         self,
