@@ -38,6 +38,7 @@ from .composition_reduce import execute_composition
 from .extrema_plan import plan_extrema, extrema_key
 from .extrema_reduce import execute_extrema
 from .predicate_plan import plan_predicates, predicate_key
+from .dictionary_group import plan_dictionary_group, execute_dictionary_group
 from .group_plan import plan_grouped, grouped_key
 from .group_properties import sample_group_tuples
 from .group_reduce import execute_grouped
@@ -106,6 +107,7 @@ def supports(region: LazyFrame) -> Bool:
             or Bool(plan_extrema(selected))
             or Bool(plan_predicates(selected))
             or Bool(plan_grouped(selected))
+            or Bool(plan_dictionary_group(selected))
         )
     except:
         return False
@@ -184,6 +186,17 @@ def region_key(region: LazyFrame) raises -> String:
     var extrema = plan_extrema(region)
     if extrema:
         return extrema_key(extrema.value())
+    var dictionary = plan_dictionary_group(region)
+    if dictionary:
+        ref frame = region._plan._frames[region._plan._nodes[0].source_slot()]
+        return (
+            "dictionary_group_sum:v1:"
+            + frame.column(dictionary.value().value).dtype().name()
+            + ":labels"
+            + String(len(dictionary.value().dictionary.dictionary()[]))
+            + ":min_count"
+            + String(region._plan._nodes[1].exprs[0]._nodes[1].min_count)
+        )
     var grouped = plan_grouped(region)
     if grouped:
         ref source = region._plan._frames[region._plan._nodes[0].source_slot()]
@@ -652,6 +665,9 @@ def execute_timed(
 def _execute_on_device(
     region: LazyFrame, zero_copy: Bool
 ) raises -> Tuple[DataFrame, HandoffTimings]:
+    var dictionary = plan_dictionary_group(region)
+    if dictionary:
+        return execute_dictionary_group(region, dictionary.value(), zero_copy)
     var grouped = plan_grouped(region)
     if grouped:
         return execute_grouped(region, zero_copy)

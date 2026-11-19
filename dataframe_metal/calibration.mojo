@@ -12,6 +12,7 @@ from std.memory import Pointer
 from std.memory.alloc import Layout, alloc
 from std.memory import bitcast
 from dataframe import DataType, LazyFrame, Series
+from dataframe.storage.string import StringColumn
 from dataframe.expr import COL, LIT_INT, LIT_FLOAT
 from dataframe.lazy import AGG
 from dataframe.json.value import JsonValue, json_quote
@@ -100,6 +101,11 @@ def shape_key(region: LazyFrame, operator: String) raises -> String:
                 key += _chunk_shape[DType.int64](chunk)
             elif chunk.dtype() == DataType.FLOAT32:
                 key += _chunk_shape[DType.float32](chunk)
+            elif (
+                chunk.dtype() == DataType.STRING
+                and chunk._data.isa[StringColumn]()
+            ):
+                key += String(Int(len(chunk._data[StringColumn]._bits[]) != 0))
             elif chunk.dtype() == DataType.BOOL:
                 # Packed Bool storage always owns a validity bitmap. The
                 # native input maps it only when this window contains nulls.
