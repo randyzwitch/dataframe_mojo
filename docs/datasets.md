@@ -65,8 +65,9 @@ early row limits close the input without draining its unread tail.
 
 ## Output
 
-`LazyFrame.sink_csv(path, ...)` and `sink_parquet(path, ...)` consume execution
-batches directly. Row-local plans do not accumulate their complete output.
+`LazyFrame.sink_csv(path, ...)` and `sink_parquet(path, ...)` take each
+morsel's rows from the pipeline's workers as it completes, in source order.
+Row-local plans and joins do not accumulate their complete output.
 Sorts, joins, grouping, and other stateful operators keep their existing
 execution memory requirements. `batch_size` controls execution batches;
 Parquet `row_group_size` controls output row groups across batch boundaries.

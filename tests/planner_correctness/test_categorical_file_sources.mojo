@@ -2,6 +2,7 @@
 workers: each batch of a file carries its own dictionary, and the pipeline's
 answers equal the in-memory answers with the categorical type kept."""
 # contract-group: planner.routing
+from std.memory import ArcPointer
 from std.os import getenv, makedirs
 from std.testing import assert_equal, assert_true
 from dataframe import (
@@ -18,6 +19,8 @@ from dataframe import (
     read_csv,
     scan_csv,
 )
+from dataframe.categorical import ScanDictionary
+from dataframe.dtype import CategoricalDictionary
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
     StrategyTrace,
@@ -113,20 +116,14 @@ def _same(actual: DataFrame, expected: DataFrame, sort_by: List[String]) raises:
 
 
 def _check(query: LazyFrame, expected: DataFrame, sort_by: List[String]) raises:
-    """The query over the file on four workers, in batches, in the morsel
-    pipeline, against the in-memory answer."""
+    """The query over the file on four workers, in batches, against the
+    in-memory answer."""
     var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
-    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     for optimize in [False, True]:
-        var trace = StrategyTrace()
         var actual = query.collect(
             engine="cpu", streaming=True, optimize=optimize, batch_size=_BATCH
         )
-        var paths = trace.text()
-        _ = trace^
         _same(actual, expected, sort_by)
-        assert_true(paths.find("dataframe-strategy: batch_stream") < 0, paths)
-    _ = setting^
     _ = threads^
 
 
@@ -289,4 +286,55 @@ def test_categorical_file_scan_routes_to_the_morsel_pipeline() raises:
     _ = threads^
     assert_true(result.column("s").dtype().is_categorical())
     assert_true(paths.find("dataframe-strategy: table_pipeline") >= 0, paths)
-    assert_true(paths.find("dataframe-strategy: batch_stream") < 0, paths)
+
+
+def test_scan_dictionary_views_share_the_values_they_grow_from() raises:
+    """512 batches, each bringing one new value: every batch's dictionary
+    is the values so far, its codes keep their values as later batches
+    add more, all of them compare equal, and together they hold under
+    three times the entries the values need, not a copy per batch."""
+    comptime batches = 512
+    var scan = ScanDictionary()
+    var types = List[DataType]()
+    for i in range(batches):
+        var dictionary = CategoricalDictionary()
+        dictionary.append(String(i))
+        var added = scan.add(ArcPointer(dictionary^))
+        assert_equal(len(added[0]), 1)
+        assert_equal(Int(added[0][0]), i)
+        types.append(added[1])
+    assert_equal(len(scan.snapshots), batches)
+    var final = len(scan.values.offsets[])
+    assert_equal(final, batches + 1)
+    # Entries held: each distinct offsets list once, at the length of the
+    # longest view of it.
+    var addresses = List[Int]()
+    var lengths = List[Int]()
+    for k in range(batches):
+        ref view = scan.snapshots[k][]
+        assert_equal(len(view), k + 1)
+        # A view taken early still reads its values after later growth.
+        for code in range(len(view)):
+            assert_equal(String(view.get(code)), String(code))
+        assert_true(types[k] == types[0], "batch types compare equal")
+        assert_true(types[k] == scan.schema_type(), "and equal the schema's")
+        var address = Int(view.offsets.unsafe_ptr())
+        var found = False
+        for a in range(len(addresses)):
+            if addresses[a] == address:
+                lengths[a] = max(lengths[a], len(view.offsets))
+                found = True
+        if not found:
+            addresses.append(address)
+            lengths.append(len(view.offsets))
+    var held = 0
+    for length in lengths:
+        held += length
+    assert_true(held < 3 * final, "views hold " + String(held) + " entries")
+    scan.settle()
+    for k in range(batches):
+        ref view = scan.snapshots[k][]
+        assert_equal(len(view), batches)
+        assert_equal(String(view.get(batches - 1)), String(batches - 1))
+    assert_equal(len(scan.schema[]), batches)
+    assert_true(types[0] == scan.schema_type())

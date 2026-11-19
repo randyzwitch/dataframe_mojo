@@ -3,6 +3,7 @@
 from std.os import getenv
 from std.os.path import exists
 from std.io import RawFileDescriptor
+from std.memory import Pointer
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
@@ -213,3 +214,35 @@ def test_parquet_read_source_can_remain_open_until_output_is_published() raises:
     replacement.append(source.slice(1))
     replacement.finish()
     assert_true(read_parquet(path).equals(source))
+
+
+def test_offered_batches_are_written_in_turn() raises:
+    var source = _source()
+    for format in ["csv", "parquet"]:
+        var path = _path("offered." + format)
+        var sink = FileSink(source.clear(), path, format, row_group_size=2)
+        var address = Int(Pointer(to=sink))
+        # Each batch in its turn; batch 1 has no rows.
+        FileSink.offer_at(address, 0, source.slice(2, 1))
+        FileSink.offer_at(address, 1, source.clear())
+        FileSink.offer_at(address, 2, source.slice(0, 2))
+        assert_equal(sink.emitted_rows, 3)
+        sink.append(source.slice(2, 1))
+        assert_equal(sink.emitted_rows, 4)
+        sink.finish()
+        var back = read_csv(path) if format == "csv" else read_parquet(path)
+        assert_equal(back.height(), 4)
+        var order: List[Int64] = [3, 1, 2, 3]
+        for row in range(4):
+            assert_equal(back.item(row, "i").int64(), order[row])
+
+
+def test_a_failed_worker_stops_the_others_waiting() raises:
+    var source = _source()
+    var sink = FileSink(source.clear(), _path("failed.csv"), "csv")
+    var address = Int(Pointer(to=sink))
+    FileSink.fail_at(address)
+    # Batch 1 waits for batch 0, which a failed worker held.
+    with assert_raises(contains="file sink is closed"):
+        FileSink.offer_at(address, 1, source)
+    _ = sink^

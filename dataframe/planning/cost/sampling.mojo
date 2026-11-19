@@ -22,38 +22,6 @@ from dataframe.storage.retained import RetainedBuffers
 from dataframe.series import (
     Series,
 )
-from std.os import (
-    getenv,
-)
-
-
-def _stream_split_groups() -> Int:
-    """Groups in the first batch at which streaming aggregation splits its
-    state into hash parts. DATAFRAME_STREAM_SPLIT_GROUPS overrides it, so
-    tests can exercise the split path on small inputs."""
-    var setting = getenv("DATAFRAME_STREAM_SPLIT_GROUPS")
-    if setting.byte_length() > 0:
-        try:
-            return max(1, Int(setting))
-        except:
-            pass
-    return 4096
-
-
-def _stream_collect_bytes() -> Int:
-    """Retained-buffer threshold for reducing collected aggregate batches.
-
-    Default 4 GiB; DATAFRAME_STREAM_COLLECT_BYTES overrides it. Checked
-    between worker waves. Input owners, hash/aggregate state, temporary
-    allocations and final output can exceed it: this is not a query limit.
-    """
-    var setting = getenv("DATAFRAME_STREAM_COLLECT_BYTES")
-    if setting.byte_length() > 0:
-        try:
-            return max(1, Int(setting))
-        except:
-            pass
-    return 4 << 30
 
 
 def _frame_bytes(frame: DataFrame) -> Int:
