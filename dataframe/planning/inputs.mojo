@@ -12,6 +12,7 @@ from dataframe.joins.hash_table import (
 from dataframe.parallel import (
     Rounds,
     partitions,
+    round_width,
     run_rounds,
     worker_count,
 )
@@ -84,11 +85,13 @@ struct BuildFinish(Movable, Rounds):
     # The chunked columns and their single-chunk copies. A fixed-width
     # number column is copied by row ranges (`merges`), others whole; task
     # t takes piece t: (chunked column, first row, end row), end -1 for
-    # the whole column.
+    # the whole column, and t + width, t + 2 * width, ... (a round has
+    # no more tasks than workers).
     var chunked: List[Int]
     var whole: List[Series]
     var merges: List[Optional[ChunkMerge]]
     var pieces: List[Tuple[Int, Int, Int]]
+    var width: Int
     var layout: Optional[ArcPointer[JoinBuildLayout]]
     var jobs: List[_FrameSinkJob]
     var table: Optional[JoinHashTable]
@@ -114,6 +117,7 @@ struct BuildFinish(Movable, Rounds):
         self.whole = List[Series]()
         self.merges = List[Optional[ChunkMerge]]()
         self.pieces = List[Tuple[Int, Int, Int]]()
+        self.width = 0
         self.layout = None
         self.jobs = List[_FrameSinkJob]()
         self.table = None
@@ -142,7 +146,8 @@ struct BuildFinish(Movable, Rounds):
                     self.merges.append(merge^)
             if len(self.chunked) > 0:
                 self.stage = _BUILD_RECHUNK
-                return len(self.pieces)
+                self.width = round_width(len(self.pieces))
+                return self.width
             return self._begin_sink()
         if self.stage == _BUILD_RECHUNK:
             for k in range(len(self.chunked)):
@@ -211,11 +216,14 @@ struct BuildFinish(Movable, Rounds):
 
     def round_task(mut self, task: Int) raises:
         if self.stage == _BUILD_RECHUNK:
-            var piece = self.pieces[task]
-            var k = piece[0]
-            if piece[2] < 0:
-                self.whole[k] = self.whole[k].rechunk()
-            else:
-                self.merges[k].value().copy_rows(piece[1], piece[2])
+            var at = task
+            while at < len(self.pieces):
+                var piece = self.pieces[at]
+                var k = piece[0]
+                if piece[2] < 0:
+                    self.whole[k] = self.whole[k].rechunk()
+                else:
+                    self.merges[k].value().copy_rows(piece[1], piece[2])
+                at += self.width
         else:
             self.jobs[task].run()
