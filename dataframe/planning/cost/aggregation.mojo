@@ -17,7 +17,6 @@ from dataframe.planning.context import (
 )
 from dataframe.planning.cost.model import (
     AggregationDecision,
-    BATCH_STREAM,
     EAGER_FRAME,
     MORSEL_PIPELINE,
     PipelineEligibility,
@@ -54,8 +53,9 @@ def select_aggregation_strategy(
     state sizes. Computed group keys are grouped by their values. Use
     estimated properties only to choose execution cost; they do not change
     grouping equality."""
+    # Work the morsel pipeline does not take runs on the eager frame.
     var choice = AggregationDecision(
-        MORSEL_PIPELINE if eligibility.allowed else BATCH_STREAM,
+        MORSEL_PIPELINE if eligibility.allowed else EAGER_FRAME,
         eligibility.reason,
     )
     if inline_table_eligible:

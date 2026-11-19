@@ -120,8 +120,6 @@ from dataframe.planning.scans import (
 )
 from dataframe.planning.strategies import (
     _frame_bytes,
-    _stream_collect_bytes,
-    _stream_split_groups,
 )
 from dataframe.query_execution.operators import (
     _gathered,
@@ -134,11 +132,5 @@ from dataframe.query_execution.placement import (
     _placement,
 )
 from dataframe.query_execution.stream_state import (
-    _StateAccumulator,
-    _StreamJob,
-    _apply_operation,
-    _filter_keeps,
-    _pipeline_steps,
     _steps_of,
-    _stream_split_bits,
 )
