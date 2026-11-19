@@ -71,11 +71,15 @@ def _type_bounds(part: Series) -> Tuple[Int128, Int128]:
     return (Int128(0), Int128(-1))
 
 
-def perfect_hash(keys: List[Series]) raises -> PerfectHash:
+def perfect_hash(
+    keys: List[Series], compute: Bool = True
+) raises -> PerfectHash:
     """Whether grouping keys like `keys`, which carry (or are given) their
     statistics, can address a perfect hash table (each key's value range small
     enough that the keys' bits side by side index a slot directly): the table's
-    shape, or none when some key does not qualify."""
+    shape, or none when some key does not qualify. Without `compute`, a key
+    with no statistics is not given them: only a small type's own range
+    qualifies it."""
     if len(keys) == 0:
         return PerfectHash.none()
     var minima = List[UInt64](capacity=len(keys))
@@ -103,10 +107,11 @@ def perfect_hash(keys: List[Series]) raises -> PerfectHash:
             var width = _integer_storage(part)
             if width == 0:
                 return PerfectHash.none()
-            try:
-                ensure_statistics(key)
-            except:
-                pass
+            if compute:
+                try:
+                    ensure_statistics(key)
+                except:
+                    pass
             var stats = series_statistics(key)
             if stats:
                 ref found = stats.value()

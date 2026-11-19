@@ -4384,10 +4384,11 @@ def begin_pipeline(
         # Bounded source key statistics can select direct-address
         # aggregation. Use those bounds only when every grouping key has a
         # compatible estimate. A file source's statistics are not known
-        # before its scan.
+        # before its scan, and a result the query computed has only those
+        # its buffers already carry (no pass over it before the workers).
         var stats = _key_statistics(frame, steps, keys)
         if len(stats) == len(keys):
-            layout[0].use_perfect_hash(stats)
+            layout[0].use_perfect_hash(stats, compute=not computed)
     if len(layout) > 0:
         trace_path("pipeline.group_table")
     elif len(keys) > 0 and len(expressions) > 0:

@@ -12,11 +12,11 @@ from dataframe.joins.hash_table import (
 from dataframe.parallel import (
     Rounds,
     partitions,
-    round_width,
     run_rounds,
     worker_count,
 )
 from dataframe.series import (
+    ChunkMerge,
     Series,
 )
 from dataframe.vector.types import (
@@ -67,7 +67,7 @@ comptime _BUILD_DONE = 3
 struct BuildFinish(Movable, Rounds):
     """A join build's finish over its whole frame as rounds of tasks
     (`next_round`, `round_task`): its chunked columns made one chunk each,
-    a task per column; then its rows sunk into the table's partitioned
+    a task per row range of a number column and per other column; then its rows sunk into the table's partitioned
     rows, each task a contiguous run of whole vectors into a sink of its
     own, whose partitions combine in task order so each keeps its rows in
     build order. Once `next_round` returns 0, `frame` holds the columns
@@ -81,11 +81,14 @@ struct BuildFinish(Movable, Rounds):
     var build_filtered: Bool
     var defer_finalize: Bool
     var stage: Int
-    # The chunked columns and their single-chunk copies; task t takes
-    # columns t, t + width, ...
+    # The chunked columns and their single-chunk copies. A fixed-width
+    # number column is copied by row ranges (`merges`), others whole; task
+    # t takes piece t: (chunked column, first row, end row), end -1 for
+    # the whole column.
     var chunked: List[Int]
     var whole: List[Series]
-    var width: Int
+    var merges: List[Optional[ChunkMerge]]
+    var pieces: List[Tuple[Int, Int, Int]]
     var layout: Optional[ArcPointer[JoinBuildLayout]]
     var jobs: List[_FrameSinkJob]
     var table: Optional[JoinHashTable]
@@ -109,7 +112,8 @@ struct BuildFinish(Movable, Rounds):
         self.stage = _BUILD_BEGIN
         self.chunked = List[Int]()
         self.whole = List[Series]()
-        self.width = 0
+        self.merges = List[Optional[ChunkMerge]]()
+        self.pieces = List[Tuple[Int, Int, Int]]()
         self.layout = None
         self.jobs = List[_FrameSinkJob]()
         self.table = None
@@ -118,17 +122,39 @@ struct BuildFinish(Movable, Rounds):
         if self.stage == _BUILD_BEGIN:
             for c in range(self.frame.width()):
                 if self.frame._columns[c].is_chunked():
+                    ref column = self.frame._columns[c]
+                    var k = len(self.chunked)
                     self.chunked.append(c)
-                    self.whole.append(self.frame._columns[c].copy())
+                    self.whole.append(column.copy())
+                    var merge = ChunkMerge.of(column)
+                    if merge:
+                        # Its rows split over the workers, as a column
+                        # copied on its own would split them.
+                        var n = len(column)
+                        var bounds = partitions(n, worker_count(n), 64)
+                        for w in range(len(bounds) - 1):
+                            if bounds[w] < bounds[w + 1]:
+                                self.pieces.append(
+                                    (k, bounds[w], bounds[w + 1])
+                                )
+                    else:
+                        self.pieces.append((k, 0, -1))
+                    self.merges.append(merge^)
             if len(self.chunked) > 0:
                 self.stage = _BUILD_RECHUNK
-                self.width = round_width(len(self.chunked))
-                return self.width
+                return len(self.pieces)
             return self._begin_sink()
         if self.stage == _BUILD_RECHUNK:
             for k in range(len(self.chunked)):
-                self.frame._columns[self.chunked[k]] = self.whole[k].copy()
+                if self.merges[k]:
+                    self.frame._columns[self.chunked[k]] = (
+                        self.merges[k].value().merged.copy()
+                    )
+                else:
+                    self.frame._columns[self.chunked[k]] = self.whole[k].copy()
             self.whole = List[Series]()
+            self.merges = List[Optional[ChunkMerge]]()
+            self.pieces = List[Tuple[Int, Int, Int]]()
             return self._begin_sink()
         if self.stage == _BUILD_SINK:
             var sinks = List[JoinBuildSink](capacity=len(self.jobs))
@@ -185,9 +211,11 @@ struct BuildFinish(Movable, Rounds):
 
     def round_task(mut self, task: Int) raises:
         if self.stage == _BUILD_RECHUNK:
-            var k = task
-            while k < len(self.chunked):
+            var piece = self.pieces[task]
+            var k = piece[0]
+            if piece[2] < 0:
                 self.whole[k] = self.whole[k].rechunk()
-                k += self.width
+            else:
+                self.merges[k].value().copy_rows(piece[1], piece[2])
         else:
             self.jobs[task].run()
