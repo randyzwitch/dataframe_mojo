@@ -12,6 +12,9 @@ Encoding of a valid value:
   0.0 and every NaN as one NaN, so they compare as the flat keys do;
 - a Boolean is one byte, 0 or 1;
 - a string is its length (four bytes) and then its bytes;
+- a categorical value is its label, written as a string is: two codes
+  for the same label are one value, as they are in a flat key, and the
+  bytes mean the same thing whatever dictionary the codes index;
 - a list is its length (four bytes) and then each element's slot;
 - a struct is each field's slot, in order.
 A slot is one byte, 0 for a null and 1 for a value, then the value when
@@ -23,10 +26,11 @@ encoding is a prefix of another, and equal bytes decode to equal values.
 A top-level null is a null string, not a slot: it takes the key's null
 bit, as a flat key's null does.
 """
-from std.memory import Pointer, bitcast, unsafe_memcpy
+from std.collections import Dict
+from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 from std.sys import size_of
 
-from dataframe.dtype import DataType, NUMERIC_DTYPES
+from dataframe.dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from dataframe.series import Series
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column, _pack_bits
@@ -38,6 +42,7 @@ comptime _BOOL = 1
 comptime _STRING = 2
 comptime _LIST = 3
 comptime _STRUCT = 4
+comptime _CATEGORICAL = 5
 
 
 @fieldwise_init
@@ -46,8 +51,9 @@ struct _Reader(Copyable, Movable):
     its validity bitmap (0 for none) and the bit of its row 0, and its
     values: a fixed value's row 0 and width (a float's width negated), a
     Boolean's bitmap and bit of row 0, a list's offsets from row 0, or a
-    string column's place in `_Readers.strings`. A list's child and a
-    struct's fields are other readers."""
+    string column's place in `_Readers.strings`, or a categorical's codes
+    from row 0 and its dictionary's place in `_Readers.dictionaries`. A
+    list's child and a struct's fields are other readers."""
 
     var kind: Int
     var bits: Int
@@ -64,11 +70,13 @@ struct _Readers(Movable):
 
     var nodes: List[_Reader]
     var strings: List[StringColumn]
+    var dictionaries: List[ArcPointer[CategoricalDictionary]]
     var owners: List[Series]
 
     def __init__(out self, series: Series) raises:
         self.nodes = List[_Reader]()
         self.strings = List[StringColumn]()
+        self.dictionaries = List[ArcPointer[CategoricalDictionary]]()
         self.owners = List[Series]()
         _ = self._add(series)
 
@@ -111,6 +119,19 @@ struct _Readers(Movable):
                 node.bit = flags.validity_offset()
             node.values = Int(flags.unsafe_values())
             node.value_bit = flags._offset
+        elif (
+            dtype.is_categorical()
+            and dtype.has_dictionary()
+            and series._data.isa[Column[UInt32]]()
+        ):
+            ref codes = series._data[Column[UInt32]]
+            node.kind = _CATEGORICAL
+            if len(codes._bits[]) > 0:
+                node.bits = Int(codes.unsafe_validity())
+                node.bit = codes.validity_offset()
+            node.values = Int(codes.unsafe_values())
+            node.value_bit = len(self.dictionaries)
+            self.dictionaries.append(dtype.dictionary())
         elif series._data.isa[Column[Int128]]():
             ref column = series._data[Column[Int128]]
             node.kind = _FIXED
@@ -155,7 +176,7 @@ struct _Readers(Movable):
         )[unsafe_offset=at >> 3]
         return (byte >> UInt8(at & 7)) & 1 != 0
 
-    def slot(self, n: Int, row: Int, mut out: List[UInt8]):
+    def slot(self, n: Int, row: Int, mut out: List[UInt8]) raises:
         """Row `row` of level `n` as a slot: its null byte, then its value."""
         if not self.valid(n, row):
             out.append(0)
@@ -163,7 +184,7 @@ struct _Readers(Movable):
         out.append(1)
         self.value(n, row, out)
 
-    def value(self, n: Int, row: Int, mut out: List[UInt8]):
+    def value(self, n: Int, row: Int, mut out: List[UInt8]) raises:
         """Row `row` of level `n`, a valid value, as its bytes."""
         ref node = self.nodes[n]
         if node.kind == _FIXED:
@@ -199,6 +220,18 @@ struct _Readers(Movable):
             var bytes = self.strings[node.values]._row_bytes(row)
             _append_word(out, UInt64(len(bytes)), 4)
             out.extend(bytes)
+        elif node.kind == _CATEGORICAL:
+            var code = Int(
+                Pointer[UInt32, ImmutAnyOrigin](
+                    unsafe_from_address=node.values
+                )[unsafe_offset=row]
+            )
+            ref dictionary = self.dictionaries[node.value_bit][]
+            if code >= len(dictionary):
+                raise Error("Categorical code exceeds its dictionary")
+            var label = dictionary.get(code).as_bytes()
+            _append_word(out, UInt64(len(label)), 4)
+            out.extend(label)
         elif node.kind == _LIST:
             var offsets = Pointer[Int64, ImmutAnyOrigin](
                 unsafe_from_address=node.values
@@ -294,7 +327,8 @@ struct _Builder(Movable):
     """One level of a column being decoded: its type and kind, each row's
     validity, and its values (fixed bytes, Boolean values, string rows, or
     a list's offsets); a list's child and a struct's fields are other
-    builders."""
+    builders. A categorical's values are codes, each label read back as
+    the first code its dictionary gives that label."""
 
     var dtype: DataType
     var kind: Int
@@ -305,6 +339,7 @@ struct _Builder(Movable):
     var strings: StringBuilder
     var offsets: List[Int64]
     var children: List[Int]
+    var codes: Dict[String, UInt32]
 
     def __init__(out self, dtype: DataType, kind: Int, width: Int):
         self.dtype = dtype
@@ -317,29 +352,49 @@ struct _Builder(Movable):
         self.offsets = List[Int64]()
         self.offsets.append(0)
         self.children = List[Int]()
+        self.codes = Dict[String, UInt32]()
 
 
 struct _Builders(Movable):
-    """The builders of a nested type's levels, by index (its own at 0)."""
+    """The builders of a nested type's levels, by index (its own at 0),
+    typed as the levels of a column of that type: a nested type names its
+    leaves' types but not a categorical's dictionary, which the column's
+    own leaves carry."""
 
     var nodes: List[_Builder]
 
-    def __init__(out self, dtype: DataType) raises:
+    def __init__(out self, template: Series) raises:
         self.nodes = List[_Builder]()
-        _ = self._add(dtype)
+        _ = self._add(template)
 
-    def _add(mut self, dtype: DataType) raises -> Int:
+    def _add(mut self, template: Series) raises -> Int:
         var at = len(self.nodes)
+        var dtype = template.dtype()
         if dtype.is_list():
+            var column = (
+                template.rechunk() if template.is_chunked() else template.copy()
+            )
             self.nodes.append(_Builder(dtype, _LIST, 0))
-            var child = self._add(dtype.inner())
+            var child = self._add(column.list_column().child())
             self.nodes[at].children.append(child)
             return at
         if dtype.is_struct():
+            var column = (
+                template.rechunk() if template.is_chunked() else template.copy()
+            )
+            var structs = column.struct_column()
             self.nodes.append(_Builder(dtype, _STRUCT, 0))
-            for field in dtype.field_dtypes():
-                var child = self._add(field)
+            for f in range(structs.field_count()):
+                var child = self._add(structs.field(f))
                 self.nodes[at].children.append(child)
+            return at
+        if dtype.is_categorical() and dtype.has_dictionary():
+            self.nodes.append(_Builder(dtype, _CATEGORICAL, 4))
+            ref dictionary = dtype.dictionary()[]
+            for code in range(len(dictionary)):
+                var label = String(dictionary.get(code))
+                if label not in self.nodes[at].codes:
+                    self.nodes[at].codes[label^] = UInt32(code)
             return at
         # A leaf's storage, as an empty column of its type reads it.
         var readers = _Readers(Series.full_null("", dtype, 0))
@@ -355,7 +410,7 @@ struct _Builders(Movable):
         keep its length)."""
         self.nodes[n].valid.append(False)
         var kind = self.nodes[n].kind
-        if kind == _FIXED:
+        if kind == _FIXED or kind == _CATEGORICAL:
             var start = len(self.nodes[n].fixed)
             self.nodes[n].fixed.resize(start + self.nodes[n].width, 0)
         elif kind == _BOOL:
@@ -394,6 +449,17 @@ struct _Builders(Movable):
             self.nodes[n].flags.append(bytes[unsafe_offset=at] != 0)
             return at + 1
         var length = Int(_read_word(data + at))
+        if kind == _CATEGORICAL:
+            var label = String(
+                unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
+                    unsafe_ptr=bytes.unsafe_offset(at + 4), length=length
+                )
+            )
+            var code = self.nodes[n].codes.get(label)
+            if not code:
+                raise Error("nested keys: a label its dictionary lacks")
+            _append_word(self.nodes[n].fixed, UInt64(code.value()), 4)
+            return at + 4 + length
         if kind == _STRING:
             # The bytes as they were: a binary value need not be UTF-8.
             ref strings = self.nodes[n].strings
@@ -510,12 +576,14 @@ def _read_word(address: Int) -> UInt32:
     return word
 
 
-def decode_nested_keys(keys: Series, dtype: DataType) raises -> Series:
+def decode_nested_keys(keys: Series, template: Series) raises -> Series:
     """Byte strings `encode_nested_keys` wrote back as the list or struct
-    column of type `dtype` they came from, a null string a null row."""
+    column they came from, a null string a null row. `template` is a
+    column of that type (its rows are not read): it gives each level its
+    type, and a categorical its dictionary."""
     var column = keys.rechunk() if keys.is_chunked() else keys.copy()
     ref strings = column._data[StringColumn]
-    var builders = _Builders(dtype)
+    var builders = _Builders(template)
     for row in range(len(strings)):
         if not strings._valid(row):
             builders.null(0)

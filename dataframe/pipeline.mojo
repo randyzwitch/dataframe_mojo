@@ -128,6 +128,7 @@ from dataframe.table_filter import (
 )
 from dataframe.table_scan import ScanFilterInfo
 from dataframe.io.scan_source import ScanSource
+from dataframe.io.sinks import FileSink
 from dataframe.aggregation.state import (
     _StreamReduction,
     PartsFinish,
@@ -1428,6 +1429,10 @@ struct _ChunkRunner(Movable):
     # (-1: every row), and the last morsel any worker still needs.
     var limit: Int
     var limit_bound: LimitBound
+    # A file the materialized rows go to as each morsel's batch is
+    # complete (a `FileSink`'s address; 0 for none): the batch leaves the
+    # worker's collections then, rather than at the finish.
+    var writer: Int
     # A join build sink (`JoinBuildSink`), when the pipeline's rows are a
     # hash join's build side: the chunks go into the worker's own rows,
     # which become the join's table, and nothing is collected.
@@ -1488,6 +1493,7 @@ struct _ChunkRunner(Movable):
         self.retained_morsel = 0
         self.limit = -1
         self.limit_bound = LimitBound.none()
+        self.writer = 0
         self.build = List[JoinBuildSink]()
         self.build_layout = List[ArcPointer[JoinBuildLayout]]()
         self.scan = None
@@ -1580,6 +1586,7 @@ struct _ChunkRunner(Movable):
                         bound=self.limit_bound,
                     )
                 )
+            self.hand_batch()
             self.materialize[0].begin(morsel)
 
     def sink_full(self) -> Bool:
@@ -1599,6 +1606,7 @@ struct _ChunkRunner(Movable):
             self.sets[0].release()
             self.sets[0].derive()
         if len(self.materialize) > 0:
+            self.hand_batch()
             self.materialize[0].release()
         if len(self.build) > 0:
             self.build[0].release()
@@ -1629,6 +1637,25 @@ struct _ChunkRunner(Movable):
         swap(batch.lists, columns.lists)
         swap(batch.rows, columns.row_lists)
         self.retained_batches.append(batch^)
+
+    def hand_batch(mut self) raises:
+        """The rows of the morsel the materialize sink took last, now
+        complete, handed to the file (`writer`) in that morsel's place, an
+        empty batch when it kept none: the file writes them once every
+        batch before them is written."""
+        if self.writer == 0 or len(self.materialize) == 0:
+            return
+        ref sink = self.materialize[0]
+        if sink.batch < 0:
+            return
+        var frame = sink.schema.copy()
+        var last = len(sink.batches) - 1
+        if last >= 0 and sink.batches[last] == sink.batch:
+            frame = sink.collections[last].frame()
+            _ = sink.batches.pop()
+            _ = sink.collections.pop()
+        FileSink.offer_at(self.writer, sink.batch, frame)
+        sink.batch = -1
 
     def release_local(mut self):
         """Release worker-local compiled steps on the worker that used them.
@@ -2639,6 +2666,10 @@ struct _PipelineJob(Job):
             if taken >= count or self.first_morsel + taken > self.bound.last():
                 self.counts = self.runner.counts.copy()
                 if not self.finishes:
+                    # The run goes on in a later round: the last morsel's
+                    # rows go to the file now, so no worker waits for
+                    # them across the rounds.
+                    self.runner.hand_batch()
                     return
                 self.runner.release_sink()
                 self.runner.release_local()
@@ -2685,6 +2716,8 @@ struct _PipelineJob(Job):
         if self.finishes:
             self.runner.release_sink()
             self.runner.release_local()
+        else:
+            self.runner.hand_batch()
 
     def _morsel(
         mut self, morsel: DataFrame, k: Int, offset: Int, length: Int
@@ -4094,7 +4127,13 @@ struct PipelineRun(Movable):
         return len(self.jobs)
 
     def execute(mut self, task: Int) raises:
-        self.jobs[task].run()
+        try:
+            self.jobs[task].run()
+        except e:
+            if self.jobs[task].runner.writer != 0:
+                # Workers waiting for this one's rows stop waiting.
+                FileSink.fail_at(self.jobs[task].runner.writer)
+            raise e^
 
     def begin_round(mut self) raises -> Bool:
         """After probing, partition the build table's rows among workers and
@@ -4294,6 +4333,20 @@ def pipeline_types(
     )
 
 
+def _grows_dictionary(frame: DataFrame) -> Bool:
+    """Whether a categorical column of `frame` is typed by a dictionary
+    that still gets values while the pipeline runs."""
+    for column in frame._columns:
+        var dtype = column.dtype()
+        if (
+            dtype.is_categorical()
+            and dtype.has_dictionary()
+            and dtype.dictionary()[].grows
+        ):
+            return True
+    return False
+
+
 def begin_pipeline(
     frame: DataFrame,
     given_steps: List[Step],
@@ -4326,6 +4379,7 @@ def begin_pipeline(
     build_filter_rows: Int = -1,
     var types: Optional[PipelineTypes] = None,
     limit: Int = -1,
+    writer: Int = 0,
     selection_output: Optional[ArcPointer[SelectionBatches]] = None,
     computed: Bool = False,
 ) raises -> PipelineRun:
@@ -4344,9 +4398,12 @@ def begin_pipeline(
     typed and compiled and the table's layout (`pipeline_types`), when
     the caller made them already for `given_steps` over `frame`'s
     columns. `limit`: only the first that many rows in source order are
-    the result (-1: every row), when the rows are materialized. `computed`:
-    `frame` is a result the query made rather than a table it reads, whose
-    vector statistics are read where it has them but never computed."""
+    the result (-1: every row), when the rows are materialized. `writer`:
+    a `FileSink` (its address) the materialized rows go to, each morsel's
+    batch as it is complete (`_ChunkRunner.hand_batch`), when every row
+    is the result; the finish's frame then has none. `computed`: `frame`
+    is a result the query made rather than a table it reads, whose vector
+    statistics are read where it has them but never computed."""
     trace_path("pipeline.run")
     # The steps typed and compiled and the table's layout, unless the
     # caller made them already for these steps and columns.
@@ -4685,6 +4742,22 @@ def begin_pipeline(
             jobs[w].runner.limit = limit
             jobs[w].runner.limit_bound = bound
             jobs[w].bound = bound
+    # Every materialized row is the result: each batch goes to the file as
+    # its morsel is complete. A categorical column of a file scan is typed
+    # by a dictionary that gets every value only once the scan is over
+    # (`ScanSource.settle`), so such rows are written from the finish.
+    if (
+        writer != 0
+        and len(expressions) == 0
+        and top <= 0
+        and not build_layout
+        and bound.address == 0
+        and len(finish_steps) == 0
+        and not _grows_dictionary(schemas[][len(steps)])
+    ):
+        trace_path("pipeline.file_sink")
+        for w in range(len(jobs)):
+            jobs[w].runner.writer = writer
     if scan:
         var shared_scan = ArcPointer(scan.take())
         for w in range(len(jobs)):
