@@ -23,9 +23,16 @@ from dataframe.kernels.group_rows import (
 )
 from dataframe.kernels.partition import Partitioner, _same_value
 from dataframe.aggregation.reducer import float_key
-from dataframe.parallel import Job, configured_workers, partitions, run_jobs
+from dataframe.parallel import (
+    Job,
+    Rounds,
+    configured_workers,
+    partitions,
+    run_jobs,
+    run_rounds,
+)
 from dataframe.series import Series
-from dataframe.sorting.sort import sort_rows
+from dataframe.sorting.sort import SortRounds, sort_rows
 from dataframe.kernels.binary import validity
 from dataframe.sorting.sort_key import STANDARD_VECTOR_SIZE
 
@@ -1702,9 +1709,11 @@ def rank_window(
     rows. With partition keys, each task sorts the rows of its whole
     partitions, marks their partition and peer boundaries and ranks them
     in one go: its ranks depend on no other task and no thread waits for
-    the others. One
-    partition is ranked in parallel ranges of the full sort, each starting
-    from the state its predecessors carry in."""
+    the others. One partition is ranked as `RankRounds`."""
+    if len(partition_keys) == 0:
+        var rounds = RankRounds(input, descending, method)
+        run_rounds(rounds)
+        return rounds.take_result()
     var code = rank_method(method)
     var n = len(input)
     var keys = List[Series]()
@@ -1732,14 +1741,24 @@ def rank_window(
         key_nulls_last,
         n,
         method == "ordinal",
-        rank if len(partition_keys) > 0 else _RankOut(),
+        rank,
         False,
         known,
     )
-    if len(partition_keys) == 0:
-        _rank_ranges(layout, rank)
     _ = layout^
     _ = present^
+    return _rank_series(average, has_nulls, ints^, floats^, out_valid^)
+
+
+def _rank_series(
+    average: Bool,
+    has_nulls: Bool,
+    var ints: List[Int64],
+    var floats: List[Float64],
+    var out_valid: List[Bool],
+) raises -> Series:
+    """The ranks as a column: averages as floats, others as integers, with
+    the validity `out_valid` holds when the input has nulls."""
     if average and has_nulls:
         return Series("", Column[Float64](floats^, out_valid))
     if average:
@@ -1749,62 +1768,198 @@ def rank_window(
     return Series("", Column[Int64](ints^))
 
 
-def _rank_ranges(layout: WindowLayout, rank: _RankOut) raises:
-    """Rank one sorted layout in parallel ranges of sorted positions: a
-    first pass summarizes each range, the second writes ranks from the
-    state the ranges before it carry in."""
-    var n = len(layout.order)
-    var workers = configured_workers()
-    var bounds = partitions(n, workers, STANDARD_VECTOR_SIZE)
-    var jobs = List[_RankScanJob](capacity=workers)
-    for w in range(workers):
-        if bounds[w + 1] > bounds[w]:
-            jobs.append(
-                _RankScanJob(
-                    Int(layout.flags.unsafe_ptr()),
-                    Int(layout.order.unsafe_ptr()),
-                    rank.valid,
-                    bounds[w],
-                    bounds[w + 1],
-                    rank.method,
-                    rank.ints,
-                    rank.floats,
-                    rank.out_valid,
-                )
+# The stages of a `RankRounds`: the round that ran last.
+comptime _RANK_SORT = 0
+comptime _RANK_MASK = 1
+comptime _RANK_SUMMARY = 2
+comptime _RANK_WRITE = 3
+comptime _RANK_DONE = 4
+
+
+struct RankRounds(Movable, Rounds):
+    """Every row's rank of `input` over all rows (one partition), as rounds
+    of tasks: the sort of `rank_order_keys(input)` (`SortRounds`), a round
+    marking peer boundaries over ranges of sorted positions, a round
+    summarizing each range (its first and last peer starts and its count
+    of peer groups), and, once each range has the state the ranges before
+    it carry in, a round writing every range's ranks to their rows. Each
+    round needs only the one before it, so the rounds can run as tasks of
+    a query's schedule or, with `run_rounds`, as jobs. `take_result` once
+    no round is left."""
+
+    var code: Int
+    var rows: Int
+    var keys: List[Series]
+    var sort: List[SortRounds]
+    var stage: Int
+    var order: List[Int]
+    var flags: List[UInt8]
+    var bounds: List[Int]
+    var present: List[Bool]
+    var has_nulls: Bool
+    var ints: List[Int64]
+    var floats: List[Float64]
+    var out_valid: List[Bool]
+    var jobs: List[_RankScanJob]
+    var result: Series
+
+    def __init__(
+        out self, input: Series, descending: Bool, method: String
+    ) raises:
+        self.code = rank_method(method)
+        self.rows = len(input)
+        self.keys = List[Series]()
+        var key_descending = List[Bool]()
+        var key_nulls_last = List[Bool]()
+        rank_order_keys(
+            input, descending, self.keys, key_descending, key_nulls_last
+        )
+        for k in range(len(self.keys)):
+            if self.keys[k].is_chunked():
+                self.keys[k] = self.keys[k].rechunk()
+        self.sort = List[SortRounds]()
+        # Ordinal ranks number peers in input order: a stable sort.
+        self.sort.append(
+            SortRounds(
+                self.keys, key_descending, key_nulls_last, method == "ordinal"
             )
-    if len(jobs) > 1:
-        run_jobs(jobs)
-        # Carry the state across ranges, then the next boundary backwards.
-        var base = -1
-        var peer = 0
-        var dense = 0
-        for j in range(len(jobs)):
-            jobs[j].base = base
-            jobs[j].peer = peer
-            jobs[j].dense = dense
-            if jobs[j].has_partition:
-                base = jobs[j].local_base
-                dense = jobs[j].local_dense
-            else:
-                if base < 0 and jobs[j].first_valid_peer >= 0:
-                    base = jobs[j].first_valid_peer
-                dense += jobs[j].local_dense
-            if jobs[j].last_peer >= 0:
-                peer = jobs[j].last_peer
-        var next_start = n
-        for r in range(len(jobs)):
-            var j = len(jobs) - 1 - r
-            jobs[j].next_start = next_start
-            if jobs[j].first_peer >= 0:
-                next_start = jobs[j].first_peer
-    elif len(jobs) == 1:
-        jobs[0].next_start = n
-    for j in range(len(jobs)):
-        jobs[j].write = True
-    if len(jobs) > 1:
-        run_jobs(jobs)
-    elif len(jobs) == 1:
-        jobs[0].run()
+        )
+        self.stage = _RANK_SORT
+        self.order = List[Int]()
+        self.flags = List[UInt8]()
+        self.bounds = List[Int]()
+        var average = self.code == RANK_AVERAGE
+        self.has_nulls = input.null_count() > 0
+        self.present = validity(input) if self.has_nulls else List[Bool]()
+        self.ints = huge_uninit[Int64](0 if average else self.rows)
+        self.floats = huge_uninit[Float64](self.rows if average else 0)
+        self.out_valid = huge_uninit[Bool](self.rows if self.has_nulls else 0)
+        self.jobs = List[_RankScanJob]()
+        self.result = Series("", Column[Int64](List[Int64]()))
+
+    def next_round(mut self) raises -> Int:
+        if self.stage == _RANK_SORT:
+            var tasks = self.sort[0].next_round()
+            if tasks > 0:
+                return tasks
+            self.order = self.sort[0].take_order()
+            _ = self.sort.pop()
+            if self.rows == 0:
+                self._finish()
+                return 0
+            self.flags = huge_uninit[UInt8](self.rows)
+            var ranges = partitions(
+                self.rows, configured_workers(), STANDARD_VECTOR_SIZE
+            )
+            self.bounds.append(0)
+            for w in range(len(ranges) - 1):
+                if ranges[w + 1] > ranges[w]:
+                    self.bounds.append(ranges[w + 1])
+            self.stage = _RANK_MASK
+            return len(self.bounds) - 1
+        if self.stage == _RANK_MASK:
+            self.flags[0] = PARTITION_START | PEER_START
+            var valid = Int(self.present.unsafe_ptr()) if self.has_nulls else 0
+            var out_valid = Int(
+                self.out_valid.unsafe_ptr()
+            ) if self.has_nulls else 0
+            for r in range(len(self.bounds) - 1):
+                self.jobs.append(
+                    _RankScanJob(
+                        Int(self.flags.unsafe_ptr()),
+                        Int(self.order.unsafe_ptr()),
+                        valid,
+                        self.bounds[r],
+                        self.bounds[r + 1],
+                        self.code,
+                        Int(self.ints.unsafe_ptr()),
+                        Int(self.floats.unsafe_ptr()),
+                        out_valid,
+                    )
+                )
+            self.stage = _RANK_SUMMARY
+            if len(self.jobs) > 1:
+                return len(self.jobs)
+        if self.stage == _RANK_SUMMARY:
+            self._carry()
+            self.stage = _RANK_WRITE
+            return len(self.jobs)
+        if self.stage == _RANK_WRITE:
+            self._finish()
+        return 0
+
+    def round_task(mut self, task: Int) raises:
+        if self.stage == _RANK_SORT:
+            self.sort[0].round_task(task)
+        elif self.stage == _RANK_MASK:
+            var job = _MaskJob(
+                self.keys,
+                self.bounds[task],
+                self.bounds[task + 1],
+                Int(self.flags.unsafe_ptr()),
+                Int(self.order.unsafe_ptr()),
+            )
+            job.run()
+        else:
+            self.jobs[task].run()
+
+    def _carry(mut self):
+        """Each range's state carried in from the summaries of the ranges
+        before it, then, backwards, the next peer start after it."""
+        var count = len(self.jobs)
+        if count > 1:
+            var base = -1
+            var peer = 0
+            var dense = 0
+            for j in range(count):
+                self.jobs[j].base = base
+                self.jobs[j].peer = peer
+                self.jobs[j].dense = dense
+                if self.jobs[j].has_partition:
+                    base = self.jobs[j].local_base
+                    dense = self.jobs[j].local_dense
+                else:
+                    if base < 0 and self.jobs[j].first_valid_peer >= 0:
+                        base = self.jobs[j].first_valid_peer
+                    dense += self.jobs[j].local_dense
+                if self.jobs[j].last_peer >= 0:
+                    peer = self.jobs[j].last_peer
+            var next_start = self.rows
+            for r in range(count):
+                var j = count - 1 - r
+                self.jobs[j].next_start = next_start
+                if self.jobs[j].first_peer >= 0:
+                    next_start = self.jobs[j].first_peer
+        elif count == 1:
+            self.jobs[0].next_start = self.rows
+        for j in range(count):
+            self.jobs[j].write = True
+
+    def _finish(mut self) raises:
+        self.jobs = List[_RankScanJob]()
+        self.order = List[Int]()
+        self.flags = List[UInt8]()
+        self.present = List[Bool]()
+        var ints = List[Int64]()
+        var floats = List[Float64]()
+        var out_valid = List[Bool]()
+        swap(ints, self.ints)
+        swap(floats, self.floats)
+        swap(out_valid, self.out_valid)
+        self.result = _rank_series(
+            self.code == RANK_AVERAGE,
+            self.has_nulls,
+            ints^,
+            floats^,
+            out_valid^,
+        )
+        self.stage = _RANK_DONE
+
+    def take_result(mut self) raises -> Series:
+        """The ranks, moved out once no round is left."""
+        var taken = Series("", Column[Int64](List[Int64]()))
+        swap(taken, self.result)
+        return taken^
 
 
 def rank_rows(
