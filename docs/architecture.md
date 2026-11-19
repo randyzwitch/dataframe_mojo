@@ -194,11 +194,10 @@ checks. It does not import sampling or cost policy. Expression input references
 live below both eligibility and observations in `planning/expression_inputs.mojo`.
 
 `planning/cost/sampling.mojo` owns the existing cardinality observations, build-key
-bounds, deferred string-density probe, and streaming split/collection budgets.
+bounds and deferred string-density probe.
 `planning/cost/aggregation.mojo` combines those observations and the prepared
-inline-state capability into one `AggregationDecision`: batch streaming, a
-morsel pipeline, an insertion pipeline, an aggregate-table pipeline, or eager
-execution. The result carries its semantic eligibility reason, preference
+inline-state capability into one `AggregationDecision`: a morsel pipeline, an
+aggregate-table pipeline, or eager execution. The result carries its semantic eligibility reason, preference
 reason, sampled counts/bounds, and any key-coding or build-row-number plan.
 
 Execution still prepares empty-frame types, applies key transformations and

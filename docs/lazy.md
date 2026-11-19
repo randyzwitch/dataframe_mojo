@@ -133,8 +133,12 @@ accepts `write_csv`'s formatting options: `has_header=True`, `separator=","`,
 Sinks execute through the CPU query executor and do not take `engine` or
 `streaming` arguments.
 
-Row-local pipelines hand batches directly to the sink. Sorts, joins, grouping,
-and other stateful operators retain their documented memory requirements.
+A sink runs the query through the same morsel pipelines as `collect`. When the
+result's rows come straight from a scan's filters, projections and joins, each
+worker formats its own morsel's rows and the file receives them in source
+order as each morsel completes, so the complete output is never held. Sorts,
+top-N, slices, grouping, unique and other stateful operators make their result
+as `collect` does; it is then written in order, formatted in parallel.
 The sink writes a temporary file beside the destination and replaces the
 file after successful completion. Errors preserve an existing destination,
 and a scan can replace its own input file. CSV emits one header when enabled,
@@ -195,16 +199,7 @@ raw samples and reproduction commands.
 
 The engine does not spill to disk. Streaming limits batches in flight, but
 join build sides, groups, distinct sets, materializing operators and collected
-output can grow with the input. `DATAFRAME_STREAM_COLLECT_BYTES` (default
-4 GiB) is a threshold for reducing collected aggregate batches between worker
-waves, not a bound on query memory.
-
-That threshold counts retained buffer capacities, including long string
-payloads, nested children, dictionaries, validity, selections and published
-merge caches. Slices retain their full backing allocations, and buffers shared
-by collected batches count once. Opaque foreign producers expose only declared
-buffer spans; allocator overhead and their undisclosed allocations are not
-included in this metric.
+output can grow with the input.
 
 To enforce a hard ceiling on a Linux query process, compile first and run:
 
