@@ -561,6 +561,9 @@ struct _BuildFor(Copyable, Movable):
     var coalesce: Bool
     var probe_estimate: Int
     var build_filtered: Bool
+    # Estimated rows of a scan the join's keys also filter, through an
+    # aggregate on its probe side; -1 for none.
+    var filter_rows: Int
 
     def __init__(out self):
         self.keys = List[String]()
@@ -568,6 +571,7 @@ struct _BuildFor(Copyable, Movable):
         self.coalesce = True
         self.probe_estimate = -1
         self.build_filtered = False
+        self.filter_rows = -1
 
 
 struct _StreamSchedule(Movable):
@@ -673,6 +677,7 @@ def _add_stream(
             inputs.coalesces[k],
             inputs.probe_estimates[k],
             inputs.build_filtered[k],
+            inputs.filter_rows[k],
         )
         var finish = Optional[ArcPointer[FinishAbove]]()
         if inputs.finish and inputs.finish.value()[].node == inputs.wanted[k]:
@@ -1387,6 +1392,7 @@ struct _StreamProbe(Movable):
                     self.build.coalesce,
                     self.build.probe_estimate,
                     self.build.build_filtered,
+                    self.build.filter_rows,
                 )
             )
             self._build_round()
@@ -1598,6 +1604,7 @@ struct _OperatorPipeline(Movable):
                     self.build.coalesce,
                     self.build.probe_estimate,
                     self.build.build_filtered,
+                    self.build.filter_rows,
                 )
             )
 
@@ -2353,6 +2360,7 @@ def _probe_start(
             build_coalesce=build.coalesce,
             build_probe_estimate=build.probe_estimate,
             build_filtered=build.build_filtered,
+            build_filter_rows=build.filter_rows,
             # Made ahead for the same steps over the same columns, unless
             # late materialization changed them.
             types=pipeline_ahead^,

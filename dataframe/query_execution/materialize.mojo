@@ -281,6 +281,9 @@ struct _StreamInputs(Movable):
     # Whether each build side filters its rows (the join filters' bloom
     # rule reads it).
     var build_filtered: List[Bool]
+    # Estimated rows of the input of an aggregate on the probe side that
+    # each build's keys also filter (`PlannedJoinFilter`); -1 for none.
+    var filter_rows: List[Int]
     # The row steps above the aggregate the stream reads, for that input's
     # finish to run (`FinishAbove`), when it can.
     var finish: Optional[ArcPointer[FinishAbove]]
@@ -290,11 +293,29 @@ struct _StreamInputs(Movable):
         self.coalesces = List[Bool]()
         self.probe_estimates = List[Int]()
         self.build_filtered = List[Bool]()
+        self.filter_rows = List[Int]()
         self.metas = List[MetaPipeline]()
         self.wanted = List[Int]()
         self.joins = List[Int]()
         self.keys = List[List[String]]()
         self.hows = List[Int]()
+
+
+def _filter_rows(
+    self: QueryContext, mut stats: PlanStatistics, join: Int
+) raises -> Int:
+    """Estimated rows of the input of the aggregate below the probe side of
+    join `join` that the join's build keys also filter
+    (`plan_push_filters_through_aggregate`): a larger set of rows the
+    keys' filter is read on than the join's own probe side; -1 when the
+    keys filter no such input."""
+    if not self._pushed_filters:
+        return -1
+    ref pushed = self._pushed_filters.value()[]
+    for planned in pushed.planned:
+        if planned.join == join:
+            return plan_cardinality(self, stats, self._nodes[pushed.node].left)
+    return -1
 
 
 def plan_schedule_inputs(
@@ -335,6 +356,7 @@ def plan_schedule_inputs(
                 inputs.build_filtered.append(
                     plan_is_filtering(self, step.right)
                 )
+                inputs.filter_rows.append(_filter_rows(self, stats, probe))
                 inputs.metas.append(MetaPipeline(META_JOIN_BUILD))
             probe = step.left
         else:
@@ -355,6 +377,7 @@ def plan_schedule_inputs(
             inputs.coalesces.append(True)
             inputs.probe_estimates.append(-1)
             inputs.build_filtered.append(False)
+            inputs.filter_rows.append(-1)
             inputs.metas.append(MetaPipeline(META_REGULAR))
     # A computed source the stream reads is a pipeline of the schedule
     # too, so it runs as no schedule of its own: also when the stream's
@@ -372,6 +395,7 @@ def plan_schedule_inputs(
         inputs.coalesces.append(True)
         inputs.probe_estimates.append(-1)
         inputs.build_filtered.append(False)
+        inputs.filter_rows.append(-1)
         inputs.metas.append(MetaPipeline(META_REGULAR))
     return inputs^
 

@@ -80,6 +80,7 @@ struct BuildFinish(Movable, Rounds):
     var coalesce: Bool
     var probe_estimate: Int
     var build_filtered: Bool
+    var filter_rows: Int
     var defer_finalize: Bool
     var stage: Int
     # The chunked columns and their single-chunk copies. A fixed-width
@@ -104,6 +105,7 @@ struct BuildFinish(Movable, Rounds):
         coalesce: Bool,
         probe_estimate: Int,
         build_filtered: Bool,
+        filter_rows: Int = -1,
     ):
         self.frame = frame^
         self.keys = keys.copy()
@@ -111,6 +113,7 @@ struct BuildFinish(Movable, Rounds):
         self.coalesce = coalesce
         self.probe_estimate = probe_estimate
         self.build_filtered = build_filtered
+        self.filter_rows = filter_rows
         self.defer_finalize = True
         self.stage = _BUILD_BEGIN
         self.chunked = List[Int]()
@@ -191,6 +194,7 @@ struct BuildFinish(Movable, Rounds):
             self.probe_estimate,
             False,
             build_filtered=self.build_filtered,
+            filter_rows=self.filter_rows,
         )
         if not layout:
             return 0

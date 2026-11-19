@@ -4323,6 +4323,7 @@ def begin_pipeline(
     build_coalesce: Bool = True,
     build_probe_estimate: Int = -1,
     build_filtered: Bool = False,
+    build_filter_rows: Int = -1,
     var types: Optional[PipelineTypes] = None,
     limit: Int = -1,
     selection_output: Optional[ArcPointer[SelectionBatches]] = None,
@@ -4334,7 +4335,8 @@ def begin_pipeline(
     no row: the workers take the source's batches as their morsels, and
     `source_rows` is its estimated height. With `build_keys`, the rows
     are the build side of a hash join of type `build_how` on those keys
-    (`build_coalesce`, `build_probe_estimate` and `build_filtered` as
+    (`build_coalesce`, `build_probe_estimate`, `build_filtered` and
+    `build_filter_rows` as
     `finish_build` takes them): each worker sinks its chunks into its own rows of the join's
     hash table (`JoinBuildSink`), and the finish makes the table
     (`PipelineRun.built`) instead of a frame, unless a column's type
@@ -4637,6 +4639,7 @@ def begin_pipeline(
             build_probe_estimate,
             True,
             build_filtered=build_filtered,
+            filter_rows=build_filter_rows,
         )
         if made:
             trace_path("pipeline.join_build_sink")
