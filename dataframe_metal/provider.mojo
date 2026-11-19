@@ -22,6 +22,8 @@ from .accelerator.faults import is_data_fault
 from .accelerator.gpu.identity import runtime_build_id
 from dataframe.json.value import json_quote
 from std.os import getenv
+from std.memory import ArcPointer
+from dataframe.execution_observation import DeviceObservation
 
 
 def installed() -> Bool:
@@ -138,15 +140,30 @@ def run_pipeline(pipeline: LazyFrame, device: Int) raises -> DataFrame:
         raise Error("Metal is not available here; no device runs pipelines")
     if device != 0:
         raise Error("Metal runs pipelines on device 0 only")
+    var observed_pipeline = pipeline.copy()
+    if not observed_pipeline._plan._device_observation and getenv(
+        "DATAFRAME_METAL_PLACEMENT_TRACE"
+    ):
+        observed_pipeline._plan._device_observation = ArcPointer(
+            DeviceObservation()
+        )
+        observed_pipeline._plan._device_observation.value()[].begin()
+    var observed = observed_pipeline._plan._device_observation
     try:
-        var result = handoff_execute(pipeline)
-        _trace_placement(pipeline, "metal")
+        var result = handoff_execute(observed_pipeline)
+        if observed:
+            observed.value()[].complete()
+        _trace_placement(observed_pipeline, "metal")
         return result^
     except error:
         if not is_data_fault(error):
+            if observed:
+                observed.value()[].failed(String(error))
             raise error^
-        var result = pipeline.collect(engine="cpu")
-        _trace_placement(pipeline, "cpu-adjudication")
+        if observed:
+            observed.value()[].cpu("data_fault_adjudication")
+        var result = observed_pipeline.collect(engine="cpu")
+        _trace_placement(observed_pipeline, "cpu-adjudication")
         return result^
 
 
@@ -158,15 +175,31 @@ def _trace_placement(pipeline: LazyFrame, engine: String) raises:
     var rows = pipeline._plan._frames[
         pipeline._plan._nodes[0].source_slot()
     ].height()
+    var observed = pipeline._plan._device_observation
+    var actual = engine
+    if observed:
+        actual = observed.value()[].result_device
     var record = (
         '{"engine":'
         + json_quote(engine)
+        + ',"result_device":'
+        + json_quote(actual)
         + ',"key":'
         + json_quote(key)
         + ',"rows":'
         + String(rows)
         + ',"runtime_build_id":'
         + json_quote(runtime_build_id())
+        + ',"gpu_launches":'
+        + String(observed.value()[].launches.load() if observed else 0)
+        + ',"gpu_completed_launches":'
+        + String(
+            observed.value()[].completed_launches.load() if observed else 0
+        )
+        + ',"device_status":'
+        + json_quote(observed.value()[].status if observed else "unverified")
+        + ',"fallback_reason":'
+        + json_quote(observed.value()[].reason if observed else "")
         + "}\n"
     )
     with open(path, "a") as target:

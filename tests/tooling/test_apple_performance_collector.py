@@ -16,6 +16,7 @@ spec = importlib.util.spec_from_file_location(
 collector = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(collector)
 from suite_answer_fixture import export_fixture  # suite_answer_fixture.py
+from metal_execution_fixture import evidence, pipeline
 
 
 def protocol():
@@ -201,6 +202,7 @@ class ApplePerformanceCollector(unittest.TestCase):
             status="ok",
             ordered_equal=False,
             collections=2,
+            runtime_execution=evidence(collector.metal.metal_execution_audit),
             runtime_adjudication=dict(
                 status="complete",
                 observed_calls=2,
@@ -331,6 +333,13 @@ class ApplePerformanceCollector(unittest.TestCase):
         self.assertEqual(missing_result["execution_boundary"], "unknown")
         self.assertFalse(missing_result["runtime_audit_verified"])
         old_receipt = copy.deepcopy(receipt)
+        old_receipt["cases"][0].pop("runtime_execution")
+        self.assertFalse(
+            collector.strict_basis(
+                case, [old_receipt], engine, sources, "sdk", 8, metadata
+            )["verified"]
+        )
+        old_receipt = copy.deepcopy(receipt)
         old_receipt["cases"][0].pop("runtime_adjudication")
         self.assertFalse(
             collector.strict_basis(
@@ -368,6 +377,7 @@ class ApplePerformanceCollector(unittest.TestCase):
             execution_boundary="gpu_collects",
             runtime_audit_verified=True,
             runtime_adjudication=dict(cpu_adjudicated_calls=0),
+            runtime_execution=evidence(collector.metal.metal_execution_audit),
         )
         runs = [
             dict(
@@ -392,6 +402,17 @@ class ApplePerformanceCollector(unittest.TestCase):
             )
         self.assertEqual(
             collector.ratio_basis(runs[:-1], strict, 3, 3), "incomplete_rounds"
+        )
+        hybrid = collector.metal.metal_execution_audit.summarize([
+            dict(status="gpu_observed", pipelines=[
+                pipeline(),
+                pipeline(node=0, pipeline=0, operator="FILTER", result_device="cpu",
+                         device_status="cpu", gpu_launches=0, gpu_completed_launches=0),
+            ])
+        ], 1)
+        self.assertEqual(
+            collector.ratio_basis(runs, dict(strict, runtime_execution=hybrid), 3, 3),
+            "cpu_pipeline_work_observed",
         )
         self.assertEqual(
             collector.ratio_basis(
@@ -426,6 +447,8 @@ class ApplePerformanceCollector(unittest.TestCase):
                 DATAFRAME_BENCH_ANSWER_EXPORT_PREFIX=str(exported),
                 DATAFRAME_TRACE_PATHS="1",
                 DATAFRAME_EXECUTION_REPORT="1",
+                DATAFRAME_EXECUTION_TRACE="unexpected-trace.jsonl",
+                DATAFRAME_METAL_PLACEMENT_TRACE="unexpected-metal-trace.jsonl",
                 DATAFRAME_THREADS="99",
                 BENCH_KEEP_SENTINEL="preserved",
             )
@@ -438,6 +461,8 @@ class ApplePerformanceCollector(unittest.TestCase):
                 "DATAFRAME_BENCH_ANSWER_EXPORT_PREFIX",
                 "DATAFRAME_TRACE_PATHS",
                 "DATAFRAME_EXECUTION_REPORT",
+                "DATAFRAME_EXECUTION_TRACE",
+                "DATAFRAME_METAL_PLACEMENT_TRACE",
             ):
                 self.assertNotIn(name, observed)
             self.assertFalse(exported.exists())

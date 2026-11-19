@@ -155,8 +155,12 @@ def plan_execute(
     if _is_scan(node.kind):
         plan_record(self, index, "eager", 0, result.height(), wall_ns=took)
     elif node.kind == JOIN:
-        var left = self._report.value()[].find(node.left)
-        var right = self._report.value()[].find(node.right)
+        var left = self._report.value()[].find(
+            node.left + self._report_node_base
+        )
+        var right = self._report.value()[].find(
+            node.right + self._report_node_base
+        )
         var left_rows = left.value().output_rows if left else -1
         var right_rows = right.value().output_rows if right else -1
         plan_record(
@@ -171,7 +175,9 @@ def plan_execute(
             wall_ns=took,
         )
     else:
-        var left = self._report.value()[].find(node.left)
+        var left = self._report.value()[].find(
+            node.left + self._report_node_base
+        )
         plan_record(
             self,
             index,

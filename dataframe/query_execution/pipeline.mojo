@@ -122,6 +122,10 @@ from dataframe.planning.inputs import (
     BuildFinish,
     finish_build,
 )
+from dataframe.query_execution.window_sink import (
+    WindowSink,
+    shared_partition_keys,
+)
 from dataframe.scheduler import (
     META_REGULAR,
     MetaPipeline,
@@ -210,6 +214,7 @@ from std.collections import (
     Dict,
     Optional,
 )
+from dataframe.vector.selection_batches import SelectionBatches
 from std.memory import (
     ArcPointer,
     Pointer,
@@ -217,6 +222,27 @@ from std.memory import (
 from std.time import (
     perf_counter_ns,
 )
+
+
+def plan_selection_batches(
+    self: QueryContext, index: Int, batch_size: Int
+) raises -> ArcPointer[SelectionBatches]:
+    """Run the CPU producer once, retaining its final vectors when possible."""
+    var output = ArcPointer(SelectionBatches(self._execute(index, True)))
+    var plan = self.copy()
+    plan._handoff = HANDOFF_OFF
+    plan._selection_node = index
+    plan._selection_output = output
+    # Use the normal executor so a completed input is consumed from its
+    # memo before considering a stream. The ordinary fallback also remains
+    # inside that one execution, rather than retrying a producer here.
+    var result = plan._execute(index, False, True, batch_size)
+    if output[].ready:
+        return output
+    output[].rows = result.height()
+    output[].fallback = result^
+    output[].ready = True
+    return output
 
 
 def plan_stream_execute(
@@ -1418,7 +1444,12 @@ struct _OperatorPipeline(Movable):
     as a pipeline of the schedule: its computed inputs are pipelines it
     depends on, their results handed to its plan's memo as its one task
     starts, and its finish makes the hash table when its result is a
-    join's build side."""
+    join's build side.
+
+    A projection whose windows all partition by some shared keys runs in
+    its finish instead (`WindowSink`): its one task computes its input,
+    and the finish splits the rows by those keys and evaluates the bins
+    as rounds of tasks, before any table is made from the result."""
 
     var plan: QueryContext
     var index: Int
@@ -1437,6 +1468,12 @@ struct _OperatorPipeline(Movable):
     var building: List[BuildFinish]
     var filled: Bool
     var filling: Bool
+    # The keys every window of the projection partitions by (empty when
+    # it does not run as a `WindowSink`), the sink while its rounds run,
+    # and when its task started.
+    var window_keys: List[String]
+    var window: List[WindowSink]
+    var began: Int
 
     def __init__(
         out self,
@@ -1467,6 +1504,16 @@ struct _OperatorPipeline(Movable):
         self.building = List[BuildFinish]()
         self.filled = False
         self.filling = False
+        self.window_keys = List[String]()
+        self.window = List[WindowSink]()
+        self.began = 0
+        ref node = self.plan._nodes[index]
+        if (
+            streaming
+            and self.plan._handoff == HANDOFF_OFF
+            and (node.kind == SELECT or node.kind == WITH_COLUMNS)
+        ):
+            self.window_keys = shared_partition_keys(node.exprs)
 
     def execute(mut self) raises:
         if len(self.wanted) > 0:
@@ -1476,13 +1523,32 @@ struct _OperatorPipeline(Movable):
             var ahead = self.plan._prefetched.value()
             for k in range(len(self.wanted)):
                 ahead[][self.wanted[k]] = pipelines[self.at[k]].take_result()
+        if len(self.window_keys) > 0:
+            ref node = self.plan._nodes[self.index]
+            self.began = Int(perf_counter_ns())
+            var input = self.plan._execute(
+                node.left, False, self.streaming, self.batch_size
+            )
+            trace_path("window.partitioned_sink")
+            self.window.append(
+                WindowSink(
+                    input^,
+                    node.exprs.copy(),
+                    node.kind == SELECT,
+                    self.window_keys.copy(),
+                )
+            )
+            return
         self.result = self.plan._execute(
             self.index, False, self.streaming, self.batch_size
         )
 
     def finalize(mut self) raises:
         """A build side's table from the result, then its fill, as
-        rounds of finalize tasks (`finalize_tasks`)."""
+        rounds of finalize tasks (`finalize_tasks`); a window sink's
+        rounds come first, and the table is made from their result."""
+        if len(self.window) > 0:
+            return
         if len(self.build.keys) > 0:
             self.building.append(
                 BuildFinish(
@@ -1496,9 +1562,28 @@ struct _OperatorPipeline(Movable):
             )
 
     def max_finalize_tasks(self) -> Int:
-        return configured_workers() if len(self.build.keys) > 0 else 0
+        return (
+            configured_workers() if len(self.build.keys) > 0
+            or len(self.window_keys) > 0 else 0
+        )
 
     def finalize_tasks(mut self) raises -> Int:
+        if len(self.window) > 0:
+            var tasks = self.window[0].next_round()
+            if tasks > 0:
+                return tasks
+            var rows = self.window[0].height
+            self.result = self.window[0].take_result()
+            _ = self.window.pop()
+            plan_record(
+                self.plan,
+                self.index,
+                "window",
+                rows,
+                self.result.height(),
+                wall_ns=Int(perf_counter_ns()) - self.began,
+            )
+            self.finalize()
         if len(self.building) > 0:
             var tasks = self.building[0].next_round()
             if tasks > 0:
@@ -1514,7 +1599,9 @@ struct _OperatorPipeline(Movable):
         return tasks
 
     def finalize_task(mut self, task: Int) raises:
-        if len(self.building) > 0:
+        if len(self.window) > 0:
+            self.window[0].round_task(task)
+        elif len(self.building) > 0:
             self.building[0].round_task(task)
         else:
             self.built.value().finalize_task(task)
@@ -2183,6 +2270,14 @@ def _probe_start(
         writer=sink if (
             top < 0 and skip == 0 and limit < 0 and not grouping
         ) else 0,
+        selection_output=self._selection_output if (
+            self._selection_node == index
+            and skip == 0
+            and limit < 0
+            and not grouping
+            and not finish
+            and not late_operations
+        ) else None,
     )
     return _ProbeStart(
         _PipedProbe(
@@ -2360,8 +2455,13 @@ def _probe_finish(
         piped_result = piped_result.slice(skip, limit)
     if late_operations:
         piped_result = late_fetch(input, piped_result, late_operations.value())
+    var output_rows = (
+        piped.run.selection_output.value()[].rows if piped.run.selection_output else piped_result.height()
+    )
     if counting:
-        plan_record(self, cursor, "pipeline", 0, piped_counts[0])
+        plan_record(
+            self, cursor, "pipeline", 0, piped_counts[0], pipeline=index
+        )
         var into_terminal = piped_counts[0]
         for k in range(step_count):
             plan_record(
@@ -2371,6 +2471,7 @@ def _probe_finish(
                 piped_counts[2 * k + 1],
                 piped_counts[2 * k + 2],
                 busy_ns=piped_counts[2 * step_count + 1 + k],
+                pipeline=index,
             )
             into_terminal = piped_counts[2 * k + 2]
         if top > 0:
@@ -2379,7 +2480,8 @@ def _probe_finish(
                 top_node,
                 "pipeline",
                 into_terminal,
-                piped_result.height(),
+                output_rows,
+                pipeline=index,
             )
         var wall = Int(perf_counter_ns()) - began
         if index != cursor and (index not in operation_nodes):
@@ -2388,12 +2490,20 @@ def _probe_finish(
                 index,
                 "pipeline",
                 into_terminal,
-                piped_result.height(),
+                output_rows,
                 wall_ns=wall,
+                pipeline=index,
             )
         else:
             plan_record(
-                self, index, "pipeline", 0, 0, executions=0, wall_ns=wall
+                self,
+                index,
+                "pipeline",
+                0,
+                0,
+                executions=0,
+                wall_ns=wall,
+                pipeline=index,
             )
         var base = 3 * step_count + 1
         for k in range(len(finish_nodes)):
@@ -2403,6 +2513,7 @@ def _probe_finish(
                 "pipeline",
                 piped_counts[base + 2 * k],
                 piped_counts[base + 2 * k + 1],
+                pipeline=index,
             )
     return piped_result^
 

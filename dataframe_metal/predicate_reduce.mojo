@@ -53,7 +53,9 @@ def execute_predicates(
     ].copy()
     if frame.height() >= Int(Int32.MAX):
         raise Error("Metal unsupported [handoff]: 2**31 or more rows")
-    var scope = Scope(service=shared_service())
+    var scope = Scope(
+        service=shared_service(), observation=region._plan._device_observation
+    )
     var timings = HandoffTimings()
     var started = Int(perf_counter_ns())
     _ = scope.context()
