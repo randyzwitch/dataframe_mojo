@@ -1520,9 +1520,9 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Join with another lazy plan on keys named alike on both sides; see DataFrame.join.
 - `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
 - `def sink_parquet(self, path: String, *, compression: String = "zstd", row_group_size: Int = Int(1000000), batch_size: Int = Int(65536), optimize: Bool = True)`
-  Execute batches into an atomic Parquet output without collecting them.
+  Execute the query into an atomic Parquet output, rows in the query's order.
 - `def sink_csv(self, path: String, *, has_header: Bool = True, separator: String = ",", quote_style: String = "necessary", null_value: String = "", line_terminator: String = "\n", buffer_size: Int = Int(65536), batch_size: Int = Int(65536), optimize: Bool = True)`
-  Execute ordered batches into CSV, publishing after successful close.
+  Execute the query into CSV in the query's row order, publishing after successful close.
 - `def collect(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "auto") -> DataFrame`
   Optimize (unless disabled) and execute the plan.
 - `def collect[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> DataFrame`

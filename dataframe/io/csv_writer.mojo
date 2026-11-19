@@ -92,14 +92,30 @@ struct _CsvFileWriter(Movable):
         if not self.file:
             raise Error("CSV writer is closed")
         _check_schema(self.schema, frame)
-        var data = frame.copy()
-        for k in range(data.width()):
-            if data._columns[k].dtype().is_categorical():
-                data._columns[k] = decode(data._columns[k])
+        var data = _decoded(frame)
         for row in range(data.height()):
             self.buffer += self.writer.row(data, row)
             if self.buffer.byte_length() >= self.buffer_size:
                 self._flush()
+
+    def format(self, frame: DataFrame) raises -> String:
+        """`frame`'s rows as CSV text, without writing them: it reads only
+        the writer's settings, so any thread may format its own frame while
+        another writes (`write_text`)."""
+        _check_schema(self.schema, frame)
+        var data = _decoded(frame)
+        var text = String()
+        for row in range(data.height()):
+            text += self.writer.row(data, row)
+        return text^
+
+    def write_text(mut self, text: String) raises:
+        """Rows `format` made, after every row written before them."""
+        if not self.file:
+            raise Error("CSV writer is closed")
+        self.buffer += text
+        if self.buffer.byte_length() >= self.buffer_size:
+            self._flush()
 
     def finish(mut self) raises:
         if not self.file:
@@ -112,3 +128,12 @@ struct _CsvFileWriter(Movable):
         except:
             raise Error("cannot close CSV temporary output")
         self.output.publish()
+
+
+def _decoded(frame: DataFrame) raises -> DataFrame:
+    """`frame` with each categorical column as its values (#106)."""
+    var data = frame.copy()
+    for k in range(data.width()):
+        if data._columns[k].dtype().is_categorical():
+            data._columns[k] = decode(data._columns[k])
+    return data^

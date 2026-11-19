@@ -1,6 +1,5 @@
 """Streaming pipeline lowering and execution."""
 from dataframe.io.dataset_scan import _DatasetBatches
-from dataframe.io.sinks import FileSink
 from dataframe.io.csv_reader import _open_csv_batches
 from dataframe.io.csv_types import _CsvScanOptions
 
@@ -63,7 +62,6 @@ from dataframe.io.json_batches import (
     _NdjsonBatches,
 )
 from dataframe.io.scan_source import (
-    ScanBatch,
     ScanSource,
 )
 from dataframe.io.parquet import (
@@ -92,12 +90,8 @@ from dataframe.joins.join_filter import (
     supports_join_filters,
 )
 from dataframe.parallel import (
-    Job,
     configured_workers,
-    run_rounds,
 )
-from dataframe.sorting.top_n import TopNBoundary
-from dataframe.sorting.top_n_sink import TopNSink
 from dataframe.sorting.row_group_order import orderable, row_group_order
 from dataframe.query_execution.late_materialization import (
     LATE_MATERIALIZATION_MAX_ROWS,
@@ -105,12 +99,9 @@ from dataframe.query_execution.late_materialization import (
     late_materialization_plan,
 )
 from dataframe.pipeline import (
-    _ORDER_COLUMN,
     PipelineTypes,
     _step_schemas,
     pipeline_types,
-    _top_flags,
-    _top_keys,
     _ensure_zones,
     _range_key,
     _window_bounds,
@@ -190,19 +181,11 @@ from dataframe.planning.properties import (
 from dataframe.planning.cost.eligibility import (
     _counts_distinct,
 )
-from dataframe.planning.cost.sampling import (
-    _keys_repeat,
-)
 from dataframe.planning.expression_inputs import (
     _references,
 )
 from dataframe.planning.scans import (
     _scan_options,
-)
-from dataframe.planning.cost.sampling import (
-    _retain_frame,
-    _stream_collect_bytes,
-    _stream_split_groups,
 )
 from dataframe.query_execution.materialize import (
     _StreamInputs,
@@ -218,21 +201,12 @@ from dataframe.query_execution.reporting import (
     plan_record,
 )
 from dataframe.query_execution.stream_state import (
-    _StateAccumulator,
-    _StreamJob,
     _steps_of,
-)
-from dataframe.planning.cost.eligibility import (
-    _pipeline_steps,
 )
 from dataframe.series import (
     Series,
 )
 from dataframe.table_scan import conjunction, scan_filtered
-from dataframe.aggregation.state import (
-    PartsFinish,
-    _StreamReduction,
-)
 from dataframe.trace import (
     trace_path,
 )
@@ -240,7 +214,6 @@ from std.collections import (
     Dict,
     Optional,
 )
-from dataframe.storage.retained import RetainedBuffers
 from dataframe.vector.selection_batches import SelectionBatches
 from std.memory import (
     ArcPointer,
@@ -427,9 +400,7 @@ def _scheduled_inputs(
         and head.limit < 0
         and head.skip == 0
     ):
-        above = _row_steps_above(
-            self, terminal, first, sink, len(head.expressions)
-        )
+        above = _row_steps_above(self, terminal, first, len(head.expressions))
     var owned = _remembering(self)
     try:
         var inputs = plan_schedule_inputs(
@@ -634,8 +605,6 @@ struct _StreamSchedule(Movable):
             ref started = probe.started
             if len(started) > 0 and len(started[0].piped) > 0:
                 started[0].piped[0].run.release()
-            if len(started) > 0 and len(started[0].batch) > 0:
-                started[0].batch[0].release()
             if len(probe.finish) > 0:
                 probe.finish[0].release()
 
@@ -1283,7 +1252,7 @@ struct _StreamProbe(Movable):
 
     def _execute_tasks(self, plan: QueryContext) -> Int:
         """A task per morsel worker, or one for a probe with no morsel
-        pipeline (a batch stream runs in its finish's rounds)."""
+        pipeline."""
         if len(self.started[0].piped) == 0:
             return 1
         return self.started[0].piped[0].run.tasks()
@@ -1302,8 +1271,6 @@ struct _StreamProbe(Movable):
             ref piped = started.piped[0]
             self.finish.append(finish_pipeline(piped.run))
             self.round = self.finish[0].next_round()
-        elif len(started.batch) > 0:
-            self.round = started.batch[0].advance()
         else:
             swap(self.result, started.result)
             self.round = 0
@@ -1319,8 +1286,6 @@ struct _StreamProbe(Movable):
             self.built.value().finalize_task(task)
         elif len(self.finish) > 0:
             self.finish[0].round_task(task)
-        else:
-            self.started[0].batch[0].run_task(task)
 
     def finish_finalize(mut self) raises:
         """A round of finalize tasks has ended: the next round, or the
@@ -1335,8 +1300,6 @@ struct _StreamProbe(Movable):
             return
         if len(self.finish) > 0:
             self.round = self.finish[0].next_round()
-        elif len(self.started[0].batch) > 0:
-            self.round = self.started[0].batch[0].advance()
         else:
             self.round = 0
         if self.round == 0:
@@ -1358,8 +1321,6 @@ struct _StreamProbe(Movable):
                 self.sank = True
                 self._fill_table()
                 return
-        elif len(started.batch) > 0:
-            self.result = started.batch[0].result(plan)
         ref on = Pointer[QueryContext, MutAnyOrigin](
             unsafe_from_address=self._on()
         )[]
@@ -1787,8 +1748,7 @@ def _probe_start(
     finish_above: Optional[ArcPointer[FinishAbove]] = None,
 ) raises -> _ProbeStart:
     """The stream's probe pipeline set up, once its inputs are done: its morsel
-    workers, not yet run, or its result when it ran here (a batch stream, or no
-    pipeline at all). `build`: the join this stream's rows are the build side of; a
+    workers, not yet run, or its result when no pipeline runs it. `build`: the join this stream's rows are the build side of; a
     pipeline whose rows are the result sinks them into that join's hash
     table. `types`: the setup made from the plan alone (`_probe_types`),
     used where the inputs' results have the columns it was made for.
@@ -2130,56 +2090,8 @@ def _probe_start(
     if decision.is_eager():
         return _ProbeStart(None)
     var workers = configured_workers()
-    # Execution report: rows fed from the source, and rows into and out
-    # of each operation, summed over batches.
     var counting = Bool(self._report)
-    var operation_rows = List[Int](
-        length=2 * len(operations) if counting else 0, fill=0
-    )
-    # Per operation, then the batches' reductions.
-    var operation_times = List[Int](
-        length=len(operations) + 1 if counting else 0, fill=0
-    )
-    var stream_began = Int(perf_counter_ns())
-    # Aggregate state (#326). Batch states wait in `pending` and are
-    # merged together once their groups reach the accumulated count (or
-    # 64 batches), so each merge covers at least as much new work as old
-    # and total merge work stays linear, with pending state about the
-    # size of the accumulated state. When the first batch shows many
-    # groups, every batch state is split into hash parts that are merged
-    # on separate workers and interleaved by first occurrence at the end.
-    var split_groups = _stream_split_groups()
-    var acc = _StateAccumulator(workers, split_groups)
-    # A grouping the pipeline does not run (its steps or order are the
-    # batches'): the batches are collected for the eager group-by, which
-    # is the aggregate table over them,
-    # and reduced into one state each time they reach the budget.
-    var collecting = len(expressions) > 0 and len(keys) > 0
-    var collect_budget = _stream_collect_bytes()
-    var projection = List[String]()
-    if len(expressions) and len(keys):
-        var wanted = List[String]()
-        var any = True
-        for name in keys:
-            wanted.append(name)
-        for expression in expressions:
-            var reads = _references(expression)
-            if not reads:
-                any = False
-                break
-            for name in reads.value():
-                if name not in wanted:
-                    wanted.append(name)
-        if any:
-            projection = wanted^
-    # Batches of a large in-memory input that streams through joins grow up to
-    # four times the default: each batch pays a fixed cost to set up every
-    # join's probe, and fewer, larger batches spread it over more rows. They
-    # grow only while every worker still gets a batch, since one batch runs on
-    # one worker. Not into the aggregate table, which holds no state per batch:
-    # there small morsels are what spread the rows a selective join keeps, often
-    # from a few stretches of sorted input, over the workers. A TopN pushes a
-    # dynamic filter into the scan when its first sort column is read from the
+    # A TopN pushes a dynamic filter into the scan when its first sort column is read from the
     # source as it is: no join, and no operation that writes a column of that
     # name. A file's batches have no statistics before they are read.
     var top_scan_key = (
@@ -2229,673 +2141,169 @@ def _probe_start(
             top = top - skip + order.value().remaining_offset
             skip = order.value().remaining_offset
             top_ranges = order.value().ranges.copy()
-    # Row-local steps over an in-memory frame into a materialize or an
-    # ungrouped reduce sink run as a thread-owned pipeline (#538): each
-    # worker takes morsels from a shared cursor and runs every step on
-    # them; nothing is held, judged or merged on the main thread.
-    if sink == 0 and decision.uses_pipeline():
-        var began = Int(perf_counter_ns())
-        var piped_counts = List[Int]()
-        # A top-k's TOP_K node was appended to the operations for the
-        # stream's per-batch selection; the pipeline's sink keeps the
-        # k best itself, so the steps stop before it.
-        var step_count = len(operations) - 1 if top >= 0 else len(operations)
-        var step_nodes = List[PlanNode](capacity=step_count)
-        for k in range(step_count):
-            step_nodes.append(operations[k].copy())
-        # A top-N of at most LATE_MATERIALIZATION_MAX_ROWS rows over filters and
-        # projections on a table scan runs on the columns its order and filters
-        # read plus the row id; the other columns are fetched for its rows
-        # afterwards.
-        var pipe_input = source_columns.value().copy() if source_columns else (
-            input.copy()
+    # The steps run as a thread-owned pipeline (#538): each worker takes
+    # morsels from a shared cursor and runs every step on them into its
+    # own sink state; nothing is held, judged or merged on the main
+    # thread. Into a file (`sink`), the result's rows go to it from the
+    # workers as each morsel is done, when every row the pipeline keeps is
+    # the result: no slice, top-N or reduction is left to apply.
+    var began = Int(perf_counter_ns())
+    var piped_counts = List[Int]()
+    # A top-k's TOP_K node was appended to the operations for the
+    # stream's per-batch selection; the pipeline's sink keeps the
+    # k best itself, so the steps stop before it.
+    var step_count = len(operations) - 1 if top >= 0 else len(operations)
+    var step_nodes = List[PlanNode](capacity=step_count)
+    for k in range(step_count):
+        step_nodes.append(operations[k].copy())
+    # A top-N of at most LATE_MATERIALIZATION_MAX_ROWS rows over filters and
+    # projections on a table scan runs on the columns its order and filters
+    # read plus the row id; the other columns are fetched for its rows
+    # afterwards.
+    var pipe_input = source_columns.value().copy() if source_columns else (
+        input.copy()
+    )
+    var late_operations = Optional[List[PlanNode]]()
+    if (
+        top > 0
+        and limit >= 0
+        and limit <= LATE_MATERIALIZATION_MAX_ROWS
+        and source.kind == SCAN_FRAME
+        and len(shared_joins[]) == 0
+        and len(keys) == 0
+        and len(expressions) == 0
+        and not grouping
+    ):
+        var late = late_materialization_plan(
+            input.columns(), step_nodes, top_names
         )
-        var late_operations = Optional[List[PlanNode]]()
-        if (
-            top > 0
-            and limit >= 0
-            and limit <= LATE_MATERIALIZATION_MAX_ROWS
-            and source.kind == SCAN_FRAME
-            and len(shared_joins[]) == 0
-            and len(keys) == 0
-            and len(expressions) == 0
+        if late:
+            trace_path("pipeline.late_materialization")
+            late_operations = step_nodes.copy()
+            pipe_input = input.select(late.value().columns)
+            step_nodes = late.value().operations.copy()
+    var set_frames = List[DataFrame]()
+    var set_indices = List[List[Int]]()
+    if grouping:
+        for members in _set_members(terminal):
+            var indices = List[Int]()
+            for name in members:
+                var at = keys.index(name) if name in keys else -1
+                if at not in indices:
+                    indices.append(at)
+            set_indices.append(indices^)
+    # Nodes above this aggregate that its finish runs, when the stream
+    # over it handed them here (`_row_steps_above`).
+    var finish_nodes = List[Int]()
+    var finish = Optional[ArcPointer[FinishAbove]]()
+    if (
+        self._finish_above
+        and self._finish_above.value()[].node == index
+        and not self._finish_above.value()[].applied
+        and terminal.kind == AGG
+        and self._finish_above.value()[].keys == terminal.names
+        and not grouping
+        and top < 0
+    ):
+        finish = self._finish_above
+        finish_nodes = self._finish_above.value()[].above.copy()
+    var finish_operations = List[PlanNode](capacity=len(finish_nodes))
+    # Join keys pushed into this aggregate's input from above it
+    # (`plan_push_filters_through_aggregate`).
+    var pushed = List[PushedJoinFilter]()
+    if (
+        self._pushed_filters
+        and self._pushed_filters.value()[].node == index
+        and terminal.kind == AGG
+    ):
+        pushed = self._pushed_filters.value()[].filters.copy()
+    for n in finish_nodes:
+        finish_operations.append(self._nodes[n].copy())
+    var pipeline_ahead = Optional[PipelineTypes]()
+    if ahead and not late_operations:
+        swap(pipeline_ahead, types.value().types)
+    var run = begin_pipeline(
+        pipe_input,
+        _steps_of(step_nodes),
+        shared_joins,
+        shared_indexes,
+        expressions,
+        keys,
+        ordered,
+        workers,
+        batch_size,
+        sets=set_indices,
+        top=top,
+        top_names=top_names,
+        top_descending=top_descending,
+        top_nulls_last=top_nulls_last,
+        top_maintain_order=top_maintain_order,
+        top_scan_key=top_scan_key,
+        top_ranges=top_ranges,
+        top_row_ids=Bool(late_operations),
+        table=decision.uses_aggregate_table(),
+        finish_steps=_steps_of(finish_operations),
+        pushed=pushed,
+        source=file_scan,
+        # The scan's estimated rows: its probe side's cardinality for
+        # join filters.
+        source_rows=plan_cardinality(self, stats, cursor) if file_scan else 0,
+        # The rows are the join's build side only when the pipeline's
+        # rows are the stream's whole result.
+        build_keys=build.keys.copy() if (
+            limit < 0
+            and skip == 0
             and not grouping
-        ):
-            var late = late_materialization_plan(
-                input.columns(), step_nodes, top_names
-            )
-            if late:
-                trace_path("pipeline.late_materialization")
-                late_operations = step_nodes.copy()
-                pipe_input = input.select(late.value().columns)
-                step_nodes = late.value().operations.copy()
-        var set_frames = List[DataFrame]()
-        var set_indices = List[List[Int]]()
-        if grouping:
-            for members in _set_members(terminal):
-                var indices = List[Int]()
-                for name in members:
-                    var at = keys.index(name) if name in keys else -1
-                    if at not in indices:
-                        indices.append(at)
-                set_indices.append(indices^)
-        # Nodes above this aggregate that its finish runs, when the stream
-        # over it handed them here (`_row_steps_above`).
-        var finish_nodes = List[Int]()
-        var finish = Optional[ArcPointer[FinishAbove]]()
-        if (
-            self._finish_above
-            and self._finish_above.value()[].node == index
-            and not self._finish_above.value()[].applied
-            and terminal.kind == AGG
-            and self._finish_above.value()[].keys == terminal.names
+            and not finish
+            and not late_operations
+        ) else List[String](),
+        build_how=build.how,
+        build_coalesce=build.coalesce,
+        build_probe_estimate=build.probe_estimate,
+        build_filtered=build.build_filtered,
+        # Made ahead for the same steps over the same columns, unless
+        # late materialization changed them.
+        types=pipeline_ahead^,
+        # A slice's rows are the first `skip + limit` in source order,
+        # less the first `skip`.
+        limit=_slice_end(skip, limit) if top < 0 else -1,
+        writer=sink if (
+            top < 0 and skip == 0 and limit < 0 and not grouping
+        ) else 0,
+        selection_output=self._selection_output if (
+            self._selection_node == index
+            and skip == 0
+            and limit < 0
             and not grouping
-            and top < 0
-        ):
-            finish = self._finish_above
-            finish_nodes = self._finish_above.value()[].above.copy()
-        var finish_operations = List[PlanNode](capacity=len(finish_nodes))
-        # Join keys pushed into this aggregate's input from above it
-        # (`plan_push_filters_through_aggregate`).
-        var pushed = List[PushedJoinFilter]()
-        if (
-            self._pushed_filters
-            and self._pushed_filters.value()[].node == index
-            and terminal.kind == AGG
-        ):
-            pushed = self._pushed_filters.value()[].filters.copy()
-        for n in finish_nodes:
-            finish_operations.append(self._nodes[n].copy())
-        var pipeline_ahead = Optional[PipelineTypes]()
-        if ahead and not late_operations:
-            swap(pipeline_ahead, types.value().types)
-        var run = begin_pipeline(
-            pipe_input,
-            _steps_of(step_nodes),
-            shared_joins,
-            shared_indexes,
-            expressions,
-            keys,
-            ordered,
-            workers,
-            batch_size,
-            sets=set_indices,
-            top=top,
-            top_names=top_names,
-            top_descending=top_descending,
-            top_nulls_last=top_nulls_last,
-            top_maintain_order=top_maintain_order,
-            top_scan_key=top_scan_key,
-            top_ranges=top_ranges,
-            top_row_ids=Bool(late_operations),
-            table=decision.uses_aggregate_table(),
-            finish_steps=_steps_of(finish_operations),
-            pushed=pushed,
-            source=file_scan,
-            # The scan's estimated rows: its probe side's cardinality for
-            # join filters.
-            source_rows=plan_cardinality(
-                self, stats, cursor
-            ) if file_scan else 0,
-            # The rows are the join's build side only when the pipeline's
-            # rows are the stream's whole result.
-            build_keys=build.keys.copy() if (
-                limit < 0
-                and skip == 0
-                and not grouping
-                and not finish
-                and not late_operations
-            ) else List[String](),
-            build_how=build.how,
-            build_coalesce=build.coalesce,
-            build_probe_estimate=build.probe_estimate,
-            build_filtered=build.build_filtered,
-            # Made ahead for the same steps over the same columns, unless
-            # late materialization changed them.
-            types=pipeline_ahead^,
-            # A slice's rows are the first `skip + limit` in source order,
-            # less the first `skip`.
-            limit=_slice_end(skip, limit) if top < 0 else -1,
-            selection_output=self._selection_output if (
-                self._selection_node == index
-                and skip == 0
-                and limit < 0
-                and not grouping
-                and not finish
-                and not late_operations
-            ) else None,
-        )
-        return _ProbeStart(
-            _PipedProbe(
-                run^,
-                piped_counts^,
-                set_frames^,
-                finish,
-                grouping,
-                set_indices^,
-                index,
-                keys.copy(),
-                expressions.copy(),
-                top,
-                skip,
-                limit,
-                late_operations^,
-                input^,
-                counting,
-                cursor,
-                step_count,
-                operation_nodes.copy(),
-                top_node,
-                began,
-                finish_nodes^,
-            )
-        )
+            and not finish
+            and not late_operations
+        ) else None,
+    )
     return _ProbeStart(
-        _BatchStream(
-            file_scan^,
-            input^,
-            batch_size,
-            operations^,
-            operation_nodes^,
-            shared_joins,
-            shared_indexes,
-            expressions^,
-            keys^,
-            ordered,
+        _PipedProbe(
+            run^,
+            piped_counts^,
+            set_frames^,
+            finish,
             grouping,
-            workers,
-            acc^,
-            counting,
-            collecting,
-            projection^,
-            collect_budget,
+            set_indices^,
+            index,
+            keys.copy(),
+            expressions.copy(),
             top,
-            top_maintain_order,
-            top_names^,
-            top_descending^,
-            top_nulls_last^,
             skip,
             limit,
-            sink,
-            index,
+            late_operations^,
+            input^,
+            counting,
             cursor,
-            _is_scan(source.kind),
-            stream_began,
-            operation_rows^,
-            operation_times^,
+            step_count,
+            operation_nodes.copy(),
+            top_node,
+            began,
+            finish_nodes^,
         )
     )
-
-
-# The kind of round a batch stream has under way (`_BatchStream`).
-comptime _ROUND_NONE = 0
-comptime _ROUND_BATCHES = 1
-comptime _ROUND_MERGE = 2
-# The reduction's hash parts finished into the result (`PartsFinish`).
-comptime _ROUND_PARTS = 3
-
-
-struct _BatchStream(Movable):
-    """A stream whose operations run batch by batch, each batch's result
-    absorbed in input order, rather than as a morsel pipeline: its source
-    or operations need the batches as they come (`pipeline_eligibility`).
-
-    Its work is rounds of tasks. A round of batches is a task per batch,
-    each running every operation over its batch; their results are then
-    absorbed in batch order (reduction states, collected rows, a top-N,
-    or output slices that keep the offset and limit). When parts of the
-    accumulated reduction are due to merge, a round of merge tasks
-    follows, each merging its own parts, which never share a key. Each
-    round reads what the one before left, so the rounds run one after
-    another (`advance`), as rounds of the probe's finish, and every task
-    runs on the schedule's one queue: no thread waits for a round of its
-    own while it could take another task."""
-
-    var file_scan: Optional[ArcPointer[ScanSource]]
-    var source_done: Bool
-    var input: DataFrame
-    var next_row: Int
-    var emitted: Bool
-    var ended: Bool
-    var finishing: Bool
-    var round: Int
-    var batch_size: Int
-    var operations: List[PlanNode]
-    var operation_nodes: List[Int]
-    var joins: ArcPointer[List[DataFrame]]
-    var indexes: ArcPointer[List[Optional[JoinHashTable]]]
-    var expressions: List[Expr]
-    var keys: List[String]
-    var ordered: Bool
-    var grouping: Bool
-    var workers: Int
-    var jobs: List[_StreamJob]
-    var acc: _StateAccumulator
-    # The finish of the reduction's hash parts, once every batch merged.
-    var parts: List[PartsFinish]
-    var counting: Bool
-    var collecting: Bool
-    var projection: List[String]
-    var collected: List[DataFrame]
-    var collected_memory: RetainedBuffers
-    var collected_rows: Int
-    var collect_budget: Int
-    var top: Int
-    var top_maintain_order: Bool
-    var top_names: List[String]
-    var top_descending: List[Bool]
-    var top_nulls_last: List[Bool]
-    # A streamed top-N's sink, made at its first batch.
-    var topn: List[TopNSink]
-    var top_batches: Int
-    var skip: Int
-    var limit: Int
-    var sink: Int
-    var outputs: List[DataFrame]
-    var index: Int
-    var cursor: Int
-    var scans: Bool
-    var stream_began: Int
-    # Execution report: rows fed from the source, and rows into and out
-    # of each operation, summed over batches; nanoseconds per operation,
-    # then the batches' reductions.
-    var fed_rows: Int
-    var operation_rows: List[Int]
-    var operation_times: List[Int]
-
-    def __init__(
-        out self,
-        var file_scan: Optional[ArcPointer[ScanSource]],
-        var input: DataFrame,
-        batch_size: Int,
-        var operations: List[PlanNode],
-        var operation_nodes: List[Int],
-        joins: ArcPointer[List[DataFrame]],
-        indexes: ArcPointer[List[Optional[JoinHashTable]]],
-        var expressions: List[Expr],
-        var keys: List[String],
-        ordered: Bool,
-        grouping: Bool,
-        workers: Int,
-        var acc: _StateAccumulator,
-        counting: Bool,
-        collecting: Bool,
-        var projection: List[String],
-        collect_budget: Int,
-        top: Int,
-        top_maintain_order: Bool,
-        var top_names: List[String],
-        var top_descending: List[Bool],
-        var top_nulls_last: List[Bool],
-        skip: Int,
-        limit: Int,
-        sink: Int,
-        index: Int,
-        cursor: Int,
-        scans: Bool,
-        stream_began: Int,
-        var operation_rows: List[Int],
-        var operation_times: List[Int],
-    ):
-        self.file_scan = file_scan^
-        self.source_done = False
-        self.input = input^
-        self.next_row = 0
-        self.emitted = False
-        self.ended = False
-        self.finishing = False
-        self.round = _ROUND_NONE
-        self.batch_size = batch_size
-        self.operations = operations^
-        self.operation_nodes = operation_nodes^
-        self.joins = joins
-        self.indexes = indexes
-        self.expressions = expressions^
-        self.keys = keys^
-        self.ordered = ordered
-        self.grouping = grouping
-        self.workers = max(1, workers)
-        self.jobs = List[_StreamJob]()
-        self.acc = acc^
-        self.parts = List[PartsFinish]()
-        self.counting = counting
-        self.collecting = collecting
-        self.projection = projection^
-        self.collected = List[DataFrame]()
-        self.collected_memory = RetainedBuffers()
-        self.collected_rows = 0
-        self.collect_budget = collect_budget
-        self.top = top
-        self.top_maintain_order = top_maintain_order
-        self.top_names = top_names^
-        self.top_descending = top_descending^
-        self.top_nulls_last = top_nulls_last^
-        self.topn = List[TopNSink]()
-        self.top_batches = 0
-        self.skip = skip
-        self.limit = limit
-        self.sink = sink
-        self.outputs = List[DataFrame]()
-        self.index = index
-        self.cursor = cursor
-        self.scans = scans
-        self.stream_began = stream_began
-        self.fed_rows = 0
-        self.operation_rows = operation_rows^
-        self.operation_times = operation_times^
-
-    def advance(mut self) raises -> Int:
-        """End the round under way, if any, and start the next: the tasks
-        it makes, a batch or a merge each, at most `workers`; 0 once the
-        stream has nothing left to run and `result` may read it."""
-        if self.round == _ROUND_BATCHES:
-            self._absorb()
-            self.round = _ROUND_NONE
-            var merges = self.acc.begin_merge(False)
-            if merges > 0:
-                self.round = _ROUND_MERGE
-                return merges
-        elif self.round == _ROUND_MERGE:
-            self.acc.end_merge()
-            self.round = _ROUND_NONE
-            if self.finishing:
-                return self._parts_round()
-        elif self.round == _ROUND_PARTS:
-            return self._parts_round()
-        if not self.ended:
-            var batches = self._take_batches()
-            if batches > 0:
-                self.round = _ROUND_BATCHES
-                return batches
-            self.ended = True
-        if self.finishing:
-            return 0
-        self.finishing = True
-        self._finish_source()
-        if self.collecting or len(self.acc.states) == 0:
-            return 0
-        # The last merge of the reduction's parts, every part forced.
-        var merges = self.acc.begin_merge(True)
-        if merges > 0:
-            self.round = _ROUND_MERGE
-            return merges
-        return self._parts_round()
-
-    def _parts_round(mut self) raises -> Int:
-        """Once every part merged: the reduction's hash parts, when it
-        has more than one, finished into its frame as rounds of tasks,
-        each part on the task that takes it (`PartsFinish`); 0 once
-        done."""
-        if (
-            self.round != _ROUND_PARTS
-            and not self.collecting
-            and len(self.acc.states) > 1
-        ):
-            var parts = List[_StreamReduction]()
-            swap(parts, self.acc.states)
-            self.parts.append(PartsFinish(parts^, True))
-            self.round = _ROUND_PARTS
-        if self.round != _ROUND_PARTS:
-            return 0
-        var tasks = self.parts[0].next_round()
-        if tasks == 0:
-            self.round = _ROUND_NONE
-        return tasks
-
-    def run_task(mut self, task: Int) raises:
-        """Task `task` of the round under way; they run at the same time."""
-        if self.round == _ROUND_BATCHES:
-            self.jobs[task].run()
-        elif self.round == _ROUND_PARTS:
-            self.parts[0].round_task(task)
-        else:
-            self.acc.merge_task(task)
-
-    def _take_batches(mut self) raises -> Int:
-        """The next round's batches, as many as workers, each a job that
-        decodes (a file's byte range) or slices its batch itself."""
-        self.jobs = List[_StreamJob]()
-        for _ in range(self.workers):
-            var frame = DataFrame(List[Series](), height=0)
-            var batch = List[ScanBatch]()
-            if self.file_scan:
-                var next = self.file_scan.value()[].take()
-                if not next:
-                    self.ended = True
-                    break
-                batch.append(next.take())
-            else:
-                if self.emitted and self.next_row >= self.input.height():
-                    self.ended = True
-                    break
-                frame = self.input.slice(self.next_row, self.batch_size)
-                self.next_row += frame.height()
-                self.emitted = True
-            var job = _StreamJob(
-                frame^,
-                self.operations,
-                self.joins,
-                self.indexes,
-                self.expressions,
-                self.keys,
-            )
-            job.scan = batch^
-            job.bits = self.acc.bits
-            job.counting = self.counting
-            job.collect_only = self.collecting
-            job.projection = self.projection.copy()
-            self.jobs.append(job^)
-        return len(self.jobs)
-
-    def _absorb(mut self) raises:
-        """The round's batch results, in batch order."""
-        ref jobs = self.jobs
-        if self.counting:
-            for i in range(len(jobs)):
-                ref counts = jobs[i].counts
-                if len(counts) > 0:
-                    self.fed_rows += counts[0]
-                elif len(self.expressions):
-                    self.fed_rows += jobs[i].rows
-                else:
-                    self.fed_rows += jobs[i].frame.height()
-                for k in range(len(counts)):
-                    self.operation_rows[k] += counts[k]
-                for k in range(len(jobs[i].times)):
-                    if k < len(self.operation_times):
-                        self.operation_times[k] += jobs[i].times[k]
-        for i in range(len(jobs)):
-            if self.collecting:
-                _retain_frame(jobs[i].frame, self.collected_memory)
-                self.collected_rows += jobs[i].rows
-                self.collected.append(jobs[i].frame.copy())
-            elif len(self.expressions):
-                self.acc.absorb(jobs[i].take_reduced(), jobs[i].rows)
-            elif self.top >= 0:
-                # The job has already cut its batch to its first rows
-                # (its own top-N); they combine into the stream's.
-                var batch = jobs[i].frame.copy()
-                if self.top_maintain_order:
-                    # Batches arrive in input order: the batch number
-                    # and row are the place that settles ties.
-                    var places = List[Int64](capacity=batch.height())
-                    var base = Int64(self.top_batches) << 40
-                    for r in range(batch.height()):
-                        places.append(base + Int64(r))
-                    batch = batch.with_column(
-                        Series(_ORDER_COLUMN, Column[Int64](places^))
-                    )
-                self.top_batches += 1
-                if len(self.topn) == 0:
-                    self.topn.append(
-                        TopNSink(
-                            batch,
-                            _top_keys(self.top_names, self.top_maintain_order),
-                            _top_flags(
-                                self.top_descending, self.top_maintain_order
-                            ),
-                            _top_flags(
-                                self.top_nulls_last, self.top_maintain_order
-                            ),
-                            self.top,
-                            TopNBoundary.none(),
-                        )
-                    )
-                self.topn[0].sink(batch)
-            else:
-                var part = jobs[i].frame.copy()
-                var dropped = min(self.skip, part.height())
-                self.skip -= dropped
-                part = part.slice(dropped, self.limit)
-                if self.limit >= 0:
-                    self.limit -= part.height()
-                if self.sink != 0:
-                    Pointer[FileSink, MutAnyOrigin](
-                        unsafe_from_address=self.sink
-                    )[].append(part)
-                else:
-                    self.outputs.append(part^)
-        self.jobs = List[_StreamJob]()
-        if (
-            self.collecting
-            and self.collected_memory.bytes >= self.collect_budget
-        ):
-            # The budget is reached: reduce what is collected into one
-            # state (every key encoded once) and keep collecting. The
-            # states merge at the end as batch states do.
-            var part = _StreamReduction(
-                concat(self.collected), self.expressions, self.keys
-            )
-            part.shift_firsts(self.acc.rows_seen)
-            self.acc.rows_seen += self.collected_rows
-            self.collected = List[DataFrame]()
-            self.collected_memory = RetainedBuffers()
-            self.collected_rows = 0
-            if len(self.acc.states) == 0:
-                self.acc.pending.append(List[_StreamReduction]())
-                self.acc.pending_groups.append(0)
-                self.acc.states.append(part^)
-            else:
-                self.acc.pending_groups[0] += part.group_count()
-                self.acc.pending[0].append(part^)
-        if self.file_scan:
-            # Every job of the round has decoded its byte range.
-            self.file_scan.value()[].discard()
-        if self.limit == 0 and self.top < 0:
-            self.ended = True
-
-    def _finish_source(mut self) raises:
-        """Close the file source once no batch is left to read. It stays
-        held with the stream: the batches' byte ranges borrow its mapped
-        addresses."""
-        if self.source_done:
-            return
-        self.source_done = True
-        if self.file_scan:
-            self.file_scan.value()[].finish()
-
-    def release(mut self):
-        """For a stream that failed before its result."""
-        try:
-            self._finish_source()
-        except:
-            pass
-
-    def result(mut self, plan: QueryContext) raises -> Optional[DataFrame]:
-        """The stream's result once `advance` has nothing left to run,
-        and its execution report entries."""
-        var result = Optional[DataFrame]()
-        if self.collecting and len(self.acc.states) == 0:
-            trace_path("lazy.collect_group_by")
-            # Contiguous first: the bucket encode reads string keys in
-            # view storage through a buffer table, which costs a lookup per
-            # buffer and grows with the number of batches.
-            var whole = concat(self.collected).rechunk()
-            # Groups come back in first-occurrence order only when asked,
-            # as the eager group-by's do.
-            result = whole.group_by(self.keys, maintain_order=self.ordered).agg(
-                self.expressions
-            )
-        elif self.collecting:
-            # Spilled at least once: the rest joins the one state, which
-            # merges here.
-            trace_path("lazy.collect_group_by_bounded")
-            if len(self.collected):
-                var part = _StreamReduction(
-                    concat(self.collected), self.expressions, self.keys
-                )
-                part.shift_firsts(self.acc.rows_seen)
-                self.acc.pending_groups[0] += part.group_count()
-                self.acc.pending[0].append(part^)
-            _ = self.acc.begin_merge(True)
-            result = self.acc.states[0].finish()
-        elif len(self.parts) > 0:
-            # The hash parts, finished in the last rounds.
-            result = self.parts[0].frame.copy()
-        elif len(self.acc.states):
-            # Every part merged in the last round: one state merges here.
-            _ = self.acc.begin_merge(True)
-            result = self.acc.states[0].finish()
-        elif self.top >= 0:
-            if len(self.topn) > 0:
-                var best = self.topn[0].finish()
-                if self.top_maintain_order:
-                    best = best.drop([_ORDER_COLUMN])
-                result = best.slice(self.skip, self.limit)
-        elif len(self.outputs):
-            result = concat(self.outputs)
-        if (
-            self.sink != 0
-            and not result
-            and (
-                len(self.expressions) == 0
-                or (len(self.keys) > 0 and not self.grouping)
-                or self.top >= 0
-            )
-        ):
-            result = Pointer[FileSink, MutAnyOrigin](
-                unsafe_from_address=self.sink
-            )[].schema.copy()
-        if self.counting:
-            var index = self.index
-            var cursor = self.cursor
-            if self.scans:
-                plan_record(plan, cursor, "streaming", 0, self.fed_rows)
-            var into_terminal = self.fed_rows
-            for k in range(len(self.operations)):
-                plan_record(
-                    plan,
-                    self.operation_nodes[k],
-                    "streaming",
-                    self.operation_rows[2 * k],
-                    self.operation_rows[2 * k + 1],
-                    busy_ns=self.operation_times[k],
-                )
-                into_terminal = self.operation_rows[2 * k + 1]
-            var stream_wall = Int(perf_counter_ns()) - self.stream_began
-            if index != cursor and (index not in self.operation_nodes):
-                plan_record(
-                    plan,
-                    index,
-                    "streaming",
-                    into_terminal,
-                    result.value().height() if result else 0,
-                    busy_ns=self.operation_times[len(self.operations)],
-                    wall_ns=stream_wall,
-                )
-            else:
-                # The stream's last node is one of its operations: add the
-                # stream's wall time there, with nothing else.
-                plan_record(
-                    plan,
-                    index,
-                    "streaming",
-                    0,
-                    0,
-                    executions=0,
-                    wall_ns=stream_wall,
-                )
-        return result^
 
 
 def _open_scan_source(
@@ -3378,12 +2786,11 @@ def _same_frames(a: List[DataFrame], b: List[DataFrame]) -> Bool:
 
 
 struct _ProbeStart(Movable):
-    """`_probe_start`'s answer: the result, or a probe set up to run, as
-    a morsel pipeline or as a batch stream."""
+    """`_probe_start`'s answer: the result, or a probe set up to run as a
+    morsel pipeline."""
 
     var result: Optional[DataFrame]
     var piped: List[_PipedProbe]
-    var batch: List[_BatchStream]
     # The plan the node declined on, when the probe was set up again on
     # one whose input is a frame (`_probe_restart`).
     var declined: List[QueryContext]
@@ -3391,37 +2798,28 @@ struct _ProbeStart(Movable):
     def __init__(out self, var result: Optional[DataFrame]):
         self.result = result^
         self.piped = List[_PipedProbe]()
-        self.batch = List[_BatchStream]()
         self.declined = List[QueryContext]()
 
     def __init__(out self, var piped: _PipedProbe):
         self.result = None
         self.piped = List[_PipedProbe]()
         self.piped.append(piped^)
-        self.batch = List[_BatchStream]()
-        self.declined = List[QueryContext]()
-
-    def __init__(out self, var batch: _BatchStream):
-        self.result = None
-        self.piped = List[_PipedProbe]()
-        self.batch = List[_BatchStream]()
-        self.batch.append(batch^)
         self.declined = List[QueryContext]()
 
     def runs(self) -> Bool:
         """Whether a probe is set up to run, rather than a result made."""
-        return len(self.piped) > 0 or len(self.batch) > 0
+        return len(self.piped) > 0
 
 
 def _row_steps_above(
-    self: QueryContext, index: Int, first: Int, sink: Int, reductions: Int
+    self: QueryContext, index: Int, first: Int, reductions: Int
 ) -> List[Int]:
     """The nodes from the one reading `first` up to `index`, in that
     order, when `first` is an aggregate and every one of them is a
     row-local filter, projection or column drop with no reduction of its
     own; else none."""
     var nodes = List[Int]()
-    if sink != 0 or reductions > 0 or self._nodes[first].kind != AGG:
+    if reductions > 0 or self._nodes[first].kind != AGG:
         return nodes^
     var at = index
     while at != first:
