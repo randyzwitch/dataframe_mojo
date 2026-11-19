@@ -2,7 +2,6 @@
 from std.sys import stderr
 from std.os import getenv
 
-comptime BATCH_STREAM = 0
 comptime MORSEL_PIPELINE = 1
 comptime TABLE_PIPELINE = 3
 comptime EAGER_FRAME = 4
@@ -46,8 +45,6 @@ struct AggregationDecision(Copyable, Movable):
         self.reason = reason.copy()
 
     def name(self) -> String:
-        if self.route == BATCH_STREAM:
-            return "batch_stream"
         if self.route == MORSEL_PIPELINE:
             return "morsel_pipeline"
         if self.route == TABLE_PIPELINE:

@@ -1,4 +1,4 @@
-"""Streaming aggregation decisions preserve scalar groups across budget boundaries."""
+"""Streamed groupings over files and frames give the scalar model's groups."""
 # contract-group: execution.modes
 from std.math import abs
 from std.os import getenv
@@ -11,16 +11,9 @@ from dataframe import (
     Expr,
     LazyFrame,
     Series,
-    CsvField,
-    CsvSchema,
     col,
-    read_csv,
     scan_ipc,
     write_ipc,
-)
-from dataframe.lazy import (
-    _stream_split_groups,
-    _stream_collect_bytes,
 )
 from dataframe.frame import _stream_reductions
 from tests.support.group_strategy_reference import (
@@ -107,12 +100,9 @@ def _batch_plan(
     median: Bool = False,
 ) raises -> LazyFrame:
     """`_plan` over `frame` written to an IPC file in batches of `batch`
-    rows, with the group key `s` categorical. Collected, the grouping runs
-    in the aggregate table pipeline: the scan moves every batch's codes
-    onto one dictionary. Written to a file (`_sunk`), the batches run one
-    at a time and the grouping collects them for one eager group-by,
-    reduced into states once they pass the collect budget. This reaches
-    the streamed state strategy."""
+    rows, with the group key `s` categorical. The grouping runs in the
+    aggregate table pipeline: the scan moves every batch's codes onto one
+    dictionary."""
     var directory = getenv("COVERAGE_TEST_TMP")
     assert_true(Bool(directory))
     var path = directory + "/group-strategy-" + name + ".arrow"
@@ -122,28 +112,6 @@ def _batch_plan(
         batch_size=batch,
     )
     return _plan_over(scan_ipc(path), ordered, median)
-
-
-def _sunk(
-    plan: LazyFrame, name: String, batch: Int, optimize: Bool = False
-) raises -> DataFrame:
-    """`plan` written to a CSV file in batches of `batch` rows, read back
-    with the result's types."""
-    var directory = getenv("COVERAGE_TEST_TMP")
-    assert_true(Bool(directory))
-    var path = directory + "/group-strategy-" + name + "-sink.csv"
-    plan.sink_csv(path, batch_size=batch, optimize=optimize)
-    var fields = List[CsvField]()
-    for entry in plan.collect_schema():
-        # Each entry is "name: type".
-        var name = String(entry.split(": ")[0])
-        if name == "s":
-            fields.append(CsvField.string(name))
-        elif name in ["mean", "median", "f_first", "f_last"]:
-            fields.append(CsvField.float64(name))
-        else:
-            fields.append(CsvField.int64(name))
-    return read_csv(path, CsvSchema(fields^), null_values=[""])
 
 
 def _plan_over(
@@ -378,12 +346,6 @@ def test_group_settings_and_scoped_environment_restore() raises:
         getenv("DATAFRAME_TEST_GROUP_ENV", "\x00missing group setting"),
         "sentinel",
     )
-    var split = ScopedEnvironment("DATAFRAME_STREAM_SPLIT_GROUPS", "32")
-    assert_equal(_stream_split_groups(), 32)
-    var budget = ScopedEnvironment("DATAFRAME_STREAM_COLLECT_BYTES", "1")
-    assert_equal(_stream_collect_bytes(), 1)
-    _ = budget^
-    _ = split^
     _ = outer^
     assert_equal(
         getenv("DATAFRAME_TEST_GROUP_ENV", "\x00missing group setting"),
@@ -408,31 +370,42 @@ def _fail_with_live_setting(setting: ScopedEnvironment) raises:
 def test_nonmergeable_median_materializes_without_claiming_stream_state_coverage() raises:
     assert_equal(_stream_reductions(_expressions()), True)
     assert_equal(_stream_reductions(_expressions(True)), False)
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    var split = ScopedEnvironment("DATAFRAME_STREAM_SPLIT_GROUPS", "32")
-    var budget = ScopedEnvironment("DATAFRAME_STREAM_COLLECT_BYTES", "1")
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "1")
-    var observed = StrategyTrace()
     var frame = _source(517, 32)
     var profiled = _batch_plan(frame, "median", 33, True, True).profile(
         optimize=False, batch_size=33, engine="cpu"
     )
     _assert_groups(profiled[0], 517, 32, True, median=True)
-    # Collected, the file's grouping runs in the pipeline's aggregate table.
+    # The file's grouping runs in the pipeline's aggregate table.
     _assert_profile(profiled[1], 517, 32, "pipeline")
-    var paths = observed.text()
-    assert_equal("dataframe-path: lazy.collect_group_by" in paths, False)
-    _ = observed^
     _ = workers^
-    _ = budget^
-    _ = split^
-    _ = trace^
 
 
-def test_streamed_collect_budget_boundaries_preserve_complete_composite_groups() raises:
-    var split = ScopedEnvironment("DATAFRAME_STREAM_SPLIT_GROUPS", "32")
+def _assert_in_memory(
+    plan: LazyFrame,
+    frame: DataFrame,
+    ordered: Bool,
+    batch: Int,
+    optimize: Bool = False,
+    median: Bool = False,
+) raises:
+    """`plan` (over a file of `frame`'s rows) collected gives the rows the
+    same grouping gives over `frame` in memory, collected eagerly: in the
+    same order when the grouping keeps it."""
+    var actual = plan.collect(
+        optimize=optimize, streaming=True, batch_size=batch, engine="cpu"
+    )
+    var expected = _plan(frame, ordered, median).collect(
+        optimize=False, streaming=False, engine="cpu"
+    )
+    if not ordered:
+        actual = actual.sort(["k"])
+        expected = expected.sort(["k"])
+    assert_true(_strings(actual).equals(_strings(expected)))
+
+
+def test_file_groupings_preserve_complete_composite_groups_across_layouts() raises:
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "1")
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var raw = _source(517, 32)
     for layout in range(3):
         var frame = (
@@ -441,118 +414,49 @@ def test_streamed_collect_budget_boundaries_preserve_complete_composite_groups()
             == 1 else chunk_layout(raw)
         )
         var plan = _batch_plan(frame, "layout" + String(layout), 33, True)
-        # Small collection thresholds and a comfortably large threshold must
-        # preserve the same groups across independent physical layouts.
-        for bytes in [1, 4095, 4096, 4097, 65536, 1 << 30]:
-            var budget = ScopedEnvironment(
-                "DATAFRAME_STREAM_COLLECT_BYTES", String(bytes)
+        for optimize in [False, True]:
+            _assert_groups(
+                plan.collect(
+                    optimize=optimize,
+                    streaming=True,
+                    batch_size=33,
+                    engine="cpu",
+                ),
+                517,
+                32,
+                True,
             )
-            var observed = StrategyTrace()
-            for optimize in [False, True]:
-                _assert_groups(
-                    plan.collect(
-                        optimize=optimize,
-                        streaming=True,
-                        batch_size=33,
-                        engine="cpu",
-                    ),
-                    517,
-                    32,
-                    True,
-                )
-                _assert_groups(
-                    _sunk(
-                        plan,
-                        "layout" + String(layout) + "-" + String(bytes),
-                        33,
-                        optimize,
-                    ),
-                    517,
-                    32,
-                    True,
-                )
-            var paths = observed.text()
-            # Only the file sink collects the batches. Backing capacities and
-            # sharing vary by layout. Only the minimum and comfortably large
-            # thresholds guarantee a particular route. Every intermediate
-            # threshold must still produce complete groups.
-            if bytes == 1 or bytes == 1 << 30:
-                assert_equal(
-                    "dataframe-path: lazy.collect_group_by_bounded\n" in paths,
-                    bytes == 1,
-                )
-                assert_equal(
-                    "dataframe-path: lazy.collect_group_by\n" in paths,
-                    bytes == 1 << 30,
-                )
-            _ = observed^
-            _ = budget^
-    var unlimited = ScopedEnvironment(
-        "DATAFRAME_STREAM_COLLECT_BYTES", String(1 << 30)
-    )
+            _assert_in_memory(plan, frame, True, 33, optimize)
     var profiled = _batch_plan(raw, "profile", 33, True).profile(
         optimize=False, batch_size=33, engine="cpu"
     )
     _assert_groups(profiled[0], 517, 32, True)
     _assert_profile(profiled[1], 517, 32, "pipeline")
-    _ = unlimited^
-    _ = trace^
     _ = workers^
-    _ = split^
 
 
-def test_collect_threshold_counts_long_payloads_beyond_row_width_estimates() raises:
-    var split = ScopedEnvironment("DATAFRAME_STREAM_SPLIT_GROUPS", "32")
+def test_long_payload_groupings_match_the_in_memory_result() raises:
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "1")
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var raw = _source(517, 32)
     var words = List[String]()
     for i in range(raw.height()):
         words.append(String("x") * 4096 + String(i))
     var frame = raw.with_column(Series("w", Column[String](words^)))
     var plan = _batch_plan(frame, "payloads", 33, True)
-    var expected = plan.collect(streaming=False, optimize=False, engine="cpu")
-    # The former 88-byte row estimate totaled under 64 KiB for this input;
-    # its retained text alone exceeds 2 MiB.
-    for bytes in [65536, 1 << 28]:
-        var budget = ScopedEnvironment(
-            "DATAFRAME_STREAM_COLLECT_BYTES", String(bytes)
-        )
-        var observed = StrategyTrace()
-        var actual = plan.collect(
-            optimize=False, streaming=True, batch_size=33, engine="cpu"
-        )
-        assert_true(_strings(actual).equals(_strings(expected)))
-        var sunk = _sunk(plan, "payloads-" + String(bytes), 33)
-        assert_true(_strings(sunk).equals(_strings(expected)))
-        assert_equal(
-            "dataframe-path: lazy.collect_group_by_bounded\n"
-            in observed.text(),
-            bytes == 65536,
-        )
-        _ = observed^
-        _ = budget^
-    _ = trace^
+    _assert_in_memory(plan, frame, True, 33)
     _ = workers^
-    _ = split^
 
 
-def test_selective_joins_collect_their_rows_for_the_eager_group_by() raises:
-    var split = ScopedEnvironment("DATAFRAME_STREAM_SPLIT_GROUPS", "32")
+def test_selective_join_groupings_match_the_in_memory_result() raises:
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "1")
-    var budget = ScopedEnvironment(
-        "DATAFRAME_STREAM_COLLECT_BYTES", String(1 << 30)
-    )
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     for groups in [7, 32]:
-        var observed = StrategyTrace()
         var raw = _source(4096, groups, 128, 1)
         # One row per 128 survives; only 32 rows reach the reducer. The
         # first kept row is 127: initial batches can therefore be empty.
         for batch in [16, 127, 128, 257]:
             for ordered in [False, True]:
-                # Ordered groupings read a file, also written to a file;
-                # unordered ones read the frame through the pipeline.
+                # Ordered groupings read a file; unordered ones read the
+                # frame through the pipeline.
                 var plan = _batch_plan(
                     raw,
                     "selective" + String(groups) + "-" + String(batch),
@@ -566,87 +470,38 @@ def test_selective_joins_collect_their_rows_for_the_eager_group_by() raises:
                     engine="cpu",
                 )
                 _assert_groups(actual, 4096, groups, ordered, 128, 1)
-                if ordered:
-                    var sunk = _sunk(
-                        plan,
-                        "selective" + String(groups) + "-" + String(batch),
-                        batch,
-                    )
-                    _assert_groups(sunk, 4096, groups, ordered, 128, 1)
+                _assert_in_memory(plan, raw, ordered, batch)
         var profiled = _batch_plan(
             raw, "selective" + String(groups) + "-profile", 127, True
         ).profile(optimize=False, batch_size=127, engine="cpu")
         _assert_groups(profiled[0], 4096, groups, True, 128, 1)
         _assert_profile(profiled[1], 32, groups, "pipeline")
-        var paths = observed.text()
-        # The ordered grouping written to a file collects the batches' rows
-        # for one eager group-by.
-        assert_true("dataframe-path: lazy.collect_group_by\n" in paths)
-        assert_equal(
-            "dataframe-path: lazy.collect_group_by_bounded\n" in paths,
-            False,
-        )
-        _ = observed^
-    _ = trace^
-    _ = budget^
-    _ = split^
     _ = workers^
 
 
-def test_default_split_threshold_bounded_and_unordered_results_match_full_scalar_rows() raises:
-    var split = ScopedEnvironment("DATAFRAME_STREAM_SPLIT_GROUPS", "4096")
+def test_wide_groupings_match_full_scalar_rows() raises:
     var workers = ScopedEnvironment("DATAFRAME_THREADS", "2")
-    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
-    assert_equal(_stream_split_groups(), 4096)
     var raw = _source(8193, 4097)
-    for bytes in [1, 1 << 30]:
-        var budget = ScopedEnvironment(
-            "DATAFRAME_STREAM_COLLECT_BYTES", String(bytes)
-        )
-        var observed = StrategyTrace()
-        for ordered in [False, True]:
-            for batch in [4095, 4096, 4097]:
-                # Ordered groupings read a file, also written to a file;
-                # unordered ones read the frame through the pipeline.
-                var plan = _batch_plan(
-                    raw,
-                    "split" + String(bytes) + "-" + String(batch),
-                    batch,
-                    ordered,
-                ) if ordered else _plan(raw, ordered)
-                _assert_groups(
-                    plan.collect(
-                        optimize=False,
-                        streaming=True,
-                        batch_size=batch,
-                        engine="cpu",
-                    ),
-                    8193,
-                    4097,
-                    ordered,
-                )
-                if ordered:
-                    _assert_groups(
-                        _sunk(
-                            plan,
-                            "split" + String(bytes) + "-" + String(batch),
-                            batch,
-                        ),
-                        8193,
-                        4097,
-                        ordered,
-                    )
-        var paths = observed.text()
-        assert_equal(
-            "dataframe-path: lazy.collect_group_by_bounded\n" in paths,
-            bytes == 1,
-        )
-        assert_equal(
-            "dataframe-path: lazy.collect_group_by\n" in paths,
-            bytes != 1,
-        )
-        _ = observed^
-        _ = budget^
-    _ = trace^
-    _ = split^
+    for ordered in [False, True]:
+        for batch in [4095, 4096, 4097]:
+            # Ordered groupings read a file; unordered ones read the frame
+            # through the pipeline.
+            var plan = _batch_plan(
+                raw,
+                "split-" + String(batch),
+                batch,
+                ordered,
+            ) if ordered else _plan(raw, ordered)
+            _assert_groups(
+                plan.collect(
+                    optimize=False,
+                    streaming=True,
+                    batch_size=batch,
+                    engine="cpu",
+                ),
+                8193,
+                4097,
+                ordered,
+            )
+            _assert_in_memory(plan, raw, ordered, batch)
     _ = workers^
