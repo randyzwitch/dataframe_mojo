@@ -2047,7 +2047,7 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def get(self, index: Int) -> AnyValue`
   Return one cell as a tagged value; raises when out of bounds.
 - `def equals(self, other: Self, *, null_equal: Bool = True, check_names: Bool = False) -> Bool`
-  Structural equality: NaN equals NaN and -0.0 equals 0.0.
+  Structural equality: NaN equals NaN, -0.0 equals 0.0, and a categorical value is its label (two codes for one label are equal).
 - `def eq(self, other: Expr) -> Self`
 - `def eq(self, other: Self) -> Self`
 - `def ne(self, other: Expr) -> Self`
