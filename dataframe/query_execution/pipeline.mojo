@@ -123,9 +123,9 @@ from dataframe.planning.inputs import (
     BuildFinish,
     finish_build,
 )
+from dataframe.optimizer.expressions import shared_partition_keys
 from dataframe.query_execution.window_sink import (
     WindowSink,
-    shared_partition_keys,
 )
 from dataframe.scheduler import (
     META_REGULAR,
