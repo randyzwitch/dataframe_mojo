@@ -5,7 +5,8 @@ partition and peer boundaries. Stable ordering keeps input order among
 equal keys, which makes positional window functions deterministic. The
 result maps computed values back to the original row positions.
 """
-from std.memory import Pointer, unsafe_memcmp, unsafe_memcpy
+from std.collections import Optional
+from std.memory import ArcPointer, Pointer, unsafe_memcmp, unsafe_memcpy
 from std.sys import size_of
 
 from dataframe.storage.allocation import huge_uninit
@@ -889,6 +890,80 @@ def _partition_groups[
     return group_rows_of[I](offsets^, rows^)
 
 
+def bin_partition_groups(
+    keys: List[Series], hashes: Int, height: Int
+) raises -> GroupRows:
+    """`partition_groups` for `height` rows that already form one hash
+    partition, in row order: rows split by their key hash beforehand need
+    no second scatter, only the partition's own step, numbering its keys
+    and writing each group's rows. `hashes`: the address of each row's key
+    hash, which the numbering probes with unless the keys are one integer
+    column (numbered by value, nulls as one group)."""
+    if height == 0:
+        return GroupRows()
+    var generic = not _integer_key(keys)
+    var flat = List[Series](capacity=len(keys))
+    for key in keys:
+        flat.append(key.rechunk() if key.is_chunked() else key.copy())
+    # One range holding one partition: [rows, null-key bucket, end).
+    var starts = List[Int](length=3, fill=height)
+    starts[0] = 0
+    var entry_rows = huge_uninit[Scalar[ROW_INDEX]](height)
+    var entry_words = huge_uninit[UInt64](height)
+    var rows = entry_rows.unsafe_ptr()
+    var words = entry_words.unsafe_ptr()
+    if generic:
+        var given = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=hashes)
+        for r in range(height):
+            rows[unsafe_offset=r] = Scalar[ROW_INDEX](r)
+            words[unsafe_offset=r] = given[unsafe_offset=r]
+    else:
+        comptime for t in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[t]
+            comptime if not D.is_floating_point():
+                if flat[0]._data.isa[Column[Scalar[D]]]():
+                    ref column = flat[0]._data[Column[Scalar[D]]]
+                    var values = column._ptr()
+                    var nulls = len(column._bits) > 0
+                    var at = 0
+                    for r in range(height):
+                        if not nulls or column._valid(r):
+                            rows[unsafe_offset=at] = Scalar[ROW_INDEX](r)
+                            words[unsafe_offset=at] = values[
+                                unsafe_offset=r
+                            ].cast[DType.uint64]()
+                            at += 1
+                    # Null keys follow, in the bucket the numbering takes
+                    # as one group.
+                    starts[1] = at
+                    if nulls:
+                        for r in range(height):
+                            if not column._valid(r):
+                                rows[unsafe_offset=at] = Scalar[ROW_INDEX](r)
+                                at += 1
+    var all_rows = huge_uninit[Scalar[ROW_INDEX]](height)
+    var job = _PartitionGroupsJob[ROW_INDEX](
+        flat,
+        generic,
+        0,
+        Int(starts.unsafe_ptr()),
+        1,
+        1,
+        Int(entry_rows.unsafe_ptr()),
+        Int(entry_words.unsafe_ptr()),
+        0,
+        Int(all_rows.unsafe_ptr()),
+    )
+    job.run()
+    var offsets = job.offsets.copy()
+    # The job read these by address: keep them alive until here.
+    _ = starts^
+    _ = entry_rows^
+    _ = entry_words^
+    _ = flat^
+    return group_rows_of[ROW_INDEX](offsets^, all_rows^)
+
+
 def sort_key_rows(
     keys: List[Series],
     descending: List[Bool],
@@ -1213,10 +1288,12 @@ def window_layout(
     nulls_last: List[Bool],
     height: Int,
     stable: Bool = True,
+    known: Optional[ArcPointer[GroupRows]] = None,
 ) raises -> WindowLayout:
     """Sort `height` rows by partition and order keys and mark their
     boundaries. `descending` and `nulls_last` hold one flag per
-    order key. Rows with equal keys keep input order when `stable`."""
+    order key. Rows with equal keys keep input order when `stable`.
+    `known`: the partition keys' groups, when they are already made."""
     return _window_layout(
         partition_keys,
         order_keys,
@@ -1226,6 +1303,7 @@ def window_layout(
         stable,
         _RankOut(),
         True,
+        known,
     )
 
 
@@ -1238,10 +1316,12 @@ def _window_layout(
     stable: Bool,
     rank: _RankOut,
     inverse: Bool,
+    known: Optional[ArcPointer[GroupRows]] = None,
 ) raises -> WindowLayout:
     """`window_layout`; with `rank.method` set and partition keys, the hash
     group tasks also write every row's rank, and the layout comes back
-    empty. Without `inverse`, rows' sorted positions are not recorded."""
+    empty. Without `inverse`, rows' sorted positions are not recorded.
+    `known`: the partition keys' groups, when they are already made."""
     var layout = WindowLayout()
     layout.group_parts.append(0)
     if height == 0:
@@ -1255,7 +1335,10 @@ def _window_layout(
         # Each partition's rows, ascending, found by hashing the keys once
         # (the over() groups' lists). Tasks then order whole groups by
         # their order keys alone, writing their positions of the layout.
-        var groups = partition_groups(partition_keys, height)
+        var held = known.value() if known else ArcPointer(
+            partition_groups(partition_keys, height)
+        )
+        ref groups = held[]
         var keys = List[Series](capacity=len(order_keys))
         for key in order_keys:
             keys.append(key.rechunk() if key.is_chunked() else key.copy())
@@ -1606,6 +1689,7 @@ def rank_window(
     input: Series,
     descending: Bool,
     method: String,
+    known: Optional[ArcPointer[GroupRows]] = None,
 ) raises -> Series:
     """Every row's rank of `input` within its partition of
     `partition_keys` (none: one partition): rank() OVER (PARTITION BY keys
@@ -1650,6 +1734,7 @@ def rank_window(
         method == "ordinal",
         rank if len(partition_keys) > 0 else _RankOut(),
         False,
+        known,
     )
     if len(partition_keys) == 0:
         _rank_ranges(layout, rank)
