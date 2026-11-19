@@ -444,9 +444,7 @@ def plan_lower_reductions(mut self: QueryContext) raises:
             var kept = List[Expr](capacity=len(outputs))
             for c in outputs:
                 kept.append(col(c))
-            self._nodes[i] = _select_node(
-                left=len(self._nodes) - 1, exprs=kept
-            )
+            self._nodes[i] = _select_node(left=len(self._nodes) - 1, exprs=kept)
         plan_forget_schema(self, i)
         changed = True
     if changed:
@@ -566,9 +564,7 @@ def plan_split_windows(mut self: QueryContext) raises:
             var kept = List[Expr](capacity=len(outputs))
             for c in outputs:
                 kept.append(col(c))
-            self._nodes[i] = _select_node(
-                left=len(self._nodes) - 1, exprs=kept
-            )
+            self._nodes[i] = _select_node(left=len(self._nodes) - 1, exprs=kept)
         plan_forget_schema(self, i)
         changed = True
     if changed:
