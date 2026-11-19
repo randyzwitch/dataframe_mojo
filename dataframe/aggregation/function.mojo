@@ -3026,9 +3026,10 @@ struct _KeyColumn(Movable):
     var bit: UInt64
     # The key's source field metadata, which its groups' column keeps.
     var metadata: Optional[ArcPointer[List[UInt8]]]
-    # A list or struct key's type: its words are its value's bytes as a
-    # string's, read as strings and then decoded.
-    var nested: Optional[DataType]
+    # A list or struct key, as no rows of its column: its words are its
+    # value's bytes as a string's, read as strings and then decoded to
+    # that column's type (a categorical leaf's dictionary included).
+    var nested: Optional[Series]
 
     def __init__(
         out self,
@@ -3040,7 +3041,7 @@ struct _KeyColumn(Movable):
     ) raises:
         self.nested = None
         if template.dtype().is_nested():
-            self.nested = template.dtype()
+            self.nested = template.slice(0, 0)
             self.values = _ValueColumn(
                 template.name(), DataType.STRING, _VALUE_STRING, n, held
             )
@@ -3070,7 +3071,7 @@ struct _KeyColumn(Movable):
     def column(deinit self) raises -> Series:
         """The finished key column, with its source's field metadata."""
         var metadata = self.metadata
-        var nested = self.nested
+        var nested = self.nested^
         var column = self.values^.column()
         if nested:
             column = decode_nested_keys(column, nested.value())
