@@ -216,6 +216,11 @@ struct QueryContext(Copyable, Deinitable, Movable):
     # For a frame slot standing for a shared subplan's result: its id in
     # `_shared`. The slot itself holds the result's columns with no rows.
     var _shared_slots: Dict[Int, Int]
+    # Frame slots holding a result this run computed: an input pipeline's
+    # output that a stream then reads as its source. Such a frame is read
+    # once, by that stream, so it carries no vector statistics: a pass to
+    # compute them would cost as much as the reading it might skip.
+    var _computed_slots: List[Int]
     # Provider-neutral envelope on dispatch copies; user plans stay unchanged.
     var _accelerator_settings: Optional[ExecutionSettings]
     # Memoize empty schemas while optimizer passes inspect names and types.
@@ -288,6 +293,7 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._materialized_distinct = Dict[Int, Dict[String, Int]]()
         self._shared = None
         self._shared_slots = Dict[Int, Int]()
+        self._computed_slots = List[Int]()
         self._accelerator_settings = None
         self._schema_memo = None
         self._prefetched = None
@@ -367,6 +373,13 @@ def plan_shared_id(self: QueryContext, slot: Int) -> Int:
     if len(self._shared_slots) == 0:
         return -1
     return self._shared_slots.get(slot, -1)
+
+
+def plan_computed_slot(self: QueryContext, slot: Int) -> Bool:
+    """Whether frame slot `slot` holds a result the query computes rather
+    than a table it reads: a shared subplan's, or an input pipeline's
+    (`_computed_slots`)."""
+    return plan_shared_id(self, slot) >= 0 or slot in self._computed_slots
 
 
 def plan_slot_rows(self: QueryContext, slot: Int) -> Int:

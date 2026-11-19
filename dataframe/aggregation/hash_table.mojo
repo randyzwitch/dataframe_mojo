@@ -654,17 +654,20 @@ struct AggregateLayout(Copyable, Movable):
     # (`sink_vectors`' `filters`); empty when none does.
     var filtered: List[Bool]
 
-    def use_perfect_hash(mut self, keys: List[Series]) raises:
+    def use_perfect_hash(
+        mut self, keys: List[Series], compute: Bool = True
+    ) raises:
         """Use direct-address slots when the bounded domains are small enough
         for the grouping keys `keys`, the
         layout's own key columns carrying their statistics: never with a
-        distinct count, which perfect hash aggregates do not take."""
+        distinct count, which perfect hash aggregates do not take. Without
+        `compute`, only statistics the keys already carry are read."""
         if len(self.distinct) > 0 or len(keys) != len(self.key_templates):
             return
         for key in self.key_templates:
             if _width(key) != 1:
                 return
-        self.perfect = perfect_hash(keys)
+        self.perfect = perfect_hash(keys, compute)
         if self.perfect.used():
             trace_path("aggregate_table.perfect_hash")
 

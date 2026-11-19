@@ -576,10 +576,16 @@ struct PushedJoinFilter(Copyable, Movable):
     side. A filter on a group key passes below the aggregate, since removing a
     group's rows removes only that group: `column` names the group key in the
     aggregate's input, which the input's pipeline follows to its source column,
-    where `finalize_filters` makes the key's filters."""
+    where the key's filters are made. When the build made a hash table,
+    `table` holds it and `index` is the key's place in it: the bounds its
+    sinks recorded as the rows came in and the bloom filter its finish
+    filled are the filters (`finalize_table_filters`), and no row is read
+    again. Otherwise `key` is the build's key column (`finalize_filters`)."""
 
     var column: String
-    var key: Series
+    var key: Optional[Series]
+    var table: Optional[JoinHashTable]
+    var index: Int
     # The join's equality conditions, and its build's rows with no null key and
     # whether the build side filters (for `can_use_bloom_filter`).
     var equalities: Int

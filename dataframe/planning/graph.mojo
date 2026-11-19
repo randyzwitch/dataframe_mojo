@@ -1352,6 +1352,11 @@ def plan_compact_scan_slots(mut self: QueryContext):
         if slots[entry.key] >= 0:
             shared[slots[entry.key]] = entry.value
     self._shared_slots = shared^
+    var computed = List[Int]()
+    for slot in self._computed_slots:
+        if slots[slot] >= 0:
+            computed.append(slots[slot])
+    self._computed_slots = computed^
     self._frames = FrameSlots(frames^)
     self._schemas = schemas^
     self._origin_rows = origins^
@@ -1478,6 +1483,9 @@ def plan_subplan(self: QueryContext, root: Int) -> QueryContext:
     for entry in self._shared_slots.items():
         if slots[entry.key] >= 0:
             sub._shared_slots[slots[entry.key]] = entry.value
+    for slot in self._computed_slots:
+        if slots[slot] >= 0:
+            sub._computed_slots.append(slots[slot])
     return sub^
 
 

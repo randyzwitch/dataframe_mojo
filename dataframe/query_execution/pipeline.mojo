@@ -115,6 +115,7 @@ from dataframe.planning.context import (
     QueryContext,
     SharedResults,
     _ReadyIndex,
+    plan_computed_slot,
     plan_shared_id,
     plan_slot_table,
 )
@@ -531,6 +532,9 @@ struct _BuildFor(Copyable, Movable):
     var coalesce: Bool
     var probe_estimate: Int
     var build_filtered: Bool
+    # Estimated rows of a scan the join's keys also filter, through an
+    # aggregate on its probe side; -1 for none.
+    var filter_rows: Int
 
     def __init__(out self):
         self.keys = List[String]()
@@ -538,6 +542,7 @@ struct _BuildFor(Copyable, Movable):
         self.coalesce = True
         self.probe_estimate = -1
         self.build_filtered = False
+        self.filter_rows = -1
 
 
 struct _StreamSchedule(Movable):
@@ -641,6 +646,7 @@ def _add_stream(
             inputs.coalesces[k],
             inputs.probe_estimates[k],
             inputs.build_filtered[k],
+            inputs.filter_rows[k],
         )
         var finish = Optional[ArcPointer[FinishAbove]]()
         if inputs.finish and inputs.finish.value()[].node == inputs.wanted[k]:
@@ -1347,6 +1353,7 @@ struct _StreamProbe(Movable):
                     self.build.coalesce,
                     self.build.probe_estimate,
                     self.build.build_filtered,
+                    self.build.filter_rows,
                 )
             )
             self._build_round()
@@ -1558,6 +1565,7 @@ struct _OperatorPipeline(Movable):
                     self.build.coalesce,
                     self.build.probe_estimate,
                     self.build.build_filtered,
+                    self.build.filter_rows,
                 )
             )
 
@@ -1803,6 +1811,7 @@ def _probe_start(
         var plan = self.copy()
         plan._frames.append(plan_union(self, first, True, batch_size))
         plan._schemas.append(Optional[CsvSchema]())
+        plan._computed_slots.append(len(plan._frames) - 1)
         plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
         return _probe_restart(plan^, index, batch_size, sink, head^, build)
     if first >= 0 and first != index and not _is_scan(self._nodes[first].kind):
@@ -1820,6 +1829,7 @@ def _probe_start(
         var plan = self.copy()
         plan._frames.append(computed^)
         plan._schemas.append(Optional[CsvSchema]())
+        plan._computed_slots.append(len(plan._frames) - 1)
         plan._nodes[first] = _frame_scan_node(slot=len(plan._frames) - 1)
         return _probe_restart(plan^, index, batch_size, sink, head^, build)
     while cursor >= 0:
@@ -2261,6 +2271,7 @@ def _probe_start(
         build_coalesce=build.coalesce,
         build_probe_estimate=build.probe_estimate,
         build_filtered=build.build_filtered,
+        build_filter_rows=build.filter_rows,
         # Made ahead for the same steps over the same columns, unless
         # late materialization changed them.
         types=pipeline_ahead^,
@@ -2278,6 +2289,9 @@ def _probe_start(
             and not finish
             and not late_operations
         ) else None,
+        # A source this run computed reads only the statistics it has.
+        computed=source.kind == SCAN_FRAME
+        and plan_computed_slot(self, source.source_slot()),
     )
     return _ProbeStart(
         _PipedProbe(
@@ -3053,31 +3067,49 @@ def _published_filters(
     planned: PlannedJoinFilter, made: _StreamPipeline
 ) raises -> List[PushedJoinFilter]:
     """The filters a finished build publishes for an aggregate below its
-    join's probe side: one per key that reaches a group key. A build whose
-    pipeline sank its rows into the join's table has an empty result, so
-    its keys are read from the table."""
+    join's probe side: one per key that reaches a group key. A build that
+    made the join's hash table hands over the table for each key whose
+    bounds its sinks recorded as the rows came in: with the bloom filter
+    its finish filled, those are the filters, and publishing reads no row.
+    Any other key is handed over as a column: the build's own, or one read
+    from the table's rows when the pipeline sank them into it."""
     var filters = List[PushedJoinFilter]()
-    if len(made.probe) > 0 and made.probe[0].sank:
-        var hashed = made.built().value().copy()
-        for i in range(len(planned.positions)):
-            var key = planned.positions[i]
+    var hashed = made.built()
+    var sank = len(made.probe) > 0 and made.probe[0].sank
+    var built = Optional[DataFrame]()
+    var count = 0
+    if hashed:
+        count = hashed.value().inserted
+    if not sank:
+        built = made.result()
+        if not hashed:
+            count = _keyed_rows(built.value(), planned.right_keys)
+    for i in range(len(planned.positions)):
+        var key = planned.positions[i]
+        if hashed and hashed.value().key_bounds(key):
             filters.append(
                 PushedJoinFilter(
                     planned.grouped[i],
-                    hashed.key_column(key, planned.right_keys[key]),
+                    None,
+                    hashed.value().copy(),
+                    key,
                     len(planned.right_keys),
-                    hashed.inserted,
+                    count,
                     planned.build_filtered,
                 )
             )
-        return filters^
-    var built = made.result()
-    var count = _keyed_rows(built, planned.right_keys)
-    for i in range(len(planned.positions)):
+            continue
+        var column: Series
+        if sank:
+            column = hashed.value().key_column(key, planned.right_keys[key])
+        else:
+            column = built.value().column(planned.right_keys[key])
         filters.append(
             PushedJoinFilter(
                 planned.grouped[i],
-                built.column(planned.right_keys[planned.positions[i]]),
+                column^,
+                None,
+                key,
                 len(planned.right_keys),
                 count,
                 planned.build_filtered,
