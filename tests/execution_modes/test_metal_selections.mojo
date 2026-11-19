@@ -15,6 +15,7 @@ from dataframe_metal.accelerator.gpu.selection_inputs import (
     selection_inputs,
     selection_inputs_supported,
 )
+from dataframe_metal.accelerator.gpu.selection_reduce import SELECTION_WORDS
 from tests.support.metal_outcomes import require_metal, same_outcome
 
 
@@ -84,15 +85,58 @@ def test_metal_selection_input_owners_and_shared_row_lists() raises:
     # are represented by one element each, never expanded to source length.
     assert_equal(len(inputs.owners), 7)
     assert_equal(len(inputs.groups), 7)
-    assert_equal(len(inputs.selections), 2 * batches.rows)
+    assert_equal(inputs.selection_count, 2 * batches.rows)
+    var packed = List[UInt32](length=inputs.selection_count, fill=UInt32.MAX)
+    inputs.fill_selections(batches, packed.unsafe_ptr())
     for owner in inputs.owners:
         if owner.name() == "constant":
             assert_equal(len(owner), 1)
     assert_true(inputs.partials > 0)
+    var batch_offset = 0
     for batch_index in range(len(batches.batches)):
         ref batch = batches.batches[batch_index]
         assert_equal(batch.copied_columns, 0)
         assert_true(batch.columns[3].is_constant())
+        for list_index in range(len(batch.rows)):
+            for row in range(batch.count):
+                var at = batch_offset + list_index * batch.count + row
+                assert_equal(packed[at], batch.rows[list_index][row])
+        for group_index in range(len(inputs.groups)):
+            ref group = inputs.groups[group_index]
+            var column = matched.value().fields[group.field].column
+            if batch.columns[column].is_constant():
+                continue
+            var descriptor = (group.first + batch_index) * SELECTION_WORDS
+            var expected = batch_offset + batch.lists[column] * batch.count
+            assert_equal(inputs.descriptors[descriptor + 4], UInt64(expected))
+        batch_offset += len(batch.rows) * batch.count
+    for group_index in range(len(inputs.groups)):
+        ref group = inputs.groups[group_index]
+        if inputs.owners[group.owner].name() == "constant":
+            var descriptor = group.first * SELECTION_WORDS
+            assert_equal(inputs.descriptors[descriptor + 4], UInt64.MAX - 1)
+
+    var ranges = SelectionBatches(batches.schema)
+    var batch = SelectionBatch()
+    batch.columns = batches.batches[0].columns.copy()
+    batch.starts = [2, 1, 2, 0]
+    batch.lists = [-1, -1, -1, -1]
+    batch.count = 3
+    ranges.append(batch^)
+    ranges.ready = True
+    var range_inputs = selection_inputs(matched.value(), ranges)
+    assert_equal(range_inputs.selection_count, 0)
+    var empty = List[UInt32](length=1, fill=UInt32.MAX)
+    range_inputs.fill_selections(ranges, empty.unsafe_ptr())
+    assert_equal(empty[0], UInt32.MAX)
+    for group_index in range(len(range_inputs.groups)):
+        ref group = range_inputs.groups[group_index]
+        var is_constant = range_inputs.owners[group.owner].name() == "constant"
+        var expected = UInt64.MAX - 1 if is_constant else UInt64.MAX
+        assert_equal(
+            range_inputs.descriptors[group.first * SELECTION_WORDS + 4],
+            expected,
+        )
 
 
 def test_metal_selection_entrypoints_reject_invalid_maps_before_submission() raises:
