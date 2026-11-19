@@ -3,22 +3,25 @@ tasks of the query's schedule rather than as one task that starts its
 kernels' jobs.
 
 Each rank orders every row of the input, so it cannot be split by rows or
-by groups: it is one window over one partition. Its work is the rounds of
-`RankRounds` (the sort, the peer boundaries, the ranges' summaries, the
-ranks written), one rank after another; the columns the projection passes
-through are kept as they are.
+by groups: it is one window over one partition. Its work is a round making
+the ranked columns contiguous (a fixed-width number column by ranges of its
+rows, any other column whole), then the rounds of `RankRounds` (the sort,
+the peer boundaries, the ranges' summaries, the ranks written), one rank
+after another; the columns the projection passes through are kept as they
+are.
 """
 from dataframe.expr import COL, RANK, Expr
 from dataframe.frame import DataFrame
-from dataframe.parallel import Rounds
-from dataframe.series import Series
+from dataframe.parallel import Rounds, partitions, round_width, worker_count
+from dataframe.series import ChunkMerge, Series
 from dataframe.storage.column import Column
 from dataframe.window_sort import RankRounds
 
 # The round that ran last.
 comptime _START = 0
-comptime _RANKS = 1
-comptime _DONE = 2
+comptime _RECHUNK = 1
+comptime _RANKS = 2
+comptime _DONE = 3
 
 
 def whole_input_ranks(exprs: List[Expr]) -> Bool:
@@ -56,6 +59,13 @@ struct RankSink(Movable, Rounds):
     var at: Int
     var ranking: List[RankRounds]
     var ranks: List[Series]
+    # The ranked columns that are chunked (input column places), their
+    # merges by row ranges (none: rechunked whole), and the rechunk
+    # round's pieces (chunked column, first row, end row; -1 for whole).
+    var chunked: List[Int]
+    var merges: List[Optional[ChunkMerge]]
+    var pieces: List[Tuple[Int, Int, Int]]
+    var width: Int
     var result: DataFrame
 
     def __init__(
@@ -68,8 +78,13 @@ struct RankSink(Movable, Rounds):
         self.at = -1
         self.ranking = List[RankRounds]()
         self.ranks = List[Series](
-            length=len(self.exprs), fill=Series("", Column[Int64](List[Int64]()))
+            length=len(self.exprs),
+            fill=Series("", Column[Int64](List[Int64]())),
         )
+        self.chunked = List[Int]()
+        self.merges = List[Optional[ChunkMerge]]()
+        self.pieces = List[Tuple[Int, Int, Int]]()
+        self.width = 0
         self.result = DataFrame(List[Series]())
 
     def _eager(self) raises -> DataFrame:
@@ -88,16 +103,38 @@ struct RankSink(Movable, Rounds):
                     return 0
                 names.append(expr._name)
                 var column = expr._nodes[0].text
-                var found = False
-                for c in self.input._columns:
-                    if c.name() == column:
-                        # A categorical is ranked by its strings, as the
-                        # evaluator reads it; that path runs whole.
-                        found = not c.dtype().is_categorical()
-                if not found:
+                var found = -1
+                for c in range(len(self.input._columns)):
+                    ref series = self.input._columns[c]
+                    # A categorical is ranked by its strings, as the
+                    # evaluator reads it; that path runs whole.
+                    if (
+                        series.name() == column
+                        and not series.dtype().is_categorical()
+                    ):
+                        found = c
+                if found < 0:
                     self.result = self._eager()
                     self.stage = _DONE
                     return 0
+                if (
+                    len(expr._nodes) == 2
+                    and self.input._columns[found].is_chunked()
+                    and found not in self.chunked
+                ):
+                    self._add_chunked(found)
+            self.stage = _RECHUNK
+            if len(self.pieces) > 0:
+                self.width = round_width(len(self.pieces))
+                return self.width
+        if self.stage == _RECHUNK:
+            for k in range(len(self.chunked)):
+                if self.merges[k]:
+                    self.input._columns[self.chunked[k]] = (
+                        self.merges[k].value().merged.copy()
+                    )
+            self.merges = List[Optional[ChunkMerge]]()
+            self.pieces = List[Tuple[Int, Int, Int]]()
             self.stage = _RANKS
         if self.stage == _RANKS:
             if len(self.ranking) > 0:
@@ -130,8 +167,35 @@ struct RankSink(Movable, Rounds):
                 _ = self.ranking.pop()
         return 0
 
+    def _add_chunked(mut self, c: Int) raises:
+        """Input column `c` as pieces of the rechunk round."""
+        var k = len(self.chunked)
+        self.chunked.append(c)
+        ref column = self.input._columns[c]
+        var merge = ChunkMerge.of(column)
+        if merge:
+            # Its rows split over the workers, as a column copied on its
+            # own would split them.
+            var n = len(column)
+            var bounds = partitions(n, worker_count(n), 64)
+            for w in range(len(bounds) - 1):
+                if bounds[w] < bounds[w + 1]:
+                    self.pieces.append((k, bounds[w], bounds[w + 1]))
+        else:
+            self.pieces.append((k, 0, -1))
+        self.merges.append(merge^)
+
     def round_task(mut self, task: Int) raises:
-        if self.stage == _RANKS:
+        if self.stage == _RECHUNK:
+            for p in range(task, len(self.pieces), self.width):
+                var piece = self.pieces[p]
+                var k = piece[0]
+                if self.merges[k]:
+                    self.merges[k].value().copy_rows(piece[1], piece[2])
+                else:
+                    var c = self.chunked[k]
+                    self.input._columns[c] = self.input._columns[c].rechunk()
+        elif self.stage == _RANKS:
             self.ranking[0].round_task(task)
 
     def _finish(mut self) raises:
