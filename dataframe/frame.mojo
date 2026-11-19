@@ -444,14 +444,27 @@ struct DataFrame(Copyable, Sized, Writable):
         return self._columns[self._index(column)].get(row)
 
     def _shares_buffers_with(self, other: Self) -> Bool:
-        """Whether both frames are the same columns over the same Arrow
-        buffers (the same frame, however many times copied)."""
+        """Whether both frames retain the same named Arrow buffers.
+
+        Their visible windows and logical types may differ.
+        """
         if self.width() != other.width() or self._height != other._height:
             return False
         for c in range(self.width()):
             if self._columns[c].name() != other._columns[c].name():
                 return False
             if not self._columns[c]._shares_buffers_with(other._columns[c]):
+                return False
+        return True
+
+    def _same_source_as(self, other: Self) -> Bool:
+        """Whether one frame scan can replace the other without changing it."""
+        if self.width() != other.width() or self._height != other._height:
+            return False
+        for c in range(self.width()):
+            if self._columns[c].name() != other._columns[c].name():
+                return False
+            if not self._columns[c]._same_view_as(other._columns[c]):
                 return False
         return True
 
