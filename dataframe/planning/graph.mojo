@@ -602,7 +602,7 @@ def plan_projection_visits(self: QueryContext) -> Tuple[List[Int], List[Int]]:
 
 
 def plan_canonical_frames(self: QueryContext) -> List[Int]:
-    """For each frame slot, the first slot holding the same buffers.
+    """For each frame slot, the first slot holding the same visible columns.
     Frames are compared only with earlier ones of the same shape
     (width and height), as a hash join compares only rows of one
     bucket: copies of one table meet once, other tables never."""
@@ -626,7 +626,7 @@ def plan_canonical_frames(self: QueryContext) -> List[Int]:
         var known = heads.get(shape)
         if known:
             for g in known.value():
-                if self._frames[g]._shares_buffers_with(frame):
+                if self._frames[g]._same_source_as(frame):
                     first = g
                     break
         if first == f:
@@ -683,7 +683,7 @@ def plan_merge_inputs(mut self: QueryContext, other: QueryContext) -> List[Int]:
             var known = heads.get(frame.height() * 4099 + frame.width())
             if known:
                 for g in known.value():
-                    if self._frames[g]._shares_buffers_with(frame):
+                    if self._frames[g]._same_source_as(frame):
                         found = g
                         break
         if found < 0:
@@ -705,7 +705,7 @@ def plan_subplan_classes(
     node."""
     # Two plans joined carry their own copies of a frame they both
     # scan, in separate slots: a scan names the first slot holding the
-    # same buffers.
+    # same typed views of the buffers.
     var canonical = plan_canonical_frames(self)
     var classes = List[Int](capacity=len(self._nodes))
     var sizes = List[Int](capacity=len(self._nodes))
@@ -1462,8 +1462,12 @@ def plan_subplan(self: QueryContext, root: Int) -> QueryContext:
         self._handoff_execute,
     )
     sub._report = self._report
+    sub._report_node_base = self._report_node_base
+    sub._device_observation = self._device_observation
     sub._accelerator_settings = self._accelerator_settings.copy()
     sub._handoff = self._handoff
+    sub._selection_supports = self._selection_supports
+    sub._selection_execute = self._selection_execute
     for entry in self._origin_rows.items():
         if slots[entry.key] >= 0:
             sub._origin_rows[slots[entry.key]] = entry.value

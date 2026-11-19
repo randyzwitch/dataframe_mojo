@@ -183,6 +183,7 @@ def execute_global_moments_math(
         raise Error("Metal unsupported [handoff]: 2**31 or more rows")
     var timings = HandoffTimings()
     if frame.height() == 0:
+        var started = Int(perf_counter_ns())
         var nf = len(plan.selected.bundle.fields)
         var moments = List[List[Int128]]()
         var extrema = List[Int64](length=nf * 4, fill=0)
@@ -198,7 +199,9 @@ def execute_global_moments_math(
             moments^,
             List[UInt64](length=nf, fill=0),
         )
-        return (finish_global_moments_math(plan, empty), timings^)
+        var result = finish_global_moments_math(plan, empty)
+        timings.finish_ns = Int(perf_counter_ns()) - started
+        return (result^, timings^)
     comptime if not METAL_TARGET:
         raise Error("Metal moments require an Apple compilation target")
     else:
@@ -209,7 +212,10 @@ def execute_global_moments_math(
                 frame, len(plan.selected.bundle.fields)
             )
             input_ns = Int(perf_counter_ns()) - input_started
-        var scope = Scope(service=shared_service())
+        var scope = Scope(
+            service=shared_service(),
+            observation=region._plan._device_observation,
+        )
         var started = Int(perf_counter_ns())
         _ = scope.context()
         timings.context_ns = Int(perf_counter_ns()) - started

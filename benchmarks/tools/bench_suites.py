@@ -525,7 +525,11 @@ def trace_paths(stderr):
 
 OPERATOR_COLUMNS = (
     "node operator executor algorithm build_side input_rows build_rows "
-    "output_rows builds executions busy_ms wall_ms"
+    "output_rows builds executions busy_ms wall_ms pipeline result_device "
+    "device_status fallback_reason gpu_launches gpu_completed_launches "
+    "upload_bytes download_bytes device_waits context_wall_ms input_wall_ms "
+    "device_work_wall_ms finish_wall_ms synchronize_wall_ms phase_timing_kind "
+    "query_id execution_attempt result_used plan_id"
 ).split()
 
 
@@ -551,10 +555,19 @@ def operator_reports(stderr):
                 if name not in row:
                     # A baseline built before the column existed.
                     continue
-                if name.endswith("rows") or name in ("node", "builds", "executions"):
+                if name.endswith(("rows", "_bytes", "_launches")) or name in (
+                    "node", "builds", "executions", "pipeline",
+                    "device_waits", "query_id", "execution_attempt", "plan_id",
+                ):
                     row[name] = int(row[name])
                 elif name.endswith("_ms"):
                     row[name] = float(row[name])
+                elif name == "result_used":
+                    if row[name] not in ("True", "False", "true", "false"):
+                        raise ValueError(
+                            "Invalid result disposition in execution report"
+                        )
+                    row[name] = row[name].lower() == "true"
             if reports[current] and row["node"] <= reports[current][-1]["node"]:
                 # Rows come in node order; a lower node starts a new run.
                 reports[current] = []

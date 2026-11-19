@@ -4,7 +4,8 @@
 # gives Metal buffers no GPU address, which MAX's device context needs, so
 # Metal changes are validated here, on Apple silicon, before a pull request.
 #
-# usage: scripts/test_metal_local.sh
+# usage: scripts/test_metal_local.sh [contract-runner arguments]
+# For example: --packaging combined --compiler /absolute/path/to/mojo-wrapper
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
@@ -84,6 +85,11 @@ pixi run --locked mojo build -O3 -I . scripts/check_metal_bool_storage.mojo \
   -o build/contract-tests/metal-bool-storage
 build/contract-tests/metal-bool-storage
 
+echo "== Retained CPU selections and native reduction faults"
+pixi run --locked mojo build -O3 -I providers/cpu -I . scripts/check_metal_selections.mojo \
+  -o build/contract-tests/metal-selections
+build/contract-tests/metal-selections
+
 echo "== Parquet reader (the file-source contracts read Parquet)"
 pixi run --locked -e native build-dfparquet
 
@@ -97,7 +103,7 @@ failed=""
 echo "== Metal contracts on the device: $groups"
 # shellcheck disable=SC2086 # one argument per group
 pixi run --locked test --areas execution public --contracts $groups \
-  --capabilities metal mojo_gpu || failed="$failed contracts"
+  --capabilities metal mojo_gpu "$@" || failed="$failed contracts"
 
 echo "== Metal suite tooling checks"
 for task in test-metal-suite-checks; do

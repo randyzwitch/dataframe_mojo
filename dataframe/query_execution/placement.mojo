@@ -26,10 +26,14 @@ from dataframe.planning.model import (
     AGG,
     FILTER,
     HANDOFF_AUTO,
+    HANDOFF_FORCED,
     SELECT,
 )
+from dataframe.planning.properties import _is_scan
+from dataframe.query_execution.pipeline import plan_selection_batches
 from dataframe.query_execution.reporting import (
     plan_record,
+    plan_observe,
 )
 from std.collections import (
     Dict,
@@ -103,10 +107,15 @@ def plan_handoff_region(
     var kind = self._nodes[index].kind
     if kind != SELECT and kind != AGG:
         return None
+    var observation = plan_observe(self, index)
+    # Pipeline placement may already have kept this region on the CPU.
+    # A later handoff decline must retain that measured decision.
     var cpu_costs = Dict[String, LinearCost]()
     if self._handoff == HANDOFF_AUTO:
         cpu_costs = load_costs("cpu")
         if len(cpu_costs) == 0:
+            if observation and not observation.value()[].reason:
+                observation.value()[].cpu("missing_cpu_calibration")
             return None
     var found = plan_handoff_input(self, index)
     var input = found[0]
@@ -114,7 +123,21 @@ def plan_handoff_region(
         return None
     var schema = self._execute(input, True, streaming, batch_size)
     var offered = plan_handoff_plan(self, index, found[1], schema)
-    if not _context_supports(offered):
+    var supported = _context_supports(offered)
+    if (
+        streaming
+        and self._handoff == HANDOFF_FORCED
+        and (not supported or not _is_scan(self._nodes[input].kind))
+    ):
+        # Keep an already-supported scan/filter on the device. A CPU
+        # producer (a join, or a filter the device cannot run) can instead
+        # pass its final vectors to a runtime's optional batch consumer.
+        var selected = _handoff_selections(self, index, batch_size)
+        if selected:
+            return selected^
+    if not supported:
+        if observation and not observation.value()[].reason:
+            observation.value()[].cpu("unsupported_operator_or_dtype")
         return None
     var algorithm = String("handoff")
     var decided = False
@@ -123,12 +146,18 @@ def plan_handoff_region(
         if estimated >= 0:
             var verdict = _placement(offered, estimated, cpu_costs)
             if not verdict[0]:
+                if observation and not observation.value()[].reason:
+                    observation.value()[].cpu(
+                        "missing_calibration" if "no measured cost"
+                        in verdict[1] else "cost_model_prefers_cpu"
+                    )
                 plan_record(
                     self,
                     index,
                     "placement",
-                    estimated,
-                    -1,
+                    0,
+                    0,
+                    executions=0,
                     algorithm="placed cpu" + verdict[1],
                 )
                 return None
@@ -140,6 +169,11 @@ def plan_handoff_region(
     if self._handoff == HANDOFF_AUTO and not decided:
         var verdict = _placement(region, rows, cpu_costs)
         if not verdict[0]:
+            if observation and not observation.value()[].reason:
+                observation.value()[].cpu(
+                    "missing_calibration" if "no measured cost"
+                    in verdict[1] else "cost_model_prefers_cpu"
+                )
             var began = Int(perf_counter_ns())
             var placed = region._execute(
                 len(region._nodes) - 1, False, streaming, batch_size
@@ -156,12 +190,99 @@ def plan_handoff_region(
             return placed^
         algorithm += verdict[1]
     var began = Int(perf_counter_ns())
-    var result = _context_handoff(region)
+    region._device_observation = observation
+    if observation:
+        observation.value()[].begin()
+    var result: DataFrame
+    try:
+        result = _context_handoff(region)
+    except error:
+        if observation:
+            observation.value()[].failed(String(error))
+        plan_record(
+            self,
+            index,
+            "accel",
+            rows,
+            0,
+            algorithm=algorithm,
+            wall_ns=Int(perf_counter_ns()) - began,
+        )
+        raise error^
+    if observation:
+        observation.value()[].complete()
     plan_record(
         self,
         index,
         "accel",
         rows,
+        result.height(),
+        algorithm=algorithm,
+        wall_ns=Int(perf_counter_ns()) - began,
+    )
+    return result^
+
+
+def _handoff_selections(
+    self: QueryContext, index: Int, batch_size: Int
+) raises -> Optional[DataFrame]:
+    var input = self._nodes[index].left
+    if input < 0:
+        return None
+    var schema = self._execute(input, True, True, batch_size)
+    var region = plan_handoff_plan(self, index, List[Int](), schema)
+    if not self._selection_supports(region):
+        return None
+    var observation = plan_observe(self, index)
+    region._device_observation = observation
+    var batches = plan_selection_batches(self, input, batch_size)
+    var began = Int(perf_counter_ns())
+    var result: DataFrame
+    var algorithm = String("handoff selections")
+    var selected = Optional[DataFrame]()
+    if observation:
+        observation.value()[].begin()
+    try:
+        if not batches[].fallback:
+            selected = self._selection_execute(region, batches[])
+        if selected:
+            result = selected.take()
+        else:
+            # A declined layout still uses the producer already run above.
+            var ordinary = plan_handoff_plan(
+                self, index, List[Int](), batches[].materialize()
+            )
+            ordinary._device_observation = observation
+            if _context_supports(ordinary):
+                result = _context_handoff(ordinary)
+                algorithm = "handoff"
+            else:
+                if observation:
+                    observation.value()[].cpu("selection_layout_unsupported")
+                result = ordinary._execute(
+                    len(ordinary._nodes) - 1, False, True, batch_size
+                )
+                algorithm = "selection layout on cpu"
+    except error:
+        if observation:
+            observation.value()[].failed(String(error))
+        plan_record(
+            self,
+            index,
+            "accel",
+            batches[].rows,
+            0,
+            algorithm=algorithm,
+            wall_ns=Int(perf_counter_ns()) - began,
+        )
+        raise error^
+    if observation:
+        observation.value()[].complete()
+    plan_record(
+        self,
+        index,
+        "eager" if algorithm == "selection layout on cpu" else "accel",
+        batches[].rows,
         result.height(),
         algorithm=algorithm,
         wall_ns=Int(perf_counter_ns()) - began,
@@ -228,6 +349,15 @@ def plan_handoff_nodes(self: QueryContext) raises -> List[String]:
         if found[0] < 0:
             continue
         var schema = plan._execute(found[0], True)
-        if _context_supports(plan_handoff_plan(plan, index, found[1], schema)):
+        var accepted = _context_supports(
+            plan_handoff_plan(plan, index, found[1], schema)
+        )
+        if not accepted:
+            var input = plan._nodes[index].left
+            var selected = plan_handoff_plan(
+                plan, index, List[Int](), plan._execute(input, True)
+            )
+            accepted = plan._selection_supports(selected)
+        if accepted:
             labels.append(plan_label(plan, index))
     return labels^
