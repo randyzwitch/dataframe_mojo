@@ -57,9 +57,7 @@ struct SortSink(Movable, Rounds):
             var width = self.input.width()
             # As `DataFrame.take`: columns gather in parallel with rows to
             # split, or several columns of a medium height; else here.
-            if width > 0 and (
-                workers > 1 or (height >= 65536 and width >= 4)
-            ):
+            if width > 0 and (workers > 1 or (height >= 65536 and width >= 4)):
                 self.gather.append(
                     GatherRounds(self.input._columns, order^, workers)
                 )
