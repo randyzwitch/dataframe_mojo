@@ -759,7 +759,7 @@ def test_windows_without_a_shared_key_split_by_keys() raises:
 
 def test_reductions_beside_row_values_run_as_an_aggregate() raises:
     """A projection or filter whose expressions reduce every input row
-    beside a value per row computes the reductions in an aggregate of the
+    inside a value per row computes the reductions in an aggregate of the
     input, joined to every row, so no task evaluates them as parallel
     work of its own. Rows and values equal the eager ones, in order."""
     var frame = source().head(20_000).with_row_index("row")
@@ -771,7 +771,7 @@ def test_reductions_beside_row_values_run_as_an_aggregate() raises:
     var exprs: List[Expr] = [
         (col("v") - col("v").min()).alias("above_min"),
         (col("v").cast(DataType.FLOAT64) / col("v").mean()).alias("share"),
-        col("v").count().alias("n"),
+        (col("row") - col("v").count()).alias("n"),
     ]
     var added = input.with_columns(exprs).collect()
     var highest = input.filter(col("v") == col("v").max()).collect()

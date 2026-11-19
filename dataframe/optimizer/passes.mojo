@@ -356,16 +356,18 @@ def plan_copy_subtree(mut self: QueryContext, root: Int) -> Int:
 
 
 def plan_lower_reductions(mut self: QueryContext) raises:
-    """Compute the reductions of a projection that also has a value per
-    row in an aggregate of its input, joined to every input row, and read
-    them there as columns: `with_columns(x / x.sum())` becomes a
+    """Compute the reductions inside expressions that have a value per row
+    in an aggregate of the projection's input, joined to every input row,
+    and read them there as columns: `with_columns(x / x.sum())` becomes a
     projection reading `col(t)` over the input crossed with
     `agg(x.sum() as t)` over the input. A reduction reads every row of
     the input before any row's value is known, so the projection cannot
     be evaluated a batch of rows at a time; the aggregate takes the input
     as a sink, with its own tasks, and the projection left reads one
     value per row. The input is written twice in the plan, and computed
-    once (`plan_copy_subtree`)."""
+    once (`plan_copy_subtree`). An expression that is one value for every
+    row (`x.sum()` alone) stays: the projection broadcasts it as a
+    constant column."""
     var count = len(self._nodes)
     var changed = False
     for i in range(count):
@@ -386,6 +388,11 @@ def plan_lower_reductions(mut self: QueryContext) raises:
                 break
             ref parts = found.value()
             rows = rows or parts[1]
+            if not parts[1]:
+                # One value for every row: the projection broadcasts it as
+                # a constant column, which a joined column would not be.
+                places.append(List[Int]())
+                continue
             reductions += len(parts[0])
             # Each reduction reads its input row by row.
             for j in parts[0]:
