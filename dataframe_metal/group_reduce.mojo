@@ -144,6 +144,7 @@ def _scan_grouped[
                 grid_dim=(state_words + 255) // 256,
                 block_dim=256,
             )
+            scope.record_launches(1)
             ctx.enqueue_function[
                 grouped_partials[arity, floats, narrow, cases, simple_cases]
             ](
@@ -176,7 +177,7 @@ def _scan_grouped[
                 grid_dim=blocks,
                 block_dim=256,
             )
-            scope.record_launches(2)
+            scope.record_launches(1)
             comptime if floats + narrow < arity:
                 ctx.enqueue_function[
                     resolve_int64_extrema[
@@ -307,7 +308,9 @@ def execute_grouped(
             ),
             timings^,
         )
-    var scope = Scope(service=shared_service())
+    var scope = Scope(
+        service=shared_service(), observation=region._plan._device_observation
+    )
     var started = Int(perf_counter_ns())
     _ = scope.context()
     timings.context_ns = Int(perf_counter_ns()) - started

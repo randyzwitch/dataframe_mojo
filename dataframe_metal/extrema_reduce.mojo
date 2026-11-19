@@ -227,7 +227,9 @@ def execute_extrema(
         raise Error("Metal unsupported [handoff]: 2**31 or more rows")
     var timings = HandoffTimings()
     var started = Int(perf_counter_ns())
-    var scope = Scope(service=shared_service())
+    var scope = Scope(
+        service=shared_service(), observation=region._plan._device_observation
+    )
     _ = scope.context()
     timings.context_ns = Int(perf_counter_ns()) - started
     var values: Tuple[List[Int64], List[Int64], List[Int], List[UInt32]]

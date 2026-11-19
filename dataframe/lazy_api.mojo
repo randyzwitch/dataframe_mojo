@@ -75,7 +75,10 @@ from dataframe.execution_backend import (
 )
 from dataframe.execution_report import (
     ExecutionReport,
+    execution_trace_path,
+    trace_execution,
 )
+from std.time import perf_counter_ns
 from dataframe.execution_settings import (
     ExecutionSettings,
 )
@@ -282,6 +285,7 @@ from dataframe.query_execution.placement import (
 )
 from dataframe.query_execution.reporting import (
     plan_record,
+    plan_observe,
 )
 from dataframe.series import (
     Series,
@@ -1713,6 +1717,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return _execute_accel(
                 self._with_accelerator_settings(optimize, streaming, batch_size)
             )[0].copy()
+        # A device region's CPU retry belongs to its enclosing observation.
+        if (
+            execution_trace_path()
+            and not self._plan._report
+            and not self._plan._device_observation
+        ):
+            return self.profile(
+                engine=engine,
+                optimize=optimize,
+                streaming=streaming,
+                batch_size=batch_size,
+            )[0].copy()
         # A placement that keeps every unit on the CPU hands back the plan
         # it optimized, so it is not optimized twice.
         var optimized = Optional[LazyFrame]()
@@ -1781,6 +1797,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         if engine == "auto":
+            if (
+                execution_trace_path()
+                and not self._plan._report
+                and not self._plan._device_observation
+            ):
+                return self.profile(
+                    accelerator=accelerator,
+                    engine=engine,
+                    optimize=optimize,
+                    streaming=streaming,
+                    batch_size=batch_size,
+                )[0].copy()
             var optimized = Optional[LazyFrame]()
             var placed = _collect_placed(
                 self, accelerator, optimize, streaming, batch_size, optimized
@@ -1836,12 +1864,28 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         if engine == "auto":
-            return self.profile(
-                engine="cpu",
-                optimize=optimize,
-                streaming=streaming,
-                batch_size=batch_size,
+            var plan = self.copy()
+            var report = self._plan._report.value().copy() if self._plan._report else ArcPointer(
+                ExecutionReport()
             )
+            plan._plan._report = report
+            var result: DataFrame
+            try:
+                result = plan.collect(
+                    accelerator=accelerator,
+                    engine=engine,
+                    optimize=optimize,
+                    streaming=streaming,
+                    batch_size=batch_size,
+                )
+            except error:
+                if not self._plan._report:
+                    trace_execution(report[].frame(), "failed")
+                raise error^
+            var measured = report[].frame()
+            if not self._plan._report:
+                trace_execution(measured)
+            return (result^, measured^)
         if engine != "accel":
             return self.profile(
                 engine=engine,
@@ -1874,8 +1918,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         eager node's wall time including its inputs; on a stream's last
         node, the whole stream's). Counts are observed, never estimated,
         and the result is the one `collect` returns.
-        Engine selection follows `collect`; accelerator providers may
-        append device and timing diagnostics.
+        Engine selection follows `collect`. `pipeline` identifies the
+        terminal node of each execution pipeline. `plan_id` is zero for
+        the consumer plan and distinct for each shared producer; node IDs
+        remain unique across those plans. `result_device`,
+        `device_status` and `fallback_reason` describe observed execution;
+        `gpu_launches` and `gpu_completed_launches` count submitted and
+        synchronized kernels. Zero launches never establish GPU execution.
+        Phase columns ending in `wall_ms` measure host elapsed time;
+        `phase_timing_kind` is "host_wall" or "unavailable" (values -1).
+        Device work includes submission, transfer and synchronization,
+        rather than device-only kernel time. `query_id`, `execution_attempt`
+        and `result_used` distinguish discarded attempts from the result.
         """
         if batch_size <= 0:
             raise Error("batch_size must be positive")
@@ -1885,31 +1939,27 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             return _profile_accel(
                 self._with_accelerator_settings(optimize, streaming, batch_size)
             )
-        var plan = self._optimized() if optimize else self.copy()
-        if not optimize:
-            plan_prepare_dataset_projections(plan._plan)
-            plan_unique_as_aggregate(plan._plan)
-        var shared = List[QueryContext]()
-        if optimize:
-            shared = plan._share_subplans(streaming, batch_size)
-            plan._order_joins(streaming, batch_size)
-            plan._push_partial_aggregates()
-        # The report counts the query's own nodes: a shared subplan's
-        # nodes are numbered in its own plan.
-        plan._plan._report = Optional(ArcPointer(ExecutionReport()))
-        if engine == "auto" and _automatic_handoff():
-            plan._plan._handoff = HANDOFF_AUTO
-            for k in range(len(shared)):
-                shared[k]._handoff = HANDOFF_AUTO
-        var result = _run_query(
-            plan._plan,
-            shared,
-            len(plan._plan._nodes) - 1,
-            streaming,
-            batch_size,
+        var plan = self.copy()
+        var report = self._plan._report.value().copy() if self._plan._report else ArcPointer(
+            ExecutionReport()
         )
-        var report = plan._plan._report.value()[].frame()
-        return (result^, report^)
+        plan._plan._report = report
+        var result: DataFrame
+        try:
+            result = plan.collect(
+                engine=engine,
+                optimize=optimize,
+                streaming=streaming,
+                batch_size=batch_size,
+            )
+        except error:
+            if not self._plan._report:
+                trace_execution(report[].frame(), "failed")
+            raise error^
+        var measured = report[].frame()
+        if not self._plan._report:
+            trace_execution(measured)
+        return (result^, measured^)
 
     def explain[
         B: AcceleratorBackend
@@ -2016,7 +2066,11 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         the passes after it run."""
         if batch_size <= 0:
             raise Error("batch_size must be positive")
-        if getenv("DATAFRAME_EXECUTION_REPORT"):
+        if (
+            getenv("DATAFRAME_EXECUTION_REPORT")
+            and not self._plan._report
+            and not self._plan._device_observation
+        ):
             # One `dataframe-operator:` line per executed node on stderr,
             # the columns of `profile`'s report, for benchmark traces.
             var profiled = self.profile(
@@ -2034,6 +2088,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                         parts.append(String(cell.int64()))
                     elif cell.dtype() == DataType.FLOAT64:
                         parts.append(String(round(cell.float64(), 3)))
+                    elif cell.dtype() == DataType.BOOL:
+                        parts.append("true" if cell.bool() else "false")
                     else:
                         parts.append(cell.string())
                 print(
@@ -2052,6 +2108,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             shared = plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
             plan._push_partial_aggregates()
+        # Retain shared producers without colliding with the consumer's IDs.
+        var report_base = plan._plan._report_node_base + len(plan._plan._nodes)
+        for k in range(len(shared)):
+            shared[k]._report = plan._plan._report
+            shared[k]._report_node_base = report_base
+            report_base += len(shared[k]._nodes)
         plan._plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
         plan._plan._prefetched_indexes = Optional(
             ArcPointer(Dict[Int, _ReadyIndex]())
@@ -2478,6 +2540,7 @@ struct _DevicePlacement(Movable):
     var units: List[PlacementPipeline]
     var problem: PlacementProblem
     var placement: Placement
+    var supported: List[List[Bool]]
 
 
 def _solve_devices[
@@ -2497,6 +2560,7 @@ def _solve_devices[
     # again; remembered, each node's schema is derived once. Cutting and
     # estimating change no node.
     var context = plan._plan.copy()
+    context._report = None
     _ = plan_remember_schemas(context)
     var units = plan_pipeline_cuts(context)
     var count = len(devices) + 1
@@ -2556,7 +2620,7 @@ def _solve_devices[
         if matched_cpu >= 0:
             problem.run_ns[p][_PLACE_CPU] = matched_cpu
     var placement = solve_placement(problem)
-    return _DevicePlacement(devices^, units^, problem^, placement^)
+    return _DevicePlacement(devices^, units^, problem^, placement^, supported^)
 
 
 def _device_placement_lines[
@@ -2744,9 +2808,15 @@ def _collect_placed[
     # The calibration is read once per process; asking for devices may
     # query a driver, so it comes second.
     if not _has_pipeline_costs():
+        if query._plan._report:
+            query._plan._report.value()[].default_reason = "missing_calibration"
         return None
     var found = backend.devices()
     if len(found) == 0:
+        if query._plan._report:
+            query._plan._report.value()[].default_reason = (
+                "no_accelerator_available"
+            )
         return None
     var plan = query._optimized() if optimize else query.copy()
     if not optimize:
@@ -2756,9 +2826,31 @@ def _collect_placed[
     var any_device = False
     for d in chosen:
         any_device |= d != _PLACE_CPU
+    for p in range(len(solved.units)):
+        if chosen[p] != _PLACE_CPU:
+            continue
+        var observed = plan_observe(plan._plan, solved.units[p].top)
+        if observed:
+            var supported = False
+            var measured = False
+            var allowed = False
+            for d in range(len(solved.devices)):
+                supported |= solved.supported[p][d]
+                measured |= solved.problem.run_ns[p][d + 1] >= 0
+                allowed |= solved.problem.allowed(p, d + 1)
+            var reason = String("cost_model_prefers_cpu")
+            if solved.problem.run_ns[p][_PLACE_CPU] < 0:
+                reason = "missing_cpu_calibration"
+            elif not supported:
+                reason = "unsupported_operator_or_dtype"
+            elif not measured:
+                reason = "unmeasured_device_cost_or_layout"
+            elif not allowed:
+                reason = "device_memory_budget"
+            observed.value()[].cpu(reason)
     if not any_device:
         # The execution report profiles the plan from the start.
-        if optimize and not getenv("DATAFRAME_EXECUTION_REPORT"):
+        if optimize:
             optimized = plan^
         return None
     ref units = solved.units
@@ -2780,6 +2872,8 @@ def _collect_placed[
             if device == _PLACE_CPU:
                 continue
             var region = plan_unit_region(context, units[p])
+            var observed = plan_observe(context, units[p].top)
+            region._device_observation = observed
             # Its inputs have run: decide again from exact rows, bytes and
             # where they live, with finished units' costs spent and
             # started devices' start-up paid.
@@ -2809,6 +2903,8 @@ def _collect_placed[
                     file=stderr,
                 )
             if device == _PLACE_CPU:
+                if observed:
+                    observed.value()[].cpu("placement_changed_after_input")
                 # The CPU runs it with the rest, on the inputs computed
                 # here, copied to the host now so a failed copy raises.
                 _frame_to_host(region._frames[0])
@@ -2826,9 +2922,40 @@ def _collect_placed[
             for d in range(1, problem.devices()):
                 if d == device:
                     problem.startup_ns[d] = 0
-            var result = backend.run_pipeline(
-                _from_context(region^), solved.devices[device - 1].ordinal
+            if observed:
+                observed.value()[].begin()
+            var began = Int(perf_counter_ns())
+            var result: DataFrame
+            try:
+                result = backend.run_pipeline(
+                    _from_context(region.copy()),
+                    solved.devices[device - 1].ordinal,
+                )
+            except error:
+                if observed:
+                    observed.value()[].failed(String(error))
+                plan_record(
+                    context,
+                    units[p].top,
+                    "accel",
+                    region._frames[0].height(),
+                    0,
+                    algorithm="placed accelerator",
+                    wall_ns=Int(perf_counter_ns()) - began,
+                )
+                raise error^
+            if observed:
+                observed.value()[].complete()
+            plan_record(
+                context,
+                units[p].top,
+                "accel",
+                region._frames[0].height(),
+                result.height(),
+                algorithm="placed accelerator",
+                wall_ns=Int(perf_counter_ns()) - began,
             )
+            context._reported_materializations.append(units[p].top)
             var consumer = chosen[parent[p]] if parent[p] >= 0 else _PLACE_CPU
             if consumer != device:
                 _frame_to_host(result)

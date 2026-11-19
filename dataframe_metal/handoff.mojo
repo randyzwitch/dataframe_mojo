@@ -624,7 +624,9 @@ def execute_timed(
                     extra[1].finish_ns + Int(perf_counter_ns()) - started
                 )
                 return (merged^, timings^)
-            var result = execute_timed(logical.value().region, zero_copy)
+            var lowered = logical.value().region.copy()
+            lowered._plan._device_observation = region._plan._device_observation
+            var result = execute_timed(lowered, zero_copy)
             var started = Int(perf_counter_ns())
             var finished = finish_logical(logical.value(), result[0])
             var timings = result[1].copy()
@@ -641,6 +643,7 @@ def execute_timed(
                 "Metal unsupported [handoff]: row expressions cannot be fused"
             )
         var selected = normalized.take()
+        selected._plan._device_observation = region._plan._device_observation
         var result = _execute_on_device(selected, zero_copy)
         _ = selected^
         return result^
@@ -674,7 +677,9 @@ def _execute_on_device(
     if len(series) >= Int(Int32.MAX):
         raise Error("Metal unsupported [handoff]: 2**31 or more rows")
     var started = Int(perf_counter_ns())
-    var scope = Scope(service=shared_service())
+    var scope = Scope(
+        service=shared_service(), observation=region._plan._device_observation
+    )
     _ = scope.context()
     timings.context_ns = Int(perf_counter_ns()) - started
     var integer = Int128(0)
@@ -726,4 +731,8 @@ def _execute_on_device(
 
 def execute(region: LazyFrame) raises -> DataFrame:
     """Run an accepted region on Metal; its columns."""
-    return execute_timed(region)[0].copy()
+    if region._plan._device_observation:
+        region._plan._device_observation.value()[].provider = "metal"
+    var result = execute_timed(region)
+    result[1].record(region._plan._device_observation)
+    return result[0].copy()

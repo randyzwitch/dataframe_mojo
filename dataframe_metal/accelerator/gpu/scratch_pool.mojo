@@ -5,9 +5,9 @@ and sub-buffer views are deliberately excluded because their aliases can outlive
 an individual operator. The caller returns scratch only after its final use has
 completed, and serializes pool access through the owning service's lock.
 """
-from max.gpu.host import DeviceBuffer, DeviceContext
+from max.gpu.host import DeviceBuffer
 from std.sys import size_of
-from .target import METAL_TARGET
+from .target import METAL_TARGET, MetalContext as DeviceContext
 
 comptime _Int64Buffer = DeviceBuffer[DType.int64] if METAL_TARGET else Int
 comptime _UInt32Buffer = DeviceBuffer[DType.uint32] if METAL_TARGET else Int
@@ -58,8 +58,10 @@ struct ScratchPool(Movable):
                         if (
                             rebind[DeviceBuffer[DType.int64]](
                                 self.int64_buffers[index]
-                            ).context()
-                            != context
+                            )
+                            .context()
+                            .into_unknown_target()
+                            != context.into_unknown_target()
                         ):
                             raise Error(
                                 "Mojo GPU scratch pool context mismatch"
@@ -83,8 +85,10 @@ struct ScratchPool(Movable):
                         if (
                             rebind[DeviceBuffer[DType.uint32]](
                                 self.uint32_buffers[index]
-                            ).context()
-                            != context
+                            )
+                            .context()
+                            .into_unknown_target()
+                            != context.into_unknown_target()
                         ):
                             raise Error(
                                 "Mojo GPU scratch pool context mismatch"
@@ -104,7 +108,12 @@ struct ScratchPool(Movable):
         comptime if METAL_TARGET and (
             dtype == DType.int64 or dtype == DType.uint32
         ):
-            if buffer.context() != context:
+            # Buffer contexts use the SDK's default static target. Pool
+            # ownership compares runtime handles, independent of that target.
+            if (
+                buffer.context().into_unknown_target()
+                != context.into_unknown_target()
+            ):
                 raise Error("Mojo GPU scratch pool context mismatch")
             var length = len(buffer)
             if length > Int.MAX // size_of[Scalar[dtype]]():

@@ -241,6 +241,7 @@ from std.collections import (
     Optional,
 )
 from dataframe.storage.retained import RetainedBuffers
+from dataframe.vector.selection_batches import SelectionBatches
 from std.memory import (
     ArcPointer,
     Pointer,
@@ -248,6 +249,27 @@ from std.memory import (
 from std.time import (
     perf_counter_ns,
 )
+
+
+def plan_selection_batches(
+    self: QueryContext, index: Int, batch_size: Int
+) raises -> ArcPointer[SelectionBatches]:
+    """Run the CPU producer once, retaining its final vectors when possible."""
+    var output = ArcPointer(SelectionBatches(self._execute(index, True)))
+    var plan = self.copy()
+    plan._handoff = HANDOFF_OFF
+    plan._selection_node = index
+    plan._selection_output = output
+    # Use the normal executor so a completed input is consumed from its
+    # memo before considering a stream. The ordinary fallback also remains
+    # inside that one execution, rather than retrying a producer here.
+    var result = plan._execute(index, False, True, batch_size)
+    if output[].ready:
+        return output
+    output[].rows = result.height()
+    output[].fallback = result^
+    output[].ready = True
+    return output
 
 
 def plan_stream_execute(
@@ -2334,6 +2356,14 @@ def _probe_start(
             # A slice's rows are the first `skip + limit` in source order,
             # less the first `skip`.
             limit=_slice_end(skip, limit) if top < 0 else -1,
+            selection_output=self._selection_output if (
+                self._selection_node == index
+                and skip == 0
+                and limit < 0
+                and not grouping
+                and not finish
+                and not late_operations
+            ) else None,
         )
         return _ProbeStart(
             _PipedProbe(
@@ -3017,8 +3047,13 @@ def _probe_finish(
         piped_result = piped_result.slice(skip, limit)
     if late_operations:
         piped_result = late_fetch(input, piped_result, late_operations.value())
+    var output_rows = (
+        piped.run.selection_output.value()[].rows if piped.run.selection_output else piped_result.height()
+    )
     if counting:
-        plan_record(self, cursor, "pipeline", 0, piped_counts[0])
+        plan_record(
+            self, cursor, "pipeline", 0, piped_counts[0], pipeline=index
+        )
         var into_terminal = piped_counts[0]
         for k in range(step_count):
             plan_record(
@@ -3028,6 +3063,7 @@ def _probe_finish(
                 piped_counts[2 * k + 1],
                 piped_counts[2 * k + 2],
                 busy_ns=piped_counts[2 * step_count + 1 + k],
+                pipeline=index,
             )
             into_terminal = piped_counts[2 * k + 2]
         if top > 0:
@@ -3036,7 +3072,8 @@ def _probe_finish(
                 top_node,
                 "pipeline",
                 into_terminal,
-                piped_result.height(),
+                output_rows,
+                pipeline=index,
             )
         var wall = Int(perf_counter_ns()) - began
         if index != cursor and (index not in operation_nodes):
@@ -3045,12 +3082,20 @@ def _probe_finish(
                 index,
                 "pipeline",
                 into_terminal,
-                piped_result.height(),
+                output_rows,
                 wall_ns=wall,
+                pipeline=index,
             )
         else:
             plan_record(
-                self, index, "pipeline", 0, 0, executions=0, wall_ns=wall
+                self,
+                index,
+                "pipeline",
+                0,
+                0,
+                executions=0,
+                wall_ns=wall,
+                pipeline=index,
             )
         var base = 3 * step_count + 1
         for k in range(len(finish_nodes)):
@@ -3060,6 +3105,7 @@ def _probe_finish(
                 "pipeline",
                 piped_counts[base + 2 * k],
                 piped_counts[base + 2 * k + 1],
+                pipeline=index,
             )
     return piped_result^
 

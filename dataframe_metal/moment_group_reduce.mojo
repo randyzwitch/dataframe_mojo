@@ -199,10 +199,13 @@ def execute_grouped_moments_math(
         raise Error("Metal unsupported [handoff]: 2**31 or more rows")
     var timings = HandoffTimings()
     if frame.height() == 0:
+        var started = Int(perf_counter_ns())
         var empty = GroupedPartials(
             List[UInt32](), List[UInt32](), List[UInt32](), List[Int64](), 1
         )
-        return (finish_grouped_moments_math(plan, frame, empty), timings^)
+        var result = finish_grouped_moments_math(plan, frame, empty)
+        timings.finish_ns = Int(perf_counter_ns()) - started
+        return (result^, timings^)
     comptime if not METAL_TARGET:
         raise Error("Metal grouped moments require an Apple compilation target")
     else:
@@ -213,7 +216,10 @@ def execute_grouped_moments_math(
                 frame, len(plan.selected.bundle.fields)
             )
             input_ns = Int(perf_counter_ns()) - input_started
-        var scope = Scope(service=shared_service())
+        var scope = Scope(
+            service=shared_service(),
+            observation=region._plan._device_observation,
+        )
         var started = Int(perf_counter_ns())
         _ = scope.context()
         timings.context_ns = Int(perf_counter_ns()) - started
