@@ -612,6 +612,9 @@ struct JoinBuildLayout(Copyable, Movable):
     var probe_estimate: Int
     # Whether the build side filters its rows (the bloom filter rule).
     var build_filtered: Bool
+    # Estimated rows of a scan the join's keys also filter beyond its
+    # probe side (through an aggregate on them); -1 for none.
+    var filter_rows: Int
     # The build side's columns in order: names, types, and the row field
     # holding each (-1 for a column the rows do not keep).
     var build_names: List[String]
@@ -636,6 +639,7 @@ struct JoinBuildLayout(Copyable, Movable):
         build_types: List[DataType],
         build_fields: List[Int],
         build_filtered: Bool = False,
+        filter_rows: Int = -1,
     ) raises:
         """`keys` and `payload` are columns (of any length) of the key and
         payload types, which the row fields are typed from."""
@@ -684,6 +688,7 @@ struct JoinBuildLayout(Copyable, Movable):
         self.keys_only = keys_only
         self.probe_estimate = probe_estimate
         self.build_filtered = build_filtered
+        self.filter_rows = filter_rows
         self.build_names = build_names.copy()
         self.build_types = build_types.copy()
         self.build_fields = build_fields.copy()
@@ -945,6 +950,7 @@ def join_build_layout(
     from_chunks: Bool,
     numbered: Bool = False,
     build_filtered: Bool = False,
+    filter_rows: Int = -1,
 ) raises -> Optional[JoinBuildLayout]:
     """The rows a hash join of type `how` on the build keys `keys` keeps
     of a build side with `columns` (columns of any length, typing the
@@ -953,7 +959,8 @@ def join_build_layout(
     them (a key only where the join does not coalesce it), and found
     flags when the join emits build rows after its probe. `probe_estimate`
     is the probe side's estimated rows, `build_filtered` whether the build
-    side filters its rows. None when the build cannot be a
+    side filters its rows, `filter_rows` the estimated rows of a scan its
+    keys also filter beyond the probe side (-1 for none). None when the build cannot be a
     table: a nested key, or, for rows sunk from pipeline chunks
     (`from_chunks`), a categorical key (the probe unifies dictionaries
     against the build frame) or a nested column (a chunk's nested vector
@@ -1037,6 +1044,7 @@ def join_build_layout(
         build_types,
         build_fields,
         build_filtered,
+        filter_rows,
     )
 
 
@@ -1689,9 +1697,15 @@ struct JoinHashTable(Copyable, Movable):
         var collection = Int(Pointer(to=self.data[].collection))
         # The probe's bloom filter, when the join's rule holds: a single
         # integer key, whose row hash is the filter's hash of the key, so
-        # the finalize tasks fill it from the hashes the rows store.
+        # the finalize tasks fill it from the hashes the rows store. A
+        # filtered build whose keys also filter a larger scan (through an
+        # aggregate on them) weighs its keys against that scan's rows,
+        # where the filter is also read.
         var bloom_words = 0
         var bloom_blocks = 0
+        var probe_rows = self.probe_estimate
+        if self.build_filtered:
+            probe_rows = max(probe_rows, shape.filter_rows)
         if (
             fields == 1
             and (
@@ -1699,7 +1713,7 @@ struct JoinHashTable(Copyable, Movable):
                 or shape.key_types[0].physical() == DataType.INT32
             )
             and can_use_bloom_filter(
-                1, self.inserted, self.probe_estimate, self.build_filtered
+                1, self.inserted, probe_rows, self.build_filtered
             )
         ):
             bloom_blocks = bloom_blocks_for(self.inserted)

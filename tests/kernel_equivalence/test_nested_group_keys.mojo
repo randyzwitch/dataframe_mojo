@@ -2,7 +2,8 @@
 in the aggregate table, against a model of which values are equal: lists
 equal elementwise with nulls equal, an empty list apart from a null one, a
 null struct apart from a struct of nulls, -0.0 equal to 0.0 and every NaN
-one value. Each key column repeats a few patterns whose equal classes are
+one value, and two categorical codes for the same label one value. Each
+key column repeats a few patterns whose equal classes are
 written out by hand. The eager group-by runs on eight workers (tables that
 clear) and on one, the lazy one through the pipeline's table sink, with
 and without maintain_order, alone and next to a flat key."""
@@ -21,6 +22,11 @@ from dataframe import (
     StructColumn,
     col,
     lit,
+)
+from dataframe.dtype import CategoricalDictionary
+from dataframe.kernels.nested_keys import (
+    decode_nested_keys,
+    encode_nested_keys,
 )
 from dataframe.storage.column import _pack_bits
 from tests.support.group_strategy_reference import (
@@ -216,6 +222,70 @@ def deep_lists() raises -> Tuple[Series, List[Int]]:
     return (key^, classes^)
 
 
+def red_blue_dictionary() -> CategoricalDictionary:
+    """Codes 0 and 2 both mean "red"."""
+    var labels = CategoricalDictionary()
+    labels.append("red")
+    labels.append("blue")
+    labels.append("red")
+    labels.append("green")
+    return labels^
+
+
+def categorical_lists() raises -> Tuple[Series, List[Int]]:
+    # Codes: [0], [2], [0, 1], [2, 1], [null], [2, null], [0, null], null,
+    # [], [3]; as labels [red] twice, [red, blue] twice, [red, null] twice.
+    var child = Series(
+        "item",
+        Column[UInt32](
+            [0, 2, 0, 1, 2, 1, 0, 2, 0, 0, 0, 3],
+            [
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                False,
+                True,
+                False,
+                True,
+                False,
+                True,
+            ],
+        ),
+    ).with_dtype(DataType.categorical(red_blue_dictionary()))
+    var lengths: List[Int] = [1, 1, 2, 2, 1, 2, 2, 0, 0, 1]
+    var valid: List[Bool] = [
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        True,
+        True,
+    ]
+    var classes: List[Int] = [0, 0, 1, 1, 2, 3, 3, 4, 5, 6]
+    return (lists_of(child, lengths, valid), classes^)
+
+
+def structs_with_categoricals() raises -> Tuple[Series, List[Int]]:
+    # {red(0)}, {red(2)}, {blue}, {null}, null
+    var c = Series(
+        "c",
+        Column[UInt32]([0, 2, 1, 0, 0], [True, True, True, False, False]),
+    ).with_dtype(DataType.categorical(red_blue_dictionary()))
+    var key = Series(
+        "key",
+        StructColumn([c^], _pack_bits([True, True, True, True, False])),
+    )
+    var classes: List[Int] = [0, 0, 1, 2, 3]
+    return (key^, classes^)
+
+
 struct Case(Movable):
     var name: String
     var patterns: Series
@@ -236,6 +306,8 @@ def cases() raises -> List[Case]:
     out.append(Case("float lists", float_lists()))
     out.append(Case("structs with lists", structs_with_lists()))
     out.append(Case("lists of structs of lists", deep_lists()))
+    out.append(Case("categorical lists", categorical_lists()))
+    out.append(Case("structs with categoricals", structs_with_categoricals()))
     return out^
 
 
@@ -437,3 +509,112 @@ def test_distinct_rows_and_counts_of_nested_values() raises:
         assert_equal(empty.height(), 0)
         assert_true(empty.column("key").dtype() == kase.patterns.dtype())
     _ = workers^
+
+
+def assert_red_child(key: Series, context: String) raises:
+    """A list key's child is still categorical over the original
+    dictionary, and its first value reads as "red"."""
+    var child = key.list_column().child()
+    assert_true(child.dtype().is_categorical(), context + ": not categorical")
+    assert_true(child.dtype().has_dictionary(), context + ": no dictionary")
+    assert_true(
+        child.dtype().dictionary()[].same_values(red_blue_dictionary()),
+        context + ": another dictionary",
+    )
+    assert_true(child.get(0) == AnyValue("red"), context + ": not red")
+
+
+def test_categorical_codes_with_one_label_are_one_nested_value() raises:
+    var labels = CategoricalDictionary()
+    labels.append("red")
+    labels.append("red")
+    var child = Series("item", Column[UInt32]([0, 1])).with_dtype(
+        DataType.categorical(labels^)
+    )
+    var key = Series(
+        "key", ListColumn([Int64(0), 1, 2], child.copy(), List[UInt8]())
+    )
+    var frame = DataFrame([key^, Series("v", Column[Int64]([1, 2]))])
+    assert_equal(
+        DataFrame([child^]).select(col("item").n_unique()).item().int64(), 1
+    )
+    assert_equal(frame.select(col("key").n_unique()).item().int64(), 1)
+    assert_equal(
+        frame.lazy().select(col("key").n_unique()).collect().item().int64(),
+        1,
+    )
+    assert_equal(frame.unique(["key"]).height(), 1)
+    assert_equal(frame.lazy().unique(["key"]).collect().height(), 1)
+    one_red_group(frame.group_by("key").len(), "len")
+    one_red_group(
+        frame.lazy().group_by("key").agg([col("v").count()]).collect(), "v"
+    )
+
+
+def one_red_group(result: DataFrame, count: String) raises:
+    """One group of two rows, its key a list whose item reads "red"."""
+    assert_equal(result.height(), 1)
+    var item = result.column("key").list_column().child()
+    assert_true(item.dtype().has_dictionary(), "group key dictionary")
+    assert_true(item.get(0) == AnyValue("red"))
+    assert_equal(result.item(0, count).int64(), 2)
+
+
+def test_categorical_nested_keys_round_trip() raises:
+    var key = categorical_lists()[0].copy()
+    var decoded = decode_nested_keys(encode_nested_keys(key), key.slice(0, 0))
+    assert_equal(len(decoded), len(key))
+    assert_true(decoded.dtype() == key.dtype())
+    assert_red_child(decoded, "round trip")
+    for row in range(len(key)):
+        assert_true(decoded.get(row) == key.get(row), "row " + String(row))
+    # Equal labels encode to equal bytes, so the bytes of rows [0] and
+    # [2] (both [red]) match, as do [red, null] under either code.
+    var bytes = encode_nested_keys(key)
+    assert_true(bytes.get(0) == bytes.get(1))
+    assert_true(bytes.get(2) == bytes.get(3))
+    assert_true(bytes.get(5) == bytes.get(6))
+    assert_true(not (bytes.get(0) == bytes.get(9)))
+    # Grouped keys come back with the dictionary too, eager and lazy.
+    var source = frame(Case("categorical lists", categorical_lists()), 100)
+    assert_red_child(
+        source.group_by("key", maintain_order=True)
+        .agg([col("v").sum()])
+        .column("key"),
+        "eager group key",
+    )
+    assert_red_child(
+        source.lazy()
+        .group_by("key", maintain_order=True)
+        .agg([col("v").sum()])
+        .collect()
+        .column("key"),
+        "lazy group key",
+    )
+
+
+def test_categorical_values_are_equal_by_label() raises:
+    """Two codes for one label are equal values, flat or inside a list or
+    struct; different labels are not."""
+    var labels = red_blue_dictionary()
+    var dtype = DataType.categorical(labels^)
+    var first = Series("c", Column[UInt32]([0, 1, 0], [True, True, False]))
+    var second = Series("c", Column[UInt32]([2, 1, 3], [True, True, False]))
+    var a = first.with_dtype(dtype)
+    var b = second.with_dtype(dtype)
+    assert_true(a.equals(b), "codes 0 and 2 both read red")
+    assert_true(a.get(0) == b.get(0))
+    var c = Series("c", Column[UInt32]([3, 1, 0], [True, True, False]))
+    assert_true(not a.equals(c.with_dtype(dtype)), "green is not red")
+    var lists_a = Series(
+        "key", ListColumn([Int64(0), 2, 3], a.copy(), List[UInt8]())
+    )
+    var lists_b = Series(
+        "key", ListColumn([Int64(0), 2, 3], b.copy(), List[UInt8]())
+    )
+    assert_true(lists_a.equals(lists_b))
+    assert_true(lists_a.get(0) == lists_b.get(0))
+    var structs_a = Series("key", StructColumn([a.copy()], List[UInt8]()))
+    var structs_b = Series("key", StructColumn([b.copy()], List[UInt8]()))
+    assert_true(structs_a.equals(structs_b))
+    assert_true(structs_a.get(0) == structs_b.get(0))

@@ -968,7 +968,8 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     def equals(
         self, other: Self, *, null_equal: Bool = True, check_names: Bool = False
     ) -> Bool:
-        """Structural equality: NaN equals NaN and -0.0 equals 0.0.
+        """Structural equality: NaN equals NaN, -0.0 equals 0.0, and a
+        categorical value is its label (two codes for one label are equal).
 
         With null_equal=False, any null in either input makes them unequal.
         """
@@ -1004,6 +1005,34 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                 if bo == len(b[bi]):
                     bi += 1
                     bo = 0
+            return True
+        if (
+            self._dtype.is_categorical()
+            and self._dtype.has_dictionary()
+            and other._dtype.has_dictionary()
+        ):
+            # A categorical value is its label: two codes that index the
+            # same label are equal, as they are when grouped.
+            ref a = self._data[Column[UInt32]]
+            ref b = other._data[Column[UInt32]]
+            var left_labels = self._dtype.dictionary()
+            var right_labels = other._dtype.dictionary()
+            var shared = left_labels.ptr() == right_labels.ptr()
+            ref left = left_labels[]
+            ref right = right_labels[]
+            for i in range(len(a)):
+                if a._valid(i) != b._valid(i):
+                    return False
+                if not a._valid(i):
+                    continue
+                var x = Int(a._get(i))
+                var y = Int(b._get(i))
+                if x == y and shared:
+                    continue
+                if x >= len(left) or y >= len(right):
+                    return False
+                if left.get(x) != right.get(y):
+                    return False
             return True
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
@@ -2379,6 +2408,95 @@ struct _MergeScalarsJob[D: DType](Job):
             for r in range(a, b):
                 if all_valid or part._valid(r - first):
                     bytes.unsafe_offset(r >> 3)[] |= UInt8(1) << UInt8(r & 7)
+
+
+struct ChunkMerge(Movable):
+    """A chunked fixed-width numeric column made one chunk, by row ranges
+    that may each be a task of its own: `of` sets the output up, and
+    `copy_rows` fills a range of its rows from the chunks that hold them
+    (values, and validity bits when some chunk has a null). Ranges start
+    at multiples of 64 rows, so no two write one bitmap byte."""
+
+    var merged: Series
+    var parts: List[Series]
+    var starts: List[Int]
+    var values: Int
+    var bits: Int
+
+    def __init__(
+        out self,
+        var merged: Series,
+        var parts: List[Series],
+        var starts: List[Int],
+        values: Int,
+        bits: Int,
+    ):
+        self.merged = merged^
+        self.parts = parts^
+        self.starts = starts^
+        self.values = values
+        self.bits = bits
+
+    @staticmethod
+    def of(column: Series) raises -> Optional[ChunkMerge]:
+        """The merge of `column`'s chunks with its rows not yet copied;
+        None for an unchunked column, a constant chunk, or a type other
+        than fixed-width numbers (`Series.rechunk` takes those)."""
+        if not column.is_chunked():
+            return None
+        var parts = column.chunks()
+        for part in parts:
+            if part.is_constant():
+                return None
+        comptime for d in range(len(NUMERIC_DTYPES) + 1):
+            comptime D = NUMERIC_DTYPES[d] if d < len(
+                NUMERIC_DTYPES
+            ) else DType.int128
+            if parts[0]._data.isa[Column[Scalar[D]]]():
+                var starts = List[Int](capacity=len(parts))
+                var total = 0
+                var nulls = False
+                for part in parts:
+                    if not part._data.isa[Column[Scalar[D]]]():
+                        return None
+                    ref chunk = part._data[Column[Scalar[D]]]
+                    starts.append(total)
+                    total += len(chunk)
+                    nulls = nulls or chunk.null_count() > 0
+                var values = List[Scalar[D]](unsafe_uninit_length=total)
+                var bits = List[UInt8]()
+                if nulls:
+                    bits = List[UInt8](length=(total + 7) // 8, fill=0)
+                var merged = Series(
+                    column._name, Column[Scalar[D]](values=values^, bits=bits^)
+                )
+                merged._dtype = column._dtype
+                merged._field_metadata = column._field_metadata
+                # Rows are written through these addresses, into the
+                # merged column's own buffers.
+                ref out = merged._data[Column[Scalar[D]]]
+                var value_address = Int(out._ptr())
+                var bit_address = Int(out.unsafe_validity()) if nulls else 0
+                return ChunkMerge(
+                    merged^, parts.copy(), starts^, value_address, bit_address
+                )
+        return None
+
+    def copy_rows(self, lo: Int, hi: Int) raises:
+        """Output rows [lo, hi), `lo` a multiple of 64."""
+        comptime for d in range(len(NUMERIC_DTYPES) + 1):
+            comptime D = NUMERIC_DTYPES[d] if d < len(
+                NUMERIC_DTYPES
+            ) else DType.int128
+            if self.parts[0]._data.isa[Column[Scalar[D]]]():
+                var columns = List[Column[Scalar[D]]](capacity=len(self.parts))
+                for part in self.parts:
+                    columns.append(part._data[Column[Scalar[D]]].copy())
+                var job = _MergeScalarsJob[D](
+                    columns, self.starts, self.values, self.bits, lo, hi
+                )
+                job.run()
+                return
 
 
 def _merge_scalars[D: DType](parts: List[Series]) raises -> Column[Scalar[D]]:

@@ -480,14 +480,66 @@ def gather(per_value: Series, codes: Series) raises -> Series:
     return gathered.pop()
 
 
-def _scan_prefix(
-    values: CategoricalDictionary, token: ArcPointer[Int]
-) -> CategoricalDictionary:
-    """A scan's values so far, marked as the scan's and still growing."""
-    var prefix = values.copy_values()
-    prefix.scan = token
-    prefix.grows = True
-    return prefix^
+struct _AppendOnlyLabels(Movable, Sized):
+    """Labels in code order that are only ever appended to: their bytes
+    and offsets live in lists that grow only within their capacity, so no
+    value already written moves or changes. A dictionary of the first n
+    labels (`prefix`) is a view of these lists at length n: taking one
+    copies nothing, and later appends write only past the end of every
+    view taken before, so a view stays valid while values are added.
+
+    A full list moves to one twice as large. The views taken before keep
+    the old list alive, but each list left behind was full and at most
+    half the size of the next one left behind, so together they hold
+    fewer than twice the entries of the last one, which the newest list
+    exceeds: all the lists hold under three times the entries the labels
+    need, however many views exist."""
+
+    var bytes: ArcPointer[List[UInt8]]
+    var offsets: ArcPointer[List[Int64]]
+
+    def __init__(out self):
+        self.bytes = ArcPointer(List[UInt8]())
+        var offsets = List[Int64](capacity=16)
+        offsets.append(0)
+        self.offsets = ArcPointer(offsets^)
+
+    def __len__(self) -> Int:
+        return len(self.offsets[]) - 1
+
+    def append(mut self, value: String):
+        var data = value.as_bytes()
+        _make_room(self.bytes, len(data))
+        _make_room(self.offsets, 1)
+        self.bytes[].extend(data)
+        self.offsets[].append(Int64(len(self.bytes[])))
+
+    def prefix(self, token: ArcPointer[Int]) -> CategoricalDictionary:
+        """The labels so far, sharing these lists, marked as the scan's
+        and still growing."""
+        var prefix = CategoricalDictionary(
+            _Buffer(self.bytes), _Buffer(self.offsets)
+        )
+        prefix.scan = token
+        prefix.grows = True
+        return prefix^
+
+
+def _make_room[
+    T: Copyable & Deinitable
+](mut values: ArcPointer[List[T]], extra: Int):
+    """Room for `extra` more values without moving the ones there: when
+    the list is full, its values move to a new list at least twice as
+    large, and the old one stays as it is for anything still viewing it.
+    """
+    var length = len(values[])
+    if length + extra <= values[].capacity():
+        return
+    var grown = List[T](
+        capacity=max(length + extra, 2 * values[].capacity(), 64)
+    )
+    grown.extend(Span(values[]))
+    values = ArcPointer(grown^)
 
 
 struct ScanDictionary(Movable):
@@ -500,15 +552,17 @@ struct ScanDictionary(Movable):
     whole scan.
 
     Batches read on many threads add values under the scan's lock
-    (`ScanSource`). A batch's column is typed by a copy of the values seen
-    so far (`snapshots`), made only when values were added, which no later
-    addition changes; the scan's schema is typed by `schema`. They share
+    (`ScanSource`). A batch's column is typed by a view of the values seen
+    so far (`snapshots`), made only when values were added: the values
+    are appended to and never moved (`_AppendOnlyLabels`), so a view is
+    just a length into them, no later addition changes it, and taking one
+    copies nothing. The scan's schema is typed by `schema`. They share
     one `token`, so their types compare equal: codes from any batch may be
     held together. Once no batch is read any longer, `settle` gives each of
     them every value, so a column typed by any of them reads its codes.
     """
 
-    var values: CategoricalDictionary
+    var values: _AppendOnlyLabels
     var lookup: Dict[String, UInt32]
     var token: ArcPointer[Int]
     var schema: ArcPointer[CategoricalDictionary]
@@ -519,10 +573,10 @@ struct ScanDictionary(Movable):
     var last_codes: List[UInt32]
 
     def __init__(out self):
-        self.values = CategoricalDictionary()
+        self.values = _AppendOnlyLabels()
         self.lookup = Dict[String, UInt32]()
         self.token = ArcPointer(0)
-        self.schema = ArcPointer(_scan_prefix(self.values, self.token))
+        self.schema = ArcPointer(self.values.prefix(self.token))
         self.snapshots = List[ArcPointer[CategoricalDictionary]]()
         self.last = None
         self.last_codes = List[UInt32]()
@@ -554,9 +608,7 @@ struct ScanDictionary(Movable):
             self.last_codes = codes^
         var count = len(self.snapshots)
         if count == 0 or len(self.snapshots[count - 1][]) != len(self.values):
-            self.snapshots.append(
-                ArcPointer(_scan_prefix(self.values, self.token))
-            )
+            self.snapshots.append(ArcPointer(self.values.prefix(self.token)))
         return (
             self.last_codes.copy(),
             DataType.categorical(self.snapshots[len(self.snapshots) - 1]),
@@ -564,9 +616,9 @@ struct ScanDictionary(Movable):
 
     def settle(mut self):
         """Every value into the schema's dictionary and each batch's, once
-        no batch is read or running any longer. They share one copy."""
-        var final = self.values.copy_values()
-        final.scan = self.token
+        no batch is read or running any longer. They share one view of all
+        the values, so the lists that earlier views kept alive go."""
+        var final = self.values.prefix(self.token)
         self.schema[] = final.copy_values()
         self.schema[].scan = self.token
         for k in range(len(self.snapshots)):
