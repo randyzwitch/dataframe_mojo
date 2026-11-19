@@ -44,6 +44,7 @@ from dataframe.expr import (
     FIRST,
     LAST,
     Expr,
+    EXPR_GET,
     HORIZONTAL_ARGS,
     IMPLODE,
     LIT_BOOL,
@@ -60,6 +61,7 @@ from dataframe.expr import (
     OVER_MAPPING_MASK,
     SELECTOR,
     UNTYPED,
+    VALUE_COUNTS,
     WHEN,
     _SCALAR_SOURCE,
     _set_node_children,
@@ -677,3 +679,52 @@ def outer_windows(expr: Expr) -> Optional[List[Int]]:
             outside[child] = True
     found.reverse()
     return found^
+
+
+def outer_reductions(expr: Expr) -> Optional[Tuple[List[Int], Bool]]:
+    """The reductions of `expr` over all of its input's rows: the reduction
+    nodes reached from its root through no over() and no other reduction,
+    in node order, and whether the expression has a value per row outside
+    them (it reads a column or a window there). None when a node reached
+    that way is a sequence, a window function without an over(), or a
+    selector, or the nodes are not a tree in evaluation order."""
+    var found = List[Int]()
+    var rows = False
+    var n = len(expr._nodes)
+    if n == 0:
+        return Tuple(found^, rows)
+    var outside = List[Bool](length=n, fill=False)
+    outside[n - 1] = True
+    for i in range(n - 1, -1, -1):
+        ref node = expr._nodes[i]
+        if node.op == SELECTOR:
+            return None
+        if not outside[i]:
+            continue
+        if node.op == OVER:
+            rows = True
+            continue
+        if node.op == COL:
+            rows = True
+        if is_reduction(node.op):
+            if (
+                node.op == VALUE_COUNTS
+                or node.op == EXPR_GET
+                or node.op == IMPLODE
+            ):
+                # Not one value per input: a list, or a value per row.
+                return None
+            found.append(i)
+            continue
+        if (
+            is_sequence(node.op)
+            or is_window(node.op)
+            or node.op == _SCALAR_SOURCE
+        ):
+            return None
+        for child in node_children(node):
+            if child >= i:
+                return None
+            outside[child] = True
+    found.reverse()
+    return Tuple(found^, rows)
