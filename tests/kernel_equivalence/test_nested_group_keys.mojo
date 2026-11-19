@@ -351,13 +351,6 @@ def expressions() -> List[Expr]:
     ]
 
 
-def same_key(a: AnyValue, b: AnyValue) -> Bool:
-    """Equal values, or values that read the same: a list or struct that
-    holds categoricals compares its codes, and a group's key may hold
-    another code for the same label."""
-    return a == b or String(a) == String(b)
-
-
 def check(kase: Case, result: DataFrame, rows: Int, flat: Bool) raises:
     """Every group against the model: one group per class (and flat key),
     its sum, count and distinct `nk` classes, and its key equal to the
@@ -398,7 +391,7 @@ def check(kase: Case, result: DataFrame, rows: Int, flat: Bool) raises:
                 distinct += 1
         assert_equal(result.item(i, "u").int64(), Int64(distinct), kase.name)
         assert_true(
-            same_key(keys.get(i), kase.patterns.get(p)),
+            keys.get(i) == kase.patterns.get(p),
             kase.name + ": a group's key differs from its rows'",
         )
         if flat:
@@ -574,9 +567,7 @@ def test_categorical_nested_keys_round_trip() raises:
     assert_true(decoded.dtype() == key.dtype())
     assert_red_child(decoded, "round trip")
     for row in range(len(key)):
-        assert_true(
-            same_key(decoded.get(row), key.get(row)), "row " + String(row)
-        )
+        assert_true(decoded.get(row) == key.get(row), "row " + String(row))
     # Equal labels encode to equal bytes, so the bytes of rows [0] and
     # [2] (both [red]) match, as do [red, null] under either code.
     var bytes = encode_nested_keys(key)
@@ -600,3 +591,30 @@ def test_categorical_nested_keys_round_trip() raises:
         .column("key"),
         "lazy group key",
     )
+
+
+def test_categorical_values_are_equal_by_label() raises:
+    """Two codes for one label are equal values, flat or inside a list or
+    struct; different labels are not."""
+    var labels = red_blue_dictionary()
+    var dtype = DataType.categorical(labels^)
+    var first = Series("c", Column[UInt32]([0, 1, 0], [True, True, False]))
+    var second = Series("c", Column[UInt32]([2, 1, 3], [True, True, False]))
+    var a = first.with_dtype(dtype)
+    var b = second.with_dtype(dtype)
+    assert_true(a.equals(b), "codes 0 and 2 both read red")
+    assert_true(a.get(0) == b.get(0))
+    var c = Series("c", Column[UInt32]([3, 1, 0], [True, True, False]))
+    assert_true(not a.equals(c.with_dtype(dtype)), "green is not red")
+    var lists_a = Series(
+        "key", ListColumn([Int64(0), 2, 3], a.copy(), List[UInt8]())
+    )
+    var lists_b = Series(
+        "key", ListColumn([Int64(0), 2, 3], b.copy(), List[UInt8]())
+    )
+    assert_true(lists_a.equals(lists_b))
+    assert_true(lists_a.get(0) == lists_b.get(0))
+    var structs_a = Series("key", StructColumn([a.copy()], List[UInt8]()))
+    var structs_b = Series("key", StructColumn([b.copy()], List[UInt8]()))
+    assert_true(structs_a.equals(structs_b))
+    assert_true(structs_a.get(0) == structs_b.get(0))

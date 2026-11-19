@@ -151,6 +151,37 @@ def _queries(scan: LazyFrame, frame: LazyFrame) raises:
         (col("s") == "s3") | (col("v") > 90)
     ).with_columns([(col("v") * 2).alias("w")])
     _check(filtered, expected.collect(streaming=False), no_sort)
+    # Uniques keep each kept row's categorical values in the column's own
+    # type: the values are known only once the batches are read.
+    for keep in ["first", "last"]:
+        _check(
+            scan.unique(["t"], keep=keep, maintain_order=True),
+            frame.unique(["t"], keep=keep, maintain_order=True).collect(
+                streaming=False
+            ),
+            no_sort,
+        )
+    _check(
+        scan.unique(["k"], keep="first", maintain_order=True),
+        frame.unique(["k"], keep="first", maintain_order=True).collect(
+            streaming=False
+        ),
+        no_sort,
+    )
+    _check(
+        scan.unique(["s", "t"], keep="any"),
+        frame.unique(["s", "t"], keep="any").collect(streaming=False),
+        ["s", "t"],
+    )
+    var whole = scan.unique(["k"], keep="first", maintain_order=True).collect()
+    assert_true(whole.column("s").dtype().is_categorical())
+    _same(
+        whole,
+        frame.unique(["k"], keep="first", maintain_order=True).collect(
+            streaming=False
+        ),
+        no_sort,
+    )
     # Groupings on a categorical key and a pair of them; the key stays
     # categorical.
     var aggregates: List[Expr] = [

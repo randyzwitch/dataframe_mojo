@@ -25,6 +25,7 @@ from dataframe.expr import (
 from dataframe.frame import (
     DataFrame,
 )
+from dataframe.dtype import DataType
 from dataframe.series import (
     Series,
 )
@@ -91,6 +92,7 @@ from dataframe.planning.model import (
     SCAN_FRAME,
     SCAN_IPC,
     SCAN_NDJSON,
+    SCAN_PARQUET,
     SELECT,
     SLICE,
     SORT,
@@ -599,6 +601,27 @@ def plan_fold_casts(mut self: QueryContext) raises:
                 self._nodes[i].exprs[k] = folded.take()
 
 
+def _reads_files(self: QueryContext, index: Int) -> Bool:
+    """Whether plan node `index` reads a file source anywhere below it."""
+    var pending: List[Int] = [index]
+    while len(pending) > 0:
+        var at = pending.pop()
+        if at < 0:
+            continue
+        ref node = self._nodes[at]
+        if (
+            node.kind == SCAN_CSV
+            or node.kind == SCAN_PARQUET
+            or node.kind == SCAN_IPC
+            or node.kind == SCAN_NDJSON
+            or node.has_dataset()
+        ):
+            return True
+        pending.append(node.left)
+        pending.append(node.right)
+    return False
+
+
 def plan_unique_as_aggregate(mut self: QueryContext) raises:
     """Every unique as a grouping on its subset (every column when none is
     named), so that its rows run through the parallel aggregate table
@@ -655,13 +678,19 @@ def plan_unique_as_aggregate(mut self: QueryContext) raises:
             input = len(self._nodes) - 1
         var aggregates = List[Expr]()
         var shown = List[Expr](capacity=len(columns))
+        var reads_files = _reads_files(self, node.left)
         for c in columns:
             var value = col(c).last() if last else col(c).first()
             var dtype = schema.column(c).dtype()
             if dtype.is_categorical():
                 # Expressions read a categorical as its labels: the kept
-                # label goes back into the column's own dictionary.
-                value = value.cast(dtype)
+                # label goes back into the column's own dictionary. A file
+                # source's dictionary is known only once its batches are
+                # read, not when the plan is made, so its kept labels are
+                # encoded into a dictionary of their own.
+                value = value.cast(
+                    DataType.CATEGORICAL if reads_files else dtype
+                )
             if c not in keys:
                 aggregates.append(value.alias(c))
                 shown.append(col(c))
