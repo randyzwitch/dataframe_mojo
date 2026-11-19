@@ -46,7 +46,9 @@ $mojo_pin
 EOF
 
 pixi add --manifest-path pixi.toml --git "$1" --rev "$2" dataframe_mojo
-output="$(pixi run --manifest-path pixi.toml --locked --clean-env --executable bash -e -c '
+output="$(pixi run --manifest-path pixi.toml --locked --clean-env --executable /bin/bash -e -c '
+    # Mojo can invoke the system linker and SDK tools during compilation.
+    export PATH="$PATH:/usr/bin:/bin"
     packages="$CONDA_PREFIX/lib/mojo"
     for module in dataframe dataframe_provider; do
         if [[ ! -s "$packages/$module.mojoc" ]]; then
