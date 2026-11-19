@@ -115,6 +115,10 @@ jobs:
             shard: 2
           - area: public
             shard: 3
+          - area: public
+            shard: 4
+          - area: public
+            shard: 5
           - area: kernels
             shard: 1
           - area: kernels
@@ -146,7 +150,7 @@ jobs:
         env:
           AREA: ${{ matrix.area }}
           SHARD: ${{ matrix.shard }}
-          SHARDS: ${{ matrix.area == 'kernels' && 8 || matrix.area == 'public' && 4 || 1 }}
+          SHARDS: ${{ matrix.area == 'kernels' && 8 || matrix.area == 'public' && 6 || 1 }}
           COMPILER: ${{ (matrix.area == 'public' || matrix.area == 'kernels') && 'scripts/ci_mojo_public.sh' || 'mojo' }}
         run: >-
           python3 scripts/ci_time.py --label "contract-$AREA" --budget-seconds 1500 --
