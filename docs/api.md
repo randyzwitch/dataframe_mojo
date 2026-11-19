@@ -1520,9 +1520,9 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Join with another lazy plan on keys named alike on both sides; see DataFrame.join.
 - `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
 - `def sink_parquet(self, path: String, *, compression: String = "zstd", row_group_size: Int = Int(1000000), batch_size: Int = Int(65536), optimize: Bool = True)`
-  Execute batches into an atomic Parquet output without collecting them.
+  Execute the query into an atomic Parquet output, rows in the query's order.
 - `def sink_csv(self, path: String, *, has_header: Bool = True, separator: String = ",", quote_style: String = "necessary", null_value: String = "", line_terminator: String = "\n", buffer_size: Int = Int(65536), batch_size: Int = Int(65536), optimize: Bool = True)`
-  Execute ordered batches into CSV, publishing after successful close.
+  Execute the query into CSV in the query's row order, publishing after successful close.
 - `def collect(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "auto") -> DataFrame`
   Optimize (unless disabled) and execute the plan.
 - `def collect[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> DataFrame`
@@ -2047,7 +2047,7 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def get(self, index: Int) -> AnyValue`
   Return one cell as a tagged value; raises when out of bounds.
 - `def equals(self, other: Self, *, null_equal: Bool = True, check_names: Bool = False) -> Bool`
-  Structural equality: NaN equals NaN and -0.0 equals 0.0.
+  Structural equality: NaN equals NaN, -0.0 equals 0.0, and a categorical value is its label (two codes for one label are equal).
 - `def eq(self, other: Expr) -> Self`
 - `def eq(self, other: Self) -> Self`
 - `def ne(self, other: Expr) -> Self`

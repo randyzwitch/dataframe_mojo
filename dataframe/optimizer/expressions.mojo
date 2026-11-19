@@ -44,7 +44,9 @@ from dataframe.expr import (
     FIRST,
     LAST,
     Expr,
+    EXPR_GET,
     HORIZONTAL_ARGS,
+    IMPLODE,
     LIT_BOOL,
     LIT_FLOAT,
     LIT_INT,
@@ -55,14 +57,20 @@ from dataframe.expr import (
     Node,
     OR,
     OVER,
+    OVER_GLOBAL,
+    OVER_MAPPING_MASK,
     SELECTOR,
     UNTYPED,
+    VALUE_COUNTS,
     WHEN,
+    _SCALAR_SOURCE,
     _set_node_children,
     col,
     is_reduction,
+    is_sequence,
     is_window,
     node_children,
+    split_names,
     subtree,
 )
 from dataframe.planning.properties import (
@@ -568,3 +576,155 @@ def _emit_folded(
     _set_node_children(copy, children)
     out.append(copy^)
     return len(out) - 1
+
+
+def shared_partition_keys(exprs: List[Expr]) -> List[String]:
+    """The partition keys every window of `exprs` partitions by, in the
+    order the first window names them; empty unless every expression is
+    row-local outside its over() windows and every window partitions by
+    named keys (none over all rows, none mapping results back by join or
+    explode). Rows that differ on these keys are in different partitions
+    of every window."""
+    var shared = List[String]()
+    var found = False
+    for expr in exprs:
+        var n = len(expr._nodes)
+        if n == 0:
+            continue
+        # Nodes reached from the root without passing an over(): their
+        # value at a row may depend only on that row.
+        var outside = List[Bool](length=n, fill=False)
+        outside[n - 1] = True
+        for i in range(n - 1, -1, -1):
+            ref node = expr._nodes[i]
+            if node.op == OVER:
+                if (node.integer & OVER_GLOBAL) != 0 or (
+                    node.integer & OVER_MAPPING_MASK
+                ) != 0:
+                    return List[String]()
+                var keys = List[String]()
+                for name in split_names(node.text2):
+                    if name.byte_length() > 0:
+                        keys.append(name)
+                if not found:
+                    shared = keys^
+                    found = True
+                else:
+                    var kept = List[String]()
+                    for name in shared:
+                        if name in keys:
+                            kept.append(name)
+                    shared = kept^
+                if len(shared) == 0:
+                    return List[String]()
+            elif outside[i]:
+                if (
+                    is_reduction(node.op)
+                    or is_sequence(node.op)
+                    or is_window(node.op)
+                    or node.op == IMPLODE
+                    or node.op == _SCALAR_SOURCE
+                ):
+                    return List[String]()
+            for child in node_children(node):
+                if child >= i:
+                    # Not a tree in evaluation order: not split.
+                    return List[String]()
+                if node.op != OVER and outside[i]:
+                    outside[child] = True
+    return shared^ if found else List[String]()
+
+
+def has_window(expr: Expr) -> Bool:
+    """Whether `expr` holds an over() window."""
+    for node in expr._nodes:
+        if node.op == OVER:
+            return True
+    return False
+
+
+def outer_windows(expr: Expr) -> Optional[List[Int]]:
+    """The over() nodes of `expr` reached from its root through no other
+    over(), in node order. None when a node reached that way is not
+    row-local (a reduction, a sequence, a window function without an
+    over()), when a selector names columns not yet known, or when the
+    nodes are not a tree in evaluation order: then the expression's
+    windows cannot be computed apart from the rest of it."""
+    var found = List[Int]()
+    var n = len(expr._nodes)
+    if n == 0:
+        return found^
+    var outside = List[Bool](length=n, fill=False)
+    outside[n - 1] = True
+    for i in range(n - 1, -1, -1):
+        ref node = expr._nodes[i]
+        if node.op == SELECTOR:
+            return None
+        if not outside[i]:
+            continue
+        if node.op == OVER:
+            found.append(i)
+            continue
+        if (
+            is_reduction(node.op)
+            or is_sequence(node.op)
+            or is_window(node.op)
+            or node.op == IMPLODE
+            or node.op == _SCALAR_SOURCE
+        ):
+            return None
+        for child in node_children(node):
+            if child >= i:
+                return None
+            outside[child] = True
+    found.reverse()
+    return found^
+
+
+def outer_reductions(expr: Expr) -> Optional[Tuple[List[Int], Bool]]:
+    """The reductions of `expr` over all of its input's rows: the reduction
+    nodes reached from its root through no over() and no other reduction,
+    in node order, and whether the expression has a value per row outside
+    them (it reads a column or a window there). None when a node reached
+    that way is a sequence, a window function without an over(), or a
+    selector, or the nodes are not a tree in evaluation order."""
+    var found = List[Int]()
+    var rows = False
+    var n = len(expr._nodes)
+    if n == 0:
+        return Tuple(found^, rows)
+    var outside = List[Bool](length=n, fill=False)
+    outside[n - 1] = True
+    for i in range(n - 1, -1, -1):
+        ref node = expr._nodes[i]
+        if node.op == SELECTOR:
+            return None
+        if not outside[i]:
+            continue
+        if node.op == OVER:
+            rows = True
+            continue
+        if node.op == COL:
+            rows = True
+        if is_reduction(node.op):
+            if (
+                node.op == VALUE_COUNTS
+                or node.op == EXPR_GET
+                or node.op == IMPLODE
+            ):
+                # Not one value per input: a list, or a value per row.
+                return None
+            found.append(i)
+            continue
+        if (
+            is_sequence(node.op)
+            or is_window(node.op)
+            or node.op == _SCALAR_SOURCE
+        ):
+            return None
+        for child in node_children(node):
+            if child >= i:
+                return None
+            outside[child] = True
+    found.reverse()
+    return Tuple(found^, rows)

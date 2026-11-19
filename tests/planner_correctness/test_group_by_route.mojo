@@ -75,12 +75,8 @@ def test_one_worker_runs_eagerly() raises:
 
 
 def test_a_batch_showing_many_groups_runs_eagerly() raises:
-    # The stream's own test, at a split small enough for a 4K-row batch:
-    # it would collect the batches into the eager group-by anyway.
     var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
     var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
-    var split = ScopedEnvironment("DATAFRAME_STREAM_SPLIT_GROUPS", "64")
     assert_true(not batched(frame(400), 400), "many groups were batched")
-    _ = split^
     _ = threads^
     _ = trace^

@@ -358,7 +358,13 @@ struct SortRounds(Movable, Rounds):
                 self.runs.append(self.blocks[b].address())
                 self.counts.append(self.blocks[b].count)
             if len(self.runs) == 1:
-                # One run is the order already.
+                # One run is the order already. The copy reads the run's
+                # records only through their address, so the blocks move
+                # to a local that is dropped after it: a value ends at its
+                # last named use, and reassigning the field here would let
+                # the records be freed before the copy reads them.
+                var blocks = List[KeyBlock]()
+                swap(blocks, self.blocks)
                 var output = Int(self.order.unsafe_ptr())
                 var variant = self._variant()
                 if variant == 0:
@@ -369,8 +375,8 @@ struct SortRounds(Movable, Rounds):
                     _copy_payloads[2, False](self.runs[0], n, output)
                 else:
                     _copy_payloads[3, False](self.runs[0], n, output)
+                _ = blocks^
                 self.stage = _SORT_DONE
-                self.blocks = List[KeyBlock]()
                 return 0
             self.partition_size = min(n, DEFAULT_ROW_GROUP_SIZE)
             self.partitions = (

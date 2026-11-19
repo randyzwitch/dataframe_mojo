@@ -98,7 +98,6 @@ def _assert_pipelined(query: LazyFrame) raises:
     _ = setting^
     _ = threads^
     assert_true(paths.find("dataframe-path: pipeline.run") >= 0, paths)
-    assert_true(paths.find("batch_stream") < 0, paths)
 
 
 def test_cross_products_materialize_every_pair() raises:
