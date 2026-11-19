@@ -54,6 +54,17 @@ def _modes(plan: LazyFrame, expected: DataFrame) raises:
             )
 
 
+def test_recursive_glob_deduplicates_matches_per_source() raises:
+    var path = _csv("recursive-glob/tree/nested/part.csv", "x\n1\n")
+    var pattern = _path("recursive-glob/tree") + "/**/**/*.csv"
+    var once = DataFrame([Series("x", Column[Int64]([1]))])
+    var twice = DataFrame([Series("x", Column[Int64]([1, 1]))])
+
+    _modes(scan_csv([pattern]), once)
+    _modes(scan_csv([path, path]), twice)
+    _modes(scan_csv([pattern, pattern]), twice)
+
+
 def test_public_hive_paths_filter_projection_and_limit_barrier() raises:
     for parquet in [False, True]:
         var suffix = String("parquet") if parquet else String("csv")

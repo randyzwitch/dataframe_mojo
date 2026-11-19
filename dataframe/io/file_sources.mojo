@@ -1,4 +1,5 @@
 """Deterministic local dataset path expansion shared by file readers."""
+from std.collections import Set
 from std.ffi import external_call
 from std.os import listdir
 from std.os.path import exists, isdir, islink
@@ -36,11 +37,11 @@ def _join(parent: String, name: String) -> String:
 
 
 def _expand(
-    parent: String, parts: List[String], at: Int, mut out: List[String]
+    parent: String, parts: List[String], at: Int, mut out: Set[String]
 ) raises:
     if at == len(parts):
         if parent != "" and exists(parent) and not isdir(parent):
-            out.append(parent)
+            out.add(parent)
         return
     var part = parts[at]
     var directory = "." if parent == "" else parent
@@ -95,10 +96,11 @@ def resolve_paths(
         for part in source.split("/"):
             if part != "":
                 parts.append(String(part))
-        var matched = List[String]()
+        var matched = Set[String]()
         _expand("/" if source.startswith("/") else "", parts, 0, matched)
         if len(matched) == 0:
             raise Error("No files matched source: " + source)
-        paths.extend(matched^)
+        for path in matched:
+            paths.append(path)
     sort(paths)
     return paths^
