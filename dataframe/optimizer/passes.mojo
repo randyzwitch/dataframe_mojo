@@ -3,6 +3,7 @@ from dataframe.planning.node_builders import (
     _aggregate_node,
     _filter_node,
     _frame_scan_node,
+    _join_node,
     _row_index_node,
     _select_node,
     _sort_node,
@@ -17,6 +18,7 @@ from dataframe.expr import (
     Node,
     SELECTOR,
     col,
+    node_children,
     lit,
     subtree,
 )
@@ -38,6 +40,7 @@ from dataframe.io.csv import (
 )
 from dataframe.join_type import (
     JOIN_ANTI,
+    JOIN_CROSS,
     JOIN_INNER,
     JOIN_LEFT,
     JOIN_RIGHT,
@@ -48,6 +51,7 @@ from dataframe.optimizer.expressions import (
     _emit_replaced,
     _emit_shared,
     has_window,
+    outer_reductions,
     outer_windows,
     shared_partition_keys,
     count_shared,
@@ -142,7 +146,8 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
         plan_push_slices(plan)
         plan_fuse_top_k(plan)
         plan_eliminate_common_subexpressions(plan)
-        plan_lower_window_filters(plan)
+        plan_lower_whole_input_filters(plan)
+        plan_lower_reductions(plan)
         plan_split_windows(plan)
         plan_push_projections(plan)
     except e:
@@ -286,16 +291,24 @@ def plan_eliminate_common_subexpressions(mut self: QueryContext) raises:
         plan_reorder(self)
 
 
-def plan_lower_window_filters(mut self: QueryContext) raises:
-    """Evaluate a filter predicate that holds windows as a column of a
-    projection below the filter, which then reads that column:
-    `filter(p)` becomes `select(input columns)` over `filter(col(t))`
-    over `with_columns(p as t)`. A window's value at a row depends on the
-    other rows of its partition, which are all of the filter's input, so
-    such a predicate cannot be evaluated a batch of rows at a time. As a
-    projection's column, the windows run in the operator that evaluates
-    windows over a whole input, split by partition into tasks of the
-    query's schedule, and the filter left reads one value per row."""
+def _reduces_input(expr: Expr) -> Bool:
+    """Whether `expr` holds a reduction over all of its input's rows."""
+    var found = outer_reductions(expr)
+    return Bool(found) and len(found.value()[0]) > 0
+
+
+def plan_lower_whole_input_filters(mut self: QueryContext) raises:
+    """Evaluate a filter predicate that holds windows or reductions as a
+    column of a projection below the filter, which then reads that
+    column: `filter(p)` becomes `select(input columns)` over
+    `filter(col(t))` over `with_columns(p as t)`. A window's value at a
+    row depends on the other rows of its partition, and a reduction's on
+    every row, all of the filter's input, so such a predicate cannot be
+    evaluated a batch of rows at a time. As a projection's column, the
+    windows run in the operator that evaluates windows over a whole
+    input, split by partition into tasks of the query's schedule, the
+    reductions in an aggregate (`plan_lower_reductions`), and the filter
+    left reads one value per row."""
     var count = len(self._nodes)
     var changed = False
     for i in range(count):
@@ -304,7 +317,10 @@ def plan_lower_window_filters(mut self: QueryContext) raises:
             or self._nodes[i].left < 0
             or len(self._nodes[i].exprs) != 1
             or _pinned(self._nodes[i])
-            or not has_window(self._nodes[i].exprs[0])
+            or not (
+                has_window(self._nodes[i].exprs[0])
+                or _reduces_input(self._nodes[i].exprs[0])
+            )
         ):
             continue
         var left = self._nodes[i].left
@@ -324,7 +340,124 @@ def plan_lower_window_filters(mut self: QueryContext) raises:
         plan_forget_schema(self, i)
         changed = True
     if changed:
-        trace_path("lazy.lower_window_filter")
+        trace_path("lazy.lower_whole_input_filter")
+        plan_reorder(self)
+
+
+def plan_copy_subtree(mut self: QueryContext, root: Int) -> Int:
+    """A copy of the nodes of the subtree at `root`, appended; the copy's
+    root. Both copies compute the same rows; a plan shares the work of
+    repeated subtrees when it runs (`plan_subplan_classes`)."""
+    var node = self._nodes[root].copy()
+    if node.left >= 0:
+        node.left = plan_copy_subtree(self, node.left)
+    if node.right >= 0:
+        node.right = plan_copy_subtree(self, node.right)
+    self._nodes.append(node^)
+    return len(self._nodes) - 1
+
+
+def plan_lower_reductions(mut self: QueryContext) raises:
+    """Compute the reductions inside expressions that have a value per row
+    in an aggregate of the projection's input, joined to every input row,
+    and read them there as columns: `with_columns(x / x.sum())` becomes a
+    projection reading `col(t)` over the input crossed with
+    `agg(x.sum() as t)` over the input. A reduction reads every row of
+    the input before any row's value is known, so the projection cannot
+    be evaluated a batch of rows at a time; the aggregate takes the input
+    as a sink, with its own tasks, and the projection left reads one
+    value per row. The input is written twice in the plan, and computed
+    once (`plan_copy_subtree`). An expression that is one value for every
+    row (`x.sum()` alone) stays: the projection broadcasts it as a
+    constant column."""
+    var count = len(self._nodes)
+    var changed = False
+    for i in range(count):
+        var kind = self._nodes[i].kind
+        if not (kind == SELECT or kind == WITH_COLUMNS):
+            continue
+        if self._nodes[i].left < 0:
+            continue
+        var exprs = self._nodes[i].exprs.copy()
+        var places = List[List[Int]]()
+        var rows = kind == WITH_COLUMNS
+        var reductions = 0
+        var lowerable = True
+        for e in exprs:
+            var found = outer_reductions(e)
+            if not found:
+                lowerable = False
+                break
+            ref parts = found.value()
+            rows = rows or parts[1]
+            if not parts[1]:
+                # One value for every row: the projection broadcasts it as
+                # a constant column, which a joined column would not be.
+                places.append(List[Int]())
+                continue
+            reductions += len(parts[0])
+            # Each reduction reads its input row by row.
+            for j in parts[0]:
+                for child in node_children(e._nodes[j]):
+                    if child >= 0 and not _row_local([subtree(e, child)]):
+                        lowerable = False
+            places.append(parts[0].copy())
+        # A projection of reductions alone is an aggregate already.
+        if not lowerable or reductions == 0 or not rows:
+            continue
+        var left = self._nodes[i].left
+        var taken = plan_columns_of(self, left)
+        for e in exprs:
+            taken.append(e._name)
+        var outputs = List[String]()
+        if kind == WITH_COLUMNS:
+            outputs = plan_columns_of(self, i)
+        var reduced = List[Expr]()
+        var rewritten = List[Expr](capacity=len(exprs))
+        for e in range(len(exprs)):
+            var replaced = Dict[Int, Node]()
+            for j in places[e]:
+                var name = "__reduced_" + String(len(reduced))
+                while name in taken:
+                    name = "_" + name
+                reduced.append(subtree(exprs[e], j).alias(name))
+                replaced[j] = col(name)._nodes[0].copy()
+            var out = List[Node]()
+            _ = _emit_replaced(
+                exprs[e]._nodes, replaced, len(exprs[e]._nodes) - 1, out
+            )
+            rewritten.append(Expr(out^, exprs[e]._name))
+        var copy = plan_copy_subtree(self, left)
+        # A projection of reductions alone: an aggregate with no keys.
+        self._nodes.append(_select_node(left=copy, exprs=reduced))
+        var aggregate = len(self._nodes) - 1
+        self._nodes.append(
+            _join_node(
+                List[String](),
+                List[String](),
+                "cross",
+                JOIN_CROSS,
+                left=left,
+                right=aggregate,
+            )
+        )
+        var joined = len(self._nodes) - 1
+        if kind == SELECT:
+            self._nodes[i].exprs = rewritten^
+            self._nodes[i].left = joined
+        else:
+            var moved = self._nodes[i].copy()
+            moved.exprs = rewritten^
+            moved.left = joined
+            self._nodes.append(moved^)
+            var kept = List[Expr](capacity=len(outputs))
+            for c in outputs:
+                kept.append(col(c))
+            self._nodes[i] = _select_node(left=len(self._nodes) - 1, exprs=kept)
+        plan_forget_schema(self, i)
+        changed = True
+    if changed:
+        trace_path("lazy.lower_reductions")
         plan_reorder(self)
 
 

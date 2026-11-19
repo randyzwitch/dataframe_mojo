@@ -699,7 +699,7 @@ def test_a_filter_on_windows_runs_them_as_rounds_of_the_schedule() raises:
     _ = setting^
     _ = threads^
     assert_true(
-        "lazy.lower_window_filter" in paths,
+        "lazy.lower_whole_input_filter" in paths,
         "the filter's windows were not computed as a column",
     )
     assert_true(
@@ -755,3 +755,42 @@ def test_windows_without_a_shared_key_split_by_keys() raises:
         frame.lazy().select_exprs(mixed).filter(keep).collect().sort("row")
     )
     assert_frame(selected, frame.select_exprs(mixed))
+
+
+def test_reductions_beside_row_values_run_as_an_aggregate() raises:
+    """A projection or filter whose expressions reduce every input row
+    inside a value per row computes the reductions in an aggregate of the
+    input, joined to every row, so no task evaluates them as parallel
+    work of its own. Rows and values equal the eager ones, in order."""
+    var frame = source().head(20_000).with_row_index("row")
+    var keep = col("v") > lit(Int64(-480))
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var input = frame.lazy().filter(keep)
+    var exprs: List[Expr] = [
+        (col("v") - col("v").min()).alias("above_min"),
+        (col("v").cast(DataType.FLOAT64) / col("v").mean()).alias("share"),
+        (col("row") - col("v").count()).alias("n"),
+    ]
+    var added = input.with_columns(exprs).collect()
+    var highest = input.filter(col("v") == col("v").max()).collect()
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "lazy.lower_reductions" in paths,
+        "the reductions were not computed in an aggregate",
+    )
+    assert_true(
+        "lazy.lower_whole_input_filter" in paths,
+        "the filter's reduction was not computed as a column",
+    )
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    var kept = frame.filter(keep)
+    assert_frame(added, kept.with_columns(exprs))
+    assert_frame(highest, kept.filter(col("v") == col("v").max()))
