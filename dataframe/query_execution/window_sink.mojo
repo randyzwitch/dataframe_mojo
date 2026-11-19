@@ -41,15 +41,7 @@ from dataframe.execution import WindowLayouts, _used_columns, evaluate
 from dataframe.expr import (
     Expr,
     COL,
-    IMPLODE,
     OVER,
-    OVER_GLOBAL,
-    OVER_MAPPING_MASK,
-    _SCALAR_SOURCE,
-    is_reduction,
-    is_sequence,
-    is_window,
-    node_children,
     split_names,
 )
 from dataframe.frame import DataFrame
@@ -86,63 +78,6 @@ comptime _DONE = 4
 comptime _FIRST_BITS = 4
 comptime _MOST_BITS = 8
 comptime _BIN_ROWS = 122880
-
-
-def shared_partition_keys(exprs: List[Expr]) -> List[String]:
-    """The partition keys every window of `exprs` partitions by, in the
-    order the first window names them; empty unless every expression is
-    row-local outside its over() windows and every window partitions by
-    named keys (none over all rows, none mapping results back by join or
-    explode). Rows that differ on these keys are in different partitions
-    of every window."""
-    var shared = List[String]()
-    var found = False
-    for expr in exprs:
-        var n = len(expr._nodes)
-        if n == 0:
-            continue
-        # Nodes reached from the root without passing an over(): their
-        # value at a row may depend only on that row.
-        var outside = List[Bool](length=n, fill=False)
-        outside[n - 1] = True
-        for i in range(n - 1, -1, -1):
-            ref node = expr._nodes[i]
-            if node.op == OVER:
-                if (node.integer & OVER_GLOBAL) != 0 or (
-                    node.integer & OVER_MAPPING_MASK
-                ) != 0:
-                    return List[String]()
-                var keys = List[String]()
-                for name in split_names(node.text2):
-                    if name.byte_length() > 0:
-                        keys.append(name)
-                if not found:
-                    shared = keys^
-                    found = True
-                else:
-                    var kept = List[String]()
-                    for name in shared:
-                        if name in keys:
-                            kept.append(name)
-                    shared = kept^
-                if len(shared) == 0:
-                    return List[String]()
-            elif outside[i]:
-                if (
-                    is_reduction(node.op)
-                    or is_sequence(node.op)
-                    or is_window(node.op)
-                    or node.op == IMPLODE
-                    or node.op == _SCALAR_SOURCE
-                ):
-                    return List[String]()
-            for child in node_children(node):
-                if child >= i:
-                    # Not a tree in evaluation order: not split.
-                    return List[String]()
-                if node.op != OVER and outside[i]:
-                    outside[child] = True
-    return shared^ if found else List[String]()
 
 
 def _column_at(columns: List[Series], name: String) -> Int:
@@ -347,7 +282,8 @@ def _gather_values(
 
 struct WindowSink(Movable, Rounds):
     """A SELECT or WITH_COLUMNS of window functions over `input`, split by
-    the windows' shared partition keys (`shared_partition_keys`) and run
+    the windows' shared partition keys (`shared_partition_keys` in
+    dataframe.optimizer.expressions) and run
     as rounds (see the module docstring); `result` once no round is
     left."""
 

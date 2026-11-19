@@ -45,7 +45,11 @@ from dataframe.join_type import (
 )
 from dataframe.optimizer.expressions import (
     _cannot_raise,
+    _emit_replaced,
     _emit_shared,
+    has_window,
+    outer_windows,
+    shared_partition_keys,
     count_shared,
     _fold_casts,
     _fold_constants,
@@ -138,6 +142,8 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
         plan_push_slices(plan)
         plan_fuse_top_k(plan)
         plan_eliminate_common_subexpressions(plan)
+        plan_lower_window_filters(plan)
+        plan_split_windows(plan)
         plan_push_projections(plan)
     except e:
         plan._schema_memo = None
@@ -277,6 +283,168 @@ def plan_eliminate_common_subexpressions(mut self: QueryContext) raises:
         plan_forget_schema(self, i)
         changed = True
     if changed:
+        plan_reorder(self)
+
+
+def plan_lower_window_filters(mut self: QueryContext) raises:
+    """Evaluate a filter predicate that holds windows as a column of a
+    projection below the filter, which then reads that column:
+    `filter(p)` becomes `select(input columns)` over `filter(col(t))`
+    over `with_columns(p as t)`. A window's value at a row depends on the
+    other rows of its partition, which are all of the filter's input, so
+    such a predicate cannot be evaluated a batch of rows at a time. As a
+    projection's column, the windows run in the operator that evaluates
+    windows over a whole input, split by partition into tasks of the
+    query's schedule, and the filter left reads one value per row."""
+    var count = len(self._nodes)
+    var changed = False
+    for i in range(count):
+        if (
+            self._nodes[i].kind != FILTER
+            or self._nodes[i].left < 0
+            or len(self._nodes[i].exprs) != 1
+            or _pinned(self._nodes[i])
+            or not has_window(self._nodes[i].exprs[0])
+        ):
+            continue
+        var left = self._nodes[i].left
+        var names = plan_columns_of(self, left)
+        var name = String("__window_filter")
+        while name in names:
+            name = "_" + name
+        var predicate = self._nodes[i].exprs[0].alias(name)
+        self._nodes.append(_with_columns_node(left=left, exprs=[predicate^]))
+        self._nodes.append(
+            _filter_node(left=len(self._nodes) - 1, exprs=[col(name)])
+        )
+        var kept = List[Expr](capacity=len(names))
+        for c in names:
+            kept.append(col(c))
+        self._nodes[i] = _select_node(left=len(self._nodes) - 1, exprs=kept)
+        plan_forget_schema(self, i)
+        changed = True
+    if changed:
+        trace_path("lazy.lower_window_filter")
+        plan_reorder(self)
+
+
+def plan_split_windows(mut self: QueryContext) raises:
+    """Split a projection whose windows have no partition key common to
+    all of them into one projection per set of windows that do share a
+    key, stacked below it, each computing its windows as hidden columns
+    that the projection then reads. Rows that differ on a set's shared
+    keys are in different partitions of each of its windows, so each
+    projection below can be evaluated apart by those keys, as tasks of
+    the query's schedule; windows over one partition, or whose own
+    windows share no key, form one more projection. The windows each
+    still read every row of the projection's input, in the same order,
+    so their values are the same."""
+    var count = len(self._nodes)
+    var changed = False
+    for i in range(count):
+        var kind = self._nodes[i].kind
+        if not (kind == SELECT or kind == WITH_COLUMNS):
+            continue
+        if self._nodes[i].left < 0:
+            continue
+        var exprs = self._nodes[i].exprs.copy()
+        if len(shared_partition_keys(exprs)) > 0:
+            continue
+        # The windows each expression reads outside any other window.
+        var places = List[List[Int]]()
+        var windows = 0
+        for e in exprs:
+            var found = outer_windows(e)
+            if not found:
+                windows = 0
+                break
+            windows += len(found.value())
+            places.append(found.take())
+        if windows < 2:
+            continue
+        # Sets of windows by shared keys (the keys all of a set's windows
+        # partition by); -1 for the set of windows with none.
+        var set_keys = List[List[String]]()
+        var set_of = List[List[Int]]()
+        var keyless = False
+        for e in range(len(exprs)):
+            var sets = List[Int]()
+            for j in places[e]:
+                var keys = shared_partition_keys([subtree(exprs[e], j)])
+                var at = -1
+                if len(keys) == 0:
+                    keyless = True
+                else:
+                    for s in range(len(set_keys)):
+                        var kept = List[String]()
+                        for name in set_keys[s]:
+                            if name in keys:
+                                kept.append(name)
+                        if len(kept) > 0:
+                            set_keys[s] = kept^
+                            at = s
+                            break
+                    if at < 0:
+                        at = len(set_keys)
+                        set_keys.append(keys^)
+                sets.append(at)
+            set_of.append(sets^)
+        if len(set_keys) + (1 if keyless else 0) < 2:
+            continue
+        var left = self._nodes[i].left
+        var taken = plan_columns_of(self, left)
+        for e in exprs:
+            taken.append(e._name)
+        var outputs = List[String]()
+        if kind == WITH_COLUMNS:
+            outputs = plan_columns_of(self, i)
+        # Each window as a hidden column of its set's projection.
+        var computed = List[List[Expr]](
+            length=len(set_keys) + 1, fill=List[Expr]()
+        )
+        var rewritten = List[Expr](capacity=len(exprs))
+        var hidden = 0
+        for e in range(len(exprs)):
+            var replaced = Dict[Int, Node]()
+            for k in range(len(places[e])):
+                var name = "__window_" + String(hidden)
+                hidden += 1
+                while name in taken:
+                    name = "_" + name
+                var j = places[e][k]
+                computed[set_of[e][k] + 1].append(
+                    subtree(exprs[e], j).alias(name)
+                )
+                replaced[j] = col(name)._nodes[0].copy()
+            var out = List[Node]()
+            _ = _emit_replaced(
+                exprs[e]._nodes, replaced, len(exprs[e]._nodes) - 1, out
+            )
+            rewritten.append(Expr(out^, exprs[e]._name))
+        var below = left
+        for s in range(len(computed)):
+            if len(computed[s]) == 0:
+                continue
+            self._nodes.append(
+                _with_columns_node(left=below, exprs=computed[s].copy())
+            )
+            below = len(self._nodes) - 1
+        if kind == SELECT:
+            self._nodes[i].exprs = rewritten^
+            self._nodes[i].left = below
+        else:
+            var moved = self._nodes[i].copy()
+            moved.exprs = rewritten^
+            moved.left = below
+            self._nodes.append(moved^)
+            var kept = List[Expr](capacity=len(outputs))
+            for c in outputs:
+                kept.append(col(c))
+            self._nodes[i] = _select_node(left=len(self._nodes) - 1, exprs=kept)
+        plan_forget_schema(self, i)
+        changed = True
+    if changed:
+        trace_path("lazy.split_windows")
         plan_reorder(self)
 
 

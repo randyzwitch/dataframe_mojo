@@ -678,3 +678,80 @@ def test_windows_without_a_shared_key_keep_the_whole_input() raises:
     var eager = frame.with_columns(exprs)
     for name in eager.columns():
         assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
+
+
+def test_a_filter_on_windows_runs_them_as_rounds_of_the_schedule() raises:
+    """A filter whose predicate holds windows computes the predicate as a
+    column of a projection below it, so the windows run as rounds of the
+    query's schedule like any projection's, and the filter reads that
+    column. The rows kept are the eager filter's, in the same order."""
+    var frame = source().head(20_000).with_row_index("row")
+    var predicate = (
+        col("v").cast(DataType.FLOAT64)
+        > lit(Float64(0.5)) * col("v").mean().over("k")
+    ) | (col("v") == col("v").min().over(["k", "s"]))
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var lazy = frame.lazy().filter(predicate).collect().sort("row")
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "lazy.lower_window_filter" in paths,
+        "the filter's windows were not computed as a column",
+    )
+    assert_true(
+        "window.partitioned_sink" in paths,
+        "the windows did not run as a partitioned sink",
+    )
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    assert_frame(lazy, frame.filter(predicate))
+
+
+def test_windows_without_a_shared_key_split_by_keys() raises:
+    """A projection whose windows share no key runs as one projection per
+    set of windows that do, each as rounds of the query's schedule, and
+    the projection reads their results; windows over all rows run in one
+    more projection. Every column equals the eager projection's."""
+    var frame = source().head(20_000).with_row_index("row")
+    var keep = col("row") >= lit(Int64(0))
+    var keyed: List[Expr] = [
+        col("v").sum().over("k").alias("by_k"),
+        col("v").max().over(["s", "k"]).alias("by_s_k"),
+        (col("v").sum().over("s") - col("v").min().over("s")).alias("by_s"),
+        (col("v").rank("min").over("k") + col("row")).alias("rank_row"),
+    ]
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var added = (
+        frame.lazy().with_columns(keyed).filter(keep).collect().sort("row")
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "lazy.split_windows" in paths, "the windows were not split by keys"
+    )
+    assert_true(
+        "window.partitioned_sink" in paths,
+        "the windows did not run as a partitioned sink",
+    )
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    assert_frame(added, frame.with_columns(keyed))
+    var mixed = keyed.copy()
+    mixed.append(col("v").cum_sum().over(order_by="row").alias("all"))
+    mixed.insert(0, col("row"))
+    var selected = (
+        frame.lazy().select_exprs(mixed).filter(keep).collect().sort("row")
+    )
+    assert_frame(selected, frame.select_exprs(mixed))
