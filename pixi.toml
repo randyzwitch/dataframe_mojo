@@ -13,20 +13,8 @@ preview = ["pixi-build"]
 # Source-dependency identities in pixi.lock must match the CI resolver.
 requires-pixi = "==0.84.2"
 
-# Installable as a Mojo package straight from GitHub. Consumers add, for
-# example:
-#
-#     [dependencies]
-#     dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.3.0" }
-#     mojo = ">=1.2,<1.3"
-#
-# and then `from dataframe import DataFrame, col`.
-#
-# A compiled Mojo package only loads in the Mojo version that produced it,
-# and pixi builds this package with the newest Mojo its host dependency
-# allows -- not with whatever the consumer pinned. Development tracks the
-# pinned Mojo 1.3 nightly and matching MAX SDK below. Release v0.3.0 uses
-# Mojo 1.2.0; compiled artifacts require the compiler that produced them.
+# The Git package installs the same platform-specific modules as the
+# standalone package task. The recipe pins Mojo and its matching MAX SDK.
 [package]
 name = "dataframe_mojo"
 version = "0.3.0"
@@ -34,26 +22,18 @@ description = "An experimental dataframe library for Mojo"
 license = "MIT"
 
 [package.build]
-backend = { name = "pixi-build-mojo", version = ">=0.2.7,<1" }
+backend = { name = "pixi-build-rattler-build", version = ">=0.4.8,<1" }
 source = { path = "." }
-
-[package.build.config.pkg]
-name = "dataframe"
-path = "dataframe"
 
 [package.host-dependencies]
 regex_mojo = { git = "https://github.com/randyzwitch/regex_mojo.git", rev = "be7d35336b1ef6ba372645168f44f8a04f1e582c" }
 unicode_mojo = { git = "https://github.com/randyzwitch/unicode_mojo.git", rev = "2bcb4f34961960ff2ecac169bb7d48c276fcc85e" }
 emberjson = { git = "https://github.com/randyzwitch/EmberJson.git", rev = "3c0d0db82eece81274cbd30732c77908e1a88e24" }
-mojo = "==1.3.0.dev2026111005"
-max-core = "==26.8.0.dev2026111005"
 
 [package.run-dependencies]
 regex_mojo = { git = "https://github.com/randyzwitch/regex_mojo.git", rev = "be7d35336b1ef6ba372645168f44f8a04f1e582c" }
 unicode_mojo = { git = "https://github.com/randyzwitch/unicode_mojo.git", rev = "2bcb4f34961960ff2ecac169bb7d48c276fcc85e" }
 emberjson = { git = "https://github.com/randyzwitch/EmberJson.git", rev = "3c0d0db82eece81274cbd30732c77908e1a88e24" }
-mojo = "==1.3.0.dev2026111005"
-max-core = "==26.8.0.dev2026111005"
 
 [dependencies]
 regex_mojo = { git = "https://github.com/randyzwitch/regex_mojo.git", rev = "be7d35336b1ef6ba372645168f44f8a04f1e582c" }
