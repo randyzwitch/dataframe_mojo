@@ -657,17 +657,30 @@ def _join_filters(
         if not probe:
             continue
         var name = probe.value()
-        var made = finalize_filters(
-            name,
-            frame.column(name).dtype(),
-            p.key,
-            -1,
-            p.equalities,
-            p.build_count,
-            probe_rows,
-            p.build_filtered,
-            scan,
-        )
+        var made: Optional[JoinFilter]
+        if p.table:
+            made = finalize_table_filters(
+                name,
+                frame.column(name).dtype(),
+                p.table.value(),
+                p.index,
+                -1,
+                p.equalities,
+                probe_rows,
+                scan,
+            )
+        else:
+            made = finalize_filters(
+                name,
+                frame.column(name).dtype(),
+                p.key.value(),
+                -1,
+                p.equalities,
+                p.build_count,
+                probe_rows,
+                p.build_filtered,
+                scan,
+            )
         if made:
             trace_path("pipeline.join_filter_through_aggregate")
             filters.append(made.take())
@@ -3447,6 +3460,7 @@ struct PipelineFinish(Movable, Rounds):
                 False,
                 List[Step](),
                 List[PushedJoinFilter](),
+                computed=True,
             )
         )
         self.steps = len(run.finish_steps)
@@ -4312,6 +4326,7 @@ def begin_pipeline(
     var types: Optional[PipelineTypes] = None,
     limit: Int = -1,
     selection_output: Optional[ArcPointer[SelectionBatches]] = None,
+    computed: Bool = False,
 ) raises -> PipelineRun:
     """`run_pipeline` up to its workers' jobs, not yet run: its execute stage is
     the jobs, one task per thread; `finish_pipeline` is its finish, after the
@@ -4327,7 +4342,9 @@ def begin_pipeline(
     typed and compiled and the table's layout (`pipeline_types`), when
     the caller made them already for `given_steps` over `frame`'s
     columns. `limit`: only the first that many rows in source order are
-    the result (-1: every row), when the rows are materialized."""
+    the result (-1: every row), when the rows are materialized. `computed`:
+    `frame` is a result the query made rather than a table it reads, whose
+    vector statistics are read where it has them but never computed."""
     trace_path("pipeline.run")
     # The steps typed and compiled and the table's layout, unless the
     # caller made them already for these steps and columns.
@@ -4484,8 +4501,14 @@ def begin_pipeline(
             break
     var join_scan = Optional[ArcPointer[ScanFilterInfo]]()
     if join_scan_filters.has_filters() and not source:
-        for f in join_scan_filters.filters:
-            _ensure_zones(frame.column(f.column))
+        # A table's vectors get statistics once, kept on its buffers for
+        # every later scan. A result the query made is read once, here:
+        # computing its statistics would be a pass over the column before
+        # any worker starts, as long as the reading it might skip, so its
+        # rows meet the join's filters in the workers instead.
+        if not computed:
+            for f in join_scan_filters.filters:
+                _ensure_zones(frame.column(f.column))
         join_scan = ArcPointer(
             ScanFilterInfo(join_scan_filters, frame._columns)
         )
