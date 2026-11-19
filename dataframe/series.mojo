@@ -2374,22 +2374,18 @@ struct ChunkMerge(Movable):
                 var bits = List[UInt8]()
                 if nulls:
                     bits = List[UInt8](length=(total + 7) // 8, fill=0)
-                var value_address = Int(values.unsafe_ptr())
-                var bit_address = Int(bits.unsafe_ptr()) if nulls else 0
                 var merged = Series(
                     column._name, Column[Scalar[D]](values=values^, bits=bits^)
                 )
                 merged._dtype = column._dtype
                 merged._field_metadata = column._field_metadata
+                # Rows are written through these addresses, into the
+                # merged column's own buffers.
                 ref out = merged._data[Column[Scalar[D]]]
-                if Int(out._ptr()) != value_address or (
-                    nulls and Int(out.unsafe_validity()) != bit_address
-                ):
-                    # The column copied its buffers: rows written to the
-                    # addresses above would not reach it.
-                    return None
+                var value_address = Int(out._ptr())
+                var bit_address = Int(out.unsafe_validity()) if nulls else 0
                 return ChunkMerge(
-                    merged^, parts^, starts^, value_address, bit_address
+                    merged^, parts.copy(), starts^, value_address, bit_address
                 )
         return None
 
