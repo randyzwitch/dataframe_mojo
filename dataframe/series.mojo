@@ -904,7 +904,8 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     def equals(
         self, other: Self, *, null_equal: Bool = True, check_names: Bool = False
     ) -> Bool:
-        """Structural equality: NaN equals NaN and -0.0 equals 0.0.
+        """Structural equality: NaN equals NaN, -0.0 equals 0.0, and a
+        categorical value is its label (two codes for one label are equal).
 
         With null_equal=False, any null in either input makes them unequal.
         """
@@ -940,6 +941,34 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                 if bo == len(b[bi]):
                     bi += 1
                     bo = 0
+            return True
+        if (
+            self._dtype.is_categorical()
+            and self._dtype.has_dictionary()
+            and other._dtype.has_dictionary()
+        ):
+            # A categorical value is its label: two codes that index the
+            # same label are equal, as they are when grouped.
+            ref a = self._data[Column[UInt32]]
+            ref b = other._data[Column[UInt32]]
+            var left_labels = self._dtype.dictionary()
+            var right_labels = other._dtype.dictionary()
+            var shared = left_labels.ptr() == right_labels.ptr()
+            ref left = left_labels[]
+            ref right = right_labels[]
+            for i in range(len(a)):
+                if a._valid(i) != b._valid(i):
+                    return False
+                if not a._valid(i):
+                    continue
+                var x = Int(a._get(i))
+                var y = Int(b._get(i))
+                if x == y and shared:
+                    continue
+                if x >= len(left) or y >= len(right):
+                    return False
+                if left.get(x) != right.get(y):
+                    return False
             return True
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
