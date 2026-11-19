@@ -678,3 +678,45 @@ def test_windows_without_a_shared_key_keep_the_whole_input() raises:
     var eager = frame.with_columns(exprs)
     for name in eager.columns():
         assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
+
+
+def test_a_sort_runs_as_rounds_of_the_schedule() raises:
+    """A sort of every row, computed as an input of the query's schedule
+    (here the source a filter streams), runs as rounds of tasks of that
+    schedule: runs of sorted keys, their merge boundaries, the merged
+    partitions, then the rows gathered in that order. No task starts
+    parallel work of its own, and the rows equal the eager sort's."""
+    var frame = source().with_row_index("row")
+    var keep = col("row") >= lit(Int64(0))
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var lazy = (
+        frame.lazy()
+        .sort(
+            ["s", "v"],
+            descending=[False, True],
+            nulls_last=[True, False],
+            maintain_order=True,
+        )
+        .filter(keep)
+        .collect(optimize=False)
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true("sort.rounds" in paths, "the sort did not run as rounds")
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    var eager = frame.sort(
+        ["s", "v"],
+        descending=[False, True],
+        nulls_last=[True, False],
+        maintain_order=True,
+    )
+    assert_equal(lazy.columns(), eager.columns())
+    for name in eager.columns():
+        assert_true(lazy[name].equals(eager[name]), "column differs: " + name)

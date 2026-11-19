@@ -9,7 +9,16 @@ from std.collections import Optional
 from std.ffi import external_call
 from std.memory import Pointer, unsafe_memcpy
 
-from dataframe.parallel import Job, configured_workers, partitions, run_jobs
+from dataframe.parallel import (
+    Job,
+    Rounds,
+    configured_workers,
+    partitions,
+    round_width,
+    run_jobs,
+    run_rounds,
+)
+from std.memory import ArcPointer
 from dataframe.series import Series
 from dataframe.sorting.algorithms import (
     MergeBuffer,
@@ -216,77 +225,245 @@ struct _MergePartitionJob[W: Int, VAR: Bool](Job):
         _ = merged^
 
 
-def _sorted_rows[
+# The stages of a `SortRounds`: the round that ran last.
+comptime _SORT_START = 0
+comptime _SORT_SINK = 1
+comptime _SORT_BOUNDARY = 2
+comptime _SORT_MERGE = 3
+comptime _SORT_DONE = 4
+
+
+def _sink_task[W: Int, VAR: Bool](layout: Int, lo: Int, hi: Int) raises -> KeyBlock:
+    """Rows [lo, hi) encoded and sorted into one run."""
+    var job = _SinkRunJob[W, VAR](layout, lo, hi)
+    job.run()
+    var block = KeyBlock()
+    swap(block, job.block)
+    return block^
+
+
+def _boundary_task[
     W: Int, VAR: Bool
-](layout: SortKeyLayout, threads_cap: Int) raises -> List[Int]:
-    var n = layout.rows
-    var order = List[Int](unsafe_uninit_length=n)
-    if n == 0:
-        return order^
-    # Sink + Combine: a sorted run per thread.
-    var threads = _sink_threads(n, threads_cap)
-    var bounds = partitions(n, threads, STANDARD_VECTOR_SIZE)
-    var jobs = List[_SinkRunJob[W, VAR]](capacity=threads)
-    var layout_address = Int(Pointer(to=layout))
-    for t in range(threads):
-        if bounds[t] < bounds[t + 1]:
-            jobs.append(
-                _SinkRunJob[W, VAR](layout_address, bounds[t], bounds[t + 1])
+](runs: List[Int], counts: List[Int], target: Int) -> List[Int]:
+    """Per run, its rows among the first `target` of the merged order."""
+    return _partition_ends[W, VAR](runs, counts, target)
+
+
+def _merge_task[
+    W: Int, VAR: Bool
+](
+    runs: List[Int],
+    begins: List[Int],
+    ends: List[Int],
+    info: SkaInfo,
+    output: Int,
+    start: Int,
+) raises:
+    """One partition of the merged order, written from `start`."""
+    var job = _MergePartitionJob[W, VAR](runs, begins, ends, info, output, start)
+    job.run()
+
+
+struct SortRounds(Movable, Rounds):
+    """The sorted order of the key columns' rows, as rounds of tasks: each
+    task of the first round encodes the keys of one range of rows and
+    sorts them into a run; the second finds, for every partition of the
+    merged order (one row group of rows each), where it starts in every
+    run, by binary search; the third merges each partition's records from
+    every run and writes its rows at its place in the order. Each round
+    needs only the one before it, so the rounds can run as tasks of a
+    query's schedule or, with `run_rounds`, as jobs. `take_order` once no
+    round is left."""
+
+    var layout: ArcPointer[SortKeyLayout]
+    var threads_cap: Int
+    var stage: Int
+    var bounds: List[Int]
+    var blocks: List[KeyBlock]
+    var runs: List[Int]
+    var counts: List[Int]
+    var partition_size: Int
+    var partitions: Int
+    # By partition but the last: per run, its rows before the end of the
+    # partition.
+    var ends: List[List[Int]]
+    var width: Int
+    var order: List[Int]
+
+    def __init__(
+        out self,
+        keys: List[Series],
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        maintain_order: Bool,
+        threads: Int = 0,
+    ) raises:
+        """The order of `keys`' rows; equal keys keep input order when
+        `maintain_order`. `threads` caps the first round's tasks (0: the
+        configured count)."""
+        self = Self(
+            SortKeyLayout(keys, descending, nulls_last, maintain_order),
+            threads,
+        )
+
+    def __init__(out self, var layout: SortKeyLayout, threads: Int = 0):
+        """The order of the rows `layout` encodes."""
+        self.layout = ArcPointer(layout^)
+        self.threads_cap = threads
+        self.stage = _SORT_START
+        self.bounds = List[Int]()
+        self.blocks = List[KeyBlock]()
+        self.runs = List[Int]()
+        self.counts = List[Int]()
+        self.partition_size = 0
+        self.partitions = 0
+        self.ends = List[List[Int]]()
+        self.width = 0
+        self.order = List[Int]()
+
+    def _variant(self) -> Int:
+        """Which records the layout's keys encode as: 0 for variable
+        width, else the words per record (1, 2 or 3)."""
+        ref layout = self.layout[]
+        if layout.variable:
+            return 0
+        if layout.words == 1 or layout.words == 2:
+            return layout.words
+        return 3
+
+    def next_round(mut self) raises -> Int:
+        var n = self.layout[].rows
+        if self.stage == _SORT_START:
+            self.order = List[Int](unsafe_uninit_length=n)
+            if n == 0:
+                self.stage = _SORT_DONE
+                return 0
+            var threads = _sink_threads(n, self.threads_cap)
+            var bounds = partitions(n, threads, STANDARD_VECTOR_SIZE)
+            self.bounds.append(0)
+            for t in range(threads):
+                if bounds[t] < bounds[t + 1]:
+                    self.bounds.append(bounds[t + 1])
+            var tasks = len(self.bounds) - 1
+            for _ in range(tasks):
+                self.blocks.append(KeyBlock())
+            self.stage = _SORT_SINK
+            return tasks
+        if self.stage == _SORT_SINK:
+            for b in range(len(self.blocks)):
+                self.runs.append(self.blocks[b].address())
+                self.counts.append(self.blocks[b].count)
+            if len(self.runs) == 1:
+                # One run is the order already.
+                var output = Int(self.order.unsafe_ptr())
+                var variant = self._variant()
+                if variant == 0:
+                    _copy_payloads[1, True](self.runs[0], n, output)
+                elif variant == 1:
+                    _copy_payloads[1, False](self.runs[0], n, output)
+                elif variant == 2:
+                    _copy_payloads[2, False](self.runs[0], n, output)
+                else:
+                    _copy_payloads[3, False](self.runs[0], n, output)
+                self.stage = _SORT_DONE
+                self.blocks = List[KeyBlock]()
+                return 0
+            self.partition_size = min(n, DEFAULT_ROW_GROUP_SIZE)
+            self.partitions = (
+                n + self.partition_size - 1
+            ) // self.partition_size
+            self.ends = List[List[Int]](
+                length=self.partitions - 1, fill=List[Int]()
             )
-    if len(jobs) > 1:
-        run_jobs(jobs)
-    else:
-        jobs[0].run()
-    var runs = List[Int](capacity=len(jobs))
-    var counts = List[Int](capacity=len(jobs))
-    for j in range(len(jobs)):
-        runs.append(jobs[j].block.address())
-        counts.append(jobs[j].block.count)
-    var output = Pointer[Int, MutAnyOrigin](
-        unsafe_from_address=Int(order.unsafe_ptr())
-    )
-    if len(runs) == 1:
-        var keys = SortKeys[W, VAR](runs[0])
-        for i in range(n):
-            output[unsafe_offset=i] = keys.payload(i)
-        _ = jobs^
-        return order^
-    # Finalize: partitions of the output; Source: each one merged.
-    var partition_size = min(n, DEFAULT_ROW_GROUP_SIZE)
-    var num_partitions = (n + partition_size - 1) // partition_size
-    var boundary_jobs = List[_BoundaryJob[W, VAR]](capacity=num_partitions)
-    for p in range(num_partitions - 1):
-        boundary_jobs.append(
-            _BoundaryJob[W, VAR](runs, counts, (p + 1) * partition_size)
-        )
-    if len(boundary_jobs) > 1:
-        run_jobs(boundary_jobs)
-    elif len(boundary_jobs) == 1:
-        boundary_jobs[0].run()
-    var merges = List[_MergePartitionJob[W, VAR]](capacity=num_partitions)
-    var previous = List[Int](length=len(runs), fill=0)
-    for p in range(num_partitions):
-        var ends = (
-            counts.copy() if p
-            == num_partitions - 1 else boundary_jobs[p].ends.copy()
-        )
-        merges.append(
-            _MergePartitionJob[W, VAR](
-                runs,
-                previous,
-                ends,
-                layout.info,
-                Int(order.unsafe_ptr()),
-                p * partition_size,
-            )
-        )
-        previous = ends^
-    if len(merges) > 1:
-        run_jobs(merges)
-    else:
-        merges[0].run()
-    _ = jobs^
-    return order^
+            self.stage = _SORT_BOUNDARY
+            if self.partitions > 1:
+                self.width = round_width(self.partitions - 1)
+                return self.width
+        if self.stage == _SORT_BOUNDARY:
+            self.width = round_width(self.partitions)
+            self.stage = _SORT_MERGE
+            return self.width
+        if self.stage == _SORT_MERGE:
+            self.stage = _SORT_DONE
+            self.blocks = List[KeyBlock]()
+            self.runs = List[Int]()
+            self.ends = List[List[Int]]()
+        return 0
+
+    def round_task(mut self, task: Int) raises:
+        var variant = self._variant()
+        if self.stage == _SORT_SINK:
+            var address = Int(Pointer(to=self.layout[]))
+            var lo = self.bounds[task]
+            var hi = self.bounds[task + 1]
+            if variant == 0:
+                self.blocks[task] = _sink_task[1, True](address, lo, hi)
+            elif variant == 1:
+                self.blocks[task] = _sink_task[1, False](address, lo, hi)
+            elif variant == 2:
+                self.blocks[task] = _sink_task[2, False](address, lo, hi)
+            else:
+                self.blocks[task] = _sink_task[3, False](address, lo, hi)
+        elif self.stage == _SORT_BOUNDARY:
+            for p in range(task, self.partitions - 1, self.width):
+                var target = (p + 1) * self.partition_size
+                if variant == 0:
+                    self.ends[p] = _boundary_task[1, True](
+                        self.runs, self.counts, target
+                    )
+                elif variant == 1:
+                    self.ends[p] = _boundary_task[1, False](
+                        self.runs, self.counts, target
+                    )
+                elif variant == 2:
+                    self.ends[p] = _boundary_task[2, False](
+                        self.runs, self.counts, target
+                    )
+                else:
+                    self.ends[p] = _boundary_task[3, False](
+                        self.runs, self.counts, target
+                    )
+        elif self.stage == _SORT_MERGE:
+            var output = Int(self.order.unsafe_ptr())
+            var info = self.layout[].info
+            for p in range(task, self.partitions, self.width):
+                var begins = List[Int](length=len(self.runs), fill=0)
+                if p > 0:
+                    begins = self.ends[p - 1].copy()
+                var ends = self.counts.copy()
+                if p < self.partitions - 1:
+                    ends = self.ends[p].copy()
+                var start = p * self.partition_size
+                if variant == 0:
+                    _merge_task[1, True](
+                        self.runs, begins, ends, info, output, start
+                    )
+                elif variant == 1:
+                    _merge_task[1, False](
+                        self.runs, begins, ends, info, output, start
+                    )
+                elif variant == 2:
+                    _merge_task[2, False](
+                        self.runs, begins, ends, info, output, start
+                    )
+                else:
+                    _merge_task[3, False](
+                        self.runs, begins, ends, info, output, start
+                    )
+
+    def take_order(mut self) -> List[Int]:
+        """The rows in sorted order, moved out once no round is left."""
+        var taken = List[Int]()
+        swap(taken, self.order)
+        return taken^
+
+
+def _copy_payloads[W: Int, VAR: Bool](run: Int, n: Int, output: Int):
+    """The row ids of a run's `n` records, in its order, to `output`."""
+    var keys = SortKeys[W, VAR](run)
+    var out = Pointer[Int, MutAnyOrigin](unsafe_from_address=output)
+    for i in range(n):
+        out[unsafe_offset=i] = keys.payload(i)
 
 
 # ===----------------------------------------------------------------------=== #
@@ -426,15 +603,9 @@ def sort_rows(
         if layout.words == 2:
             return _top_rows[2, False](layout, take, threads)
         return _top_rows[3, False](layout, take, threads)
-    var order: List[Int]
-    if layout.variable:
-        order = _sorted_rows[1, True](layout, threads)
-    elif layout.words == 1:
-        order = _sorted_rows[1, False](layout, threads)
-    elif layout.words == 2:
-        order = _sorted_rows[2, False](layout, threads)
-    else:
-        order = _sorted_rows[3, False](layout, threads)
+    var rounds = SortRounds(layout^, threads)
+    run_rounds(rounds)
+    var order = rounds.take_order()
     if limit >= 0 and limit < len(order):
         order.shrink(limit)
     return order^

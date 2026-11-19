@@ -42,9 +42,12 @@ from dataframe.parallel import (
     _performance_core_count,
     Job,
     Pool,
+    Rounds,
     configured_workers,
     partitions,
+    round_width,
     run_jobs,
+    run_rounds,
     task_count,
     worker_count,
 )
@@ -798,139 +801,223 @@ def take_parallel(
     With `or_null`, a negative index yields a null instead of a row, which
     is how a join names the side that has no matching row.
     """
-    if not or_null:
-        # A constant gathers as the same value over the gathered rows; only
-        # the other columns are gathered.
-        var constants = 0
-        for column in columns:
-            if column.is_constant():
-                constants += 1
-        if constants > 0:
-            var m = len(indices)
-            var others = List[Series](capacity=len(columns) - constants)
+    var rounds = GatherRounds(columns, indices^, workers, or_null)
+    run_rounds(rounds)
+    return rounds.take_result()
+
+
+# The stages of a `GatherRounds`: the round that ran last.
+comptime _GATHER_START = 0
+comptime _GATHER_RECHUNK = 1
+comptime _GATHER_ROWS = 2
+comptime _GATHER_DONE = 3
+
+
+struct GatherRounds(Movable, Rounds):
+    """`take_parallel` as rounds of tasks: chunked columns are first made
+    contiguous, one column a task; then each task gathers one range of
+    output rows of every column, writing straight into the outputs. A
+    constant column (unless `or_null`) is the same value over the gathered
+    rows, and list and struct columns gather through their own take, so
+    neither is gathered by the tasks. `take_result` once no round is
+    left."""
+
+    var columns: List[Series]
+    var indices: ArcPointer[List[Int]]
+    var workers: Int
+    var or_null: Bool
+    var stage: Int
+    # By column: whether it is resized rather than gathered; the gathered
+    # columns, made contiguous by the first round.
+    var constant: List[Bool]
+    var gathered: List[Series]
+    var chunked: List[Int]
+    var width: Int
+    # The second round's ranges, outputs and validity, and its jobs (by
+    # gathered column, then by range).
+    var active: Int
+    var outputs: List[Series]
+    var bits: List[List[UInt8]]
+    var skip_validity: List[Bool]
+    var share_validity: Bool
+    var shared_bits: _Buffer[UInt8]
+    var jobs: List[_GatherJob]
+    var result: List[Series]
+
+    def __init__(
+        out self,
+        columns: List[Series],
+        var indices: List[Int],
+        workers: Int,
+        or_null: Bool = False,
+    ):
+        self.columns = columns.copy()
+        self.indices = ArcPointer(indices^)
+        self.workers = workers
+        self.or_null = or_null
+        self.stage = _GATHER_START
+        self.constant = List[Bool]()
+        self.gathered = List[Series]()
+        self.chunked = List[Int]()
+        self.width = 0
+        self.active = 0
+        self.outputs = List[Series]()
+        self.bits = List[List[UInt8]]()
+        self.skip_validity = List[Bool]()
+        self.share_validity = False
+        self.shared_bits = _Buffer(List[UInt8]())
+        self.jobs = List[_GatherJob]()
+        self.result = List[Series]()
+
+    def next_round(mut self) raises -> Int:
+        if self.stage == _GATHER_START:
+            for column in self.columns:
+                var resized = not self.or_null and column.is_constant()
+                self.constant.append(resized)
+                if not resized:
+                    self.gathered.append(column.copy())
+            for column in self.gathered:
+                if column.dtype().is_nested():
+                    # List and struct columns gather through their own
+                    # take; the payload scatter below only knows
+                    # fixed-width and string buffers.
+                    var taken = List[Series](capacity=len(self.gathered))
+                    ref rows = self.indices[]
+                    for c in self.gathered:
+                        taken.append(
+                            c.take_or_null(rows) if self.or_null else c.take(
+                                rows
+                            )
+                        )
+                    self.gathered = taken^
+                    self._finish()
+                    return 0
+            for c in range(len(self.gathered)):
+                if self.gathered[c].is_chunked():
+                    self.chunked.append(c)
+            self.stage = _GATHER_RECHUNK
+            if len(self.chunked) > 0:
+                self.width = round_width(len(self.chunked))
+                return self.width
+        if self.stage == _GATHER_RECHUNK:
+            return self._start_rows()
+        if self.stage == _GATHER_ROWS:
+            self._finish_rows()
+        return 0
+
+    def round_task(mut self, task: Int) raises:
+        if self.stage == _GATHER_RECHUNK:
+            for k in range(task, len(self.chunked), self.width):
+                var c = self.chunked[k]
+                self.gathered[c] = self.gathered[c].rechunk()
+        elif self.stage == _GATHER_ROWS:
+            for c in range(len(self.gathered)):
+                self.jobs[c * self.active + task].run()
+
+    def _start_rows(mut self) raises -> Int:
+        ref columns = self.gathered
+        var m = len(self.indices[])
+        self.active = task_count(m, self.workers)
+        var nonnullable_fixed = 0
+        if self.or_null and self.active < self.workers:
             for column in columns:
-                if not column.is_constant():
-                    others.append(column.copy())
-            var gathered = List[Series]()
-            if len(others) > 0:
-                gathered = take_parallel(others, indices^, workers)
-            var result = List[Series](capacity=len(columns))
-            var next = 0
-            for column in columns:
-                if column.is_constant():
-                    result.append(column._constant_resized(m))
-                else:
-                    result.append(gathered[next].copy())
-                    next += 1
-            return result^
-    # List and struct columns gather through their own take; the payload
-    # scatter below only knows fixed-width and string buffers.
-    for column in columns:
-        if column.dtype().is_nested():
-            var gathered = List[Series](capacity=len(columns))
-            for c in columns:
-                gathered.append(
-                    c.take_or_null(indices) if or_null else c.take(indices)
-                )
-            return gathered^
-    var contiguous = List[Series](capacity=len(columns))
-    var rechunk = List[_RechunkJob]()
-    var positions = List[Int]()
-    for c in range(len(columns)):
-        contiguous.append(columns[c].copy())
-        if columns[c].is_chunked():
-            positions.append(c)
-            rechunk.append(_RechunkJob(columns[c]))
-    if len(rechunk) > 0:
-        if len(rechunk) == 1:
-            rechunk[0].run()
-        else:
-            run_jobs(rechunk)
-        while len(rechunk) > 0:
-            contiguous[positions.pop(0)] = rechunk.pop(0).into_result()
-        return take_parallel(contiguous, indices^, workers, or_null)
-    var m = len(indices)
-    var active_workers = task_count(m, workers)
-    var nonnullable_fixed = 0
-    if or_null and active_workers < workers:
+                if (
+                    not column._data.isa[StringColumn]()
+                    and column.null_count() == 0
+                ):
+                    nonnullable_fixed += 1
+        # A shared bitmap amortizes the index scan when several fixed-width
+        # columns would otherwise write the same null-extension bits.
+        self.share_validity = nonnullable_fixed >= 3
+        var common_bits = List[UInt8]()
+        if self.share_validity:
+            common_bits = List[UInt8](length=(m + 7) // 8, fill=0)
+            ref rows = self.indices[]
+            for i in range(m):
+                if rows[i] >= 0:
+                    common_bits[i // 8] |= UInt8(1) << UInt8(i % 8)
+        self.shared_bits = _Buffer(common_bits^)
+        var bounds = partitions(m, self.active, 8)
+        # Preallocate each fixed-width output; strings are assembled from
+        # pieces.
         for column in columns:
-            if (
-                not column._data.isa[StringColumn]()
-                and column.null_count() == 0
-            ):
-                nonnullable_fixed += 1
-    # A shared bitmap amortizes the index scan when several fixed-width
-    # columns would otherwise write the same null-extension bits.
-    var share_validity = nonnullable_fixed >= 3
-    var shared = ArcPointer(indices^)
-    var common_bits = List[UInt8]()
-    if share_validity:
-        common_bits = List[UInt8](length=(m + 7) // 8, fill=0)
-        for i in range(m):
-            if shared[][i] >= 0:
-                common_bits[i // 8] |= UInt8(1) << UInt8(i % 8)
-    var shared_bits = _Buffer(common_bits^)
-    var bounds = partitions(m, active_workers, 8)
-    # Preallocate each fixed-width output; strings are assembled from pieces.
-    var outputs = List[Series](capacity=len(columns))
-    var bits = List[List[UInt8]](capacity=len(columns))
-    var skip_validity = List[Bool](capacity=len(columns))
-    for column in columns:
-        # An absent output bitmap means every gathered row is valid. Check
-        # once per column instead of reading and writing validity per row.
-        var source_all_valid = column.null_count() == 0
-        skip_validity.append(source_all_valid)
-        var needs_own_bits = not source_all_valid or (
-            or_null and not share_validity
-        )
-        bits.append(
-            List[UInt8](
-                length=(m + 7) // 8, fill=0
-            ) if needs_own_bits else List[UInt8]()
-        )
-        outputs.append(_allocate(column, m))
-    var jobs = List[_GatherJob](capacity=len(columns) * active_workers)
-    for c in range(len(columns)):
-        var values = _payload_address(outputs[c])
-        for w in range(active_workers):
-            jobs.append(
-                _GatherJob(
-                    columns[c],
-                    shared,
-                    bounds[w],
-                    bounds[w + 1],
-                    values,
-                    Int(bits[c].unsafe_ptr()),
-                    or_null,
-                    skip_validity[c],
-                    share_validity and skip_validity[c],
-                )
+            # An absent output bitmap means every gathered row is valid.
+            # Check once per column instead of reading and writing
+            # validity per row.
+            var source_all_valid = column.null_count() == 0
+            self.skip_validity.append(source_all_valid)
+            var needs_own_bits = not source_all_valid or (
+                self.or_null and not self.share_validity
             )
-    if active_workers == 1:
-        # Rows for one task at most: every column gathers on this thread.
-        for j in range(len(jobs)):
-            jobs[j].run()
-    else:
-        run_jobs(jobs)
-    var result = List[Series](capacity=len(columns))
-    for c in range(len(columns)):
-        if columns[c]._data.isa[StringColumn]():
-            # Keep each worker's gathered view as a physical chunk. Appending
-            # views here repeatedly copies the growing descriptor array.
-            var pieces = List[Series](capacity=active_workers)
-            for w in range(active_workers):
-                pieces.append(jobs[c * active_workers + w].piece.copy())
-            result.append(Series._from_chunks(pieces))
-            continue
-        var output = outputs[c].copy()
-        if share_validity and skip_validity[c]:
-            _set_shared_bits(output, shared_bits)
-        else:
-            _set_bits(output, bits[c].copy())
-        result.append(output^)
-    _ = bits^
-    _ = outputs^
-    return result^
+            self.bits.append(
+                List[UInt8](
+                    length=(m + 7) // 8, fill=0
+                ) if needs_own_bits else List[UInt8]()
+            )
+            self.outputs.append(_allocate(column, m))
+        for c in range(len(columns)):
+            var values = _payload_address(self.outputs[c])
+            for w in range(self.active):
+                self.jobs.append(
+                    _GatherJob(
+                        columns[c],
+                        self.indices,
+                        bounds[w],
+                        bounds[w + 1],
+                        values,
+                        Int(self.bits[c].unsafe_ptr()),
+                        self.or_null,
+                        self.skip_validity[c],
+                        self.share_validity and self.skip_validity[c],
+                    )
+                )
+        self.stage = _GATHER_ROWS
+        if len(columns) == 0:
+            self._finish_rows()
+            return 0
+        return self.active
+
+    def _finish_rows(mut self) raises:
+        var result = List[Series](capacity=len(self.gathered))
+        for c in range(len(self.gathered)):
+            if self.gathered[c]._data.isa[StringColumn]():
+                # Keep each task's gathered view as a physical chunk.
+                # Appending views here repeatedly copies the growing
+                # descriptor array.
+                var pieces = List[Series](capacity=self.active)
+                for w in range(self.active):
+                    pieces.append(self.jobs[c * self.active + w].piece.copy())
+                result.append(Series._from_chunks(pieces))
+                continue
+            var output = self.outputs[c].copy()
+            if self.share_validity and self.skip_validity[c]:
+                _set_shared_bits(output, self.shared_bits)
+            else:
+                _set_bits(output, self.bits[c].copy())
+            result.append(output^)
+        self.jobs = List[_GatherJob]()
+        self.bits = List[List[UInt8]]()
+        self.outputs = List[Series]()
+        self.gathered = result^
+        self._finish()
+
+    def _finish(mut self):
+        var m = len(self.indices[])
+        var next = 0
+        for c in range(len(self.columns)):
+            if self.constant[c]:
+                self.result.append(self.columns[c]._constant_resized(m))
+            else:
+                self.result.append(self.gathered[next].copy())
+                next += 1
+        self.gathered = List[Series]()
+        self.stage = _GATHER_DONE
+
+    def take_result(mut self) -> List[Series]:
+        """The gathered columns, moved out once no round is left."""
+        var taken = List[Series]()
+        swap(taken, self.result)
+        return taken^
 
 
 def _allocate(column: Series, m: Int) raises -> Series:
