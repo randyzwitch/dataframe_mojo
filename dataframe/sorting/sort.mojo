@@ -233,7 +233,9 @@ comptime _SORT_MERGE = 3
 comptime _SORT_DONE = 4
 
 
-def _sink_task[W: Int, VAR: Bool](layout: Int, lo: Int, hi: Int) raises -> KeyBlock:
+def _sink_task[
+    W: Int, VAR: Bool
+](layout: Int, lo: Int, hi: Int) raises -> KeyBlock:
     """Rows [lo, hi) encoded and sorted into one run."""
     var job = _SinkRunJob[W, VAR](layout, lo, hi)
     job.run()
@@ -260,7 +262,9 @@ def _merge_task[
     start: Int,
 ) raises:
     """One partition of the merged order, written from `start`."""
-    var job = _MergePartitionJob[W, VAR](runs, begins, ends, info, output, start)
+    var job = _MergePartitionJob[W, VAR](
+        runs, begins, ends, info, output, start
+    )
     job.run()
 
 

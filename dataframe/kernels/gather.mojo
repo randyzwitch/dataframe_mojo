@@ -51,7 +51,7 @@ from dataframe.parallel import (
     task_count,
     worker_count,
 )
-from dataframe.series import Series
+from dataframe.series import ChunkMerge, Series
 from dataframe.storage.string import StringColumn
 from dataframe.trace import trace_path
 
@@ -815,8 +815,10 @@ comptime _GATHER_DONE = 3
 
 struct GatherRounds(Movable, Rounds):
     """`take_parallel` as rounds of tasks: chunked columns are first made
-    contiguous, one column a task; then each task gathers one range of
-    output rows of every column, writing straight into the outputs. A
+    contiguous, a fixed-width number column by ranges of its rows (each
+    a piece of the round), any other column whole; then each task
+    gathers one range of output rows of every column, writing straight
+    into the outputs. A
     constant column (unless `or_null`) is the same value over the gathered
     rows, and list and struct columns gather through their own take, so
     neither is gathered by the tasks. `take_result` once no round is
@@ -832,6 +834,11 @@ struct GatherRounds(Movable, Rounds):
     var constant: List[Bool]
     var gathered: List[Series]
     var chunked: List[Int]
+    # By chunked column: its merge by row ranges (none: rechunked whole);
+    # the round's pieces (chunked column, first row, end row; -1 for the
+    # whole column).
+    var merges: List[Optional[ChunkMerge]]
+    var pieces: List[Tuple[Int, Int, Int]]
     var width: Int
     # The second round's ranges, outputs and validity, and its jobs (by
     # gathered column, then by range).
@@ -859,6 +866,8 @@ struct GatherRounds(Movable, Rounds):
         self.constant = List[Bool]()
         self.gathered = List[Series]()
         self.chunked = List[Int]()
+        self.merges = List[Optional[ChunkMerge]]()
+        self.pieces = List[Tuple[Int, Int, Int]]()
         self.width = 0
         self.active = 0
         self.outputs = List[Series]()
@@ -893,13 +902,35 @@ struct GatherRounds(Movable, Rounds):
                     self._finish()
                     return 0
             for c in range(len(self.gathered)):
-                if self.gathered[c].is_chunked():
-                    self.chunked.append(c)
+                if not self.gathered[c].is_chunked():
+                    continue
+                var k = len(self.chunked)
+                self.chunked.append(c)
+                ref column = self.gathered[c]
+                var merge = ChunkMerge.of(column)
+                if merge:
+                    # Its rows split over the workers, as a column copied
+                    # on its own would split them.
+                    var n = len(column)
+                    var bounds = partitions(n, worker_count(n), 64)
+                    for w in range(len(bounds) - 1):
+                        if bounds[w] < bounds[w + 1]:
+                            self.pieces.append((k, bounds[w], bounds[w + 1]))
+                else:
+                    self.pieces.append((k, 0, -1))
+                self.merges.append(merge^)
             self.stage = _GATHER_RECHUNK
-            if len(self.chunked) > 0:
-                self.width = round_width(len(self.chunked))
+            if len(self.pieces) > 0:
+                self.width = round_width(len(self.pieces))
                 return self.width
         if self.stage == _GATHER_RECHUNK:
+            for k in range(len(self.chunked)):
+                if self.merges[k]:
+                    self.gathered[self.chunked[k]] = (
+                        self.merges[k].value().merged.copy()
+                    )
+            self.merges = List[Optional[ChunkMerge]]()
+            self.pieces = List[Tuple[Int, Int, Int]]()
             return self._start_rows()
         if self.stage == _GATHER_ROWS:
             self._finish_rows()
@@ -907,9 +938,14 @@ struct GatherRounds(Movable, Rounds):
 
     def round_task(mut self, task: Int) raises:
         if self.stage == _GATHER_RECHUNK:
-            for k in range(task, len(self.chunked), self.width):
-                var c = self.chunked[k]
-                self.gathered[c] = self.gathered[c].rechunk()
+            for p in range(task, len(self.pieces), self.width):
+                var piece = self.pieces[p]
+                var k = piece[0]
+                if self.merges[k]:
+                    self.merges[k].value().copy_rows(piece[1], piece[2])
+                else:
+                    var c = self.chunked[k]
+                    self.gathered[c] = self.gathered[c].rechunk()
         elif self.stage == _GATHER_ROWS:
             for c in range(len(self.gathered)):
                 self.jobs[c * self.active + task].run()
