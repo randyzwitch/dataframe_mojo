@@ -98,6 +98,19 @@ from the repository root with `pixi run -e native build-dfparquet`.
 
 ## Use it in your own Mojo project
 
+For the development version, add this repository as a Git dependency in a
+fresh Pixi workspace with the `pixi-build` preview enabled. Include the
+`https://conda.modular.com/max-nightly`, `https://conda.modular.com/max`,
+`conda-forge` and `https://prefix.dev/pixi-build-backends` channels.
+
+```bash
+pixi add --git https://github.com/randyzwitch/dataframe_mojo.git --branch main dataframe_mojo
+pixi run mojo run sales.mojo
+```
+
+The package installs the CPU provider on Linux and the Metal provider on
+Apple silicon. Pixi records the resolved revision in the consumer's lockfile.
+
 The v0.3.0 Pixi Git dependency omits a required provider. From the tagged
 checkout, run `pixi run package` to build the dataframe and its platform
 provider together in `dist/`. Then run your app from the same environment

@@ -34,6 +34,11 @@ def main() -> None:
         fail(f"pixi.toml versions disagree: {versions[0]} vs {versions[1]}")
     version = versions[0]
 
+    # The Git dependency gets its distributed version from the Rattler recipe.
+    recipe = (ROOT / "recipe/recipe.yaml").read_text()
+    if not re.search(rf'^  version: "{re.escape(version)}"$', recipe, re.MULTILINE):
+        fail(f"recipe/recipe.yaml package version must match {version}")
+
     # Install snippets must point at this version's tag, or consumers follow
     # the README to a tag that does not exist.
     expected = f"v{version}"

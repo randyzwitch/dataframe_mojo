@@ -28,7 +28,7 @@ def default_provider() -> str:
     return "metal" if mac else "cpu"
 
 
-def build(output: Path, provider: str) -> None:
+def build(output: Path, provider: str, *, modules_only: bool = False) -> None:
     compiler = subprocess.check_output(["mojo", "--version"], text=True).strip()
     identity = cpu_build_id(ROOT, compiler)
     metal_identity = (
@@ -75,6 +75,8 @@ def build(output: Path, provider: str) -> None:
             (output / f"{package}.mojoc.tmp").replace(
                 output / f"{package}.mojoc"
             )
+    if modules_only:
+        return
     (output / "cpu-build.json").write_text(
         json.dumps({"cpu_build_id": identity, "mojo": compiler}, indent=2)
         + "\n"
@@ -140,5 +142,9 @@ if __name__ == "__main__":
         default=default_provider(),
         help="override the platform's provider (testing only)",
     )
+    parser.add_argument(
+        "--modules-only", action="store_true",
+        help="install the importable modules without standalone build metadata",
+    )
     args = parser.parse_args()
-    build(args.output.resolve(), args.provider)
+    build(args.output.resolve(), args.provider, modules_only=args.modules_only)
