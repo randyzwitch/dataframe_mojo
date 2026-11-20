@@ -1,5 +1,6 @@
 """One queue of native reductions over the CPU schedule's retained batches."""
-from std.memory import bitcast, ArcPointer
+from std.ffi import external_call
+from std.memory import bitcast, ArcPointer, Pointer
 from dataframe.execution_observation import DeviceObservation
 from std.time import perf_counter_ns
 from max.gpu.host import DeviceBuffer
@@ -35,6 +36,27 @@ from .accelerator.gpu.query_scope import (
 )
 from .accelerator.gpu.typed_storage import _NativeReservation
 from .accelerator.gpu.target import METAL_TARGET
+
+
+struct _IndexPages(Movable):
+    # Metal borrows these pages until the queued reductions have finished.
+    var address: Int
+
+    def __init__(out self, size: Int, alignment: Int) raises:
+        var address = 0
+        if (
+            size
+            and external_call["posix_memalign", Int32](
+                Pointer(to=address), alignment, size
+            )
+            != 0
+        ):
+            raise Error("Could not allocate shared Metal selection indices")
+        self.address = address
+
+    def __deinit__(deinit self):
+        if self.address:
+            external_call["free", NoneType](self.address)
 
 
 struct _Total(Movable):
@@ -319,12 +341,18 @@ def _execute_selection_validated(
             checked_mul(state_count + bin_count, 8),
             checked_mul(special_count, 4),
         )
+        var page = Int(external_call["getpagesize", Int32]())
+        var index_bytes = (
+            checked_add(checked_mul(inputs.selection_count, 4), page - 1)
+            // page
+            * page
+        )
         var input_bytes = checked_add(
-            checked_mul(max(1, len(inputs.selections)), 4),
+            max(index_bytes, 4),
             checked_mul(len(inputs.descriptors), 8),
         )
         var host_input_bytes = checked_add(
-            checked_mul(inputs.selections.capacity(), 4),
+            inputs.selection_layout_bytes(),
             checked_mul(inputs.descriptors.capacity(), 8),
         )
         var reservations = List[_NativeReservation]()
@@ -351,9 +379,19 @@ def _execute_selection_validated(
                             inputs.owners[o], scope, empty, reservations
                         )
                     )
-        var selections = ctx.enqueue_create_buffer[DType.uint32](
-            max(1, len(inputs.selections))
-        )
+        var pages = _IndexPages(index_bytes, page)
+        var selections: DeviceBuffer[DType.uint32]
+        if index_bytes:
+            var dest = Pointer[UInt32, MutAnyOrigin](
+                unsafe_from_address=pages.address
+            )
+            inputs.fill_selections(batches, dest)
+            selections = ctx.wrap_host_memory[DType.uint32](
+                dest, index_bytes // 4
+            )
+        else:
+            # Identity and constant segments never dereference this argument.
+            selections = ctx.enqueue_create_buffer[DType.uint32](1)
         var descriptors = ctx.enqueue_create_buffer[DType.uint64](
             len(inputs.descriptors)
         )
@@ -366,12 +404,8 @@ def _execute_selection_validated(
         timings.upload_ns += Int(perf_counter_ns()) - started
         started = Int(perf_counter_ns())
         try:
-            if len(inputs.selections):
-                ctx.enqueue_copy(selections, inputs.selections.unsafe_ptr())
             ctx.enqueue_copy(descriptors, inputs.descriptors.unsafe_ptr())
-            scope.record_upload(
-                len(inputs.selections) * 4 + len(inputs.descriptors) * 8
-            )
+            scope.record_upload(len(inputs.descriptors) * 8)
             ctx.enqueue_memset(states, Int64(-1))
             for group_index in range(len(inputs.groups)):
                 ref group = inputs.groups[group_index]
@@ -403,7 +437,7 @@ def _execute_selection_validated(
                 pass
             _ = (host^, host_bins^, host_specials^)
             _ = (selections^, descriptors^, states^, bins^, specials^)
-            _ = (views^, empty^, inputs^, reservations^)
+            _ = (pages^, views^, empty^, inputs^, reservations^)
             raise error^
         timings.kernel_ns = Int(perf_counter_ns()) - started
         started = Int(perf_counter_ns())
@@ -443,7 +477,7 @@ def _execute_selection_validated(
         # The source columns, selection arrays and reservations outlive the
         # last device read on both the normal and failed paths.
         _ = (selections^, descriptors^, states^, bins^, specials^)
-        _ = (views^, empty^, inputs^, reservations^)
+        _ = (pages^, views^, empty^, inputs^, reservations^)
         var result = _finish(plan, totals)
         timings.finish_ns = Int(perf_counter_ns()) - started
         scope.mark_success()

@@ -1,6 +1,6 @@
 """Coalesce retained batches by source owner without gathering their values."""
 from std.collections import Dict
-from std.memory import Pointer
+from std.memory import MutPointer, Pointer, unsafe_memcpy
 from std.ffi import external_call
 from std.sys import size_of
 from max.gpu.host import DeviceBuffer
@@ -43,7 +43,8 @@ struct SelectionInputs(Movable):
     var owners: List[Series]
     var tags: List[Int]
     var groups: List[SelectionGroup]
-    var selections: List[UInt32]
+    var selection_count: Int
+    var _selection_lists: List[Tuple[Int, Int]]
     var descriptors: List[UInt64]
     var partials: Int
 
@@ -51,9 +52,33 @@ struct SelectionInputs(Movable):
         self.owners = List[Series]()
         self.tags = List[Int]()
         self.groups = List[SelectionGroup]()
-        self.selections = List[UInt32]()
+        self.selection_count = 0
+        self._selection_lists = List[Tuple[Int, Int]]()
         self.descriptors = List[UInt64]()
         self.partials = 0
+
+    def selection_layout_bytes(self) raises -> Int:
+        return checked_mul(
+            self._selection_lists.capacity(), size_of[Tuple[Int, Int]]()
+        )
+
+    def fill_selections(
+        self, batches: SelectionBatches, destination: MutPointer[UInt32, _]
+    ):
+        """Copy from the batches used to build this layout.
+
+        The destination must have room for `selection_count` elements and
+        must not overlap their source row lists.
+        """
+        var offset = 0
+        for source in self._selection_lists:
+            ref rows = batches.batches[source[0]].rows[source[1]]
+            unsafe_memcpy(
+                dest=destination.unsafe_offset(offset),
+                src=rows.unsafe_ptr(),
+                count=len(rows),
+            )
+            offset += len(rows)
 
 
 def _owner[
@@ -169,9 +194,11 @@ def _validated_selection_inputs(
                 selection = UInt64.MAX - 1
             elif list >= 0:
                 if selections[list] < 0:
-                    selections[list] = len(result.selections)
-                    for row in batch.rows[list]:
-                        result.selections.append(row)
+                    selections[list] = result.selection_count
+                    result.selection_count = checked_add(
+                        result.selection_count, batch.count
+                    )
+                    result._selection_lists.append((batch_index, list))
                 selection = UInt64(selections[list])
             var key = (field, source[0])
             var found = groups.get(key)
