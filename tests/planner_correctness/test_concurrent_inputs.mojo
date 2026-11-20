@@ -836,3 +836,46 @@ def test_a_sort_runs_as_rounds_of_the_schedule() raises:
     assert_equal(lazy.columns(), eager.columns())
     for name in eager.columns():
         assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
+
+
+def test_ranks_over_every_row_run_as_rounds_of_the_schedule() raises:
+    """A projection of ranks over all rows, computed as an input of the
+    query's schedule, runs as rounds of tasks of that schedule: the sort,
+    peer boundaries, range summaries and ranks written. No task starts
+    parallel work of its own, and the ranks equal the eager ones for
+    every method, both directions, with nulls."""
+    var frame = source().with_row_index("row")
+    var keep = col("row") >= lit(Int64(0))
+    var exprs: List[Expr] = [
+        col("row"),
+        col("v").rank("min").alias("min"),
+        col("v").rank("dense", descending=True).alias("dense"),
+        col("v").rank("ordinal").alias("ordinal"),
+        col("k").rank("average").alias("average"),
+        col("s").rank("max", descending=True).alias("max"),
+    ]
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var lazy = (
+        frame.lazy()
+        .select_exprs(exprs)
+        .filter(keep)
+        .collect(optimize=False)
+        .sort("row")
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "window.rank_rounds" in paths, "the ranks did not run as rounds"
+    )
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    var eager = frame.select_exprs(exprs)
+    assert_equal(lazy.columns(), eager.columns())
+    for name in eager.columns():
+        assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
