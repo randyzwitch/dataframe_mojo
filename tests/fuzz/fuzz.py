@@ -794,7 +794,11 @@ class Gen:
             if p is not None and is_numeric(t):
                 base = ("when", p, base, ("null", t))
         fns = ["count", "n_unique", "null_count", "elen"]
-        if is_numeric(t) or t == "decimal[10,2]":
+        if t == "float32":
+            # Our float32 mean, median, std and var are Float64 (documented),
+            # which later steps would type differently from Polars.
+            fns += ["sum", "min", "max"]
+        elif is_numeric(t) or t == "decimal[10,2]":
             fns += ["sum", "mean", "min", "max", "std", "var", "median"]
         elif t in ("string", "date", "datetime", "categorical"):
             fns += ["min", "max"]
@@ -806,7 +810,7 @@ class Gen:
                 fns += ["arg_min", "arg_max"]
         f = r.choice(fns)
         if f in ("std", "var"):
-            e = (f, base, r.choice([0, 1]))
+            e = (f, base, 1)
         elif f == "len_rows":
             e = ("len",)
         else:
@@ -1010,6 +1014,27 @@ def fix_unique_order(plan, ordered):
     return ordered
 
 
+def join_rows(p, srcs):
+    """The rows a join step would produce, counted from its inputs' key
+    frequencies, so the generator never materializes a huge join."""
+    if p[0] not in ("join", "cross"):
+        return 0
+    left = to_pl_plan(p[1], srcs)
+    right = to_pl_plan(p[2], srcs)
+    if p[0] == "cross":
+        n = left.select(pl.len()).collect().item()
+        m = right.select(pl.len()).collect().item()
+        return n * m
+    lk, rk = list(p[3][1:]), list(p[4][1:])
+    lc = left.group_by(lk).agg(pl.len().alias("_l"))
+    rc = right.group_by(rk).agg(pl.len().alias("_r"))
+    pairs = lc.join(rc, left_on=lk, right_on=rk, how="inner")
+    total = pairs.select((pl.col("_l").cast(pl.Int64) * pl.col("_r")).sum()).collect().item()
+    n = left.select(pl.len()).collect().item()
+    m = right.select(pl.len()).collect().item()
+    return (total or 0) + n + m
+
+
 def gen_case(rng):
     """A random case: tables, formats and a validated plan."""
     ntables = rng.choice([1, 1, 2, 2, 3])
@@ -1050,6 +1075,8 @@ def gen_case(rng):
             new_plan, new_ordered = got
             if new_plan[0] == "unique" and new_ordered is None:
                 new_ordered = new_plan[4]
+            if join_rows(new_plan, srcs) > MAX_ROWS:
+                continue
             try:
                 result = to_pl_plan(new_plan, srcs).collect()
             except Exception:
@@ -1137,8 +1164,14 @@ def run_driver(case_file, out_dir, threads, timeout=120):
         for f in out_dir.glob("*"):
             f.unlink()
         try:
+            cmd = [str(driver_path()), str(case_file), str(out_dir)] + remaining
+            cap = os.environ.get("FUZZ_MEMORY_MAX", "8G")
+            if cap and shutil.which("systemd-run"):
+                # One runaway case must not take the machine's memory.
+                cmd = ["systemd-run", "--user", "--scope", "-q", "-p",
+                       f"MemoryMax={cap}", "-p", "MemorySwapMax=0", "--"] + cmd
             proc = subprocess.run(
-                [str(driver_path()), str(case_file), str(out_dir)] + remaining,
+                cmd,
                 env=env,
                 capture_output=True,
                 timeout=timeout,
@@ -1675,10 +1708,13 @@ def run(args):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     rng = random.Random(args.seed)
-    jobs = [(n, rng.randrange(1 << 30), args) for n in range(args.cases)]
+    if args.seeds:
+        jobs = [(n, seed, args) for n, seed in enumerate(args.seeds)]
+    else:
+        jobs = [(n, rng.randrange(1 << 30), args) for n in range(args.cases)]
     stats = {"cases": 0, "pass": 0, "fail": 0, "oracle-error": 0, "skipped": 0}
     buckets = {}
-    to_shrink = []
+    saved = {}
     log = open(out / "log.txt", "a")
     t0 = time.time()
     with mp.get_context("fork").Pool(args.jobs) as pool:
@@ -1694,11 +1730,12 @@ def run(args):
             log.write(f"[{n}] seed {seed}: {b}\n")
             log.flush()
             if buckets[b] <= args.max_per_bucket:
-                to_shrink.append((case, failures, expected, seed, args))
-        saved = {}
-        for seed, b in pool.imap_unordered(shrink_job, to_shrink):
-            saved[f"seed{seed}"] = b
-            print(f"saved seed{seed}: {b}", flush=True)
+                # Shrink now, so a run that stops early keeps what it found.
+                seed, small = shrink_job((case, failures, expected, seed, args))
+                saved[f"seed{seed}"] = small
+                print(f"saved seed{seed}: {small}", flush=True)
+                log.write(f"saved seed{seed}: {small}\n")
+                log.flush()
     for d in out.glob("work*"):
         shutil.rmtree(d, ignore_errors=True)
     summary = {
@@ -1734,6 +1771,7 @@ def main():
     r.add_argument("--seed", type=int, default=1)
     r.add_argument("--out", default=str(ROOT / "build/fuzz"))
     r.add_argument("--threads", type=int, nargs="+", default=[1, 8])
+    r.add_argument("--seeds", type=int, nargs="+", help="check these case seeds (from a log) instead of new ones")
     r.add_argument("--jobs", type=int, default=1, help="cases checked at once (each runs the driver)")
     r.add_argument("--no-shrink", dest="shrink", action="store_false")
     r.add_argument("--shrink-budget", type=int, default=300)

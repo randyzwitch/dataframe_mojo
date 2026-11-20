@@ -48,6 +48,15 @@ the oracle is adjusted, or the error is allowed:
   widths and categorical-versus-string are not.
 - String functions on a categorical read its labels; the oracle casts to
   String first.
+- Mean, median, std and var of Float32 are Float64 here; the generator does
+  not build them on Float32 columns, so later steps type alike.
+- Polars' lazy engine gives a grouped `var`/`std` with `ddof=0` of an
+  all-null group as 0.0 (its eager engine and DuckDB give null, as we do),
+  so the generator uses `ddof=1`.
+
+Each driver run is capped at 8 GB (`FUZZ_MEMORY_MAX`, through
+`systemd-run --user`), and the generator never builds a join step whose
+result, counted from key frequencies, passes 600,000 rows.
 
 ## Running
 
@@ -59,7 +68,8 @@ pixi run -e oracle fuzz-build
 pixi run -e oracle fuzz --cases 500 --seed 1
 ```
 
-Options: `--threads 1 8` (thread counts to run), `--no-shrink`,
+Options: `--threads 1 8` (thread counts to run), `--seeds N ...` (rerun
+case seeds from a log), `--jobs N` (cases at once; default 1), `--no-shrink`,
 `--shrink-budget N`, `--max-per-bucket N` (how many failures of one kind to
 shrink and save), `--out DIR` (default `build/fuzz`). A summary of failure
 kinds goes to `build/fuzz/summary.json`.
