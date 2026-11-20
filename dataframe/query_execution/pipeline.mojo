@@ -123,6 +123,7 @@ from dataframe.planning.inputs import (
     BuildFinish,
     finish_build,
 )
+from dataframe.query_execution.sort_sink import SortSink
 from dataframe.optimizer.expressions import shared_partition_keys
 from dataframe.query_execution.window_sink import (
     WindowSink,
@@ -1456,7 +1457,9 @@ struct _OperatorPipeline(Movable):
     A projection whose windows all partition by some shared keys runs in
     its finish instead (`WindowSink`): its one task computes its input,
     and the finish splits the rows by those keys and evaluates the bins
-    as rounds of tasks, before any table is made from the result."""
+    as rounds of tasks, before any table is made from the result. A sort
+    of every row does too (`SortSink`): the finish sorts the keys and
+    gathers the rows in rounds."""
 
     var plan: QueryContext
     var index: Int
@@ -1480,6 +1483,10 @@ struct _OperatorPipeline(Movable):
     # and when its task started.
     var window_keys: List[String]
     var window: List[WindowSink]
+    # Whether it is a sort of every row that runs as a `SortSink`, and the
+    # sink while its rounds run.
+    var sorts: Bool
+    var sorting: List[SortSink]
     var began: Int
 
     def __init__(
@@ -1513,6 +1520,8 @@ struct _OperatorPipeline(Movable):
         self.filling = False
         self.window_keys = List[String]()
         self.window = List[WindowSink]()
+        self.sorts = False
+        self.sorting = List[SortSink]()
         self.began = 0
         ref node = self.plan._nodes[index]
         if (
@@ -1521,6 +1530,12 @@ struct _OperatorPipeline(Movable):
             and (node.kind == SELECT or node.kind == WITH_COLUMNS)
         ):
             self.window_keys = shared_partition_keys(node.exprs)
+        self.sorts = (
+            streaming
+            and self.plan._handoff == HANDOFF_OFF
+            and node.kind == SORT
+            and node.sort_limit() < 0
+        )
 
     def execute(mut self) raises:
         if len(self.wanted) > 0:
@@ -1546,6 +1561,28 @@ struct _OperatorPipeline(Movable):
                 )
             )
             return
+        if self.sorts:
+            ref node = self.plan._nodes[self.index]
+            self.began = Int(perf_counter_ns())
+            var input = self.plan._execute(
+                node.left, False, self.streaming, self.batch_size
+            )
+            var descending = List[Bool]()
+            var nulls_last = List[Bool]()
+            for i in range(len(node.sort_keys())):
+                descending.append(node.sort_descending(i))
+                nulls_last.append(node.sort_nulls_last(i))
+            trace_path("sort.rounds")
+            self.sorting.append(
+                SortSink(
+                    input^,
+                    node.sort_keys(),
+                    descending,
+                    nulls_last,
+                    node.maintain_order,
+                )
+            )
+            return
         self.result = self.plan._execute(
             self.index, False, self.streaming, self.batch_size
         )
@@ -1554,7 +1591,7 @@ struct _OperatorPipeline(Movable):
         """A build side's table from the result, then its fill, as
         rounds of finalize tasks (`finalize_tasks`); a window sink's
         rounds come first, and the table is made from their result."""
-        if len(self.window) > 0:
+        if len(self.window) > 0 or len(self.sorting) > 0:
             return
         if len(self.build.keys) > 0:
             self.building.append(
@@ -1572,7 +1609,8 @@ struct _OperatorPipeline(Movable):
     def max_finalize_tasks(self) -> Int:
         return (
             configured_workers() if len(self.build.keys) > 0
-            or len(self.window_keys) > 0 else 0
+            or len(self.window_keys) > 0
+            or self.sorts else 0
         )
 
     def finalize_tasks(mut self) raises -> Int:
@@ -1588,6 +1626,21 @@ struct _OperatorPipeline(Movable):
                 self.index,
                 "window",
                 rows,
+                self.result.height(),
+                wall_ns=Int(perf_counter_ns()) - self.began,
+            )
+            self.finalize()
+        if len(self.sorting) > 0:
+            var tasks = self.sorting[0].next_round()
+            if tasks > 0:
+                return tasks
+            self.result = self.sorting[0].take_result()
+            _ = self.sorting.pop()
+            plan_record(
+                self.plan,
+                self.index,
+                "sort",
+                self.result.height(),
                 self.result.height(),
                 wall_ns=Int(perf_counter_ns()) - self.began,
             )
@@ -1609,6 +1662,8 @@ struct _OperatorPipeline(Movable):
     def finalize_task(mut self, task: Int) raises:
         if len(self.window) > 0:
             self.window[0].round_task(task)
+        elif len(self.sorting) > 0:
+            self.sorting[0].round_task(task)
         elif len(self.building) > 0:
             self.building[0].round_task(task)
         else:
