@@ -592,6 +592,11 @@ struct Pool(Movable):
         """
         if len(jobs) == 0:
             return
+        if len(jobs) > 1 and in_shared_task():
+            # One task's share of a schedule's event: the jobs run here.
+            for j in range(len(jobs)):
+                jobs[j].run()
+            return
         if len(jobs) > 1:
             _trace_nested[J]()
         if self.address == 0 and self._on_crew > 1:

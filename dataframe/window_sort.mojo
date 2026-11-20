@@ -1363,28 +1363,15 @@ def _window_layout(
             _ = flags^
             return layout^
     elif len(order_keys) > 0:
-        # No partition keys: one group, sorted on every thread; peers are marked
-        # in parallel ranges, reading the keys through the sorted order.
-        order = sort_key_rows(order_keys, descending, nulls_last, stable)
-        var keys = List[Series](capacity=len(order_keys))
-        for key in order_keys:
-            keys.append(key.rechunk() if key.is_chunked() else key.copy())
-        var ranges = partitions(height, workers, STANDARD_VECTOR_SIZE)
-        var jobs = List[_MaskJob](capacity=workers)
-        for w in range(workers):
-            if ranges[w + 1] > ranges[w]:
-                jobs.append(
-                    _MaskJob(
-                        keys,
-                        ranges[w],
-                        ranges[w + 1],
-                        Int(flags.unsafe_ptr()),
-                        Int(order.unsafe_ptr()),
-                    )
-                )
-        run_jobs(jobs)
-        flags[0] = PARTITION_START | PEER_START
-        bounds.append(0)
+        # No partition keys: one group, sorted on every thread, its peers
+        # and boundaries marked over ranges of sorted positions.
+        var rounds = LayoutRounds(
+            order_keys, descending, nulls_last, height, stable, inverse
+        )
+        run_rounds(rounds)
+        _ = order^
+        _ = flags^
+        return rounds.take_layout()
     else:
         # No keys at all: input order, one partition of peers.
         for k in range(height):
@@ -1477,6 +1464,145 @@ struct _FinishJob(Job):
         )
         for k in range(self.lo, self.hi):
             inverse[unsafe_offset=order[unsafe_offset=k]] = k
+
+
+# The stages of a `LayoutRounds`: the round that ran last.
+comptime _LAYOUT_SORT = 0
+comptime _LAYOUT_MASK = 1
+comptime _LAYOUT_STARTS = 2
+comptime _LAYOUT_INVERSE = 3
+comptime _LAYOUT_DONE = 4
+
+
+struct LayoutRounds(Movable, Rounds):
+    """The `WindowLayout` of rows that form one partition, ordered by
+    order keys, as rounds of tasks: the sort (`SortRounds`), a round
+    marking peer boundaries over ranges of sorted positions, a round
+    finding the partition starts of each range and whether the order is
+    the identity there, and, unless it is the identity everywhere, a round
+    writing each row's sorted position. Each round needs only the one
+    before it, so the rounds can run as tasks of a query's schedule or,
+    with `run_rounds`, as jobs. `take_layout` once no round is left."""
+
+    var keys: List[Series]
+    var rows: Int
+    var inverse: Bool
+    var sort: List[SortRounds]
+    var stage: Int
+    var order: List[Int]
+    var flags: List[UInt8]
+    # The ranges of sorted positions the marking and finishing rounds
+    # split into (ranges + 1 entries).
+    var bounds: List[Int]
+    var finish: List[_FinishJob]
+    var layout: WindowLayout
+
+    def __init__(
+        out self,
+        order_keys: List[Series],
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        rows: Int,
+        stable: Bool = True,
+        inverse: Bool = True,
+    ) raises:
+        """The layout of `rows` rows ordered by `order_keys` (at least
+        one); rows with equal keys keep input order when `stable`.
+        Without `inverse`, rows' sorted positions are not recorded."""
+        self.keys = List[Series](capacity=len(order_keys))
+        for key in order_keys:
+            self.keys.append(key.rechunk() if key.is_chunked() else key.copy())
+        self.rows = rows
+        self.inverse = inverse
+        self.sort = List[SortRounds]()
+        self.stage = _LAYOUT_SORT
+        self.order = List[Int]()
+        self.flags = List[UInt8]()
+        self.bounds = List[Int]()
+        self.finish = List[_FinishJob]()
+        self.layout = WindowLayout()
+        self.layout.group_parts.append(0)
+        if rows == 0:
+            self.layout.starts.append(0)
+            self.stage = _LAYOUT_DONE
+            return
+        self.sort.append(SortRounds(self.keys, descending, nulls_last, stable))
+
+    def next_round(mut self) raises -> Int:
+        if self.stage == _LAYOUT_SORT:
+            var tasks = self.sort[0].next_round()
+            if tasks > 0:
+                return tasks
+            self.order = self.sort[0].take_order()
+            _ = self.sort.pop()
+            self.flags = huge_uninit[UInt8](self.rows)
+            var ranges = partitions(
+                self.rows, configured_workers(), STANDARD_VECTOR_SIZE
+            )
+            self.bounds.append(0)
+            for w in range(len(ranges) - 1):
+                if ranges[w + 1] > ranges[w]:
+                    self.bounds.append(ranges[w + 1])
+            self.stage = _LAYOUT_MASK
+            return len(self.bounds) - 1
+        if self.stage == _LAYOUT_MASK:
+            self.flags[0] = PARTITION_START | PEER_START
+            for r in range(len(self.bounds) - 1):
+                self.finish.append(
+                    _FinishJob(
+                        Int(self.flags.unsafe_ptr()),
+                        Int(self.order.unsafe_ptr()),
+                        self.bounds[r],
+                        self.bounds[r + 1],
+                    )
+                )
+            self.stage = _LAYOUT_STARTS
+            return len(self.finish)
+        if self.stage == _LAYOUT_STARTS:
+            ref layout = self.layout
+            layout.in_place = True
+            for j in range(len(self.finish)):
+                layout.in_place = layout.in_place and self.finish[j].in_place
+                layout.starts.extend(Span(self.finish[j].starts))
+            layout.count = len(layout.starts)
+            layout.starts.append(self.rows)
+            layout.group_parts.append(layout.count)
+            if self.inverse and not layout.in_place:
+                # Each row's sorted position, to put row results back in
+                # order.
+                layout.inverse = huge_uninit[Int](self.rows)
+                for j in range(len(self.finish)):
+                    self.finish[j].inverse = Int(layout.inverse.unsafe_ptr())
+                self.stage = _LAYOUT_INVERSE
+                return len(self.finish)
+            self.stage = _LAYOUT_INVERSE
+        if self.stage == _LAYOUT_INVERSE:
+            self.finish = List[_FinishJob]()
+            swap(self.layout.order, self.order)
+            swap(self.layout.flags, self.flags)
+            self.stage = _LAYOUT_DONE
+        return 0
+
+    def round_task(mut self, task: Int) raises:
+        if self.stage == _LAYOUT_SORT:
+            self.sort[0].round_task(task)
+        elif self.stage == _LAYOUT_MASK:
+            var job = _MaskJob(
+                self.keys,
+                self.bounds[task],
+                self.bounds[task + 1],
+                Int(self.flags.unsafe_ptr()),
+                Int(self.order.unsafe_ptr()),
+            )
+            job.run()
+        else:
+            self.finish[task].run()
+
+    def take_layout(mut self) -> WindowLayout:
+        """The layout, moved out once no round is left."""
+        var taken = WindowLayout()
+        swap(taken, self.layout)
+        return taken^
 
 
 # Rank methods (rank()'s `method`).
