@@ -393,7 +393,8 @@ def to_pl_expr(e, types):
             a = a.cast(pl.String)
         return unary[op](a)
     if op == "round":
-        return E(1).round(e[2])
+        # Our round is half away from zero (documented).
+        return E(1).round(e[2], mode="half_away_from_zero")
     if op == "std":
         return E(1).std(e[2])
     if op == "var":
@@ -479,21 +480,6 @@ def expr_type(e, types):
     return None
 
 
-def nan_last_sort(lf, keys, desc, nulls_last, schema, maintain):
-    """Sort as our engine does: NaN after every number in both directions
-    (Polars puts NaN first when descending)."""
-    by, d, nl = [], [], []
-    for k, de, n in zip(keys, desc, nulls_last):
-        if spec_of(schema[k]) in FLOATS:
-            by.append(pl.col(k).is_nan())
-            d.append(False)
-            nl.append(n)
-        by.append(pl.col(k))
-        d.append(de)
-        nl.append(n)
-    return lf.sort(by, descending=d, nulls_last=nl, maintain_order=maintain)
-
-
 def to_pl_plan(p, srcs):
     """Translate a plan tree into a Polars LazyFrame. srcs are the input
     frames as Polars read them."""
@@ -528,8 +514,11 @@ def to_pl_plan(p, srcs):
     if op == "cross":
         return lf.join(to_pl_plan(p[2], srcs), how="cross")
     if op == "sort":
-        return nan_last_sort(
-            lf, list(p[2][1:]), list(p[3][1:]), list(p[4][1:]), schema, p[5]
+        return lf.sort(
+            list(p[2][1:]),
+            descending=list(p[3][1:]),
+            nulls_last=list(p[4][1:]),
+            maintain_order=p[5],
         )
     if op == "unique":
         subset = list(p[2][1:]) or None
@@ -541,7 +530,8 @@ def to_pl_plan(p, srcs):
     if op == "slice":
         return lf.slice(p[2], None if p[3] < 0 else p[3])
     if op == "explode":
-        return lf.explode(p[2])
+        # An empty list explodes to one null row here (documented).
+        return lf.explode(p[2], empty_as_null=True)
     if op == "drop_nulls":
         return lf.drop_nulls(list(p[2][1:]) or None)
     if op == "drop":
@@ -793,11 +783,11 @@ class Gen:
             return None
         c = r.choice(cs)
         t = self.schema[c]
+        base = ("col", c)
         if r.random() < 0.3 and is_numeric(t):
             n = self.numeric(1)
-            base = n[0] if n else ("col", c)
-        else:
-            base = ("col", c)
+            if n is not None:
+                base, t = n
         if r.random() < 0.15:
             p = self.predicate(2)
             # A filtered aggregate: sum over rows meeting a condition.
@@ -925,7 +915,8 @@ class PlanGen:
                 (a, b)
                 for a in schema
                 for b in rschema
-                if schema[a] == rschema[b] and is_key(schema[a]) and (schema[a] != "float64" or r.random() < 0.2)
+                if schema[a] == rschema[b] and is_key(schema[a])
+                and (a[0] in "kt") and (schema[a] != "float64" or r.random() < 0.2)
             ]
             if not pairs:
                 return None
@@ -1067,6 +1058,12 @@ def gen_case(rng):
             if result.width == 0 or result.height > MAX_ROWS:
                 continue
             new_schema = {k: spec_of(v) for k, v in result.schema.items()}
+            # Counts are UInt32 in Polars and Int64 here (a documented
+            # choice); expressions on them would mix types, so leave
+            # them untyped.
+            for k, v in result.schema.items():
+                if v == pl.UInt32 and k[0] in "ai":
+                    new_schema[k] = None
             plan, schema, ordered = new_plan, new_schema, new_ordered
             break
     case["plan"] = plan
@@ -1633,47 +1630,83 @@ def bucket(failures):
     return k
 
 
+def process(job):
+    """Generate, check and (when it fails) shrink one case. Runs in a
+    worker process with its own work directory."""
+    n, seed, args = job
+    out = Path(args.out)
+    work = out / f"work{os.getpid()}"
+    crng = random.Random(seed)
+    try:
+        case = gen_case(crng)
+    except Exception:
+        return n, seed, "skipped", None
+    failures, expected = evaluate(case, work, args.threads)
+    if failures and failures[0][0] == "oracle-error":
+        return n, seed, "oracle-error", None
+    if not failures:
+        return n, seed, "pass", None
+    return n, seed, "fail", (case, failures, expected)
+
+
+def shrink_and_save(case, failures, expected, seed, args):
+    out = Path(args.out)
+    work = out / f"work{os.getpid()}"
+    sig = signature(failures)
+    small = shrink(case, sig, work, args.shrink_budget) if args.shrink else case
+    small_failures, small_expected = evaluate(small, work, args.threads)
+    if not small_failures:
+        small, small_failures, small_expected = case, failures, expected
+    save_case(small, small_failures, small_expected, out / "failures" / f"seed{seed}")
+    return bucket(small_failures)
+
+
+def shrink_job(job):
+    case, failures, expected, seed, args = job
+    try:
+        return seed, shrink_and_save(case, failures, expected, seed, args)
+    except Exception as exc:
+        return seed, f"shrink failed: {exc}"
+
+
 def run(args):
+    import multiprocessing as mp
+
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    fail_dir = out / "failures"
-    work = out / "work"
     rng = random.Random(args.seed)
-    stats = {"cases": 0, "failed": 0, "oracle_error": 0}
+    jobs = [(n, rng.randrange(1 << 30), args) for n in range(args.cases)]
+    stats = {"cases": 0, "pass": 0, "fail": 0, "oracle-error": 0, "skipped": 0}
     buckets = {}
+    to_shrink = []
     log = open(out / "log.txt", "a")
     t0 = time.time()
-    for n in range(args.cases):
-        seed = rng.randrange(1 << 30)
-        crng = random.Random(seed)
-        try:
-            case = gen_case(crng)
-        except Exception:
-            traceback.print_exc(file=log)
-            continue
-        failures, expected = evaluate(case, work, args.threads)
-        stats["cases"] += 1
-        if failures and failures[0][0] == "oracle-error":
-            stats["oracle_error"] += 1
-            continue
-        if not failures:
-            continue
-        stats["failed"] += 1
-        b = bucket(failures)
-        buckets[b] = buckets.get(b, 0) + 1
-        print(f"[{n}] seed {seed}: {b}", flush=True)
-        log.write(f"[{n}] seed {seed}: {b}\n")
-        if buckets[b] > args.max_per_bucket:
-            continue
-        sig = signature(failures)
-        small = shrink(case, sig, work, args.shrink_budget) if args.shrink else case
-        small_failures, small_expected = evaluate(small, work, args.threads)
-        if not small_failures:
-            small, small_failures, small_expected = case, failures, expected
-        save_case(small, small_failures, small_expected, fail_dir / f"seed{seed}")
-        log.flush()
-    elapsed = time.time() - t0
-    summary = {"stats": stats, "buckets": buckets, "seconds": round(elapsed)}
+    with mp.get_context("fork").Pool(args.jobs) as pool:
+        for n, seed, status, payload in pool.imap_unordered(process, jobs):
+            stats[status] += 1
+            stats["cases"] += 1
+            if status != "fail":
+                continue
+            case, failures, expected = payload
+            b = bucket(failures)
+            buckets[b] = buckets.get(b, 0) + 1
+            print(f"[{n}] seed {seed}: {b}", flush=True)
+            log.write(f"[{n}] seed {seed}: {b}\n")
+            log.flush()
+            if buckets[b] <= args.max_per_bucket:
+                to_shrink.append((case, failures, expected, seed, args))
+        saved = {}
+        for seed, b in pool.imap_unordered(shrink_job, to_shrink):
+            saved[f"seed{seed}"] = b
+            print(f"saved seed{seed}: {b}", flush=True)
+    for d in out.glob("work*"):
+        shutil.rmtree(d, ignore_errors=True)
+    summary = {
+        "stats": stats,
+        "buckets": buckets,
+        "saved": saved,
+        "seconds": round(time.time() - t0),
+    }
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary, indent=1))
 
@@ -1701,6 +1734,7 @@ def main():
     r.add_argument("--seed", type=int, default=1)
     r.add_argument("--out", default=str(ROOT / "build/fuzz"))
     r.add_argument("--threads", type=int, nargs="+", default=[1, 8])
+    r.add_argument("--jobs", type=int, default=1, help="cases checked at once (each runs the driver)")
     r.add_argument("--no-shrink", dest="shrink", action="store_false")
     r.add_argument("--shrink-budget", type=int, default=300)
     r.add_argument("--max-per-bucket", type=int, default=3, help="shrink and save at most this many failures per bucket")

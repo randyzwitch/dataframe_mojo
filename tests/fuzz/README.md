@@ -39,8 +39,9 @@ the oracle is adjusted, or the error is allowed:
 
 - Float comparisons follow IEEE (NaN compares false, `NaN != NaN`); Polars
   orders NaN as the largest value. The oracle rewrites comparisons.
-- Sorting puts NaN after every number in both directions; Polars puts it
-  first when descending. The oracle sorts on `is_nan()` first.
+- `explode` gives one null row for an empty list; the oracle passes
+  `empty_as_null=True`.
+- `round` is half away from zero; the oracle asks Polars for that mode.
 - Integer overflow raises here and wraps in Polars; such errors are allowed.
 - Expressions on categoricals return String, and `len`/`n_unique` return
   Int64 where Polars returns UInt32: values are compared, and integer
