@@ -6,6 +6,7 @@ from dataframe import Column, DataFrame, DataType, Series, StringColumn, col
 from dataframe.categorical import decode
 from dataframe.dtype import CategoricalDictionary
 from dataframe.storage.string import StringCodes
+from dataframe_metal.metal import MetalRuntime
 from dataframe_metal.dictionary_group import (
     plan_dictionary_group,
     execute_dictionary_group,
@@ -40,9 +41,9 @@ def test_metal_dictionary_group_labels_nulls_and_order() raises:
         key._data[StringColumn]._codes = ArcPointer(
             StringCodes(ArcPointer(codes^), dtype)
         )
+        var coded_frame = DataFrame([key^, values^])
         var plan = (
-            DataFrame([key^, values^])
-            .lazy()
+            coded_frame.lazy()
             .group_by("k", maintain_order=True)
             .agg([col("v").sum(min_count=1).alias("total")])
         )
@@ -56,3 +57,21 @@ def test_metal_dictionary_group_labels_nulls_and_order() raises:
                     plan, matched.value(), True
                 )
                 assert_true(result[0].equals(plan.collect(engine="cpu")))
+                var plain_tail = DataFrame(
+                    [
+                        Series("k", Column[String](["other", "east"])),
+                        Series("v", Column[Int64]([3, 2])),
+                    ]
+                )
+                var mixed = (
+                    coded_frame.vstack(plain_tail)
+                    .lazy()
+                    .group_by("k", maintain_order=True)
+                    .agg([col("v").sum(min_count=1).alias("total")])
+                )
+                assert_false(Bool(plan_dictionary_group(mixed)))
+                assert_true(
+                    mixed.collect(accelerator=MetalRuntime()).equals(
+                        mixed.collect(engine="cpu")
+                    )
+                )
