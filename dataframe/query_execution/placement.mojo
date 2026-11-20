@@ -1,4 +1,6 @@
 """CPU/accelerator region placement through provider-neutral runtime ports."""
+from dataframe.dtype import DataType
+from dataframe.expr import COL, SUM, COUNT
 from dataframe.frame import (
     DataFrame,
 )
@@ -27,6 +29,8 @@ from dataframe.planning.model import (
     FILTER,
     HANDOFF_AUTO,
     HANDOFF_FORCED,
+    HANDOFF_OFF,
+    JOIN,
     SELECT,
 )
 from dataframe.planning.properties import _is_scan
@@ -122,6 +126,31 @@ def plan_handoff_region(
     if input < 0:
         return None
     var schema = self._execute(input, True, streaming, batch_size)
+    if (
+        streaming
+        and self._handoff == HANDOFF_FORCED
+        and self._integral_combine
+        and kind == SELECT
+        and self._nodes[input].kind == JOIN
+        and _integral_reductions(self, index, schema)
+    ):
+        # Sink the join vectors into private aggregate states while each
+        # worker still holds the match indexes. Only state rows cross over.
+        var partial = self.copy()
+        partial._handoff = HANDOFF_OFF
+        partial._integral_node = index
+        var result = partial._execute(index, False, True, batch_size)
+        if observation and observation.value()[].completed_launches.load() > 0:
+            plan_record(
+                self,
+                index,
+                "pipeline",
+                0,
+                0,
+                executions=0,
+                algorithm="handoff integral partials",
+            )
+        return result^
     var offered = plan_handoff_plan(self, index, found[1], schema)
     var supported = _context_supports(offered)
     if (
@@ -232,6 +261,25 @@ def plan_handoff_region(
         wall_ns=Int(perf_counter_ns()) - began,
     )
     return result^
+
+
+def _integral_reductions(
+    self: QueryContext, index: Int, schema: DataFrame
+) raises -> Bool:
+    for expression in self._nodes[index].exprs:
+        ref nodes = expression._nodes
+        if (
+            len(nodes) != 2
+            or nodes[0].op != COL
+            or nodes[1].left != 0
+            or (nodes[1].op != COUNT and nodes[1].op != SUM)
+        ):
+            return False
+        if nodes[0].text not in schema.columns() or schema.column(
+            nodes[0].text
+        ).dtype() not in [DataType.INT32, DataType.INT64]:
+            return False
+    return len(self._nodes[index].exprs) > 0
 
 
 def _handoff_selections(

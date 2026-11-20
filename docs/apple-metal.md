@@ -209,6 +209,11 @@ policy described below. Automatic placement currently uses its calibrated
 ordinary-column interface; selected-input costs are not inferred from those
 profiles.
 
+For a streaming join followed by integer sums and counts, an explicit Metal
+runtime lets the CPU workers consume each match directly. The device merges
+their wide sum and validity-count states in one launch. A profile reports
+`handoff integral partials` and the bytes used for the worker states.
+
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
 every node it supports. `engine="auto"` places supported pipelines by measured
 cost when `DATAFRAME_HANDOFF_CALIBRATION` names a calibration file, and

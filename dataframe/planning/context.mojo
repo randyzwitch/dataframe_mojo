@@ -5,7 +5,7 @@ from dataframe.planning.node_builders import (
 from dataframe.execution_report import (
     ExecutionReport,
 )
-from dataframe.execution_observation import DeviceObservation
+from dataframe.execution_observation import DeviceObservation, IntegralCombine
 from dataframe.execution_settings import (
     ExecutionSettings,
 )
@@ -266,6 +266,8 @@ struct QueryContext(Copyable, Deinitable, Movable):
     var _selection_execute: def(
         QueryContext, SelectionBatches
     ) raises thin -> Optional[DataFrame]
+    var _integral_combine: Optional[IntegralCombine]
+    var _integral_node: Int
     var _selection_node: Int
     var _selection_output: Optional[ArcPointer[SelectionBatches]]
 
@@ -310,6 +312,8 @@ struct QueryContext(Copyable, Deinitable, Movable):
         self._handoff_execute = handoff_execute
         self._selection_supports = _no_selection_supports
         self._selection_execute = _no_selection_execute
+        self._integral_combine = None
+        self._integral_node = -1
         self._selection_node = -1
         self._selection_output = None
 
@@ -324,6 +328,7 @@ struct QueryContext(Copyable, Deinitable, Movable):
             self._estimate,
             self._handoff_execute,
         )
+        result._integral_combine = self._integral_combine
         result._selection_supports = self._selection_supports
         result._selection_execute = self._selection_execute
         result._device_observation = self._device_observation
