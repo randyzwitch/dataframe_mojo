@@ -166,7 +166,15 @@ def plan_handoff_region(
     var columns = self._execute(input, False, streaming, batch_size)
     var rows = columns.height()
     var region = plan_handoff_plan(self, index, found[1], columns)
-    if self._handoff == HANDOFF_AUTO and not decided:
+    # The zero-row schema can preserve only the first input chunk. A provider
+    # may require all chunks to share a physical encoding. Recheck before
+    # submission and keep the materialized input if its layout is unsuitable.
+    var cpu_algorithm = String()
+    if not _context_supports(region):
+        if observation:
+            observation.value()[].cpu("unsupported_operator_or_dtype")
+        cpu_algorithm = "placed cpu (unsupported input layout)"
+    elif self._handoff == HANDOFF_AUTO and not decided:
         var verdict = _placement(region, rows, cpu_costs)
         if not verdict[0]:
             if observation and not observation.value()[].reason:
@@ -174,21 +182,24 @@ def plan_handoff_region(
                     "missing_calibration" if "no measured cost"
                     in verdict[1] else "cost_model_prefers_cpu"
                 )
-            var began = Int(perf_counter_ns())
-            var placed = region._execute(
-                len(region._nodes) - 1, False, streaming, batch_size
-            )
-            plan_record(
-                self,
-                index,
-                "eager",
-                rows,
-                placed.height(),
-                algorithm="placed cpu" + verdict[1],
-                wall_ns=Int(perf_counter_ns()) - began,
-            )
-            return placed^
-        algorithm += verdict[1]
+            cpu_algorithm = "placed cpu" + verdict[1]
+        else:
+            algorithm += verdict[1]
+    if cpu_algorithm:
+        var began = Int(perf_counter_ns())
+        var placed = region._execute(
+            len(region._nodes) - 1, False, streaming, batch_size
+        )
+        plan_record(
+            self,
+            index,
+            "eager",
+            rows,
+            placed.height(),
+            algorithm=cpu_algorithm,
+            wall_ns=Int(perf_counter_ns()) - began,
+        )
+        return placed^
     var began = Int(perf_counter_ns())
     region._device_observation = observation
     if observation:
