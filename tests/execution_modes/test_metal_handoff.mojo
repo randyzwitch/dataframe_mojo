@@ -623,6 +623,7 @@ def _calibrate(
     plan: LazyFrame,
     min_rows: Int = 1,
     max_rows: Int = 1_000_000_000,
+    startup_ns: Int = 0,
 ) raises:
     from dataframe.json.value import json_quote
     from dataframe_metal.calibration import (
@@ -651,12 +652,43 @@ def _calibrate(
         + String(min_rows)
         + ',"max_rows":'
         + String(max_rows)
+        + ',"startup_ns":'
+        + String(startup_ns)
         + ',"accel":{"fixed_ns":2000000,"row_ns":'
         + String(accel_row_ns)
         + "}}}}"
     )
     with open(path, "w") as target:
         target.write(text)
+
+
+# requires: metal
+def test_explaining_cold_metal_preserves_startup_for_the_first_collect() raises:
+    _ = require_metal()
+    from dataframe_metal.accelerator.gpu.identity import runtime_build_id
+
+    if not runtime_build_id().startswith("dataframe-mojo-metal-v2;cpu="):
+        return
+    var plan = (
+        _columns(100_000, False)
+        .lazy()
+        .filter(col("i") > 0)
+        .select(col("i").sum())
+    )
+    var expected = plan.collect(engine="cpu")
+    var path = String("build/test-handoff-cold-collect.json")
+    _calibrate(path, 50.0, 0.1, plan, startup_ns=5_000_000)
+    var configured = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
+    for _ in range(4):
+        assert_false("; on metal:0" in plan.explain(engine="auto"))
+    for collect in range(3):
+        var result = plan.profile(engine="auto")
+        assert_true(result[0].equals(expected))
+        var launches = Int64(0)
+        for row in range(result[1].height()):
+            launches += result[1].item(row, "gpu_completed_launches").int64()
+        assert_equal(launches > 0, collect > 0)
+    _ = configured^
 
 
 # requires: metal
