@@ -4,24 +4,27 @@ starts its kernels' jobs.
 
 A window ordered by some keys with no partition keys
 (`f.over(order_by=...)`) reads every row in that order, so it cannot be
-split by rows or by partitions: it is one window over one partition. Each
-runs as the rounds of `OverRounds` (the sort, the peer boundaries, the
+split by rows or by partitions: it is one window over one partition. The
+columns the windows read are first made contiguous by a round (a
+fixed-width number column by ranges of its rows, any other column whole).
+Each window then runs as the rounds of `OverRounds` (the sort, the peer boundaries, the
 gather into sorted order, one task evaluating it, the results put back in
 row order), one window after another; the columns the projection passes
 through are kept as they are.
 """
 from dataframe.binding import bind
 from dataframe.execution import OverRounds, whole_input_window
-from dataframe.expr import COL, Expr
+from dataframe.expr import COL, Expr, split_names
 from dataframe.frame import DataFrame
-from dataframe.parallel import Rounds
-from dataframe.series import Series
+from dataframe.parallel import Rounds, partitions, round_width, worker_count
+from dataframe.series import ChunkMerge, Series
 from dataframe.storage.column import Column
 
 # The round that ran last.
 comptime _START = 0
-comptime _WINDOWS = 1
-comptime _DONE = 2
+comptime _RECHUNK = 1
+comptime _WINDOWS = 2
+comptime _DONE = 3
 
 
 def whole_input_windows(exprs: List[Expr]) -> Bool:
@@ -54,6 +57,13 @@ struct OrderedWindowSink(Movable, Rounds):
     var at: Int
     var running: List[OverRounds]
     var values: List[Series]
+    # The chunked columns the windows read (input column places), their
+    # merges by row ranges (none: rechunked whole), and the rechunk
+    # round's pieces (chunked column, first row, end row; -1 for whole).
+    var chunked: List[Int]
+    var merges: List[Optional[ChunkMerge]]
+    var pieces: List[Tuple[Int, Int, Int]]
+    var width: Int
     var result: DataFrame
 
     def __init__(
@@ -74,6 +84,10 @@ struct OrderedWindowSink(Movable, Rounds):
             length=len(self.exprs),
             fill=Series("", Column[Int64](List[Int64]())),
         )
+        self.chunked = List[Int]()
+        self.merges = List[Optional[ChunkMerge]]()
+        self.pieces = List[Tuple[Int, Int, Int]]()
+        self.width = 0
         self.result = DataFrame(List[Series]())
 
     def _eager(self) raises -> DataFrame:
@@ -101,6 +115,35 @@ struct OrderedWindowSink(Movable, Rounds):
                     self.stage = _DONE
                     return 0
                 names.append(expr._name)
+            # Every column a window reads: its argument's, its order
+            # keys.
+            for expr in self.exprs:
+                if len(expr._nodes) == 1:
+                    continue
+                var read = List[String]()
+                for node in expr._nodes:
+                    if node.op == COL:
+                        read.append(node.text)
+                read.extend(split_names(expr._nodes[len(expr._nodes) - 1].text))
+                for c in range(len(self.input._columns)):
+                    if (
+                        self.input._columns[c].name() in read
+                        and self.input._columns[c].is_chunked()
+                        and c not in self.chunked
+                    ):
+                        self._add_chunked(c)
+            self.stage = _RECHUNK
+            if len(self.pieces) > 0:
+                self.width = round_width(len(self.pieces))
+                return self.width
+        if self.stage == _RECHUNK:
+            for k in range(len(self.chunked)):
+                if self.merges[k]:
+                    self.input._columns[self.chunked[k]] = (
+                        self.merges[k].value().merged.copy()
+                    )
+            self.merges = List[Optional[ChunkMerge]]()
+            self.pieces = List[Tuple[Int, Int, Int]]()
             self.stage = _WINDOWS
         if self.stage == _WINDOWS:
             if len(self.running) > 0:
@@ -135,8 +178,33 @@ struct OrderedWindowSink(Movable, Rounds):
                 _ = self.running.pop()
         return 0
 
+    def _add_chunked(mut self, c: Int) raises:
+        """Input column `c` as pieces of the rechunk round."""
+        var k = len(self.chunked)
+        self.chunked.append(c)
+        ref column = self.input._columns[c]
+        var merge = ChunkMerge.of(column)
+        if merge:
+            var n = len(column)
+            var bounds = partitions(n, worker_count(n), 64)
+            for w in range(len(bounds) - 1):
+                if bounds[w] < bounds[w + 1]:
+                    self.pieces.append((k, bounds[w], bounds[w + 1]))
+        else:
+            self.pieces.append((k, 0, -1))
+        self.merges.append(merge^)
+
     def round_task(mut self, task: Int) raises:
-        if self.stage == _WINDOWS:
+        if self.stage == _RECHUNK:
+            for p in range(task, len(self.pieces), self.width):
+                var piece = self.pieces[p]
+                var k = piece[0]
+                if self.merges[k]:
+                    self.merges[k].value().copy_rows(piece[1], piece[2])
+                else:
+                    var c = self.chunked[k]
+                    self.input._columns[c] = self.input._columns[c].rechunk()
+        elif self.stage == _WINDOWS:
             self.running[0].round_task(task)
 
     def _finish(mut self) raises:
