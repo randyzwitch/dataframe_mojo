@@ -10,7 +10,13 @@ the peer boundaries, the ranges' summaries, the ranks written), one rank
 after another; the columns the projection passes through are kept as they
 are.
 """
-from dataframe.expr import COL, RANK, Expr
+from dataframe.expr import (
+    COL,
+    RANK,
+    STRUCT_PACK,
+    Expr,
+    struct_pack_children,
+)
 from dataframe.frame import DataFrame
 from dataframe.parallel import Rounds, partitions, round_width, worker_count
 from dataframe.series import ChunkMerge, Series
@@ -24,21 +30,40 @@ comptime _RANKS = 2
 comptime _DONE = 3
 
 
+def ranked_columns(expr: Expr) -> List[String]:
+    """The columns a rank over all rows orders by: one for `col(x).rank()`,
+    each field's in turn for `as_struct([col(a), col(b), ...]).rank()`;
+    none when `expr` is not such a rank."""
+    var names = List[String]()
+    var n = len(expr._nodes)
+    if n < 2 or expr._nodes[n - 1].op != RANK:
+        return names^
+    ref ranked = expr._nodes[expr._nodes[n - 1].left]
+    if expr._nodes[n - 1].left == n - 2 and ranked.op == COL and n == 2:
+        names.append(ranked.text)
+        return names^
+    if expr._nodes[n - 1].left != n - 2 or ranked.op != STRUCT_PACK:
+        return names^
+    var fields = struct_pack_children(ranked)
+    if len(fields) != n - 2:
+        return List[String]()
+    for f in fields:
+        if f < 0 or f >= n - 2 or expr._nodes[f].op != COL:
+            return List[String]()
+        names.append(expr._nodes[f].text)
+    return names^
+
+
 def whole_input_ranks(exprs: List[Expr]) -> Bool:
     """Whether every expression of a projection is a column passed through
-    or a rank of a column over all rows (`col(x).rank(...)`), with at
-    least one rank."""
+    or a rank over all rows of a column or a struct of columns
+    (`ranked_columns`), with at least one rank."""
     var ranks = 0
     for expr in exprs:
         var n = len(expr._nodes)
         if n == 1 and expr._nodes[0].op == COL:
             continue
-        if (
-            n == 2
-            and expr._nodes[1].op == RANK
-            and expr._nodes[1].left == 0
-            and expr._nodes[0].op == COL
-        ):
+        if len(ranked_columns(expr)) > 0:
             ranks += 1
             continue
         return False
@@ -102,27 +127,32 @@ struct RankSink(Movable, Rounds):
                     self.stage = _DONE
                     return 0
                 names.append(expr._name)
-                var column = expr._nodes[0].text
-                var found = -1
-                for c in range(len(self.input._columns)):
-                    ref series = self.input._columns[c]
-                    # A categorical is ranked by its strings, as the
-                    # evaluator reads it; that path runs whole.
+                var columns = List[String]()
+                if len(expr._nodes) == 1:
+                    columns.append(expr._nodes[0].text)
+                else:
+                    columns = ranked_columns(expr)
+                for column in columns:
+                    var found = -1
+                    for c in range(len(self.input._columns)):
+                        ref series = self.input._columns[c]
+                        # A categorical is ranked by its strings, as the
+                        # evaluator reads it; that path runs whole.
+                        if (
+                            series.name() == column
+                            and not series.dtype().is_categorical()
+                        ):
+                            found = c
+                    if found < 0:
+                        self.result = self._eager()
+                        self.stage = _DONE
+                        return 0
                     if (
-                        series.name() == column
-                        and not series.dtype().is_categorical()
+                        len(expr._nodes) > 1
+                        and self.input._columns[found].is_chunked()
+                        and found not in self.chunked
                     ):
-                        found = c
-                if found < 0:
-                    self.result = self._eager()
-                    self.stage = _DONE
-                    return 0
-                if (
-                    len(expr._nodes) == 2
-                    and self.input._columns[found].is_chunked()
-                    and found not in self.chunked
-                ):
-                    self._add_chunked(found)
+                        self._add_chunked(found)
             self.stage = _RECHUNK
             if len(self.pieces) > 0:
                 self.width = round_width(len(self.pieces))
@@ -150,16 +180,24 @@ struct RankSink(Movable, Rounds):
                     self._finish()
                     return 0
                 ref expr = self.exprs[self.at]
-                if len(expr._nodes) != 2:
+                if len(expr._nodes) == 1:
                     continue
-                ref rank = expr._nodes[1]
-                self.ranking.append(
-                    RankRounds(
-                        self.input.column(expr._nodes[0].text),
-                        rank.min_count == 1,
-                        rank.text,
+                ref rank = expr._nodes[len(expr._nodes) - 1]
+                if len(expr._nodes) == 2:
+                    self.ranking.append(
+                        RankRounds(
+                            self.input.column(expr._nodes[0].text),
+                            rank.min_count == 1,
+                            rank.text,
+                        )
                     )
-                )
+                else:
+                    var fields = List[Series]()
+                    for name in ranked_columns(expr):
+                        fields.append(self.input.column(name))
+                    self.ranking.append(
+                        RankRounds(fields, rank.min_count == 1, rank.text)
+                    )
                 var tasks = self.ranking[0].next_round()
                 if tasks > 0:
                     return tasks

@@ -12,6 +12,7 @@ from dataframe import (
     Expr,
     LazyFrame,
     Series,
+    as_struct,
     col,
     lit,
 )
@@ -854,6 +855,10 @@ def test_ranks_over_every_row_run_as_rounds_of_the_schedule() raises:
         col("v").rank("ordinal").alias("ordinal"),
         col("k").rank("average").alias("average"),
         col("s").rank("max", descending=True).alias("max"),
+        as_struct([col("s"), col("v")]).rank("min").alias("pair"),
+        as_struct([col("k"), col("s")])
+        .rank("dense", descending=True)
+        .alias("pair_dense"),
     ]
     var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
     var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")

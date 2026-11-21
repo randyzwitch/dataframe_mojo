@@ -1963,6 +1963,43 @@ struct RankRounds(Movable, Rounds):
         self.jobs = List[_RankScanJob]()
         self.result = Series("", Column[Int64](List[Int64]()))
 
+    def __init__(
+        out self, fields: List[Series], descending: Bool, method: String
+    ) raises:
+        """The ranks of the rows of a struct of `fields` that is never
+        null (`as_struct` of columns): its fields in turn, each null as
+        its smallest value."""
+        self.code = rank_method(method)
+        self.rows = len(fields[0])
+        self.keys = List[Series]()
+        var key_descending = List[Bool]()
+        var key_nulls_last = List[Bool]()
+        for field in fields:
+            self.keys.append(
+                field.rechunk() if field.is_chunked() else field.copy()
+            )
+            key_descending.append(descending)
+            key_nulls_last.append(descending)
+        self.sort = List[SortRounds]()
+        # Ordinal ranks number peers in input order: a stable sort.
+        self.sort.append(
+            SortRounds(
+                self.keys, key_descending, key_nulls_last, method == "ordinal"
+            )
+        )
+        self.stage = _RANK_SORT
+        self.order = List[Int]()
+        self.flags = List[UInt8]()
+        self.bounds = List[Int]()
+        var average = self.code == RANK_AVERAGE
+        self.has_nulls = False
+        self.present = List[Bool]()
+        self.ints = huge_uninit[Int64](0 if average else self.rows)
+        self.floats = huge_uninit[Float64](self.rows if average else 0)
+        self.out_valid = List[Bool]()
+        self.jobs = List[_RankScanJob]()
+        self.result = Series("", Column[Int64](List[Int64]()))
+
     def next_round(mut self) raises -> Int:
         if self.stage == _RANK_SORT:
             var tasks = self.sort[0].next_round()
