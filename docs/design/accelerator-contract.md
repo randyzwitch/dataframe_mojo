@@ -50,6 +50,13 @@ Replacement provider modules must export `pipeline_costs`. A provider without
 matched CPU measurements can return `(-1, pipeline_estimate(...))`; existing
 explicit `AcceleratorBackend` classes inherit that behavior automatically.
 
+For a complete resident pipeline, `features.cpu_executor` can carry the
+requested streaming setting. A provider with measurements for both CPU
+executors may set `materialized` on that choice and return the corresponding
+CPU cost in the same call. The planner uses the selected executor if the
+pipeline stays on CPU. An estimate with `collect_request` set counts once
+toward startup payback.
+
 The core calls the whole-plan functions for `engine="accel"`, the hand-off
 functions from the CPU executor when a provider runs a plan through it, and
 the device functions for `engine="auto"`. No provider chooses a whole plan's

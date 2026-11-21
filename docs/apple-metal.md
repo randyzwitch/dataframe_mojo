@@ -239,17 +239,23 @@ It publishes the measured profile under `$XDG_CACHE_HOME` (default
 `~/.cache`) for the packaged CPU build and worker count. To measure startup
 for a shape, run its capture first in a fresh process. The fitter records
 the excess of the first submission over warm execution. Auto charges that
-cost on first use. Repeated collects of the same measured shape accumulate
-estimated savings toward paying startup. A successful submission marks that
-shape warm on the reusable Metal context.
+cost on first use. Capture times both streaming and materializing CPU execution.
+When every capture for a layout includes both modes, auto can use the cheaper
+one for a complete, optimized pipeline over a resident frame at the captured
+batch size (65,536 rows). With `streaming=False` it prices the materializing
+CPU executor. Each collect credits the estimated advantage of warm Metal over
+the eligible CPU executor toward startup for that shape. A successful
+submission marks the shape warm on the reusable Metal context. If materializing
+execution fails its answer check or raises, the capture records
+`cpu_materialized_error` and retains the verified streaming CPU and Metal timings.
 
 The built-in capture uses 50M, 75M and 100M rows, eleven representative operator
 shapes, contiguous/eight-chunk inputs and independent nullable masks. Optional
 row counts follow the repetition count. It checks answers against a periodic
 scalar oracle, includes shared Float32 arithmetic SUM/COUNT/MEAN and mixed
 Float32-mean bundles, mixed MIN/MAX/SUM/COUNT/MEAN projections, arithmetic
-extrema and multi-column AND/OR filters. It alternates
-CPU/Metal timing order and records unsupported or
+extrema and multi-column AND/OR filters. It rotates the order of streaming CPU,
+materializing CPU and Metal trials and records unsupported or
 CPU-adjudicated cases explicitly. Every Metal timing requires direct GPU
 execution. These are development calibration workloads, not external-suite
 performance results.
@@ -262,11 +268,12 @@ to the same fitter. Check `capture_records` and `skipped` in the resulting
 profile. Query constants, output work, chunk counts and bitmap presence are
 part of the key; calibrating one layout does not measure another.
 
-The fitter takes a lower CPU and upper Metal envelope over the observed
-samples, adds a safety margin, and limits placement to each key's measured
-row range. Its content-addressed output filename is immutable. Models are
-empirical: changed selectivity or value distributions can change runtime
-even for the same schema. Recalibrate representative data after changes.
+The fitter estimates time per executor from median samples at each size.
+It adds a switching margin to Metal based on paired timings against the
+selected CPU executor. Placement stays within the measured row range.
+The fitter publishes each profile under an immutable, content-addressed
+filename. Selectivity and value distributions can change runtime even for
+the same schema. Recalibrate with representative data after changes.
 
 Profiles must match both source/compiler build IDs, the device/host power
 and thermal state, and the effective CPU worker budget. A CPU rewrite, new
@@ -365,6 +372,33 @@ Native validation recorded 241 passing contracts and 2 failures, with
 all 16 native probes passing. Empty copied packed-logical input and
 grouped ordered FIRST/LAST parity also fail on the pre-selection baseline.
 Those failures remain recorded separately from the passing selection tests.
+
+### Pricing Metal startup against both CPU executors on M1
+
+An eight-worker M1 Mac mini ran a resident Float32 filter followed by SUM,
+COUNT, MEAN, MIN and MAX. Calibration used 10M, 20M and 40M rows. The
+table shows wall time on three other sizes. Both auto policies ran in the
+same executable with profiles fitted from the same captures. The previous
+policy priced only streaming CPU. The new policy could also choose the
+materializing CPU executor. Each cell is the median across five fresh
+processes, with engine order rotated across runs.
+
+| Rows | First collect, previous / new (ms) | 128 collects, previous / new (ms) | 128 collects, materializing CPU (ms) | 128 collects, forced Metal (ms) |
+| ---: | ---: | ---: | ---: | ---: |
+| 15M | 27.0 / 16.8 | 2,550 / 1,706 | 1,666 | 2,452 |
+| 25M | 42.6 / 26.2 | 2,972 / 2,743 | 2,699 | 2,897 |
+| 35M | 59.2 / 37.0 | 3,882 / 3,701 | 3,692 | 3,845 |
+
+Separate traces showed the previous policy first used Metal on collects
+5, 3 and 2 respectively. The new policy stayed on materializing CPU for
+all 128 collects at each size. Its cumulative time finished within 2.4%
+of that CPU control at every size. Forced Metal took longer than the same
+CPU control over 128 collects at each size. A separate controlled profile
+that priced warm Metal below both CPU executors confirmed the first five
+collects used materializing CPU and the sixth launched Metal.
+
+DuckDB verified all five output values for all 9,600 timed collects.
+These results apply to this resident query, layout and worker count.
 
 ### Historical measurements on an M1 Mac mini
 

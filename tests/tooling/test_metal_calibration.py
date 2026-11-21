@@ -52,6 +52,38 @@ class MetalCalibrationTests(unittest.TestCase):
         self.assertAlmostEqual(model["switch_margin"], 0.05)
         self.assertAlmostEqual(model["accel"]["fixed_ns"], 1050)
 
+    def test_cpu_executor_crossover_is_layout_specific(self):
+        records = self.captures()
+        for entry in records:
+            entry["cpu_materialized_ns"] = [entry["rows"] + 500] * 3
+        profile = fit(records)
+        region = profile["regions"][records[0]["key"]]
+        self.assertEqual(region["cpu_materialized"], {"row_ns": 1, "fixed_ns": 500})
+        self.assertEqual(region["cpu"], {"row_ns": 2, "fixed_ns": 100})
+        self.assertNotIn("cpu_materialized", profile["operators"][region["cpu_key"]])
+        del records[1]["cpu_materialized_ns"]
+        records[1]["cpu_materialized_error"] = "answer differs from reference"
+        fallback = fit(records)["regions"][records[0]["key"]]
+        self.assertNotIn("cpu_materialized", fallback)
+        self.assertEqual(fallback["cpu"], region["cpu"])
+
+    def test_materialized_cpu_samples_must_be_paired_and_finite(self):
+        for invalid in ([1, 2], [1, 2, 3, 4], [1, -1, 2], [1, float("nan"), 2], None):
+            records = self.captures()
+            records[0]["cpu_materialized_ns"] = invalid
+            with self.subTest(samples=invalid), self.assertRaisesRegex(ValueError, "paired"):
+                fit(records)
+
+    def test_gpu_margin_uses_residuals_against_the_cheaper_cpu(self):
+        records = self.captures()
+        for record in records:
+            n = record["rows"]
+            record["cpu_ns"] = [5 * n] * 3
+            record["cpu_materialized_ns"] = [n, 2 * n, 3 * n]
+            record["accel_ns"] = [n] * 3
+        region = fit(records)["regions"][records[0]["key"]]
+        self.assertAlmostEqual(region["switch_margin"], 1)
+
     def test_startup_uses_only_paired_cold_and_warm_measurements(self):
         records = self.captures()
         key = records[0]["key"]

@@ -128,6 +128,15 @@ def fit(records):
                 raise ValueError(
                     "at least three positive finite samples per engine required"
                 )
+        if "cpu_materialized_ns" in record:
+            samples = record["cpu_materialized_ns"]
+            if (
+                not isinstance(samples, list)
+                or len(samples) != len(record["cpu_ns"])
+                or len(samples) != len(record["accel_ns"])
+                or not all(_positive(n) for n in samples)
+            ):
+                raise ValueError("invalid paired materialized CPU samples")
         if "first_accel_ns" in record and not _positive(record["first_accel_ns"]):
             raise ValueError("invalid first Metal execution time")
         grouped[key].append(record)
@@ -158,11 +167,15 @@ def fit(records):
         rows = sorted({e["rows"] for e in entries})
         if len(rows) < 3:
             raise ValueError(f"{key}: measure at least three distinct scales")
-        cpu, accel = [], []
+        cpu, accel, materialized = [], [], []
+        paired_cpu = all("cpu_materialized_ns" in e for e in entries)
         for n in rows:
             same = [e for e in entries if e["rows"] == n]
             cpu.append((n, median(t for e in same for t in e["cpu_ns"])))
             accel.append((n, median(t for e in same for t in e["accel_ns"])))
+            if paired_cpu:
+                times = [t for e in same for t in e["cpu_materialized_ns"]]
+                materialized.append((n, median(times)))
         pipeline_keys = {e["pipeline_key"] for e in entries}
         if len(pipeline_keys) != 1:
             raise ValueError(
@@ -171,20 +184,26 @@ def fit(records):
         pipeline = next(iter(pipeline_keys))
         cpu_model = _typical(cpu)
         accel_model = _typical(accel)
+        materialized_model = _typical(materialized) if paired_cpu else None
         # Separate within-scale timing noise from systematic fit optimism.
         # Robust scale medians protect against individual timing outliers;
         # no consistently slower measured scale may be fitted as a GPU win.
         errors = []
         optimism = 1.0
         for n in rows:
+            sample_key = "cpu_ns"
+            cpu_ns = _ns(cpu_model, n)
+            if materialized_model and _ns(materialized_model, n) < cpu_ns:
+                cpu_ns = _ns(materialized_model, n)
+                sample_key = "cpu_materialized_ns"
             paired = [
                 c / a
                 for e in entries
                 if e["rows"] == n
-                for c, a in zip(e["cpu_ns"], e["accel_ns"])
+                for c, a in zip(e[sample_key], e["accel_ns"])
             ]
             observed = median(paired)
-            predicted = _ns(cpu_model, n) / _ns(accel_model, n)
+            predicted = cpu_ns / _ns(accel_model, n)
             optimism = max(optimism, predicted / observed)
             errors.extend(abs(r / observed - 1) for r in paired)
         margin = max(0.05, optimism * (1 + 2 * median(errors)) - 1)
@@ -205,6 +224,8 @@ def fit(records):
             "measured_rows": rows,
             "samples_per_engine": sum(len(e["cpu_ns"]) for e in entries),
         }
+        if paired_cpu:
+            regions[key]["cpu_materialized"] = materialized_model
         # Compare within the same capture so differences in row count or
         # layout do not get charged as initialization. Older captures contain
         # only warm samples and keep their previous placement behavior.

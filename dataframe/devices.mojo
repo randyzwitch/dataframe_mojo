@@ -11,6 +11,8 @@ buffer already lives (`dataframe/storage/residence.mojo`).
 Nothing in this module knows a backend exists.
 """
 
+from std.memory import ArcPointer
+
 # How a device's memory relates to the host's.
 # Discrete: its own memory, reached over a bus (NVIDIA and AMD discrete GPUs).
 comptime MEMORY_DISCRETE = 0
@@ -79,6 +81,14 @@ struct TransferModel(Copyable, Movable):
 
 
 @fieldwise_init
+struct CPUExecutorChoice(Movable):
+    """CPU executors eligible for a complete pipeline, and the one priced."""
+
+    var streaming_allowed: Bool
+    var materialized: Bool
+
+
+@fieldwise_init
 struct PipelineFeatures(Copyable, Movable):
     """Facts the planner knows about a pipeline when it asks for an estimate:
     estimated at plan time, exact when the pipeline is about to start. -1
@@ -95,6 +105,10 @@ struct PipelineFeatures(Copyable, Movable):
     # and rechecks at execution time must not count as repeat demand.
     var collect_request: Bool
 
+    # Set only when the planner can run the entire resident plan with the
+    # CPU executor whose time the provider returns.
+    var cpu_executor: Optional[ArcPointer[CPUExecutorChoice]]
+
     def __init__(
         out self,
         input_rows: Int,
@@ -102,13 +116,15 @@ struct PipelineFeatures(Copyable, Movable):
         output_rows: Int,
         groups: Int,
         build_rows: Int,
+        collect_request: Bool = False,
     ):
         self.input_rows = input_rows
         self.input_bytes = input_bytes
         self.output_rows = output_rows
         self.groups = groups
         self.build_rows = build_rows
-        self.collect_request = False
+        self.collect_request = collect_request
+        self.cpu_executor = None
 
     @staticmethod
     def rows(input_rows: Int) -> Self:
