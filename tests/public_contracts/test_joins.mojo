@@ -1,7 +1,7 @@
 """Full join rows and schema against a nested-loop oracle; duplicates are pairs."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_raises, assert_true
-from dataframe import Column, DataFrame, Series
+from dataframe import Column, DataFrame, DataType, Series
 from tests.support.reference_model import (
     generated_model,
     ReferenceRow,
@@ -180,3 +180,45 @@ def test_a_coalesced_right_join_keeps_the_right_key_names() raises:
             right.drop(["k"]).rename({"bk": "k"}), on="k", how="right"
         )
         assert_equal(same.columns(), List[String](["x", "x_right", "k"]))
+
+
+def test_decimal_join_keys_of_one_precision_and_scale_match_across_widths() raises:
+    """decimal(10, 2) held as 64 and as 128 bits (files declare their own
+    width) is one key type: the keys join on value, eager and lazy, at the
+    wider width. Other decimal pairs still raise. Found by the differential
+    fuzzer (tests/fuzz)."""
+    var narrow = DataFrame(
+        [
+            Series(
+                "d", Column[Int64]([100, 250, 0], [True, True, False])
+            ).with_dtype(DataType.decimal(10, 2, 64)),
+            Series("l", Column[Int64]([1, 2, 3])),
+        ]
+    )
+    var wide = DataFrame(
+        [
+            Series(
+                "d",
+                Column[Int128]([250, 100, 100, 0], [True, True, True, False]),
+            ).with_dtype(DataType.decimal(10, 2)),
+            Series("r", Column[Int64]([10, 20, 30, 40])),
+        ]
+    )
+    var wanted = DataType.decimal(10, 2, 128)
+    var eager = narrow.join(wide, on="d").sort(["l", "r"])
+    var lazy = (
+        narrow.lazy().join(wide.lazy(), on="d").sort(["l", "r"]).collect()
+    )
+    for joined in [eager^, lazy^]:
+        assert_equal(joined.height(), 3)
+        assert_equal(joined.column("d").dtype(), wanted)
+        assert_equal(joined.item(0, "l").int64(), Int64(1))
+        assert_equal(joined.item(0, "r").int64(), Int64(20))
+        assert_equal(joined.item(1, "r").int64(), Int64(30))
+        assert_equal(joined.item(2, "l").int64(), Int64(2))
+        assert_equal(joined.item(2, "r").int64(), Int64(10))
+    var other_scale = wide.with_column(
+        wide.column("d").cast(DataType.decimal(10, 3))
+    )
+    with assert_raises(contains="Join key dtypes differ"):
+        _ = narrow.join(other_scale, on="d")
