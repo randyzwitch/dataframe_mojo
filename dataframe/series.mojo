@@ -294,6 +294,27 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         self._chunked = None
         self._field_metadata = metadata
 
+    def _direct_dictionary(self) -> Optional[DataType]:
+        """The shared dictionary when all string chunks already own codes."""
+        if self.dtype() != DataType.STRING:
+            return None
+        var dictionary = Optional[DataType]()
+        for chunk in self.chunks():
+            if not chunk._data.isa[StringColumn]():
+                return None
+            ref strings = chunk._data[StringColumn]
+            if not strings._codes:
+                return None
+            ref held = strings._codes.value()[]
+            if (
+                held.rows
+                or not held.dtype.has_dictionary()
+                or (dictionary and dictionary.value() != held.dtype)
+            ):
+                return None
+            dictionary = held.dtype
+        return dictionary^
+
     def _dictionary_codes(self) raises -> Optional[Series]:
         """This String column as a categorical over the dictionary its
         source stored (`StringCodes`), sharing the codes; None unless every

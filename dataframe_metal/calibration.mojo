@@ -21,6 +21,7 @@ from dataframe.planning.device_placement import plan_pipeline_cuts
 from dataframe.placement import calibration_path, load_costs, LinearCost
 from .accelerator.gpu.identity import hardware, runtime_build_id
 from .accelerator.gpu.erased_input import single_native_span
+from .accelerator.gpu.query_scope import shared_service
 
 comptime SCHEMA_VERSION = 2
 
@@ -166,6 +167,9 @@ struct RegionCost(Copyable, Movable):
     var cpu_key: String
     var first: Float64
     var last: Float64
+    var startup_ns: Float64
+    var prior_savings_ns: Float64
+    var warm_generation: Int
 
 
 struct _ProfileCache(Movable):
@@ -195,15 +199,19 @@ def _profile_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
     pass
 
 
-def _snapshot(
-    path: String, text: String, key: String
-) raises -> Tuple[String, Optional[RegionCost]]:
+def _profile_cache() -> Pointer[_ProfileCache, MutAnyOrigin]:
     var address = _get_global[
         "DATAFRAME_METAL_CALIBRATION_PROFILE_V2", _profile_init, _profile_keep
     ]()
-    ref cache = Pointer[_ProfileCache, MutAnyOrigin](
+    return Pointer[_ProfileCache, MutAnyOrigin](
         unsafe_from_address=Int(address.value())
-    )[]
+    )
+
+
+def _snapshot(
+    path: String, text: String, key: String
+) raises -> Tuple[String, Optional[RegionCost]]:
+    ref cache = _profile_cache()[]
     var unlocked = Int64(0)
     while not cache.lock.compare_exchange(unlocked, 1):
         unlocked = 0
@@ -250,8 +258,21 @@ def _snapshot(
                         raise Error(
                             "Metal region does not match its CPU pipeline model"
                         )
+                    var startup = Float64(0)
+                    if entry.has("startup_ns"):
+                        startup = _number(entry.get("startup_ns"))
+                        if not isfinite(startup) or startup < 0:
+                            raise Error("Invalid measured Metal startup cost")
                     cache.regions[name] = RegionCost(
-                        cpu^, accel^, pipeline^, cpu_key^, first, last
+                        cpu^,
+                        accel^,
+                        pipeline^,
+                        cpu_key^,
+                        first,
+                        last,
+                        startup,
+                        0,
+                        0,
                     )
                 cache.valid = True
         # File bytes are checked on every call, while JSON is parsed once.
@@ -268,7 +289,53 @@ def _snapshot(
         raise error^
 
 
-def measured_costs(key: String, rows: Int) raises -> Tuple[Float64, Float64]:
+def _startup_cost(
+    path: String,
+    key: String,
+    measured: Float64,
+    savings: Float64,
+    collect_request: Bool,
+) raises -> Float64:
+    var generation = shared_service().reusable_generation()
+    ref cache = _profile_cache()[]
+    var unlocked = Int64(0)
+    while not cache.lock.compare_exchange(unlocked, 1):
+        unlocked = 0
+    var remaining = measured
+    if cache.path == path and cache.valid and key in cache.regions:
+        ref entry = cache.regions[key]
+        remaining = max(Float64(0), measured - entry.prior_savings_ns)
+        if generation > 0 and generation == entry.warm_generation:
+            remaining = 0
+        elif collect_request:
+            # Repeated CPU collects supply evidence that the one-time cost
+            # can be recovered. Charge the current request before crediting
+            # its saving, so a first request always faces the full cost.
+            entry.prior_savings_ns = min(
+                measured, entry.prior_savings_ns + max(Float64(0), savings)
+            )
+    cache.lock.store(0)
+    return remaining
+
+
+def record_warm_region(key: String) raises:
+    var generation = shared_service().reusable_generation()
+    if not generation:
+        return
+    var path = calibration_path()
+    ref cache = _profile_cache()[]
+    var unlocked = Int64(0)
+    while not cache.lock.compare_exchange(unlocked, 1):
+        unlocked = 0
+    if cache.valid and cache.path == path and key in cache.regions:
+        cache.regions[key].warm_generation = generation
+        cache.regions[key].prior_savings_ns = 0
+    cache.lock.store(0)
+
+
+def measured_costs(
+    key: String, rows: Int, collect_request: Bool = False
+) raises -> Tuple[Float64, Float64]:
     var path = calibration_path()
     if not path:
         return (Float64(-1), Float64(-1))
@@ -298,6 +365,10 @@ def measured_costs(key: String, rows: Int) raises -> Tuple[Float64, Float64]:
     var accel_ns = entry.accel.ns(rows)
     if not isfinite(cpu_ns) or not isfinite(accel_ns):
         return (Float64(-1), Float64(-1))
+    if entry.startup_ns > 0:
+        accel_ns += _startup_cost(
+            path, key, entry.startup_ns, cpu_ns - accel_ns, collect_request
+        )
     return (cpu_ns, accel_ns)
 
 

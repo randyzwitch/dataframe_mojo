@@ -638,7 +638,11 @@ def recode_codes(
             same = False
             break
     if same:
-        return values.with_dtype(dtype)
+        # Retyped onto another dictionary of the same field: the field's
+        # metadata stays, as it does when codes change below.
+        var retyped = values.with_dtype(dtype)
+        retyped._field_metadata = values._field_metadata
+        return retyped^
     var flat = values.rechunk() if values.is_chunked() else values.copy()
     ref column = flat._data[Column[UInt32]]
     var n = len(column)
