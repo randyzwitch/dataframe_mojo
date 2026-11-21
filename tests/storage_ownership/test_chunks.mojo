@@ -2,6 +2,8 @@
 # contract-group: storage.chunks
 from std.testing import assert_true
 from dataframe import Column, DataFrame, DataType, Series
+from dataframe.kernels.gather import take_parallel
+from dataframe.series import ChunkMerge
 from tests.support.reference_model import generated_model
 from tests.support.coverage_generators import frame_from_model
 from tests.support.coverage_compare import assert_model
@@ -76,3 +78,35 @@ def test_numeric_chunks_merge_on_every_worker_with_their_nulls_and_dtypes() rais
         assert_true(merged.dtype() == source.dtype())
         assert_true(merged.equals(window))
         assert_true(merged.null_count() == window.null_count())
+
+
+def test_gather_keeps_its_numeric_merge_for_later_gathers() raises:
+    # A gather makes a chunked number column contiguous once; the merge is
+    # kept on the column, so a later gather, rechunk or merge of it (or of
+    # a copy of it) reads the kept array instead of copying the rows again.
+    var n = 200_003
+    var ints = List[Int64]()
+    var valid = List[Bool]()
+    for row in range(n):
+        ints.append(Int64(row * 7 - 11))
+        valid.append(row % 9 != 4)
+    var source = Series("ints", Column[Int64](ints^, valid^))
+    var cuts: List[Int] = [0, 3, 65_537, 130_000, n]
+    var parts = List[Series]()
+    for c in range(len(cuts) - 1):
+        parts.append(source.slice(cuts[c], cuts[c + 1] - cuts[c]))
+    var chunked = Series._from_chunks(parts)
+    var alias = chunked.copy()
+    assert_true(Bool(ChunkMerge.of(chunked)))
+    var rows = List[Int]()
+    for i in range(n - 1, -1, -3):
+        rows.append(i)
+    var expected = source.take(rows)
+    var first = take_parallel([chunked.copy()], rows.copy(), 4)
+    assert_true(first[0].equals(expected))
+    assert_true(not ChunkMerge.of(alias))
+    assert_true(chunked.rechunk()._shares_buffers_with(alias.rechunk()))
+    assert_true(chunked.rechunk().equals(source))
+    var second = take_parallel([alias.copy()], rows^, 4)
+    assert_true(second[0].equals(expected))
+    assert_true(second[0].null_count() == expected.null_count())

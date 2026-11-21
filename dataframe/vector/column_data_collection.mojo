@@ -20,11 +20,13 @@ from dataframe.frame import DataFrame, concat
 from dataframe.parallel import (
     Job,
     Rounds,
+    partitions,
     round_width,
     run_rounds,
     run_rounds_serially,
+    worker_count,
 )
-from dataframe.series import Series
+from dataframe.series import ChunkMerge, Series
 from dataframe.storage.column import Column
 from dataframe.dtype import DataType
 from dataframe.vector.data_chunk import (
@@ -377,8 +379,10 @@ struct ColumnDataCollection(Movable):
             self.schema._columns[c],
         )
 
-    def frame(mut self) raises -> DataFrame:
-        """The rows appended, as a frame of the schema's columns."""
+    def frame(mut self, merge: Bool = True) raises -> DataFrame:
+        """The rows appended, as a frame of the schema's columns. Without
+        `merge`, a column copied out in several pieces stays chunked
+        (`chunked_columns` names them), for its merge to run apart."""
         var columns = List[Series](capacity=len(self.modes))
         for c in range(len(self.modes)):
             if self.modes[c] == _COPY_RAW:
@@ -398,9 +402,25 @@ struct ColumnDataCollection(Movable):
                     for piece in pieces:
                         frames.append(DataFrame([piece.copy()]))
                     columns.append(concat(frames)._columns[0].rechunk())
-                else:
+                elif merge:
                     columns.append(Series._from_chunks(pieces).rechunk())
+                else:
+                    columns.append(Series._from_chunks(pieces))
         return DataFrame(columns^, height=self.count)
+
+    def chunked_columns(self) -> List[Int]:
+        """The columns `frame(merge=False)` leaves chunked."""
+        var chunked = List[Int]()
+        for c in range(len(self.modes)):
+            if (
+                self.modes[c] != _COPY_RAW
+                and self.modes[c] != _COPY_WINDOW
+                and self.modes[c] != _COPY_CONSTANT
+                and len(self.values[c]) > 1
+                and not self.schema._columns[c].dtype().is_categorical()
+            ):
+                chunked.append(c)
+        return chunked^
 
 
 struct LimitBound(ImplicitlyCopyable, Movable):
@@ -542,15 +562,20 @@ struct _FrameJob(Job):
 
     var collection: Int
     var frame: DataFrame
+    # The frame's columns still in pieces, merged by the next round.
+    var chunked: List[Int]
 
     def __init__(out self, collection: Int, schema: DataFrame):
         self.collection = collection
         self.frame = schema.copy()
+        self.chunked = List[Int]()
 
     def run(mut self) raises:
-        self.frame = Pointer[ColumnDataCollection, MutAnyOrigin](
+        ref collection = Pointer[ColumnDataCollection, MutAnyOrigin](
             unsafe_from_address=self.collection
-        )[].frame()
+        )[]
+        self.frame = collection.frame(merge=False)
+        self.chunked = collection.chunked_columns()
 
 
 struct MaterializeFinish(Movable, Rounds):
@@ -561,13 +586,26 @@ struct MaterializeFinish(Movable, Rounds):
     batches are each in the order the worker took them, so a merge by
     batch index over the workers orders all. `frame` is the result once
     `next_round` returns 0. With a `limit`, the batches stop once they
-    hold that many rows: later batches hold none of the first rows."""
+    hold that many rows: later batches hold none of the first rows.
+
+    A column a batch copied out in several pieces is made one chunk by a
+    second round: a fixed-width number column by ranges of its rows, each
+    a piece of the round, any other column whole. The pieces of every
+    batch share the round, so one large batch is merged on every thread
+    rather than by the one task that copied it."""
 
     var sinks: List[MaterializeSink]
     var schema: DataFrame
     var jobs: List[_FrameJob]
     var width: Int
     var ran: Bool
+    var merging: Bool
+    # The second round: by merged column, its batch and column and its
+    # merge by row ranges (none: rechunked whole); its pieces (merged
+    # column, first row, end row; -1 for the whole column).
+    var merged: List[Tuple[Int, Int]]
+    var merges: List[Optional[ChunkMerge]]
+    var pieces: List[Tuple[Int, Int, Int]]
     var done: Bool
     var frame: DataFrame
     var limit: Int
@@ -583,6 +621,10 @@ struct MaterializeFinish(Movable, Rounds):
         self.jobs = List[_FrameJob]()
         self.width = 0
         self.ran = False
+        self.merging = False
+        self.merged = List[Tuple[Int, Int]]()
+        self.merges = List[Optional[ChunkMerge]]()
+        self.pieces = List[Tuple[Int, Int, Int]]()
         self.done = False
         self.frame = schema.copy()
         self.limit = limit
@@ -618,6 +660,23 @@ struct MaterializeFinish(Movable, Rounds):
             self.width = round_width(len(self.jobs))
             if self.width > 0:
                 return self.width
+        if not self.merging:
+            self.merging = True
+            for j in range(len(self.jobs)):
+                var chunked = self.jobs[j].chunked.copy()
+                for c in chunked:
+                    self._add_merge(j, c)
+            if len(self.pieces) > 0:
+                self.width = round_width(len(self.pieces))
+                return self.width
+        for k in range(len(self.merged)):
+            if self.merges[k]:
+                var at = self.merged[k]
+                self.jobs[at[0]].frame._columns[at[1]] = (
+                    self.merges[k].value().merged.copy()
+                )
+        self.merges = List[Optional[ChunkMerge]]()
+        self.pieces = List[Tuple[Int, Int, Int]]()
         self.done = True
         if len(self.jobs) == 1:
             self.frame = self.jobs[0].frame.copy()
@@ -637,7 +696,34 @@ struct MaterializeFinish(Movable, Rounds):
         self.jobs = List[_FrameJob]()
         return 0
 
+    def _add_merge(mut self, j: Int, c: Int) raises:
+        """Column `c` of batch `j`'s frame as pieces of the merge round."""
+        var k = len(self.merged)
+        self.merged.append((j, c))
+        ref column = self.jobs[j].frame._columns[c]
+        var merge = ChunkMerge.of(column)
+        if merge:
+            var n = len(column)
+            var bounds = partitions(n, worker_count(n), 64)
+            for w in range(len(bounds) - 1):
+                if bounds[w] < bounds[w + 1]:
+                    self.pieces.append((k, bounds[w], bounds[w + 1]))
+        else:
+            self.pieces.append((k, 0, -1))
+        self.merges.append(merge^)
+
     def round_task(mut self, task: Int) raises:
+        if self.merging:
+            for p in range(task, len(self.pieces), self.width):
+                var piece = self.pieces[p]
+                var k = piece[0]
+                if self.merges[k]:
+                    self.merges[k].value().copy_rows(piece[1], piece[2])
+                else:
+                    var at = self.merged[k]
+                    ref frame = self.jobs[at[0]].frame
+                    frame._columns[at[1]] = frame._columns[at[1]].rechunk()
+            return
         var j = task
         while j < len(self.jobs):
             self.jobs[j].run()
