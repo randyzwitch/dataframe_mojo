@@ -12,10 +12,12 @@ from dataframe import (
     Expr,
     LazyFrame,
     Series,
+    as_struct,
     col,
     lit,
 )
 from dataframe.frame import concat
+from dataframe.row_expressions import int_range, len as row_count
 from tests.support.coverage_compare import assert_frame
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
@@ -853,6 +855,10 @@ def test_ranks_over_every_row_run_as_rounds_of_the_schedule() raises:
         col("v").rank("ordinal").alias("ordinal"),
         col("k").rank("average").alias("average"),
         col("s").rank("max", descending=True).alias("max"),
+        as_struct([col("s"), col("v")]).rank("min").alias("pair"),
+        as_struct([col("k"), col("s")])
+        .rank("dense", descending=True)
+        .alias("pair_dense"),
     ]
     var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
     var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
@@ -949,6 +955,55 @@ def test_collected_pieces_merge_as_a_round_of_the_schedule() raises:
         "a task started parallel work of its own",
     )
     var eager = frame.filter(keep)
+    assert_equal(lazy.columns(), eager.columns())
+    for name in eager.columns():
+        assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
+
+
+def test_ordered_windows_over_every_row_run_as_rounds_of_the_schedule() raises:
+    """A projection of windows ordered over all rows (no partition keys),
+    computed as an input of the query's schedule, runs as rounds of tasks
+    of that schedule: the sort, peer boundaries, the gather into sorted
+    order, one evaluation task, and the results put back in row order. No
+    task starts parallel work of its own, and the values equal the eager
+    ones for running sums, rolling sums and row numbers, both directions,
+    with nulls and tied keys."""
+    var frame = source().with_row_index("row")
+    var keep = col("row") >= lit(Int64(0))
+    var exprs: List[Expr] = [
+        col("row"),
+        col("v").cum_sum().over(order_by=["s", "k"]).alias("running"),
+        col("v")
+        .rolling_sum(11, min_samples=1)
+        .over(order_by=["k"], descending=True)
+        .alias("rolling"),
+        (int_range(row_count()) + lit(Int64(1)))
+        .over(order_by=["s"])
+        .alias("number"),
+        col("k"),
+    ]
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var lazy = (
+        frame.lazy()
+        .select_exprs(exprs)
+        .filter(keep)
+        .collect(optimize=False)
+        .sort("row")
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "window.ordered_rounds" in paths, "the windows did not run as rounds"
+    )
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    var eager = frame.select_exprs(exprs)
     assert_equal(lazy.columns(), eager.columns())
     for name in eager.columns():
         assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
