@@ -2701,13 +2701,16 @@ struct _PipelineJob(Job):
         """Batches from the file source until it is done: each is taken under
         the source's lock and decoded on this thread, then runs as a morsel
         numbered by its place in the file."""
+        # Every worker reads the one source: by address, so no worker holds
+        # it as a `mut` argument (`ScanSource.take_at`).
+        var source = Int(Pointer(to=self.source.value()[]))
         while True:
-            var next = self.source.value()[].take(self.bound.last())
+            var next = ScanSource.take_at(source, self.bound.last())
             if not next:
                 break
             var batch = next.take()
             var k = batch.number
-            var morsel = self.source.value()[].frame(batch^)
+            var morsel = ScanSource.frame_at(source, batch^)
             var length = morsel.height()
             self.runner.begin_sink(k, 0, length)
             self.runner.begin_morsel()

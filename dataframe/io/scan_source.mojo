@@ -6,16 +6,17 @@ A file scan is the source of a pipeline: one shared state hands each
 thread the next piece of the file under a lock, and the thread decodes
 that piece itself, so reading is serialized only for the short cut while
 decoding runs on every thread at once. `ScanSource` is that shared state
-over this library's batch readers: `take` cuts the next batch under the
+over this library's batch readers: `take_at` cuts the next batch under the
 lock (a CSV or NDJSON byte range, or an imported Arrow batch), and
 `ScanBatch.into_frame` decodes a byte range on the calling
 thread, outside the lock."""
+from std.atomic import Atomic
 from std.collections import Optional
-from std.memory import Pointer
-from std.utils.lock import BlockingSpinLock
+from std.ffi import external_call
+from std.memory import ArcPointer, Allocation, Layout, Pointer, alloc, dealloc
 
 from dataframe.categorical import ScanDictionary, recode_codes
-from dataframe.dtype import DataType
+from dataframe.dtype import CategoricalDictionary, DataType
 from dataframe.frame import DataFrame
 from dataframe.series import Series
 from .csv_reader import _CsvBatches, _DecodeJob
@@ -52,18 +53,71 @@ struct ScanBatch(Movable):
         return self.frame^
 
 
+struct _ScanLock(Movable):
+    """A spin lock word in its own heap cell. Workers reach the source it
+    guards by address (`ScanSource.take_at`), never through a `mut`
+    argument: a `mut` argument promises the callee sole access to the
+    value's memory, so the compiler may move that memory's loads and
+    stores across the lock's atomics, and a worker would read state
+    another worker is still changing (or spin on a value it never
+    reloads). The word sits outside the source, so taking it touches no
+    memory any argument claims."""
+
+    var address: Int
+
+    def __init__(out self):
+        var pointer = alloc(Layout[Atomic[Int64]](length=1)).unsafe_leak()
+        pointer.unsafe_write(Atomic[Int64](0))
+        self.address = Int(pointer)
+
+    def __deinit__(deinit self):
+        dealloc(
+            Allocation[Atomic[Int64]](
+                unsafe_owned_ptr=Pointer[Atomic[Int64], MutUntrackedOrigin](
+                    unsafe_from_address=self.address
+                ),
+                layout=Layout[Atomic[Int64]](length=1),
+            )
+        )
+
+    @always_inline
+    def _word(self) -> ref[MutAnyOrigin] Atomic[Int64]:
+        return Pointer[Atomic[Int64], MutAnyOrigin](
+            unsafe_from_address=self.address
+        )[]
+
+    def acquire(self):
+        while True:
+            var free = Int64(0)
+            if self._word().compare_exchange(free, 1):
+                return
+            _ = external_call["sched_yield", Int32]()
+
+    def release(self):
+        self._word().store(0)
+
+
+def _source_at(address: Int) -> ref[MutAnyOrigin] ScanSource:
+    return Pointer[ScanSource, MutAnyOrigin](unsafe_from_address=address)[]
+
+
 struct ScanSource(Movable):
     """One file source's readers (exactly one of the lists holds one), the
-    batches handed out so far, and the lock `take` holds while it cuts the
-    next. A CSV or NDJSON byte range points into the file's mapping, which
-    stays mapped until `finish`."""
+    batches handed out so far, and the lock `take_at` holds while it cuts
+    the next. A CSV or NDJSON byte range points into the file's mapping,
+    which stays mapped until `finish`.
+
+    Workers share one source and reach it by address (`take_at`,
+    `frame_at`); the state the lock guards is changed only inside the
+    methods those call while holding it, which are not inlined, so each
+    change is complete before the lock is released."""
 
     var csv: List[_CsvBatches]
     var dataset: List[_DatasetBatches]
     var parquet: List[_ParquetBatches]
     var ipc: List[_IpcBatches]
     var ndjson: List[_NdjsonBatches]
-    var lock: BlockingSpinLock
+    var lock: _ScanLock
     var taken: Int
     var ended: Bool
     # A batch `schema` read ahead to learn the source's columns, handed
@@ -80,7 +134,7 @@ struct ScanSource(Movable):
         self.parquet = List[_ParquetBatches]()
         self.ipc = List[_IpcBatches]()
         self.ndjson = List[_NdjsonBatches]()
-        self.lock = BlockingSpinLock()
+        self.lock = _ScanLock()
         self.taken = 0
         self.ended = False
         self.ahead = List[ScanBatch]()
@@ -152,26 +206,37 @@ struct ScanSource(Movable):
         self.taken += 1
         return batch^
 
-    def take(mut self, last: Int = Int.MAX) raises -> Optional[ScanBatch]:
-        """The next batch in source order, for any thread; None once the
-        source is done, or when the next batch would be numbered past
-        `last` (a limit's rows are all in the batches before it). Decoding
-        a byte range is left to the caller."""
-        var owner = Int(Pointer(to=self))
-        self.lock.lock(owner)
+    @staticmethod
+    def take_at(
+        address: Int, last: Int = Int.MAX
+    ) raises -> Optional[ScanBatch]:
+        """The next batch in source order from the source at `address`, for
+        any thread; None once the source is done, or when the next batch
+        would be numbered past `last` (a limit's rows are all in the
+        batches before it). Decoding a byte range is left to the caller.
+        """
+        ref source = _source_at(address)
+        source.lock.acquire()
+        try:
+            var batch = _source_at(address)._take_locked(last)
+            source.lock.release()
+            return batch^
+        except e:
+            source.lock.release()
+            raise e^
+
+    @no_inline
+    def _take_locked(mut self, last: Int) raises -> Optional[ScanBatch]:
+        """`take_at`'s work, under the lock."""
         try:
             var number = self.ahead[len(self.ahead) - 1].number if len(
                 self.ahead
             ) else self.taken
             if number > last:
-                _ = self.lock.unlock(owner)
                 return None
-            var batch = self._next()
-            _ = self.lock.unlock(owner)
-            return batch^
+            return self._next()
         except e:
             self.ended = True
-            _ = self.lock.unlock(owner)
             raise e^
 
     def schema(mut self) raises -> Optional[DataFrame]:
@@ -222,12 +287,17 @@ struct ScanSource(Movable):
             self.dictionaries.append(shared^)
         return len(self.dictionaries) > 0
 
-    def frame(mut self, var batch: ScanBatch) raises -> DataFrame:
-        """The batch's rows (`ScanBatch.into_frame`), with each categorical
-        column's codes moved onto its dictionary over the scan when
-        `share_dictionaries` set one up. Any thread."""
+    @staticmethod
+    def frame_at(address: Int, var batch: ScanBatch) raises -> DataFrame:
+        """The batch's rows (`ScanBatch.into_frame`), decoded on this
+        thread, with each categorical column's codes moved onto its
+        dictionary over the scan when `share_dictionaries` set one up.
+        The source at `address`; any thread."""
         var frame = batch^.into_frame()
-        if len(self.dictionaries) == 0:
+        # The names and the list of dictionaries are fixed before any batch
+        # is handed out; only a dictionary's values change, under the lock.
+        ref source = _source_at(address)
+        if len(source.dictionaries) == 0:
             return frame^
         for c in range(frame.width()):
             ref column = frame._columns[c]
@@ -237,29 +307,36 @@ struct ScanSource(Movable):
             ):
                 continue
             var at = -1
-            for d in range(len(self.dictionary_names)):
-                if self.dictionary_names[d] == column.name():
+            for d in range(len(source.dictionary_names)):
+                if source.dictionary_names[d] == column.name():
                     at = d
                     break
             if at < 0:
                 continue
             var codes = List[UInt32]()
             var dtype = DataType.NULL
-            var owner = Int(Pointer(to=self))
-            self.lock.lock(owner)
+            source.lock.acquire()
             try:
-                var added = self.dictionaries[at].add(
-                    column.dtype().dictionary()
+                var added = _source_at(address)._add_locked(
+                    at, column.dtype().dictionary()
                 )
                 codes = added[0].copy()
                 dtype = added[1]
             except e:
-                _ = self.lock.unlock(owner)
+                source.lock.release()
                 raise e^
-            _ = self.lock.unlock(owner)
+            source.lock.release()
             var recoded = recode_codes(column, codes, dtype)
             frame._columns[c] = recoded^
         return frame^
+
+    @no_inline
+    def _add_locked(
+        mut self, at: Int, values: ArcPointer[CategoricalDictionary]
+    ) raises -> Tuple[List[UInt32], DataType]:
+        """A batch's dictionary added to scan dictionary `at`, under the
+        lock: each batch value's code in it, and its type now."""
+        return self.dictionaries[at].add(values)
 
     def settle(mut self):
         """Every value each scan dictionary holds into the schema's, once
