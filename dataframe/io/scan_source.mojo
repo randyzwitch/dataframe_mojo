@@ -213,7 +213,10 @@ struct ScanSource(Movable):
             if column.name() in self.dictionary_names:
                 continue
             var shared = ScanDictionary()
+            # The column's type gains the scan's dictionary but it is the
+            # same field, so its Arrow metadata stays, as each batch's does.
             var typed = column.with_dtype(shared.schema_type())
+            typed._field_metadata = column._field_metadata
             columns._columns[c] = typed^
             self.dictionary_names.append(column.name())
             self.dictionaries.append(shared^)

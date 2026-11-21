@@ -1761,18 +1761,18 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var crew = Crew.start()
         try:
             var result: DataFrame
-            var handoff = engine == "auto" and _automatic_handoff()
             if optimized:
                 var plan = optimized.take()
-                if handoff:
-                    plan = plan._with_handoff(HANDOFF_AUTO)
+                # Pipeline placement already priced these units. Offering the
+                # terminal again can materialize its input (e.g. a join) just
+                # to discover that its layout has no measured device cost.
                 result = plan._collect(
                     optimize=optimize,
                     streaming=streaming,
                     batch_size=batch_size,
                     optimized=True,
                 )
-            elif handoff:
+            elif engine == "auto" and _automatic_handoff():
                 result = self._with_handoff(HANDOFF_AUTO)._collect(
                     optimize=optimize,
                     streaming=streaming,
@@ -2622,8 +2622,10 @@ def _solve_devices[
             if problem.run_ns[p][_PLACE_CPU] < 0:
                 continue
             if supported[p][d]:
+                var features = unit.features.copy()
+                features.collect_request = not estimate_all
                 var costs = backend.pipeline_costs(
-                    region, devices[d].ordinal, unit.features
+                    region, devices[d].ordinal, features
                 )
                 problem.run_ns[p][d + 1] = costs[1] if isfinite(
                     costs[1]
@@ -2865,8 +2867,7 @@ def _collect_placed[
             observed.value()[].cpu(reason)
     if not any_device:
         # The execution report profiles the plan from the start.
-        if optimize:
-            optimized = plan^
+        optimized = plan^
         return None
     ref units = solved.units
     var problem = solved.problem.copy()

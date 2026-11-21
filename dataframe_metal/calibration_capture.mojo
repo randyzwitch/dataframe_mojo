@@ -10,6 +10,7 @@ from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
 from dataframe.json.value import json_quote
 from .calibration import identity_json, pipeline_key
+from .accelerator.gpu.query_scope import shared_service
 from .handoff import execute_timed, layout_key, supports
 
 
@@ -101,6 +102,8 @@ def capture(
         )
     _check(region.collect(engine="cpu"), expected)
     var warm: DataFrame
+    var first_use = shared_service().cached_generations() == 0
+    var started_first = Int(perf_counter_ns())
     try:
         var measured = execute_timed(region)
         warm = measured[0].copy()
@@ -111,7 +114,10 @@ def capture(
             + json_quote(String(error))
             + "}"
         )
+    var first_ns = Int(perf_counter_ns()) - started_first
     _check(warm, expected)
+    if first_use:
+        prefix += ',"first_accel_ns":' + String(first_ns)
     var cpu = String("[")
     var accel = String("[")
     for rep in range(repetitions):

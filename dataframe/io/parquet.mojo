@@ -825,7 +825,12 @@ struct _ParquetBatches(Movable):
                     )
                 )
                 self.pool_ready = True
-            self.pending = _import_arrow_with_pool(array, schema, self.pool)
+            # Decimals at the width read_parquet gives them, so batches
+            # and the eager reader agree on every column's type.
+            self.pending = _narrow_decimals(
+                _import_arrow_with_pool(array, schema, self.pool),
+                parallel=False,
+            )
             var batch = self.pending.value().slice(0, self.size)
             self.offset = batch.height()
             return batch^
@@ -874,7 +879,9 @@ struct _NarrowDecimalJob(Job):
         self.result._field_metadata = self.source._field_metadata
 
 
-def _narrow_decimals(frame: DataFrame) raises -> DataFrame:
+def _narrow_decimals(
+    frame: DataFrame, *, parallel: Bool = True
+) raises -> DataFrame:
     """Decimal columns at the smallest width that holds their declared
     precision (decimal32 up to 9 digits, decimal64 up to 18), as the
     Arrow C++ reader's smallest-decimal option loads them (#472): the
@@ -883,7 +890,8 @@ def _narrow_decimals(frame: DataFrame) raises -> DataFrame:
     slower per-row path, while at 64 bits the typed compare and arithmetic
     kernels apply because precision of at most 18 digits fits in a signed
     64-bit integer.
-    One chunk a job."""
+    One chunk a job; with `parallel=False` the jobs run on the calling
+    thread (a batch reader may itself run on a worker)."""
     var jobs = List[_NarrowDecimalJob]()
     var at = List[Int]()
     var chunk_of = List[Int]()
@@ -904,8 +912,9 @@ def _narrow_decimals(frame: DataFrame) raises -> DataFrame:
                 chunk_of.append(k)
     if len(jobs) == 0:
         return frame.copy()
-    if len(jobs) == 1:
-        jobs[0].run()
+    if len(jobs) == 1 or not parallel:
+        for k in range(len(jobs)):
+            jobs[k].run()
     else:
         run_jobs(jobs)
     var columns = frame._columns.copy()

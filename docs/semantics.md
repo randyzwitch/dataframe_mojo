@@ -237,8 +237,9 @@ nulls_last=[True, False])`. An empty key list or a length mismatch raises.
 Rows with equal keys come out in no particular order unless the sort is
 given `maintain_order=True`, which keeps their input order in either
 direction. Leaving ties free lets the planner reorder joins below a sort.
-Null placement is independent of direction and defaults to last. NaNs follow
-all non-null non-NaN numeric values in either direction; nulls remain first or
+Null placement is independent of direction and defaults to last. NaN is the
+largest value: it follows the numbers ascending and precedes them
+descending (every NaN is one value); nulls remain first or
 last according to the option. `-0.0` and `0.0` are equal keys. Strings use
 Mojo's byte-lexicographic comparison, without locale collation. Boolean false
 sorts before true in ascending order.

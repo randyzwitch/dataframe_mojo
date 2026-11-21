@@ -314,6 +314,25 @@ def test_ipc_writer_preserves_unaligned_chunks_nulls_empty_and_zero_column_frame
         assert_equal(read(zero, stream).width(), 0)
 
 
+def test_ipc_writer_reads_back_zero_row_slices_past_the_first_row() raises:
+    """A zero-row slice that starts past the first row (tail(0), a slice
+    past the end) writes a file every reader opens. Found by the
+    differential fuzzer (tests/fuzz)."""
+    var source = DataFrame(
+        [
+            Series("x", Column[Float64]([1.5, 2.5, 3.5], [True, False, True])),
+            Series("s", StringColumn(["a", "", "λ"])),
+        ]
+    )
+    var path = getenv("COVERAGE_TEST_TMP") + "/ipc-zero-row-slice.arrow"
+    for empty in [source.tail(0), source.slice(2, 0), source.slice(5, 3)]:
+        assert_equal(empty.height(), 0)
+        write_ipc(empty, path)
+        var back = read_ipc(path)
+        assert_true(back.equals(source.clear()))
+        assert_equal(read_ipc_schema(path)[1].name, "s")
+
+
 def test_ipc_invalid_inputs_and_writer_options_raise_and_keep_existing_output() raises:
     var source = read_ipc(fixture("core-uncompressed.arrow"))
     var existing = getenv("COVERAGE_TEST_TMP") + "/ipc-existing.arrow"
