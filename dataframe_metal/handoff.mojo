@@ -224,7 +224,7 @@ def layout_key(region: LazyFrame) raises -> String:
 
 
 def estimate_costs(
-    region: LazyFrame, rows: Int
+    region: LazyFrame, rows: Int, collect_request: Bool = False
 ) -> Tuple[String, Float64, Float64]:
     """Measured Metal cost only for this build, host, threads and layout."""
     try:
@@ -236,7 +236,7 @@ def estimate_costs(
             and ":distinct_cardinality=uncertain" in key
         ):
             return (key^, Float64(-1), Float64(-1))
-        var costs = measured_costs(key, rows)
+        var costs = measured_costs(key, rows, collect_request)
         return (key^, costs[0], costs[1])
     except:
         return (String(), Float64(-1), Float64(-1))

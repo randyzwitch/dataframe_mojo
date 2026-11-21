@@ -18,6 +18,7 @@ from dataframe.frame import DataFrame
 from dataframe.lazy import LazyFrame
 from .metal import MetalRuntime, default_runtime, metal_installed
 from . import handoff
+from .calibration import record_warm_region
 from .accelerator.faults import is_data_fault
 from .accelerator.gpu.identity import runtime_build_id
 from dataframe.json.value import json_quote
@@ -123,7 +124,9 @@ def pipeline_costs(
     try:
         # The handoff matcher preserves logical moment operations while
         # normalizing their physical inputs for the same validated profile.
-        var costs = handoff.estimate_costs(pipeline, features.input_rows)
+        var costs = handoff.estimate_costs(
+            pipeline, features.input_rows, features.collect_request
+        )
         return (costs[1], costs[2])
     except:
         return (Float64(-1), Float64(-1))
@@ -153,6 +156,7 @@ def run_pipeline(pipeline: LazyFrame, device: Int) raises -> DataFrame:
         var result = handoff_execute(observed_pipeline)
         if observed:
             observed.value()[].complete()
+        record_warm_region(handoff.layout_key(pipeline))
         _trace_placement(observed_pipeline, "metal")
         return result^
     except error:
