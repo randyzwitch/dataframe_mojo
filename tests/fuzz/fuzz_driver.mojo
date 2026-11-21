@@ -123,11 +123,17 @@ struct Tree(Movable):
             else:
                 var node: Node
                 if t.startswith("i:"):
-                    node = Node(INT, t, Int(String(t[byte=2:])), 0.0, List[Int]())
+                    node = Node(
+                        INT, t, Int(String(t[byte=2:])), 0.0, List[Int]()
+                    )
                 elif t.startswith("f:"):
-                    node = Node(FLOAT, t, 0, Float64(String(t[byte=2:])), List[Int]())
+                    node = Node(
+                        FLOAT, t, 0, Float64(String(t[byte=2:])), List[Int]()
+                    )
                 elif t.startswith("s:"):
-                    node = Node(STR, _unhex(String(t[byte=2:])), 0, 0.0, List[Int]())
+                    node = Node(
+                        STR, _unhex(String(t[byte=2:])), 0, 0.0, List[Int]()
+                    )
                 elif t.startswith("b:"):
                     node = Node(
                         BOOL, t, 1 if t == "b:1" else 0, 0.0, List[Int]()
@@ -336,7 +342,9 @@ def build_expr(t: Tree, i: Int) raises -> Expr:
     if op == "arg_max":
         return ea(t, i, 1).arg_max()
     if op == "quantile":
-        return ea(t, i, 1).quantile(t.nodes[t.kid(i, 2)].fval, t.text(t.kid(i, 3)))
+        return ea(t, i, 1).quantile(
+            t.nodes[t.kid(i, 2)].fval, t.text(t.kid(i, 3))
+        )
     # Order-dependent and window expressions.
     if op == "cum_sum":
         return ea(t, i, 1).cum_sum(t.flag(t.kid(i, 2)))
@@ -382,13 +390,19 @@ def build_expr(t: Tree, i: Int) raises -> Expr:
     if op == "str.slice":
         return ea(t, i, 1).str().slice(t.int(t.kid(i, 2)), t.int(t.kid(i, 3)))
     if op == "str.replace_all":
-        return ea(t, i, 1).str().replace_all(t.text(t.kid(i, 2)), t.text(t.kid(i, 3)), literal=True)
+        return (
+            ea(t, i, 1)
+            .str()
+            .replace_all(t.text(t.kid(i, 2)), t.text(t.kid(i, 3)), literal=True)
+        )
     if op == "str.strip_chars":
         return ea(t, i, 1).str().strip_chars()
     if op == "str.reverse":
         return ea(t, i, 1).str().reverse()
     if op == "str.pad_start":
-        return ea(t, i, 1).str().pad_start(t.int(t.kid(i, 2)), t.text(t.kid(i, 3)))
+        return (
+            ea(t, i, 1).str().pad_start(t.int(t.kid(i, 2)), t.text(t.kid(i, 3)))
+        )
     if op == "dt.year":
         return ea(t, i, 1).dt().year()
     if op == "dt.month":
