@@ -201,6 +201,7 @@ from dataframe.query_execution.operators import (
     _set_rows,
 )
 from dataframe.query_execution.reporting import (
+    plan_observe,
     plan_record,
 )
 from dataframe.query_execution.stream_state import (
@@ -2494,6 +2495,9 @@ def _probe_start(
         computed=source.kind == SCAN_FRAME
         and plan_computed_slot(self, source.source_slot()),
     )
+    if self._integral_node == index and run.ungrouped:
+        run.ungrouped[0][].integral_combine = self._integral_combine
+        run.ungrouped[0][].combine_observation = plan_observe(self, index)
     return _ProbeStart(
         _PipedProbe(
             run^,
