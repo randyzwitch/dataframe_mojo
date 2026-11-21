@@ -624,6 +624,20 @@ def _reads_files(self: QueryContext, index: Int) -> Bool:
     return False
 
 
+def _join_input_schemas(
+    self: QueryContext, left: Int, right: Int
+) raises -> Tuple[DataFrame, DataFrame]:
+    """The empty schemas of a join's two inputs. When only the right input
+    reads files, it is resolved first: a missing or unreadable file is a
+    fault in the query's sources, and it is reported before any error that
+    evaluating the other input's values could raise."""
+    if _reads_files(self, right) and not _reads_files(self, left):
+        var right_schema = self._execute(right, True)
+        return (self._execute(left, True), right_schema^)
+    var left_schema = self._execute(left, True)
+    return (left_schema^, self._execute(right, True))
+
+
 def plan_align_join_keys(mut self: QueryContext) raises:
     """Give each join key pair that holds one decimal at two storage widths
     a single type, by a cast below the join on the side that differs
@@ -648,8 +662,9 @@ def plan_align_join_keys(mut self: QueryContext) raises:
         ):
             continue
         var node = self._nodes[i].copy()
-        var left = self._execute(node.left, True)
-        var right = self._execute(node.right, True)
+        var schemas = _join_input_schemas(self, node.left, node.right)
+        ref left = schemas[0]
+        ref right = schemas[1]
         var left_casts = List[Expr]()
         var right_casts = List[Expr]()
         var left_cast = Dict[String, Bool]()
