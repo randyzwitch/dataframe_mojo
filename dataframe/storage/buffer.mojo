@@ -66,11 +66,18 @@ struct _Repeat[T: Copyable & Deinitable](Movable):
     var value: Self.T
     var _state: Atomic[Int64]
     var _filled: List[Self.T]
+    # `_filled`'s storage address, published before `_state` turns
+    # filled: readers on other threads take the address from this atomic
+    # and never load `_filled` itself, which only the filling thread
+    # writes (a plain load of it could be reordered before the state load
+    # that says it is ready).
+    var _address: Atomic[Int64]
 
     def __init__(out self, var value: Self.T):
         self.value = value^
         self._state = Atomic[Int64](_UNFILLED)
         self._filled = List[Self.T]()
+        self._address = Atomic[Int64](0)
 
     def is_filled(self) -> Bool:
         return self._state.load() == _FILLED
@@ -80,16 +87,19 @@ struct _Repeat[T: Copyable & Deinitable](Movable):
         # Field pointers give interior mutability, as `_DeviceResidence`
         # does: the repeat is shared by every buffer that refers to it.
         var cell = Pointer(to=self._state).unsafe_mut_cast[True]()
+        var address = Pointer(to=self._address).unsafe_mut_cast[True]()
         var out = Pointer(to=self._filled).unsafe_mut_cast[True]()
         while True:
             var state = cell[].load()
             if state == _FILLED:
-                return Int(out[].unsafe_ptr())
+                return Int(address[].load())
             var expected = Int64(_UNFILLED)
             if cell[].compare_exchange(expected, Int64(_FILLING)):
                 out[] = List[Self.T](length=length, fill=self.value.copy())
+                var filled = Int(out[].unsafe_ptr())
+                address[].store(Int64(filled))
                 cell[].store(_FILLED)
-                return Int(out[].unsafe_ptr())
+                return filled
             _ = external_call["sched_yield", Int32]()
 
 
