@@ -211,8 +211,9 @@ profiles.
 
 **Placement.** `engine="accel"` (or passing a `MetalRuntime`) hands Metal
 every node it supports. `engine="auto"` places supported pipelines by measured
-cost when `DATAFRAME_HANDOFF_CALIBRATION` names a calibration file, and
-runs on the CPU otherwise:
+cost. Set `DATAFRAME_HANDOFF_CALIBRATION` to a profile path or install a
+profile for discovery. An empty override disables discovery. Queries without
+a matching measurement keep their fused CPU pipeline.
 
 Build the packages first so the measurements carry actual CPU and Metal
 source/compiler identities. Build both the capture program and application
@@ -227,6 +228,15 @@ DATAFRAME_THREADS=8 build/metal-calibration 5 > build/metal-capture.jsonl
 python3 scripts/metal_calibration.py build/metal-capture.jsonl --output-dir build/calibration
 export DATAFRAME_HANDOFF_CALIBRATION=/absolute/path/printed/by/the/fitter.json
 ```
+
+To install a profile on the target Mac, pass `--install` to the fitter.
+It publishes the measured profile under `$XDG_CACHE_HOME` (default
+`~/.cache`) for the packaged CPU build and worker count. To measure startup
+for a shape, run its capture first in a fresh process. The fitter records
+the excess of the first submission over warm execution. Auto charges that
+cost on first use. Repeated collects of the same measured shape accumulate
+estimated savings toward paying startup. A successful submission marks that
+shape warm on the reusable Metal context.
 
 The built-in capture uses 50M, 75M and 100M rows, eleven representative operator
 shapes, contiguous/eight-chunk inputs and independent nullable masks. Optional

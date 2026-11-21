@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from metal_calibration import fit, publish, _typical
+from metal_calibration import fit, install, publish, _typical
 
 
 class MetalCalibrationTests(unittest.TestCase):
@@ -52,12 +52,34 @@ class MetalCalibrationTests(unittest.TestCase):
         self.assertAlmostEqual(model["switch_margin"], 0.05)
         self.assertAlmostEqual(model["accel"]["fixed_ns"], 1050)
 
+    def test_startup_uses_only_paired_cold_and_warm_measurements(self):
+        records = self.captures()
+        key = records[0]["key"]
+        self.assertNotIn("startup_ns", fit(records)["regions"][key])
+        records[0]["first_accel_ns"] = 6100
+        records[2]["first_accel_ns"] = 16000
+        self.assertEqual(fit(records)["regions"][key]["startup_ns"], 5000)
+        records[1]["first_accel_ns"] = -1
+        with self.assertRaisesRegex(ValueError, "first Metal execution"):
+            fit(records)
+
     def test_boundary_refit_does_not_keep_an_oversteep_slope(self):
         model = _typical([(1, 1), (2, 3), (3, 5)])
         self.assertEqual(model, {"fixed_ns": 0.0, "row_ns": 1.5})
         self.assertEqual(
             _typical([(1, 10), (2, 9), (3, 8)]), {"fixed_ns": 9, "row_ns": 0}
         )
+
+    def test_install_selects_an_immutable_profile_for_one_build_and_worker_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = self.captures()
+            original = install(fit(records), Path(tmp))
+            records[0]["first_accel_ns"] = 9000
+            updated = install(fit(records), Path(tmp))
+            self.assertNotEqual(original, updated)
+            self.assertTrue(original.is_file())
+            self.assertEqual(updated.parent.parts[-2:], ("a" * 64, "8"))
+            self.assertEqual((updated.parent / "active").read_text().strip(), updated.name)
 
     def test_a_single_slow_gpu_sample_does_not_hide_clear_wins(self):
         records = self.captures()
