@@ -2,6 +2,7 @@
 # contract-group: kernel.row_ops
 # contract-group: io.arrow
 # contract-group: io.parquet
+from std.os import getenv
 from std.testing import assert_equal, assert_true
 from dataframe import (
     Column,
@@ -11,6 +12,8 @@ from dataframe import (
     col,
     when,
     read_parquet,
+    scan_parquet,
+    write_parquet,
 )
 from tests.support.parquet_runtime import Observer
 
@@ -150,3 +153,41 @@ def test_parquet_dictionary_codes_stay_aligned_after_gathers_and_outer_join_null
         else:
             assert_equal(groups.item(row, "s").string(), "red")
             assert_equal(groups.item(row, "weight").int64(), Int64(3))
+
+
+def test_parquet_scan_batches_keep_the_readers_decimal_width() raises:
+    """A decimal(10, 2) column loads as decimal64 from read_parquet, and a
+    scan's batches give it the same type, so two scans of the file join on
+    it and a join on another key keeps both sides' types. Found by the
+    differential fuzzer (tests/fuzz)."""
+    var frame = DataFrame(
+        [
+            Series(
+                "d",
+                Column[Int128]([100, 250, 0, 100], [True, True, False, True]),
+            ).with_dtype(DataType.decimal(10, 2)),
+            Series("x", Column[Int64]([1, 2, 3, 4])),
+        ]
+    )
+    var path = (
+        getenv("COVERAGE_TEST_TMP") + "/parquet-scan-decimal-width.parquet"
+    )
+    write_parquet(frame, path)
+    var width = read_parquet(path).column("d").dtype()
+    assert_equal(width, DataType.decimal(10, 2, 64))
+    for optimize in [False, True]:
+        var on_decimal = (
+            scan_parquet(path)
+            .join(scan_parquet(path), on="d")
+            .collect(engine="cpu", optimize=optimize)
+        )
+        assert_equal(on_decimal.height(), 5)
+        assert_equal(on_decimal.column("d").dtype(), width)
+        var on_x = (
+            scan_parquet(path)
+            .join(scan_parquet(path), on="x")
+            .collect(engine="cpu", optimize=optimize)
+        )
+        assert_equal(on_x.height(), 4)
+        assert_equal(on_x.column("d").dtype(), width)
+        assert_equal(on_x.column("d_right").dtype(), width)

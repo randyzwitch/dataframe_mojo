@@ -1,5 +1,6 @@
 """Lazy IPC scans against independent files and deliberately unreadable bodies."""
 # contract-group: io.ipc
+from std.memory import ArcPointer
 from std.os import getenv
 from std.testing import assert_equal, assert_true
 from dataframe import (
@@ -16,6 +17,7 @@ from dataframe import (
 )
 from dataframe.io.ipc import _IpcBatches
 from tests.interchange.test_ipc import fixture, check_metadata
+from tests.support.arrow_foreign import packed_metadata, text_bytes
 from tests.interchange.test_parquet import assert_core_rows
 
 
@@ -366,3 +368,52 @@ def test_ipc_scan_batch_reader_handles_partial_batches_early_stop_and_errors() r
     assert_core_rows(
         scan_ipc(path).head(1).collect(engine="cpu"), [0], ["x", "s", "score"]
     )
+
+
+def test_ipc_scan_keeps_categorical_field_metadata_through_row_steps() raises:
+    """A categorical field carrying Arrow metadata (other writers tag theirs)
+    keeps it through a scan: the scan's schema and every batch agree, so a
+    filter, projection or head over the scan collects the file's values.
+    Found by the differential fuzzer (tests/fuzz)."""
+    var labels = Series(
+        "c", StringColumn(["a", "b", "", "a"], [True, True, False, True])
+    ).cast(DataType.CATEGORICAL)
+    labels._field_metadata = ArcPointer(
+        packed_metadata(
+            [text_bytes("application")], [text_bytes("independent")]
+        )
+    )
+    var frame = DataFrame([labels^, Series("x", Column[Int64]([1, 2, 3, 4]))])
+    var path = getenv("COVERAGE_TEST_TMP") + "/ipc-scan-categorical-meta.arrow"
+    write_ipc(frame, path)
+    var full = read_ipc(path)
+    for optimize in [False, True]:
+        var kept = (
+            scan_ipc(path)
+            .filter(col("x") > 1)
+            .collect(engine="cpu", optimize=optimize)
+        )
+        var expected = full.filter(col("x") > 1)
+        assert_true(kept.column("c").dtype().is_categorical())
+        assert_true(
+            kept.column("c")
+            .cast(DataType.STRING)
+            .equals(expected.column("c").cast(DataType.STRING))
+        )
+        assert_true(kept.column("x").equals(expected.column("x")))
+        check_metadata(kept.column("c"))
+        var projected = (
+            scan_ipc(path)
+            .select(["c"])
+            .collect(engine="cpu", optimize=optimize)
+        )
+        assert_true(
+            projected.column("c")
+            .cast(DataType.STRING)
+            .equals(full.column("c").cast(DataType.STRING))
+        )
+        var first = (
+            scan_ipc(path).head(2).collect(engine="cpu", optimize=optimize)
+        )
+        assert_equal(first.height(), 2)
+        check_metadata(first.column("c"))

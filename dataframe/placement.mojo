@@ -28,8 +28,12 @@ from std.ffi import _get_global
 from std.memory import Pointer
 from std.memory.alloc import Layout, alloc
 from std.os import getenv
+from std.os.path import exists
+from std.sys import CompilationTarget
 
+from dataframe._build_identity import CPU_BUILD_ID
 from dataframe.json.value import JsonValue
+from dataframe.parallel import configured_workers
 
 
 struct LinearCost(Copyable, Movable):
@@ -47,7 +51,48 @@ struct LinearCost(Copyable, Movable):
 
 
 def calibration_path() -> String:
-    return getenv("DATAFRAME_HANDOFF_CALIBRATION")
+    var configured = getenv("DATAFRAME_HANDOFF_CALIBRATION", "\0")
+    if configured != "\0":
+        return configured^
+    comptime if CompilationTarget.is_macos() and CPU_BUILD_ID.byte_length() == 64:
+        var base = getenv("XDG_CACHE_HOME")
+        if not base:
+            var home = getenv("HOME")
+            if not home:
+                return String()
+            base = home + "/.cache"
+        var directory = (
+            base
+            + "/dataframe-mojo/calibration/"
+            + CPU_BUILD_ID
+            + "/"
+            + String(configured_workers())
+            + "/"
+        )
+        return _active_calibration(directory)
+    return String()
+
+
+def _active_calibration(directory: String) -> String:
+    var active = directory + "active"
+    try:
+        if exists(active):
+            with open(active, "r") as source:
+                var name = String(source.read().strip())
+                comptime prefix = "metal-calibration-"
+                comptime suffix = ".json"
+                if (
+                    name.startswith(prefix)
+                    and name.endswith(suffix)
+                    and name.byte_length()
+                    == prefix.byte_length() + 64 + suffix.byte_length()
+                    and "/" not in name
+                    and exists(directory + name)
+                ):
+                    return directory + name
+    except:
+        pass
+    return String()
 
 
 def _number(value: JsonValue) raises -> Float64:
