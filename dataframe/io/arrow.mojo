@@ -616,6 +616,11 @@ def _fill_array(
                     != 0 else 0
                 )
                 state.buffers.append(Int(column._data[].unsafe_ptr()))
+    if length == 0:
+        # A zero-length array reads no values, and a consumer may size its
+        # buffers from the length alone, which an offset past their start
+        # would overrun.
+        array.offset = 0
     if dtype.is_categorical():
         var values = _leak(ArrowArray())
         _fill_array(

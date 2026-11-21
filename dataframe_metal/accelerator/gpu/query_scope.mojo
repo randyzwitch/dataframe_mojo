@@ -83,6 +83,17 @@ struct DeviceService(Copyable):
     def cached_generations(self) -> Int:
         return Int(self._state[].generation.load())
 
+    def reusable_generation(self) -> Int:
+        """Generation of the idle cached context, or zero if it cannot be leased."""
+        var unlocked = Int64(0)
+        if not self._state[].cached_lease.compare_exchange(unlocked, 1):
+            return 0
+        var generation = (
+            self.cached_generations() if self._state[].context else 0
+        )
+        self._state[].cached_lease.store(0)
+        return generation
+
     def device_id(self) -> Int:
         return self._state[].device
 

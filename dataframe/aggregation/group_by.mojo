@@ -41,6 +41,7 @@ from dataframe.kernels.canonical_labels import (
 from dataframe.categorical import (
     decode,
 )
+from dataframe.dtype import DataType
 from dataframe.storage.column import (
     Column,
 )
@@ -355,9 +356,12 @@ struct GroupBy(Copyable):
         if coded:
             var result = coded.value().agg(expressions, batch_size=batch_size)
             var columns = List[Series](capacity=result.width())
-            for column in result._columns:
-                if column.dtype().is_categorical() and column.name() in (
-                    self._key_names()
+            for i in range(result.width()):
+                ref column = result._columns[i]
+                if (
+                    i < len(self._keys)
+                    and self._keys[i].dtype() == DataType.STRING
+                    and column.dtype().is_categorical()
                 ):
                     columns.append(decode(column))
                 else:

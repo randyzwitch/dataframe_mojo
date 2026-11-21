@@ -117,6 +117,20 @@ from std.time import (
 )
 
 
+def _resident_dictionary_groups(self: QueryContext, index: Int) raises -> Bool:
+    ref node = self._nodes[index]
+    if node.kind != AGG or node.left < 0:
+        return False
+    ref scan = self._nodes[node.left]
+    if scan.kind != SCAN_FRAME or plan_shared_id(self, scan.source_slot()) >= 0:
+        return False
+    ref frame = self._frames[scan.source_slot()]
+    for key in node.group_keys():
+        if key in frame.columns() and frame.column(key)._direct_dictionary():
+            return True
+    return False
+
+
 def plan_execute(
     self: QueryContext,
     index: Int,
@@ -132,7 +146,12 @@ def plan_execute(
         var handed = plan_handoff_region(self, index, streaming, batch_size)
         if handed:
             return handed.take()
-    if streaming and not empty and index != self._declined:
+    # Whole resident columns can group by their shared dictionary codes.
+    # This eager input is already in memory, including all its chunks.
+    var stream = streaming and (
+        empty or not _resident_dictionary_groups(self, index)
+    )
+    if stream and not empty and index != self._declined:
         var streamed = plan_stream_execute(self, index, batch_size)
         if streamed:
             return streamed.take()
@@ -145,11 +164,11 @@ def plan_execute(
         memo[][index] = schema.copy()
         return schema^
     if not self._report or empty:
-        return plan_execute_node(self, index, empty, streaming, batch_size)
+        return plan_execute_node(self, index, empty, stream, batch_size)
     # Record what the node did: its inputs record themselves as they
     # run below it, so the input rows are read back from the report.
     var began = Int(perf_counter_ns())
-    var result = plan_execute_node(self, index, empty, streaming, batch_size)
+    var result = plan_execute_node(self, index, empty, stream, batch_size)
     var took = Int(perf_counter_ns()) - began
     ref node = self._nodes[index]
     if _is_scan(node.kind):
