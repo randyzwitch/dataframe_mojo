@@ -10,8 +10,10 @@ from collections import defaultdict
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 from statistics import median
+from tempfile import NamedTemporaryFile
 
 SCHEMA_VERSION = 2
 IDENTITY_FIELDS = {"runtime_build_id", "device", "host", "workers"}
@@ -126,6 +128,8 @@ def fit(records):
                 raise ValueError(
                     "at least three positive finite samples per engine required"
                 )
+        if "first_accel_ns" in record and not _positive(record["first_accel_ns"]):
+            raise ValueError("invalid first Metal execution time")
         grouped[key].append(record)
     if identity is None or not grouped:
         raise ValueError("no measured operators")
@@ -201,6 +205,16 @@ def fit(records):
             "measured_rows": rows,
             "samples_per_engine": sum(len(e["cpu_ns"]) for e in entries),
         }
+        # Compare within the same capture so differences in row count or
+        # layout do not get charged as initialization. Older captures contain
+        # only warm samples and keep their previous placement behavior.
+        startup = [
+            e["first_accel_ns"] - median(e["accel_ns"])
+            for e in entries
+            if "first_accel_ns" in e
+        ]
+        if startup:
+            regions[key]["startup_ns"] = max(0.0, median(startup))
     return {
         "schema_version": SCHEMA_VERSION,
         "identity": identity,
@@ -218,23 +232,50 @@ def publish(profile, directory):
     name = "metal-calibration-" + hashlib.sha256(payload).hexdigest() + ".json"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
+    with NamedTemporaryFile(dir=directory, delete=False) as target:
+        target.write(payload)
     try:
-        with path.open("xb") as target:
-            target.write(payload)
-    except FileExistsError:
-        if path.read_bytes() != payload:
-            raise ValueError("calibration filename collision")
+        try:
+            os.link(target.name, path)
+        except FileExistsError:
+            if path.read_bytes() != payload:
+                raise ValueError("calibration filename collision")
+    finally:
+        Path(target.name).unlink(missing_ok=True)
+    return path
+
+
+def install(profile, cache):
+    identity = profile["identity"]
+    cpu = identity["runtime_build_id"].split(";cpu=", 1)[1].split(";", 1)[0]
+    if len(cpu) != 64 or any(c not in "0123456789abcdef" for c in cpu):
+        raise ValueError("installation requires a packaged CPU build identity")
+    directory = cache / "dataframe-mojo" / "calibration" / cpu / str(identity["workers"])
+    path = publish(profile, directory)
+    with NamedTemporaryFile(mode="w", dir=directory, delete=False) as tmp:
+        tmp.write(path.name + "\n")
+    try:
+        os.replace(tmp.name, directory / "active")
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
     return path
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("capture", type=Path)
-    parser.add_argument("--output-dir", type=Path, required=True)
+    dest = parser.add_mutually_exclusive_group(required=True)
+    dest.add_argument("--output-dir", type=Path)
+    dest.add_argument("--install", action="store_true", help="use this profile for local auto placement")
     args = parser.parse_args()
     records = [
         json.loads(line)
         for line in args.capture.read_text().splitlines()
         if line.strip()
     ]
-    print(publish(fit(records), args.output_dir))
+    profile = fit(records)
+    if args.install:
+        cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+        print(install(profile, cache))
+    else:
+        print(publish(profile, args.output_dir))
