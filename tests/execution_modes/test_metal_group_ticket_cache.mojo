@@ -253,3 +253,9 @@ def test_metal_group_ticket_cache_keeps_fields_and_external_updates_separate() r
                 )
                 assert_equal(actual[field * 2], expected[field * 2])
                 assert_equal(actual[field * 2 + 1], expected[field * 2 + 1])
+    # The tickets read `words`, `left` and `right` only through the
+    # addresses above, so they must live to here: a value is destroyed
+    # after its last named use.
+    _ = words^
+    _ = left^
+    _ = right^

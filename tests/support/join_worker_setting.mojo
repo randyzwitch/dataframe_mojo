@@ -22,6 +22,10 @@ struct JoinWorkers(Movable):
             != 0
         ):
             raise Error("cannot install worker setting")
+        # setenv read the strings through their addresses: keep them to
+        # here, since a value is destroyed after its last named use.
+        _ = name^
+        _ = value^
 
     def __deinit__(deinit self):
         var name = String("DATAFRAME_THREADS\x00")
@@ -30,5 +34,7 @@ struct JoinWorkers(Movable):
             _ = external_call["setenv", Int32](
                 Int(name.unsafe_ptr()), Int(previous.unsafe_ptr()), Int32(1)
             )
+            _ = previous^
         else:
             _ = external_call["unsetenv", Int32](Int(name.unsafe_ptr()))
+        _ = name^
