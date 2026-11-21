@@ -156,7 +156,7 @@ struct BuildFinish(Movable, Rounds):
             for k in range(len(self.chunked)):
                 if self.merges[k]:
                     self.frame._columns[self.chunked[k]] = (
-                        self.merges[k].value().merged.copy()
+                        self.merges[k].value().result()
                     )
                 else:
                     self.frame._columns[self.chunked[k]] = self.whole[k].copy()
