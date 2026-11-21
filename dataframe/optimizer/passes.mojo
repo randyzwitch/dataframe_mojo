@@ -630,11 +630,11 @@ def _join_side_has_decimal_key(
     """Whether one input of join `node` holds a decimal key, so that key
     alignment could apply. Only one input's schema is resolved: when no
     key there is a decimal, no pair can be, and the other input is never
-    evaluated by this pass. The input that reads files is the one asked,
-    so its source faults surface no later than they would without the
-    pass."""
-    var right_side = _reads_files(self, node.right) and not _reads_files(
-        self, node.left
+    resolved by this pass. An input that reads no files is the one asked,
+    so a file is opened only when its schema can change the plan; a fault
+    in that file then surfaces where the query itself would reach it."""
+    var right_side = _reads_files(self, node.left) and not _reads_files(
+        self, node.right
     )
     var schema = self._execute(node.right if right_side else node.left, True)
     var keys = node.right_keys.copy() if right_side else node.names.copy()
@@ -650,11 +650,9 @@ def _join_side_has_decimal_key(
 def _join_input_schemas(
     self: QueryContext, left: Int, right: Int
 ) raises -> Tuple[DataFrame, DataFrame]:
-    """The empty schemas of a join's two inputs. When only the right input
-    reads files, it is resolved first: a missing or unreadable file is a
-    fault in the query's sources, and it is reported before any error that
-    evaluating the other input's values could raise."""
-    if _reads_files(self, right) and not _reads_files(self, left):
+    """The empty schemas of a join's two inputs, an input that reads no
+    files first (`_join_side_has_decimal_key`)."""
+    if _reads_files(self, left) and not _reads_files(self, right):
         var right_schema = self._execute(right, True)
         return (self._execute(left, True), right_schema^)
     var left_schema = self._execute(left, True)
