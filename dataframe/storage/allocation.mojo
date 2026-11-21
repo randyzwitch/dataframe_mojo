@@ -126,15 +126,26 @@ struct _BlockPool(Movable):
         self.retained = 0
         self.limit = _retain_limit()
 
-    def _acquire(mut self):
+    # Every thread shares the one pool, so its methods reach it by address
+    # (`_block_pool`) rather than as a `mut self` argument: a `mut` argument
+    # promises the callee sole access to the value's memory, which lets the
+    # compiler move the list and map reads and writes across the lock's
+    # atomics, and two threads could then change them at once. The helpers
+    # that take `mut self` run only under the lock and are not inlined, so
+    # their changes are complete before it is released.
+
+    @staticmethod
+    def _acquire():
+        ref lock = _block_pool().lock
         while True:
             var expected = Int64(0)
-            if self.lock.compare_exchange(expected, 1):
+            if lock.compare_exchange(expected, 1):
                 return
             _ = external_call["sched_yield", Int32]()
 
-    def _release(mut self):
-        self.lock.store(0)
+    @staticmethod
+    def _release():
+        _block_pool().lock.store(0)
 
     def _drop_first(mut self, count: Int, mut out: List[_Retained]):
         """Move the `count` oldest blocks to `out`, for the caller to free
@@ -160,13 +171,23 @@ struct _BlockPool(Movable):
             cut += 1
         self._drop_first(cut, out)
 
-    def take(mut self, bytes: Int) -> _Retained:
+    @staticmethod
+    def take(bytes: Int) -> _Retained:
         """The smallest retained block of at least `bytes` and at most
         twice that (larger blocks are left for larger tables), or an empty
         record (address 0)."""
         var expired = List[_Retained]()
-        var found = _Retained(0, 0, 0)
-        self._acquire()
+        _BlockPool._acquire()
+        var found = _block_pool()._take_locked(bytes, expired)
+        _BlockPool._release()
+        for block in expired:
+            _free_block(block.address, block.bytes)
+        return found
+
+    @no_inline
+    def _take_locked(
+        mut self, bytes: Int, mut expired: List[_Retained]
+    ) -> _Retained:
         self._expire(monotonic(), expired)
         var best = -1
         for i in range(len(self.blocks)):
@@ -174,29 +195,42 @@ struct _BlockPool(Movable):
             if size >= bytes and size <= 2 * bytes:
                 if best < 0 or size < self.blocks[best].bytes:
                     best = i
-        if best >= 0:
-            found = self.blocks.pop(best)
-            self.retained -= found.bytes
-            self.owned[found.address] = found.bytes
-        self._release()
-        for block in expired:
-            _free_block(block.address, block.bytes)
+        if best < 0:
+            return _Retained(0, 0, 0)
+        var found = self.blocks.pop(best)
+        self.retained -= found.bytes
+        self.owned[found.address] = found.bytes
         return found
 
-    def hand_out(mut self, address: Int, bytes: Int):
+    @staticmethod
+    def hand_out(address: Int, bytes: Int):
         """Record fresh storage handed out, to retain once freed."""
-        self._acquire()
-        self.owned[address] = bytes
-        self._release()
+        _BlockPool._acquire()
+        _block_pool()._hand_out_locked(address, bytes)
+        _BlockPool._release()
 
-    def give(mut self, address: Int, bytes: Int) -> Bool:
+    @no_inline
+    def _hand_out_locked(mut self, address: Int, bytes: Int):
+        self.owned[address] = bytes
+
+    @staticmethod
+    def give(address: Int, bytes: Int) -> Bool:
         """Retain a freed block this pool handed out, and whether it did;
         the oldest blocks are freed when the pool would exceed its limit.
         """
         var expired = List[_Retained]()
-        self._acquire()
+        _BlockPool._acquire()
+        var kept = _block_pool()._give_locked(address, bytes, expired)
+        _BlockPool._release()
+        for block in expired:
+            _free_block(block.address, block.bytes)
+        return kept
+
+    @no_inline
+    def _give_locked(
+        mut self, address: Int, bytes: Int, mut expired: List[_Retained]
+    ) -> Bool:
         if self.owned.pop(address, 0) == 0:
-            self._release()
             return False
         var now = monotonic()
         self._expire(now, expired)
@@ -211,9 +245,6 @@ struct _BlockPool(Movable):
                 over -= self.blocks[cut].bytes
                 cut += 1
             self._drop_first(cut, expired)
-        self._release()
-        for block in expired:
-            _free_block(block.address, block.bytes)
         return True
 
 
@@ -263,7 +294,7 @@ def release_huge[T: Copyable & Deinitable](var table: List[T]):
     if bytes < _HUGE_PAGE:
         return
     table.clear()
-    if _block_pool().give(Int(table.unsafe_ptr()), bytes):
+    if _BlockPool.give(Int(table.unsafe_ptr()), bytes):
         # The pool owns the storage now; the list must not free it.
         _ = table.unsafe_take_allocation().unsafe_leak()
 
@@ -274,7 +305,7 @@ def _fresh(address: Int, bytes: Int):
     if bytes < _HUGE_PAGE:
         return
     advise_huge_pages(address, bytes)
-    _block_pool().hand_out(address, bytes)
+    _BlockPool.hand_out(address, bytes)
 
 
 def huge_list[T: Copyable](length: Int, fill: T) -> List[T]:
@@ -292,7 +323,7 @@ def huge_uninit[T: Copyable](length: Int) -> List[T]:
     writes, on huge pages when the list is large enough to hold one and
     the kernel grants them."""
     var bytes = length * size_of[T]()
-    var block = _block_pool().take(bytes) if bytes >= _HUGE_PAGE else (
+    var block = _BlockPool.take(bytes) if bytes >= _HUGE_PAGE else (
         _Retained(0, 0, 0)
     )
     if block.address != 0:
@@ -307,7 +338,7 @@ def huge_capacity[T: Copyable](length: Int) -> List[T]:
     written through its pointer, on huge pages when the room can hold one
     and the kernel grants them."""
     var bytes = length * size_of[T]()
-    var block = _block_pool().take(bytes) if bytes >= _HUGE_PAGE else (
+    var block = _BlockPool.take(bytes) if bytes >= _HUGE_PAGE else (
         _Retained(0, 0, 0)
     )
     if block.address != 0:

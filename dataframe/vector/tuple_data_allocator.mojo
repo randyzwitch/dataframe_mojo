@@ -50,34 +50,56 @@ struct _RowBlockPool(Movable):
         self.free = List[List[UInt8]]()
         self.limit = ROW_BLOCKS_KEPT_PER_THREAD * configured_workers()
 
-    def _acquire(mut self):
+    # Every thread shares the one pool, so its methods reach it by address
+    # (`_row_block_pool`) rather than as a `mut self` argument: a `mut`
+    # argument promises the callee sole access to the value's memory, which
+    # lets the compiler move the list's reads and writes across the lock's
+    # atomics, and two threads could then change it at once. The list
+    # changes run under the lock in functions that are not inlined, so they
+    # are complete before it is released.
+
+    @staticmethod
+    def _acquire():
+        ref lock = _row_block_pool().lock
         while True:
             var expected = Int64(0)
-            if self.lock.compare_exchange(expected, 1):
+            if lock.compare_exchange(expected, 1):
                 return
 
-    def _release(mut self):
-        self.lock.store(0)
+    @staticmethod
+    def _release():
+        _row_block_pool().lock.store(0)
 
-    def take(mut self) -> List[UInt8]:
+    @staticmethod
+    def take() -> List[UInt8]:
         """A free block, or a new one when the pool is empty."""
-        self._acquire()
-        if len(self.free) > 0:
-            var block = self.free.pop()
-            self._release()
-            return block^
-        self._release()
+        _RowBlockPool._acquire()
+        var block = _row_block_pool()._pop_locked()
+        _RowBlockPool._release()
+        if block:
+            return block.take()
         return List[UInt8](unsafe_uninit_length=TUPLE_DATA_BLOCK_SIZE)
 
-    def give(mut self, var block: List[UInt8]):
+    @no_inline
+    def _pop_locked(mut self) -> Optional[List[UInt8]]:
+        if len(self.free) > 0:
+            return self.free.pop()
+        return None
+
+    @staticmethod
+    def give(var block: List[UInt8]):
         """Keep a freed block for reuse, unless the pool is full (then it
         is freed when `block` goes out of scope)."""
         if len(block) != TUPLE_DATA_BLOCK_SIZE:
             return
-        self._acquire()
+        _RowBlockPool._acquire()
+        _row_block_pool()._push_locked(block^)
+        _RowBlockPool._release()
+
+    @no_inline
+    def _push_locked(mut self, var block: List[UInt8]):
         if len(self.free) < self.limit:
             self.free.append(block^)
-        self._release()
 
 
 def _pool_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
@@ -242,10 +264,10 @@ struct TupleDataAllocator(Copyable, Movable):
             if block.data.count() == 1:
                 var bytes = List[UInt8]()
                 swap(bytes, block.data[])
-                _row_block_pool().give(bytes^)
+                _RowBlockPool.give(bytes^)
 
     def create_row_block(mut self):
-        self.row_blocks.append(TupleDataBlock(_row_block_pool().take()))
+        self.row_blocks.append(TupleDataBlock(_RowBlockPool.take()))
         self.block_allocation_size += TUPLE_DATA_BLOCK_SIZE
 
     def create_heap_block(mut self, size: Int):

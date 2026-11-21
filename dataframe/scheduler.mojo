@@ -37,7 +37,7 @@ run.
 """
 from std.atomic import Atomic
 from std.ffi import _get_global, external_call
-from std.memory import Layout, Pointer, alloc
+from std.memory import ArcPointer, Layout, Pointer, alloc
 from std.time import perf_counter_ns
 
 from dataframe.parallel import (
@@ -281,6 +281,49 @@ def _counter(base: Int, i: Int) -> ref[MutAnyOrigin] Atomic[Int64]:
     )[]
 
 
+struct _Turns(Movable):
+    """Whose turn it is when events run one at a time: the event whose
+    tasks may run (-1 for none), the events ready after it in the order
+    they became ready, and the spin lock over both.
+
+    Every worker of the schedule changes them, so they live in a heap cell
+    reached by address, never as part of a `mut self` argument: such an
+    argument promises the callee sole access to the value's memory, which
+    lets the compiler move its reads and writes across the lock's atomics.
+    The changes run under the lock in functions that are not inlined, so
+    they are complete before it is released."""
+
+    var gate: Atomic[Int64]
+    var turn: Int
+    var waiting: List[Int]
+
+    def __init__(out self):
+        self.gate = Atomic[Int64](0)
+        self.turn = -1
+        self.waiting = List[Int]()
+
+    @no_inline
+    def _take_or_wait(mut self, event: Int) -> Bool:
+        """`event` takes the turn when no event holds it (True), else
+        waits for it behind the events ready before it."""
+        if self.turn >= 0:
+            self.waiting.append(event)
+            return False
+        self.turn = event
+        return True
+
+    @no_inline
+    def _pass_on(mut self) -> Int:
+        """The turn to the event ready longest: that event, or -1 when
+        none is waiting."""
+        if len(self.waiting) == 0:
+            self.turn = -1
+            return -1
+        var next = self.waiting.pop(0)
+        self.turn = next
+        return next
+
+
 struct _Executor[P: SchedulablePipeline](Movable):
     """The events of one schedule and the queue of their tasks. Lives on
     the caller's stack while the crew works on it; crew threads reach it
@@ -321,13 +364,10 @@ struct _Executor[P: SchedulablePipeline](Movable):
     # When the schedule began: orders it against schedules nested in its
     # tasks (`_Crew.step`).
     var stamp: Int
-    # Events one at a time (`run_pipelines`' `one_event`): the event
-    # whose tasks may run (-1 for none), the events ready after it in the
-    # order they became ready, and the spin lock over both.
+    # Events one at a time (`run_pipelines`' `one_event`), and whose turn
+    # it is (`_Turns`).
     var one_event: Bool
-    var turn: Int
-    var waiting: List[Int]
-    var gate: Atomic[Int64]
+    var turns: ArcPointer[_Turns]
 
     def __init__(
         out self,
@@ -381,9 +421,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
         self.error = String()
         self.stamp = Int(perf_counter_ns())
         self.one_event = False
-        self.turn = -1
-        self.waiting = List[Int]()
-        self.gate = Atomic[Int64](0)
+        self.turns = ArcPointer(_Turns())
 
     def _pipelines(self) -> ref[MutAnyOrigin] List[Self.P]:
         return Pointer[List[Self.P], MutAnyOrigin](
@@ -404,41 +442,41 @@ struct _Executor[P: SchedulablePipeline](Movable):
             or self.failed.load() != 0
         )
 
-    def _lock(mut self):
+    def _turns(self) -> ref[MutAnyOrigin] _Turns:
+        return Pointer[_Turns, MutAnyOrigin](
+            unsafe_from_address=Int(Pointer(to=self.turns[]))
+        )[]
+
+    def _lock(self):
+        ref gate = self._turns().gate
         while True:
             var free = Int64(0)
-            if self.gate.compare_exchange(free, Int64(1)):
+            if gate.compare_exchange(free, Int64(1)):
                 return
             _ = external_call["sched_yield", Int32]()
 
-    def _unlock(mut self):
-        self.gate.store(0)
+    def _unlock(self):
+        self._turns().gate.store(0)
 
     def _schedule(mut self, event: Int):
         """Queue the event's tasks once its turn comes (at once unless
         events run one at a time)."""
         if self.one_event:
             self._lock()
-            if self.turn >= 0:
-                self.waiting.append(event)
-                self._unlock()
-                return
-            self.turn = event
+            var now = self._turns()._take_or_wait(event)
             self._unlock()
+            if not now:
+                return
         self._queue_event(event)
 
     def _next_turn(mut self):
         """The event holding the turn finished: the one ready longest
         takes it."""
         self._lock()
-        if len(self.waiting) == 0:
-            self.turn = -1
-            self._unlock()
-            return
-        var next = self.waiting.pop(0)
-        self.turn = next
+        var next = self._turns()._pass_on()
         self._unlock()
-        self._queue_event(next)
+        if next >= 0:
+            self._queue_event(next)
 
     def _queue_event(mut self, event: Int):
         """Queue the event's tasks; an event without tasks finishes now, since
