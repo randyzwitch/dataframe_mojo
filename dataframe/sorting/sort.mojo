@@ -542,31 +542,169 @@ struct _TopNJob[W: Int, VAR: Bool](Job):
         self.heap.finalize[Self.W, Self.VAR]()
 
 
-def _top_rows[
+def top_n(rows: Int, limit: Int) -> Bool:
+    """Whether the first `limit` of `rows` rows are found with top-N heaps
+    rather than by sorting every row (see `_TOPN_LARGE_LIMIT`)."""
+    return limit >= 0 and not (
+        limit > _TOPN_LARGE_LIMIT
+        and Float64(limit) > Float64(rows) * _TOPN_INPUT_SHARE
+    )
+
+
+# The stages of a `TopNRounds`: the round that ran last.
+comptime _TOPN_START = 0
+comptime _TOPN_SINK = 1
+comptime _TOPN_DONE = 2
+
+
+struct TopNRounds(Movable, Rounds):
+    """The first `limit` rows of the key columns in sorted order, as a
+    round of tasks: each task keeps the best rows of one range of rows in
+    its own heap, a vector at a time, the tasks sharing the boundary a row
+    must beat; then the heaps are combined into one and sorted, here.
+    `take_order` once no round is left."""
+
+    var layout: ArcPointer[SortKeyLayout]
+    var limit: Int
+    var threads_cap: Int
+    var stage: Int
+    var boundary: TopNBoundary
+    # One thread's sink per range of rows, for the layout's record shape
+    # (only one list is used).
+    var narrow: List[_TopNJob[1, False]]
+    var variable: List[_TopNJob[1, True]]
+    var two: List[_TopNJob[2, False]]
+    var three: List[_TopNJob[3, False]]
+    var order: List[Int]
+
+    def __init__(
+        out self,
+        keys: List[Series],
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        maintain_order: Bool,
+        limit: Int,
+        threads: Int = 0,
+    ) raises:
+        """The first `limit` rows of `keys`' order; equal keys keep input
+        order when `maintain_order`. `threads` caps the round's tasks (0:
+        the configured count)."""
+        self = Self(
+            SortKeyLayout(keys, descending, nulls_last, maintain_order),
+            limit,
+            threads,
+        )
+
+    def __init__(
+        out self, var layout: SortKeyLayout, limit: Int, threads: Int = 0
+    ):
+        self.limit = min(limit, layout.rows)
+        self.layout = ArcPointer(layout^)
+        self.threads_cap = threads
+        self.stage = _TOPN_START
+        self.boundary = TopNBoundary.none()
+        self.narrow = List[_TopNJob[1, False]]()
+        self.variable = List[_TopNJob[1, True]]()
+        self.two = List[_TopNJob[2, False]]()
+        self.three = List[_TopNJob[3, False]]()
+        self.order = List[Int]()
+
+    def next_round(mut self) raises -> Int:
+        if self.stage == _TOPN_START:
+            var n = self.layout[].rows
+            var threads = _sink_threads(n, self.threads_cap)
+            var bounds = partitions(n, threads, STANDARD_VECTOR_SIZE)
+            if threads > 1:
+                self.boundary = TopNBoundary.new()
+            var address = Int(Pointer(to=self.layout[]))
+            var tasks = 0
+            for t in range(threads):
+                if bounds[t] < bounds[t + 1]:
+                    tasks += 1
+                    if self.layout[].variable:
+                        self.variable.append(
+                            _TopNJob[1, True](
+                                address,
+                                bounds[t],
+                                bounds[t + 1],
+                                self.limit,
+                                self.boundary,
+                            )
+                        )
+                    elif self.layout[].words == 1:
+                        self.narrow.append(
+                            _TopNJob[1, False](
+                                address,
+                                bounds[t],
+                                bounds[t + 1],
+                                self.limit,
+                                self.boundary,
+                            )
+                        )
+                    elif self.layout[].words == 2:
+                        self.two.append(
+                            _TopNJob[2, False](
+                                address,
+                                bounds[t],
+                                bounds[t + 1],
+                                self.limit,
+                                self.boundary,
+                            )
+                        )
+                    else:
+                        self.three.append(
+                            _TopNJob[3, False](
+                                address,
+                                bounds[t],
+                                bounds[t + 1],
+                                self.limit,
+                                self.boundary,
+                            )
+                        )
+            self.stage = _TOPN_SINK
+            if tasks > 0:
+                return tasks
+        if self.stage == _TOPN_SINK:
+            self.boundary.free()
+            self.boundary = TopNBoundary.none()
+            if self.layout[].variable:
+                self.order = _combined_heaps[1, True](self.variable, self.limit)
+                self.variable = List[_TopNJob[1, True]]()
+            elif self.layout[].words == 1:
+                self.order = _combined_heaps[1, False](self.narrow, self.limit)
+                self.narrow = List[_TopNJob[1, False]]()
+            elif self.layout[].words == 2:
+                self.order = _combined_heaps[2, False](self.two, self.limit)
+                self.two = List[_TopNJob[2, False]]()
+            else:
+                self.order = _combined_heaps[3, False](self.three, self.limit)
+                self.three = List[_TopNJob[3, False]]()
+            self.stage = _TOPN_DONE
+        return 0
+
+    def round_task(mut self, task: Int) raises:
+        if self.layout[].variable:
+            self.variable[task].run()
+        elif self.layout[].words == 1:
+            self.narrow[task].run()
+        elif self.layout[].words == 2:
+            self.two[task].run()
+        else:
+            self.three[task].run()
+
+    def take_order(mut self) -> List[Int]:
+        """The first rows in sorted order, moved out once no round is
+        left."""
+        var taken = List[Int]()
+        swap(taken, self.order)
+        return taken^
+
+
+def _combined_heaps[
     W: Int, VAR: Bool
-](layout: SortKeyLayout, limit: Int, threads_cap: Int) raises -> List[Int]:
-    var n = layout.rows
-    var threads = _sink_threads(n, threads_cap)
-    var bounds = partitions(n, threads, STANDARD_VECTOR_SIZE)
-    var boundary = TopNBoundary.new() if threads > 1 else TopNBoundary.none()
-    var jobs = List[_TopNJob[W, VAR]](capacity=threads)
-    var layout_address = Int(Pointer(to=layout))
-    for t in range(threads):
-        if bounds[t] < bounds[t + 1]:
-            jobs.append(
-                _TopNJob[W, VAR](
-                    layout_address, bounds[t], bounds[t + 1], limit, boundary
-                )
-            )
-    try:
-        if len(jobs) > 1:
-            run_jobs(jobs)
-        elif len(jobs) == 1:
-            jobs[0].run()
-    except e:
-        boundary.free()
-        raise e^
-    boundary.free()
+](mut jobs: List[_TopNJob[W, VAR]], limit: Int) raises -> List[Int]:
+    """The threads' heaps combined into one and sorted: its rows in
+    order."""
     var order = List[Int]()
     if len(jobs) == 0:
         return order^
@@ -575,7 +713,6 @@ def _top_rows[
         heap.combine[W, VAR](jobs[j].heap)
     heap.finalize[W, VAR]()
     order = heap.payloads[W, VAR]()
-    _ = jobs^
     _ = heap^
     return order^
 
@@ -599,20 +736,10 @@ def sort_rows(
     `maintain_order`, which keeps their input order. `threads` caps the
     sink's threads (0: the configured count)."""
     var layout = SortKeyLayout(keys, descending, nulls_last, maintain_order)
-    var n = layout.rows
-    var top = limit >= 0 and not (
-        limit > _TOPN_LARGE_LIMIT
-        and Float64(limit) > Float64(n) * _TOPN_INPUT_SHARE
-    )
-    if top:
-        var take = min(limit, n)
-        if layout.variable:
-            return _top_rows[1, True](layout, take, threads)
-        if layout.words == 1:
-            return _top_rows[1, False](layout, take, threads)
-        if layout.words == 2:
-            return _top_rows[2, False](layout, take, threads)
-        return _top_rows[3, False](layout, take, threads)
+    if top_n(layout.rows, limit):
+        var top = TopNRounds(layout^, limit, threads)
+        run_rounds(top)
+        return top.take_order()
     var rounds = SortRounds(layout^, threads)
     run_rounds(rounds)
     var order = rounds.take_order()

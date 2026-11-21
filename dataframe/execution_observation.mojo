@@ -1,5 +1,6 @@
 """Provider-neutral evidence retained by one observed execution region."""
 from std.atomic import Atomic
+from std.memory import ArcPointer
 
 
 struct DeviceObservation(Movable):
@@ -73,3 +74,10 @@ struct DeviceObservation(Movable):
         self.device_work_ns += device_work
         self.finish_ns += finish
         self.phase_samples += 1
+
+
+# Worker-major (low sum word, high sum word, valid count) triples. A
+# provider combines the workers for each field and returns one state row.
+comptime IntegralCombine = def(
+    List[UInt64], Int, Optional[ArcPointer[DeviceObservation]]
+) raises thin -> List[UInt64]

@@ -881,6 +881,48 @@ def test_ranks_over_every_row_run_as_rounds_of_the_schedule() raises:
         assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
 
 
+def test_top_rows_run_as_rounds_of_the_schedule() raises:
+    """A sort limited to its first rows, computed as an input of the
+    query's schedule, runs as rounds of tasks of that schedule: a heap
+    per range of rows, combined, then the rows gathered. No task starts
+    parallel work of its own, and the rows equal the eager ones."""
+    var frame = source().with_row_index("row")
+    var keep = col("row") >= lit(Int64(0))
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var lazy = (
+        frame.lazy()
+        .sort(
+            ["s", "v"],
+            descending=[False, True],
+            nulls_last=[True, False],
+            maintain_order=True,
+        )
+        .head(1000)
+        .filter(keep)
+        .collect()
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true("sort.rounds" in paths, "the top rows did not run as rounds")
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    var eager = frame.sort(
+        ["s", "v"],
+        descending=[False, True],
+        nulls_last=[True, False],
+        maintain_order=True,
+    ).head(1000)
+    assert_equal(lazy.columns(), eager.columns())
+    for name in eager.columns():
+        assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
+
+
 def test_reductions_over_every_row_run_as_rounds_of_the_schedule() raises:
     """A projection of values made from reductions over all rows (each a
     window over one partition with no order), computed as an input of the
