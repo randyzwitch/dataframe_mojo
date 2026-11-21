@@ -191,3 +191,51 @@ def test_parquet_scan_batches_keep_the_readers_decimal_width() raises:
         assert_equal(on_x.height(), 4)
         assert_equal(on_x.column("d").dtype(), width)
         assert_equal(on_x.column("d_right").dtype(), width)
+
+
+def test_parquet_decimal64_keys_join_decimal128_keys_on_value() raises:
+    """A scan's decimal64 key joins an in-memory decimal128 key of the same
+    precision and scale on value, at the wider width, for every join kind
+    that keeps key columns, with and without coalescing, optimized or not.
+    Found by the differential fuzzer (tests/fuzz)."""
+    var path = (
+        getenv("COVERAGE_TEST_TMP") + "/parquet-decimal-key-widths.parquet"
+    )
+    write_parquet(
+        DataFrame(
+            [
+                Series(
+                    "d", Column[Int128]([123, 0, -167], [True, False, True])
+                ).with_dtype(DataType.decimal(10, 2)),
+                Series("x", Column[Float32]([0.0, 63.5, -0.5])),
+            ]
+        ),
+        path,
+    )
+    assert_equal(
+        read_parquet(path).column("d").dtype(), DataType.decimal(10, 2, 64)
+    )
+    var wide = DataFrame(
+        [
+            Series("d", Column[Int128]([123, 999])).with_dtype(
+                DataType.decimal(10, 2)
+            )
+        ]
+    )
+    var heights: List[Int] = [1, 2, 3, 4]
+    var hows: List[String] = ["inner", "left", "right", "full"]
+    for h in range(len(hows)):
+        for coalesce in [True, False]:
+            for optimize in [False, True]:
+                var out = (
+                    wide.lazy()
+                    .join(
+                        scan_parquet(path).filter(col("x") > -1.0),
+                        on="d",
+                        how=hows[h],
+                        coalesce=coalesce,
+                    )
+                    .collect(engine="cpu", optimize=optimize)
+                )
+                assert_equal(out.height(), heights[h], hows[h])
+                assert_equal(out.column("d").dtype(), DataType.decimal(10, 2))

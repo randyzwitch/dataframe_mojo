@@ -1,7 +1,7 @@
 """Full join rows and schema against a nested-loop oracle; duplicates are pairs."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_raises, assert_true
-from dataframe import Column, DataFrame, Series
+from dataframe import Column, DataFrame, DataType, Series, col
 from tests.support.reference_model import (
     generated_model,
     ReferenceRow,
@@ -180,3 +180,257 @@ def test_a_coalesced_right_join_keeps_the_right_key_names() raises:
             right.drop(["k"]).rename({"bk": "k"}), on="k", how="right"
         )
         assert_equal(same.columns(), List[String](["x", "x_right", "k"]))
+
+
+def _decimal_key_frame(
+    keys: List[Int], valid: List[Bool], width: Int, value: String, start: Int
+) raises -> DataFrame:
+    """Key `d` as decimal(10, 2) stored in `width` bits, a value column
+    named `value` counting from `start`, and a float `f` to filter on."""
+    var values = List[Int64]()
+    var floats = List[Float64]()
+    for i in range(len(keys)):
+        values.append(Int64(start + i))
+        floats.append(Float64(i))
+    var key: Series
+    if width == 64:
+        var stored = List[Int64]()
+        for k in keys:
+            stored.append(Int64(k))
+        key = Series("d", Column[Int64](stored^, valid.copy())).with_dtype(
+            DataType.decimal(10, 2, 64)
+        )
+    else:
+        var stored = List[Int128]()
+        for k in keys:
+            stored.append(Int128(k))
+        key = Series("d", Column[Int128](stored^, valid.copy())).with_dtype(
+            DataType.decimal(10, 2)
+        )
+    return DataFrame(
+        [
+            key^,
+            Series(value, Column[Int64](values^)),
+            Series("f", Column[Float64](floats^)),
+        ]
+    )
+
+
+def _rows(frame: DataFrame, names: List[String]) raises -> List[String]:
+    """Each row's cells in `names` order joined by "|", sorted, so results
+    compare without depending on row order."""
+    var out = List[String]()
+    for row in range(frame.height()):
+        var cells = List[String]()
+        for name in names:
+            cells.append(String(frame.item(row, name)))
+        out.append(String("|").join(cells))
+    sort(out)
+    return out^
+
+
+def _sorted(var names: List[String]) -> List[String]:
+    sort(names)
+    return names^
+
+
+def test_decimal_join_keys_of_one_precision_and_scale_join_across_widths() raises:
+    """decimal(10, 2) held as 64 and as 128 bits (each file declares its
+    own width) is one key type: the keys join on value at the wider width,
+    for every join kind, with and without coalescing, eagerly and lazily
+    (optimized, unoptimized, streaming or not), with either side narrow
+    and a filter below the wide side. Semi and anti joins keep the left
+    rows' own type. Found by the differential fuzzer (tests/fuzz)."""
+    var wide_type = DataType.decimal(10, 2)
+    # Narrow side keys 1.00, 2.50, null; wide side 2.50, 1.00, 1.00,
+    # 7.00, null. Nulls never match.
+    var narrow = _decimal_key_frame(
+        [100, 250, 0], [True, True, False], 64, "l", 1
+    )
+    var wide = _decimal_key_frame(
+        [250, 100, 100, 700, 0], [True, True, True, True, False], 128, "r", 10
+    )
+    var matched: List[String] = ["1.00|1|11", "1.00|1|12", "2.50|2|10"]
+    var left_only: List[String] = ["null|3|null"]
+    var right_only: List[String] = ["7.00|null|13", "null|null|14"]
+    for narrow_left in [True, False]:
+        var left = narrow.copy() if narrow_left else wide.copy()
+        var right = wide.drop(["f"]) if narrow_left else narrow.drop(["f"])
+        var right_lazy = (
+            wide.lazy()
+            .filter(col("f") > -1.0)
+            .drop(["f"]) if narrow_left else narrow.lazy()
+            .filter(col("f") > -1.0)
+            .drop(["f"])
+        )
+        left = left.drop(["f"])
+        for how in ["inner", "left", "right", "full"]:
+            var wanted = matched.copy()
+            var keeps_left = how == "left" or how == "full"
+            var keeps_right = how == "right" or how == "full"
+            if (keeps_left and narrow_left) or (
+                keeps_right and not narrow_left
+            ):
+                wanted.extend(left_only.copy())
+            if (keeps_right and narrow_left) or (
+                keeps_left and not narrow_left
+            ):
+                wanted.extend(right_only.copy())
+            for coalesce in [True, False]:
+                for mode in range(4):
+                    var label = (
+                        String(how)
+                        + " coalesce="
+                        + String(coalesce)
+                        + " narrow_left="
+                        + String(narrow_left)
+                        + " mode="
+                        + String(mode)
+                    )
+                    var out: DataFrame
+                    if mode == 0:
+                        out = left.join(
+                            right, on="d", how=how, coalesce=coalesce
+                        )
+                    else:
+                        out = (
+                            left.lazy()
+                            .join(
+                                right_lazy, on="d", how=how, coalesce=coalesce
+                            )
+                            .collect(optimize=mode != 2, streaming=mode != 3)
+                        )
+                    assert_equal(out.column("d").dtype(), wide_type, label)
+                    var names: List[String] = ["d", "l", "r"]
+                    if not coalesce:
+                        assert_equal(
+                            out.column("d_right").dtype(), wide_type, label
+                        )
+                        assert_equal(
+                            _sorted(out.columns()),
+                            List[String](["d", "d_right", "l", "r"]),
+                            label,
+                        )
+                        # The coalesced key is the non-null of the two.
+                        out = out.with_columns(
+                            [col("d").fill_null(col("d_right")).alias("d")]
+                        )
+                    else:
+                        assert_equal(_sorted(out.columns()), names, label)
+                    assert_equal(
+                        _rows(out, names), _sorted(wanted.copy()), label
+                    )
+        for how in ["semi", "anti"]:
+            for lazy in [False, True]:
+                var out = (
+                    left.lazy()
+                    .join(right_lazy, on="d", how=how)
+                    .collect() if lazy else left.join(right, on="d", how=how)
+                )
+                assert_equal(
+                    out.column("d").dtype(), left.column("d").dtype(), how
+                )
+                var count = 2 if narrow_left else 3
+                if how == "anti":
+                    count = 1 if narrow_left else 2
+                assert_equal(out.height(), count, how)
+    # Other decimal pairs still raise.
+    var other_scale = wide.with_column(
+        wide.column("d").cast(DataType.decimal(10, 3))
+    )
+    with assert_raises(contains="Join key dtypes differ"):
+        _ = narrow.join(other_scale, on="d")
+
+
+def test_decimal_join_keys_across_widths_with_an_empty_side() raises:
+    """Shrunk fuzzer cases: an empty 128-bit side against a 64-bit side,
+    for a full join (the one null key row survives) and a right join
+    keeping both keys under different names; and an inner join whose
+    64-bit side is filtered. Each runs eagerly and lazily, optimized or
+    not."""
+    var empty = DataFrame(
+        [
+            Series("d", Column[Int128](List[Int128]())).with_dtype(
+                DataType.decimal(10, 2)
+            )
+        ]
+    )
+    var one_null = DataFrame(
+        [
+            Series("d", Column[Int64]([0], [False])).with_dtype(
+                DataType.decimal(10, 2, 64)
+            )
+        ]
+    )
+    var named = DataFrame(
+        [
+            Series("e", Column[Int64]([-197])).with_dtype(
+                DataType.decimal(10, 2, 64)
+            ),
+            Series("x", Column[Int64]([5])),
+        ]
+    )
+    var single = DataFrame(
+        [Series("d", Column[Int128]([123])).with_dtype(DataType.decimal(10, 2))]
+    )
+    var filtered = DataFrame(
+        [
+            Series(
+                "d",
+                Column[Int64]([123, 0, -167, -196], [True, False, True, True]),
+            ).with_dtype(DataType.decimal(10, 2, 64)),
+            Series("f", Column[Float64]([0.0, 63.5, 0.0, -0.5])),
+        ]
+    )
+    for mode in range(3):
+        var full: DataFrame
+        var right: DataFrame
+        var inner: DataFrame
+        if mode == 0:
+            full = empty.join(one_null, on="d", how="full", coalesce=True)
+            right = empty.join(
+                named,
+                left_on=["d"],
+                right_on=["e"],
+                how="right",
+                coalesce=False,
+            )
+            inner = single.join(
+                filtered.filter(col("f") > -1.5), on="d", how="inner"
+            )
+        else:
+            var optimize = mode == 1
+            full = (
+                empty.lazy()
+                .join(one_null.lazy(), on="d", how="full", coalesce=True)
+                .collect(optimize=optimize)
+            )
+            right = (
+                empty.lazy()
+                .join(
+                    named.lazy(),
+                    left_on=["d"],
+                    right_on=["e"],
+                    how="right",
+                    coalesce=False,
+                )
+                .collect(optimize=optimize)
+            )
+            inner = (
+                single.lazy()
+                .join(
+                    filtered.lazy().filter(col("f") > -1.5), on="d", how="inner"
+                )
+                .collect(optimize=optimize)
+            )
+        var label = "mode=" + String(mode)
+        assert_equal(full.height(), 1, label)
+        assert_true(full.item(0, "d").is_null(), label)
+        assert_equal(full.column("d").dtype(), DataType.decimal(10, 2), label)
+        assert_equal(right.height(), 1, label)
+        assert_true(right.item(0, "d").is_null(), label)
+        assert_equal(String(right.item(0, "e")), "-1.97", label)
+        assert_equal(right.item(0, "x").int64(), 5, label)
+        assert_equal(right.column("e").dtype(), DataType.decimal(10, 2), label)
+        assert_equal(inner.height(), 1, label)
+        assert_equal(String(inner.item(0, "d")), "1.23", label)
