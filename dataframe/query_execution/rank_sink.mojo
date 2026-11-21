@@ -161,7 +161,7 @@ struct RankSink(Movable, Rounds):
             for k in range(len(self.chunked)):
                 if self.merges[k]:
                     self.input._columns[self.chunked[k]] = (
-                        self.merges[k].value().merged.copy()
+                        self.merges[k].value().result()
                     )
             self.merges = List[Optional[ChunkMerge]]()
             self.pieces = List[Tuple[Int, Int, Int]]()

@@ -369,3 +369,29 @@ def test_scan_dictionary_views_share_the_values_they_grow_from() raises:
         assert_equal(String(view.get(batches - 1)), String(batches - 1))
     assert_equal(len(scan.schema[]), batches)
     assert_true(types[0] == scan.schema_type())
+
+
+def test_every_batch_is_handed_out_once_across_many_workers() raises:
+    # Eight workers take batches of ten rows from one file source, and
+    # each batch's categorical dictionary joins the scan's shared one: the
+    # cut and the join run under the source's lock on whichever worker
+    # takes the batch, so every row is counted once and every value keeps
+    # its spelling, on every repetition.
+    var path = _one_file()
+    var frame = read_csv(path, _schema(), null_values=[""])
+    var expected = (
+        frame.lazy()
+        .group_by(["s"])
+        .agg([col("v").sum().alias("v"), col("k").count().alias("n")])
+        .collect()
+    )
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "8")
+    for _ in range(8):
+        var actual = (
+            scan_csv(path, _schema(), null_values=[""])
+            .group_by(["s"])
+            .agg([col("v").sum().alias("v"), col("k").count().alias("n")])
+            .collect(engine="cpu", streaming=True, batch_size=10)
+        )
+        _same(actual, expected, ["s"])
+    _ = threads^

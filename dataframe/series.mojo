@@ -2435,14 +2435,22 @@ struct ChunkMerge(Movable):
     """A chunked fixed-width numeric column made one chunk, by row ranges
     that may each be a task of its own: `of` sets the output up, and
     `copy_rows` fills a range of its rows from the chunks that hold them
-    (values, and validity bits when some chunk has a null). Ranges start
-    at multiples of 64 rows, so no two write one bitmap byte."""
+    (values, and validity bits when some chunk has a null), and `result`
+    hands the merged column out once every range is copied. Ranges start
+    at multiples of 64 rows, so no two write one bitmap byte.
+
+    The merge is kept on the chunked column as `Series.rechunk` keeps its
+    own (`_MergedCache`): a table's chunks never change, so a later
+    gather or build over the same column reads the kept array instead of
+    copying every row again, and `of` declines a column that already has
+    one."""
 
     var merged: Series
     var parts: List[Series]
     var starts: List[Int]
     var values: Int
     var bits: Int
+    var cache: ArcPointer[_MergedCache]
 
     def __init__(
         out self,
@@ -2451,19 +2459,25 @@ struct ChunkMerge(Movable):
         var starts: List[Int],
         values: Int,
         bits: Int,
+        cache: ArcPointer[_MergedCache],
     ):
         self.merged = merged^
         self.parts = parts^
         self.starts = starts^
         self.values = values
         self.bits = bits
+        self.cache = cache
 
     @staticmethod
     def of(column: Series) raises -> Optional[ChunkMerge]:
         """The merge of `column`'s chunks with its rows not yet copied;
         None for an unchunked column, a constant chunk, or a type other
-        than fixed-width numbers (`Series.rechunk` takes those)."""
+        than fixed-width numbers, and for a column whose merge is already
+        kept (`Series.rechunk` takes those, the kept one without a copy)."""
         if not column.is_chunked():
+            return None
+        var cache = column._chunked.value()[].cache
+        if cache[].state.load() == 2:
             return None
         var parts = column.chunks()
         for part in parts:
@@ -2499,9 +2513,25 @@ struct ChunkMerge(Movable):
                 var value_address = Int(out._ptr())
                 var bit_address = Int(out.unsafe_validity()) if nulls else 0
                 return ChunkMerge(
-                    merged^, parts.copy(), starts^, value_address, bit_address
+                    merged^,
+                    parts.copy(),
+                    starts^,
+                    value_address,
+                    bit_address,
+                    cache,
                 )
         return None
+
+    def result(self) -> Series:
+        """The merged column, once every range is copied; kept on the
+        chunked column for later merges of it unless another caller kept
+        one first."""
+        ref kept = self.cache[]
+        var empty = Int64(0)
+        if kept.state.compare_exchange(empty, 1):
+            kept.merged = self.merged._data.copy()
+            kept.state.store(2)
+        return self.merged.copy()
 
     def copy_rows(self, lo: Int, hi: Int) raises:
         """Output rows [lo, hi), `lo` a multiple of 64."""
