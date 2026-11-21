@@ -109,6 +109,9 @@ from .expr import (
     is_text_function,
     is_nested_op,
     IMPLODE,
+    MODE,
+    VALUE_COUNTS,
+    EXPR_GET,
     LIST_GET,
     STRUCT_PACK,
     STRUCT_FIELD,
@@ -159,7 +162,7 @@ from dataframe.aggregation.reducer import Reducer, _sum_bools, _variance_blocks
 from dataframe.aggregation.ungrouped import distinct_count, distinct_counts
 from dataframe.kernels.nested_keys import nested_key_supported
 from .trace import trace_path
-from .parallel import Job, partitions, run_jobs, worker_count
+from .parallel import Job, Rounds, partitions, run_jobs, worker_count
 from dataframe.kernels.group_rows import (
     GroupRows,
     ROW_INDEX,
@@ -170,7 +173,7 @@ from dataframe.kernels.group_rows import (
     write_by_groups,
 )
 from dataframe.storage.allocation import huge_uninit
-from std.collections import Optional
+from std.collections import Dict, Optional
 from std.memory import ArcPointer, Pointer
 from std.math import isnan
 from std.utils.numerics import inf
@@ -1669,6 +1672,213 @@ def reduce_rows[
             grouped,
             groups,
         )
+
+
+def constant_reductions(expr: Expr) -> Bool:
+    """Whether `expr` is one value for all of its input's rows made from
+    reductions over every row, with at least one reduction, that
+    `ReduceRounds` can compute: outside its reductions only literals, the
+    row count and row-wise steps on them; inside a reduction, row-wise
+    steps on columns and literals. A reduction whose value is not one
+    value (`mode`, `value_counts`, `get`, `implode`) is not one, nor is
+    `n_unique`, which counts its input in a table of its own."""
+    var n = len(expr._nodes)
+    # By node: whether its value can be computed that way, whether it is
+    # row-wise on columns and literals, and whether it has a value per row.
+    var computable = List[Bool](capacity=n)
+    var row_wise = List[Bool](capacity=n)
+    var per_row = List[Bool](capacity=n)
+    var reductions = 0
+    for i in range(n):
+        ref node = expr._nodes[i]
+        var op = node.op
+        var reduction = is_reduction(op) and not (
+            op == MODE
+            or op == VALUE_COUNTS
+            or op == EXPR_GET
+            or op == IMPLODE
+            or op == N_UNIQUE
+        )
+        var local = op == COL or (_row_wise(op) and not is_replace(op))
+        var ok = reduction or local or op == ROW_LEN
+        var rows = op == COL
+        for child in node_children(node):
+            if child < 0 or child >= i:
+                return False
+            ok = ok and computable[child]
+            local = local and row_wise[child]
+            rows = rows or per_row[child]
+            if reduction and not row_wise[child]:
+                ok = False
+        if reduction:
+            reductions += 1
+            rows = False
+        computable.append(ok)
+        row_wise.append(local)
+        per_row.append(rows)
+    return n > 0 and computable[n - 1] and not per_row[n - 1] and reductions > 0
+
+
+struct ReduceRounds(Movable, Rounds):
+    """The reductions over every row of `columns` that some expressions
+    hold (each `constant_reductions`), as one round of tasks: the round
+    splits the rows into ranges, and each task folds its range into a
+    state of its own for every reduction. The states are then merged in
+    row order, as one pass over every row would leave them, and finished.
+
+    A count of a column's values, or of its rows, is a popcount or the
+    height, read whole as the rounds are made rather than reduced by rows.
+    `reduced(e)` gives expression e's computed reductions by node, for
+    `evaluate`."""
+
+    var bound: List[BoundExpr]
+    var columns: List[Series]
+    var height: Int
+    var batch_size: Int
+    # Each row range's first row, then the end.
+    var bounds: List[Int]
+    # By expression and node, the states read while reducing; by
+    # expression, its reductions once computed.
+    var states: List[List[Series]]
+    var computed: List[Dict[Int, Series]]
+    # The reductions the round computes (expression, node), each task's
+    # states for them (task-major), and whether the round ran.
+    var work: List[Tuple[Int, Int]]
+    var partials: List[Reducer]
+    var started: Bool
+
+    def __init__(
+        out self,
+        var bound: List[BoundExpr],
+        columns: List[Series],
+        height: Int,
+        batch_size: Int,
+    ) raises:
+        self.bound = bound^
+        # A categorical is reduced by its strings, as the evaluator reads
+        # it.
+        self.columns = columns.copy()
+        for c in range(len(self.columns)):
+            if self.columns[c].dtype().is_categorical():
+                var used = False
+                for b in self.bound:
+                    for i in range(len(b.expr._nodes)):
+                        used = used or (
+                            b.expr._nodes[i].op == COL and b.sources[i] == c
+                        )
+                if used:
+                    self.columns[c] = decode(self.columns[c])
+        self.height = height
+        self.batch_size = batch_size
+        self.bounds = partitions(
+            height, max(1, worker_count(height)), batch_size
+        )
+        self.states = List[List[Series]]()
+        self.computed = List[Dict[Int, Series]]()
+        self.work = List[Tuple[Int, Int]]()
+        self.partials = List[Reducer]()
+        self.started = False
+        for e in range(len(self.bound)):
+            ref b = self.bound[e]
+            ref nodes = b.expr._nodes
+            var states = List[Series](capacity=len(nodes))
+            var computed = Dict[Int, Series]()
+            for i in range(len(nodes)):
+                ref node = nodes[i]
+                if _counted_whole(b, node):
+                    var none = Optional[ArcPointer[GroupRows]]()
+                    var count = _reduce[8](
+                        b,
+                        self.columns,
+                        states,
+                        node,
+                        height,
+                        batch_size,
+                        False,
+                        List[Int](),
+                        1,
+                        none,
+                    )
+                    states.append(count.copy())
+                    computed[i] = count^
+                    continue
+                if is_reduction(node.op):
+                    self.work.append((e, i))
+                states.append(_empty(b.dtypes[i]))
+            self.states.append(states^)
+            self.computed.append(computed^)
+
+    def _tasks(self) -> Int:
+        return len(self.bounds) - 1
+
+    def next_round(mut self) raises -> Int:
+        if self.started:
+            self._merge()
+            return 0
+        self.started = True
+        if len(self.work) == 0:
+            return 0
+        for _ in range(self._tasks()):
+            for item in self.work:
+                ref b = self.bound[item[0]]
+                self.partials.append(_new_reducer(b, b.expr._nodes[item[1]], 1))
+        return self._tasks()
+
+    def round_task(mut self, task: Int) raises:
+        var start = self.bounds[task]
+        var end = self.bounds[task + 1]
+        # Statistics of one range, shared by its reductions that read the
+        # same column.
+        var stats = ArcPointer(List[_ColumnStats]())
+        var at = task * len(self.work)
+        for k in range(len(self.work)):
+            var e = self.work[k][0]
+            ref b = self.bound[e]
+            reduce_rows[8](
+                self.partials[at + k],
+                b,
+                self.columns,
+                self.states[e],
+                b.expr._nodes[self.work[k][1]],
+                start,
+                end,
+                self.batch_size,
+                False,
+                List[Int](),
+                stats,
+            )
+
+    def _merge(mut self) raises:
+        """The round's states, merged in row order and finished."""
+        var count = len(self.work)
+        if count == 0:
+            return
+        # By reduction, its tasks' states in row order: taken from the
+        # back of the task-major list, then reversed.
+        var by_reduction = List[List[Reducer]](capacity=count)
+        for _ in range(count):
+            by_reduction.append(List[Reducer](capacity=self._tasks()))
+        for index in range(len(self.partials) - 1, -1, -1):
+            by_reduction[index % count].append(self.partials.pop())
+        for k in range(count):
+            by_reduction[k].reverse()
+            var merged = by_reduction[k].pop(0)
+            for t in range(len(by_reduction[k])):
+                merged.merge(by_reduction[k][t])
+            self.computed[self.work[k][0]][self.work[k][1]] = merged.finish()
+
+    def reduced(self, e: Int) -> Dict[Int, Series]:
+        """Expression `e`'s reductions computed by the round, by node."""
+        return self.computed[e].copy()
+
+
+def _counted_whole(bound: BoundExpr, node: Node) -> Bool:
+    """Whether a reduction is a count of a column's rows or of its valid
+    values, which is the height or a popcount of its validity bitmap: less
+    work than a round of tasks."""
+    return (node.op == LEN or node.op == COUNT) and bound.expr._nodes[
+        node.left
+    ].op == COL
 
 
 struct _RowsJob[width: Int](Job):
@@ -4531,6 +4741,7 @@ def evaluate[
     group_count: Int = 1,
     layouts: Int = 0,
     group_rows: Optional[ArcPointer[GroupRows]] = None,
+    reduced: Dict[Int, Series] = Dict[Int, Series](),
 ) raises -> Series:
     """Evaluate a bound expression; temporary vectors are bounded by batch_size.
 
@@ -4548,6 +4759,9 @@ def evaluate[
     aggregate-shaped expression yields one value per group; a row-shaped one
     (inside over()) yields one value per row, with windows restarting and
     aggregates broadcasting per group.
+
+    `reduced` holds, by node, reductions over every row already computed
+    (`ReduceRounds`); those nodes are read from it, not computed again.
     """
     if batch_size <= 0:
         raise Error("batch_size must be positive")
@@ -4650,6 +4864,9 @@ def evaluate[
     var known_rows = group_rows
     for node_index in range(count):
         if inside_over[node_index]:
+            continue
+        if node_index in reduced:
+            states[node_index] = reduced[node_index].copy()
             continue
         var node = bound.expr._nodes[node_index].copy()
         if node.op == ROW_LEN:
