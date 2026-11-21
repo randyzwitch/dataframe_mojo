@@ -1,7 +1,15 @@
 """Typed equality joins preserve complete rows, multiplicity and key identity."""
 # contract-group: table.join
+from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, DataType, Series, StructColumn
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    Series,
+    StringColumn,
+    StructColumn,
+)
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.join_typed_reference import (
     typed_join_values,
@@ -221,3 +229,35 @@ def test_categorical_join_keys_match_values_across_independent_dictionaries() ra
                     coalesce=False,
                     dictionary_union=True,
                 )
+
+
+def test_lazy_join_payloads_keep_field_metadata_from_a_gathered_build() raises:
+    """A payload column carrying Arrow field metadata (a file's categorical
+    field, say) joins lazily: the build side's gathered rows and the plan's
+    column are one field. Found by the differential fuzzer (tests/fuzz)."""
+    var labels = Series(
+        "c", StringColumn(["red", "blue", "red"], [True, True, False])
+    ).cast(DataType.CATEGORICAL)
+    # Packed Arrow metadata: one entry, "tag" -> "raw".
+    var metadata: List[UInt8] = [1, 0, 0, 0, 3, 0, 0, 0, 116, 97, 103]
+    metadata += [3, 0, 0, 0, 114, 97, 119]
+    labels._field_metadata = ArcPointer(metadata^)
+    var frame = DataFrame([labels^, Series("x", Column[Int32]([18, 7, 18]))])
+    for optimize in [False, True]:
+        var joined = (
+            frame.lazy()
+            .join(frame.lazy(), on="x")
+            .sort(["c", "c_right"], nulls_last=True)
+            .collect(optimize=optimize)
+        )
+        var eager = frame.join(frame, on="x").sort(
+            ["c", "c_right"], nulls_last=True
+        )
+        assert_equal(joined.height(), 5)
+        for name in ["c", "c_right"]:
+            assert_true(
+                joined.column(name)
+                .cast(DataType.STRING)
+                .equals(eager.column(name).cast(DataType.STRING)),
+                name,
+            )
