@@ -82,7 +82,8 @@ def join_frames(
     # A categorical key joins on codes, which compare only on a shared
     # dictionary (#106): both key columns move onto the union of theirs
     # (a String key is encoded into it), leaving the left codes as they
-    # are. Unchanged pairs join as before.
+    # are. Decimal keys that differ only in storage width move to the
+    # wider. Unchanged pairs join as before.
     var unified = False
     var left_frame = self.copy()
     var right_frame = right.copy()
@@ -101,6 +102,23 @@ def join_frames(
                 left_frame._columns[l] = lkey^
                 right_frame._columns[r] = rkey^
                 unified = True
+        elif (
+            ltype.is_decimal()
+            and rtype.is_decimal()
+            and ltype != rtype
+            and ltype.precision() == rtype.precision()
+            and ltype.scale() == rtype.scale()
+        ):
+            # The same decimal held at two storage widths (files declare
+            # their own) has the same values: both keys move to the wider.
+            var wide = DataType.decimal(
+                ltype.precision(),
+                ltype.scale(),
+                max(ltype.decimal_width(), rtype.decimal_width()),
+            )
+            left_frame._columns[l] = left_frame._columns[l].cast(wide)
+            right_frame._columns[r] = right_frame._columns[r].cast(wide)
+            unified = True
     if unified:
         return left_frame._join_impl(
             right_frame,
