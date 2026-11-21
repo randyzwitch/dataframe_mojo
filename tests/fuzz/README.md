@@ -54,6 +54,10 @@ the oracle is adjusted, or the error is allowed:
   all-null group as 0.0 (its eager engine and DuckDB give null, as we do),
   so the generator uses `ddof=1`.
 
+Known oracle noise (not engine bugs): Polars' grouped `arg_min` can pick a
+later tied row after a sort, and a comparison of an aggregated float with a
+literal can flip between thread counts when the value sits on the literal.
+
 Each driver run is capped at 8 GB (`FUZZ_MEMORY_MAX`, through
 `systemd-run --user`), and the generator never builds a join step whose
 result, counted from key frequencies, passes 600,000 rows.
