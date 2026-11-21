@@ -624,6 +624,29 @@ def _reads_files(self: QueryContext, index: Int) -> Bool:
     return False
 
 
+def _join_side_has_decimal_key(
+    self: QueryContext, node: PlanNode
+) raises -> Bool:
+    """Whether one input of join `node` holds a decimal key, so that key
+    alignment could apply. Only one input's schema is resolved: when no
+    key there is a decimal, no pair can be, and the other input is never
+    evaluated by this pass. The input that reads files is the one asked,
+    so its source faults surface no later than they would without the
+    pass."""
+    var right_side = _reads_files(self, node.right) and not _reads_files(
+        self, node.left
+    )
+    var schema = self._execute(node.right if right_side else node.left, True)
+    var keys = node.right_keys.copy() if right_side else node.names.copy()
+    for k in range(len(keys)):
+        if (
+            keys[k] in schema.columns()
+            and schema.column(keys[k]).dtype().is_decimal()
+        ):
+            return True
+    return False
+
+
 def _join_input_schemas(
     self: QueryContext, left: Int, right: Int
 ) raises -> Tuple[DataFrame, DataFrame]:
@@ -662,6 +685,8 @@ def plan_align_join_keys(mut self: QueryContext) raises:
         ):
             continue
         var node = self._nodes[i].copy()
+        if not _join_side_has_decimal_key(self, node):
+            continue
         var schemas = _join_input_schemas(self, node.left, node.right)
         ref left = schemas[0]
         ref right = schemas[1]
