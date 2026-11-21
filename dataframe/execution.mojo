@@ -3578,9 +3578,15 @@ def _full[
     return result^
 
 
-from dataframe.kernels.gather import take_parallel
-from .parallel import configured_workers
+from dataframe.kernels.gather import GatherRounds, take_parallel
+from .parallel import (
+    Rounds,
+    configured_workers,
+    in_shared_task,
+    set_shared_task,
+)
 from .window_sort import (
+    LayoutRounds,
     WindowLayout,
     rank_window,
     partition_groups,
@@ -4334,6 +4340,219 @@ def _over[
     _ = owned^
     var spread = take_parallel([combined^], rows^, lanes)
     return spread[0].copy()
+
+
+def whole_input_window(expr: Expr) -> Bool:
+    """Whether `expr` is one ordered over() of all rows (order keys, no
+    partition keys), mapping its results back to their rows, with no
+    window inside it: what `OverRounds` evaluates."""
+    var n = len(expr._nodes)
+    if n < 2:
+        return False
+    ref root = expr._nodes[n - 1]
+    if (
+        root.op != OVER
+        or root.min_count == 0
+        or (root.integer & OVER_GLOBAL) == 0
+        or (root.integer & OVER_MAPPING_MASK) != 0
+    ):
+        return False
+    for i in range(n - 1):
+        if expr._nodes[i].op == OVER:
+            return False
+    return True
+
+
+# The stages of an `OverRounds`: the round that ran last.
+comptime _OVER_LAYOUT = 0
+comptime _OVER_GATHER = 1
+comptime _OVER_EVALUATE = 2
+comptime _OVER_SCATTER = 3
+comptime _OVER_DONE = 4
+
+
+struct OverRounds(Movable, Rounds):
+    """An ordered over() of all rows (`whole_input_window`) as rounds of
+    tasks. The rows form one partition, so its evaluation cannot be split
+    by partitions: the rounds of the layout (`LayoutRounds`: the sort, peer
+    boundaries, each row's sorted position), a round gathering the columns
+    the window reads into sorted order, one task evaluating the window
+    over them, and a round putting the results back in row order. Each
+    round needs only the one before it. `take_result` once no round is
+    left."""
+
+    var height: Int
+    var batch_size: Int
+    var keys: String
+    var stage: Int
+    # The argument expression with its row-local parts computed, bound to
+    # the gathered columns once they are; the columns it reads.
+    var argument: Expr
+    var reads: List[Series]
+    var local: Optional[BoundExpr]
+    var layouts: List[LayoutRounds]
+    var layout: WindowLayout
+    var gathering: List[GatherRounds]
+    var gathered: List[Series]
+    var result: Series
+
+    def __init__(
+        out self,
+        bound: BoundExpr,
+        columns: List[Series],
+        index: Int,
+        height: Int,
+        batch_size: Int,
+    ) raises:
+        """Window node `index` of `bound` over `columns` (`height`
+        rows)."""
+        ref node = bound.expr._nodes[index]
+        self.height = height
+        self.batch_size = batch_size
+        self.keys = node.text2
+        self.stage = _OVER_LAYOUT
+        self.argument = Expr(List[Node](), "")
+        self.reads = List[Series]()
+        self.local = None
+        self.layouts = List[LayoutRounds]()
+        self.layout = WindowLayout()
+        self.gathering = List[GatherRounds]()
+        self.gathered = List[Series]()
+        self.result = Series("", Column[Int64](List[Int64]()))
+        var inner = bind(subtree(bound.expr, node.left), columns)
+        if inner.shape() == SCALAR:
+            var scalar = evaluate(inner, columns, height, batch_size=batch_size)
+            self.result = scalar._broadcast(height)
+            self.stage = _OVER_DONE
+            return
+        # Argument expressions in input order before sorting, so
+        # checked-expression faults are observed first.
+        var inputs = columns.copy()
+        var nodes = List[Node]()
+        _ = _project_arguments[8](
+            inner,
+            len(inner.expr._nodes) - 1,
+            _row_local_nodes(inner.expr),
+            columns,
+            inputs,
+            nodes,
+            height,
+            batch_size,
+        )
+        self.argument = Expr(nodes^, inner.expr._name)
+        var used = _used_columns(self.argument, inputs)
+        for c in range(len(inputs)):
+            if used[c]:
+                self.reads.append(inputs[c].copy())
+        var order_keys = List[Series]()
+        for name in split_names(node.text):
+            for column in columns:
+                if column.name() == name:
+                    order_keys.append(column.copy())
+                    break
+        var descending = List[Bool](
+            length=len(order_keys), fill=(node.integer & 1) != 0
+        )
+        var nulls_last = List[Bool](
+            length=len(order_keys), fill=(node.integer & 2) != 0
+        )
+        self.layouts.append(
+            LayoutRounds(order_keys, descending, nulls_last, height)
+        )
+
+    def next_round(mut self) raises -> Int:
+        if self.stage == _OVER_LAYOUT:
+            var tasks = self.layouts[0].next_round()
+            if tasks > 0:
+                return tasks
+            self.layout = self.layouts[0].take_layout()
+            _ = self.layouts.pop()
+            self.stage = _OVER_GATHER
+            if not self.layout.in_place:
+                self.gathering.append(
+                    GatherRounds(
+                        self.reads,
+                        self.layout.order.copy(),
+                        configured_workers(),
+                    )
+                )
+            else:
+                self.gathered = self.reads.copy()
+        if self.stage == _OVER_GATHER:
+            if len(self.gathering) > 0:
+                var tasks = self.gathering[0].next_round()
+                if tasks > 0:
+                    return tasks
+                self.gathered = self.gathering[0].take_result()
+                _ = self.gathering.pop()
+            self.reads = List[Series]()
+            self.local = bind(self.argument, self.gathered)
+            self.stage = _OVER_EVALUATE
+            return 1
+        if self.stage == _OVER_EVALUATE:
+            self.gathered = List[Series]()
+            ref local = self.local.value()
+            var rows: List[Int]
+            if local.shape() == ROWS:
+                if self.layout.in_place:
+                    if self.result.is_chunked():
+                        self.result = self.result.rechunk()
+                    self.stage = _OVER_DONE
+                    return 0
+                rows = self.layout.inverse.copy()
+            else:
+                rows = self.layout.row_partitions()
+            self.gathering.append(
+                GatherRounds([self.result.copy()], rows^, configured_workers())
+            )
+            self.stage = _OVER_SCATTER
+        if self.stage == _OVER_SCATTER:
+            var tasks = self.gathering[0].next_round()
+            if tasks > 0:
+                return tasks
+            var spread = self.gathering[0].take_result()
+            _ = self.gathering.pop()
+            self.result = spread[0].copy()
+            self.layout = WindowLayout()
+            self.stage = _OVER_DONE
+        return 0
+
+    def round_task(mut self, task: Int) raises:
+        if self.stage == _OVER_LAYOUT:
+            self.layouts[0].round_task(task)
+        elif self.stage == _OVER_EVALUATE:
+            # The window over its one partition is this task's work, so
+            # any jobs its evaluation starts run here, one after another.
+            var shared = in_shared_task()
+            set_shared_task(True)
+            var job = _OverJob(
+                self.local.value(),
+                self.gathered,
+                Int(self.layout.starts.unsafe_ptr()),
+                0,
+                self.layout.count,
+                0,
+                self.height,
+                self.batch_size,
+                self.keys,
+            )
+            try:
+                job.run()
+            except e:
+                set_shared_task(shared)
+                raise e^
+            set_shared_task(shared)
+            self.result = job.result.copy()
+            _ = job^
+        else:
+            self.gathering[0].round_task(task)
+
+    def take_result(mut self) -> Series:
+        """The window's value at every row, in row order, moved out once
+        no round is left."""
+        var taken = Series("", Column[Int64](List[Int64]()))
+        swap(taken, self.result)
+        return taken^
 
 
 def _sequence_emit[

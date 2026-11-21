@@ -607,6 +607,9 @@ struct JoinBuildLayout(Copyable, Movable):
     var output_columns: List[Int]
     var output_names: List[String]
     var output_types: List[DataType]
+    # Each output column's Arrow field metadata, which the rows do not
+    # hold: a gathered column carries its build column's (empty: none).
+    var output_metadata: List[Optional[ArcPointer[List[UInt8]]]]
     var perfect: Bool
     var keys_only: Bool
     var probe_estimate: Int
@@ -684,6 +687,7 @@ struct JoinBuildLayout(Copyable, Movable):
         self.output_columns = output_columns.copy()
         self.output_names = output_names.copy()
         self.output_types = output_types.copy()
+        self.output_metadata = List[Optional[ArcPointer[List[UInt8]]]]()
         self.perfect = perfect
         self.keys_only = keys_only
         self.probe_estimate = probe_estimate
@@ -984,6 +988,7 @@ def join_build_layout(
     var output_columns = List[Int]()
     var output_names = List[String]()
     var output_types = List[DataType]()
+    var output_metadata = List[Optional[ArcPointer[List[UInt8]]]]()
     var build_names = List[String]()
     var build_types = List[DataType]()
     var build_fields = List[Int]()
@@ -1007,6 +1012,7 @@ def join_build_layout(
                 output_columns.append(field)
                 output_names.append(column.name())
                 output_types.append(column.dtype())
+                output_metadata.append(column._field_metadata)
             else:
                 build_fields.append(-1)
             continue
@@ -1019,6 +1025,7 @@ def join_build_layout(
         output_columns.append(key_at)
         output_names.append(column.name())
         output_types.append(column.dtype())
+        output_metadata.append(column._field_metadata)
     var key_series = List[Series](capacity=len(key_columns))
     for c in key_columns:
         key_series.append(columns[c].copy())
@@ -1027,7 +1034,7 @@ def join_build_layout(
         payload_series.append(columns[c].copy())
     var perfect = how == JOIN_INNER
     var keys_only = keys_only_join(how)
-    return JoinBuildLayout(
+    var layout = JoinBuildLayout(
         key_series,
         payload_series,
         key_columns,
@@ -1046,6 +1053,8 @@ def join_build_layout(
         build_filtered,
         filter_rows,
     )
+    layout.output_metadata = output_metadata^
+    return layout^
 
 
 def build_from_columns(
@@ -1481,6 +1490,7 @@ struct JoinHashTable(Copyable, Movable):
     var output_columns: List[Int]
     var output_names: List[String]
     var output_types: List[DataType]
+    var output_metadata: List[Optional[ArcPointer[List[UInt8]]]]
     # Whether a probe emits `data.dictionary` (perfect or dictionary
     # emission) rather than gathering from the rows.
     var use_dictionary: Bool
@@ -1570,6 +1580,7 @@ struct JoinHashTable(Copyable, Movable):
         self.output_columns = shape.output_columns.copy()
         self.output_names = shape.output_names.copy()
         self.output_types = shape.output_types.copy()
+        self.output_metadata = shape.output_metadata.copy()
         self.key_types = shape.key_types.copy()
         self.build_names = shape.build_names.copy()
         self.build_types = shape.build_types.copy()
@@ -1930,13 +1941,16 @@ struct JoinHashTable(Copyable, Movable):
         """Output column `output` of the `count` rows at the pointers at
         `rows`, named `name`: the build side's values of the matched
         rows; strings reference the rows' heap."""
-        return self.gather_field(
+        var column = self.gather_field(
             self.output_columns[output],
             rows,
             count,
             name^,
             self.output_types[output],
         )
+        if output < len(self.output_metadata):
+            column._field_metadata = self.output_metadata[output]
+        return column^
 
     def gather_field(
         self,
@@ -1985,6 +1999,8 @@ struct JoinHashTable(Copyable, Movable):
                     decoded[c],
                 )
             )
+            if c < len(self.output_metadata):
+                out[c]._field_metadata = self.output_metadata[c]
         self._set_dictionary(out^, decoded^)
 
     def _build_dictionary_arrays(mut self) raises:

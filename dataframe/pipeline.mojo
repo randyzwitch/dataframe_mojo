@@ -51,6 +51,7 @@ from .expr import (
 from dataframe.aggregation.reducer import Reducer
 from .binding import BoundExpr, bind
 from dataframe.storage.column import Column, _copy_validity
+from .categorical import share_codes
 from .dtype import DataType, NUMERIC_DTYPES
 from dataframe.execution import _ReduceJob, _new_reducer
 from dataframe.kernels.validity import _valid_lanes
@@ -1351,6 +1352,51 @@ def _step_schemas(
             current = current.clear()
         schemas.append(current.copy())
     return schemas^
+
+
+def join_keys_need_unifying(
+    frame: DataFrame, steps: List[Step], joins: List[DataFrame]
+) -> Bool:
+    """Whether a join step of a pipeline over `frame` compares a categorical
+    key with a key whose codes are not known to mean the same values
+    (`share_codes`). Such a join must first move both keys onto one
+    dictionary holding the values of both, and only whole inputs know
+    those values: a file scan's dictionary keeps growing until its last
+    batch, and a join that emits build rows no probe row matched emits them
+    once, not per morsel. The pipeline runs it as an eager join instead."""
+    var categorical = False
+    for column in frame._columns:
+        categorical = categorical or column.dtype().is_categorical()
+    for s in range(len(steps)):
+        if steps[s].kind != STEP_JOIN or _cross_step(steps[s]):
+            continue
+        ref right = joins[steps[s].join]
+        for name in steps[s].right_keys:
+            try:
+                categorical = (
+                    categorical or right.column(name).dtype().is_categorical()
+                )
+            except:
+                pass
+    if not categorical:
+        return False
+    try:
+        var schemas = _step_schemas(frame, steps, joins)
+        for s in range(len(steps)):
+            ref step = steps[s]
+            if step.kind != STEP_JOIN or _cross_step(step):
+                continue
+            for i in range(len(step.names)):
+                var left = schemas[s].column(step.names[i]).dtype()
+                var right = joins[step.join].column(step.right_keys[i]).dtype()
+                if (
+                    left.is_categorical() or right.is_categorical()
+                ) and not share_codes(left, right):
+                    return True
+    except:
+        # The steps reject their inputs: running them raises as before.
+        return False
+    return False
 
 
 def _compile_steps(

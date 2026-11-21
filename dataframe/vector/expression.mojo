@@ -1612,6 +1612,12 @@ struct VectorExpression(Copyable, Movable):
                 Int(out),
                 count,
             )
+            # The comparison reads the aligned values only through their
+            # addresses. A value is destroyed after its last named use,
+            # which would otherwise be the address arguments above, so
+            # before the call reads them.
+            _ = a^
+            _ = b^
         else:
             _compare_lanes[DType.int64](
                 op,

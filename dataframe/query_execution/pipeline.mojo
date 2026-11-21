@@ -101,6 +101,7 @@ from dataframe.query_execution.late_materialization import (
 from dataframe.pipeline import (
     PipelineTypes,
     _step_schemas,
+    join_keys_need_unifying,
     pipeline_types,
     _ensure_zones,
     _range_key,
@@ -122,6 +123,10 @@ from dataframe.planning.context import (
 from dataframe.planning.inputs import (
     BuildFinish,
     finish_build,
+)
+from dataframe.query_execution.ordered_window_sink import (
+    OrderedWindowSink,
+    whole_input_windows,
 )
 from dataframe.query_execution.rank_sink import RankSink, whole_input_ranks
 from dataframe.query_execution.reduction_sink import (
@@ -1554,8 +1559,9 @@ struct _OperatorPipeline(Movable):
     and the finish splits the rows by those keys and evaluates the bins
     as rounds of tasks, before any table is made from the result. A sort
     of every row does too (`SortSink`): the finish sorts the keys and
-    gathers the rows in rounds; and so does a projection of ranks over
-    every row (`RankSink`), and one of values made from reductions over
+    gathers the rows in rounds; and so do a projection of ranks over
+    every row (`RankSink`), one of ordered windows over every row
+    (`OrderedWindowSink`), and one of values made from reductions over
     every row (`ReductionSink`)."""
 
     var plan: QueryContext
@@ -1588,6 +1594,10 @@ struct _OperatorPipeline(Movable):
     # `RankSink`, and the sink while its rounds run.
     var ranks: Bool
     var ranking: List[RankSink]
+    # Whether it is a projection of ordered windows over every row that
+    # runs as an `OrderedWindowSink`, and the sink while its rounds run.
+    var windows: Bool
+    var windowing: List[OrderedWindowSink]
     # Whether it is a projection of values made from reductions over every
     # row that runs as a `ReductionSink`, and the sink while its rounds
     # run.
@@ -1630,6 +1640,8 @@ struct _OperatorPipeline(Movable):
         self.sorting = List[SortSink]()
         self.ranks = False
         self.ranking = List[RankSink]()
+        self.windows = False
+        self.windowing = List[OrderedWindowSink]()
         self.reductions = False
         self.reducing = List[ReductionSink]()
         self.began = 0
@@ -1641,6 +1653,7 @@ struct _OperatorPipeline(Movable):
         ):
             self.window_keys = shared_partition_keys(node.exprs)
             self.ranks = whole_input_ranks(node.exprs)
+            self.windows = whole_input_windows(node.exprs)
             self.reductions = whole_input_reductions(node.exprs)
         self.sorts = (
             streaming
@@ -1688,6 +1701,22 @@ struct _OperatorPipeline(Movable):
             trace_path("window.rank_rounds")
             self.ranking.append(
                 RankSink(input^, node.exprs.copy(), node.kind == SELECT)
+            )
+            return
+        if self.windows:
+            ref node = self.plan._nodes[self.index]
+            self.began = Int(perf_counter_ns())
+            var input = self.plan._execute(
+                node.left, False, self.streaming, self.batch_size
+            )
+            trace_path("window.ordered_rounds")
+            self.windowing.append(
+                OrderedWindowSink(
+                    input^,
+                    node.exprs.copy(),
+                    node.kind == SELECT,
+                    self.batch_size,
+                )
             )
             return
         if self.reductions:
@@ -1744,6 +1773,7 @@ struct _OperatorPipeline(Movable):
             len(self.window) > 0
             or len(self.sorting) > 0
             or len(self.ranking) > 0
+            or len(self.windowing) > 0
             or len(self.reducing) > 0
         ):
             return
@@ -1766,6 +1796,7 @@ struct _OperatorPipeline(Movable):
             or len(self.window_keys) > 0
             or self.sorts
             or self.ranks
+            or self.windows
             or self.reductions else 0
         )
 
@@ -1792,6 +1823,21 @@ struct _OperatorPipeline(Movable):
                 return tasks
             self.result = self.ranking[0].take_result()
             _ = self.ranking.pop()
+            plan_record(
+                self.plan,
+                self.index,
+                "window",
+                self.result.height(),
+                self.result.height(),
+                wall_ns=Int(perf_counter_ns()) - self.began,
+            )
+            self.finalize()
+        if len(self.windowing) > 0:
+            var tasks = self.windowing[0].next_round()
+            if tasks > 0:
+                return tasks
+            self.result = self.windowing[0].take_result()
+            _ = self.windowing.pop()
             plan_record(
                 self.plan,
                 self.index,
@@ -1850,6 +1896,8 @@ struct _OperatorPipeline(Movable):
             self.window[0].round_task(task)
         elif len(self.ranking) > 0:
             self.ranking[0].round_task(task)
+        elif len(self.windowing) > 0:
+            self.windowing[0].round_task(task)
         elif len(self.reducing) > 0:
             self.reducing[0].round_task(task)
         elif len(self.sorting) > 0:
@@ -2251,6 +2299,17 @@ def _probe_start(
         # the steps and sinks are typed by, not a setup made ahead.
         if file_scan.value()[].share_dictionaries(source_columns.value()):
             ahead = False
+    # A join comparing categorical keys whose codes may mean different
+    # values runs on whole inputs, which unify the dictionaries first.
+    if len(joins) > 0 and join_keys_need_unifying(
+        _typed_source(self, cursor, source_columns, empty_source, batch_size),
+        _steps_of(operations),
+        joins,
+    ):
+        trace_path("stream.categorical_join_keys")
+        if file_scan:
+            file_scan.value()[].finish()
+        return _ProbeStart(None)
     var inline_table_eligible = False
     if not frame_source and not source_columns:
         # A file read batch by batch: no setup is made for its steps.
@@ -3035,6 +3094,29 @@ def _same_columns(a: DataFrame, b: DataFrame) -> Bool:
         ):
             return False
     return True
+
+
+def _typed_source(
+    self: QueryContext,
+    cursor: Int,
+    source_columns: Optional[DataFrame],
+    empty_source: Optional[DataFrame],
+    batch_size: Int,
+) raises -> DataFrame:
+    """The columns a probe's source at `cursor` gives its steps, without
+    rows: an opened file scan's, those of the empty source standing in for
+    it, a frame's, or the plan's for a scan not opened yet."""
+    if source_columns:
+        return source_columns.value().clear()
+    if empty_source:
+        return empty_source.value().clear()
+    ref source = self._nodes[cursor]
+    if source.kind == SCAN_FRAME:
+        var frame = plan_slot_table(self, source.source_slot()).clear()
+        if len(source.names):
+            frame = frame.select(source.names)
+        return frame^
+    return self._execute(cursor, True, False, batch_size)
 
 
 def _same_frames(a: List[DataFrame], b: List[DataFrame]) -> Bool:
