@@ -101,6 +101,7 @@ from dataframe.query_execution.late_materialization import (
 from dataframe.pipeline import (
     PipelineTypes,
     _step_schemas,
+    join_keys_need_unifying,
     pipeline_types,
     _ensure_zones,
     _range_key,
@@ -2255,6 +2256,17 @@ def _probe_start(
         # the steps and sinks are typed by, not a setup made ahead.
         if file_scan.value()[].share_dictionaries(source_columns.value()):
             ahead = False
+    # A join comparing categorical keys whose codes may mean different
+    # values runs on whole inputs, which unify the dictionaries first.
+    if len(joins) > 0 and join_keys_need_unifying(
+        _typed_source(self, cursor, source_columns, empty_source, batch_size),
+        _steps_of(operations),
+        joins,
+    ):
+        trace_path("stream.categorical_join_keys")
+        if file_scan:
+            file_scan.value()[].finish()
+        return _ProbeStart(None)
     var inline_table_eligible = False
     if not frame_source and not source_columns:
         # A file read batch by batch: no setup is made for its steps.
@@ -3039,6 +3051,29 @@ def _same_columns(a: DataFrame, b: DataFrame) -> Bool:
         ):
             return False
     return True
+
+
+def _typed_source(
+    self: QueryContext,
+    cursor: Int,
+    source_columns: Optional[DataFrame],
+    empty_source: Optional[DataFrame],
+    batch_size: Int,
+) raises -> DataFrame:
+    """The columns a probe's source at `cursor` gives its steps, without
+    rows: an opened file scan's, those of the empty source standing in for
+    it, a frame's, or the plan's for a scan not opened yet."""
+    if source_columns:
+        return source_columns.value().clear()
+    if empty_source:
+        return empty_source.value().clear()
+    ref source = self._nodes[cursor]
+    if source.kind == SCAN_FRAME:
+        var frame = plan_slot_table(self, source.source_slot()).clear()
+        if len(source.names):
+            frame = frame.select(source.names)
+        return frame^
+    return self._execute(cursor, True, False, batch_size)
 
 
 def _same_frames(a: List[DataFrame], b: List[DataFrame]) -> Bool:

@@ -257,6 +257,31 @@ def _values_of(column: Series) raises -> CategoricalDictionary:
     return encode(column).dtype().dictionary()[].copy_values()
 
 
+def share_codes(first: DataType, second: DataType) -> Bool:
+    """Whether two categorical types' codes are known to mean the same
+    values, so that comparing codes compares values: one dictionary, the
+    dictionaries of one file scan, or two finished dictionaries holding the
+    same values in the same order. A dictionary a scan still adds values
+    to holds only a prefix of its values, so equal prefixes of two scans
+    prove nothing: the next value each adds may differ. A type without a
+    dictionary knows nothing of its codes either."""
+    if not first.is_categorical() or not second.is_categorical():
+        return False
+    if not first.has_dictionary() or not second.has_dictionary():
+        return False
+    var mine = first.dictionary()
+    var theirs = second.dictionary()
+    if mine.ptr() == theirs.ptr():
+        return True
+    ref a = mine[].scan
+    ref b = theirs[].scan
+    if a and b and a.value().ptr() == b.value().ptr():
+        return True
+    if mine[].grows or theirs[].grows:
+        return False
+    return mine[].same_values(theirs[])
+
+
 def unify(mut first: Series, mut second: Series) raises:
     """Put two key columns, at least one categorical, on one dictionary so
     their codes compare: the union of both, with `first`'s codes unchanged.
