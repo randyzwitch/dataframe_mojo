@@ -91,6 +91,24 @@ struct PipelineFeatures(Copyable, Movable):
     var groups: Int
     # Rows on the build side of a join sink.
     var build_rows: Int
+    # True once per candidate for an actual collect. Estimates for explain
+    # and rechecks at execution time must not count as repeat demand.
+    var collect_request: Bool
+
+    def __init__(
+        out self,
+        input_rows: Int,
+        input_bytes: Int,
+        output_rows: Int,
+        groups: Int,
+        build_rows: Int,
+    ):
+        self.input_rows = input_rows
+        self.input_bytes = input_bytes
+        self.output_rows = output_rows
+        self.groups = groups
+        self.build_rows = build_rows
+        self.collect_request = False
 
     @staticmethod
     def rows(input_rows: Int) -> Self:

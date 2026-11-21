@@ -715,3 +715,20 @@ def test_matched_cpu_costs_override_coarse_models_at_plan_and_execution_time() r
         assert_equal(solved.problem.run_ns[0][CPU], expected)
         assert_equal(chosen.devices[0], 0 if scenario == 1 else 1)
         _ = environment^
+
+
+def test_active_profile_discovery_reads_the_content_addressed_filename() raises:
+    from std.os import makedirs
+    from dataframe.placement import _active_calibration
+
+    var directory = String("build/test-calibration-discovery/")
+    makedirs(directory, exist_ok=True)
+    var name = String("metal-calibration-") + String("a") * 64 + ".json"
+    with open(directory + name, "w") as profile:
+        profile.write("{}")
+    with open(directory + "active", "w") as pointer:
+        pointer.write(name + "\n")
+    assert_equal(_active_calibration(directory), directory + name)
+    with open(directory + "active", "w") as pointer:
+        pointer.write(name + ".tmp")
+    assert_equal(_active_calibration(directory), String())

@@ -169,6 +169,12 @@ def exported_node_count(kind: Int) -> Int:
     return 2 if kind == 13 or kind == 26 else 3 if kind == 27 else 1
 
 
+def _exported_offset(series: Series, offset: Int) -> Int64:
+    """The offset a zero-copy export gives its window: the column's own,
+    or 0 for a zero-length window, which reads no values."""
+    return Int64(offset) if len(series) > 0 else Int64(0)
+
+
 def assert_export_source_buffers(series: Series, array: ArrowArray) raises:
     var buffers = at[Int](array.buffers)
     if series.dtype() == DataType.DATE:
@@ -184,22 +190,22 @@ def assert_export_source_buffers(series: Series, array: ArrowArray) raises:
         comptime D = NUMERIC_DTYPES[i]
         if series._data.isa[Column[Scalar[D]]]():
             ref column = series._data[Column[Scalar[D]]]
-            assert_equal(array.offset, Int64(column._offset))
+            assert_equal(array.offset, _exported_offset(series, column._offset))
             assert_equal(
                 buffers[unsafe_offset=1], Int(column._data[].unsafe_ptr())
             )
             return
     if series._data.isa[Column[Int128]]():
         ref column = series._data[Column[Int128]]
-        assert_equal(array.offset, Int64(column._offset))
+        assert_equal(array.offset, _exported_offset(series, column._offset))
         assert_equal(buffers[unsafe_offset=1], Int(column._data[].unsafe_ptr()))
     elif series._data.isa[BoolColumn]():
         ref column = series._data[BoolColumn]
-        assert_equal(array.offset, Int64(column._offset))
+        assert_equal(array.offset, _exported_offset(series, column._offset))
         assert_equal(buffers[unsafe_offset=1], Int(column._data[].unsafe_ptr()))
     elif series._data.isa[ListColumn]():
         ref column = series._data[ListColumn]
-        assert_equal(array.offset, Int64(column._offset))
+        assert_equal(array.offset, _exported_offset(series, column._offset))
         assert_equal(
             buffers[unsafe_offset=1], Int(column._offsets[].unsafe_ptr())
         )
@@ -217,7 +223,7 @@ def assert_export_source_buffers(series: Series, array: ArrowArray) raises:
     else:
         ref column = series._data[StringColumn]
         assert_true(not column._is_view_storage())
-        assert_equal(array.offset, Int64(column._offset))
+        assert_equal(array.offset, _exported_offset(series, column._offset))
         assert_equal(
             buffers[unsafe_offset=1], Int(column._offsets[].unsafe_ptr())
         )

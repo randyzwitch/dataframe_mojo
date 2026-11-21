@@ -688,3 +688,45 @@ def test_ordered_groupings_reach_the_table_sink_in_first_row_order() raises:
     assert_true(piped.equals(eager), "ordered groups differ")
     _ = trace^
     _ = workers^
+
+
+def test_resident_dictionary_group_preserves_categorical_and_string_keys() raises:
+    from dataframe.categorical import encode
+
+    var first = Series("area", Column[String](["east", "west", "east"]))
+    var second = Series("size", Column[String](["small", "large", "small"]))
+    var size = encode(second)
+    var frame = DataFrame(
+        [
+            coded_strings(first),
+            size.copy(),
+            Series("v", Column[Int64]([2, 7, 3])),
+        ]
+    )
+    var query = (
+        frame.lazy()
+        .group_by(["area", "size"], maintain_order=True)
+        .agg([col("v").sum()])
+    )
+    var expected = DataFrame(
+        [
+            Series("area", Column[String](["east", "west"])),
+            size.take([0, 1]),
+            Series("v", Column[Int64]([5, 7])),
+        ]
+    )
+    var profiled = query.profile(engine="auto")
+    assert_frame(profiled[0], expected)
+    var grouped_by_codes = False
+    for row in range(profiled[1].height()):
+        if profiled[1].item(row, "operator").string().startswith("GROUP_BY"):
+            grouped_by_codes = (
+                profiled[1].item(row, "executor").string() == "eager"
+            )
+    assert_true(grouped_by_codes)
+    assert_frame(
+        frame.group_by(["area", "size"], maintain_order=True).agg(
+            [col("v").sum()]
+        ),
+        expected,
+    )
