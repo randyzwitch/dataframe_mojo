@@ -205,6 +205,7 @@ from dataframe.query_execution.operators import (
     _set_rows,
 )
 from dataframe.query_execution.reporting import (
+    plan_observe,
     plan_record,
 )
 from dataframe.query_execution.stream_state import (
@@ -1106,6 +1107,11 @@ struct _StreamProbe(Movable):
     var below: Int
     # The build side's table made from its result frame, as rounds.
     var building: List[BuildFinish]
+    # A declined sort (`_declined_sort`) as rounds of its own over the
+    # rows below it, and the slice taken of its result after (offset,
+    # length; offset -1 for none).
+    var sorting: List[SortSink]
+    var sorted_slice: Tuple[Int, Int]
 
     def __init__(
         out self,
@@ -1147,6 +1153,8 @@ struct _StreamProbe(Movable):
         self.declined = List[QueryContext]()
         self.below = -1
         self.building = List[BuildFinish]()
+        self.sorting = List[SortSink]()
+        self.sorted_slice = (-1, -1)
 
     def initialize(mut self):
         """The probe's setup that reads no input's rows, made as the
@@ -1292,7 +1300,9 @@ struct _StreamProbe(Movable):
             self._complete()
 
     def finalize_task(mut self, task: Int) raises:
-        if len(self.building) > 0:
+        if len(self.sorting) > 0:
+            self.sorting[0].round_task(task)
+        elif len(self.building) > 0:
             self.building[0].round_task(task)
         elif self.filling:
             self.built.value().finalize_task(task)
@@ -1302,6 +1312,9 @@ struct _StreamProbe(Movable):
     def finish_finalize(mut self) raises:
         """A round of finalize tasks has ended: the next round, or the
         result. The build table's fill is the last round."""
+        if len(self.sorting) > 0:
+            self._sort_round()
+            return
         if len(self.building) > 0:
             self._build_round()
             return
@@ -1336,17 +1349,75 @@ struct _StreamProbe(Movable):
         ref on = Pointer[QueryContext, MutAnyOrigin](
             unsafe_from_address=self._on()
         )[]
+        var sort = _declined_sort(on, self.index)
         if self.below >= 0 and self.result:
+            if sort >= 0 and on._nodes[sort].left == self.below:
+                # A sort over the rows this pipeline made: its rounds
+                # are this finish's next rounds.
+                self._begin_sort(on, sort, self.result.take())
+                return
             # The node declined, and this pipeline made the rows below
             # it: the node runs over them, as an operator over a frame.
             on._prefetched.value()[][self.below] = self.result.take()
             on._declined = self.index
             self.result = on._execute(self.index, False, True, self.batch_size)
         elif not self.result and (self.is_input or len(self.declined) > 0):
+            if sort >= 0 and _is_scan(on._nodes[on._nodes[sort].left].kind):
+                # A sort over a scan: the scan's rows, then the sort's
+                # rounds.
+                var rows = on._execute(
+                    on._nodes[sort].left, False, True, self.batch_size
+                )
+                self._begin_sort(on, sort, rows^)
+                return
             # The node declined over its source alone: it runs on its
             # own, as `plan_execute` runs a node no stream takes.
             on._declined = self.index
             self.result = on._execute(self.index, False, True, self.batch_size)
+        self._after_result()
+
+    def _begin_sort(
+        mut self, on: QueryContext, sort: Int, var rows: DataFrame
+    ) raises:
+        """The declined sort at `sort` over `rows` as rounds of this
+        finish (`SortSink`), its first round set up."""
+        ref node = on._nodes[sort]
+        var descending = List[Bool]()
+        var nulls_last = List[Bool]()
+        for i in range(len(node.sort_keys())):
+            descending.append(node.sort_descending(i))
+            nulls_last.append(node.sort_nulls_last(i))
+        if sort != self.index:
+            ref top = on._nodes[self.index]
+            self.sorted_slice = (top.slice_offset(), top.slice_length())
+        trace_path("sort.rounds")
+        self.sorting.append(
+            SortSink(
+                rows^,
+                node.sort_keys(),
+                descending,
+                nulls_last,
+                node.maintain_order,
+                node.sort_limit(),
+            )
+        )
+        self._sort_round()
+
+    def _sort_round(mut self) raises:
+        """The declined sort's next round, or, once none is left, its
+        result and the work after it."""
+        self.round = self.sorting[0].next_round()
+        if self.round > 0:
+            return
+        var sorted = self.sorting[0].take_result()
+        _ = self.sorting.pop()
+        if self.sorted_slice[0] >= 0:
+            sorted = sorted.slice(self.sorted_slice[0], self.sorted_slice[1])
+        self.result = sorted^
+        self._after_result()
+
+    def _after_result(mut self) raises:
+        """The work after the result is made: a build side's table."""
         if len(self.build.keys) > 0 and self.result:
             # A result made as a frame (the stream ran no pipeline, or its
             # columns' types keep the build on one): its table from it,
@@ -1384,6 +1455,25 @@ struct _StreamProbe(Movable):
             self.filling = True
         else:
             self.built.value().finish_finalize()
+
+
+def _declined_sort(on: QueryContext, index: Int) -> Int:
+    """The sort a declined node at `index` is, or slices (a sort limited
+    to its first rows under its slice), when it runs as rounds of its own
+    (`SortSink`); -1 when not."""
+    if not (on._handoff == HANDOFF_OFF):
+        return -1
+    ref node = on._nodes[index]
+    if node.kind == SORT:
+        return index
+    if (
+        node.kind == SLICE
+        and node.slice_offset() >= 0
+        and node.left >= 0
+        and on._nodes[node.left].kind == SORT
+    ):
+        return node.left
+    return -1
 
 
 struct _OuterScan(Movable):
@@ -1554,8 +1644,14 @@ struct _OperatorPipeline(Movable):
         self.sorts = (
             streaming
             and self.plan._handoff == HANDOFF_OFF
-            and node.kind == SORT
-            and node.sort_limit() < 0
+            and (
+                node.kind == SORT
+                or (
+                    node.kind == SELECT
+                    and self.plan._nodes[node.left].kind == SORT
+                    and _column_projection(node)
+                )
+            )
         )
 
     def execute(mut self) raises:
@@ -1610,11 +1706,18 @@ struct _OperatorPipeline(Movable):
             )
             return
         if self.sorts:
-            ref node = self.plan._nodes[self.index]
+            ref top = self.plan._nodes[self.index]
+            # A projection of columns over the sort orders the sort's
+            # input and gathers only its own columns.
+            var sort = self.index if top.kind == SORT else top.left
+            ref node = self.plan._nodes[sort]
             self.began = Int(perf_counter_ns())
             var input = self.plan._execute(
                 node.left, False, self.streaming, self.batch_size
             )
+            var gathered = Optional[DataFrame]()
+            if top.kind == SELECT:
+                gathered = input.select_exprs(top.exprs)
             var descending = List[Bool]()
             var nulls_last = List[Bool]()
             for i in range(len(node.sort_keys())):
@@ -1628,6 +1731,8 @@ struct _OperatorPipeline(Movable):
                     descending,
                     nulls_last,
                     node.maintain_order,
+                    node.sort_limit(),
+                    gathered^,
                 )
             )
             return
@@ -2437,6 +2542,9 @@ def _probe_start(
         computed=source.kind == SCAN_FRAME
         and plan_computed_slot(self, source.source_slot()),
     )
+    if self._integral_node == index and run.ungrouped:
+        run.ungrouped[0][].integral_combine = self._integral_combine
+        run.ungrouped[0][].combine_observation = plan_observe(self, index)
     return _ProbeStart(
         _PipedProbe(
             run^,

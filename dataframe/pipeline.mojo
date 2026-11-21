@@ -1524,12 +1524,20 @@ struct _ChunkRunner(Movable):
                         # decoded once by the table.
                         ref table = self.indexes[][step.join].value()
                         ref dictionary = table.data[].dictionary
+                        ref build = self.joins[][step.join]
                         for c in range(len(dictionary)):
-                            handles.append(
-                                self.arena.add_decoded(
-                                    dictionary[c], table.dictionary_values(c)
-                                )
+                            var handle = self.arena.add_decoded(
+                                dictionary[c], table.dictionary_values(c)
                             )
+                            # Each holds a build column's values: it is
+                            # that field, Arrow metadata included.
+                            var name = table.output_names[c]
+                            for column in build._columns:
+                                if column.name() == name:
+                                    self.arena.columns[
+                                        handle
+                                    ]._field_metadata = column._field_metadata
+                            handles.append(handle)
                 self.builds.append(handles^)
             self.held = self.arena.mark()
         self.arena.truncate(self.held)
@@ -2211,16 +2219,13 @@ struct _ChunkRunner(Movable):
                 result.starts.append(0)
                 result.lists.append(list)
             else:
-                result.handles.append(
-                    self.arena.add(
-                        table.gather(
-                            t,
-                            Int(pointers.unsafe_ptr()),
-                            len(pointers),
-                            column.name(),
-                        )
-                    )
+                var gathered = table.gather(
+                    t, Int(pointers.unsafe_ptr()), len(pointers), column.name()
                 )
+                # The table's rows hold values, not the field's Arrow
+                # metadata: the gathered column is the build column's field.
+                gathered._field_metadata = column._field_metadata
+                result.handles.append(self.arena.add(gathered^))
                 result.starts.append(0)
                 result.lists.append(-1)
         if result.width() != output.width():
@@ -2937,15 +2942,15 @@ struct _PipelineJob(Job):
                         if step.names[k] == column.name():
                             key = k
                 if key >= 0:
-                    columns.append(
-                        table.gather_field(
-                            key,
-                            Int(pointers.unsafe_ptr()),
-                            n,
-                            column.name(),
-                            column.dtype(),
-                        )
+                    var gathered = table.gather_field(
+                        key,
+                        Int(pointers.unsafe_ptr()),
+                        n,
+                        column.name(),
+                        column.dtype(),
                     )
+                    gathered._field_metadata = column._field_metadata
+                    columns.append(gathered^)
                 else:
                     columns.append(
                         Series.full_null(column.name(), column.dtype(), n)
@@ -2959,11 +2964,11 @@ struct _PipelineJob(Job):
             var t = table.output_index(right._columns[i].name())
             if t < 0:
                 raise Error("pipeline join: a build column is not in the rows")
-            columns.append(
-                table.gather(
-                    t, Int(pointers.unsafe_ptr()), n, right._columns[i].name()
-                )
+            var gathered = table.gather(
+                t, Int(pointers.unsafe_ptr()), n, right._columns[i].name()
             )
+            gathered._field_metadata = right._columns[i]._field_metadata
+            columns.append(gathered^)
         for c in range(len(columns)):
             columns[c] = columns[c].renamed(schema._columns[c].name())
         return DataFrame(columns^, height=n)

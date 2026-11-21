@@ -192,6 +192,9 @@ struct MetalRuntime(AcceleratorBackend):
         var plan = offered._with_handoff()
         from .selection_reduce import selection_supports, selection_execute
 
+        from .integral_partials import combine_integrals
+
+        plan._plan._integral_combine = combine_integrals
         plan._plan._selection_supports = selection_supports
         plan._plan._selection_execute = selection_execute
         plan._plan._report = report
