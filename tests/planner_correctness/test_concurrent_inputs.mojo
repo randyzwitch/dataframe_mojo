@@ -921,3 +921,34 @@ def test_top_rows_run_as_rounds_of_the_schedule() raises:
     assert_equal(lazy.columns(), eager.columns())
     for name in eager.columns():
         assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
+
+
+def test_collected_pieces_merge_as_a_round_of_the_schedule() raises:
+    """Rows a pipeline collects in pieces (a decimal column read through a
+    filter's selection) are made one chunk by a round of tasks of the
+    query's schedule, by ranges of rows: no task starts parallel work of
+    its own, and the rows equal the eager filter's."""
+    var values = List[Int64]()
+    for row in range(100_000):
+        values.append(Int64(row * 37 % 100_003))
+    var frame = DataFrame([Series("d", Column[Int64](values^))]).with_row_index(
+        "row"
+    )
+    frame = frame.with_columns([col("d").cast(DataType.decimal(9, 2, 32))])
+    var keep = (col("row") % lit(Int64(3))) != lit(Int64(1))
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var lazy = frame.lazy().filter(keep).collect()
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    var eager = frame.filter(keep)
+    assert_equal(lazy.columns(), eager.columns())
+    for name in eager.columns():
+        assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
