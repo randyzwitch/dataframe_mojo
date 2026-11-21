@@ -85,6 +85,7 @@ from dataframe.expr import (
 )
 from dataframe.dtype import DataType
 from dataframe.execution import _empty
+from dataframe.execution_observation import DeviceObservation, IntegralCombine
 from dataframe.frame import DataFrame
 from dataframe.series import Series
 from dataframe.storage.column import Column
@@ -112,6 +113,8 @@ struct UngroupedLayout(Copyable, Movable):
     row count), the inputs' types, and the reductions."""
 
     var layout: AggregateLayout
+    var integral_combine: Optional[IntegralCombine]
+    var combine_observation: Optional[ArcPointer[DeviceObservation]]
     var expressions: List[Optional[VectorExpression]]
     # Per input, an aggregate filter: an
     # input `when(c).then(x)` with no otherwise, into a reduction that
@@ -131,6 +134,8 @@ struct UngroupedLayout(Copyable, Movable):
     var outputs: List[Expr]
 
     def __init__(out self, *, copy: Self):
+        self.integral_combine = copy.integral_combine
+        self.combine_observation = copy.combine_observation
         self.layout = copy.layout.copy()
         self.expressions = copy.expressions.copy()
         self.filters = copy.filters.copy()
@@ -155,6 +160,8 @@ struct UngroupedLayout(Copyable, Movable):
         var schema: DataFrame,
         template: _StreamReduction,
     ):
+        self.integral_combine = None
+        self.combine_observation = None
         self.layout = layout^
         self.expressions = expressions^
         self.filters = filters^
@@ -963,6 +970,56 @@ def distinct_counts(
     return counts^
 
 
+def _combine_integrals(
+    layout: UngroupedLayout, mut sinks: List[UngroupedSink]
+) raises -> Bool:
+    ref slots = layout.layout.slots
+    for slot in slots:
+        if (
+            slot.kind != _K_INT_SUM
+            and slot.kind != _K_NARROW_SUM
+            and slot.kind != _K_COUNT
+        ):
+            return False
+    var rows = 0
+    var packed = List[UInt64](capacity=3 * len(slots) * len(sinks))
+    for i in range(len(sinks)):
+        ref sink = sinks[i]
+        rows += sink.count
+        var words = _words(sink.groups.at(0) + 8 * sink.groups.states_at)
+        for slot in slots:
+            var at = words.unsafe_offset(slot.offset)
+            packed.append(at[])
+            packed.append(
+                at[unsafe_offset=1] if slot.kind == _K_INT_SUM else UInt64(0)
+            )
+            packed.append(
+                at[unsafe_offset=2] if slot.kind
+                == _K_INT_SUM else at[unsafe_offset=1] if slot.kind
+                == _K_NARROW_SUM else UInt64(0)
+            )
+    if not rows:
+        return False
+    var combine = layout.integral_combine.value()
+    var merged = combine(packed, len(slots), layout.combine_observation)
+    if len(merged) != 3 * len(slots):
+        raise Error("Invalid number of combined integer aggregate states")
+    var out_words = _words(
+        sinks[0].groups.at(0) + 8 * sinks[0].groups.states_at
+    )
+    for i in range(len(slots)):
+        ref slot = slots[i]
+        var at = out_words.unsafe_offset(slot.offset)
+        at[] = merged[3 * i]
+        if slot.kind == _K_INT_SUM:
+            at[unsafe_offset=1] = merged[3 * i + 1]
+            at[unsafe_offset=2] = merged[3 * i + 2]
+        elif slot.kind == _K_NARROW_SUM:
+            at[unsafe_offset=1] = merged[3 * i + 2]
+    sinks[0].count = rows
+    return True
+
+
 struct UngroupedFinish(Movable, Rounds):
     """The ungrouped reductions' finish as rounds of tasks (`next_round`,
     `round_task`): every worker's states combined into the global ones,
@@ -987,8 +1044,15 @@ struct UngroupedFinish(Movable, Rounds):
     ) raises:
         self.shared = shared
         self.sinks = List[UngroupedSink]()
-        while len(sinks) > 0:
-            sinks.pop(0).combine(self.sinks)
+        if (
+            shared[].integral_combine
+            and sinks
+            and _combine_integrals(shared[], sinks)
+        ):
+            self.sinks.append(sinks.pop(0))
+        else:
+            while len(sinks) > 0:
+                sinks.pop(0).combine(self.sinks)
         self.at = 0
         self.count = len(shared[].layout.distinct)
         self.table = List[AggregateFinish]()

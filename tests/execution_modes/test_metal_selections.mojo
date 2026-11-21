@@ -258,12 +258,26 @@ def test_metal_selected_float_specials_and_integer_faults() raises:
         _ = execute_selection_timed(region._plan, batches)
 
 
-def _selection_report(report: DataFrame) raises:
+def _selection_report(report: DataFrame, joined: Bool) raises:
     var found = False
     for row in range(report.height()):
-        if report.item(row, "algorithm").string() == "handoff selections":
+        var algorithm = (
+            "handoff integral partials" if joined else "handoff selections"
+        )
+        if report.item(row, "algorithm").string() == algorithm:
             found = True
-            assert_equal(report.item(row, "executions").int64(), Int64(1))
+            if joined:
+                assert_equal(
+                    report.item(row, "gpu_completed_launches").int64(), Int64(1)
+                )
+                assert_equal(
+                    report.item(row, "download_bytes").int64(), Int64(3 * 3 * 8)
+                )
+                assert_true(
+                    report.item(row, "upload_bytes").int64() < 70_019 * 4
+                )
+            else:
+                assert_equal(report.item(row, "executions").int64(), Int64(1))
     assert_true(
         found, "expected a native selection handoff in the execution report"
     )
@@ -317,7 +331,7 @@ def test_metal_selected_cpu_string_filter_and_join_use_native_reducers() raises:
                 accelerator=runtime, optimize=optimize, batch_size=4096
             )
             assert_true(actual[0].equals(expected))
-            _selection_report(actual[1])
+            _selection_report(actual[1], joined)
         assert_true("HANDOFF metal" in query.explain(accelerator=runtime))
     var overflow = (
         DataFrame(
@@ -331,3 +345,29 @@ def test_metal_selected_cpu_string_filter_and_join_use_native_reducers() raises:
         .select(col("v").sum())
     )
     same_outcome(overflow)
+
+
+# requires: metal
+def test_metal_join_partial_carry_and_null_counts() raises:
+    from dataframe_metal.integral_partials import combine_integrals
+
+    # Two worker rows, each with a wide signed sum and a nullable count.
+    # -1 + 2 wraps the low word and cancels the negative high word.
+    _ = require_metal()
+    var packed: List[UInt64] = [
+        UInt64.MAX,
+        UInt64.MAX,
+        1,
+        5,
+        0,
+        0,
+        2,
+        0,
+        2,
+        3,
+        0,
+        0,
+    ]
+    var actual = combine_integrals(packed, 2, None)
+    var expected: List[UInt64] = [1, 0, 3, 8, 0, 0]
+    assert_equal(actual, expected)

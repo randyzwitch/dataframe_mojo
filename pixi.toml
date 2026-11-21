@@ -79,6 +79,9 @@ report-apple = "bash benchmarks/tools/report_apple.sh"
 report-apple-quick = { cmd = "bash benchmarks/tools/report_apple.sh", env = { APPLE_SCALE = "smoke", APPLE_ROUNDS = "1" } }
 report-cpu = "mkdir -p build/reports/cpu && python3 benchmarks/tools/bench_suites.py --tier full --all-suites --output build/reports/cpu/results.json"
 report-cpu-quick = "mkdir -p build/reports/cpu && python3 benchmarks/tools/bench_suites.py --tier quick --output build/reports/cpu/results.json"
+# Differential fuzzer against Polars (tests/fuzz/README.md); not run in CI.
+fuzz-build = "mkdir -p build/fuzz && mojo build -O2 -I . tests/fuzz/fuzz_driver.mojo -o build/fuzz/fuzz_driver"
+fuzz = "python3 tests/fuzz/fuzz.py"
 
 [feature.oracle.pypi-dependencies]
 duckdb = ">=2.0, <3"

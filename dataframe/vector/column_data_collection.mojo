@@ -165,7 +165,7 @@ def raw_series(
     bytes: List[UInt8], bits: List[UInt8], physical: Int, template: Series
 ) raises -> Series:
     """Raw values of vector type `physical` as a column typed and named as
-    `template`."""
+    `template`, with its field metadata."""
     var size = physical_size(physical)
     var n = len(bytes) // size if size > 0 else 0
     var result = template.copy()
@@ -186,6 +186,9 @@ def raw_series(
     var dtype = template.dtype()
     if result.dtype() != dtype:
         result = result.with_dtype(dtype)
+    # The values are the template's field, Arrow metadata included, so they
+    # concatenate with other pieces of it.
+    result._field_metadata = template._field_metadata
     return result^
 
 
