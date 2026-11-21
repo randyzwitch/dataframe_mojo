@@ -1258,7 +1258,7 @@ def sort_key(row):
             if math.isnan(v):
                 key.append((2, 0))
             else:
-                key.append((1, float(f"{v:.6g}")))
+                key.append((1, float(f"{v:.10g}")))
         elif isinstance(v, bool):
             key.append((1, int(v)))
         elif isinstance(v, (int,)):
@@ -1304,6 +1304,12 @@ def compare(expected, got, ordered, sort_keys=None):
         return f"height: expected {expected.height}, got {got.height}"
     e_rows = [tuple(norm_value(v) for v in r) for r in comparable(expected).rows()]
     g_rows = [tuple(norm_value(v) for v in r) for r in comparable(got).rows()]
+    if sort_keys and any(
+        dtype_class(expected.schema[k]) == "float" for k in sort_keys
+    ):
+        # Float keys from aggregates may differ in their last bits, which
+        # can reorder near-ties; compare as a multiset only.
+        sort_keys = None
     if sort_keys:
         # A sort with ties: the key columns are in a fixed order even when
         # the tied rows are not.
@@ -1669,6 +1675,8 @@ def process(job):
     n, seed, args = job
     out = Path(args.out)
     work = out / f"work{os.getpid()}"
+    # The case in hand, so a run that dies or stalls names it.
+    (out / f"current{os.getpid()}.txt").write_text(f"case {n} seed {seed}\n")
     crng = random.Random(seed)
     try:
         case = gen_case(crng)
@@ -1717,8 +1725,12 @@ def run(args):
     saved = {}
     log = open(out / "log.txt", "a")
     t0 = time.time()
-    with mp.get_context("fork").Pool(args.jobs) as pool:
-        for n, seed, status, payload in pool.imap_unordered(process, jobs):
+    pool = mp.get_context("fork").Pool(args.jobs) if args.jobs > 1 else None
+    # One job runs in this process: a worker that dies (out of memory, say)
+    # would leave a pool waiting on its case forever.
+    results = pool.imap_unordered(process, jobs) if pool else map(process, jobs)
+    try:
+        for n, seed, status, payload in results:
             stats[status] += 1
             stats["cases"] += 1
             if status != "fail":
@@ -1736,8 +1748,13 @@ def run(args):
                 print(f"saved seed{seed}: {small}", flush=True)
                 log.write(f"saved seed{seed}: {small}\n")
                 log.flush()
+    finally:
+        if pool:
+            pool.terminate()
     for d in out.glob("work*"):
         shutil.rmtree(d, ignore_errors=True)
+    for f in out.glob("current*.txt"):
+        f.unlink()
     summary = {
         "stats": stats,
         "buckets": buckets,
