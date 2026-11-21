@@ -23,7 +23,8 @@ run in CI.
   `lazy_noopt` (collect with optimize=False) and `lazy_mem` (read eagerly,
   then `.lazy()`). It runs under `DATAFRAME_THREADS=1` and `8`. One compile
   serves every case.
-- Polars runs the same plan as the reference. Floats compare within
+- Polars runs the same plan as the reference, collected with
+  `engine="in-memory"`. Floats compare within
   rtol 1e-6 / atol 1e-8. Row order is compared only where the plan fixes it
   (a sort on every column, `maintain_order=True`, head after an ordered
   step); a sort with ties checks its key columns in order and the rest as a
@@ -31,7 +32,14 @@ run in CI.
 - A failing case is shrunk (plan steps, list entries, sub-expressions,
   rows, columns and file formats are dropped while it still fails the same
   way) and saved to `build/fuzz/failures/seed<N>/` with the tables as
-  Parquet, `case.json` and a readable `report.txt`.
+  Parquet, `case.json` and a readable `report.txt`. The case as found is
+  saved beside it in `unshrunk/`.
+- "Fails the same way" means the same set of failures: kind, mode and
+  thread count, the first line of an error, and for a mismatch what
+  differs (a row value, the height, a dtype, a sort key) and how the
+  failing column is made (the top of its expression, or its aggregate's
+  kind, with `ddof` for `std`/`var`). A smaller case that fails some other
+  way, or in other modes or thread counts, is not taken.
 
 The generator follows our typing rules (no implicit numeric promotion), so
 an error from our side is a finding. Where we differ from Polars on purpose
@@ -50,13 +58,16 @@ the oracle is adjusted, or the error is allowed:
   String first.
 - Mean, median, std and var of Float32 are Float64 here; the generator does
   not build them on Float32 columns, so later steps type alike.
-- Polars' lazy engine gives a grouped `var`/`std` with `ddof=0` of an
-  all-null group as 0.0 (its eager engine and DuckDB give null, as we do),
-  so the generator uses `ddof=1`.
+- Polars' streaming engine gives a grouped `var`/`std` with `ddof=0` of an
+  all-null group as 0.0 (its eager and in-memory engines and DuckDB give
+  null, as we do), so the oracle runs on the in-memory engine.
+- `arg_min`/`arg_max` return the first row holding the extreme; Polars may
+  pick any tied row. The oracle asks for the first:
+  `(c == c.min()).arg_true().first()`.
 
-Known oracle noise (not engine bugs): Polars' grouped `arg_min` can pick a
-later tied row after a sort, and a comparison of an aggregated float with a
-literal can flip between thread counts when the value sits on the literal.
+Known oracle noise (not engine bugs): a comparison of an aggregated float
+with a literal can flip between thread counts when the value sits on the
+literal.
 
 Each driver run is capped at 8 GB (`FUZZ_MEMORY_MAX`, through
 `systemd-run --user`), and the generator never builds a join step whose
