@@ -64,9 +64,9 @@ def _pipeline_steps(
     an explode or unnest (each morsel's rows through the operator), a cross
     product with its collected build, or a join probing its build. A join's
     morsels probe the shared hash index on their own worker; with no index
-    (keys the table does not hold, such as nested values) each morsel
-    joins the build's rows on its own, which serves every join that emits
-    only probe-side matches. A right, full, right-semi or right-anti join
+    (keys the table does not hold: a list or struct type with no key
+    bytes) each morsel joins the build's rows on its own, which serves
+    every join that emits only probe-side matches. A right, full, right-semi or right-anti join
     also emits build rows by whether any morsel matched them, flags only
     the shared index keeps."""
     for node in operations:

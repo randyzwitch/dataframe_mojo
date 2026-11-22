@@ -301,8 +301,9 @@ def _flip_left_join(
     its left builds, the build rows no probe row matched coming out last, under
     a selection that restores the join's columns: the left's, then the right's
     other than its keys. False, with nothing changed, when the sides share a
-    column name, a key repeats, or the key types differ or need the general join
-    (categorical, nested)."""
+    column name, a key repeats, or the key types differ or are categorical
+    (codes compare only within one dictionary, which the general join
+    unifies)."""
     var node = plan._nodes[at].copy()
     if not node.coalesce:
         return False
@@ -320,12 +321,7 @@ def _flip_left_join(
     for i in range(len(node.names)):
         var ltype = left.column(node.names[i]).dtype()
         var rtype = right.column(node.right_keys[i]).dtype()
-        if (
-            ltype != rtype
-            or ltype.is_categorical()
-            or ltype.is_nested()
-            or ltype.is_struct()
-        ):
+        if ltype != rtype or ltype.is_categorical():
             return False
     var exprs = List[Expr]()
     for name in left_names:
@@ -356,7 +352,8 @@ def _flip_right_join(
     every row, and its left builds, under a selection that restores the
     join's columns and their order. False, with nothing changed, when the
     sides share a column name, a key repeats, or the key types differ or
-    need the general join (categorical, nested)."""
+    are categorical (codes compare only within one dictionary, which the
+    general join unifies)."""
     var node = plan._nodes[at].copy()
     for keys in [node.names.copy(), node.right_keys.copy()]:
         for i in range(len(keys)):
@@ -372,12 +369,7 @@ def _flip_right_join(
     for i in range(len(node.names)):
         var ltype = left.column(node.names[i]).dtype()
         var rtype = right.column(node.right_keys[i]).dtype()
-        if (
-            ltype != rtype
-            or ltype.is_categorical()
-            or ltype.is_nested()
-            or ltype.is_struct()
-        ):
+        if ltype != rtype or ltype.is_categorical():
             return False
     var exprs = List[Expr]()
     for name in plan._execute(at, True, False, batch_size).columns():
@@ -401,14 +393,14 @@ def _flip_semi_join(
 ) raises -> Bool:
     """Flip a semi/anti join so its left input builds and its right probes. The
     build-side scan emits matched/unmatched left rows respectively. Decline
-    differing or nested key types that cannot share this hash table."""
+    differing key types, which cannot share this hash table."""
     var node = plan._nodes[at].copy()
     var left = plan._execute(node.left, True, False, batch_size)
     var right = plan._execute(node.right, True, False, batch_size)
     for i in range(len(node.names)):
         var ltype = left.column(node.names[i]).dtype()
         var rtype = right.column(node.right_keys[i]).dtype()
-        if ltype != rtype or ltype.is_nested():
+        if ltype != rtype:
             return False
     var join = node.copy()
     join.left = node.right

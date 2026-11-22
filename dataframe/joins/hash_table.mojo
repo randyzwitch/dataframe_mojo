@@ -45,6 +45,11 @@ from dataframe.join_type import (
     JOIN_SEMI,
     join_emits_build_rows,
 )
+from dataframe.kernels.nested_keys import (
+    decode_nested_keys,
+    encode_nested_keys,
+    nested_key_supported,
+)
 from dataframe.kernels.partition import _hash_column, _row_at
 from dataframe.kernels.runtime_filter import (
     KeyBitmap,
@@ -265,8 +270,9 @@ struct _StringBytes:
 
 def _row_type(key: Series) raises -> DataType:
     """The row column type of a key: its storage (a decimal keeps its own
-    type, whose storage is 128 bits)."""
-    if key._data.isa[StringColumn]():
+    type, whose storage is 128 bits). A list or struct key is held as its
+    key bytes (`encode_nested_keys`), a string."""
+    if key._data.isa[StringColumn]() or key.dtype().is_nested():
         return DataType.STRING
     if key._data.isa[BoolColumn]():
         return DataType.BOOL
@@ -281,7 +287,7 @@ def _row_type(key: Series) raises -> DataType:
 
 def _field_kind(key: Series) -> Int:
     """How a key field compares."""
-    if key._data.isa[StringColumn]():
+    if key._data.isa[StringColumn]() or key.dtype().is_nested():
         return _TEXT
     if key._data.isa[Column[Float64]]():
         return _F64
@@ -598,6 +604,9 @@ struct JoinBuildLayout(Copyable, Movable):
     var key_columns: List[Int]
     var payload_columns: List[Int]
     var key_types: List[DataType]
+    # Each key's column with no rows: a list or struct key's bytes decode
+    # into its type, a categorical leaf into its dictionary.
+    var key_templates: List[Series]
     # Whether each key's least and greatest values are recorded (integer
     # keys).
     var bounded: List[Bool]
@@ -648,10 +657,15 @@ struct JoinBuildLayout(Copyable, Movable):
         payload types, which the row fields are typed from."""
         var types = List[DataType](capacity=len(keys) + len(payload) + 3)
         self.key_types = List[DataType](capacity=len(keys))
+        self.key_templates = List[Series](capacity=len(keys))
         for key in keys:
-            if key.dtype().is_nested():
+            self.key_templates.append(key.slice(0, 0))
+            if key.dtype().is_nested() and not nested_key_supported(
+                key.dtype()
+            ):
                 raise Error(
-                    "list and struct columns cannot be join keys: " + key.name()
+                    "join keys cannot hold this list or struct type: "
+                    + key.name()
                 )
             types.append(_row_type(key))
             self.key_types.append(key.dtype())
@@ -795,10 +809,18 @@ struct JoinBuildSink(Sink):
                 n,
             )
         var hashes = self.chunk.writable(layout.hash_column(), PHYSICAL_UINT64)
+        # The columns added here are dropped once the rows are appended.
+        var mark = arena.mark()
         for k in range(fields):
             var key = to_series(
                 chunk, layout.key_columns[k], arena, "", layout.key_types[k]
             )
+            if layout.key_types[k].is_nested():
+                # A list or struct key is held as its key bytes, which
+                # hash and compare as a string key's do: equal bytes are
+                # equal values. The probe writes its keys the same way.
+                key = encode_nested_keys(key)
+                self.chunk.data[k] = flat_over(arena, arena.add(key), 0)
             _hash_column(key, 0, n, hashes.data, k == 0)
             if self.exact[k]:
                 self._bound(k, key)
@@ -814,7 +836,8 @@ struct JoinBuildSink(Sink):
                 # copied into the rows' heap: the rows point at its bytes,
                 # and the table holds the buffers they are in.
                 var v = self.chunk.data[k]
-                if v.source >= 0:
+                var encoded = k < fields and layout.key_types[k].is_nested()
+                if v.source >= 0 and not encoded:
                     var buffers = _string_buffers(arena.columns[v.source])
                     if buffers:
                         referenced = True
@@ -846,6 +869,8 @@ struct JoinBuildSink(Sink):
             )
         else:
             self.rows.append_unified(self.state, self.chunk, append_sel, added)
+        # Encoded key bytes were copied into the rows' heap.
+        arena.truncate(mark)
         self.count += n
         self.next_row += n
 
@@ -964,11 +989,13 @@ def join_build_layout(
     flags when the join emits build rows after its probe. `probe_estimate`
     is the probe side's estimated rows, `build_filtered` whether the build
     side filters its rows, `filter_rows` the estimated rows of a scan its
-    keys also filter beyond the probe side (-1 for none). None when the build cannot be a
-    table: a nested key, or, for rows sunk from pipeline chunks
-    (`from_chunks`), a categorical key (the probe unifies dictionaries
-    against the build frame) or a nested column (a chunk's nested vector
-    may have no column to read)."""
+    keys also filter beyond the probe side (-1 for none). A list or struct
+    key is held as its key bytes. None when the build cannot be a table: a
+    nested key holding a type that has no key bytes, or, for rows sunk from
+    pipeline chunks (`from_chunks`), a categorical key (the probe unifies
+    dictionaries against the build frame) or a nested payload column (a
+    chunk's nested vector may have no column to read); the build is then
+    collected and its table made from its frame."""
     if len(keys) == 0:
         return None
     var key_columns = List[Int](capacity=len(keys))
@@ -980,7 +1007,9 @@ def join_build_layout(
         if at < 0:
             raise Error("join build: no key column " + name)
         ref dtype = columns[at].dtype()
-        if dtype.is_nested() or (from_chunks and dtype.is_categorical()):
+        if dtype.is_nested() and not nested_key_supported(dtype):
+            return None
+        if from_chunks and dtype.is_categorical():
             return None
         key_columns.append(at)
     var emits = how != JOIN_SEMI and how != JOIN_ANTI
@@ -994,14 +1023,14 @@ def join_build_layout(
     var build_fields = List[Int]()
     for i in range(len(columns)):
         ref column = columns[i]
-        if from_chunks and column.dtype().is_nested():
-            return None
         build_names.append(column.name())
         build_types.append(column.dtype())
         var key_at = -1
         for k in range(len(keys)):
             if keys[k] == column.name():
                 key_at = k
+        if from_chunks and column.dtype().is_nested() and key_at < 0:
+            return None
         if key_at < 0:
             # A payload column: in the rows, strings and nested values in
             # their heap.
@@ -1502,6 +1531,7 @@ struct JoinHashTable(Copyable, Movable):
     # The key types, and per key its least and greatest valid value, known
     # for an integer key with a valid value (`bounded`).
     var key_types: List[DataType]
+    var key_templates: List[Series]
     var least: List[Int64]
     var most: List[Int64]
     var bounded: List[Bool]
@@ -1532,10 +1562,6 @@ struct JoinHashTable(Copyable, Movable):
         var build_names = List[String](capacity=len(keys))
         var build_types = List[DataType](capacity=len(keys))
         for key in keys:
-            if key.dtype().is_nested():
-                raise Error(
-                    "list and struct columns cannot be join keys: " + key.name()
-                )
             key_columns.append(len(columns))
             build_names.append(key.name())
             build_types.append(key.dtype())
@@ -1582,6 +1608,7 @@ struct JoinHashTable(Copyable, Movable):
         self.output_types = shape.output_types.copy()
         self.output_metadata = shape.output_metadata.copy()
         self.key_types = shape.key_types.copy()
+        self.key_templates = shape.key_templates.copy()
         self.build_names = shape.build_names.copy()
         self.build_types = shape.build_types.copy()
         self.build_fields = shape.build_fields.copy()
@@ -1616,7 +1643,8 @@ struct JoinHashTable(Copyable, Movable):
                     self.most[k] = max(self.most[k], sinks[w].most[k])
         for k in range(fields):
             self.bounded[k] = self.bounded[k] and seen[k]
-        if count > Int(Int32.MAX):
+        if shape.numbered and count > Int(Int32.MAX):
+            # Its rows hold 32-bit build row numbers.
             raise Error("A join build exceeds 2^31 - 1 rows")
         var sink_threads = max(len(sinks), 1)
         _ = sinks^
@@ -1961,7 +1989,21 @@ struct JoinHashTable(Copyable, Movable):
         dtype: DataType,
     ) raises -> Series:
         """Row layout column `column` (a key, or a payload column) of the
-        `count` rows at the pointers at `rows`, typed `dtype`."""
+        `count` rows at the pointers at `rows`, typed `dtype`. A list or
+        struct key's rows hold its key bytes, decoded back into values."""
+        if column < len(self.key_types) and self.key_types[column].is_nested():
+            var bytes = gather_rows_series(
+                self.row_layout,
+                rows,
+                count,
+                column,
+                name.copy(),
+                DataType.STRING,
+                self.data[].heaps,
+            )
+            return decode_nested_keys(
+                bytes, self.key_templates[column]
+            ).renamed(name^)
         return gather_rows_series(
             self.row_layout,
             rows,
@@ -2135,6 +2177,9 @@ struct ScanStructure(Movable):
     var marks: List[UInt8]
     # The join flags matched build rows (right, full, right-semi/anti).
     var propagate: Bool
+    # Per key, the probe rows' key bytes of a list or struct key, held
+    # until the next probe: the probe records point at their long ones.
+    var encoded: List[Series]
 
     def __init__(out self, table: JoinHashTable, how: Int):
         self.table = table.copy()
@@ -2169,6 +2214,7 @@ struct ScanStructure(Movable):
             or how == JOIN_RIGHT_SEMI
             or how == JOIN_RIGHT_ANTI
         )
+        self.encoded = List[Series]()
 
     def probe(mut self, keys: List[Series], start: Int, count: Int) raises:
         """Probe rows [start, start + count) of the unchunked `keys` (at most
@@ -2260,6 +2306,36 @@ struct ScanStructure(Movable):
         var records = Int(self.records.unsafe_ptr())
         var valid = Int(self.valid.unsafe_ptr())
         var hashes = Int(self.hashes.unsafe_ptr())
+        if self.table.key_types[k].is_nested():
+            # A list or struct key: the chunk's rows as key bytes, which
+            # the build's rows hold for the same values.
+            var rows: Series
+            if selection != 0:
+                var picked = Pointer[UInt32, MutAnyOrigin](
+                    unsafe_from_address=selection
+                )
+                var at = List[Int](capacity=count)
+                for i in range(count):
+                    at.append(Int(picked[unsafe_offset=i]))
+                rows = key.take(at)
+            else:
+                rows = key.slice(start, count)
+            var made = encode_nested_keys(rows)
+            while len(self.encoded) <= k:
+                self.encoded.append(made.copy())
+            self.encoded[k] = made^
+            ref bytes = self.encoded[k]
+            _write_native(
+                bytes,
+                0,
+                count,
+                records + layout.offsets[k],
+                layout.key_bytes,
+                valid,
+                1,
+            )
+            _hash_column(bytes, 0, count, hashes, k == 0)
+            return
         if selection != 0:
             _write_native[True](
                 key,
