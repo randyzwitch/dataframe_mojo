@@ -1326,8 +1326,8 @@ def _step_schemas(
         elif step.kind == STEP_WITH_COLUMNS:
             current = current.with_columns(step.exprs)
         elif _cross_step(step):
-            current = current.join(
-                joins[step.join].clear(), how="cross", suffix=step.suffix
+            current = current._cross_join(
+                joins[step.join].clear(), "cross", step.suffix
             )
         elif step.kind == STEP_EXPLODE:
             current = current.explode(step.names)
@@ -2135,7 +2135,7 @@ struct _ChunkRunner(Movable):
             # Where its output is collected for a later join: the morsel's
             # whole product.
             var frame = columns.whole(self.arena, input)
-            var crossed = frame.join(right, how="cross", suffix=step.suffix)
+            var crossed = frame._cross_join(right, "cross", step.suffix)
             return _Columns.of_frame(self.arena, crossed)
         if not direct:
             var frame = columns.whole(self.arena, input)
