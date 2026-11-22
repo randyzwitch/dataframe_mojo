@@ -1,7 +1,7 @@
 """Typed equality joins preserve complete rows, multiplicity and key identity."""
 # contract-group: table.join
 from std.memory import ArcPointer
-from std.testing import assert_equal, assert_true, assert_raises
+from std.testing import assert_equal, assert_true
 from dataframe import (
     Column,
     DataFrame,
@@ -138,7 +138,7 @@ def test_join_payloads_preserve_nested_children_and_all_logical_metadata() raise
                     assert_typed_join(actual, l, r, pairs, how)
 
 
-def test_flat_struct_keys_obey_scalar_membership_and_reject_unsupported_join_kinds() raises:
+def test_flat_struct_keys_obey_scalar_membership_in_every_join_kind() raises:
     var li: List[Int] = [1, 0, 1, 3, -1, 4]
     var ri: List[Int] = [3, 1, 1, 2, -1, 0]
     var struct_key = Series(
@@ -168,7 +168,7 @@ def test_flat_struct_keys_obey_scalar_membership_and_reject_unsupported_join_kin
     for layout in range(3):
         var l = _layout(left, layout)
         var r = _layout(right, layout)
-        for how in ["inner", "left", "semi", "anti"]:
+        for how in ["inner", "left", "right", "full", "semi", "anti"]:
             assert_typed_join(
                 l.join(r, "k", how=how),
                 l,
@@ -176,10 +176,6 @@ def test_flat_struct_keys_obey_scalar_membership_and_reject_unsupported_join_kin
                 nested_loop_pairs(li, ri, how),
                 how,
             )
-        # docs/expressions.md explicitly excludes right/full struct-key joins.
-        for how in ["right", "full"]:
-            with assert_raises():
-                _ = l.join(r, "k", how=how)
 
 
 def test_categorical_join_keys_match_values_across_independent_dictionaries() raises:

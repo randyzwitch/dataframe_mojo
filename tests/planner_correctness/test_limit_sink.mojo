@@ -155,3 +155,43 @@ def test_slices_over_joins_keep_source_order() raises:
             .select(["s", "v"])
             .head(1234),
         )
+
+
+def test_first_sorted_rows_of_a_frame_run_in_the_pipeline() raises:
+    # A sort's first rows straight over a frame in memory, or over a
+    # computed input the stream reads as a frame (here an aggregate's
+    # groups), run in the pipeline's top-N sink. Keys are unique, so the
+    # rows are fully determined.
+    for rows in [0, 1, 20_000]:
+        var frame = _source(rows)
+        for window in [(0, 0), (0, 1), (0, 10), (3, 100), (19_990, 50)]:
+            var offset = window[0]
+            var length = window[1]
+            var lazy = (
+                frame.lazy().sort("v", descending=True).slice(offset, length)
+            )
+            _check(lazy, frame.sort("v", descending=True).slice(offset, length))
+            if rows > 0 and length > 0:
+                _assert_pipelined(lazy)
+        var grouped = (
+            frame.lazy()
+            .group_by("k")
+            .agg([col("v").sum().alias("t"), col("v").len().alias("n")])
+        )
+        var eager = (
+            frame.group_by("k")
+            .agg([col("v").sum().alias("t"), col("v").len().alias("n")])
+            .sort(["t", "k"], descending=[True, False], nulls_last=[True, True])
+        )
+        _check(
+            grouped.sort(
+                ["t", "k"], descending=[True, False], nulls_last=[True, True]
+            ).head(7),
+            eager.head(7),
+        )
+        _check(
+            grouped.sort(
+                ["t", "k"], descending=[True, False], nulls_last=[True, True]
+            ).slice(2, 5),
+            eager.slice(2, 5),
+        )

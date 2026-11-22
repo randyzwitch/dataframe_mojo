@@ -2269,14 +2269,7 @@ def _probe_start(
     var file_scan = Optional[ArcPointer[ScanSource]]()
     var source_columns = Optional[DataFrame]()
     var distinct = _counts_distinct(expressions)
-    var eligibility = pipeline_eligibility(
-        operations,
-        indexes,
-        distinct,
-        len(keys),
-        ordered,
-        expressions,
-    )
+    var eligibility = pipeline_eligibility(operations, indexes)
     if eligibility.allowed and not frame_source:
         var opened = _open_scan_source(self, cursor, operations, batch_size)
         if not opened:
@@ -2336,19 +2329,7 @@ def _probe_start(
                 typed[len(typed) - 1], keys, expressions
             )
     var decision = select_aggregation_strategy(
-        self,
-        cursor,
-        batch_size,
-        keys,
-        expressions,
-        operations,
-        joins,
-        distinct,
-        ordered,
-        top,
-        grouping,
-        eligibility,
-        inline_table_eligible,
+        expressions, grouping, eligibility, inline_table_eligible
     )
     if decision.is_eager():
         trace_decision(decision)

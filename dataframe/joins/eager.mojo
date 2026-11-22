@@ -4,17 +4,12 @@ Choose a build side, retain its columns and populate the join hash table.
 Probe the other frame in chunks, then gather the matched payload columns.
 Outer and build-side semi/anti joins scan match flags after probing.
 """
-from dataframe.aggregation.keys import (
-    _expand_struct_keys,
-)
 from dataframe.categorical import (
     unify,
 )
 from dataframe.dtype import (
     DataType,
 )
-from dataframe.kernels.hashing import encode_rows
-from dataframe.storage.column import Column
 from dataframe.kernels.binary import (
     choose,
 )
@@ -34,7 +29,6 @@ from dataframe.join_type import (
     JOIN_RIGHT_SEMI,
     JOIN_SEMI,
     join_emits_build_rows,
-    join_name,
     shared_join_key_type,
 )
 from dataframe.joins.hash_table import (
@@ -143,88 +137,6 @@ def join_frames(
                 + " is "
                 + rtype.name()
             )
-    var has_struct_key = False
-    for k in left_keys:
-        if self._columns[k].dtype().is_struct():
-            has_struct_key = True
-    if has_struct_key:
-        # Join on the struct's fields and validity as ordinary key
-        # columns, then drop those helpers. The right struct column is
-        # dropped up front so it does not come through as an extra
-        # output column.
-        if (
-            how != JOIN_INNER
-            and how != JOIN_LEFT
-            and how != JOIN_SEMI
-            and how != JOIN_ANTI
-        ):
-            raise Error(
-                "struct join keys support inner, left, semi and anti"
-                " joins; found " + join_name(how)
-            )
-        var left_side = self.copy()
-        var right_side = right.copy()
-        var new_left_on = List[String]()
-        var new_right_on = List[String]()
-        var helpers = List[String]()
-        for i in range(len(left_on)):
-            if not self._columns[left_keys[i]].dtype().is_struct():
-                new_left_on.append(left_on[i])
-                new_right_on.append(right_on[i])
-                continue
-            var left_parts = _expand_struct_keys(
-                [self._columns[left_keys[i]].copy()]
-            )
-            var right_parts = _expand_struct_keys(
-                [right._columns[right_keys[i]].renamed(left_on[i])]
-            )
-            var combined = List[Series]()
-            for p in range(len(left_parts)):
-                combined.append(left_parts[p].append(right_parts[p]))
-            var labels = encode_rows(combined, True)
-            var helper = left_parts[len(left_parts) - 1].name()
-            while (
-                helper in left_side.columns() or helper in right_side.columns()
-            ):
-                helper += "_"
-            var left_codes = List[Int64](capacity=self.height())
-            var right_codes = List[Int64](capacity=right.height())
-            for row in range(self.height()):
-                left_codes.append(Int64(labels.ids[row]))
-            for row in range(right.height()):
-                right_codes.append(Int64(labels.ids[self.height() + row]))
-            left_side = left_side.with_column(
-                Series(
-                    helper,
-                    Column[Int64](
-                        left_codes^,
-                        self._columns[left_keys[i]].struct_column().validity(),
-                    ),
-                )
-            )
-            right_side = right_side.drop([right_on[i]]).with_column(
-                Series(
-                    helper,
-                    Column[Int64](
-                        right_codes^,
-                        right._columns[right_keys[i]]
-                        .struct_column()
-                        .validity(),
-                    ),
-                )
-            )
-            new_left_on.append(helper)
-            new_right_on.append(helper)
-            helpers.append(helper)
-        return left_side._join_impl(
-            right_side,
-            left_on=new_left_on,
-            right_on=new_right_on,
-            how=how,
-            suffix=suffix,
-            coalesce=coalesce,
-            keep_order=keep_order,
-        ).drop(helpers)
     var keep_right_keys = not coalesce and how != JOIN_SEMI and how != JOIN_ANTI
     # A coalesced right join keeps the right keys, under their names and
     # in their places among the right columns, after the left's other
@@ -437,13 +349,27 @@ def join_frames(
         for i in left_rows:
             use_left.append(i >= 0)
         columns[c] = (
-            choose(use_left, columns[c], from_right[j])
+            _coalesced(use_left, columns[c], from_right[j])
             .with_dtype(self._columns[c].dtype())
             .renamed(self._columns[c].name())
         )
     for k in range(len(right_output)):
         columns.append(from_right[len(coalesced) + k].renamed(right_names[k]))
     return DataFrame(columns^, height=len(left_rows))
+
+
+def _coalesced(
+    use_left: List[Bool], left: Series, right: Series
+) raises -> Series:
+    """Per row, `left`'s value where `use_left` holds, else `right`'s. A
+    list or struct column is picked by gathering from both sides."""
+    if not left.dtype().is_nested():
+        return choose(use_left, left, right)
+    var n = len(use_left)
+    var rows = List[Int](capacity=n)
+    for i in range(n):
+        rows.append(i if use_left[i] else n + i)
+    return left.append(right).take(rows)
 
 
 # Estimate build memory from row-layout widths plus per-column overhead and

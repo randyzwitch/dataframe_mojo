@@ -184,7 +184,7 @@ struct BuildFinish(Movable, Rounds):
         a thread; none for absent or unsupported keys."""
         self.stage = _BUILD_DONE
         var count = self.frame.height()
-        if len(self.keys) == 0 or count > Int(Int32.MAX):
+        if len(self.keys) == 0:
             return 0
         var layout = join_build_layout(
             self.frame._columns,

@@ -501,7 +501,8 @@ struct _Executor[P: SchedulablePipeline](Movable):
 
     def _push(mut self, record: Int) -> Bool:
         """Queue a task record; fails the schedule when the ring has no
-        free slot, which its sizing rules out."""
+        free slot, which its sizing rules out. A slot whose task has been
+        taken but not yet released is waited for, not counted as full."""
         var sequences = Int(self.sequences.unsafe_ptr())
         while True:
             var position = self.tail.load()
@@ -515,6 +516,13 @@ struct _Executor[P: SchedulablePipeline](Movable):
                     _counter(sequences, slot).store(position + 1)
                     return True
             elif free < 0:
+                # The slot still holds the task one lap behind. A taker
+                # advances `head` before it marks the slot free, so the
+                # ring is full only when `capacity` positions are queued
+                # and not yet taken; otherwise that taker is about to
+                # release the slot, and the push tries again.
+                if position - self.head.load() < Int64(self.mask + 1):
+                    continue
                 self._fail(Error("pipeline task queue overflow"))
                 return False
 
