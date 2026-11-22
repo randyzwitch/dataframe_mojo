@@ -164,7 +164,7 @@ def test_pipeline_filters_per_reduction() raises:
     _ = seen^
     _ = trace_eager^
     _ = workers^
-    assert_true("group_by.aggregate_table" in eager_text)
+    assert_true("pipeline.group_table" in eager_text)
     assert_false("group_by.row_lists" in eager_text)
     assert_frame(eager, piped)
 

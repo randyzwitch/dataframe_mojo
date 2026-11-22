@@ -44,7 +44,7 @@ def grouped(frame: DataFrame) raises -> DataFrame:
     var observed = StrategyTrace()
     var result = frame.group_by(["s", "i", "f", "b"]).agg(reductions())
     assert_true(
-        "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+        "dataframe-path: pipeline.group_table\n" in observed.text(),
         "the group-by did not reach the aggregate table",
     )
     _ = observed^

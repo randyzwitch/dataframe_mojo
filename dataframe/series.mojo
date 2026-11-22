@@ -1369,7 +1369,9 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         """Distinct values and their row counts (nulls included), most
         frequent first when sort=True; ties keep first-occurrence order."""
         var counts = (
-            self._frame().group_by(self._name, maintain_order=True).len(name)
+            self._frame()
+            .group_by(self._name, maintain_order=True)
+            ._counts(name)
         )
         if sort:
             return counts.sort([name], descending=True)

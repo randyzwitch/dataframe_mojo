@@ -426,7 +426,7 @@ def run_cases(threads: Int, rows: Int, lazy: Bool) raises:
                 var result = grouped(kase, rows, lazy, ordered, flat)
                 var path = (
                     "dataframe-path: pipeline.group_table\n" if lazy else (
-                        "dataframe-path: group_by.aggregate_table\n"
+                        "dataframe-path: pipeline.group_table\n"
                     )
                 )
                 assert_true(

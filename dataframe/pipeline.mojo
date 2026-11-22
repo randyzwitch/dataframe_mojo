@@ -3651,7 +3651,7 @@ struct PipelineFinish(Movable, Rounds):
                     else:
                         whole = whole.group_by(
                             run.keys, maintain_order=run.ordered
-                        ).agg(run.expressions)
+                        )._declined(run.expressions, run.batch_size, True)
                 self.frame = whole^
                 self.sink = _SINK_DONE
             else:
