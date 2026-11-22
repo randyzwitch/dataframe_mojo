@@ -35,6 +35,7 @@ from dataframe.join_type import (
     JOIN_SEMI,
     join_emits_build_rows,
     join_name,
+    shared_join_key_type,
 )
 from dataframe.joins.hash_table import (
     JoinHashTable,
@@ -82,7 +83,8 @@ def join_frames(
     # A categorical key joins on codes, which compare only on a shared
     # dictionary (#106): both key columns move onto the union of theirs
     # (a String key is encoded into it), leaving the left codes as they
-    # are. Unchanged pairs join as before.
+    # are. A decimal pair held at two storage widths moves to one type
+    # (`shared_join_key_type`). Unchanged pairs join as before.
     var unified = False
     var left_frame = self.copy()
     var right_frame = right.copy()
@@ -101,6 +103,14 @@ def join_frames(
                 left_frame._columns[l] = lkey^
                 right_frame._columns[r] = rkey^
                 unified = True
+        var shared = shared_join_key_type(ltype, rtype, how)
+        if shared:
+            var target = shared.value()
+            if ltype != target:
+                left_frame._columns[l] = left_frame._columns[l].cast(target)
+            if rtype != target:
+                right_frame._columns[r] = right_frame._columns[r].cast(target)
+            unified = True
     if unified:
         return left_frame._join_impl(
             right_frame,
