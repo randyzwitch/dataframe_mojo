@@ -349,8 +349,9 @@ struct GroupBy(Copyable):
         (or there are none), that is the one-node plan over the frame,
         which runs in the table sink. Otherwise each group's rows are
         reduced by the grouped evaluator: so are a plan's schema runs (no
-        rows) and a node a pipeline already declined over a frame scan,
-        which a one-node plan would decline again."""
+        rows) and a node a pipeline declined, which runs inside that
+        pipeline's task (where no other schedule may start) and which a
+        one-node plan would decline again."""
         var names = List[String](capacity=len(self._keys))
         for key in self._keys:
             names.append(key.name())
