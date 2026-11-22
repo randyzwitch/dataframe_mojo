@@ -14,6 +14,8 @@ Native chunks are mapped in place on Apple silicon; Float64 input stays on CPU.
 from max.gpu.host import DeviceBuffer
 from std.time import perf_counter_ns
 
+from dataframe.devices import CPUExecutorChoice
+from std.memory import ArcPointer
 from dataframe.storage.column import Column
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
@@ -224,7 +226,10 @@ def layout_key(region: LazyFrame) raises -> String:
 
 
 def estimate_costs(
-    region: LazyFrame, rows: Int, collect_request: Bool = False
+    region: LazyFrame,
+    rows: Int,
+    collect_request: Bool = False,
+    cpu_executor: Optional[ArcPointer[CPUExecutorChoice]] = None,
 ) -> Tuple[String, Float64, Float64]:
     """Measured Metal cost only for this build, host, threads and layout."""
     try:
@@ -236,7 +241,12 @@ def estimate_costs(
             and ":distinct_cardinality=uncertain" in key
         ):
             return (key^, Float64(-1), Float64(-1))
-        var costs = measured_costs(key, rows, collect_request)
+        var costs = measured_costs(
+            key,
+            rows,
+            collect_request,
+            cpu_executor,
+        )
         return (key^, costs[0], costs[1])
     except:
         return (String(), Float64(-1), Float64(-1))

@@ -711,6 +711,9 @@ def test_matched_cpu_costs_override_coarse_models_at_plan_and_execution_time() r
             0,
             region,
             load_costs("cpu"),
+            solved.compare_cpu_modes,
+            True,
+            solved.materialized_cpu,
         )
         assert_equal(solved.problem.run_ns[0][CPU], expected)
         assert_equal(chosen.devices[0], 0 if scenario == 1 else 1)

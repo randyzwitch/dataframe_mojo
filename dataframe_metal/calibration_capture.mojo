@@ -70,6 +70,16 @@ def _check(actual: DataFrame, expected: DataFrame) raises:
             )
 
 
+def _cpu_sample(
+    region: LazyFrame, expected: DataFrame, streaming: Bool
+) raises -> Int:
+    var started = Int(perf_counter_ns())
+    var result = region.collect(engine="cpu", streaming=streaming)
+    var elapsed = Int(perf_counter_ns()) - started
+    _check(result, expected)
+    return elapsed
+
+
 def capture(
     region: LazyFrame,
     expected: DataFrame,
@@ -100,7 +110,12 @@ def capture(
             prefix
             + ',"status":"skipped","reason":"empty input has no GPU timing"}'
         )
-    _check(region.collect(engine="cpu"), expected)
+    _ = _cpu_sample(region, expected, True)
+    var materialized_error = Optional[String]()
+    try:
+        _ = _cpu_sample(region, expected, False)
+    except error:
+        materialized_error = String(error)
     var warm: DataFrame
     var first_use = shared_service().cached_generations() == 0
     var started_first = Int(perf_counter_ns())
@@ -119,13 +134,24 @@ def capture(
     if first_use:
         prefix += ',"first_accel_ns":' + String(first_ns)
     var cpu = String("[")
+    var materialized = String("[")
     var accel = String("[")
     for rep in range(repetitions):
-        for engine in range(2):
-            var gpu = (engine + rep + Int(reverse)) % 2 == 1
-            var started = Int(perf_counter_ns())
-            var result: DataFrame
-            if gpu:
+        for trial in range(3):
+            var engine = (rep + (2 - trial if reverse else trial)) % 3
+            var separator = "," if rep else ""
+            if engine == 0:
+                cpu += separator + String(_cpu_sample(region, expected, True))
+            elif engine == 1:
+                if not materialized_error:
+                    try:
+                        var elapsed = _cpu_sample(region, expected, False)
+                        materialized += separator + String(elapsed)
+                    except error:
+                        materialized_error = String(error)
+            else:
+                var started = Int(perf_counter_ns())
+                var result: DataFrame
                 try:
                     var measured = execute_timed(region)
                     result = measured[0].copy()
@@ -136,24 +162,29 @@ def capture(
                         + json_quote(String(error))
                         + "}"
                     )
-            else:
-                result = region.collect(engine="cpu")
-            var elapsed = Int(perf_counter_ns()) - started
-            _check(result, expected)
-            if gpu:
-                accel += ("," if rep else "") + String(elapsed)
-            else:
-                cpu += ("," if rep else "") + String(elapsed)
+                var elapsed = Int(perf_counter_ns()) - started
+                _check(result, expected)
+                accel += separator + String(elapsed)
     if identity_json() != identity:
         return (
             prefix
             + ',"status":"skipped","reason":"hardware or power identity changed during capture"}'
         )
+    var alternative = (
+        ',"cpu_materialized_error":'
+        + json_quote(
+            materialized_error.value()
+        ) if materialized_error else ',"cpu_materialized_ns":'
+        + materialized
+        + "]"
+    )
     return (
         prefix
         + ',"status":"measured","verified":true,"direct_gpu":true,"cpu_ns":'
         + cpu
-        + '],"accel_ns":'
+        + "]"
+        + alternative
+        + ',"accel_ns":'
         + accel
         + "]}"
     )

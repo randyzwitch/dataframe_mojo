@@ -150,6 +150,7 @@ from dataframe.placement import (
 )
 from dataframe.planning.cost.sampling import _frame_bytes
 from dataframe.devices import (
+    CPUExecutorChoice,
     DeviceInfo,
     MEMORY_UNIFIED,
     PipelineFeatures,
@@ -1748,13 +1749,14 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             )[0].copy()
         # A placement that keeps every unit on the CPU hands back the plan
         # it optimized, so it is not optimized twice.
+        var cpu_streaming = streaming
         var optimized = Optional[LazyFrame]()
         if engine == "auto":
             var placed = _collect_placed(
                 self,
                 _RegisteredProvider(),
                 optimize,
-                streaming,
+                cpu_streaming,
                 batch_size,
                 optimized,
             )
@@ -1770,7 +1772,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 # to discover that its layout has no measured device cost.
                 result = plan._collect(
                     optimize=optimize,
-                    streaming=streaming,
+                    streaming=cpu_streaming,
                     batch_size=batch_size,
                     optimized=True,
                 )
@@ -1826,9 +1828,15 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                     streaming=streaming,
                     batch_size=batch_size,
                 )[0].copy()
+            var cpu_streaming = streaming
             var optimized = Optional[LazyFrame]()
             var placed = _collect_placed(
-                self, accelerator, optimize, streaming, batch_size, optimized
+                self,
+                accelerator,
+                optimize,
+                cpu_streaming,
+                batch_size,
+                optimized,
             )
             if placed:
                 return placed.take()
@@ -1843,7 +1851,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             try:
                 var result = optimized.value()._collect(
                     optimize=optimize,
-                    streaming=streaming,
+                    streaming=cpu_streaming,
                     batch_size=batch_size,
                     optimized=True,
                 )
@@ -1999,6 +2007,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
                 + _device_placement_lines(
                     self._optimized() if optimize else self.copy(),
                     accelerator,
+                    streaming,
+                    optimize and batch_size == 65536,
                 )
                 + self.explain(
                     engine="cpu",
@@ -2054,7 +2064,12 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if engine == "auto" and _automatic_handoff():
             out += plan._placement_lines()
         if engine == "auto":
-            out += _device_placement_lines(plan, _RegisteredProvider())
+            out += _device_placement_lines(
+                plan,
+                _RegisteredProvider(),
+                streaming,
+                optimize and batch_size == 65536,
+            )
         plan._describe(len(plan._plan._nodes) - 1, 0, out, streaming)
         return out^
 
@@ -2560,6 +2575,50 @@ struct _DevicePlacement(Movable):
     var problem: PlacementProblem
     var placement: Placement
     var supported: List[List[Bool]]
+    var compare_cpu_modes: Bool
+    var materialized_cpu: Bool
+
+
+def _price_unit[
+    B: AcceleratorBackend
+](
+    backend: B,
+    region: LazyFrame,
+    devices: List[DeviceInfo],
+    supported: List[Bool],
+    var features: PipelineFeatures,
+    compare_cpu_modes: Bool,
+    streaming: Bool,
+    mut run_ns: List[Float64],
+) -> Bool:
+    """Price a unit against every supported device and keep the CPU executor
+    associated with the lowest matched CPU cost."""
+    var matched_cpu = Float64(-1)
+    var materialized = False
+    for d in range(len(devices)):
+        if not supported[d]:
+            continue
+        if compare_cpu_modes:
+            features.cpu_executor = ArcPointer(
+                CPUExecutorChoice(streaming, False)
+            )
+        var costs = backend.pipeline_costs(region, devices[d].ordinal, features)
+        run_ns[d + 1] = costs[1] if isfinite(costs[1]) and costs[
+            1
+        ] >= 0 else Float64(-1)
+        if (
+            isfinite(costs[0])
+            and costs[0] >= 0
+            and (matched_cpu < 0 or costs[0] < matched_cpu)
+        ):
+            matched_cpu = costs[0]
+            materialized = (
+                Bool(features.cpu_executor)
+                and features.cpu_executor.value()[].materialized
+            )
+    if matched_cpu >= 0:
+        run_ns[_PLACE_CPU] = matched_cpu
+    return materialized
 
 
 def _solve_devices[
@@ -2569,6 +2628,9 @@ def _solve_devices[
     backend: B,
     var devices: List[DeviceInfo],
     estimate_all: Bool = False,
+    *,
+    streaming: Bool = True,
+    calibrated_settings: Bool = True,
 ) raises -> _DevicePlacement:
     """Cut the plan into units, ask each device which it runs, and estimate
     rows and bytes only for those units and the units below them, whose
@@ -2582,6 +2644,15 @@ def _solve_devices[
     context._report = None
     _ = plan_remember_schemas(context)
     var units = plan_pipeline_cuts(context)
+    # Capture measures a complete, optimized query over a resident frame
+    # using the default batch size. Keep all other CPU plans as requested.
+    var compare_cpu_modes = (
+        calibrated_settings
+        and len(units) == 1
+        and units[0].source >= 0
+        and context._nodes[units[0].source].kind == SCAN_FRAME
+    )
+    var materialized_cpu = False
     var count = len(devices) + 1
     var problem = PlacementProblem(len(units), count)
     var cpu_costs = load_costs("cpu")
@@ -2620,40 +2691,49 @@ def _solve_devices[
             problem.run_ns[p][
                 _PLACE_CPU
             ] = cpu.value().fixed_ns + cpu.value().row_ns * Float64(rows)
-        var region = _from_context(unit.region.copy())
-        var matched_cpu = Float64(-1)
-        for d in range(len(devices)):
-            if problem.run_ns[p][_PLACE_CPU] < 0:
-                continue
-            if supported[p][d]:
-                var features = unit.features.copy()
-                features.collect_request = not estimate_all
-                var costs = backend.pipeline_costs(
-                    region, devices[d].ordinal, features
-                )
-                problem.run_ns[p][d + 1] = costs[1] if isfinite(
-                    costs[1]
-                ) and costs[1] >= 0 else Float64(-1)
-                if costs[0] >= 0 and isfinite(costs[0]):
-                    matched_cpu = costs[0] if matched_cpu < 0 else min(
-                        matched_cpu, costs[0]
-                    )
-        if matched_cpu >= 0:
-            problem.run_ns[p][_PLACE_CPU] = matched_cpu
+            var features = unit.features.copy()
+            features.collect_request = not estimate_all
+            materialized_cpu = _price_unit(
+                backend,
+                _from_context(unit.region.copy()),
+                devices,
+                supported[p],
+                features^,
+                compare_cpu_modes,
+                streaming,
+                problem.run_ns[p],
+            )
     var placement = solve_placement(problem)
-    return _DevicePlacement(devices^, units^, problem^, placement^, supported^)
+    return _DevicePlacement(
+        devices^,
+        units^,
+        problem^,
+        placement^,
+        supported^,
+        compare_cpu_modes,
+        materialized_cpu,
+    )
 
 
 def _device_placement_lines[
     B: AcceleratorBackend
-](plan: LazyFrame, backend: B) raises -> String:
+](
+    plan: LazyFrame, backend: B, streaming: Bool, calibrated_settings: Bool
+) raises -> String:
     """`DEVICES`, one `PIPELINE` line per placement unit and a `PLACEMENT`
     summary: where each unit runs under `engine="auto"` and why. Nothing
     when the backend reports no devices."""
     var found = backend.devices()
     if len(found) == 0:
         return String()
-    var solved = _solve_devices(plan, backend, found^, estimate_all=True)
+    var solved = _solve_devices(
+        plan,
+        backend,
+        found^,
+        estimate_all=True,
+        streaming=streaming,
+        calibrated_settings=calibrated_settings,
+    )
     ref devices = solved.devices
     ref units = solved.units
     ref problem = solved.problem
@@ -2694,7 +2774,10 @@ def _device_placement_lines[
                 out += "not measured"
             else:
                 out += "not compared"
-        out += "; on " + names[placement.devices[p]] + "\n"
+        out += "; on " + names[placement.devices[p]]
+        if placement.devices[p] == _PLACE_CPU and solved.materialized_cpu:
+            out += " (materialized)"
+        out += "\n"
     out += (
         "PLACEMENT estimated "
         + _ms(placement.total_ns)
@@ -2738,10 +2821,14 @@ def _decide_at_start[
     p: Int,
     region: QueryContext,
     cpu_costs: Dict[String, LinearCost],
+    compare_cpu_modes: Bool,
+    streaming: Bool,
+    mut materialized_cpu: Bool,
 ) raises -> Placement:
     """Re-solve the remaining plan with unit `p`'s exact inputs. Its
     children have run, so their costs are spent and their results are its
     sources."""
+    materialized_cpu = False
     var labels = List[String]()
     labels.append("cpu")
     for device in devices:
@@ -2782,21 +2869,19 @@ def _decide_at_start[
             _PLACE_CPU
         ] = cpu.value().fixed_ns + cpu.value().row_ns * Float64(rows)
         var lazy = _from_context(region.copy())
-        var matched_cpu = Float64(-1)
-        for d in range(len(devices)):
-            if backend.pipeline_supports(lazy, devices[d].ordinal):
-                var costs = backend.pipeline_costs(
-                    lazy, devices[d].ordinal, features
-                )
-                problem.run_ns[p][d + 1] = costs[1] if isfinite(
-                    costs[1]
-                ) and costs[1] >= 0 else Float64(-1)
-                if costs[0] >= 0 and isfinite(costs[0]):
-                    matched_cpu = costs[0] if matched_cpu < 0 else min(
-                        matched_cpu, costs[0]
-                    )
-        if matched_cpu >= 0:
-            problem.run_ns[p][_PLACE_CPU] = matched_cpu
+        var supported = List[Bool](capacity=len(devices))
+        for device in devices:
+            supported.append(backend.pipeline_supports(lazy, device.ordinal))
+        materialized_cpu = _price_unit(
+            backend,
+            lazy,
+            devices,
+            supported,
+            features^,
+            compare_cpu_modes,
+            streaming,
+            problem.run_ns[p],
+        )
     return solve_placement(problem)
 
 
@@ -2811,7 +2896,7 @@ def _collect_placed[
     query: LazyFrame,
     backend: B,
     optimize: Bool,
-    streaming: Bool,
+    mut streaming: Bool,
     batch_size: Int,
     mut optimized: Optional[LazyFrame],
 ) raises -> Optional[DataFrame]:
@@ -2843,7 +2928,13 @@ def _collect_placed[
     if not optimize:
         plan_unique_as_aggregate(plan._plan)
         plan_align_join_keys(plan._plan)
-    var solved = _solve_devices(plan, backend, found^)
+    var solved = _solve_devices(
+        plan,
+        backend,
+        found^,
+        streaming=streaming,
+        calibrated_settings=optimize and batch_size == 65536,
+    )
     var chosen = solved.placement.devices.copy()
     var any_device = False
     for d in chosen:
@@ -2872,6 +2963,7 @@ def _collect_placed[
             observed.value()[].cpu(reason)
     if not any_device:
         # The execution report profiles the plan from the start.
+        streaming = streaming and not solved.materialized_cpu
         optimized = plan^
         return None
     ref units = solved.units
@@ -2907,6 +2999,9 @@ def _collect_placed[
                 p,
                 region,
                 cpu_costs,
+                solved.compare_cpu_modes,
+                streaming,
+                solved.materialized_cpu,
             )
             for q in range(p, len(units)):
                 chosen[q] = revised.devices[q]
@@ -2924,6 +3019,7 @@ def _collect_placed[
                     file=stderr,
                 )
             if device == _PLACE_CPU:
+                streaming = streaming and not solved.materialized_cpu
                 if observed:
                     observed.value()[].cpu("placement_changed_after_input")
                 # The CPU runs it with the rest, on the inputs computed

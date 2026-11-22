@@ -12,6 +12,8 @@ from std.memory import Pointer
 from std.memory.alloc import Layout, alloc
 from std.memory import bitcast
 from dataframe import DataType, LazyFrame, Series
+from dataframe.devices import CPUExecutorChoice
+from std.memory import ArcPointer
 from dataframe.storage.string import StringColumn
 from dataframe.expr import COL, LIT_INT, LIT_FLOAT
 from dataframe.lazy import AGG
@@ -162,6 +164,7 @@ def pipeline_key(region: LazyFrame) raises -> String:
 @fieldwise_init
 struct RegionCost(Copyable, Movable):
     var cpu: LinearCost
+    var materialized: Optional[LinearCost]
     var accel: LinearCost
     var pipeline: String
     var cpu_key: String
@@ -240,6 +243,9 @@ def _snapshot(
                     ):
                         raise Error("Invalid measured Metal row range")
                     var cpu = _model(entry, "cpu")
+                    var materialized = Optional[LinearCost]()
+                    if entry.has("cpu_materialized"):
+                        materialized = _model(entry, "cpu_materialized")
                     var accel = _model(entry, "accel")
                     var pipeline = entry.get("pipeline_key").string()
                     var cpu_key = entry.get("cpu_key").string() if entry.has(
@@ -265,6 +271,7 @@ def _snapshot(
                             raise Error("Invalid measured Metal startup cost")
                     cache.regions[name] = RegionCost(
                         cpu^,
+                        materialized^,
                         accel^,
                         pipeline^,
                         cpu_key^,
@@ -334,7 +341,10 @@ def record_warm_region(key: String) raises:
 
 
 def measured_costs(
-    key: String, rows: Int, collect_request: Bool = False
+    key: String,
+    rows: Int,
+    collect_request: Bool = False,
+    cpu_executor: Optional[ArcPointer[CPUExecutorChoice]] = None,
 ) raises -> Tuple[Float64, Float64]:
     var path = calibration_path()
     if not path:
@@ -362,6 +372,14 @@ def measured_costs(
     ):
         return (Float64(-1), Float64(-1))
     var cpu_ns = entry.cpu.ns(rows)
+    if cpu_executor and entry.materialized:
+        var alt_ns = entry.materialized.value().ns(rows)
+        ref choice = cpu_executor.value()[]
+        if isfinite(alt_ns) and (
+            not choice.streaming_allowed or alt_ns < cpu_ns
+        ):
+            choice.materialized = True
+            cpu_ns = alt_ns
     var accel_ns = entry.accel.ns(rows)
     if not isfinite(cpu_ns) or not isfinite(accel_ns):
         return (Float64(-1), Float64(-1))

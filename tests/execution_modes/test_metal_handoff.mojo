@@ -624,6 +624,7 @@ def _calibrate(
     min_rows: Int = 1,
     max_rows: Int = 1_000_000_000,
     startup_ns: Int = 0,
+    materialized_row_ns: Float64 = -1,
 ) raises:
     from dataframe.json.value import json_quote
     from dataframe_metal.calibration import (
@@ -654,9 +655,15 @@ def _calibrate(
         + String(max_rows)
         + ',"startup_ns":'
         + String(startup_ns)
-        + ',"accel":{"fixed_ns":2000000,"row_ns":'
-        + String(accel_row_ns)
-        + "}}}}"
+    )
+    if materialized_row_ns >= 0:
+        text += (
+            ',"cpu_materialized":{"fixed_ns":1000,"row_ns":'
+            + String(materialized_row_ns)
+            + "}"
+        )
+    text += (
+        ',"accel":{"fixed_ns":2000000,"row_ns":' + String(accel_row_ns) + "}}}}"
     )
     with open(path, "w") as target:
         target.write(text)
@@ -689,6 +696,65 @@ def test_explaining_cold_metal_preserves_startup_for_the_first_collect() raises:
             launches += result[1].item(row, "gpu_completed_launches").int64()
         assert_equal(launches > 0, collect > 0)
     _ = configured^
+
+
+# requires: metal
+def test_startup_payback_uses_the_resident_cpu_executor() raises:
+    _ = require_metal()
+    from dataframe_metal.accelerator.gpu.identity import runtime_build_id
+
+    if not runtime_build_id().startswith("dataframe-mojo-metal-v2;cpu="):
+        return
+    var plan = (
+        _columns(100_000, False)
+        .lazy()
+        .filter(col("i") > 0)
+        .select(col("i").sum())
+    )
+    var expected = plan.collect(engine="cpu", streaming=False)
+    var path = String("build/test-handoff-cpu-executor.json")
+    _calibrate(
+        path, 50.0, 0.1, plan, startup_ns=5_000_000, materialized_row_ns=30.0
+    )
+    var configured = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
+    assert_false("(materialized)" in plan.explain(engine="auto", batch_size=64))
+    for rep in range(7):
+        # 3.001 ms CPU minus 2.01 ms Metal saves 0.991 ms per request.
+        # The sixth request can recover the remaining 0.045 ms of startup.
+        var shown = plan.explain(engine="auto")
+        assert_equal("; on cpu (materialized)" in shown, rep < 5)
+        var result = plan.profile(engine="auto")
+        assert_true(result[0].equals(expected))
+        var launches = Int64(0)
+        var eager = False
+        for row in range(result[1].height()):
+            launches += result[1].item(row, "gpu_completed_launches").int64()
+            if result[1].item(row, "operator").string().startswith("SELECT"):
+                eager |= result[1].item(row, "executor").string() == "eager"
+        assert_equal(launches > 0, rep >= 5)
+        if rep < 5:
+            assert_true(eager)
+    _ = configured^
+
+    # At this price streaming beats Metal, but materializing costs more.
+    var explicit_path = String("build/test-handoff-explicit-cpu-executor.json")
+    _calibrate(explicit_path, 10.0, 0.1, plan, materialized_row_ns=30.0)
+    var explicit = ScopedEnvironment(
+        "DATAFRAME_HANDOFF_CALIBRATION", explicit_path
+    )
+    var automatic = plan.explain(engine="auto")
+    assert_true(
+        "; on cpu" in automatic and "(materialized)" not in automatic, automatic
+    )
+    var requested = plan.explain(engine="auto", streaming=False)
+    assert_true("; on metal:0" in requested, requested)
+    var profiled = plan.profile(engine="auto", streaming=False)
+    assert_true(profiled[0].equals(expected))
+    var completed = Int64(0)
+    for row in range(profiled[1].height()):
+        completed += profiled[1].item(row, "gpu_completed_launches").int64()
+    assert_true(completed > 0)
+    _ = explicit^
 
 
 # requires: metal

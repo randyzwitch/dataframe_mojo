@@ -125,7 +125,10 @@ def pipeline_costs(
         # The handoff matcher preserves logical moment operations while
         # normalizing their physical inputs for the same validated profile.
         var costs = handoff.estimate_costs(
-            pipeline, features.input_rows, features.collect_request
+            pipeline,
+            features.input_rows,
+            features.collect_request,
+            features.cpu_executor,
         )
         return (costs[1], costs[2])
     except:
