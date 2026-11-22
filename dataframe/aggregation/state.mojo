@@ -529,24 +529,6 @@ def _table_input(
     return evaluated._columns[0].copy()
 
 
-def filters_supported(
-    empty: DataFrame, keys: List[Series], expressions: List[Expr]
-) raises -> Bool:
-    """Whether the aggregate table applies every aggregate filter of
-    `expressions` over a frame typed as `empty`: the values each filters
-    are not nested (the table's predicate reads no nested validity)."""
-    for expression in expressions:
-        for node in expression._nodes:
-            if not is_reduction(node.op) or node.left < 0:
-                continue
-            if not aggregate_filter(expression, node.left):
-                continue
-            var value = _table_input(empty, keys, expression, node.left)
-            if value.dtype().is_nested():
-                return False
-    return True
-
-
 def table_supported(
     frame: DataFrame, keys: List[String], expressions: List[Expr]
 ) raises -> Bool:
@@ -568,8 +550,6 @@ def table_supported(
         if not key_supported(column):
             return False
         columns.append(column^)
-    if not filters_supported(frame.clear(), columns, expressions):
-        return False
     var template = _StreamReduction(
         frame.clear(), without_filters(expressions), keys
     )
