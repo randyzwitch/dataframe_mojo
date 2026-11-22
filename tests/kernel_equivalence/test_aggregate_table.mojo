@@ -730,3 +730,42 @@ def test_resident_dictionary_group_preserves_categorical_and_string_keys() raise
         ),
         expected,
     )
+
+
+def test_string_literal_comparisons_feed_every_worker_the_same_literal() raises:
+    """A grouped reduction of a string column compared with a literal, on
+    several workers: each worker evaluates its own copy of the compiled
+    comparison, and every copy must still read the literal after the
+    expression it was copied from is gone. Every value here sorts before
+    both literals (one short enough to be stored inline, one longer), so
+    every group's min and max is true."""
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
+    var keys = List[Int16]()
+    var texts = List[String]()
+    var pool: List[String] = ["a", "", "b", "zz", "xyz", "abc"]
+    var rows = 3_000
+    for i in range(rows):
+        keys.append(Int16(i % 53))
+        texts.append(pool[i % len(pool)])
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int16](keys^)),
+            Series("s", Column[String](texts^)),
+        ]
+    )
+    var short = col("s") <= lit("🙂")
+    var long = col("s") < lit("zzzzzzzzzzzzzzzzzzzz")
+    var grouped = frame.group_by(["k"]).agg(
+        [
+            short.copy().min().alias("short_min"),
+            short.copy().max().alias("short_max"),
+            long.copy().min().alias("long_min"),
+            long.copy().max().alias("long_max"),
+        ]
+    )
+    assert_equal(grouped.height(), 53)
+    for name in ["short_min", "short_max", "long_min", "long_max"]:
+        var column = grouped.column(name)
+        assert_equal(column.null_count(), 0)
+        assert_equal(grouped.filter(col(name)).height(), 53, name)
+    _ = workers^
