@@ -108,33 +108,19 @@ def _pipeline_steps(
 def pipeline_eligibility(
     operations: List[PlanNode],
     indexes: List[Optional[JoinHashTable]],
-    distinct: Bool,
-    key_count: Int,
-    ordered: Bool,
-    expressions: List[Expr],
 ) -> PipelineEligibility:
-    """Apply the original pipeline guards in their original short-circuit
-    order. Any scan is a pipeline's source: an in-memory frame's morsels,
-    or a file's batches (`ScanSource`). A slice runs in the pipeline's
-    limited sink, a sort's first rows in its top-N sink, and a sort's first
-    no rows over a source that yields none."""
+    """Whether a pipeline runs the stream's steps (`_pipeline_steps`). Any
+    scan is a pipeline's source: an in-memory frame's morsels, or a file's
+    batches (`ScanSource`). A slice runs in the pipeline's limited sink, a
+    sort's first rows in its top-N sink, and a sort's first no rows over a
+    source that yields none. Groups kept in order of first appearance
+    follow the order the pipeline's rows come in, also through a join that
+    emits build rows: its probe rows come in their morsels' order, and its
+    unmatched build rows after every probe morsel, numbered as morsels of
+    a later round."""
     if not _pipeline_steps(operations, indexes):
         return PipelineEligibility(False, "build_rows_need_table")
-    if ordered and key_count > 0 and _emits_build_rows(operations):
-        return PipelineEligibility(False, "ordered_groups_need_join_order")
     return PipelineEligibility(True, "row_local_frame_pipeline")
-
-
-def _emits_build_rows(operations: List[PlanNode]) -> Bool:
-    """Whether some join emits build rows: a right join's rows come in its
-    build side's order and a full join's unmatched build rows come after
-    its probe rows, while the pipeline emits a join's build rows after
-    every probe morsel, in the hash table's order. Groups kept in order of
-    first appearance need the join's own order."""
-    for node in operations:
-        if node.kind == JOIN and join_emits_build_rows(node.how):
-            return True
-    return False
 
 
 def consider_inline_table(

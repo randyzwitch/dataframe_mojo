@@ -92,6 +92,27 @@ def _check(query: LazyFrame, expected: DataFrame) raises:
         _ = threads^
 
 
+def _check_unmatched_last(
+    query: LazyFrame, expected: DataFrame, unmatched: Int
+) raises:
+    """The groups first seen in probe rows come first, in order; the last
+    `unmatched` groups, first seen in unmatched build rows, come after
+    them in the hash table's order, which is not the build input's."""
+    var seen = expected.height() - unmatched
+    for workers in [1, 3, 8]:
+        var threads = ScopedEnvironment("DATAFRAME_THREADS", String(workers))
+        for optimize in [False, True]:
+            var actual = query.collect(
+                engine="cpu", streaming=True, optimize=optimize
+            )
+            _same(actual.head(seen), expected.head(seen))
+            _same(
+                actual.tail(unmatched).sort("d"),
+                expected.tail(unmatched).sort("d"),
+            )
+        _ = threads^
+
+
 def _assert_table(query: LazyFrame) raises:
     """The grouping runs in the aggregate table pipeline, not over ordered
     batches."""
@@ -195,21 +216,57 @@ def test_ordered_groups_over_cross_products() raises:
         )
 
 
-def test_ordered_groups_over_build_row_joins_stay_eager() raises:
-    # A right or full join's rows come in its build side's order, which the
-    # pipeline does not keep: the grouping runs over the joined frame.
-    var dimension = _dimension()
-    var frame = _source(True)
-    for how in ["right", "full"]:
-        var query = (
-            frame.lazy()
-            .join(dimension.lazy(), on="k", how=how)
-            .group_by("d", maintain_order=True)
-            .agg(_reductions())
-        )
-        _check(
-            query,
-            frame.join(dimension, on="k", how=how)
-            .group_by("d", maintain_order=True)
-            .agg(_reductions()),
-        )
+def _wide_dimension() raises -> DataFrame:
+    # `_dimension` plus keys no source row has, whose names are groups of
+    # their own: a full or right join emits them as unmatched build rows,
+    # after every probe row.
+    var keys = List[Int64]()
+    var names = List[String]()
+    for key in range(97):
+        if key % 10 == 3:
+            continue
+        keys.append(Int64(key))
+        names.append("d" + String(key % 7))
+    for key in range(200, 210):
+        keys.append(Int64(key))
+        names.append("u" + String(key % 4))
+    return DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("d", Column[String](names^)),
+        ]
+    )
+
+
+def test_ordered_groups_over_build_row_joins_run_in_the_table() raises:
+    # A right or full join emits its probe rows in their morsels' order and
+    # its unmatched build rows after them: the groups first seen in those
+    # rows come last, in the hash table's order (join row order is
+    # unspecified).
+    for wide in [False, True]:
+        var dimension = _wide_dimension() if wide else _dimension()
+        var frame = _source(True)
+        for how in ["right", "full"]:
+            for coalesce in [False, True]:
+                var query = (
+                    frame.lazy()
+                    .join(
+                        dimension.lazy(),
+                        on="k",
+                        how=how,
+                        coalesce=coalesce,
+                    )
+                    .group_by("d", maintain_order=True)
+                    .agg(_reductions())
+                )
+                _assert_table(query)
+                var expected = (
+                    frame.join(dimension, on="k", how=how, coalesce=coalesce)
+                    .group_by("d", maintain_order=True)
+                    .agg(_reductions())
+                )
+                if not wide:
+                    # No unmatched build row.
+                    _check(query, expected)
+                else:
+                    _check_unmatched_last(query, expected, 4)
