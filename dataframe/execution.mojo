@@ -1682,6 +1682,27 @@ def constant_reductions(expr: Expr) -> Bool:
     steps on columns and literals. A reduction whose value is not one
     value (`mode`, `value_counts`, `get`, `implode`) is not one, nor is
     `n_unique`, which counts its input in a table of its own."""
+    var shape = _reduction_shape(expr)
+    return shape[0] and not shape[1] and shape[2] > 0
+
+
+def row_reductions(expr: Expr) -> Int:
+    """How many reductions over every row `expr` reads when it has a value
+    per row made by row-wise steps on columns, literals, the row count and
+    reductions `ReduceRounds` can compute (as `constant_reductions` says),
+    such as `y - y.mean()`; -1 when it is not one. Once its reductions are
+    known, any range of its rows can be evaluated on its own."""
+    var shape = _reduction_shape(expr)
+    if not shape[0] or not shape[1]:
+        return -1
+    return shape[2]
+
+
+def _reduction_shape(expr: Expr) -> Tuple[Bool, Bool, Int]:
+    """Whether every node of `expr` is a column, a literal, the row count,
+    a row-wise step, or a reduction `ReduceRounds` computes over row-wise
+    steps on columns and literals; whether its value is one per row; and
+    how many reductions it holds."""
     var n = len(expr._nodes)
     # By node: whether its value can be computed that way, whether it is
     # row-wise on columns and literals, and whether it has a value per row.
@@ -1704,7 +1725,7 @@ def constant_reductions(expr: Expr) -> Bool:
         var rows = op == COL
         for child in node_children(node):
             if child < 0 or child >= i:
-                return False
+                return (False, False, 0)
             ok = ok and computable[child]
             local = local and row_wise[child]
             rows = rows or per_row[child]
@@ -1716,7 +1737,9 @@ def constant_reductions(expr: Expr) -> Bool:
         computable.append(ok)
         row_wise.append(local)
         per_row.append(rows)
-    return n > 0 and computable[n - 1] and not per_row[n - 1] and reductions > 0
+    if n == 0:
+        return (False, False, 0)
+    return (computable[n - 1], per_row[n - 1], reductions)
 
 
 struct ReduceRounds(Movable, Rounds):
@@ -1802,7 +1825,9 @@ struct ReduceRounds(Movable, Rounds):
                     states.append(count.copy())
                     computed[i] = count^
                     continue
-                if is_reduction(node.op):
+                # The row count is the height, which `evaluate` reads
+                # itself.
+                if is_reduction(node.op) and node.op != ROW_LEN:
                     self.work.append((e, i))
                 states.append(_empty(b.dtypes[i]))
             self.states.append(states^)
@@ -4961,6 +4986,7 @@ def evaluate[
     layouts: Int = 0,
     group_rows: Optional[ArcPointer[GroupRows]] = None,
     reduced: Dict[Int, Series] = Dict[Int, Series](),
+    workers: Int = 0,
 ) raises -> Series:
     """Evaluate a bound expression; temporary vectors are bounded by batch_size.
 
@@ -4981,6 +5007,8 @@ def evaluate[
 
     `reduced` holds, by node, reductions over every row already computed
     (`ReduceRounds`); those nodes are read from it, not computed again.
+    `workers`, when not 0, is how many workers evaluate a row-valued
+    expression's rows (1: on this thread alone).
     """
     if batch_size <= 0:
         raise Error("batch_size must be positive")
@@ -5211,7 +5239,9 @@ def evaluate[
             var done = whole.take()
             done._name = bound.expr._name
             return done^
-    var workers = worker_count(size) if bound.shape() == ROWS else 1
+    var row_workers = workers if workers > 0 else worker_count(size)
+    if bound.shape() != ROWS:
+        row_workers = 1
     if (
         bound.shape() == ROWS
         and not grouped
@@ -5226,7 +5256,7 @@ def evaluate[
             root,
             size,
             batch_size,
-            workers,
+            row_workers,
         )
         if masked:
             var done = masked.take()
@@ -5241,7 +5271,7 @@ def evaluate[
         size,
         batch_size,
         grouped,
-        workers,
+        row_workers,
     )
     if bound.dtypes[root].is_categorical():
         result = cast_series(result, bound.dtypes[root], True, 0, List[Bool]())
