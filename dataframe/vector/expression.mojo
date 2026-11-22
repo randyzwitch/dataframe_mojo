@@ -368,7 +368,11 @@ struct VectorExpression(Copyable, Movable):
     var constant_valid: List[Bool]
     var constant_vectors: List[Vector]
     var held: List[Series]
-    var strings: List[StringT]
+    # String constants' string_t, which their constant vectors point at:
+    # one buffer every copy of this expression shares, so the address a
+    # copy reads stays valid when the expression it was copied from is
+    # gone.
+    var strings: ArcPointer[List[StringT]]
     # Fallback nodes: the subtree bound to the columns it reads, and those
     # columns (input column indices), with an empty column of each type.
     var fallback_bound: List[Optional[BoundExpr]]
@@ -458,7 +462,9 @@ struct VectorExpression(Copyable, Movable):
         self.constant_valid = List[Bool](length=n, fill=True)
         self.constant_vectors = List[Vector](length=n, fill=Vector())
         self.held = List[Series]()
-        self.strings = List[StringT](length=n, fill=StringT(0, 0, 0))
+        self.strings = ArcPointer(
+            List[StringT](length=n, fill=StringT(0, 0, 0))
+        )
         self.fallback_bound = List[Optional[BoundExpr]](length=n, fill=None)
         self.fallback_reads = List[List[Int]](length=n, fill=List[Int]())
         self.lane_ints = List[List[Int64]](length=n, fill=List[Int64]())
@@ -974,12 +980,12 @@ struct VectorExpression(Copyable, Movable):
             self.constant_valid[index] = valid
             if valid:
                 var text = strings._get(0)
-                self.strings[index] = StringT.make(
+                self.strings[][index] = StringT.make(
                     Int(text.unsafe_ptr()), text.byte_length()
                 )
             vector = Vector.constant(
                 PHYSICAL_VARCHAR,
-                Int(self.strings.unsafe_ptr()) + 16 * index,
+                Int(self.strings[].unsafe_ptr()) + 16 * index,
                 valid,
             )
             self.constant_vectors[index] = vector

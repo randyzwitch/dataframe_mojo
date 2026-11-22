@@ -24,6 +24,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,9 @@ import pyarrow.ipc as ipc
 
 ROOT = Path(__file__).resolve().parents[2]
 MODES = ["eager", "lazy", "lazy_noopt", "lazy_mem"]
+# Polars' streaming engine gives a grouped var/std with ddof=0 of an
+# all-null group as 0.0; its in-memory engine gives null, as we do.
+ORACLE_ENGINE = "in-memory"
 RTOL = 1e-6
 MAX_ROWS = 600_000
 ATOL = 1e-8
@@ -365,8 +369,10 @@ def to_pl_expr(e, types):
         "elen": lambda a: a.len(),
         "any": lambda a: a.any(),
         "all": lambda a: a.all(),
-        "arg_min": lambda a: a.arg_min(),
-        "arg_max": lambda a: a.arg_max(),
+        # The first row holding the extreme. Polars' own arg_min/arg_max
+        # may pick any tied row; ours picks the first.
+        "arg_min": lambda a: (a == a.min()).arg_true().first(),
+        "arg_max": lambda a: (a == a.max()).arg_true().first(),
         "str.len_chars": lambda a: a.str.len_chars(),
         "str.len_bytes": lambda a: a.str.len_bytes(),
         "str.to_uppercase": lambda a: a.str.to_uppercase(),
@@ -810,7 +816,7 @@ class Gen:
                 fns += ["arg_min", "arg_max"]
         f = r.choice(fns)
         if f in ("std", "var"):
-            e = (f, base, 1)
+            e = (f, base, r.choice([0, 1]))
         elif f == "len_rows":
             e = ("len",)
         else:
@@ -1078,7 +1084,7 @@ def gen_case(rng):
             if join_rows(new_plan, srcs) > MAX_ROWS:
                 continue
             try:
-                result = to_pl_plan(new_plan, srcs).collect()
+                result = to_pl_plan(new_plan, srcs).collect(engine=ORACLE_ENGINE)
             except Exception:
                 continue
             # Keep results small: joins on low-cardinality keys multiply.
@@ -1096,7 +1102,7 @@ def gen_case(rng):
     case["plan"] = plan
     case["ordered"] = ordered
     # Some failures only show when the plan runs (not in its schema).
-    to_pl_plan(plan, srcs).collect()
+    to_pl_plan(plan, srcs).collect(engine=ORACLE_ENGINE)
     return case
 
 
@@ -1350,7 +1356,7 @@ def evaluate(case, work, threads_list=(1, 8)):
     paths = write_inputs(case, work / "in")
     srcs = oracle_sources(case, paths)
     try:
-        expected = to_pl_plan(case["plan"], srcs).collect()
+        expected = to_pl_plan(case["plan"], srcs).collect(engine=ORACLE_ENGINE)
     except Exception as exc:
         return [("oracle-error", "-", 0, str(exc)[:300])], None
     case_file = work / "case.sexp"
@@ -1372,9 +1378,58 @@ def evaluate(case, work, threads_list=(1, 8)):
     return failures, expected
 
 
-def signature(failures):
-    """What must stay true while shrinking: the same kinds of failure."""
-    return {(k, first_line(d) if k in ("error",) else "") for k, _, _, d in failures}
+def signature(case, failures):
+    """What must stay true while shrinking: the same failures in the same
+    modes and thread counts. A mismatch is named by what differs (rows,
+    height, dtype, ...) and by how the failing output column is computed,
+    so shrinking cannot wander to a different bug."""
+    sig = set()
+    for k, mode, threads, d in failures:
+        if k == "error":
+            what = first_line(d)
+        elif k == "mismatch":
+            what = mismatch_what(case["plan"], d)
+        else:
+            what = ""
+        sig.add((k, what, mode, threads))
+    return frozenset(sig)
+
+
+def mismatch_what(plan, detail):
+    """The kind of difference and the failing column's definition."""
+    m = re.match(r"(row \d+(?: \(sorted\))? column|sort key|dtype of) '([^']*)'", detail)
+    if not m:
+        return detail.split(":")[0]
+    kind = "row" if m.group(1).startswith("row") else m.group(1)
+    return f"{kind} {column_definition(plan, m.group(2))}"
+
+
+def column_definition(plan, name):
+    """The top of the expression that makes column `name` (an aggregate's
+    kind, with ddof for std/var), or "column" for a source column."""
+    found = []
+
+    def walk(node):
+        if not isinstance(node, tuple):
+            return
+        if len(node) == 3 and node[0] == "alias" and node[2] == name:
+            found.append(node[1])
+        for k in node[1:]:
+            walk(k)
+
+    walk(plan)
+    if not found and name.endswith("_right"):
+        return column_definition(plan, name[: -len("_right")])
+    if not found:
+        return "column"
+    e = found[-1]
+    if not isinstance(e, tuple) or not e:
+        return "literal"
+    if e[0] in ("std", "var"):
+        return f"{e[0]}(ddof={e[2]})"
+    if e[0] == "over" and isinstance(e[1], tuple) and e[1]:
+        return f"over({e[1][0]})"
+    return e[0]
 
 
 def first_line(text):
@@ -1383,11 +1438,8 @@ def first_line(text):
     return "".join(c for c in line if not c.isdigit())[:120]
 
 
-def matches(sig, failures):
-    if not failures:
-        return False
-    got = signature(failures)
-    return bool(sig & got)
+def matches(sig, case, failures):
+    return bool(failures) and signature(case, failures) == sig
 
 
 # ---------------------------------------------------------------------------
@@ -1598,7 +1650,7 @@ def shrink(case, sig, work, budget=400):
                 continue
             tries += 1
             failures, _ = evaluate(c, work)
-            if matches(sig, failures):
+            if matches(sig, c, failures):
                 case = c
                 improved = True
                 break
@@ -1693,12 +1745,16 @@ def process(job):
 def shrink_and_save(case, failures, expected, seed, args):
     out = Path(args.out)
     work = out / f"work{os.getpid()}"
-    sig = signature(failures)
+    sig = signature(case, failures)
     small = shrink(case, sig, work, args.shrink_budget) if args.shrink else case
     small_failures, small_expected = evaluate(small, work, args.threads)
     if not small_failures:
         small, small_failures, small_expected = case, failures, expected
-    save_case(small, small_failures, small_expected, out / "failures" / f"seed{seed}")
+    d = out / "failures" / f"seed{seed}"
+    save_case(small, small_failures, small_expected, d)
+    if small is not case:
+        # The case as found, so a shrunk case can be checked against it.
+        save_case(case, failures, expected, d / "unshrunk")
     return bucket(small_failures)
 
 

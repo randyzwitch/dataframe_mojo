@@ -123,6 +123,7 @@ from dataframe.optimizer.partial_aggregates import (
     plan_push_partial_aggregates,
 )
 from dataframe.optimizer.passes import (
+    plan_align_join_keys,
     plan_align_union_inputs,
     plan_eliminate_common_subexpressions,
     plan_filter_shared_subplans,
@@ -1646,6 +1647,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
+            plan_align_join_keys(plan._plan)
         var shared = List[QueryContext]()
         if optimize:
             shared = plan._share_subplans(True, batch_size)
@@ -2045,6 +2047,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
+            plan_align_join_keys(plan._plan)
         var out = String()
         if engine != "cpu":
             out = backend.describe()
@@ -2118,6 +2121,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
+            plan_align_join_keys(plan._plan)
         var shared = List[QueryContext]()
         if optimize:
             shared = plan._share_subplans(streaming, batch_size)
@@ -2838,6 +2842,7 @@ def _collect_placed[
     var plan = query._optimized() if optimize else query.copy()
     if not optimize:
         plan_unique_as_aggregate(plan._plan)
+        plan_align_join_keys(plan._plan)
     var solved = _solve_devices(plan, backend, found^)
     var chosen = solved.placement.devices.copy()
     var any_device = False
