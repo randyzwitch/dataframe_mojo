@@ -468,7 +468,11 @@ def plan_execute_node(
     if node.kind == AGG:
         return input.group_by(
             node.group_keys(), maintain_order=node.maintain_order
-        ).agg(node.exprs)
+        )._declined(
+            node.exprs,
+            batch_size,
+            not empty and self._declined != index,
+        )
     if node.kind == ASOF:
         var right = self._execute(node.right, empty, streaming, batch_size)
         var groups = List[String]()

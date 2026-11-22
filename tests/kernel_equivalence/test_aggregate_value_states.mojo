@@ -327,7 +327,7 @@ def eager(threads: Int, rows: Int, groups: Int) raises:
     var observed = StrategyTrace()
     var actual = frame(rows, groups).group_by(["k"]).agg(reductions())
     assert_true(
-        "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+        "dataframe-path: pipeline.group_table\n" in observed.text(),
         "value states did not reach the aggregate table",
     )
     _ = observed^

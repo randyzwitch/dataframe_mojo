@@ -77,7 +77,7 @@ def eager_route(threads: Int) raises:
         var observed = StrategyTrace()
         var actual = frame.group_by(["s", "i", "f", "b"]).agg(reductions())
         assert_true(
-            "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+            "dataframe-path: pipeline.group_table\n" in observed.text(),
             "the eager group-by did not reach the aggregate table",
         )
         _ = observed^
@@ -203,7 +203,7 @@ def test_few_valued_keys_forming_many_groups_reach_the_table() raises:
         [col("v").sum().alias("total"), col("v").len().alias("rows")]
     )
     assert_true(
-        "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+        "dataframe-path: pipeline.group_table\n" in observed.text(),
         "few-valued keys forming many groups did not reach the table",
     )
     _ = observed^
@@ -360,7 +360,7 @@ def test_decimal_sums_and_means_match_int128_totals_on_both_routes() raises:
     var observed = StrategyTrace()
     var eager = frame.group_by(["s", "i"]).agg(decimal_reductions())
     assert_true(
-        "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+        "dataframe-path: pipeline.group_table\n" in observed.text(),
         "decimal reductions did not reach the aggregate table",
     )
     _ = observed^
@@ -471,7 +471,7 @@ def test_results_written_from_group_rows_match_the_single_thread_route() raises:
     )
     var unordered = frame.group_by(["k"]).agg(narrow_reductions())
     assert_true(
-        "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+        "dataframe-path: pipeline.group_table\n" in observed.text(),
         "narrow sums did not reach the aggregate table",
     )
     _ = observed^
@@ -572,7 +572,7 @@ def test_quantiles_from_group_rows_match_the_single_thread_route() raises:
         )
         var unordered = frame.group_by(["k"]).agg(aggregations.copy())
         assert_true(
-            "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+            "dataframe-path: pipeline.group_table\n" in observed.text(),
             "quantiles did not reach the aggregate table",
         )
         _ = observed^

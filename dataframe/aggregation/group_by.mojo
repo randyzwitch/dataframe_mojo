@@ -1,34 +1,25 @@
 """Eager grouping requests, strategy dispatch, and worker jobs."""
 from dataframe.aggregation.hash_table import (
-    AggregateLayout,
-    AggregateSink,
-    _Cursor,
-    aggregate_finish,
-    aggregate_layout,
-    ReducerSpec,
-    key_supported,
-    table_reduction,
     table_states_supported,
 )
 from dataframe.aggregation.table_sink import (
-    TableSinkInputs,
-    TableSinkLayout,
     aggregate_table,
-    sink_frame,
 )
 from dataframe.aggregation.expressions import (
-    count_rows_by,
     _bind_all,
-    _stream_reductions,
     without_filters,
 )
 from dataframe.aggregation.state import (
     _StreamReduction,
     _merge_ascending_runs,
+    table_supported,
     table_frame,
     table_inputs,
     table_specs,
 )
+from dataframe.row_expressions import len as row_len
+from dataframe.selectors import expand_all
+from dataframe.planning.expression_inputs import _references
 from dataframe.binding import (
     AGGREGATE,
     BoundExpr,
@@ -48,21 +39,19 @@ from dataframe.execution import (
     evaluate,
 )
 from dataframe.expr import (
-    COL,
     Expr,
     SELECTOR,
     group_sequence_rows,
     col,
-    is_reduction,
 )
 from dataframe.frame import (
     DataFrame,
     concat,
 )
 from dataframe.kernels.gather import (
+    take_sorted_chunked,
     can_filter_aligned_chunks,
     take_parallel,
-    take_sorted_chunked,
 )
 from dataframe.kernels.hashing import (
     RowKeys,
@@ -169,88 +158,6 @@ def _encode_parallel(keys: List[Series], workers: Int) raises -> RowKeys:
     return RowKeys(ids^, representatives^)
 
 
-def _plain_inputs(expressions: List[Expr], frame: DataFrame) -> Bool:
-    """Whether every reduction reads a column of `frame` as it is (or no
-    input), so nothing is evaluated before its states update."""
-    for expression in expressions:
-        ref nodes = expression._nodes
-        for node in nodes:
-            if not is_reduction(node.op):
-                continue
-            for child in [node.left, node.right]:
-                if child < 0:
-                    continue
-                if nodes[child].op != COL or (
-                    nodes[child].text not in frame.columns()
-                ):
-                    return False
-    return True
-
-
-struct _BatchSinkJob(Job):
-    """One worker's morsels into its aggregate table sink, a data chunk of
-    at most `batch` rows at a time, each chunk's reduction inputs computed
-    by their compiled vector expressions."""
-
-    var columns: List[Series]
-    var layout: AggregateLayout
-    var shared: TableSinkLayout
-    var ranges: List[Int]
-    var cursor: _Cursor
-    var workers: Int
-    var batch: Int
-    var sinks: List[AggregateSink]
-    var failed_morsel: Int
-    var failure: String
-
-    def __init__(
-        out self,
-        columns: List[Series],
-        layout: AggregateLayout,
-        shared: TableSinkLayout,
-        ranges: List[Int],
-        cursor: _Cursor,
-        workers: Int,
-        batch: Int,
-    ):
-        self.columns = columns.copy()
-        self.layout = layout.copy()
-        self.shared = shared.copy()
-        self.ranges = ranges.copy()
-        self.cursor = cursor.copy()
-        self.workers = workers
-        self.batch = max(1, batch)
-        self.sinks = List[AggregateSink]()
-        self.failed_morsel = -1
-        self.failure = String()
-
-    def run(mut self) raises:
-        # The shared layout's: it marks the reductions with an aggregate
-        # filter.
-        var sink = AggregateSink(self.shared.layout, self.workers)
-        var reader = TableSinkInputs(self.shared)
-        var morsels = len(self.ranges) // 2
-        while True:
-            var m = self.cursor.take()
-            if m >= morsels:
-                break
-            var offset = self.ranges[2 * m]
-            var length = self.ranges[2 * m + 1]
-            var columns = List[Series](capacity=len(self.columns))
-            for column in self.columns:
-                columns.append(column.slice(offset, length))
-            try:
-                sink_frame(sink, reader, columns, offset, self.batch)
-            except e:
-                # Kept for the caller to raise the earliest morsel's error;
-                # morsels are claimed in order, so every earlier one runs.
-                self.failed_morsel = m
-                self.failure = String(e)
-                break
-        reader.release()
-        self.sinks.append(sink^)
-
-
 @fieldwise_init
 struct GroupingSets(Copyable):
     """A pending `group_by_rollup`, `group_by_cube` or
@@ -300,22 +207,6 @@ struct GroupBy(Copyable):
                 selected.append(group[k])
         return self._frame.take(selected)
 
-    def _coded_keys(self) raises -> Optional[GroupBy]:
-        """This grouping with each String key that carries dictionary codes
-        replaced by those codes as a categorical; None when no key does."""
-        var keys = List[Series](capacity=len(self._keys))
-        var any = False
-        for key in self._keys:
-            var codes = key._dictionary_codes()
-            if codes:
-                keys.append(canonical_labels(codes.take()))
-                any = True
-            else:
-                keys.append(key.copy())
-        if not any:
-            return None
-        return GroupBy(self._frame.copy(), keys^, self._maintain_order)
-
     def _key_names(self) -> Dict[String, Bool]:
         var names = Dict[String, Bool]()
         for key in self._keys:
@@ -330,45 +221,25 @@ struct GroupBy(Copyable):
     def agg(
         self, expressions: List[Expr], *, batch_size: Int = 1024
     ) raises -> DataFrame:
+        """One row per group: the keys, then the aggregations.
+
+        Runs as the lazy plan's group_by does: a plan of one aggregation
+        over this frame, executed through the same pipelines and sinks as
+        `LazyFrame.collect`. The aggregate table sink takes every reduction
+        it has a state for; the plan's executor evaluates the rest over each
+        group's rows. `batch_size` is the plan's batch size."""
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
         var prepared = List[Expr](capacity=len(expressions))
-        var changed = False
-        var counted = len(self._keys) > 0 and (
-            self._keys[0].name() in self._frame.columns()
-        )
         for expression in expressions:
             if group_sequence_rows(expression):
                 prepared.append(expression.implode())
-                changed = True
-            elif counted:
-                var rows = count_rows_by(expression, self._keys[0].name())
-                changed = changed or len(rows._nodes) != len(expression._nodes)
-                prepared.append(rows^)
             else:
                 prepared.append(expression.copy())
-        if changed:
-            return self.agg(prepared, batch_size=batch_size)
-        # String keys that carry their source's dictionary codes (a Parquet
-        # scan) group by the codes, as categorical keys do, and come back as
-        # strings: integer codes hash and compare far faster than the strings,
-        # and the strings are read once per group, not per row.
-        var coded = self._coded_keys()
-        if coded:
-            var result = coded.value().agg(expressions, batch_size=batch_size)
-            var columns = List[Series](capacity=result.width())
-            for i in range(result.width()):
-                ref column = result._columns[i]
-                if (
-                    i < len(self._keys)
-                    and self._keys[i].dtype() == DataType.STRING
-                    and column.dtype().is_categorical()
-                ):
-                    columns.append(decode(column))
-                else:
-                    columns.append(column.copy())
-            return DataFrame(columns^)
-        var bound = _bind_all(expressions, self._frame._columns)
-        if batch_size <= 0:
-            raise Error("batch_size must be positive")
+        # Selectors expand against this frame's columns, before the key
+        # columns join them.
+        var expanded = expand_all(prepared, self._frame._columns)
+        var bound = _bind_all(expanded, self._frame._columns)
         var key_names = self._key_names()
         for expression in bound:
             if expression.shape() != AGGREGATE:
@@ -380,45 +251,128 @@ struct GroupBy(Copyable):
                     "Aggregate output name collides with grouping key: "
                     + expression.expr._name
                 )
-        var height = self._frame.height()
-        var workers = group_by_workers(height)
-        # Every grouping goes through the aggregate table whatever its
-        # number of groups, whose per-thread tables adapt to however many
-        # there are; keys whose statistics bound them to a few values make
-        # it a perfect hash table, using the key ranges. An expression the
-        # table has no state for is evaluated over each group's row list.
-        if self._table_supported(expressions):
-            var table = self._agg_table(expressions, workers, batch_size)
-            if table:
-                return table.take()
-        return self._agg_groups(bound, batch_size)
+        return self._planned(expanded, batch_size)
 
-    def _table_supported(self, expressions: List[Expr]) raises -> Bool:
-        """Whether the aggregate table (`aggregate_table.mojo`) groups these
-        keys and reduces these expressions."""
-        # No expressions is the groups alone: a table of no states.
-        if len(self._keys) == 0 or (
-            len(expressions) > 0
-            and not _stream_reductions(expressions, True, True, True)
-        ):
-            return False
+    def _planned(
+        self, expressions: List[Expr], batch_size: Int
+    ) raises -> DataFrame:
+        """`agg` of checked, expanded expressions. The plan's input is the
+        frame with each key column added under a name of its own, so that
+        computed keys and keys named like a column the aggregations read
+        group as given while the aggregations still see the frame's
+        columns. Of those, it holds only the ones the aggregations read:
+        the pipeline cuts every input column into each morsel."""
+        var taken = Dict[String, Bool]()
+        for column in self._frame._columns:
+            taken[column.name()] = True
+        var reads = Dict[String, Bool]()
+        var every_column = False
         for expression in expressions:
-            for node in expression._nodes:
-                if is_reduction(node.op) and not table_reduction(node.op):
-                    return False
+            var r = _references(expression)
+            if not r:
+                every_column = True
+                break
+            for name in r.value():
+                reads[name] = True
+        var columns = List[Series]()
+        for column in self._frame._columns:
+            if every_column or column.name() in reads:
+                columns.append(column.copy())
+        for expression in expressions:
+            taken[expression._name] = True
+        var grouped = List[String](capacity=len(self._keys))
+        var coded = List[Bool](capacity=len(self._keys))
+        var firsts = List[String](capacity=len(self._keys))
+        var all_expressions = expressions.copy()
+        for k in range(len(self._keys)):
+            ref key = self._keys[k]
+            var name = String("__group_key_") + String(k)
+            while name in taken:
+                name += "_"
+            taken[name] = True
+            # A String key that carries its source's dictionary codes (a
+            # Parquet scan) groups by the codes, as a categorical key does,
+            # and comes back as strings: integer codes hash and compare far
+            # faster than the strings, which are then read once per group.
+            var codes = key._dictionary_codes()
+            if codes:
+                columns.append(canonical_labels(codes.take()).renamed(name))
+                coded.append(key.dtype() == DataType.STRING)
+            else:
+                columns.append(key.renamed(name))
+                coded.append(False)
+            grouped.append(name)
+            # A float key's groups compare canonical words (-0.0 and 0.0,
+            # or two NaNs, are one group); the output keeps the value of
+            # the group's first row.
+            var first = String()
+            if key.dtype().is_float():
+                first = String("__key_first_") + String(k)
+                while first in taken:
+                    first += "_"
+                taken[first] = True
+                all_expressions.append(col(name).first().alias(first))
+            firsts.append(first^)
+        if len(all_expressions) == 0:
+            # The groups alone: a table whose one state, a count, is not
+            # output.
+            var count = String("__group_count")
+            while count in taken:
+                count += "_"
+            all_expressions.append(col(grouped[0]).len().alias(count))
+        var input = DataFrame(columns^, height=self._frame.height())
+        var result = (
+            input.lazy()
+            .group_by(grouped, maintain_order=self._maintain_order)
+            .agg(all_expressions)
+            ._collect(optimize=False, streaming=True, batch_size=batch_size)
+        )
+        var out = List[Series](capacity=len(self._keys) + len(expressions))
+        for k in range(len(self._keys)):
+            var key: Series
+            if firsts[k].byte_length() > 0:
+                key = result.column(firsts[k])
+            else:
+                key = result._columns[k].copy()
+            if coded[k] and key.dtype().is_categorical():
+                key = decode(key)
+            out.append(key.renamed(self._keys[k].name()))
+        for j in range(len(expressions)):
+            out.append(result._columns[len(self._keys) + j].copy())
+        return DataFrame(out^, height=result.height())
+
+    def _declined(
+        self, expressions: List[Expr], batch_size: Int, planned: Bool
+    ) raises -> DataFrame:
+        """An aggregation node the plan's executor runs over its executed
+        input. With `planned`, when the aggregate table holds every state
+        (or there are none), that is the one-node plan over the frame,
+        which runs in the table sink. Otherwise each group's rows are
+        reduced by the grouped evaluator: so are a plan's schema runs (no
+        rows) and a node a pipeline declined, which runs inside that
+        pipeline's task (where no other schedule may start) and which a
+        one-node plan would decline again."""
+        var names = List[String](capacity=len(self._keys))
         for key in self._keys:
-            if not key_supported(key):
-                return False
-        return True
+            names.append(key.name())
+        if planned and (
+            len(expressions) == 0
+            or table_supported(self._frame.clear(), names, expressions)
+        ):
+            return self.agg(expressions, batch_size=batch_size)
+        return self._agg_groups(
+            _bind_all(expressions, self._frame._columns), batch_size
+        )
 
     def _agg_table(
         self, expressions: List[Expr], workers: Int, batch_size: Int
     ) raises -> Optional[DataFrame]:
-        """Grouped reductions through the aggregate table: each worker
-        hashes its morsels' keys where they are and probes its own table,
-        updating its states by group; partitions of the groups then merge
-        across workers in parallel (`aggregate_table.mojo`). None when some reduction's
-        state does not fit inline in a group row."""
+        """Reductions of the frame's columns as they are (`_agg_groups`'
+        row lists) through the aggregate table: each worker hashes its
+        morsels' keys where they are and probes its own table, updating
+        its states by group; partitions of the groups then merge across
+        workers in parallel (`aggregate_table.mojo`). None when some
+        reduction's state does not fit inline in a group row."""
         # A float key's words are canonical (-0.0 and 0.0, or two NaNs, are
         # one group), so output uses the first row's original value. That
         # value comes from a FIRST state and replaces the key column.
@@ -458,8 +412,7 @@ struct GroupBy(Copyable):
         var empty_keys = List[Series](capacity=len(self._keys))
         for key in self._keys:
             empty_keys.append(key.slice(0, 0))
-        # The states' types are the unfiltered reductions': an aggregate
-        # filter only drops rows (`_agg_batches` applies it).
+        # The states' types are the unfiltered reductions'.
         var template = _StreamReduction(
             self._frame.clear(),
             without_filters(expressions),
@@ -471,14 +424,6 @@ struct GroupBy(Copyable):
         if not table_states_supported(specs, empty):
             return None
         trace_path("group_by.aggregate_table")
-        if not _plain_inputs(expressions, self._frame):
-            # Computed reduction inputs are evaluated a batch of
-            # `batch_size` rows at a time, each batch then updating the
-            # states: an input error past the batch comes after the
-            # batch's update errors, as the batch size says.
-            return self._agg_batches(
-                expressions, specs, empty, template, workers, batch_size
-            )
         var inputs = table_inputs(self._frame, self._keys, expressions)
         # Morsels within chunks: the columns' common chunks, or one
         # contiguous copy of each chunked column when they differ.
@@ -500,92 +445,6 @@ struct GroupBy(Copyable):
         var ranges = morsel_ranges(ends, workers)
         var result = aggregate_table(
             keys, inputs, specs, ranges, workers, self._maintain_order
-        )
-        return table_frame(template, result^, self._maintain_order)
-
-    def _agg_batches(
-        self,
-        expressions: List[Expr],
-        specs: List[ReducerSpec],
-        empty: List[Series],
-        template: _StreamReduction,
-        workers: Int,
-        batch_size: Int,
-    ) raises -> Optional[DataFrame]:
-        """The aggregate table over morsels whose reduction inputs are
-        evaluated `batch_size` rows at a time on the workers."""
-        var frame = self._frame.rechunk()
-        # The sink's input: the key columns (named apart from the frame's),
-        # then the frame's columns, which the input expressions read.
-        var columns = List[Series](capacity=len(self._keys) + frame.width())
-        var key_names = List[String](capacity=len(self._keys))
-        var keys = List[Series](capacity=len(self._keys))
-        for k in range(len(self._keys)):
-            var key = (
-                self._keys[k]
-                .rechunk() if self._keys[k]
-                .is_chunked() else self._keys[k]
-                .copy()
-            )
-            var name = "__agg_key_" + String(k)
-            key_names.append(name)
-            columns.append(key.renamed(name))
-            keys.append(key^)
-        for column in frame._columns:
-            columns.append(column.copy())
-        var empty_keys = List[Series](capacity=len(keys))
-        for key in keys:
-            empty_keys.append(key.slice(0, 0))
-        var layout = aggregate_layout(empty_keys, empty, specs)
-        layout.use_perfect_hash(keys)
-        var schema = List[Series](capacity=len(columns))
-        for column in columns:
-            schema.append(column.slice(0, 0))
-        var shared = TableSinkLayout(
-            layout, DataFrame(schema^), key_names, expressions, empty
-        )
-        # Morsels end on whole input batches: an input error anywhere in a
-        # batch precedes that batch's state updates, whichever worker has it.
-        var ends: List[Int] = [frame.height()]
-        var batch = max(1, batch_size)
-        var ranges = morsel_ranges(
-            ends, workers, batch if batch % 64 == 0 else 64 * batch
-        )
-        var cursor = _Cursor.new()
-        var jobs = List[_BatchSinkJob](capacity=workers)
-        for _ in range(max(1, workers)):
-            jobs.append(
-                _BatchSinkJob(
-                    columns,
-                    layout,
-                    shared,
-                    ranges,
-                    cursor,
-                    workers,
-                    batch_size,
-                )
-            )
-        try:
-            run_jobs(jobs)
-        except e:
-            cursor.free()
-            raise e^
-        cursor.free()
-        # The error of the earliest morsel, as a serial scan would meet it.
-        var failed = -1
-        for j in range(len(jobs)):
-            if jobs[j].failed_morsel >= 0 and (
-                failed < 0 or jobs[j].failed_morsel < jobs[failed].failed_morsel
-            ):
-                failed = j
-        if failed >= 0:
-            raise Error(jobs[failed].failure)
-        var sinks = List[AggregateSink](capacity=len(jobs))
-        for j in range(len(jobs)):
-            while len(jobs[j].sinks) > 0:
-                sinks.append(jobs[j].sinks.pop())
-        var result = aggregate_finish(
-            sinks, layout, ordered=self._maintain_order
         )
         return table_frame(template, result^, self._maintain_order)
 
@@ -642,6 +501,12 @@ struct GroupBy(Copyable):
 
     def len(self, name: String = "len") raises -> DataFrame:
         """Row count per group, including rows with null values."""
+        return self.agg([row_len().alias(name)])
+
+    def _counts(self, name: String) raises -> DataFrame:
+        """`len` in first-occurrence order on the calling thread, for a
+        value's counts within an expression (`Series.value_counts`), which
+        may run once per group over a few rows."""
         if name in self._key_names():
             raise Error(
                 "Aggregate output name collides with grouping key: " + name

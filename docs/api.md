@@ -1250,6 +1250,7 @@ An eager grouping request over a snapshot and evaluated key columns.
   Last n rows of each group, retaining every original column.
 - `def agg(self, expression: Expr, *, batch_size: Int = Int(1024)) -> DataFrame`
 - `def agg(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> DataFrame`
+  One row per group: the keys, then the aggregations.
 - `def len(self, name: String = "len") -> DataFrame`
   Row count per group, including rows with null values.
 - `def sum(self) -> DataFrame`

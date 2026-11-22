@@ -160,7 +160,7 @@ def eager(threads: Int, rows: Int, groups: Int, ordered: Bool) raises:
         .agg(reductions())
     )
     assert_true(
-        "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+        "dataframe-path: pipeline.group_table\n" in observed.text(),
         "distinct counts did not reach the aggregate table",
     )
     _ = observed^
