@@ -2337,19 +2337,7 @@ def _probe_start(
                 typed[len(typed) - 1], keys, expressions
             )
     var decision = select_aggregation_strategy(
-        self,
-        cursor,
-        batch_size,
-        keys,
-        expressions,
-        operations,
-        joins,
-        distinct,
-        ordered,
-        top,
-        grouping,
-        eligibility,
-        inline_table_eligible,
+        expressions, grouping, eligibility, inline_table_eligible
     )
     if decision.is_eager():
         trace_decision(decision)
