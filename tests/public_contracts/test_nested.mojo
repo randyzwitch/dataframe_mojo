@@ -709,9 +709,17 @@ def test_struct_key_equality_and_supported_join_kinds() raises:
                             actual.item(row, "rid").int64(),
                             right_ids[expected_right[row]],
                         )
-        for how in [String("right"), String("full")]:
-            with assert_raises():
-                _ = source.join(right, on="key", how=how)
+        # Right rows: tags 0, 1, null, 0 (each valid tag matches two left
+        # rows); the null key matches nothing.
+        var right_join = source.join(right, on="key", how="right")
+        assert_equal(right_join.height(), 7)
+        assert_equal(right_join.column("id").null_count(), 1)
+        assert_equal(right_join.column("key").null_count(), 1)
+        var full = source.join(right, on="key", how="full")
+        assert_equal(full.height(), 9)
+        assert_equal(full.column("id").null_count(), 1)
+        assert_equal(full.column("rid").null_count(), 2)
+        assert_equal(full.column("key").null_count(), 3)
 
 
 def test_grouped_first_last_and_unique_keep_nested_values_whole() raises:
@@ -791,9 +799,9 @@ def test_nested_unsupported_operations_fail_for_nonempty_and_empty_inputs() rais
                 _ = source.select(
                     when(lit(True)).then(col("xs")).otherwise(col("xs"))
                 )
-    for source in [lists.copy(), lists.clear()]:
-        with assert_raises():
-            _ = source.join(source, on="xs")
+    # List keys join: four distinct lists and a null, which matches nothing.
+    assert_equal(lists.join(lists, on="xs").height(), 4)
+    assert_equal(lists.clear().join(lists, on="xs").height(), 0)
 
 
 def test_nested_constructors_and_expression_validation_reject_malformed_inputs() raises:

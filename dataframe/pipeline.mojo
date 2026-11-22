@@ -2118,8 +2118,8 @@ struct _ChunkRunner(Movable):
         the build side a dictionary over the build's columns when it can; a
         left, full or right join gathers it, and flags the build rows it matched
         for `begin_round`, as a right-semi or right-anti join does without
-        emitting anything. A step with no table (nested keys) or whose keys need
-        dictionaries unified joins the morsel's frame eagerly."""
+        emitting anything. A step whose keys need dictionaries unified (or
+        with no table) joins the morsel's frame eagerly."""
         ref step = self.steps[][s]
         ref input = self.schemas[][s]
         ref output = self.schemas[][s + 1]
@@ -2129,7 +2129,7 @@ struct _ChunkRunner(Movable):
             for i in range(len(step.names)):
                 var lt = input.column(step.names[i]).dtype()
                 var rt = right.column(step.right_keys[i]).dtype()
-                if lt != rt or lt.is_nested():
+                if lt != rt:
                     direct = False
         if _cross_step(step):
             # Where its output is collected for a later join: the morsel's
