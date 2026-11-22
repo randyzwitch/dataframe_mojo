@@ -857,6 +857,89 @@ def test_a_sort_runs_as_rounds_of_the_schedule() raises:
         assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
 
 
+def test_a_final_sort_and_eager_sorts_run_as_rounds_of_the_schedule() raises:
+    """A sort at the top of a query runs as rounds of tasks of the query's
+    schedule, its computed input (an aggregate) a pipeline of the same
+    schedule, with no schedule inside another's task. The eager sort, its
+    expression-key form, top_k and bottom_k are one-node plans that run
+    the same way. Every result equals the rows ordered by `arg_sort`."""
+    var frame = source().with_row_index("row")
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var grouped = (
+        frame.lazy()
+        .group_by("k")
+        .agg([col("v").sum().alias("total"), col("row").min().alias("first")])
+        .sort(["total", "k"], descending=[True, False], nulls_last=[True, True])
+        .collect(optimize=False)
+    )
+    var paths = trace.text()
+    _ = trace^
+    assert_true("sort.rounds" in paths, "the final sort did not run as rounds")
+    assert_true(
+        "schedule.nested" not in paths, "a schedule ran inside another's task"
+    )
+    var groups = (
+        frame.lazy()
+        .group_by("k")
+        .agg([col("v").sum().alias("total"), col("row").min().alias("first")])
+        .collect(optimize=False)
+    )
+    assert_frame(
+        grouped,
+        groups.take(
+            groups.arg_sort(
+                ["total", "k"],
+                descending=[True, False],
+                nulls_last=[True, True],
+            )
+        ),
+    )
+    var eager_trace = StrategyTrace()
+    var sorted = frame.sort(
+        ["s", "v"],
+        descending=[True, False],
+        nulls_last=[False, True],
+        maintain_order=True,
+    )
+    var by_expression = frame.sort(
+        [col("v") * lit(Int64(-1)), col("row")], descending=True
+    )
+    var top = frame.top_k(25, ["v", "row"])
+    var bottom = frame.bottom_k(25, ["v", "row"])
+    var eager_paths = eager_trace.text()
+    _ = eager_trace^
+    _ = setting^
+    _ = threads^
+    assert_true(
+        "sort.rounds" in eager_paths, "the eager sort did not run as rounds"
+    )
+    assert_frame(
+        sorted,
+        frame.take(
+            frame.arg_sort(
+                ["s", "v"],
+                descending=[True, False],
+                nulls_last=[False, True],
+                maintain_order=True,
+            )
+        ),
+    )
+    var negated = frame.with_columns(
+        [(col("v") * lit(Int64(-1))).alias("neg")]
+    )
+    assert_frame(
+        by_expression,
+        frame.take(negated.arg_sort(["neg", "row"], descending=True)),
+    )
+    assert_frame(
+        top,
+        frame.take(frame.arg_sort(["v", "row"], descending=True)).head(25),
+    )
+    assert_frame(bottom, frame.take(frame.arg_sort(["v", "row"])).head(25))
+
+
 def test_ranks_over_every_row_run_as_rounds_of_the_schedule() raises:
     """A projection of ranks over all rows, computed as an input of the
     query's schedule, runs as rounds of tasks of that schedule: the sort,

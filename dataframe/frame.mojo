@@ -1333,10 +1333,11 @@ struct DataFrame(Copyable, Sized, Writable):
     ) raises -> Self:
         """Lexicographic sort by several columns, one direction; equal keys
         in no particular order unless `maintain_order`."""
-        return self.take(
-            self.arg_sort(
-                by, descending, nulls_last, maintain_order=maintain_order
-            )
+        return self._planned_sort(
+            by,
+            List[Bool](length=len(by), fill=descending),
+            List[Bool](length=len(by), fill=nulls_last),
+            maintain_order,
         )
 
     def sort(
@@ -1349,6 +1350,53 @@ struct DataFrame(Copyable, Sized, Writable):
     ) raises -> Self:
         """Per-column direction and null placement; list lengths match by.
         Equal keys in no particular order unless `maintain_order`."""
+        return self._planned_sort(by, descending, nulls_last, maintain_order)
+
+    def _planned_sort(
+        self,
+        by: List[String],
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        maintain_order: Bool,
+        limit: Int = -1,
+        output: Optional[List[String]] = None,
+    ) raises -> Self:
+        """`sort` (or, with a nonnegative `limit`, its first `limit` rows)
+        as the lazy plan's sort runs it: a plan of one sort over this
+        frame, executed through the same pipelines as `LazyFrame.collect`,
+        whose finish sorts the keys and gathers the rows in rounds of
+        tasks. `output`: the columns the result keeps (none: every column);
+        only those are gathered."""
+        if len(by) == 0:
+            raise Error("sort requires at least one column")
+        if len(descending) != len(by) or len(nulls_last) != len(by):
+            raise Error(
+                "descending and nulls_last must have one entry per sort column"
+            )
+        for name in by:
+            _ = self.column(name)
+        var plan = self.lazy().sort(
+            by,
+            descending=descending,
+            nulls_last=nulls_last,
+            maintain_order=maintain_order,
+        )
+        if limit >= 0:
+            plan._plan._nodes[len(plan._plan._nodes) - 1].set_sort_limit(limit)
+        if output:
+            plan = plan.select(output.value())
+        return plan._collect(optimize=False, streaming=True, batch_size=65536)
+
+    def _sorted(
+        self,
+        by: List[String],
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        maintain_order: Bool,
+    ) raises -> Self:
+        """`sort` on the calling thread's kernels, with no plan: for a
+        node the plan's executor runs over its executed input, and for
+        sorts inside an expression, which may run once per group."""
         return self.take(
             self.arg_sort(
                 by,
@@ -1426,14 +1474,14 @@ struct DataFrame(Copyable, Sized, Writable):
         var names = List[String](capacity=len(keys))
         for key in keys:
             names.append(key._name)
-        var evaluated = self.with_columns(keys).select(names)
-        return self.take(
-            evaluated.arg_sort(
-                names,
-                descending=descending,
-                nulls_last=nulls_last,
-                maintain_order=maintain_order,
-            )
+        # The keys are sorted as columns beside this frame's, which alone
+        # are gathered into the result.
+        return self.with_columns(keys)._planned_sort(
+            names,
+            descending,
+            nulls_last,
+            maintain_order,
+            output=self.columns(),
         )
 
     def arg_sort(
@@ -1483,15 +1531,15 @@ struct DataFrame(Copyable, Sized, Writable):
         Nulls rank last. A top-N heap over the full key, not a sort;
         equal keys keep input order.
         """
+        if k < 0:
+            raise Error("k must be nonnegative")
         var n = len(by)
-        return self.take(
-            self._arg_sort_head(
-                by,
-                List[Bool](length=n, fill=not reverse),
-                List[Bool](length=n, fill=True),
-                k,
-                maintain_order=True,
-            )
+        return self._planned_sort(
+            by,
+            List[Bool](length=n, fill=not reverse),
+            List[Bool](length=n, fill=True),
+            True,
+            limit=k,
         )
 
     def top_k(
@@ -1505,15 +1553,15 @@ struct DataFrame(Copyable, Sized, Writable):
         """The k rows that sort(by) would put first (sort(by,
         descending=True) with reverse=True); nulls rank last, and equal keys
         keep input order."""
+        if k < 0:
+            raise Error("k must be nonnegative")
         var n = len(by)
-        return self.take(
-            self._arg_sort_head(
-                by,
-                List[Bool](length=n, fill=reverse),
-                List[Bool](length=n, fill=True),
-                k,
-                maintain_order=True,
-            )
+        return self._planned_sort(
+            by,
+            List[Bool](length=n, fill=reverse),
+            List[Bool](length=n, fill=True),
+            True,
+            limit=k,
         )
 
     def _arg_sort_head(

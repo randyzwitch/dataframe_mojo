@@ -270,6 +270,12 @@ def plan_stream_execute(
             ArcPointer(Dict[Int, _ReadyIndex]())
         )
         return plan_stream_execute(plan, index, batch_size, sink)
+    if sink == 0 and _sorts_whole(self, index):
+        # A sort of every row reads its whole input, so no morsel
+        # pipeline runs it: it is an operator pipeline whose finish sorts
+        # in rounds (`SortSink`), its computed input a pipeline of the
+        # same schedule.
+        return _run_operator(self, index, batch_size)
     var outcome = _stream_head(self, index, batch_size, sink)
     if len(outcome.plan) > 0:
         return _stream_after_materialization(
@@ -303,6 +309,26 @@ def plan_stream_execute(
         False,
     )
     return _run_schedule(self, schedule, top)
+
+
+def _run_operator(
+    self: QueryContext, index: Int, batch_size: Int
+) raises -> DataFrame:
+    """Node `index` as an operator pipeline (`_OperatorPipeline`), with
+    its computed inputs as pipelines of the same schedule."""
+    var schedule = _StreamSchedule()
+    var top = _add_operator(
+        schedule, self, index, batch_size, _BuildFor(), META_REGULAR
+    )
+    schedule.bind()
+    try:
+        run_pipelines(
+            schedule.pipelines, schedule.metas, one_event=Bool(self._report)
+        )
+    except e:
+        schedule.release()
+        raise e^
+    return schedule.pipelines[top].take_result()
 
 
 def _run_schedule(
@@ -794,6 +820,23 @@ def _add_input(
                 type,
                 True,
             )
+    return _add_operator(
+        schedule, self, index, batch_size, build^, type, streaming
+    )
+
+
+def _add_operator(
+    mut schedule: _StreamSchedule,
+    self: QueryContext,
+    index: Int,
+    batch_size: Int,
+    var build: _BuildFor,
+    type: Int,
+    streaming: Bool = True,
+) raises -> Int:
+    """Add node `index` of `self` to `schedule` as an operator pipeline
+    that runs it over whole inputs, those inputs added before it as
+    pipelines of the same schedule, and return the operator's pipeline."""
     var wanted = List[Int]()
     var at = List[Int]()
     if streaming and self._handoff == HANDOFF_OFF:
@@ -1462,6 +1505,22 @@ struct _StreamProbe(Movable):
             self.built.value().finish_finalize()
 
 
+def _sorts_whole(plan: QueryContext, index: Int) -> Bool:
+    """Whether node `index` is a sort of every row, or a projection of
+    columns over one, that an operator pipeline runs as a `SortSink`."""
+    if not (plan._handoff == HANDOFF_OFF):
+        return False
+    ref node = plan._nodes[index]
+    if node.kind == SORT:
+        return True
+    return (
+        node.kind == SELECT
+        and node.left >= 0
+        and plan._nodes[node.left].kind == SORT
+        and _column_projection(node)
+    )
+
+
 def _declined_sort(on: QueryContext, index: Int) -> Int:
     """The sort a declined node at `index` is, or slices (a sort limited
     to its first rows under its slice), when it runs as rounds of its own
@@ -1654,18 +1713,7 @@ struct _OperatorPipeline(Movable):
             self.ranks = whole_input_ranks(node.exprs)
             self.windows = whole_input_windows(node.exprs)
             self.reductions = whole_input_reductions(node.exprs)
-        self.sorts = (
-            streaming
-            and self.plan._handoff == HANDOFF_OFF
-            and (
-                node.kind == SORT
-                or (
-                    node.kind == SELECT
-                    and self.plan._nodes[node.left].kind == SORT
-                    and _column_projection(node)
-                )
-            )
-        )
+        self.sorts = streaming and _sorts_whole(self.plan, index)
 
     def execute(mut self) raises:
         if len(self.wanted) > 0:

@@ -1372,7 +1372,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             self._frame().group_by(self._name, maintain_order=True).len(name)
         )
         if sort:
-            return counts.sort([name], descending=True)
+            return counts._sorted([name], [True], [True], False)
         return counts^
 
     def to_values(self) raises -> List[AnyValue]:
