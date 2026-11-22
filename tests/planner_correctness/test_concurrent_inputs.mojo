@@ -453,21 +453,25 @@ def test_aggregate_build_sides_finish_with_the_steps_above_them() raises:
 
 def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
     """A build side whose aggregate the stream declines once its inputs
-    are known (an aggregate filter over struct values, which the aggregate
-    table does not apply) still runs in the schedule: its pipeline makes
+    are known (a distinct count of struct values with a geometry field,
+    which has no key bytes, so the aggregate table holds no state for it)
+    still runs in the schedule: its pipeline makes
     the joined rows, and the aggregate runs over them as an operator, with
     no schedule inside another's task. The result is what the eager steps
     give."""
     var frame = source()
     var weights = List[Int64]()
     var keys = List[Int64]()
+    var shapes = List[List[UInt8]]()
     for k in range(997):
         keys.append(Int64(k))
         weights.append(Int64(k % 13))
+        shapes.append([UInt8(k % 7), UInt8(k % 3)])
     var dim = DataFrame(
         [
             Series("k", Column[Int64](keys^)),
             Series("w", Column[Int64](weights^)),
+            Series.binary("g", shapes).with_dtype(DataType.geometry()),
         ]
     ).lazy()
     var probe = frame.lazy().filter(col("v") > lit(Int64(-400)))
@@ -485,10 +489,7 @@ def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
             [
                 col("v").median().alias("m"),
                 col("w").sum().alias("t"),
-                as_struct([col("v"), col("w")])
-                .filter(col("w") > lit(Int64(0)))
-                .first()
-                .alias("f"),
+                as_struct([col("w"), col("g")]).n_unique().alias("f"),
             ]
         )
     )
@@ -530,10 +531,7 @@ def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
             [
                 col("v").median().alias("m"),
                 col("w").sum().alias("t"),
-                as_struct([col("v"), col("w")])
-                .filter(col("w") > lit(Int64(0)))
-                .first()
-                .alias("f"),
+                as_struct([col("w"), col("g")]).n_unique().alias("f"),
             ]
         )
     )
