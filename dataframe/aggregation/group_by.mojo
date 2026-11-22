@@ -19,6 +19,7 @@ from dataframe.aggregation.state import (
 )
 from dataframe.row_expressions import len as row_len
 from dataframe.selectors import expand_all
+from dataframe.planning.expression_inputs import _references
 from dataframe.binding import (
     AGGREGATE,
     BoundExpr,
@@ -259,11 +260,24 @@ struct GroupBy(Copyable):
         frame with each key column added under a name of its own, so that
         computed keys and keys named like a column the aggregations read
         group as given while the aggregations still see the frame's
-        columns."""
-        var columns = self._frame._columns.copy()
+        columns. Of those, it holds only the ones the aggregations read:
+        the pipeline cuts every input column into each morsel."""
         var taken = Dict[String, Bool]()
-        for column in columns:
+        for column in self._frame._columns:
             taken[column.name()] = True
+        var reads = Dict[String, Bool]()
+        var every_column = False
+        for expression in expressions:
+            var r = _references(expression)
+            if not r:
+                every_column = True
+                break
+            for name in r.value():
+                reads[name] = True
+        var columns = List[Series]()
+        for column in self._frame._columns:
+            if every_column or column.name() in reads:
+                columns.append(column.copy())
         for expression in expressions:
             taken[expression._name] = True
         var grouped = List[String](capacity=len(self._keys))
