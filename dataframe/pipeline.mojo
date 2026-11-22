@@ -3078,8 +3078,11 @@ def _top_scan_filter(
     """Derive a scan bound from the leading top-N key: strict inequality for
     one key, or inclusive inequality when later keys must settle ties. Do
     not push nulls-first keys because statistics cannot retain null rows
-    separately from rejected values. Categorical storage codes also cannot
-    supply label-order bounds."""
+    separately from rejected values. Nor descending float keys: the order
+    places NaN above every number, while a comparison is false for NaN,
+    so a vector holding NaN would be ruled out though its NaN rows come
+    first. Categorical storage codes also cannot supply label-order
+    bounds."""
     var none = _TopScanFilter(None, None, 0, False, False)
     if top <= 0 or not scan_key or len(names) == 0 or not nulls_last[0]:
         return none^
@@ -3087,6 +3090,8 @@ def _top_scan_filter(
         return none^
     var dtype = frame.column(names[0]).dtype()
     if column_domain(dtype) < 0:
+        return none^
+    if descending[0] and dtype.is_float():
         return none^
     var op: Int
     # `maintain_order` makes the source place a last key: a row tied on
