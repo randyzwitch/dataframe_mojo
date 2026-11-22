@@ -671,6 +671,9 @@ def test_date_export_does_not_narrow_hidden_null_payloads() raises:
         if "date outside the Arrow date32 range" in String(error):
             raise Error("date export must ignore hidden null payloads")
         raise error
+    # The export's release callback counts into `releases` through its
+    # address, so it must live until the arrays are released.
+    _ = releases
 
 
 def test_validity_lists_pack_to_the_same_bits_at_every_length() raises:
