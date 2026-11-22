@@ -129,6 +129,10 @@ from dataframe.query_execution.ordered_window_sink import (
     whole_input_windows,
 )
 from dataframe.query_execution.rank_sink import RankSink, whole_input_ranks
+from dataframe.query_execution.reduction_sink import (
+    ReductionSink,
+    whole_input_reductions,
+)
 from dataframe.query_execution.sort_sink import SortSink
 from dataframe.optimizer.expressions import shared_partition_keys
 from dataframe.query_execution.window_sink import (
@@ -1556,8 +1560,9 @@ struct _OperatorPipeline(Movable):
     as rounds of tasks, before any table is made from the result. A sort
     of every row does too (`SortSink`): the finish sorts the keys and
     gathers the rows in rounds; and so do a projection of ranks over
-    every row (`RankSink`) and one of ordered windows over every row
-    (`OrderedWindowSink`)."""
+    every row (`RankSink`), one of ordered windows over every row
+    (`OrderedWindowSink`), and one of values made from reductions over
+    every row (`ReductionSink`)."""
 
     var plan: QueryContext
     var index: Int
@@ -1593,6 +1598,11 @@ struct _OperatorPipeline(Movable):
     # runs as an `OrderedWindowSink`, and the sink while its rounds run.
     var windows: Bool
     var windowing: List[OrderedWindowSink]
+    # Whether it is a projection of values made from reductions over every
+    # row that runs as a `ReductionSink`, and the sink while its rounds
+    # run.
+    var reductions: Bool
+    var reducing: List[ReductionSink]
     var began: Int
 
     def __init__(
@@ -1632,6 +1642,8 @@ struct _OperatorPipeline(Movable):
         self.ranking = List[RankSink]()
         self.windows = False
         self.windowing = List[OrderedWindowSink]()
+        self.reductions = False
+        self.reducing = List[ReductionSink]()
         self.began = 0
         ref node = self.plan._nodes[index]
         if (
@@ -1642,6 +1654,7 @@ struct _OperatorPipeline(Movable):
             self.window_keys = shared_partition_keys(node.exprs)
             self.ranks = whole_input_ranks(node.exprs)
             self.windows = whole_input_windows(node.exprs)
+            self.reductions = whole_input_reductions(node.exprs)
         self.sorts = (
             streaming
             and self.plan._handoff == HANDOFF_OFF
@@ -1706,6 +1719,17 @@ struct _OperatorPipeline(Movable):
                 )
             )
             return
+        if self.reductions:
+            ref node = self.plan._nodes[self.index]
+            self.began = Int(perf_counter_ns())
+            var input = self.plan._execute(
+                node.left, False, self.streaming, self.batch_size
+            )
+            trace_path("window.reduce_rounds")
+            self.reducing.append(
+                ReductionSink(input^, node.exprs.copy(), node.kind == SELECT)
+            )
+            return
         if self.sorts:
             ref top = self.plan._nodes[self.index]
             # A projection of columns over the sort orders the sort's
@@ -1750,6 +1774,7 @@ struct _OperatorPipeline(Movable):
             or len(self.sorting) > 0
             or len(self.ranking) > 0
             or len(self.windowing) > 0
+            or len(self.reducing) > 0
         ):
             return
         if len(self.build.keys) > 0:
@@ -1771,7 +1796,8 @@ struct _OperatorPipeline(Movable):
             or len(self.window_keys) > 0
             or self.sorts
             or self.ranks
-            or self.windows else 0
+            or self.windows
+            or self.reductions else 0
         )
 
     def finalize_tasks(mut self) raises -> Int:
@@ -1821,6 +1847,21 @@ struct _OperatorPipeline(Movable):
                 wall_ns=Int(perf_counter_ns()) - self.began,
             )
             self.finalize()
+        if len(self.reducing) > 0:
+            var tasks = self.reducing[0].next_round()
+            if tasks > 0:
+                return tasks
+            self.result = self.reducing[0].take_result()
+            _ = self.reducing.pop()
+            plan_record(
+                self.plan,
+                self.index,
+                "window",
+                self.result.height(),
+                self.result.height(),
+                wall_ns=Int(perf_counter_ns()) - self.began,
+            )
+            self.finalize()
         if len(self.sorting) > 0:
             var tasks = self.sorting[0].next_round()
             if tasks > 0:
@@ -1857,6 +1898,8 @@ struct _OperatorPipeline(Movable):
             self.ranking[0].round_task(task)
         elif len(self.windowing) > 0:
             self.windowing[0].round_task(task)
+        elif len(self.reducing) > 0:
+            self.reducing[0].round_task(task)
         elif len(self.sorting) > 0:
             self.sorting[0].round_task(task)
         elif len(self.building) > 0:

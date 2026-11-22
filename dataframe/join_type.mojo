@@ -1,5 +1,8 @@
 """Join types as integer codes, parsed once from the public `how` name."""
 
+from dataframe.dtype import DataType
+from std.collections import Optional
+
 comptime JOIN_INNER = 0
 comptime JOIN_LEFT = 1
 comptime JOIN_RIGHT = 2
@@ -79,3 +82,32 @@ def join_name(code: Int) -> String:
     if code == JOIN_MARK:
         return "mark"
     return "unknown"
+
+
+def shared_join_key_type(
+    left: DataType, right: DataType, how: Int
+) raises -> Optional[DataType]:
+    """The one type both keys of a pair take before the join, when they
+    hold the same decimal at two storage widths; None for every other pair.
+
+    A decimal's precision and scale fix its values, and its storage width
+    (32, 64 or 128 bits) only says how they are held, so such a pair joins
+    on value once both sides share a representation. Every join path (hash
+    table, probe, coalesced key and unmatched rows) then sees one type. The
+    shared type is the wider one, which holds every value of the narrower
+    exactly. A semi, anti or mark join outputs only the probe side's rows
+    as they are, so its other key takes the probe key's type instead; the
+    precision fits either width, so that cast loses nothing."""
+    if not (left.is_decimal() and right.is_decimal()) or left == right:
+        return None
+    if left.precision() != right.precision() or left.scale() != right.scale():
+        return None
+    if how == JOIN_SEMI or how == JOIN_ANTI or how == JOIN_MARK:
+        return left
+    if how == JOIN_RIGHT_SEMI or how == JOIN_RIGHT_ANTI:
+        return right
+    return DataType.decimal(
+        left.precision(),
+        left.scale(),
+        max(left.decimal_width(), right.decimal_width()),
+    )

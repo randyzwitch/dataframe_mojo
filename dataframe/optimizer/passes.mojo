@@ -45,6 +45,7 @@ from dataframe.join_type import (
     JOIN_LEFT,
     JOIN_RIGHT,
     JOIN_SEMI,
+    shared_join_key_type,
 )
 from dataframe.optimizer.expressions import (
     _cannot_raise,
@@ -141,6 +142,7 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
     # memo entries for nodes that are rewritten or renumbered.
     plan._schema_memo = Optional(ArcPointer(Dict[Int, DataFrame]()))
     try:
+        plan_align_join_keys(plan)
         plan_filter_shared_subplans(plan)
         plan_push_predicates(plan)
         plan_push_slices(plan)
@@ -620,6 +622,111 @@ def _reads_files(self: QueryContext, index: Int) -> Bool:
         pending.append(node.left)
         pending.append(node.right)
     return False
+
+
+def _join_side_has_decimal_key(
+    self: QueryContext, node: PlanNode
+) raises -> Bool:
+    """Whether one input of join `node` holds a decimal key, so that key
+    alignment could apply. Only one input's schema is resolved: when no
+    key there is a decimal, no pair can be, and the other input is never
+    resolved by this pass. An input that reads no files is the one asked,
+    so a file is opened only when its schema can change the plan; a fault
+    in that file then surfaces where the query itself would reach it."""
+    var right_side = _reads_files(self, node.left) and not _reads_files(
+        self, node.right
+    )
+    var schema = self._execute(node.right if right_side else node.left, True)
+    var keys = node.right_keys.copy() if right_side else node.names.copy()
+    for k in range(len(keys)):
+        if (
+            keys[k] in schema.columns()
+            and schema.column(keys[k]).dtype().is_decimal()
+        ):
+            return True
+    return False
+
+
+def _join_input_schemas(
+    self: QueryContext, left: Int, right: Int
+) raises -> Tuple[DataFrame, DataFrame]:
+    """The empty schemas of a join's two inputs, an input that reads no
+    files first (`_join_side_has_decimal_key`)."""
+    if _reads_files(self, left) and not _reads_files(self, right):
+        var right_schema = self._execute(right, True)
+        return (self._execute(left, True), right_schema^)
+    var left_schema = self._execute(left, True)
+    return (left_schema^, self._execute(right, True))
+
+
+def plan_align_join_keys(mut self: QueryContext) raises:
+    """Give each join key pair that holds one decimal at two storage widths
+    a single type, by a cast below the join on the side that differs
+    (`shared_join_key_type`). The plan's schema, the hash table, the probe,
+    a coalesced key and unmatched rows then all see the same type, as they
+    would for keys declared alike. Pairs of any other types are left for
+    the join to accept or reject.
+
+    Run whether or not the plan is optimized: no join path compares keys
+    of two types. Joins are visited children first, so a join's inputs
+    already carry the types the joins below them produce."""
+    var count = len(self._nodes)
+    var changed = False
+    var owned = plan_remember_schemas(self)
+    for i in range(count):
+        if (
+            self._nodes[i].kind != JOIN
+            or self._nodes[i].left < 0
+            or self._nodes[i].right < 0
+            or len(self._nodes[i].names) == 0
+            or len(self._nodes[i].names) != len(self._nodes[i].right_keys)
+        ):
+            continue
+        var node = self._nodes[i].copy()
+        if not _join_side_has_decimal_key(self, node):
+            continue
+        var schemas = _join_input_schemas(self, node.left, node.right)
+        ref left = schemas[0]
+        ref right = schemas[1]
+        var left_casts = List[Expr]()
+        var right_casts = List[Expr]()
+        var left_cast = Dict[String, Bool]()
+        var right_cast = Dict[String, Bool]()
+        for k in range(len(node.names)):
+            ref lname = node.names[k]
+            ref rname = node.right_keys[k]
+            # A missing key is reported by the join itself.
+            if lname not in left.columns() or rname not in right.columns():
+                continue
+            var ltype = left.column(lname).dtype()
+            var rtype = right.column(rname).dtype()
+            var shared = shared_join_key_type(ltype, rtype, node.how)
+            if not shared:
+                continue
+            var target = shared.value()
+            if ltype != target and lname not in left_cast:
+                left_cast[lname] = True
+                left_casts.append(col(lname).cast(target))
+            if rtype != target and rname not in right_cast:
+                right_cast[rname] = True
+                right_casts.append(col(rname).cast(target))
+        if len(left_casts) > 0:
+            self._nodes.append(
+                _with_columns_node(left=node.left, exprs=left_casts)
+            )
+            self._nodes[i].left = len(self._nodes) - 1
+            changed = True
+        if len(right_casts) > 0:
+            self._nodes.append(
+                _with_columns_node(left=node.right, exprs=right_casts)
+            )
+            self._nodes[i].right = len(self._nodes) - 1
+            changed = True
+    if owned:
+        self._schema_memo = None
+    if changed:
+        trace_path("lazy.align_join_keys")
+        plan_reorder(self)
 
 
 def plan_unique_as_aggregate(mut self: QueryContext) raises:
