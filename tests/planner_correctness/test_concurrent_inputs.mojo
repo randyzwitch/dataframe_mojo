@@ -1007,3 +1007,76 @@ def test_ordered_windows_over_every_row_run_as_rounds_of_the_schedule() raises:
     assert_equal(lazy.columns(), eager.columns())
     for name in eager.columns():
         assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
+
+
+def test_reductions_over_every_row_run_as_rounds_of_the_schedule() raises:
+    """A projection of values made from reductions over all rows (each a
+    window over one partition with no order), computed as an input of the
+    query's schedule, runs as rounds of tasks of that schedule: ranges of
+    rows reduced into states of their own, then merged in row order. No
+    task starts parallel work of its own, each value is a constant column,
+    and the values equal the eager ones: with nulls, an order-sensitive
+    reduction, two reductions in one value, a count and a string. A sum
+    past Int64 still fails."""
+    var frame = source().with_row_index("row")
+    var keep = col("row") >= lit(Int64(0))
+    var exprs: List[Expr] = [
+        col("v").sum().alias("total"),
+        (col("v") * lit(Int64(2)) + col("k")).max().alias("big"),
+        (col("v").mean() - col("v").min().cast(DataType.FLOAT64)).alias(
+            "spread"
+        ),
+        col("v").first().alias("first"),
+        col("v").count().alias("n"),
+        col("v").cast(DataType.FLOAT64).std().alias("sd"),
+        col("s").max().alias("s_max"),
+    ]
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var lazy = (
+        frame.lazy().with_columns(exprs).filter(keep).collect(optimize=False)
+    )
+    var selected = (
+        frame.lazy()
+        .select_exprs([col("row"), col("v").sum().alias("total")])
+        .filter(keep)
+        .collect(optimize=False)
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    assert_true(
+        "window.reduce_rounds" in paths, "the reductions did not run as rounds"
+    )
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    var eager = frame.with_columns(exprs)
+    assert_equal(lazy.columns(), eager.columns())
+    assert_equal(lazy.height(), eager.height())
+    for name in frame.columns():
+        assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
+    for expr in exprs:
+        var name = expr._name
+        assert_true(lazy[name].is_constant(), "not a constant: " + name)
+        assert_frame(
+            lazy.select(col(name)).head(1), eager.select(col(name)).head(1)
+        )
+    var picked = frame.select_exprs([col("row"), col("v").sum().alias("total")])
+    assert_equal(selected.columns(), picked.columns())
+    assert_true(selected["row"].equals(picked["row"]))
+    assert_true(selected["total"].equals(picked["total"]))
+    var big = List[Int64](length=ROWS, fill=Int64(1) << 62)
+    var huge = DataFrame([Series("x", Column[Int64](big^))]).with_row_index(
+        "row"
+    )
+    with assert_raises(contains="overflow"):
+        _ = (
+            huge.lazy()
+            .with_columns([col("x").sum().alias("total")])
+            .filter(col("row") >= lit(Int64(0)))
+            .collect(optimize=False)
+        )
+    _ = threads^
