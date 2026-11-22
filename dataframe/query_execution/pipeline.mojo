@@ -1561,8 +1561,8 @@ struct _OperatorPipeline(Movable):
     of every row does too (`SortSink`): the finish sorts the keys and
     gathers the rows in rounds; and so do a projection of ranks over
     every row (`RankSink`), one of ordered windows over every row
-    (`OrderedWindowSink`), and one of values made from reductions over
-    every row (`ReductionSink`)."""
+    (`OrderedWindowSink`), and one that reads reductions over every row
+    (`ReductionSink`)."""
 
     var plan: QueryContext
     var index: Int
@@ -1598,9 +1598,8 @@ struct _OperatorPipeline(Movable):
     # runs as an `OrderedWindowSink`, and the sink while its rounds run.
     var windows: Bool
     var windowing: List[OrderedWindowSink]
-    # Whether it is a projection of values made from reductions over every
-    # row that runs as a `ReductionSink`, and the sink while its rounds
-    # run.
+    # Whether it is a projection that reads reductions over every row and
+    # runs as a `ReductionSink`, and the sink while its rounds run.
     var reductions: Bool
     var reducing: List[ReductionSink]
     var began: Int
@@ -2270,14 +2269,7 @@ def _probe_start(
     var file_scan = Optional[ArcPointer[ScanSource]]()
     var source_columns = Optional[DataFrame]()
     var distinct = _counts_distinct(expressions)
-    var eligibility = pipeline_eligibility(
-        operations,
-        indexes,
-        distinct,
-        len(keys),
-        ordered,
-        expressions,
-    )
+    var eligibility = pipeline_eligibility(operations, indexes)
     if eligibility.allowed and not frame_source:
         var opened = _open_scan_source(self, cursor, operations, batch_size)
         if not opened:
@@ -2337,19 +2329,7 @@ def _probe_start(
                 typed[len(typed) - 1], keys, expressions
             )
     var decision = select_aggregation_strategy(
-        self,
-        cursor,
-        batch_size,
-        keys,
-        expressions,
-        operations,
-        joins,
-        distinct,
-        ordered,
-        top,
-        grouping,
-        eligibility,
-        inline_table_eligible,
+        expressions, grouping, eligibility, inline_table_eligible
     )
     if decision.is_eager():
         trace_decision(decision)

@@ -963,11 +963,11 @@ values in input order (nulls included), and on its own it gathers the whole
 column into one row. `group_by(...).agg(col(x).implode())` followed by
 `explode(x)` gives the rows back.
 
-Struct columns work as `group_by`, `unique`/`n_unique`/`is_duplicated` and
-inner/left/semi/anti join keys. They are compared field by field together
-with the struct's own validity, so a null struct forms a group of its own,
-distinct from a struct whose fields are all null. Right and full joins on
-struct keys, struct keys with nested fields, and list keys raise.
+Struct and list columns work as `group_by`, `unique`/`n_unique`/`is_duplicated`
+and join keys of every kind. Structs compare field by field together with the
+struct's own validity, so a null struct forms a group of its own, distinct from
+a struct whose fields are all null; lists compare element by element, nulls
+equal, and an empty list differs from a null one. A null key joins nothing.
 
 `DataFrame.explode(columns)` and `LazyFrame.explode(columns)` produce one row
 per list element and repeat the other columns; an empty or null list gives

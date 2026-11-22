@@ -453,12 +453,11 @@ def test_aggregate_build_sides_finish_with_the_steps_above_them() raises:
 
 def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
     """A build side whose aggregate the stream declines once its inputs
-    are known (an ordered grouping over a right join, whose rows come in
-    its build side's order, which no pipeline keeps) still runs in the
-    schedule:
-    its pipeline makes the joined rows, and the aggregate runs over them
-    as an operator, with no schedule inside another's task. The result
-    is what the eager steps give."""
+    are known (an aggregate filter over struct values, which the aggregate
+    table does not apply) still runs in the schedule: its pipeline makes
+    the joined rows, and the aggregate runs over them as an operator, with
+    no schedule inside another's task. The result is what the eager steps
+    give."""
     var frame = source()
     var weights = List[Int64]()
     var keys = List[Int64]()
@@ -482,7 +481,16 @@ def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
             coalesce=False,
         )
         .group_by("s", maintain_order=True)
-        .agg([col("v").median().alias("m"), col("w").sum().alias("t")])
+        .agg(
+            [
+                col("v").median().alias("m"),
+                col("w").sum().alias("t"),
+                as_struct([col("v"), col("w")])
+                .filter(col("w") > lit(Int64(0)))
+                .first()
+                .alias("f"),
+            ]
+        )
     )
     var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
     var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
@@ -518,7 +526,16 @@ def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
             coalesce=False,
         )
         .group_by(["s"], maintain_order=True)
-        .agg([col("v").median().alias("m"), col("w").sum().alias("t")])
+        .agg(
+            [
+                col("v").median().alias("m"),
+                col("w").sum().alias("t"),
+                as_struct([col("v"), col("w")])
+                .filter(col("w") > lit(Int64(0)))
+                .first()
+                .alias("f"),
+            ]
+        )
     )
     var eager = (
         frame.select(["s", "k"])
@@ -887,10 +904,10 @@ def test_ranks_over_every_row_run_as_rounds_of_the_schedule() raises:
         assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
 
 
-def test_top_rows_run_as_rounds_of_the_schedule() raises:
-    """A sort limited to its first rows, computed as an input of the
-    query's schedule, runs as rounds of tasks of that schedule: a heap
-    per range of rows, combined, then the rows gathered. No task starts
+def test_top_rows_of_a_frame_run_in_a_pipeline_of_the_schedule() raises:
+    """A sort limited to its first rows over a frame in memory, computed
+    as an input of the query's schedule, runs as a morsel pipeline of that
+    schedule into its top-N sink, not on the eager frame. No task starts
     parallel work of its own, and the rows equal the eager ones."""
     var frame = source().with_row_index("row")
     var keep = col("row") >= lit(Int64(0))
@@ -913,7 +930,14 @@ def test_top_rows_run_as_rounds_of_the_schedule() raises:
     _ = trace^
     _ = setting^
     _ = threads^
-    assert_true("sort.rounds" in paths, "the top rows did not run as rounds")
+    assert_true(
+        "dataframe-strategy: morsel_pipeline" in paths,
+        "the top rows did not run in a pipeline",
+    )
+    assert_true(
+        "dataframe-strategy: eager_frame" not in paths,
+        "the top rows ran on the eager frame",
+    )
     assert_true(
         "parallel.jobs_in_task" not in paths,
         "a task started parallel work of its own",
@@ -1076,6 +1100,79 @@ def test_reductions_over_every_row_run_as_rounds_of_the_schedule() raises:
         _ = (
             huge.lazy()
             .with_columns([col("x").sum().alias("total")])
+            .filter(col("row") >= lit(Int64(0)))
+            .collect(optimize=False)
+        )
+    _ = threads^
+
+
+def test_reductions_beside_row_values_run_as_rounds_of_the_schedule() raises:
+    """A projection that mixes values made from reductions over all rows
+    with row-valued expressions, some of which read those reductions,
+    runs as rounds of tasks of the query's schedule: a round that reduces
+    ranges of rows, then a round that evaluates ranges of rows with the
+    reduced values given. No task starts parallel work of its own, the
+    values made from reductions alone are constant columns, and every
+    column equals the eager one, the row count included. A sum past Int64
+    read by a row-valued expression still fails."""
+    var frame = source().with_row_index("row")
+    var keep = col("row") >= lit(Int64(0))
+    var exprs: List[Expr] = [
+        col("v").sum().alias("total"),
+        (col("k") + lit(Int64(1))).alias("k1"),
+        (col("v").cast(DataType.FLOAT64) - col("v").mean()).alias("centered"),
+        (col("k") * row_count() - col("v").max()).alias("scaled"),
+        col("s").str().to_uppercase().alias("upper"),
+    ]
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var lazy = (
+        frame.lazy().with_columns(exprs).filter(keep).collect(optimize=False)
+    )
+    var selected = (
+        frame.lazy()
+        .select_exprs(
+            [
+                col("v").sum().alias("total"),
+                (col("k") * lit(Int64(2))).alias("k2"),
+            ]
+        )
+        .filter(col("k2") >= lit(Int64(0)))
+        .collect(optimize=False)
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    assert_true(
+        "window.reduce_row_rounds" in paths,
+        "the row-valued expressions did not run as rounds",
+    )
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    var eager = frame.with_columns(exprs)
+    assert_equal(lazy.columns(), eager.columns())
+    assert_equal(lazy.height(), eager.height())
+    for name in eager.columns():
+        assert_true(lazy[name].equals(eager[name]), "column differs: " + name)
+    assert_true(lazy["total"].is_constant(), "not a constant: total")
+    var picked = frame.select_exprs(
+        [col("v").sum().alias("total"), (col("k") * lit(Int64(2))).alias("k2")]
+    )
+    assert_equal(selected.columns(), picked.columns())
+    assert_equal(selected.height(), ROWS)
+    assert_true(selected["total"].equals(picked["total"]))
+    assert_true(selected["k2"].equals(picked["k2"]))
+    var big = List[Int64](length=ROWS, fill=Int64(1) << 62)
+    var huge = DataFrame([Series("x", Column[Int64](big^))]).with_row_index(
+        "row"
+    )
+    with assert_raises(contains="overflow"):
+        _ = (
+            huge.lazy()
+            .with_columns([(col("row") + col("x").sum()).alias("total")])
             .filter(col("row") >= lit(Int64(0)))
             .collect(optimize=False)
         )
