@@ -25,7 +25,6 @@ from dataframe.aggregation.expressions import (
 from dataframe.aggregation.state import (
     _StreamReduction,
     _merge_ascending_runs,
-    filters_supported,
     table_frame,
     table_inputs,
     table_specs,
@@ -410,10 +409,7 @@ struct GroupBy(Copyable):
         for key in self._keys:
             if not key_supported(key):
                 return False
-        var empty_keys = List[Series](capacity=len(self._keys))
-        for key in self._keys:
-            empty_keys.append(key.slice(0, 0))
-        return filters_supported(self._frame.clear(), empty_keys, expressions)
+        return True
 
     def _agg_table(
         self, expressions: List[Expr], workers: Int, batch_size: Int
