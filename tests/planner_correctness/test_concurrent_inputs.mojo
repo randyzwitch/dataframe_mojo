@@ -453,12 +453,11 @@ def test_aggregate_build_sides_finish_with_the_steps_above_them() raises:
 
 def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
     """A build side whose aggregate the stream declines once its inputs
-    are known (an ordered grouping over a right join, whose rows come in
-    its build side's order, which no pipeline keeps) still runs in the
-    schedule:
-    its pipeline makes the joined rows, and the aggregate runs over them
-    as an operator, with no schedule inside another's task. The result
-    is what the eager steps give."""
+    are known (an aggregate filter over struct values, which the aggregate
+    table does not apply) still runs in the schedule: its pipeline makes
+    the joined rows, and the aggregate runs over them as an operator, with
+    no schedule inside another's task. The result is what the eager steps
+    give."""
     var frame = source()
     var weights = List[Int64]()
     var keys = List[Int64]()
@@ -482,7 +481,16 @@ def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
             coalesce=False,
         )
         .group_by("s", maintain_order=True)
-        .agg([col("v").median().alias("m"), col("w").sum().alias("t")])
+        .agg(
+            [
+                col("v").median().alias("m"),
+                col("w").sum().alias("t"),
+                as_struct([col("v"), col("w")])
+                .filter(col("w") > lit(Int64(0)))
+                .first()
+                .alias("f"),
+            ]
+        )
     )
     var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
     var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
@@ -518,7 +526,16 @@ def test_a_declined_aggregate_input_streams_the_rows_below_it() raises:
             coalesce=False,
         )
         .group_by(["s"], maintain_order=True)
-        .agg([col("v").median().alias("m"), col("w").sum().alias("t")])
+        .agg(
+            [
+                col("v").median().alias("m"),
+                col("w").sum().alias("t"),
+                as_struct([col("v"), col("w")])
+                .filter(col("w") > lit(Int64(0)))
+                .first()
+                .alias("f"),
+            ]
+        )
     )
     var eager = (
         frame.select(["s", "k"])
