@@ -163,7 +163,7 @@ def eager(threads: Int, rows: Int, groups: Int) raises:
         )
         var text = observed.text()
         assert_true(
-            "dataframe-path: group_by.aggregate_table\n" in text,
+            "dataframe-path: pipeline.group_table\n" in text,
             "states by address did not reach the aggregate table",
         )
         assert_true(

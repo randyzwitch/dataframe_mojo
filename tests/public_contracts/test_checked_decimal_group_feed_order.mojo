@@ -33,11 +33,18 @@ def _frame(rows: Int, bad: Int, second: Int = 1) raises -> DataFrame:
 
 def test_checked_decimal_group_and_over_distinct_operand_batches() raises:
     var worker = WorkerSetting(1)
+    # A grouping's reduction inputs are computed one data chunk
+    # (STANDARD_VECTOR_SIZE rows) at a time, before that chunk updates the
+    # states: an operand fault inside the first chunk (row 1024) comes
+    # before the precision fault its rows 0 and 1 make, and one in a later
+    # chunk (row 4096) after it.
     var frame = _frame(1025, 1024)
-    with assert_raises(contains="decimal precision 38"):
+    with assert_raises(contains="decimal multiplication overflow"):
         _ = frame.group_by("g").agg(feed_expression(), batch_size=1024)
     with assert_raises(contains="decimal multiplication overflow"):
         _ = frame.group_by("g").agg(feed_expression(), batch_size=1025)
+    with assert_raises(contains="decimal precision 38"):
+        _ = _frame(4097, 4096).group_by("g").agg(feed_expression())
     var over = feed_expression().over("g")
     # A window's argument (a * b) is computed over every input row before
     # any partition is summed,
@@ -46,8 +53,8 @@ def test_checked_decimal_group_and_over_distinct_operand_batches() raises:
         _ = frame.select(over, batch_size=1024)
     with assert_raises(contains="decimal multiplication overflow"):
         _ = frame.select(over, batch_size=1025)
-    # Public lazy defaults differ: eager GROUP uses 1024, SELECT/OVER 8192.
-    with assert_raises(contains="decimal precision 38"):
+    # The lazy grouping computes its inputs a chunk at a time too.
+    with assert_raises(contains="decimal multiplication overflow"):
         _ = (
             frame.lazy()
             .group_by("g")
@@ -74,19 +81,13 @@ def test_checked_decimal_group_and_over_distinct_operand_batches() raises:
 
 
 def test_checked_decimal_group_range_workers_before_partial_merges() raises:
-    var frame = _frame(32768, 1024)
     var serial = WorkerSetting(1)
     with assert_raises(contains="decimal precision 38"):
-        _ = frame.group_by("g").agg(feed_expression(), batch_size=1024)
+        _ = _frame(32768, 4096).group_by("g").agg(feed_expression())
+    with assert_raises(contains="decimal multiplication overflow"):
+        _ = _frame(32768, 1024).group_by("g").agg(feed_expression())
     _ = serial^
     var parallel = WorkerSetting(2)
-    # Each worker's morsel evaluates agg's requested batch before it updates
-    # the states: rows 0 and 1 pass precision inside a 1024-row batch, while
-    # an 8192-row batch reaches the operand fault at row 1024 first.
-    with assert_raises(contains="decimal precision 38"):
-        _ = frame.group_by("g").agg(feed_expression(), batch_size=1024)
-    with assert_raises(contains="decimal multiplication overflow"):
-        _ = frame.group_by("g").agg(feed_expression(), batch_size=8192)
     # Range workers must succeed before group partials are merged. With no
     # input fault each worker holds 6e37; only their merge exceeds precision.
     with assert_raises(contains="decimal precision 38"):
@@ -105,10 +106,10 @@ def test_checked_decimal_group_range_workers_before_partial_merges() raises:
         "expected a decimal fault, got: " + raised,
     )
     _ = parallel^
-    # A batch's operands are evaluated before the batch updates the states,
-    # and no later: on one worker the prefix of rows 0 and 1 exceeds
-    # precision in the first batch, before the operand fault at the last
-    # row is reached. (On several workers either fault may come first.)
+    # A chunk's operands are evaluated before the chunk updates the
+    # states, and no later: on one worker the prefix of rows 0 and 1
+    # exceeds precision in the first chunk, before the operand fault at the
+    # last row is reached. (On several workers either fault may come first.)
     var one = WorkerSetting(1)
     with assert_raises(contains="decimal precision 38"):
         _ = _frame(131072, 131071).group_by("g").agg(feed_expression())

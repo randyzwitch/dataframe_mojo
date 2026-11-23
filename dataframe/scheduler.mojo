@@ -368,6 +368,10 @@ struct _Executor[P: SchedulablePipeline](Movable):
     # it is (`_Turns`).
     var one_event: Bool
     var turns: ArcPointer[_Turns]
+    # The crew serving this schedule (0: none). Its threads are created
+    # once two tasks are queued at once (`_push`): a schedule of one task
+    # at a time runs on the caller and creates none.
+    var crew: Int
 
     def __init__(
         out self,
@@ -422,6 +426,7 @@ struct _Executor[P: SchedulablePipeline](Movable):
         self.stamp = Int(perf_counter_ns())
         self.one_event = False
         self.turns = ArcPointer(_Turns())
+        self.crew = 0
 
     def _pipelines(self) -> ref[MutAnyOrigin] List[Self.P]:
         return Pointer[List[Self.P], MutAnyOrigin](
@@ -514,6 +519,14 @@ struct _Executor[P: SchedulablePipeline](Movable):
                         Int64(record)
                     )
                     _counter(sequences, slot).store(position + 1)
+                    if self.crew != 0 and position + 1 - self.head.load() > 1:
+                        # Work for a second thread: the crew's threads
+                        # start (once; `spawn` is a no-op after).
+                        ref serving = Pointer[_Crew, MutAnyOrigin](
+                            unsafe_from_address=self.crew
+                        )[]
+                        if serving.spawned.load() == 0:
+                            serving.spawn(self.crew)
                     return True
             elif free < 0:
                 # The slot still holds the task one lap behind. A taker
@@ -733,7 +746,14 @@ def run_pipelines[
             ref serving = Pointer[_Crew, MutAnyOrigin](
                 unsafe_from_address=crew
             )[]
-            if serving.spawned.load() != 2:
+            # Its threads start once two tasks are queued at once: now,
+            # when the first events already queued them, else on the push
+            # that does.
+            executor.crew = crew
+            if (
+                executor.tail.load() - executor.head.load() > 1
+                and serving.spawned.load() == 0
+            ):
                 serving.spawn(crew)
             var step: _Entry = _step[P]
             var queued: _Entry = _queued[P]

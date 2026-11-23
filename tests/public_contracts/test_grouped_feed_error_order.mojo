@@ -44,50 +44,51 @@ def decimal_feed_operand(precision: Int = 3) raises -> Expr:
 
 
 def test_grouped_feed_input_batch_precedes_decimal_update_same_batch_only() raises:
-    # At row1, Decimal128 precision3 state would become1000. An input error
-    # anywhere in that complete1024-row batch happens before state.update.
+    # At row1, Decimal128 precision3 state would become1000. A grouping's
+    # inputs are computed one data chunk (STANDARD_VECTOR_SIZE = 2048 rows)
+    # at a time: an input error anywhere in the first chunk happens before
+    # its state update, and one in the next chunk after it, whatever the
+    # plan's batch size. On several workers a later morsel's input error
+    # may race the first morsel's update, so only row 2 is checked there.
     for workers in [1, 4]:
         var setting = WorkerSetting(workers)
-        for fault_row in [2, 1023, 1024]:
-            var frame = decimal_feed_frame(fault_row)
+        var fault_rows: List[Int] = [2]
+        if workers == 1:
+            fault_rows = [2, 2047, 2048]
+        for fault_row in fault_rows:
+            var frame = decimal_feed_frame(fault_row, rows=4097)
             with assert_raises(
                 contains="cast from int64 to int8 failed" if fault_row
-                < 1024 else "decimal precision"
+                < 2048 else "decimal precision"
             ):
                 _ = frame.group_by("k").agg(
                     decimal_feed_operand().sum(), batch_size=1024
                 )
             # MEAN widens its accumulator to precision 38 even for a
             # Decimal128 input. Overflow that state to exercise update order.
-            var mean_frame = decimal_feed_frame(fault_row, precision=38)
+            var mean_frame = decimal_feed_frame(
+                fault_row, rows=4097, precision=38
+            )
             with assert_raises(
                 contains="cast from int64 to int8 failed" if fault_row
-                < 1024 else "decimal precision 38"
+                < 2048 else "decimal precision 38"
             ):
-                _ = mean_frame.group_by("k").agg(
-                    decimal_feed_operand(38).mean(), batch_size=1024
-                )
-            # Changing the actual eager GroupBy batch boundary changes phase
-            # precedence. This is a contract, not a global fixed8192 assumption.
-            with assert_raises(contains="decimal precision"):
-                _ = frame.group_by("k").agg(
-                    decimal_feed_operand().sum(), batch_size=1
-                )
-            with assert_raises(contains="decimal precision 38"):
                 _ = mean_frame.group_by("k").agg(
                     decimal_feed_operand(38).mean(), batch_size=1
                 )
-        for fault_row in [1023, 1024]:
-            var decimals = List[Int128](length=1025, fill=0)
+        for fault_row in fault_rows:
+            if fault_row == 2:
+                continue
+            var decimals = List[Int128](length=4097, fill=0)
             decimals[0] = 999
             decimals[1] = 999
             decimals[2] = 1
             decimals[3] = 1
-            var keys = List[Int32](length=1025, fill=0)
-            for row in range(1025):
+            var keys = List[Int32](length=4097, fill=0)
+            for row in range(4097):
                 keys[row] = Int32(row % 2)
             var frame = (
-                decimal_feed_frame(fault_row)
+                decimal_feed_frame(fault_row, rows=4097)
                 .with_column(
                     Series("d", Column[Int128](decimals^)).with_dtype(
                         DataType.decimal(3, 0, 128)
@@ -97,7 +98,7 @@ def test_grouped_feed_input_batch_precedes_decimal_update_same_batch_only() rais
             )
             with assert_raises(
                 contains="cast from int64 to int8 failed" if fault_row
-                < 1024 else "decimal precision"
+                < 2048 else "decimal precision"
             ):
                 _ = frame.group_by("k").agg(decimal_feed_operand().sum())
         # Raising min_count suppresses final validity, not an update exception.

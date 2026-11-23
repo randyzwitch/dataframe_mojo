@@ -122,7 +122,7 @@ def eager_lists(threads: Int, rows: Int, groups: Int) raises:
             .agg(list_reductions())
         )
         assert_true(
-            "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+            "dataframe-path: pipeline.group_table\n" in observed.text(),
             "implode and mode did not reach the aggregate table",
         )
         _ = observed^

@@ -121,7 +121,7 @@ def check_case(
     _ = eager_observed^
     _ = trace^
     assert_true(
-        "dataframe-path: group_by.aggregate_table\n" in eager_text,
+        "dataframe-path: pipeline.group_table\n" in eager_text,
         context + ": the eager group-by left the table",
     )
     var expected = source.filter(kept).group_by(["k"]).agg(plain).sort(["k"])
