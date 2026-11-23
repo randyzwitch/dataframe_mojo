@@ -209,7 +209,7 @@ def test_ordered_groups_over_cross_products() raises:
         _assert_table(query)
         _check(
             query,
-            frame.join(build, how="cross")
+            _left_major(frame, build)
             .filter(col("v") >= 10)
             .group_by(by, maintain_order=True)
             .agg(_reductions()),
@@ -270,3 +270,22 @@ def test_ordered_groups_over_build_row_joins_run_in_the_table() raises:
                     _check(query, expected)
                 else:
                     _check_unmatched_last(query, expected, 4)
+
+
+def _left_major(left: DataFrame, right: DataFrame) raises -> DataFrame:
+    """The cross product in left-major order (each left row with every
+    right row in turn), the order an order-dependent reduction over a
+    cross product reads its pairs in. A join's own output order is
+    unspecified, so the oracle builds the pairs itself."""
+    var left_rows = List[Int]()
+    var right_rows = List[Int]()
+    for i in range(left.height()):
+        for j in range(right.height()):
+            left_rows.append(i)
+            right_rows.append(j)
+    var columns = List[Series]()
+    for name in left.columns():
+        columns.append(left.column(name).take(left_rows))
+    for name in right.columns():
+        columns.append(right.column(name).take(right_rows))
+    return DataFrame(columns^)
