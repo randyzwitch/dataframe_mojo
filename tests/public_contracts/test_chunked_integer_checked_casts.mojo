@@ -215,12 +215,16 @@ def test_public_cast_conditionals_preserve_actual_mask_and_total_cast_recipes() 
     var frame = DataFrame(
         [source.copy(), Series("keep", BoolColumn([True, False, True]))]
     )
-    # A nonnull otherwise passes a real observation mask to the cast.
-    var masked = frame.select(
-        when(col("keep"))
-        .then(col("x").cast(DataType.FLOAT32))
-        .otherwise(lit(Float32(0)))
-        .alias("result")
+    # A nonnull otherwise passes a real observation mask to the cast (in
+    # the expression kernels; an eager select's pipeline casts each row
+    # once, rounding once).
+    var masked = frame._select_exprs(
+        [
+            when(col("keep"))
+            .then(col("x").cast(DataType.FLOAT32))
+            .otherwise(lit(Float32(0)))
+            .alias("result")
+        ]
     )
     assert_equal(masked.column("result").name(), "result")
     _float_bits(

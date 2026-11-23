@@ -523,7 +523,7 @@ def _table_input(
         and expression._nodes[value].text in frame.columns()
     ):
         return frame.column(expression._nodes[value].text)
-    var evaluated = frame.select_exprs(
+    var evaluated = frame._select_exprs(
         [subtree(expression, value).alias("__input")]
     )
     return evaluated._columns[0].copy()
@@ -1024,7 +1024,7 @@ struct _StreamReduction(Movable):
             )
         var values = DataFrame(
             reduced^, height=self.keys.height()
-        ).select_exprs(self.outputs)
+        )._select_exprs(self.outputs)
         var columns = self.keys._columns.copy()
         for column in values._columns:
             columns.append(column.copy())

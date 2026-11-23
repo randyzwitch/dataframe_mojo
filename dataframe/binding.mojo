@@ -1776,6 +1776,17 @@ def bind(
             if len(node.dtypes) == 0 or not node.dtypes[0]:
                 raise Error("Unknown cast dtype: " + node.text)
             dtype = node.dtypes[0].value()
+            var cast_from = types[node.left]
+            if (
+                cast_from.is_temporal()
+                and dtype.is_temporal()
+                and not _temporal_cast_pair(cast_from, dtype)
+            ):
+                # A pair of time types with no conversion between them is
+                # a schema error, raised whatever rows the cast reads.
+                raise Error(
+                    "cannot cast " + cast_from.name() + " to " + dtype.name()
+                )
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif is_replace(node.op):
@@ -2121,4 +2132,18 @@ def bind(
         compiled = ArcPointer(regexes^)
     return BoundExpr(
         resolved^, types^, shapes^, aggregated^, sources^, fusible^, compiled^
+    )
+
+
+def _temporal_cast_pair(source: DataType, target: DataType) -> Bool:
+    """Whether a cast between two time types converts: to itself, a date
+    to a datetime and back, a datetime to its time of day, or between
+    units of datetimes or of durations."""
+    return (
+        source == target
+        or (source.is_date() and target.is_datetime())
+        or (source.is_datetime() and target.is_date())
+        or (source.is_datetime() and target.is_time())
+        or (source.is_datetime() and target.is_datetime())
+        or (source.is_duration() and target.is_duration())
     )

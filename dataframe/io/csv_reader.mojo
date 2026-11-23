@@ -142,7 +142,7 @@ struct _DecodeJob(Job):
         if self.context[].options.n_rows >= 0:
             _ = self.context[].decoded_rows.fetch_add(Int64(actual))
         if self.context[].predicate:
-            self.result = self.result.filter(self.context[].predicate.value())
+            self.result = self.result._filter(self.context[].predicate.value())
 
     def into_frame(deinit self) -> DataFrame:
         return self.result^
@@ -406,7 +406,7 @@ def read_csv_explicit(
             var result = _decode_unmapped(
                 input^, schema, options, keep, has_header
             )
-            return result.filter(predicate.value()) if predicate else result^
+            return result._filter(predicate.value()) if predicate else result^
     _validate_explicit_header(mapping.span(), schema, options, has_header)
     var prelude = _prelude(mapping.span(), options, has_header)
     return _read_mapped_body(
@@ -430,7 +430,7 @@ def _read_mapped_body(
         var empty = decode_chunk(
             bytes[len(bytes) :], schema, options, keep, 0, record
         )
-        return empty.filter(predicate.value()) if predicate else empty^
+        return empty._filter(predicate.value()) if predicate else empty^
     # Give each decode worker enough input to amortize pool startup.
     # Large mapped files still use every configured worker.
     var workers = min(
@@ -598,7 +598,7 @@ def read_csv_inferred(
         if n_rows >= 0 and result.height() > n_rows:
             result = result.head(n_rows)
         if predicate:
-            result = result.filter(predicate.value())
+            result = result._filter(predicate.value())
         _ = input^
         return result^
 
@@ -740,7 +740,7 @@ def _decode_buffer_body(
     if options.n_rows >= 0 and result.height() > options.n_rows:
         result = result.head(options.n_rows)
     if predicate:
-        return result.filter(predicate.value())
+        return result._filter(predicate.value())
     return result^
 
 
@@ -1125,7 +1125,7 @@ def _read_compressed_csv(
     if options.n_rows >= 0 and result.height() > options.n_rows:
         result = result.head(options.n_rows)
     if predicate:
-        return result.filter(predicate.value())
+        return result._filter(predicate.value())
     return result^
 
 

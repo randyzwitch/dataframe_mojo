@@ -1386,7 +1386,7 @@ def plan_left_join_to_inner(
             continue
         names.append(name)
         nulls.append(Series.full_null(name, schema.column(name).dtype(), 1))
-    if DataFrame(nulls^).filter(predicate).height() > 0:
+    if DataFrame(nulls^)._filter(predicate).height() > 0:
         return False
     self._nodes[join].how = JOIN_INNER
     self._nodes[join].text = "inner"

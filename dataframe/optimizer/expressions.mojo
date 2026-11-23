@@ -604,8 +604,11 @@ def shared_partition_keys(exprs: List[Expr]) -> List[String]:
                     return List[String]()
                 var keys = List[String]()
                 for name in split_names(node.text2):
-                    if name.byte_length() > 0:
-                        keys.append(name)
+                    if name.byte_length() == 0:
+                        # A column named by the empty string reads like
+                        # no key at all to the partitioned sink.
+                        return List[String]()
+                    keys.append(name)
                 if not found:
                     shared = keys^
                     found = True

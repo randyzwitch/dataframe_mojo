@@ -152,6 +152,24 @@ def _storage_joined(a: Storage, b: Storage) -> Optional[Storage]:
         var joined = x.copy()
         joined._length += y._length
         return Storage(joined^)
+    if a.isa[StringColumn]() and b.isa[StringColumn]():
+        ref x = a[StringColumn]
+        ref y = b[StringColumn]
+        # A repeated value is not a window of its buffers' rows, and codes
+        # carried from different sources number different dictionaries.
+        if (
+            x.is_constant()
+            or y.is_constant()
+            or not x._shares_buffers_with(y)
+            or x._offset + x._length != y._offset
+            or Bool(x._codes) != Bool(y._codes)
+        ):
+            return None
+        if x._codes and x._codes.value().ptr() != y._codes.value().ptr():
+            return None
+        var joined = x.copy()
+        joined._length += y._length
+        return Storage(joined^)
     return None
 
 
@@ -1108,7 +1126,11 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         return DataFrame([self.copy()])
 
     def _apply(self, expr: Expr) raises -> Self:
-        return self._frame().select(expr.alias(self._name)).column(self._name)
+        return (
+            self._frame()
+            ._select_exprs([expr.alias(self._name)])
+            .column(self._name)
+        )
 
     def _pair(self, other: Self, op: String) raises -> Self:
         if len(self) != len(other):
@@ -1154,10 +1176,10 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             e = left | right
         else:
             e = left ^ right
-        return frame.select(e.alias(self._name)).column(self._name)
+        return frame._select_exprs([e.alias(self._name)]).column(self._name)
 
     def _scalar(self, expr: Expr) raises -> AnyValue:
-        return self._frame().select(expr.alias(self._name)).item()
+        return self._frame()._select_exprs([expr.alias(self._name)]).item()
 
     def __add__(self, other: Self) raises -> Self:
         return self._pair(other, "+")

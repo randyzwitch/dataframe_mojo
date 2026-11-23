@@ -180,8 +180,9 @@ def test_constant_columns_in_arithmetic() raises:
         assert_true(got.equals(want))
         var lazy = frame.lazy().select(pair[0].alias("r")).collect()
         assert_true(lazy.column("r").equals(want))
-    # Constants with constants (and literals) stay constants.
-    var both = frame.select_exprs(
+    # Constants with constants (and literals) stay constants in the
+    # projection kernels; an eager select's pipeline writes every row.
+    var both = frame._select_exprs(
         [
             (col("c") * lit(Int64(2))).alias("a"),
             (col("c") + col("c")).alias("b"),
