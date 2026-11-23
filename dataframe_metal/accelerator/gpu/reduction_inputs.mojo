@@ -13,6 +13,7 @@ from dataframe.execution_observation import DeviceObservation
 from std.memory import ArcPointer
 
 comptime MAX_PARTIALS = 1024
+comptime MIN_CHUNK_PARTIALS = 64
 
 
 struct HandoffTimings(Copyable, Movable):
@@ -112,4 +113,4 @@ def _chunk_partials(rows: Int, total_rows: Int) -> Int:
     only the blocks their rows need. A single chunk keeps the original grid.
     """
     var share = (rows * MAX_PARTIALS + total_rows - 1) // total_rows
-    return min(_partials(rows), max(64, share))
+    return min(_partials(rows), max(MIN_CHUNK_PARTIALS, share))

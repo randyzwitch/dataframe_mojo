@@ -507,18 +507,29 @@ struct DataFrame(Copyable, Sized, Writable):
 
     def tail(self, n: Int = 5) raises -> Self:
         """Last n rows; a negative n drops the first -n rows."""
+        return self._row_order(self.lazy().tail(n))
+
+    def _tail_rows(self, n: Int) raises -> Self:
+        """`tail` as a slice of this frame, with no plan."""
         if n < 0:
             return self.slice(min(-n, self._height))
         return self.slice(self._height - min(n, self._height))
+
+    def _row_order(self, plan: LazyFrame) raises -> Self:
+        """A one-node plan over this frame of an operation that places
+        rows by their position (tail, reverse, shift, gather_every,
+        with_row_index) or fills nulls by strategy, run through the same
+        pipelines as `LazyFrame.collect`: its input is complete when the
+        node's sink starts, which then splits the work by rows or columns
+        as rounds of tasks (`RowOrderSink`)."""
+        return plan._collect(optimize=False, streaming=True, batch_size=65536)
 
     def limit(self, n: Int = 5) raises -> Self:
         return self.head(n)
 
     def reverse(self) raises -> Self:
-        var columns = List[Series](capacity=self.width())
-        for column in self._columns:
-            columns.append(column.reverse())
-        return Self(columns^, height=self._height)
+        """The rows in reverse order."""
+        return self._row_order(self.lazy().reverse())
 
     def shift(
         self, n: Int = 1, *, fill_value: Optional[Expr] = None
@@ -530,39 +541,10 @@ struct DataFrame(Copyable, Sized, Writable):
         column's type. `fill_value` is a scalar expression evaluated
         against this frame: a literal, or a reduction such as
         `col("a").max()`."""
-        var height = self._height
-        var vacated = height if n >= height or n <= -height else abs(n)
-        if vacated == 0:
-            return self.copy()
-        var fills = Optional[Self]()
         if fill_value and self.width() > 0:
             if bind(fill_value.value(), self._columns).shape() == ROWS:
                 raise Error("shift fill_value must be a scalar value")
-            var exprs = List[Expr](capacity=self.width())
-            for column in self._columns:
-                exprs.append(
-                    fill_value.value().cast(column.dtype()).alias(column.name())
-                )
-            fills = self._select_exprs(exprs)
-        # The source row of each output row; vacated rows read -1 (null)
-        # or, with a fill value, the fill row appended after the last.
-        var empty_row = height if fills else -1
-        var rows = List[Int](capacity=height)
-        for i in range(height):
-            if n > 0:
-                rows.append(i - vacated if i >= vacated else empty_row)
-            else:
-                rows.append(i + vacated if i + vacated < height else empty_row)
-        var columns = List[Series](capacity=self.width())
-        for k in range(self.width()):
-            ref column = self._columns[k]
-            if fills:
-                columns.append(
-                    column.append(fills.value()._columns[k]).take(rows)
-                )
-            else:
-                columns.append(column.take_or_null(rows))
-        return Self(columns^, height=height)
+        return self._row_order(self.lazy().shift(n, fill_value=fill_value))
 
     def vstack(self, other: Self) raises -> Self:
         """Append other's rows; schemas must match exactly."""
@@ -665,14 +647,7 @@ struct DataFrame(Copyable, Sized, Writable):
         """Take every nth row from a nonnegative offset; n must be positive."""
         if n <= 0 or offset < 0:
             raise Error("gather_every needs positive n and nonnegative offset")
-        var indices = List[Int]()
-        var row = offset
-        while row < self._height:
-            indices.append(row)
-            if n >= self._height - row:
-                break
-            row += n
-        return self.take(indices)
+        return self._row_order(self.lazy().gather_every(n, offset))
 
     def with_row_index(
         self, name: String = "index", offset: Int64 = 0
@@ -681,14 +656,7 @@ struct DataFrame(Copyable, Sized, Writable):
         for column in self._columns:
             if column.name() == name:
                 raise Error("Row index name collides with column: " + name)
-        var values = List[Int64](capacity=self._height)
-        for i in range(self._height):
-            values.append(offset + Int64(i))
-        var columns = List[Series](capacity=self.width() + 1)
-        columns.append(Series(name, Column[Int64](values^)))
-        for column in self._columns:
-            columns.append(column.copy())
-        return Self(columns^, height=self._height)
+        return self._row_order(self.lazy().with_row_index(name, offset))
 
     def select(self, names: List[String]) raises -> Self:
         var columns = List[Series](capacity=len(names))
@@ -2929,7 +2897,18 @@ struct DataFrame(Copyable, Sized, Writable):
         toward zero, preserving dtype. Columns with no nulls are unchanged;
         all-null columns stay null for forward/backward/min/max/mean.
         """
-        var run_limit = self._fill_strategy_limit(strategy, limit, subset)
+        _ = self._fill_strategy_limit(strategy, limit, subset)
+        return self._row_order(
+            self.lazy().fill_null(strategy=strategy, limit=limit, subset=subset)
+        )
+
+    def _strategy_fills(
+        self, strategy: String, run_limit: Int, subset: List[String]
+    ) raises -> List[Expr]:
+        """The expressions `fill_null(strategy=...)` replaces columns with
+        (`_fill_strategy_limit` checked the arguments): none for a column
+        with no nulls, or, unless filling with zero or one, one of only
+        nulls."""
         var fills = List[Expr]()
         for column in self._columns:
             var name = column.name()
@@ -2991,7 +2970,7 @@ struct DataFrame(Copyable, Sized, Writable):
             if dtype.is_categorical():
                 expression = expression.cast(dtype)
             fills.append(expression.alias(name))
-        return self._with_columns(fills)
+        return fills^
 
     def _fill_strategy_limit(
         self, strategy: String, limit: Optional[Int], subset: List[String]
