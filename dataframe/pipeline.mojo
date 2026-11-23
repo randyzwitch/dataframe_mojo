@@ -1643,6 +1643,18 @@ struct _ChunkRunner(Movable):
             self.hand_batch()
             self.materialize[0].begin(morsel)
 
+    def _sinks_frames(self) -> Bool:
+        """Whether the sink is a materialize sink, which takes a morsel's
+        columns whole (`MaterializeSink.sink_frame`)."""
+        return (
+            len(self.materialize) > 0
+            and len(self.ungrouped) == 0
+            and len(self.table) == 0
+            and len(self.sets) == 0
+            and len(self.build) == 0
+            and len(self.retained) == 0
+        )
+
     def sink_full(self) -> Bool:
         """Whether the worker's limited sink holds all the rows it can use:
         nothing it would sink from here on is wanted."""
@@ -1789,8 +1801,12 @@ struct _ChunkRunner(Movable):
         var columns: _Columns,
         first: Int,
         stop: Int,
+        whole: Bool = True,
     ) raises -> _Columns:
-        """Steps [first, stop) over `columns`, collected."""
+        """Steps [first, stop) over `columns`, collected. With `whole`,
+        columns that reach a materialize sink are its batch as they are
+        (`_sinks_frames`); a cross product's pieces, a chunk each, are cut
+        into chunks like any other rows instead."""
         var at = first
         var n = len(self.steps[])
         while at < stop:
@@ -1827,6 +1843,16 @@ struct _ChunkRunner(Movable):
                 # Row counts read no column: the rows are only counted.
                 self.ungrouped[0].sink_rows(columns.height)
                 return _Columns()
+            if whole and self._sinks_frames():
+                # Rows held as whole columns (a join's output, or the
+                # source with no steps) are the morsel's batch as they
+                # are: a column read whole stays a window of its source,
+                # and one read through a row list is gathered once.
+                ref schema = self.schemas[][n]
+                self.materialize[0].sink_frame(
+                    columns.whole(self.arena, schema)
+                )
+                return _Columns()
             # A join's output (or the source, with no steps) cut into
             # chunks for the sink.
             columns = self._vector_steps(columns, n, n)
@@ -1857,7 +1883,7 @@ struct _ChunkRunner(Movable):
             if not piece:
                 return
             self.counts[2 * s + 2] += piece.value().height
-            _ = self.run_until(piece.take(), s + 1, n)
+            _ = self.run_until(piece.take(), s + 1, n, whole=False)
             if self.sink_full():
                 return
 
