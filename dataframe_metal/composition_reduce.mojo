@@ -54,6 +54,8 @@ from .accelerator.gpu.filter_sum import BLOCK_SIZE
 from .accelerator.gpu.reduction_inputs import (
     HandoffTimings,
     _chunk_partials,
+    MAX_PARTIALS,
+    MIN_CHUNK_PARTIALS,
     _check_ran,
 )
 from .accelerator.gpu.query_scope import Scope, shared_service
@@ -733,6 +735,37 @@ def _partial_float(s: Float32, c: Float32) raises -> Float64:
     return Float64(s) - Float64(c)
 
 
+def _pack_fragmented_inputs(
+    frame: DataFrame, bundle: Composition
+) raises -> Optional[DataFrame]:
+    # A small chunk cannot fill one grid. With enough separate allocations,
+    # even the minimum useful launches together exceed a full grid of blocks.
+    var names = bundle.inputs.copy()
+    if bundle.predicate.filter_column not in names:
+        names.append(bundle.predicate.filter_column.copy())
+    var min_chunks = max(
+        MAX_PARTIALS // MIN_CHUNK_PARTIALS + 1,
+        (frame.height() + MAX_PARTIALS * BLOCK_SIZE - 1)
+        // (MAX_PARTIALS * BLOCK_SIZE),
+    )
+    var fragmented = False
+    for name in names:
+        if frame.column(name).n_chunks() >= min_chunks:
+            fragmented = True
+            break
+    if not fragmented:
+        return None
+    var inputs = List[Series]()
+    fragmented = False
+    for name in names:
+        var joined = frame.column(name)._joined_windows()
+        fragmented = fragmented or joined.n_chunks() >= min_chunks
+        inputs.append(joined^)
+    if not fragmented:
+        return None
+    return DataFrame(inputs^).rechunk()
+
+
 def _float_arity[
     wide: Bool, arity: Int
 ](
@@ -761,7 +794,22 @@ def _float_arity[
                     bundle, frame, scope, zero_copy, timings
                 )
             else:
-                # Preserve the original exact-mean scan and its register state.
+                # Exact bins can combine the original chunks in any order.
+                comptime if n == arity:
+                    if zero_copy and bundle.predicate.filtered:
+                        var started = Int(perf_counter_ns())
+                        var packed = _pack_fragmented_inputs(frame, bundle)
+                        if packed:
+                            var prepare_ns = Int(perf_counter_ns()) - started
+                            var result = _run[True, wide, arity, n, True, 0](
+                                bundle,
+                                packed.value(),
+                                scope,
+                                zero_copy,
+                                timings,
+                            )
+                            timings.upload_ns += prepare_ns
+                            return result^
                 return _run[True, wide, arity, n, True, 0](
                     bundle, frame, scope, zero_copy, timings
                 )
