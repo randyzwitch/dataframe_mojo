@@ -51,10 +51,13 @@ matched CPU measurements can return `(-1, pipeline_estimate(...))`; existing
 explicit `AcceleratorBackend` classes inherit that behavior automatically.
 
 For a complete resident pipeline, `features.cpu_executor` can carry the
-requested streaming setting. A provider with measurements for both CPU
+requested streaming setting and the planner’s pipeline key. A provider with measurements for both CPU
 executors may set `materialized` on that choice and return the corresponding
 CPU cost in the same call. The planner uses the selected executor if the
-pipeline stays on CPU. An estimate with `collect_request` set counts once
+pipeline stays on CPU. A provider with consistent CPU measurements across
+layouts may set the same preference and return `(-1, -1)` for an unfamiliar
+layout. The generic CPU cost then applies. A matched CPU estimate from any
+device takes precedence over that preference. An estimate with `collect_request` set counts once
 toward startup payback.
 
 The core calls the whole-plan functions for `engine="accel"`, the hand-off

@@ -552,6 +552,11 @@ struct _TableData(Movable):
     var heaps: TupleDataHeaps
     # The finalize tasks not yet run, one per build sink thread.
     var pending: List[_FinalizeJob]
+    # The build side's stored columns, each one chunk, when its rows are
+    # numbered by their place in them and keep no payload
+    # (`JoinBuildLayout.from_source`): a join reads its build columns
+    # from here by row number. Empty otherwise.
+    var source: List[Series]
 
     def __init__(
         out self, var keys: List[Series], layout: TupleDataLayout
@@ -569,6 +574,7 @@ struct _TableData(Movable):
         self.null_row = List[UInt8](length=layout.row_width(), fill=0)
         self.heaps = TupleDataHeaps()
         self.pending = List[_FinalizeJob]()
+        self.source = List[Series]()
 
     def __deinit__(deinit self):
         # The pointer table is the table's largest scratch: keep its pages
@@ -632,6 +638,9 @@ struct JoinBuildLayout(Copyable, Movable):
     var build_names: List[String]
     var build_types: List[DataType]
     var build_fields: List[Int]
+    # Whether the rows are a stored frame's rows, numbered by their place
+    # in it, with no payload (`join_build_layout`).
+    var from_source: Bool
 
     def __init__(
         out self,
@@ -710,6 +719,7 @@ struct JoinBuildLayout(Copyable, Movable):
         self.build_names = build_names.copy()
         self.build_types = build_types.copy()
         self.build_fields = build_fields.copy()
+        self.from_source = False
 
     def width(self) -> Int:
         """The key and payload fields."""
@@ -980,6 +990,7 @@ def join_build_layout(
     numbered: Bool = False,
     build_filtered: Bool = False,
     filter_rows: Int = -1,
+    from_source: Bool = False,
 ) raises -> Optional[JoinBuildLayout]:
     """The rows a hash join of type `how` on the build keys `keys` keeps
     of a build side with `columns` (columns of any length, typing the
@@ -995,9 +1006,16 @@ def join_build_layout(
     pipeline chunks (`from_chunks`), a categorical key (the probe unifies
     dictionaries against the build frame) or a nested payload column (a
     chunk's nested vector may have no column to read); the build is then
-    collected and its table made from its frame."""
+    collected and its table made from its frame.
+
+    With `from_source`, the build side's rows are a stored frame's rows in
+    order: they keep the keys and each row's number in the frame and no
+    payload, and the join reads its build columns from the frame by those
+    numbers (`JoinHashTable.set_source`), so no build value is copied
+    into the rows."""
     if len(keys) == 0:
         return None
+
     var key_columns = List[Int](capacity=len(keys))
     for name in keys:
         var at = -1
@@ -1034,7 +1052,7 @@ def join_build_layout(
         if key_at < 0:
             # A payload column: in the rows, strings and nested values in
             # their heap.
-            if emits:
+            if emits and not from_source:
                 payload_columns.append(i)
                 var field = len(keys) + len(payload_columns) - 1
                 build_fields.append(field)
@@ -1047,7 +1065,7 @@ def join_build_layout(
             continue
         # A key column: read from its own field where the join outputs it.
         build_fields.append(key_at)
-        if not emits:
+        if not emits or from_source:
             continue
         if coalesce and how != JOIN_RIGHT_SEMI and how != JOIN_RIGHT_ANTI:
             continue
@@ -1068,7 +1086,7 @@ def join_build_layout(
         payload_series,
         key_columns,
         payload_columns,
-        numbered,
+        numbered or from_source,
         join_emits_build_rows(how) and not perfect and not keys_only,
         output_columns,
         output_names,
@@ -1083,6 +1101,7 @@ def join_build_layout(
         filter_rows,
     )
     layout.output_metadata = output_metadata^
+    layout.from_source = from_source
     return layout^
 
 
@@ -1860,7 +1879,10 @@ struct JoinHashTable(Copyable, Movable):
         operator that reads the build's columns rather than the table: a
         row with a null key is missing unless the join reads found flags
         (no such row ever matches), and a column the rows do not keep (the
-        payload of a join that outputs no build column) is null."""
+        payload of a join that outputs no build column) is null. A table
+        over a stored frame's rows gives that frame's columns."""
+        if len(self.data[].source) > 0:
+            return self.data[].source.copy()
         var pointers = self._row_pointers()
         var n = len(pointers)
         var columns = List[Series](capacity=len(self.build_names))
@@ -2068,6 +2090,29 @@ struct JoinHashTable(Copyable, Movable):
     def null_row_address(self) -> Int:
         """A row whose every column is null, for a probe row with no match."""
         return Int(self.data[].null_row.unsafe_ptr())
+
+    def set_source(mut self, columns: List[Series]) raises:
+        """The stored frame whose rows the table's rows are, in order
+        (`JoinBuildLayout.from_source`): each column held as one chunk,
+        for the join to read build rows from by number."""
+        var held = List[Series](capacity=len(columns))
+        for column in columns:
+            held.append(
+                column.rechunk() if column.is_chunked() else column.copy()
+            )
+        self.data[].source = held^
+
+    def reads_source(self) -> Bool:
+        """Whether the join reads its build columns from the stored frame
+        by row number rather than from the rows."""
+        return len(self.data[].source) > 0
+
+    def source_column(self, name: String) raises -> Series:
+        """The stored build column `name`."""
+        for column in self.data[].source:
+            if column.name() == name:
+                return column.copy()
+        raise Error("join build: no stored column " + name)
 
     def build_side_row(self, pointer: UInt64) -> Int:
         """The build row of the row at `pointer`, -1 for the null row."""

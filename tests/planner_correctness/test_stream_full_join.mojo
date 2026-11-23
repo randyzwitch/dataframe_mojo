@@ -174,7 +174,8 @@ def test_an_empty_left_side_keeps_every_right_row() raises:
         )
         assert_equal(joined.height(), 50)
         assert_equal(joined.column("l_v").null_count(), 50)
-        assert_frame(
+        # The unmatched build rows come in no particular order.
+        assert_frame_unordered(
             joined.select(["r_a", "r_b", "r_v"]),
             right,
         )

@@ -80,12 +80,22 @@ struct TransferModel(Copyable, Movable):
         return self.to_device.measured() and self.to_host.measured()
 
 
-@fieldwise_init
 struct CPUExecutorChoice(Movable):
     """CPU executors eligible for a complete pipeline, and the one priced."""
 
     var streaming_allowed: Bool
     var materialized: Bool
+    var pipeline_key: String
+
+    def __init__(
+        out self,
+        streaming_allowed: Bool,
+        materialized: Bool,
+        var pipeline_key: String = "",
+    ):
+        self.streaming_allowed = streaming_allowed
+        self.materialized = materialized
+        self.pipeline_key = pipeline_key^
 
 
 @fieldwise_init
