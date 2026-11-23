@@ -65,6 +65,38 @@ def _ns(model, rows):
     return model["fixed_ns"] + model["row_ns"] * rows
 
 
+def _materialized_cpu_ranges(pipelines):
+    """An executor preference, valid only where every contributing layout was measured."""
+    ranges = {}
+    for pipeline, entries in pipelines.items():
+        # A legacy capture could be contrary evidence for any family.
+        if any(
+            not isinstance(e.get("cpu_layout_family"), str) or not e["cpu_layout_family"]
+            for e in entries
+        ):
+            continue
+        families = defaultdict(list)
+        for entry in entries:
+            families[entry["cpu_layout_family"]].append(entry)
+        for family, members in families.items():
+            layouts = defaultdict(list)
+            for entry in members:
+                layouts[entry["key"]].append(entry["rows"])
+            if len(layouts) < 2 or not all(
+                "cpu_materialized_ns" in e
+                and all(m < s for m, s in zip(e["cpu_materialized_ns"], e["cpu_ns"]))
+                for e in members
+            ):
+                continue
+            first = max(min(scales) for scales in layouts.values())
+            last = min(max(scales) for scales in layouts.values())
+            if first <= last:
+                ranges[pipeline + "|" + family] = {
+                    "min_rows": first, "max_rows": last
+                }
+    return ranges
+
+
 def fit(records):
     identity = None
     grouped = defaultdict(list)
@@ -241,6 +273,7 @@ def fit(records):
         "identity": identity,
         "operators": operators,
         "regions": regions,
+        "materialized_cpu_ranges": _materialized_cpu_ranges(pipelines),
         "skipped": skipped,
         "capture_records": records,
     }

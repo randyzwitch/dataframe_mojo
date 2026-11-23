@@ -43,12 +43,14 @@ def identity_json() raises -> String:
     )
 
 
-def _chunk_shape[D: DType](series: Series) raises -> String:
+def _chunk_has_bitmap[D: DType](series: Series) raises -> Bool:
     var column = series.numeric[D]()
-    return String(Int(len(column._bits[]) != 0))
+    return len(column._bits[]) != 0
 
 
-def shape_key(region: LazyFrame, operator: String) raises -> String:
+def shape_keys(
+    region: LazyFrame, operator: String
+) raises -> Tuple[String, String]:
     """Physical layout and output work, independent of user column names."""
     var names = List[String]()
     for node in region._plan._nodes:
@@ -80,6 +82,7 @@ def shape_key(region: LazyFrame, operator: String) raises -> String:
                         bitcast[DType.uint64](value.floating)
                     )
 
+    var family = key.copy()
     for name in names:
         var series = frame.column(name)
         key += (
@@ -89,6 +92,7 @@ def shape_key(region: LazyFrame, operator: String) raises -> String:
             + String(Int(single_native_span(series)))
             + "["
         )
+        var bitmap_kinds = 0
         for chunk in series.chunks():
             # Ratios generalize across calibrated row scales, while uneven
             # chunk geometry must not borrow a balanced layout's timings.
@@ -98,30 +102,38 @@ def shape_key(region: LazyFrame, operator: String) raises -> String:
                 )
                 + "/"
             )
+            var bitmap: Bool
             if chunk.dtype() == DataType.INT32:
-                key += _chunk_shape[DType.int32](chunk)
+                bitmap = _chunk_has_bitmap[DType.int32](chunk)
             elif chunk.dtype() == DataType.INT64:
-                key += _chunk_shape[DType.int64](chunk)
+                bitmap = _chunk_has_bitmap[DType.int64](chunk)
             elif chunk.dtype() == DataType.FLOAT32:
-                key += _chunk_shape[DType.float32](chunk)
+                bitmap = _chunk_has_bitmap[DType.float32](chunk)
             elif (
                 chunk.dtype() == DataType.STRING
                 and chunk._data.isa[StringColumn]()
             ):
-                key += String(Int(len(chunk._data[StringColumn]._bits[]) != 0))
+                bitmap = len(chunk._data[StringColumn]._bits[]) != 0
             elif chunk.dtype() == DataType.BOOL:
                 # Packed Bool storage always owns a validity bitmap. The
                 # native input maps it only when this window contains nulls.
-                key += String(Int(chunk.null_count() > 0))
+                bitmap = chunk.null_count() > 0
             else:
                 raise Error("Unsupported Metal calibration layout")
-            key += ","
+            key += String(Int(bitmap)) + ","
+            bitmap_kinds |= 1 << Int(bitmap)
         key += "]"
-    return (
-        key
-        + ":outputs="
-        + String(len(region._plan._nodes[len(region._plan._nodes) - 1].exprs))
+        # Keep input types and the presence of validity bitmaps in the CPU
+        # comparison. Only chunk geometry and native-span mapping may vary.
+        family += ":" + series.dtype().name() + "/" + String(bitmap_kinds)
+    var outputs = ":outputs=" + String(
+        len(region._plan._nodes[len(region._plan._nodes) - 1].exprs)
     )
+    return (key + outputs, family + outputs)
+
+
+def shape_key(region: LazyFrame, operator: String) raises -> String:
+    return shape_keys(region, operator)[0]
 
 
 def _number(value: JsonValue) raises -> Float64:
@@ -181,6 +193,7 @@ struct _ProfileCache(Movable):
     var text: String
     var identity: String
     var regions: Dict[String, RegionCost]
+    var materialized_ranges: Dict[String, Tuple[Int, Int]]
     var valid: Bool
 
     def __init__(out self):
@@ -189,6 +202,7 @@ struct _ProfileCache(Movable):
         self.text = String()
         self.identity = String()
         self.regions = Dict[String, RegionCost]()
+        self.materialized_ranges = Dict[String, Tuple[Int, Int]]()
         self.valid = False
 
 
@@ -212,8 +226,8 @@ def _profile_cache() -> Pointer[_ProfileCache, MutAnyOrigin]:
 
 
 def _snapshot(
-    path: String, text: String, key: String
-) raises -> Tuple[String, Optional[RegionCost]]:
+    path: String, text: String, key: String, family: String, rows: Int
+) raises -> Tuple[String, Optional[RegionCost], Bool]:
     ref cache = _profile_cache()[]
     var unlocked = Int64(0)
     while not cache.lock.compare_exchange(unlocked, 1):
@@ -224,6 +238,7 @@ def _snapshot(
             cache.text = text.copy()
             cache.valid = False
             cache.regions = Dict[String, RegionCost]()
+            cache.materialized_ranges = Dict[String, Tuple[Int, Int]]()
             var profile = JsonValue(text)
             if profile.get("schema_version").canonical() == String(
                 SCHEMA_VERSION
@@ -281,14 +296,31 @@ def _snapshot(
                         0,
                         0,
                     )
+                if profile.has("materialized_cpu_ranges"):
+                    var ranges = profile.get("materialized_cpu_ranges")
+                    for name in ranges.keys():
+                        var bounds = ranges.get(name)
+                        var first = Int(bounds.get("min_rows").canonical())
+                        var last = Int(bounds.get("max_rows").canonical())
+                        if first < 1 or last < first:
+                            raise Error("Invalid CPU executor row range")
+                        cache.materialized_ranges[name] = (first, last)
                 cache.valid = True
         # File bytes are checked on every call, while JSON is parsed once.
         # An overwritten cached path cannot mix new GPU and old CPU models.
-        var result: Tuple[String, Optional[RegionCost]]
+        var result: Tuple[String, Optional[RegionCost], Bool]
         if cache.valid and cache.text == text:
-            result = (cache.identity.copy(), cache.regions.get(key))
+            var exact = cache.regions.get(key)
+            var prefer_materialized = False
+            if not exact and family:
+                var bounds = cache.materialized_ranges.get(family)
+                if bounds:
+                    prefer_materialized = (
+                        bounds.value()[0] <= rows <= bounds.value()[1]
+                    )
+            result = (cache.identity.copy(), exact^, prefer_materialized)
         else:
-            result = (String(), Optional[RegionCost]())
+            result = (String(), Optional[RegionCost](), False)
         cache.lock.store(0)
         return result^
     except error:
@@ -345,6 +377,7 @@ def measured_costs(
     rows: Int,
     collect_request: Bool = False,
     cpu_executor: Optional[ArcPointer[CPUExecutorChoice]] = None,
+    family: String = "",
 ) raises -> Tuple[Float64, Float64]:
     var path = calibration_path()
     if not path:
@@ -352,12 +385,16 @@ def measured_costs(
     var text: String
     with open(path, "r") as source:
         text = source.read()
-    var snapshot = _snapshot(path, text, key)
-    if not snapshot[1]:
+    var snapshot = _snapshot(path, text, key, family, rows)
+    if not snapshot[1] and not snapshot[2]:
         return (Float64(-1), Float64(-1))
     var current = JsonValue(identity_json())
     var saved = JsonValue('{"schema_version":2,"identity":' + snapshot[0] + "}")
     if validate_identity(saved, current):
+        return (Float64(-1), Float64(-1))
+    if not snapshot[1]:
+        if cpu_executor:
+            cpu_executor.value()[].materialized = snapshot[2]
         return (Float64(-1), Float64(-1))
     var entry = snapshot[1].value().copy()
     if Float64(rows) < entry.first or Float64(rows) > entry.last:
