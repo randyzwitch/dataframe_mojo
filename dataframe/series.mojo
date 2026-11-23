@@ -1351,7 +1351,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         )
 
     def tail(self, n: Int = 5) raises -> Self:
-        return self._frame().tail(n).column(self._name)
+        return self._frame()._tail_rows(n).column(self._name)
 
     def sort(
         self, descending: Bool = False, nulls_last: Bool = True
