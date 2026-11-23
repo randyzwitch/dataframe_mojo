@@ -327,6 +327,37 @@ struct ColumnDataCollection(Movable):
             )
         self.count += n
 
+    def append_frame(mut self, frame: DataFrame) raises:
+        """`frame`'s columns (the schema's, in its order) kept as they are,
+        each one piece of its column: rows an operator already holds as
+        columns, such as a join's output for a morsel, are not cut into
+        chunks and copied in again."""
+        var n = frame.height()
+        if n == 0:
+            return
+        for c in range(len(self.modes)):
+            var mode = self.modes[c]
+            var piece = frame._columns[c].renamed(
+                self.schema._columns[c].name()
+            )
+            if self.count == 0:
+                self.modes[c] = _COPY_VALUES
+                self.values[c] = [piece^]
+                continue
+            if mode == _COPY_RAW:
+                self.values[c] = [self._raw_column(c)]
+                self.raw[c] = List[UInt8]()
+                self.raw_bits[c] = List[UInt8]()
+            elif mode == _COPY_WINDOW:
+                self.values[c] = [self._window(c)]
+                self.windows[c] = self.schema._columns[c].copy()
+            elif mode == _COPY_CONSTANT:
+                self.values[c] = [self._constant(c)]
+                self.windows[c] = self.schema._columns[c].copy()
+            self.modes[c] = _COPY_VALUES
+            self.values[c].append(piece^)
+        self.count += n
+
     def _window(self, c: Int) raises -> Series:
         """Column `c`'s rows so far, a window of the column they are in."""
         return (
@@ -542,6 +573,30 @@ struct MaterializeSink(Sink):
             last += 1
         self.collections[last].append(chunk, arena)
         chunk.count = count
+        if self.full():
+            self.bound.lower(self.batch)
+
+    def sink_frame(mut self, frame: DataFrame) raises:
+        """A morsel's rows already held as whole columns (`frame`, of the
+        schema's columns), kept as they are rather than copied in a chunk
+        at a time."""
+        if frame.height() == 0 or self.full():
+            return
+        var rows = frame.height()
+        if self.limit >= 0:
+            rows = min(rows, self.limit - self.kept)
+            self.kept += rows
+        var last = len(self.batches) - 1
+        if last < 0 or self.batches[last] != self.batch:
+            self.batches.append(self.batch)
+            self.collections.append(
+                ColumnDataCollection(self.schema, self.capacity)
+            )
+            last += 1
+        if rows < frame.height():
+            self.collections[last].append_frame(frame.slice(0, rows))
+        else:
+            self.collections[last].append_frame(frame)
         if self.full():
             self.bound.lower(self.batch)
 
