@@ -20,7 +20,7 @@ from dataframe.storage.column import Column
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
 from dataframe.lazy import LazyFrame
-from .calibration import shape_key, measured_costs
+from .calibration import shape_keys, measured_costs
 from dataframe.series import Series
 from .filter_plan import FilterSum, plan_region
 from .region_plan import normalize_region
@@ -212,17 +212,21 @@ def region_key(region: LazyFrame) raises -> String:
     return String()
 
 
-def layout_key(region: LazyFrame) raises -> String:
+def layout_keys(region: LazyFrame) raises -> Tuple[String, String]:
     """One operator/layout key for placement, capture and execution traces."""
     var moments = plan_moments(region)
     if moments:
-        return shape_key(moments.value().matching_region, region_key(region))
+        return shape_keys(moments.value().matching_region, region_key(region))
     var normalized = normalize_region(region)
     if not normalized:
-        return String()
+        return (String(), String())
     var selected = normalized.take()
     var operator = region_key(selected)
-    return shape_key(selected, operator) if operator else String()
+    return shape_keys(selected, operator) if operator else (String(), String())
+
+
+def layout_key(region: LazyFrame) raises -> String:
+    return layout_keys(region)[0]
 
 
 def estimate_costs(
@@ -233,7 +237,8 @@ def estimate_costs(
 ) -> Tuple[String, Float64, Float64]:
     """Measured Metal cost only for this build, host, threads and layout."""
     try:
-        var key = layout_key(region)
+        var keys = layout_keys(region)
+        var key = keys[0].copy()
         if not key:
             return (String(), Float64(-1), Float64(-1))
         if (
@@ -246,6 +251,9 @@ def estimate_costs(
             rows,
             collect_request,
             cpu_executor,
+            cpu_executor.value()[].pipeline_key
+            + "|"
+            + keys[1] if cpu_executor else String(),
         )
         return (key^, costs[0], costs[1])
     except:

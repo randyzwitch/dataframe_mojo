@@ -1949,15 +1949,32 @@ struct DataFrame(Copyable, Sized, Writable):
         join's unmatched rows then have a null right key.
         Semi and anti joins output left columns only, so the flag does not
         apply to them.
+
+        Runs as the lazy plan's join does: a plan of one join over the two
+        frames, executed through the same pipelines as `LazyFrame.collect`
+        (the right frame built into a hash table, the left probing it a
+        morsel at a time).
         """
-        return self._join_impl(
-            right,
-            left_on=left_on,
-            right_on=right_on,
-            how=join_type(how),
-            suffix=suffix,
-            coalesce=coalesce,
-            keep_order=False,
+        var code = join_type(how)
+        if code == JOIN_CROSS:
+            raise Error(
+                "A cross join takes no keys; use join(right, how='cross')"
+            )
+        if len(left_on) == 0 or len(left_on) != len(right_on):
+            raise Error(
+                "Join requires the same nonzero number of left and right keys"
+            )
+        return (
+            self.lazy()
+            .join(
+                right.lazy(),
+                left_on=left_on,
+                right_on=right_on,
+                how=how,
+                suffix=suffix,
+                coalesce=coalesce,
+            )
+            ._collect(optimize=False, streaming=True, batch_size=65536)
         )
 
     def _join_impl(
@@ -2001,6 +2018,31 @@ struct DataFrame(Copyable, Sized, Writable):
 
         Right names that collide with left names gain the suffix.
         """
+        _ = self._cross_names(right, how, suffix)
+        # The plan's cross product: the right frame collected as the
+        # build, the left's morsels paired with it chunk by chunk.
+        return (
+            self.lazy()
+            .join(right.lazy(), how=how, suffix=suffix)
+            ._collect(optimize=False, streaming=True, batch_size=65536)
+        )
+
+    def _cross_join(
+        self, right: Self, how: String, suffix: String
+    ) raises -> Self:
+        """The cross join of two executed inputs, for a plan's executor."""
+        return cross_join_frames(
+            self,
+            right,
+            self._height * right._height,
+            self._cross_names(right, how, suffix),
+        )
+
+    def _cross_names(
+        self, right: Self, how: String, suffix: String
+    ) raises -> List[String]:
+        """The right columns' output names of a cross join, after checking
+        its type, row count and names."""
         if join_code(how) != JOIN_CROSS:
             raise Error("Join how='" + how + "' requires key columns")
         var total = self._height * right._height
@@ -2019,7 +2061,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 raise Error("Join output name collision: " + name)
             names[name] = True
             right_names.append(name)
-        return cross_join_frames(self, right, total, right_names)
+        return right_names^
 
     def select(
         self, expression: Expr, *, batch_size: Int = 8192

@@ -11,7 +11,7 @@ from dataframe import DataFrame, DataType, LazyFrame
 from dataframe.json.value import json_quote
 from .calibration import identity_json, pipeline_key
 from .accelerator.gpu.query_scope import shared_service
-from .handoff import execute_timed, layout_key, supports
+from .handoff import execute_timed, layout_keys, supports
 
 
 def _check(actual: DataFrame, expected: DataFrame) raises:
@@ -93,7 +93,7 @@ def capture(
     var prefix = '{"schema_version":2,"identity":' + identity
     if not supports(region):
         return prefix + ',"status":"skipped","reason":"unsupported region"}'
-    var key = layout_key(region)
+    var keys = layout_keys(region)
     var rows = region._plan._frames[
         region._plan._nodes[0].source_slot()
     ].height()
@@ -101,7 +101,9 @@ def capture(
         ',"pipeline_key":'
         + json_quote(pipeline_key(region))
         + ',"key":'
-        + json_quote(key)
+        + json_quote(keys[0])
+        + ',"cpu_layout_family":'
+        + json_quote(keys[1])
         + ',"rows":'
         + String(rows)
     )

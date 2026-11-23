@@ -673,7 +673,43 @@ struct MatchedCosts(AcceleratorBackend):
     def pipeline_costs(
         self, pipeline: LazyFrame, device: Int, features: PipelineFeatures
     ) -> Tuple[Float64, Float64]:
+        if device == 1:
+            if features.cpu_executor:
+                features.cpu_executor.value()[].materialized = True
+            return (Float64(-1), Float64(-1))
         return (self.cpu_ns, self.accel_ns)
+
+
+def test_cpu_executor_preference_preserves_costs_and_yields_to_a_measured_cpu() raises:
+    var frames = sources()
+    var plan = frames[0].lazy().select(col("v").sum())._optimized()
+    var key = plan_pipeline_cuts(plan._plan)[0].key.copy()
+    var path = String("build/test-device-placement-cpu-preference.json")
+    calibrate(path, [key.copy()], 1000)
+    var environment = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
+    var backend = MatchedCosts(500, -1)
+    var fallback = DeviceInfo("matched", 1, "CPU preference", 1, -1)
+    var solved = _solve_devices(plan, backend, [fallback.copy()])
+    assert_true(solved.materialized_cpu)
+    assert_equal(
+        solved.problem.run_ns[0][CPU],
+        1000 + 5 * Float64(solved.units[0].features.input_rows),
+    )
+    assert_equal(solved.problem.run_ns[0][1], Float64(-1))
+    var custom = _solve_devices(
+        plan, backend, [fallback.copy()], calibrated_settings=False
+    )
+    assert_false(custom.materialized_cpu)
+    for reverse in [False, True]:
+        var devices = backend.devices()
+        if reverse:
+            devices.insert(0, fallback.copy())
+        else:
+            devices.append(fallback.copy())
+        var matched = _solve_devices(plan, backend, devices^)
+        assert_false(matched.materialized_cpu)
+        assert_equal(matched.problem.run_ns[0][CPU], Float64(500))
+    _ = environment^
 
 
 def test_matched_cpu_costs_override_coarse_models_at_plan_and_execution_time() raises:

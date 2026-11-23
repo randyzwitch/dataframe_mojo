@@ -206,6 +206,47 @@ class MetalCalibrationTests(unittest.TestCase):
             self.assertNotEqual(first, second)
             self.assertTrue(first.exists())
 
+    def test_cpu_executor_consensus_requires_distinct_layouts_and_overlapping_scales(self):
+        records = self.captures()
+        for e in records:
+            e["cpu_layout_family"] = "sum:int32:plain"
+            e["cpu_materialized_ns"] = [v / 2 for v in e["cpu_ns"]]
+        other = copy.deepcopy(records)
+        for e in other:
+            e["key"] = "eight chunks"
+            e["rows"] *= 2
+        name = records[0]["pipeline_key"] + "|sum:int32:plain"
+        profile = fit(records + other)
+        self.assertEqual(profile["materialized_cpu_ranges"], {name: {"min_rows": 200, "max_rows": 10000}})
+        self.assertNotIn(name, profile["operators"])
+        self.assertNotIn(name, profile["regions"])
+        self.assertFalse(fit(records + records)["materialized_cpu_ranges"])
+        for field, value in [("pipeline_key", "pipeline:other"), ("cpu_layout_family", "sum:int32:nullable")]:
+            different = copy.deepcopy(other)
+            for e in different:
+                e[field] = value
+            self.assertFalse(fit(records + different)["materialized_cpu_ranges"])
+        for e in other:
+            e["rows"] += 10000
+        self.assertFalse(fit(records + other)["materialized_cpu_ranges"])
+
+    def test_one_tie_loss_or_missing_cpu_sample_vetoes_the_preference(self):
+        records = self.captures()
+        for e in records:
+            e["cpu_layout_family"] = "sum:int32:plain"
+            e["cpu_materialized_ns"] = [v / 2 for v in e["cpu_ns"]]
+        other = copy.deepcopy(records)
+        for e in other:
+            e["key"] = "four chunks"
+        for factor in [1, 2]:
+            mixed = copy.deepcopy(other)
+            mixed[1]["cpu_materialized_ns"][0] = factor * mixed[1]["cpu_ns"][0]
+            self.assertFalse(fit(records + mixed)["materialized_cpu_ranges"])
+        for field in ["cpu_materialized_ns", "cpu_layout_family"]:
+            missing = copy.deepcopy(other)
+            del missing[0][field]
+            self.assertFalse(fit(records + missing)["materialized_cpu_ranges"])
+
     def test_cpu_pipeline_envelope_is_conservative_across_layouts(self):
         records = self.captures()
         other = copy.deepcopy(records)

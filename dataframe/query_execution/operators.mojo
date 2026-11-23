@@ -189,7 +189,7 @@ def plan_join_frames(
     """Join node `index`'s executed inputs."""
     ref node = self._nodes[index]
     if node.how == JOIN_CROSS:
-        return input.join(right, how=node.text, suffix=node.join_suffix())
+        return input._cross_join(right, node.text, node.join_suffix())
     if empty and input.height() == 0 and right.height() == 0:
         var schema = _join_schema(node, input, right)
         if schema:
