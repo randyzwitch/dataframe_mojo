@@ -508,11 +508,8 @@ def plan_execute_node(
                     maintain_order=node.maintain_order,
                 )
             )
-        return input.sort(
-            node.sort_keys(),
-            descending=descending,
-            nulls_last=nulls_last,
-            maintain_order=node.maintain_order,
+        return input._sorted(
+            node.sort_keys(), descending, nulls_last, node.maintain_order
         )
     if node.kind == SLICE:
         return input.slice(node.slice_offset(), node.slice_length())

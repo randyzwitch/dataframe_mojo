@@ -1374,7 +1374,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             ._counts(name)
         )
         if sort:
-            return counts.sort([name], descending=True)
+            return counts._sorted([name], [True], [True], False)
         return counts^
 
     def to_values(self) raises -> List[AnyValue]:
