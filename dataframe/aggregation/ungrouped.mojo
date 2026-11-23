@@ -78,12 +78,14 @@ from dataframe.expr import (
     MAX,
     MEAN,
     MIN,
+    N_UNIQUE,
     SUM,
     WHEN,
     is_reduction,
     subtree,
 )
 from dataframe.dtype import DataType
+from dataframe.kernels.canonical_labels import label_map
 from dataframe.execution import _empty
 from dataframe.execution_observation import DeviceObservation, IntegralCombine
 from dataframe.frame import DataFrame
@@ -179,6 +181,16 @@ struct UngroupedLayout(Copyable, Movable):
         return _StreamReduction(self.schema, self.reductions, List[String]())
 
 
+def _counts_labels(specs: List[ReducerSpec], typed: List[Series]) -> Bool:
+    """Whether a distinct count reads a categorical whose dictionary holds
+    one label under several codes: it counts labels, and the distinct
+    table would count codes."""
+    for i in range(min(len(specs), len(typed))):
+        if specs[i].op == N_UNIQUE and label_map(typed[i]):
+            return True
+    return False
+
+
 def ungrouped_layout(
     empty: DataFrame, expressions: List[Expr]
 ) raises -> Optional[UngroupedLayout]:
@@ -250,7 +262,7 @@ def ungrouped_layout(
             var one = VectorExpression(value, empty._columns)
             typed.append(_empty(one.root_dtype()))
             compiled[i] = one^
-    if not table_states_supported(specs, typed):
+    if not table_states_supported(specs, typed) or _counts_labels(specs, typed):
         return None
     var layout = aggregate_layout(List[Series](), typed, specs)
     var simple: List[Int] = [
@@ -322,7 +334,7 @@ def _unfiltered(
             var one = VectorExpression(inputs[i].value(), empty._columns)
             typed.append(_empty(one.root_dtype()))
             compiled[i] = one^
-    if not table_states_supported(specs, typed):
+    if not table_states_supported(specs, typed) or _counts_labels(specs, typed):
         return None
     var layout = aggregate_layout(List[Series](), typed, specs)
     return UngroupedLayout(

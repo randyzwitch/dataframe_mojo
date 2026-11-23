@@ -1,4 +1,7 @@
-"""Accepted identity casts retain array windows and their original owners."""
+"""Accepted identity casts retain array windows and their original owners.
+
+Frame-level checks call the projection kernels (`_select_exprs`): an eager
+select runs as a plan, whose pipeline cuts columns into morsels."""
 # contract-group: types.cast
 # contract-group: expr.chunk_windows
 from std.memory import ArcPointer, bitcast
@@ -134,7 +137,7 @@ def _identity(master: Series, expected: Series) raises:
     _same(empty_result, expected.slice(0, 0))
     _field_owner(empty_result, empty)
     var frame = DataFrame([source.copy()])
-    var public_result = frame.select_exprs(
+    var public_result = frame._select_exprs(
         [col(source.name()).cast(source.dtype()).alias(source.name())],
         batch_size=2,
     )
@@ -548,7 +551,7 @@ def test_chunked_string_to_binary_shares_offset_and_view_owners_but_drops_field_
         )
         _same(empty, _binary_expected().slice(0, 0))
         assert_false(Bool(empty._field_metadata))
-        var public_result = DataFrame([source.copy()]).select_exprs(
+        var public_result = DataFrame([source.copy()])._select_exprs(
             [col("value").cast(DataType.BINARY)], batch_size=2
         )
         assert_frame(public_result, DataFrame([_binary_expected()]))
@@ -707,7 +710,7 @@ def test_public_metadata_cast_chains_and_prepared_states_avoid_batch_assembly() 
     for views in [False, True]:
         var source = _pieces(_text_master(views).slice(1, 6))
         var frame = DataFrame([source.copy()])
-        var actual = frame.select_exprs(
+        var actual = frame._select_exprs(
             [col("value").cast(DataType.STRING).cast(DataType.BINARY)],
             batch_size=2,
         )
@@ -715,7 +718,7 @@ def test_public_metadata_cast_chains_and_prepared_states_avoid_batch_assembly() 
         _array_owners(actual.column("value"), source)
         assert_false(Bool(actual.column("value")._field_metadata))
         _cold(source)
-        var shifted = frame.select_exprs(
+        var shifted = frame._select_exprs(
             [col("value").shift(1).cast(DataType.BINARY)], batch_size=2
         )
         var wanted = Series.binary(
@@ -768,7 +771,7 @@ def test_public_metadata_cast_chains_and_prepared_states_avoid_batch_assembly() 
             ),
         )
     )
-    var summed = DataFrame([numbers^]).select_exprs(
+    var summed = DataFrame([numbers^])._select_exprs(
         [col("value").cum_sum().cast(DataType.INT64).cast(DataType.INT64)],
         batch_size=2,
     )
