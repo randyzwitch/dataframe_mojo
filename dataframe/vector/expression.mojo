@@ -1398,9 +1398,33 @@ struct VectorExpression(Copyable, Movable):
                     self.schema[r].dtype(),
                 )
             )
-        var result = evaluate(
-            self.fallback_bound[index].value(), columns, count
-        )
+        # Errors name a row of the pipeline's input where the chunk knows
+        # it (`DataChunk.source_row`): computed rows that are consecutive
+        # rows of the input number theirs from the first; others, rows
+        # selected from the chunk, are run one at a time on an error, so
+        # that it names the first failing row as the input numbers it.
+        var first = input.source_row(rows.get_index(0)) if count > 0 else -1
+        var consecutive = first >= 0 and input.parent == 0 and not rows.is_set()
+        self.fallback_bound[
+            index
+        ].value().first_row = first if consecutive else 0
+        var result: Series
+        try:
+            result = evaluate(
+                self.fallback_bound[index].value(), columns, count
+            )
+        except e:
+            if first < 0 or consecutive:
+                raise e^
+            for k in range(count):
+                var one = List[Series](capacity=len(columns))
+                for column in columns:
+                    one.append(column.slice(k, 1))
+                self.fallback_bound[index].value().first_row = input.source_row(
+                    rows.get_index(k)
+                )
+                _ = evaluate(self.fallback_bound[index].value(), one, 1)
+            raise e^
         if len(result) != count:
             if len(result) == 1:
                 result = result._broadcast(count)

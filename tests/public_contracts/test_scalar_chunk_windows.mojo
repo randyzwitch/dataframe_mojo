@@ -1,6 +1,6 @@
 """Scalar consumers preserve values and observation across unequal chunks."""
 # contract-group: expr.chunk_windows
-from std.testing import assert_equal, assert_true
+from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import (
     Column,
     DataFrame,
@@ -145,6 +145,61 @@ def test_chunk_cast_errors_keep_global_rows_and_inactive_rows_unobserved() raise
         rejected = True
         assert_true(String(error).find("row 1") >= 0)
     assert_true(rejected)
+
+
+def test_plan_errors_name_the_first_failing_row_of_the_frame() raises:
+    var frame = DataFrame(
+        [
+            pieces(
+                Series("s", StringColumn(["10", "20", "30", "bad", "50"])),
+                [2, 2, 1],
+            ),
+            pieces(
+                Series("take", Column[Bool]([True, True, True, False, True])),
+                [1, 3, 1],
+            ),
+        ]
+    )
+    # Only the branch's rows are cast; the failing one is named by its
+    # row in the frame.
+    with assert_raises(contains="failed at row 3 "):
+        _ = frame.select(
+            when(col("take").not_())
+            .then(col("s").cast(DataType.INT64))
+            .otherwise(lit(Int64(0)))
+        )
+    # Over many morsels, with two failing rows: the first is named, by
+    # eager methods and by a plan whose filter runs before the cast.
+    var n = 100000
+    var text = List[String](capacity=n)
+    var numbers = List[Int64](capacity=n)
+    for i in range(n):
+        text.append(String(i))
+        numbers.append(Int64(i))
+    text[70002] = "bad"
+    text[90002] = "worse"
+    var many = DataFrame(
+        [
+            Series("s", StringColumn(text^)),
+            Series("i", Column[Int64](numbers^)),
+        ]
+    )
+    var cast = col("s").cast(DataType.INT64)
+    with assert_raises(contains="failed at row 70002 "):
+        _ = many.select(cast.copy())
+    with assert_raises(contains="failed at row 70002 "):
+        _ = many.with_columns((cast.copy() + lit(Int64(1))).alias("y"))
+    with assert_raises(contains="failed at row 70002 "):
+        _ = many.filter(cast.copy() > lit(Int64(3)))
+    with assert_raises(contains="failed at row 70002 "):
+        _ = many.select((cast.copy() - cast.copy().max()).alias("d"))
+    with assert_raises(contains="failed at row 70002 "):
+        _ = (
+            many.lazy()
+            .filter(col("i") % lit(Int64(2)) == lit(Int64(0)))
+            .select(cast.copy())
+            .collect(optimize=False)
+        )
 
 
 def test_empty_chunked_slices_retain_result_types_and_names() raises:
