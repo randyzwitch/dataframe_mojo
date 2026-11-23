@@ -2038,6 +2038,12 @@ struct DataFrame(Copyable, Sized, Writable):
         in their sinks' rounds, and the plan's executor evaluates the rest
         over the whole frame. `batch_size` is the plan's batch size.
 
+        A morsel knows only its own rows, so when the plan fails the
+        kernels evaluate the whole frame again to raise the error as they
+        report it, with rows numbered over the frame (with_columns and
+        filter do the same); the plan's error is raised if they do not
+        fail.
+
         If any expression is row-valued, scalar results broadcast to height,
         including zero rows. An empty selection preserves the input height.
         """
@@ -2047,12 +2053,16 @@ struct DataFrame(Copyable, Sized, Writable):
         _ = _bind_all(expanded, self._columns)
         if len(expanded) == 0 or len(self._columns) == 0:
             return self._select_exprs(expanded, batch_size)
-        return (
-            self._reading(expanded)
-            .lazy()
-            .select_exprs(expanded)
-            ._collect(optimize=False, streaming=True, batch_size=batch_size)
-        )
+        try:
+            return (
+                self._reading(expanded)
+                .lazy()
+                .select_exprs(expanded)
+                ._collect(optimize=False, streaming=True, batch_size=batch_size)
+            )
+        except e:
+            _ = self._select_exprs(expanded, batch_size)
+            raise e^
 
     def _reading(self, expressions: List[Expr]) raises -> Self:
         """This frame with only the columns `expressions` read (every column
@@ -2163,11 +2173,16 @@ struct DataFrame(Copyable, Sized, Writable):
         if len(expanded) == 0 or len(self._columns) == 0:
             return self._with_columns(expanded, batch_size)
         var input = self._reading(expanded)
-        var made = (
-            input.lazy()
-            .with_columns(expanded)
-            ._collect(optimize=False, streaming=True, batch_size=batch_size)
-        )
+        var made: Self
+        try:
+            made = (
+                input.lazy()
+                .with_columns(expanded)
+                ._collect(optimize=False, streaming=True, batch_size=batch_size)
+            )
+        except e:
+            _ = self._with_columns(expanded, batch_size)
+            raise e^
         var columns = self._columns.copy()
         var done = Dict[String, Bool]()
         for expression in bound:
@@ -2265,9 +2280,13 @@ struct DataFrame(Copyable, Sized, Writable):
         var plan = input.lazy().filter(predicates[0])
         if len(keep) > 0:
             plan = plan.select(keep)
-        return plan._collect(
-            optimize=False, streaming=True, batch_size=batch_size
-        )
+        try:
+            return plan._collect(
+                optimize=False, streaming=True, batch_size=batch_size
+            )
+        except e:
+            _ = self._filter(predicate, batch_size, keep)
+            raise e^
 
     def _filter(
         self,
