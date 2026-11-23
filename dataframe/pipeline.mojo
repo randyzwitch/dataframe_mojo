@@ -2297,8 +2297,9 @@ struct _ChunkRunner(Movable):
         # perfect join or dictionary emission).
         var list = -1
         if table.reads_source():
+            var width = output.width()
             self._source_columns(result, s, right_keys, dictionary_rows^)
-            if result.width() != output.width():
+            if result.width() != width:
                 raise Error(
                     "pipeline join: output columns differ from its schema"
                 )
