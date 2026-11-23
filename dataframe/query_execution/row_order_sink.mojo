@@ -24,8 +24,7 @@ its own place, so the work splits by rows:
 from std.collections import Optional
 from std.memory import ArcPointer
 
-from dataframe.binding import ROWS, BoundExpr, bind
-from dataframe.execution import evaluate
+from dataframe.binding import ROWS, bind
 from dataframe.expr import Expr
 from dataframe.frame import DataFrame
 from dataframe.kernels.gather import GatherRounds
@@ -85,18 +84,11 @@ def shift_fills(input: DataFrame, fill_value: Expr) raises -> DataFrame:
     reduction such as `col("a").max()`)."""
     if bind(fill_value, input._columns).shape() == ROWS:
         raise Error("shift fill_value must be a scalar value")
-    var columns = List[Series](capacity=input.width())
+    var exprs = List[Expr](capacity=input.width())
     for column in input._columns:
-        var expression = fill_value.cast(column.dtype()).alias(column.name())
-        columns.append(
-            evaluate(
-                bind(expression, input._columns),
-                input._columns,
-                input.height(),
-                batch_size=8192,
-            ).renamed(column.name())
-        )
-    return DataFrame(columns^, height=1)
+        exprs.append(fill_value.cast(column.dtype()).alias(column.name()))
+    # The kernels, with no plan: this runs inside the node's schedule.
+    return input._select_exprs(exprs)
 
 
 struct RowOrderSink(Movable, Rounds):
@@ -119,8 +111,8 @@ struct RowOrderSink(Movable, Rounds):
     var gather: List[GatherRounds]
     # The row numbers with_row_index adds.
     var index: List[Int64]
-    # A fill's expressions, bound to the input, and their columns.
-    var fills: List[BoundExpr]
+    # A fill's expressions and their columns.
+    var fills: List[Expr]
     var filled: List[Series]
     var result: DataFrame
 
@@ -136,7 +128,7 @@ struct RowOrderSink(Movable, Rounds):
         self.or_null = False
         self.gather = List[GatherRounds]()
         self.index = List[Int64]()
-        self.fills = List[BoundExpr]()
+        self.fills = List[Expr]()
         self.filled = List[Series]()
         self.result = DataFrame(List[Series]())
 
@@ -206,13 +198,12 @@ struct RowOrderSink(Movable, Rounds):
                 self.result = self.input.copy()
                 self.stage = _DONE
                 return 0
-            for expression in exprs:
-                self.fills.append(bind(expression, self.input._columns))
+            self.fills = exprs^
             self.filled = List[Series](
-                length=len(exprs), fill=self.input._columns[0].copy()
+                length=len(self.fills), fill=self.input._columns[0].copy()
             )
             self.stage = _FILL
-            return round_width(len(exprs))
+            return round_width(len(self.fills))
         # The rows gathered: reverse, shift or gather_every.
         self.gathered = self.input._columns.copy()
         var rows = height
@@ -258,11 +249,11 @@ struct RowOrderSink(Movable, Rounds):
             var width = round_width(len(self.fills))
             var k = task
             while k < len(self.fills):
-                self.filled[k] = evaluate(
-                    self.fills[k],
-                    self.input._columns,
-                    self.height,
-                    batch_size=8192,
+                # The kernels, with no plan: a task of the node's schedule.
+                self.filled[k] = (
+                    self.input._select_exprs([self.fills[k].copy()])
+                    ._columns[0]
+                    .copy()
                 )
                 k += width
 
@@ -335,13 +326,13 @@ struct RowOrderSink(Movable, Rounds):
         """The input with each filled column in its place."""
         var columns = self.input._columns.copy()
         for k in range(len(self.fills)):
-            var name = self.fills[k].expr._name
+            var name = self.fills[k]._name
             for c in range(len(columns)):
                 if columns[c].name() == name:
                     columns[c] = self.filled[k].renamed(name)
                     break
         self.result = DataFrame(columns^, height=self.height)
-        self.fills = List[BoundExpr]()
+        self.fills = List[Expr]()
         self.filled = List[Series]()
         self.stage = _DONE
 

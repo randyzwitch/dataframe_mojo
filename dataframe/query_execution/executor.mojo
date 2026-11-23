@@ -362,7 +362,7 @@ def plan_execute_node(
                     nulls_last=nulls_last,
                     maintain_order=sorted.maintain_order,
                 )
-                return source.select_exprs(node.exprs).take(order)
+                return source._select_exprs(node.exprs).take(order)
     # Filter each decoded CSV range before assembling the scan result.
     # A row limit and a whole-column predicate require the original
     # materialization order, so retain the eager path for those cases.
@@ -371,7 +371,7 @@ def plan_execute_node(
         if source.has_dataset() and source.scan_row_limit() < 0:
             return _execute_dataset_scan(
                 self, source, False, batch_size, Optional(node.exprs[0].copy())
-            ).filter(node.exprs[0])
+            )._filter(node.exprs[0])
         # Decode only the row groups whose footer bounds admit a match;
         # the filter still runs on what was read.
         if source.kind == SCAN_PARQUET and not source.has_dataset():
@@ -380,7 +380,7 @@ def plan_execute_node(
             )
             return read_parquet(
                 source.text, columns=source.names, row_groups=groups, glob=False
-            ).filter(node.exprs[0])
+            )._filter(node.exprs[0])
         if (
             source.kind == SCAN_CSV
             and not source.has_dataset()
@@ -458,11 +458,11 @@ def plan_execute_node(
         if schema:
             return schema.take()
     if node.kind == FILTER:
-        return input.filter(node.exprs[0])
+        return input._filter(node.exprs[0])
     if node.kind == SELECT:
-        return input.select_exprs(node.exprs)
+        return input._select_exprs(node.exprs)
     if node.kind == WITH_COLUMNS:
-        return input.with_columns(node.exprs)
+        return input._with_columns(node.exprs)
     if node.kind == AGG:
         return input.group_by(
             node.group_keys(), maintain_order=node.maintain_order

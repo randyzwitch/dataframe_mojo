@@ -290,7 +290,7 @@ def _metadata_truth(
         var metadata = _with_metadata(
             spec, file_index, DataFrame(List[Series](), height=1)
         )
-        return 1 if metadata.filter(expression).height() != 0 else 0
+        return 1 if metadata._filter(expression).height() != 0 else 0
     except:
         # Unsupported type comparisons must be reported by the real filter.
         return -1
