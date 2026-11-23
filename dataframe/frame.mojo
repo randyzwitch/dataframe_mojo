@@ -3125,12 +3125,7 @@ struct DataFrame(Copyable, Sized, Writable):
 
     def _mean_fill(self, c: Expr, dtype: DataType) raises -> Expr:
         var work = c.cast(DataType.INT64) if dtype.is_temporal() else c.copy()
-        # Evaluated here, not as a plan: the sink of a plan's fill node
-        # calls this inside its schedule.
-        var reduced = evaluate(
-            bind(work.mean(), self._columns), self._columns, self._height
-        )
-        var mean = lit(Self([reduced^], height=1).item().float64())
+        var mean = lit(self._select_exprs([work.mean()]).item().float64())
         if dtype.is_decimal():
             var scale = lit(Float64(pow10(dtype.scale())))
             return ((mean * scale).truncate() / scale).cast(dtype)
