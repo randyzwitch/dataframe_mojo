@@ -126,9 +126,9 @@ def late_fetch(
     var frame = scan.take(rows)
     for node in operations:
         if node.kind == SELECT:
-            frame = frame.select_exprs(node.exprs)
+            frame = frame._select_exprs(node.exprs)
         elif node.kind == WITH_COLUMNS:
-            frame = frame.with_columns(node.exprs)
+            frame = frame._with_columns(node.exprs)
         elif node.kind == DROP:
             frame = frame.drop(node.names)
     return frame^

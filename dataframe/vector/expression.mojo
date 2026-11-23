@@ -217,6 +217,10 @@ def _computed_supported(bound: BoundExpr, index: Int) raises -> Bool:
         if not _numeric_lane(_lane(source)) or source.is_temporal():
             return False
         if dtype.is_decimal():
+            if node.integer == 0:
+                # A lenient cast makes a value past the precision null;
+                # the lanes only raise.
+                return False
             if source.is_decimal():
                 # An upscale must stay within 38 digits before the check.
                 return (
@@ -2985,11 +2989,14 @@ struct VectorExpression(Copyable, Movable):
             var shift = left_type.scale() + right_type.scale() - dtype.scale()
             var rescale = pow10(max(shift, 0))
             for k in range(count):
+                # A null row's payload is never multiplied: its product
+                # may not fit, and the row has no value to overflow.
+                if not whole and flags[unsafe_offset=k] == 0:
+                    out[unsafe_offset=k] = 0
+                    continue
                 var value = _decimal_mul(x[unsafe_offset=k], y[unsafe_offset=k])
                 if shift > 0:
                     value = divide_half_even(value, rescale)
-                if not whole and flags[unsafe_offset=k] == 0:
-                    value = 0
                 overflow |= value <= -limit or value >= limit
                 out[unsafe_offset=k] = value
         else:
@@ -2997,6 +3004,9 @@ struct VectorExpression(Copyable, Movable):
             var left_factor = pow10(common - left_type.scale())
             var right_factor = pow10(common - right_type.scale())
             for k in range(count):
+                if not whole and flags[unsafe_offset=k] == 0:
+                    out[unsafe_offset=k] = 0
+                    continue
                 var a = x[unsafe_offset=k]
                 var b = y[unsafe_offset=k]
                 if left_factor != 1:
@@ -3004,8 +3014,6 @@ struct VectorExpression(Copyable, Movable):
                 if right_factor != 1:
                     b = _decimal_mul(b, right_factor)
                 var value = a + b if node.op == ADD else a - b
-                if not whole and flags[unsafe_offset=k] == 0:
-                    value = 0
                 overflow |= value <= -limit or value >= limit
                 out[unsafe_offset=k] = value
         if overflow:

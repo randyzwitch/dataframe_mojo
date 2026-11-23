@@ -3579,6 +3579,8 @@ struct Reducer(Movable):
             if self.dtype == DataType.BOOL:
                 return Series("", BoolColumn(self.bools.copy(), valid))
             return Series("", StringColumn(self.strings, valid))
+        if op != ANY and op != ALL:
+            raise Error("Unsupported reduction")
         var output = List[Bool](length=n, fill=False)
         var ignore_nulls = self.integer != 0
         for g in range(n):

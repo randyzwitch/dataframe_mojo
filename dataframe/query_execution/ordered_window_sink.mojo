@@ -92,8 +92,8 @@ struct OrderedWindowSink(Movable, Rounds):
 
     def _eager(self) raises -> DataFrame:
         if self.select:
-            return self.input.select_exprs(self.exprs)
-        return self.input.with_columns(self.exprs)
+            return self.input._select_exprs(self.exprs)
+        return self.input._with_columns(self.exprs)
 
     def next_round(mut self) raises -> Int:
         if self.stage == _START:

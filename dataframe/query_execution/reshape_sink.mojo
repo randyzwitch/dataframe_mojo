@@ -153,21 +153,24 @@ struct ReshapeSink(Movable, Rounds):
                     var c = self.merged[k]
                     self.columns[c] = self.columns[c].rechunk()
         elif self.stage == _KEYS:
-            # With no index, the one task numbers the `on` values.
-            if task == 0 and len(self._index()) > 0:
-                var keys = List[Series]()
-                for name in self._index():
-                    keys.append(self.input.column(name))
-                var encoded = encode_rows(keys, nulls_equal=True)
-                swap(self.row_ids, encoded.ids)
-                swap(self.row_firsts, encoded.representatives)
-            else:
-                var encoded = encode_rows(
-                    [self.input.column(self.node.pivot_on())],
-                    nulls_equal=True,
-                )
-                swap(self.column_ids, encoded.ids)
-                swap(self.column_firsts, encoded.representatives)
+            # Job 0 numbers the `on` values, job 1 the index keys (none
+            # with no index).
+            var indexed = len(self._index()) > 0
+            for job in range(task, 2 if indexed else 1, self.width):
+                if job == 1:
+                    var keys = List[Series]()
+                    for name in self._index():
+                        keys.append(self.input.column(name))
+                    var encoded = encode_rows(keys, nulls_equal=True)
+                    swap(self.row_ids, encoded.ids)
+                    swap(self.row_firsts, encoded.representatives)
+                else:
+                    var encoded = encode_rows(
+                        [self.input.column(self.node.pivot_on())],
+                        nulls_equal=True,
+                    )
+                    swap(self.column_ids, encoded.ids)
+                    swap(self.column_firsts, encoded.representatives)
         elif self.stage == _GATHER:
             var index = self._index()
             for c in range(task, len(self.gathered), self.width):
@@ -274,8 +277,10 @@ struct ReshapeSink(Movable, Rounds):
             self.row_ids = List[Int](length=self.height, fill=0)
             if self.height > 0:
                 self.row_firsts.append(0)
-            return 1
-        return 2
+            self.width = 1
+        else:
+            self.width = round_width(2)
+        return self.width
 
     def _spread(mut self) raises -> Int:
         """The output columns chosen and checked, the cell each of their
