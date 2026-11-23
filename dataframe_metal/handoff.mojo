@@ -191,11 +191,14 @@ def region_key(region: LazyFrame) raises -> String:
     var dictionary = plan_dictionary_group(region)
     if dictionary:
         ref frame = region._plan._frames[region._plan._nodes[0].source_slot()]
-        return (
-            "dictionary_group_sum:v1:"
+        var identity = (
+            "dictionary_group_sum:v2:"
             + frame.column(dictionary.value().value).dtype().name()
-            + ":labels"
-            + String(len(dictionary.value().dictionary.dictionary()[]))
+        )
+        for labels in dictionary.value().dictionaries:
+            identity += ":labels" + String(len(labels.dictionary()[]))
+        return (
+            identity
             + ":min_count"
             + String(region._plan._nodes[1].exprs[0]._nodes[1].min_count)
         )
