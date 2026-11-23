@@ -133,30 +133,25 @@ def test_parquet_dictionary_codes_stay_aligned_after_gathers_and_outer_join_null
     assert_dictionary_rows(
         source.sort("x", descending=True), [8, 7, 6, 5, 4, 3, 2, 1, 0]
     )
-    var weights = DataFrame(
+    var left = DataFrame(
         [
             Series("x", Column[Int64]([0, 100, 777])),
             Series("weight", Column[Int64]([1, 2, 4])),
         ]
     )
-    # The dictionary column on a join's probe side: its rows are a gather
-    # (here every row once) of the column, which keeps its codes in step,
-    # while the other side's unmatched rows are null-extended. A build
-    # side's columns are read back out of the hash table as values, so
-    # they carry no codes.
-    var joined = source.join(weights, on="x", how="left").sort("x")
-    assert_dictionary_rows(
-        joined.select(["x", "s"]), [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    )
-    assert_equal(joined.item(0, "weight").int64(), Int64(1))
-    assert_equal(joined.item(4, "weight").int64(), Int64(2))
-    assert_equal(joined.column("weight").null_count(), 7)
+    var joined = left.join(source, on="x", how="left").sort("x")
+    assert_equal(joined.height(), 3)
+    assert_true(Bool(joined.column("s")._dictionary_codes()))
+    assert_equal(joined.item(0, "s").string(), "red")
+    assert_equal(joined.item(1, "s").string(), "red")
+    assert_true(joined.item(2, "s").is_null())
     var groups = joined.group_by("s").agg(col("weight").sum())
-    for row in range(groups.height()):
-        if (
-            not groups.item(row, "s").is_null()
-            and groups.item(row, "s").string() == "red"
-        ):
+    assert_equal(groups.height(), 2)
+    for row in range(2):
+        if groups.item(row, "s").is_null():
+            assert_equal(groups.item(row, "weight").int64(), Int64(4))
+        else:
+            assert_equal(groups.item(row, "s").string(), "red")
             assert_equal(groups.item(row, "weight").int64(), Int64(3))
 
 
