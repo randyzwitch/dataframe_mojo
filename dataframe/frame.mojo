@@ -544,35 +544,7 @@ struct DataFrame(Copyable, Sized, Writable):
         if fill_value and self.width() > 0:
             if bind(fill_value.value(), self._columns).shape() == ROWS:
                 raise Error("shift fill_value must be a scalar value")
-<<<<<<< HEAD
         return self._row_order(self.lazy().shift(n, fill_value=fill_value))
-=======
-            var exprs = List[Expr](capacity=self.width())
-            for column in self._columns:
-                exprs.append(
-                    fill_value.value().cast(column.dtype()).alias(column.name())
-                )
-            fills = self._select_exprs(exprs)
-        # The source row of each output row; vacated rows read -1 (null)
-        # or, with a fill value, the fill row appended after the last.
-        var empty_row = height if fills else -1
-        var rows = List[Int](capacity=height)
-        for i in range(height):
-            if n > 0:
-                rows.append(i - vacated if i >= vacated else empty_row)
-            else:
-                rows.append(i + vacated if i + vacated < height else empty_row)
-        var columns = List[Series](capacity=self.width())
-        for k in range(self.width()):
-            ref column = self._columns[k]
-            if fills:
-                columns.append(
-                    column.append(fills.value()._columns[k]).take(rows)
-                )
-            else:
-                columns.append(column.take_or_null(rows))
-        return Self(columns^, height=height)
->>>>>>> origin/main
 
     def vstack(self, other: Self) raises -> Self:
         """Append other's rows; schemas must match exactly."""
@@ -3123,11 +3095,7 @@ struct DataFrame(Copyable, Sized, Writable):
             if dtype.is_categorical():
                 expression = expression.cast(dtype)
             fills.append(expression.alias(name))
-<<<<<<< HEAD
         return fills^
-=======
-        return self._with_columns(fills)
->>>>>>> origin/main
 
     def _fill_strategy_limit(
         self, strategy: String, limit: Optional[Int], subset: List[String]
@@ -3157,16 +3125,12 @@ struct DataFrame(Copyable, Sized, Writable):
 
     def _mean_fill(self, c: Expr, dtype: DataType) raises -> Expr:
         var work = c.cast(DataType.INT64) if dtype.is_temporal() else c.copy()
-<<<<<<< HEAD
         # Evaluated here, not as a plan: the sink of a plan's fill node
         # calls this inside its schedule.
         var reduced = evaluate(
             bind(work.mean(), self._columns), self._columns, self._height
         )
         var mean = lit(Self([reduced^], height=1).item().float64())
-=======
-        var mean = lit(self._select_exprs([work.mean()]).item().float64())
->>>>>>> origin/main
         if dtype.is_decimal():
             var scale = lit(Float64(pow10(dtype.scale())))
             return ((mean * scale).truncate() / scale).cast(dtype)

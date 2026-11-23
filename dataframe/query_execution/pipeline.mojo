@@ -284,20 +284,16 @@ def plan_stream_execute(
             ArcPointer(Dict[Int, _ReadyIndex]())
         )
         return plan_stream_execute(plan, index, batch_size, sink)
-<<<<<<< HEAD
-    if sink == 0 and (
-        _sorts_whole(self, index)
-        or _orders_rows(self, index)
-        or _reshapes_whole(self, index)
-    ):
-=======
     if sink == 0 and _renames_frame(self, index):
         # Columns of an in-memory table, renamed or reordered: no row is
         # computed or moved, so the executor takes the table's columns
         # as they are rather than copying them morsel by morsel.
         return None
-    if sink == 0 and _sorts_whole(self, index):
->>>>>>> origin/main
+    if sink == 0 and (
+        _sorts_whole(self, index)
+        or _orders_rows(self, index)
+        or _reshapes_whole(self, index)
+    ):
         # A sort of every row reads its whole input, so no morsel
         # pipeline runs it: it is an operator pipeline whose finish sorts
         # in rounds (`SortSink`), its computed input a pipeline of the
@@ -1576,7 +1572,6 @@ def _sorts_whole(plan: QueryContext, index: Int) -> Bool:
     )
 
 
-<<<<<<< HEAD
 def _reshapes_whole(plan: QueryContext, index: Int) -> Bool:
     """Whether node `index` is an unpivot or a pivot, which reads its whole
     input, and an operator pipeline runs it as a `ReshapeSink`."""
@@ -1619,7 +1614,9 @@ def _orders_rows(plan: QueryContext, index: Int) -> Bool:
     `RowOrderSink`."""
     return plan._handoff == HANDOFF_OFF and row_order_node(
         plan._nodes[index].kind
-=======
+    )
+
+
 def _renames_frame(plan: QueryContext, index: Int) -> Bool:
     """Whether node `index` is a projection of columns
     (`_column_projection`) straight over a scan of an in-memory table."""
@@ -1648,7 +1645,6 @@ def _projects_whole(plan: QueryContext, index: Int) -> Bool:
         or whole_input_ranks(node.exprs)
         or whole_input_windows(node.exprs)
         or whole_input_reductions(node.exprs)
->>>>>>> origin/main
     )
 
 
