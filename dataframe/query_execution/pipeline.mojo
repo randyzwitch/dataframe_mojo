@@ -270,6 +270,11 @@ def plan_stream_execute(
             ArcPointer(Dict[Int, _ReadyIndex]())
         )
         return plan_stream_execute(plan, index, batch_size, sink)
+    if sink == 0 and _renames_frame(self, index):
+        # Columns of an in-memory table, renamed or reordered: no row is
+        # computed or moved, so the executor takes the table's columns
+        # as they are rather than copying them morsel by morsel.
+        return None
     if sink == 0 and _sorts_whole(self, index):
         # A sort of every row reads its whole input, so no morsel
         # pipeline runs it: it is an operator pipeline whose finish sorts
@@ -1528,6 +1533,18 @@ def _sorts_whole(plan: QueryContext, index: Int) -> Bool:
         node.kind == SELECT
         and node.left >= 0
         and plan._nodes[node.left].kind == SORT
+        and _column_projection(node)
+    )
+
+
+def _renames_frame(plan: QueryContext, index: Int) -> Bool:
+    """Whether node `index` is a projection of columns
+    (`_column_projection`) straight over a scan of an in-memory table."""
+    ref node = plan._nodes[index]
+    return (
+        node.kind == SELECT
+        and node.left >= 0
+        and plan._nodes[node.left].kind == SCAN_FRAME
         and _column_projection(node)
     )
 
