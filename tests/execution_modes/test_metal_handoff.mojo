@@ -1115,6 +1115,44 @@ def test_metal_composition_matches_cpu_for_shared_arithmetic_nulls_and_chunks() 
 
 
 # requires: metal
+def test_metal_filtered_exact_product_batches_independent_chunks() raises:
+    var runtime = require_metal()
+    var prices = List[Series]()
+    var quantities = List[Series]()
+    for i in range(32):
+        var source = _columns(64, i % 3 != 0).column("f")
+        prices.append(source.slice(i % 8, 31))
+        # Different boundaries on the two inputs, with the same total length.
+        quantities.append(source.slice(7 - i % 8, 30 + 2 * (i % 2)))
+    var frame = DataFrame(
+        [
+            Series._from_chunks(prices).renamed("price"),
+            Series._from_chunks(quantities).renamed("qty"),
+            _columns(32 * 31, True).column("i"),
+        ]
+    )
+    var product = col("price") * col("qty")
+    for threshold in [-100, 1_000_000]:
+        var plan = (
+            frame.lazy()
+            .filter(col("i") > threshold)
+            .select_exprs(
+                [
+                    product.sum(min_count=1).alias("total"),
+                    product.count().alias("count"),
+                    product.mean().alias("mean"),
+                ]
+            )
+        )
+        var observed = plan.profile(accelerator=runtime)
+        assert_true(observed[0].equals(plan.collect(engine="cpu")))
+        var launches = Int64(0)
+        for row in range(observed[1].height()):
+            launches += observed[1].item(row, "gpu_completed_launches").int64()
+        assert_equal(launches, Int64(1))
+
+
+# requires: metal
 def test_metal_composition_uses_eight_value_inputs_and_independent_predicate() raises:
     _ = require_metal()
     var columns = List[Series]()
