@@ -1,4 +1,4 @@
-"""Eager adapters for grouping sets, time windows, pivot, and gather."""
+"""Eager adapters for grouping sets, pivot, and gather."""
 from dataframe.binding import (
     bind,
 )
@@ -32,7 +32,6 @@ from dataframe.planning.graph import (
 )
 from dataframe.planning.model import (
     PlanNode,
-    ROLLING,
 )
 from dataframe.planning.properties import (
     _join_schema,
@@ -100,29 +99,6 @@ def _run_grouping_sets(node: PlanNode, input: DataFrame) raises -> DataFrame:
             part = input.group_by(one).agg(aggregates)
         parts.append(_set_rows(node, part^, one, dtypes))
     return concat(parts)
-
-
-def _run_time_window(node: PlanNode, input: DataFrame) raises -> DataFrame:
-    """The eager `group_by_dynamic` or `rolling` aggregation a time window
-    node records, over its executed input."""
-    var by = List[String](node.window_columns()[1:])
-    if node.kind == ROLLING:
-        return input.rolling(
-            node.window_columns()[0],
-            node.window_period(),
-            Optional(node.window_offset()),
-            node.window_closed(),
-            by,
-        ).agg(node.exprs, batch_size=node.window_batch_size())
-    return input.group_by_dynamic(
-        node.window_columns()[0],
-        node.window_every(),
-        Optional(node.window_period()),
-        Optional(node.window_offset()),
-        node.window_closed(),
-        node.window_label(),
-        by,
-    ).agg(node.exprs, batch_size=node.window_batch_size())
 
 
 def _pivoted(input: DataFrame, node: PlanNode) raises -> DataFrame:

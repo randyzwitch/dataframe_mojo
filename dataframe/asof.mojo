@@ -303,16 +303,14 @@ def _match[
     return result^
 
 
-def asof_rows(
+def asof_key_checks(
     left: Series,
     right: Series,
-    left_ids: List[Int],
-    right_ids: List[Int],
-    matchable: List[Bool],
     strategy: String,
     tolerance: Optional[AnyValue],
-    allow_exact_matches: Bool,
-) raises -> List[Int]:
+) raises -> Tuple[Bool, Int128, Float64]:
+    """Raise on keys or options an as-of match cannot use; the tolerance
+    in key units (whether there is one, as an integer, as a float)."""
     var dtype = left.dtype()
     if dtype != right.dtype():
         raise Error(
@@ -333,7 +331,22 @@ def asof_rows(
         )
     if strategy not in ["backward", "forward", "nearest"]:
         raise Error("join_asof strategy must be backward, forward or nearest")
-    var bound = _tolerance(tolerance, dtype)
+    return _tolerance(tolerance, dtype)
+
+
+def asof_rows(
+    left: Series,
+    right: Series,
+    left_ids: List[Int],
+    right_ids: List[Int],
+    matchable: List[Bool],
+    strategy: String,
+    tolerance: Optional[AnyValue],
+    allow_exact_matches: Bool,
+) raises -> List[Int]:
+    """Each left row's matched right row (-1: none), by one ordered scan of
+    both sides per group."""
+    var bound = asof_key_checks(left, right, strategy, tolerance)
     var lhs = left.rechunk()
     var rhs = right.rechunk()
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -353,3 +366,128 @@ def asof_rows(
                         bound,
                     )
     raise Error("Unsupported join_asof key storage")
+
+
+def asof_buckets(
+    right: Series, right_ids: List[Int], matchable: List[Bool]
+) raises -> Tuple[List[Int], List[Int]]:
+    """The right rows a match may pick, by group in key order: each
+    group's first position (then the end), and the rows. Rows already in
+    key order within their group keep their order; otherwise the group's
+    rows are taken in a stable (group, key) order. Null keys and groups
+    that cannot match are left out. `right` is one array."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if right._data.isa[Column[Scalar[D]]]():
+            return _buckets(
+                right, right._data[Column[Scalar[D]]], right_ids, matchable
+            )
+    raise Error("Unsupported join_asof key storage")
+
+
+def _buckets[
+    D: DType
+](
+    right: Series,
+    column: Column[Scalar[D]],
+    right_ids: List[Int],
+    matchable: List[Bool],
+) raises -> Tuple[List[Int], List[Int]]:
+    var groups = len(matchable)
+    var sequence: List[Int]
+    if _is_sorted(column, right_ids, groups):
+        sequence = List[Int](capacity=len(column))
+        for row in range(len(column)):
+            sequence.append(row)
+    else:
+        sequence = _sorted_order(right, right_ids)
+    # Stable buckets by group: total work is linear for any number of
+    # groups.
+    var starts = List[Int](length=groups + 1, fill=0)
+    for row in sequence:
+        var g = right_ids[row] if len(right_ids) else 0
+        if column._valid(row) and matchable[g]:
+            starts[g + 1] += 1
+    for g in range(groups):
+        starts[g + 1] += starts[g]
+    var places = starts.copy()
+    var order = List[Int](length=starts[groups], fill=0)
+    for row in sequence:
+        var g = right_ids[row] if len(right_ids) else 0
+        if column._valid(row) and matchable[g]:
+            order[places[g]] = row
+            places[g] += 1
+    return (starts^, order^)
+
+
+def _bound[
+    D: DType
+](
+    keys: Column[Scalar[D]], start: Int, stop: Int, value: Scalar[D], past: Bool
+) -> Int:
+    """The first position in [start, stop) whose key is above `value`
+    (`past`), or at or above it."""
+    var lo = start
+    var hi = stop
+    while lo < hi:
+        var mid = lo + (hi - lo) // 2
+        var key = keys._get(mid)
+        if _less(key, value) or (past and not _less(value, key)):
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def asof_probe[
+    D: DType, forward: Bool
+](
+    left: Column[Scalar[D]],
+    keys: Column[Scalar[D]],
+    left_ids: List[Int],
+    starts: List[Int],
+    order: List[Int],
+    matchable: List[Bool],
+    exact: Bool,
+    tolerance: Tuple[Bool, Int128, Float64],
+    mut matched: List[Int],
+    first: Int,
+    end: Int,
+):
+    """The backward (last key at or below) or forward (first key at or
+    above) match of left rows [first, end), each found on its own by
+    binary search over its group's keys in key order (`asof_buckets`;
+    `keys` holds the key of each of `order`'s rows)."""
+    for row in range(first, end):
+        if not left._valid(row):
+            continue
+        var g = left_ids[row] if len(left_ids) else 0
+        if not matchable[g]:
+            continue
+        var start = starts[g]
+        var stop = starts[g + 1]
+        var value = left._get(row)
+        var chosen = -1
+        comptime if forward:
+            var pos = _bound(keys, start, stop, value, not exact)
+            if pos < stop:
+                chosen = pos
+        else:
+            var pos = _bound(keys, start, stop, value, exact)
+            if pos > start:
+                chosen = pos - 1
+        if chosen >= 0 and tolerance[0]:
+            comptime if D.is_floating_point():
+                if not (
+                    abs(Float64(value) - Float64(keys._get(chosen)))
+                    <= tolerance[2]
+                ):
+                    chosen = -1
+            else:
+                if (
+                    abs(Int128(value) - Int128(keys._get(chosen)))
+                    > tolerance[1]
+                ):
+                    chosen = -1
+        if chosen >= 0:
+            matched[row] = order[chosen]

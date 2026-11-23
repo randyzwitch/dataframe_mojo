@@ -95,8 +95,13 @@ from dataframe.query_execution.operators import (
     _gathered,
     _pivoted,
     _run_grouping_sets,
-    _run_time_window,
     plan_join_frames,
+)
+from dataframe.query_execution.asof_sink import (
+    asof_join,
+)
+from dataframe.query_execution.time_window_sink import (
+    time_window,
 )
 from dataframe.query_execution.pipeline import (
     plan_execute_inputs,
@@ -475,19 +480,7 @@ def plan_execute_node(
         )
     if node.kind == ASOF:
         var right = self._execute(node.right, empty, streaming, batch_size)
-        var groups = List[String]()
-        for i in range(node.asof_group_count()):
-            groups.append(node.asof_group(i))
-        return input.join_asof(
-            right,
-            left_on=node.join_left_keys()[0],
-            right_on=node.join_right_keys()[0],
-            by=groups,
-            strategy=node.text,
-            tolerance=node.asof_tolerance,
-            suffix=node.join_suffix(),
-            allow_exact_matches=node.asof_allow_exact_matches(),
-        )
+        return asof_join(input^, right^, node)
     if node.kind == JOIN:
         var right = self._execute(node.right, empty, streaming, batch_size)
         return plan_join_frames(self, index, input^, right^, empty)
@@ -531,7 +524,7 @@ def plan_execute_node(
             value_name=node.unpivot_output_names()[1],
         )
     if _is_time_window(node.kind):
-        return _run_time_window(node, input)
+        return time_window(input^, node)
     if node.kind == GROUPING_SETS:
         return _run_grouping_sets(node, input)
     if node.kind == TAIL:
