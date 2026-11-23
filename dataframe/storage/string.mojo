@@ -469,15 +469,15 @@ struct StringColumn(Copyable, Sized):
         if self._is_view_storage() or other._is_view_storage():
             if not (self._is_view_storage() and other._is_view_storage()):
                 return False
-            var left = self._view_storage.value().copy()
-            var right = other._view_storage.value().copy()
+            ref left = self._view_storage.value()
+            ref right = other._view_storage.value()
             if left._selects() or right._selects():
                 # Shared descriptors read through different rows.
                 return False
             return (
-                left.views_arc().ptr() == right.views_arc().ptr()
+                left._views.ptr() == right._views.ptr()
                 and left.buffers_arc().ptr() == right.buffers_arc().ptr()
-                and left.validity_arc().ptr() == right.validity_arc().ptr()
+                and left._bits.ptr() == right._bits.ptr()
             )
         return (
             self._bytes.ptr() == other._bytes.ptr()

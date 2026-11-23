@@ -1320,11 +1320,11 @@ def _step_schemas(
     schemas.append(current.copy())
     for step in steps:
         if step.kind == STEP_FILTER:
-            current = current.filter(step.exprs[0])
+            current = current._filter(step.exprs[0])
         elif step.kind == STEP_SELECT:
-            current = current.select_exprs(step.exprs)
+            current = current._select_exprs(step.exprs)
         elif step.kind == STEP_WITH_COLUMNS:
-            current = current.with_columns(step.exprs)
+            current = current._with_columns(step.exprs)
         elif _cross_step(step):
             current = current._cross_join(
                 joins[step.join].clear(), "cross", step.suffix
@@ -3719,7 +3719,7 @@ struct PipelineFinish(Movable, Rounds):
                 if len(run.sets[s]) == 0:
                     if finished.height() == 0:
                         # No rows: the grand total is still one row.
-                        finished = run.set_empty[0].select_exprs(
+                        finished = run.set_empty[0]._select_exprs(
                             run.expressions
                         )
                     else:
@@ -3767,7 +3767,7 @@ struct PipelineFinish(Movable, Rounds):
                 var whole = self.batches.pop().frame.copy()
                 if run.collects:
                     if len(run.keys) == 0:
-                        whole = whole.select_exprs(run.expressions)
+                        whole = whole._select_exprs(run.expressions)
                     else:
                         whole = whole.group_by(
                             run.keys, maintain_order=run.ordered
@@ -4168,7 +4168,9 @@ def _having_keep(context: Int, states: List[Reducer]) raises -> List[Int]:
             .renamed(having.names[i])
         )
     var height = len(columns[0])
-    var values = DataFrame(columns^, height=height).select_exprs(having.outputs)
+    var values = DataFrame(columns^, height=height)._select_exprs(
+        having.outputs
+    )
     return true_rows(values._selection(having.predicate, having.batch_size))
 
 
@@ -4444,7 +4446,7 @@ def pipeline_types(
             steps = extracted[0].copy()
             expressions = extracted[1].copy()
             typed.append(
-                typed[len(typed) - 1].select_exprs(steps[len(steps) - 1].exprs)
+                typed[len(typed) - 1]._select_exprs(steps[len(steps) - 1].exprs)
             )
     var schemas = ArcPointer(typed^)
     var templates = ArcPointer(_compile_steps(steps, schemas[]))

@@ -126,7 +126,7 @@ def test_integer_and_boolean_decimal_casts_read_every_row_at_all_storage_widths(
                                 )
                                 if valid[row]:
                                     assert_equal(
-                                        actual._decimal_raw(row),
+                                        actual.rechunk()._decimal_raw(row),
                                         numbers[row] * factor,
                                     )
 

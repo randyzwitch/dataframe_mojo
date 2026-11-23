@@ -77,7 +77,7 @@ def _keys_repeat(
                 rows.append(r)
     var picked = narrowed.take(rows)
     for f in filters:
-        picked = picked.filter(f)
+        picked = picked._filter(f)
     if picked.height() < 64:
         return False
     var columns = List[Series](capacity=len(keys))

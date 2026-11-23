@@ -101,6 +101,7 @@ from .groups import GroupIndices
 from dataframe.kernels.top_k import top_k_mask
 from dataframe.kernels.binary import validity
 from .selectors import expand, expand_all
+from dataframe.planning.expression_inputs import _references
 from .lazy import LazyFrame, _concat_plans
 from .display import render_frame, render_glimpse
 from dataframe.aggregation.keys import (
@@ -506,18 +507,29 @@ struct DataFrame(Copyable, Sized, Writable):
 
     def tail(self, n: Int = 5) raises -> Self:
         """Last n rows; a negative n drops the first -n rows."""
+        return self._row_order(self.lazy().tail(n))
+
+    def _tail_rows(self, n: Int) raises -> Self:
+        """`tail` as a slice of this frame, with no plan."""
         if n < 0:
             return self.slice(min(-n, self._height))
         return self.slice(self._height - min(n, self._height))
+
+    def _row_order(self, plan: LazyFrame) raises -> Self:
+        """A one-node plan over this frame of an operation that places
+        rows by their position (tail, reverse, shift, gather_every,
+        with_row_index) or fills nulls by strategy, run through the same
+        pipelines as `LazyFrame.collect`: its input is complete when the
+        node's sink starts, which then splits the work by rows or columns
+        as rounds of tasks (`RowOrderSink`)."""
+        return plan._collect(optimize=False, streaming=True, batch_size=65536)
 
     def limit(self, n: Int = 5) raises -> Self:
         return self.head(n)
 
     def reverse(self) raises -> Self:
-        var columns = List[Series](capacity=self.width())
-        for column in self._columns:
-            columns.append(column.reverse())
-        return Self(columns^, height=self._height)
+        """The rows in reverse order."""
+        return self._row_order(self.lazy().reverse())
 
     def shift(
         self, n: Int = 1, *, fill_value: Optional[Expr] = None
@@ -529,39 +541,10 @@ struct DataFrame(Copyable, Sized, Writable):
         column's type. `fill_value` is a scalar expression evaluated
         against this frame: a literal, or a reduction such as
         `col("a").max()`."""
-        var height = self._height
-        var vacated = height if n >= height or n <= -height else abs(n)
-        if vacated == 0:
-            return self.copy()
-        var fills = Optional[Self]()
         if fill_value and self.width() > 0:
             if bind(fill_value.value(), self._columns).shape() == ROWS:
                 raise Error("shift fill_value must be a scalar value")
-            var exprs = List[Expr](capacity=self.width())
-            for column in self._columns:
-                exprs.append(
-                    fill_value.value().cast(column.dtype()).alias(column.name())
-                )
-            fills = self.select_exprs(exprs)
-        # The source row of each output row; vacated rows read -1 (null)
-        # or, with a fill value, the fill row appended after the last.
-        var empty_row = height if fills else -1
-        var rows = List[Int](capacity=height)
-        for i in range(height):
-            if n > 0:
-                rows.append(i - vacated if i >= vacated else empty_row)
-            else:
-                rows.append(i + vacated if i + vacated < height else empty_row)
-        var columns = List[Series](capacity=self.width())
-        for k in range(self.width()):
-            ref column = self._columns[k]
-            if fills:
-                columns.append(
-                    column.append(fills.value()._columns[k]).take(rows)
-                )
-            else:
-                columns.append(column.take_or_null(rows))
-        return Self(columns^, height=height)
+        return self._row_order(self.lazy().shift(n, fill_value=fill_value))
 
     def vstack(self, other: Self) raises -> Self:
         """Append other's rows; schemas must match exactly."""
@@ -664,14 +647,7 @@ struct DataFrame(Copyable, Sized, Writable):
         """Take every nth row from a nonnegative offset; n must be positive."""
         if n <= 0 or offset < 0:
             raise Error("gather_every needs positive n and nonnegative offset")
-        var indices = List[Int]()
-        var row = offset
-        while row < self._height:
-            indices.append(row)
-            if n >= self._height - row:
-                break
-            row += n
-        return self.take(indices)
+        return self._row_order(self.lazy().gather_every(n, offset))
 
     def with_row_index(
         self, name: String = "index", offset: Int64 = 0
@@ -680,14 +656,7 @@ struct DataFrame(Copyable, Sized, Writable):
         for column in self._columns:
             if column.name() == name:
                 raise Error("Row index name collides with column: " + name)
-        var values = List[Int64](capacity=self._height)
-        for i in range(self._height):
-            values.append(offset + Int64(i))
-        var columns = List[Series](capacity=self.width() + 1)
-        columns.append(Series(name, Column[Int64](values^)))
-        for column in self._columns:
-            columns.append(column.copy())
-        return Self(columns^, height=self._height)
+        return self._row_order(self.lazy().with_row_index(name, offset))
 
     def select(self, names: List[String]) raises -> Self:
         var columns = List[Series](capacity=len(names))
@@ -775,7 +744,7 @@ struct DataFrame(Copyable, Sized, Writable):
         )
         if len(expressions) == 0:
             return Self(List[Series](), height=1)
-        return self.select_exprs(expressions)
+        return self._select_exprs(expressions)
 
     def _frame_reduction_exprs(
         self,
@@ -868,7 +837,7 @@ struct DataFrame(Copyable, Sized, Writable):
         """
         var qs = _describe_percentiles(percentiles)
         var exprs = self._describe_exprs(qs, interpolation)
-        var stats = self.select_exprs(exprs) if len(exprs) > 0 else Self(
+        var stats = self._select_exprs(exprs) if len(exprs) > 0 else Self(
             List[Series](), height=1
         )
         return self._described(qs, stats)
@@ -1476,7 +1445,7 @@ struct DataFrame(Copyable, Sized, Writable):
             names.append(key._name)
         # The keys are sorted as columns beside this frame's, which alone
         # are gathered into the result.
-        return self.with_columns(keys)._planned_sort(
+        return self._with_columns(keys)._planned_sort(
             names,
             descending,
             nulls_last,
@@ -2072,12 +2041,69 @@ struct DataFrame(Copyable, Sized, Writable):
     ) raises -> Self:
         """Evaluate against the original frame. Scalar-only output has one row.
 
-        Rows are evaluated in batches of `batch_size`. The default, as for
-        with_columns, amortizes each expression node's fixed per-batch cost:
-        with bitmap comparisons (#327) that cost dominated at 1024 rows.
+        Runs as the lazy plan's select does: a plan of one projection over
+        the columns the expressions read, executed through the same
+        pipelines as `LazyFrame.collect`. Row-wise expressions run on each
+        morsel, windows partitioned by keys and reductions over all rows run
+        in their sinks' rounds, and the plan's executor evaluates the rest
+        over the whole frame. `batch_size` is the plan's batch size.
+
+        When the plan fails, the kernels evaluate the whole frame again
+        (with_columns and filter do the same): their errors number rows
+        over the frame, where a morsel knows only its own, and an
+        expression the plan has no route for still gets the kernels'
+        answer (traced as `eager.kernels_after_plan_error`).
 
         If any expression is row-valued, scalar results broadcast to height,
         including zero rows. An empty selection preserves the input height.
+        """
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        var expanded = expand_all(expressions, self._columns)
+        _ = _bind_all(expanded, self._columns)
+        if len(expanded) == 0 or len(self._columns) == 0:
+            return self._select_exprs(expanded, batch_size)
+        try:
+            return (
+                self._reading(expanded)
+                .lazy()
+                .select_exprs(expanded)
+                ._collect(optimize=False, streaming=True, batch_size=batch_size)
+            )
+        except:
+            trace_path("eager.kernels_after_plan_error")
+            return self._select_exprs(expanded, batch_size)
+
+    def _reading(self, expressions: List[Expr]) raises -> Self:
+        """This frame with only the columns `expressions` read (every column
+        when one reads columns it does not name, and the first when they
+        read none, which keeps the height): a pipeline cuts every column of
+        its source into each morsel, read or not."""
+        var reads = Dict[String, Bool]()
+        for expression in expressions:
+            var r = _references(expression)
+            if not r:
+                return self.copy()
+            for name in r.value():
+                reads[name] = True
+        var columns = List[Series]()
+        for column in self._columns:
+            if column.name() in reads:
+                columns.append(column.copy())
+        if len(columns) == 0:
+            columns.append(self._columns[0].copy())
+        return Self(columns^, height=self._height)
+
+    def _select_exprs(
+        self, expressions: List[Expr], batch_size: Int = 8192
+    ) raises -> Self:
+        """`select_exprs` on the calling thread's kernels, with no plan: for
+        a node the plan's executor runs over its executed input, and for
+        callers that run inside a pipeline's task or once per group.
+
+        Rows are evaluated in batches of `batch_size`. The default, as for
+        with_columns, amortizes each expression node's fixed per-batch cost:
+        with bitmap comparisons (#327) that cost dominated at 1024 rows.
         """
         var bound = _bind_all(expressions, self._columns)
         var has_rows = len(bound) == 0
@@ -2127,7 +2153,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var frame = Self(columns^, height=height)
         if len(modes) > 0:
             # An empty input has no modes: zero rows, not one null row.
-            var empty = frame.select(col(modes[0]).list().len()).item()
+            var empty = frame._select_exprs([col(modes[0]).list().len()]).item()
             if empty.int64() == 0:
                 return frame.explode(modes).clear()
             return frame.explode(modes)
@@ -2143,8 +2169,58 @@ struct DataFrame(Copyable, Sized, Writable):
     ) raises -> Self:
         """All siblings see the original schema and data; aliases are outputs.
 
+        Runs as the lazy plan's with_columns does: a plan of one projection
+        over the columns the expressions read, executed through the same
+        pipelines as `LazyFrame.collect` (see `select_exprs`). The columns it
+        makes then replace this frame's of the same name or follow them;
+        the others are this frame's as they are. `batch_size` is the plan's
+        batch size.
+        """
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        var expanded = expand_all(expressions, self._columns)
+        var bound = _bind_all(expanded, self._columns)
+        if len(expanded) == 0 or len(self._columns) == 0:
+            return self._with_columns(expanded, batch_size)
+        var input = self._reading(expanded)
+        var made: Self
+        try:
+            made = (
+                input.lazy()
+                .with_columns(expanded)
+                ._collect(optimize=False, streaming=True, batch_size=batch_size)
+            )
+        except:
+            trace_path("eager.kernels_after_plan_error")
+            return self._with_columns(expanded, batch_size)
+        var columns = self._columns.copy()
+        var done = Dict[String, Bool]()
+        for expression in bound:
+            var name = expression.expr._name
+            if name in done:
+                continue
+            done[name] = True
+            var result = made.column(name)
+            var replacement = -1
+            for i in range(len(columns)):
+                if columns[i].name() == name:
+                    replacement = i
+                    break
+            if replacement < 0:
+                columns.append(result^)
+            else:
+                columns[replacement] = result^
+        return Self(columns^, height=self._height)
+
+    def _with_columns(
+        self, expressions: List[Expr], batch_size: Int = 8192
+    ) raises -> Self:
+        """`with_columns` on the calling thread's kernels, with no plan: for
+        a node the plan's executor runs over its executed input, and for
+        callers that run inside a pipeline's task or once per group.
+
         The bounded default batch amortizes fused expression setup on large
-        inputs. Callers can still choose a smaller batch_size explicitly.
+        inputs.
         """
         var bound = _bind_all(expressions, self._columns)
         if batch_size <= 0:
@@ -2184,18 +2260,56 @@ struct DataFrame(Copyable, Sized, Writable):
         """The rows `predicate` keeps. Given `keep`, only those columns are
         returned: the predicate still reads any column, but columns only it
         reads are never copied (a lazy filter whose later steps read fewer
-        columns than it does)."""
-        return self._filter(predicate, batch_size, keep, True)
+        columns than it does).
+
+        Runs as the lazy plan's filter does: a plan of one filter over the
+        columns the result keeps and the predicate reads, executed through
+        the same pipelines as `LazyFrame.collect`. A row-wise predicate
+        narrows each morsel's selection, its table filters checked against
+        the buffers' statistics first; the plan's executor evaluates any
+        other over the whole frame. `batch_size` is the plan's batch size.
+        """
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        var predicates = expand(predicate, self._columns)
+        if len(predicates) != 1:
+            raise Error("A filter selector must match exactly one column")
+        var bound = bind(predicates[0], self._columns)
+        if bound.dtypes[len(bound.dtypes) - 1] != DataType.BOOL:
+            raise Error("Filter expression must return Boolean values")
+        if len(self._columns) == 0:
+            return self._filter(predicate, batch_size, keep)
+        var input = self.copy()
+        if len(keep) > 0:
+            for name in keep:
+                _ = self._index(name)
+            var wanted = predicates.copy()
+            for name in keep:
+                wanted.append(col(name))
+            input = self._reading(wanted)
+        var plan = input.lazy().filter(predicates[0])
+        if len(keep) > 0:
+            plan = plan.select(keep)
+        try:
+            return plan._collect(
+                optimize=False, streaming=True, batch_size=batch_size
+            )
+        except:
+            trace_path("eager.kernels_after_plan_error")
+            return self._filter(predicate, batch_size, keep)
 
     def _filter(
         self,
         predicate: Expr,
-        batch_size: Int,
-        keep: List[String],
-        scan: Bool,
+        batch_size: Int = 8192,
+        keep: List[String] = List[String](),
+        scan: Bool = True,
     ) raises -> Self:
-        """`filter`; `scan` checks the parts that are table filters against
-        the buffers' statistics first."""
+        """`filter` on the calling thread's kernels, with no plan: for a
+        node the plan's executor runs over its executed input, and for
+        callers that run inside a pipeline's task or once per group.
+        `scan` checks the parts that are table filters against the buffers'
+        statistics first."""
         # A literal true keeps every row as it is (a filter whose parts an
         # ordered column answered leaves one behind).
         if (
@@ -2642,7 +2756,7 @@ struct DataFrame(Copyable, Sized, Writable):
         for item in dtypes.items():
             _ = self._index(item.key)
             casts.append(col(item.key).cast(item.value, strict))
-        return self.with_columns(casts)
+        return self._with_columns(casts)
 
     def _subset_keys(self, subset: List[String]) raises -> List[Series]:
         var names = subset.copy() if len(subset) > 0 else self.columns()
@@ -2787,7 +2901,7 @@ struct DataFrame(Copyable, Sized, Writable):
         adopt (an integer: every numeric column; a float: every float
         column), range-checked per column.
         """
-        return self.with_columns(self._fill_null_exprs(value, subset))
+        return self._with_columns(self._fill_null_exprs(value, subset))
 
     def fill_null(
         self,
@@ -2802,7 +2916,18 @@ struct DataFrame(Copyable, Sized, Writable):
         toward zero, preserving dtype. Columns with no nulls are unchanged;
         all-null columns stay null for forward/backward/min/max/mean.
         """
-        var run_limit = self._fill_strategy_limit(strategy, limit, subset)
+        _ = self._fill_strategy_limit(strategy, limit, subset)
+        return self._row_order(
+            self.lazy().fill_null(strategy=strategy, limit=limit, subset=subset)
+        )
+
+    def _strategy_fills(
+        self, strategy: String, run_limit: Int, subset: List[String]
+    ) raises -> List[Expr]:
+        """The expressions `fill_null(strategy=...)` replaces columns with
+        (`_fill_strategy_limit` checked the arguments): none for a column
+        with no nulls, or, unless filling with zero or one, one of only
+        nulls."""
         var fills = List[Expr]()
         for column in self._columns:
             var name = column.name()
@@ -2864,7 +2989,7 @@ struct DataFrame(Copyable, Sized, Writable):
             if dtype.is_categorical():
                 expression = expression.cast(dtype)
             fills.append(expression.alias(name))
-        return self.with_columns(fills)
+        return fills^
 
     def _fill_strategy_limit(
         self, strategy: String, limit: Optional[Int], subset: List[String]
@@ -2894,7 +3019,7 @@ struct DataFrame(Copyable, Sized, Writable):
 
     def _mean_fill(self, c: Expr, dtype: DataType) raises -> Expr:
         var work = c.cast(DataType.INT64) if dtype.is_temporal() else c.copy()
-        var mean = lit(self.select(work.mean()).item().float64())
+        var mean = lit(self._select_exprs([work.mean()]).item().float64())
         if dtype.is_decimal():
             var scale = lit(Float64(pow10(dtype.scale())))
             return ((mean * scale).truncate() / scale).cast(dtype)
@@ -2927,7 +3052,7 @@ struct DataFrame(Copyable, Sized, Writable):
         value is cast to each floating dtype and may be a scalar or a
         row-valued expression.
         """
-        return self.with_columns(self._fill_nan_exprs(value))
+        return self._with_columns(self._fill_nan_exprs(value))
 
     def _fill_nan_exprs(self, value: Expr) -> List[Expr]:
         var expressions = List[Expr]()
@@ -2943,7 +3068,7 @@ struct DataFrame(Copyable, Sized, Writable):
     def drop_nans(self, subset: List[String] = List[String]()) raises -> Self:
         """Remove rows with a NaN in subset's floating columns; keep nulls."""
         var predicate = self._drop_nan_predicate(subset)
-        return self.filter(predicate.value()) if predicate else self.copy()
+        return self._filter(predicate.value()) if predicate else self.copy()
 
     def _drop_nan_predicate(
         self, subset: List[String]
@@ -3278,8 +3403,8 @@ struct _ChunkFilterJob(Job):
         self.result = DataFrame(List[Series]())
 
     def run(mut self) raises:
-        self.result = self.frame.filter(
-            self.predicate, batch_size=self.batch_size, keep=self.keep
+        self.result = self.frame._filter(
+            self.predicate, self.batch_size, self.keep
         )
 
 

@@ -55,28 +55,22 @@ from dataframe.planning.model import (
     ASOF,
     CONCAT,
     EXPLODE,
-    FILL_NULL_STRATEGY,
     FILTER,
     GATHER,
-    GATHER_EVERY,
     GROUPING_SETS,
     HANDOFF_OFF,
     HCONCAT,
     INSERT_COLUMN,
     JOIN,
     PIVOT,
-    REVERSE,
-    ROW_INDEX,
     SCAN_CSV,
     SCAN_FRAME,
     SCAN_IPC,
     SCAN_NDJSON,
     SCAN_PARQUET,
     SELECT,
-    SHIFT,
     SLICE,
     SORT,
-    TAIL,
     UNIQUE,
     UNNEST,
     UNPIVOT,
@@ -108,6 +102,10 @@ from dataframe.query_execution.placement import (
 )
 from dataframe.query_execution.reporting import (
     plan_record,
+)
+from dataframe.query_execution.row_order_sink import (
+    row_order,
+    row_order_node,
 )
 from std.collections import (
     Optional,
@@ -364,7 +362,7 @@ def plan_execute_node(
                     nulls_last=nulls_last,
                     maintain_order=sorted.maintain_order,
                 )
-                return source.select_exprs(node.exprs).take(order)
+                return source._select_exprs(node.exprs).take(order)
     # Filter each decoded CSV range before assembling the scan result.
     # A row limit and a whole-column predicate require the original
     # materialization order, so retain the eager path for those cases.
@@ -373,7 +371,7 @@ def plan_execute_node(
         if source.has_dataset() and source.scan_row_limit() < 0:
             return _execute_dataset_scan(
                 self, source, False, batch_size, Optional(node.exprs[0].copy())
-            ).filter(node.exprs[0])
+            )._filter(node.exprs[0])
         # Decode only the row groups whose footer bounds admit a match;
         # the filter still runs on what was read.
         if source.kind == SCAN_PARQUET and not source.has_dataset():
@@ -382,7 +380,7 @@ def plan_execute_node(
             )
             return read_parquet(
                 source.text, columns=source.names, row_groups=groups, glob=False
-            ).filter(node.exprs[0])
+            )._filter(node.exprs[0])
         if (
             source.kind == SCAN_CSV
             and not source.has_dataset()
@@ -460,11 +458,11 @@ def plan_execute_node(
         if schema:
             return schema.take()
     if node.kind == FILTER:
-        return input.filter(node.exprs[0])
+        return input._filter(node.exprs[0])
     if node.kind == SELECT:
-        return input.select_exprs(node.exprs)
+        return input._select_exprs(node.exprs)
     if node.kind == WITH_COLUMNS:
-        return input.with_columns(node.exprs)
+        return input._with_columns(node.exprs)
     if node.kind == AGG:
         return input.group_by(
             node.group_keys(), maintain_order=node.maintain_order
@@ -534,29 +532,8 @@ def plan_execute_node(
         return _run_time_window(node, input)
     if node.kind == GROUPING_SETS:
         return _run_grouping_sets(node, input)
-    if node.kind == TAIL:
-        return input.tail(node.tail_count())
-    if node.kind == REVERSE:
-        return input.reverse()
-    if node.kind == SHIFT:
-        if len(node.exprs) > 0:
-            return input.shift(
-                node.shift_count(), fill_value=node.exprs[0].copy()
-            )
-        return input.shift(node.shift_count())
-    if node.kind == GATHER_EVERY:
-        return input.gather_every(node.gather_stride(), node.gather_offset())
-    if node.kind == ROW_INDEX:
-        return input.with_row_index(
-            node.row_index_name(), Int64(node.row_index_offset())
-        )
-    if node.kind == FILL_NULL_STRATEGY:
-        var limit: Optional[Int] = None
-        if node.fill_limit() >= 0:
-            limit = node.fill_limit()
-        return input.fill_null(
-            strategy=node.text, limit=limit, subset=node.names
-        )
+    if row_order_node(node.kind):
+        return row_order(input^, node)
     return input.drop(node.names)
 
 

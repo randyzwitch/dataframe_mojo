@@ -390,6 +390,7 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Last n rows; a negative n drops the first -n rows.
 - `def limit(self, n: Int = Int(5)) -> Self`
 - `def reverse(self) -> Self`
+  The rows in reverse order.
 - `def shift(self, n: Int = Int(1), *, fill_value: Optional[Expr] = None) -> Self`
   Every column's values moved n rows later (earlier when n is negative). Height and schema stay the same. The min(|n|, height) rows left empty at the start (or, for a negative n, the end) are null, or `fill_value` cast to each column's type. `fill_value` is a scalar expression evaluated against this frame: a literal, or a reduction such as `col("a").max()`.
 - `def vstack(self, other: Self) -> Self`
