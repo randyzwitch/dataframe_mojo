@@ -55,28 +55,22 @@ from dataframe.planning.model import (
     ASOF,
     CONCAT,
     EXPLODE,
-    FILL_NULL_STRATEGY,
     FILTER,
     GATHER,
-    GATHER_EVERY,
     GROUPING_SETS,
     HANDOFF_OFF,
     HCONCAT,
     INSERT_COLUMN,
     JOIN,
     PIVOT,
-    REVERSE,
-    ROW_INDEX,
     SCAN_CSV,
     SCAN_FRAME,
     SCAN_IPC,
     SCAN_NDJSON,
     SCAN_PARQUET,
     SELECT,
-    SHIFT,
     SLICE,
     SORT,
-    TAIL,
     UNIQUE,
     UNNEST,
     UNPIVOT,
@@ -113,6 +107,10 @@ from dataframe.query_execution.placement import (
 )
 from dataframe.query_execution.reporting import (
     plan_record,
+)
+from dataframe.query_execution.row_order_sink import (
+    row_order,
+    row_order_node,
 )
 from std.collections import (
     Optional,
@@ -527,29 +525,8 @@ def plan_execute_node(
         return time_window(input^, node)
     if node.kind == GROUPING_SETS:
         return _run_grouping_sets(node, input)
-    if node.kind == TAIL:
-        return input.tail(node.tail_count())
-    if node.kind == REVERSE:
-        return input.reverse()
-    if node.kind == SHIFT:
-        if len(node.exprs) > 0:
-            return input.shift(
-                node.shift_count(), fill_value=node.exprs[0].copy()
-            )
-        return input.shift(node.shift_count())
-    if node.kind == GATHER_EVERY:
-        return input.gather_every(node.gather_stride(), node.gather_offset())
-    if node.kind == ROW_INDEX:
-        return input.with_row_index(
-            node.row_index_name(), Int64(node.row_index_offset())
-        )
-    if node.kind == FILL_NULL_STRATEGY:
-        var limit: Optional[Int] = None
-        if node.fill_limit() >= 0:
-            limit = node.fill_limit()
-        return input.fill_null(
-            strategy=node.text, limit=limit, subset=node.names
-        )
+    if row_order_node(node.kind):
+        return row_order(input^, node)
     return input.drop(node.names)
 
 

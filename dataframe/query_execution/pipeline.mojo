@@ -136,6 +136,10 @@ from dataframe.query_execution.reduction_sink import (
 from dataframe.query_execution.sort_sink import SortSink
 from dataframe.query_execution.asof_sink import AsofSink
 from dataframe.query_execution.time_window_sink import TimeWindowSink
+from dataframe.query_execution.row_order_sink import (
+    RowOrderSink,
+    row_order_node,
+)
 from dataframe.optimizer.expressions import shared_partition_keys
 from dataframe.query_execution.window_sink import (
     WindowSink,
@@ -280,14 +284,16 @@ def plan_stream_execute(
         return None
     if sink == 0 and (
         _sorts_whole(self, index)
+        or _orders_rows(self, index)
         or _windows_time(self, index)
         or _joins_asof(self, index)
     ):
         # A sort of every row reads its whole input, so no morsel
         # pipeline runs it: it is an operator pipeline whose finish sorts
         # in rounds (`SortSink`), its computed input a pipeline of the
-        # same schedule. So are time windows (`TimeWindowSink`) and an
-        # as-of join (`AsofSink`).
+        # same schedule. So is an operation that places rows by their
+        # position (`RowOrderSink`), time windows (`TimeWindowSink`) and
+        # an as-of join (`AsofSink`).
         return _run_operator(self, index, batch_size)
     var outcome = _stream_head(self, index, batch_size, sink)
     if len(outcome.plan) > 0:
@@ -1560,6 +1566,15 @@ def _joins_asof(plan: QueryContext, index: Int) -> Bool:
     return plan._handoff == HANDOFF_OFF and plan._nodes[index].kind == ASOF
 
 
+def _orders_rows(plan: QueryContext, index: Int) -> Bool:
+    """Whether node `index` places rows by their position in its whole
+    input, or fills nulls along it, and an operator pipeline runs it as a
+    `RowOrderSink`."""
+    return plan._handoff == HANDOFF_OFF and row_order_node(
+        plan._nodes[index].kind
+    )
+
+
 def _renames_frame(plan: QueryContext, index: Int) -> Bool:
     """Whether node `index` is a projection of columns
     (`_column_projection`) straight over a scan of an in-memory table."""
@@ -1731,6 +1746,10 @@ struct _OperatorPipeline(Movable):
     # runs as a `ReductionSink`, and the sink while its rounds run.
     var reductions: Bool
     var reducing: List[ReductionSink]
+    # Whether it places rows by position or fills nulls along them
+    # (`RowOrderSink`), and the sink while its rounds run.
+    var orders: Bool
+    var ordering: List[RowOrderSink]
     # Whether it is a time window aggregation (`TimeWindowSink`) or an
     # as-of join (`AsofSink`), and the sink while its rounds run.
     var times: Bool
@@ -1778,6 +1797,8 @@ struct _OperatorPipeline(Movable):
         self.windowing = List[OrderedWindowSink]()
         self.reductions = False
         self.reducing = List[ReductionSink]()
+        self.orders = False
+        self.ordering = List[RowOrderSink]()
         self.times = False
         self.timing = List[TimeWindowSink]()
         self.asof = False
@@ -1794,6 +1815,7 @@ struct _OperatorPipeline(Movable):
             self.windows = whole_input_windows(node.exprs)
             self.reductions = whole_input_reductions(node.exprs)
         self.sorts = streaming and _sorts_whole(self.plan, index)
+        self.orders = streaming and _orders_rows(self.plan, index)
         self.times = streaming and _windows_time(self.plan, index)
         self.asof = streaming and _joins_asof(self.plan, index)
 
@@ -1890,6 +1912,15 @@ struct _OperatorPipeline(Movable):
                 )
             )
             return
+        if self.orders:
+            ref node = self.plan._nodes[self.index]
+            self.began = Int(perf_counter_ns())
+            var input = self.plan._execute(
+                node.left, False, self.streaming, self.batch_size
+            )
+            trace_path("row_order.rounds")
+            self.ordering.append(RowOrderSink(input^, node))
+            return
         if self.times:
             ref node = self.plan._nodes[self.index]
             self.began = Int(perf_counter_ns())
@@ -1925,6 +1956,7 @@ struct _OperatorPipeline(Movable):
             or len(self.ranking) > 0
             or len(self.windowing) > 0
             or len(self.reducing) > 0
+            or len(self.ordering) > 0
             or len(self.timing) > 0
             or len(self.matching) > 0
         ):
@@ -1950,6 +1982,7 @@ struct _OperatorPipeline(Movable):
             or self.ranks
             or self.windows
             or self.reductions
+            or self.orders
             or self.times
             or self.asof else 0
         )
@@ -2031,6 +2064,22 @@ struct _OperatorPipeline(Movable):
                 wall_ns=Int(perf_counter_ns()) - self.began,
             )
             self.finalize()
+        if len(self.ordering) > 0:
+            var tasks = self.ordering[0].next_round()
+            if tasks > 0:
+                return tasks
+            var rows = self.ordering[0].height
+            self.result = self.ordering[0].take_result()
+            _ = self.ordering.pop()
+            plan_record(
+                self.plan,
+                self.index,
+                "row_order",
+                rows,
+                self.result.height(),
+                wall_ns=Int(perf_counter_ns()) - self.began,
+            )
+            self.finalize()
         if len(self.timing) > 0:
             var tasks = self.timing[0].next_round()
             if tasks > 0:
@@ -2088,6 +2137,8 @@ struct _OperatorPipeline(Movable):
             self.reducing[0].round_task(task)
         elif len(self.sorting) > 0:
             self.sorting[0].round_task(task)
+        elif len(self.ordering) > 0:
+            self.ordering[0].round_task(task)
         elif len(self.timing) > 0:
             self.timing[0].round_task(task)
         elif len(self.matching) > 0:
