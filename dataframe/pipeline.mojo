@@ -1563,6 +1563,20 @@ struct _ChunkRunner(Movable):
                 elif step.kind == STEP_JOIN:
                     if (
                         self.indexes[][step.join]
+                        and self.indexes[][step.join].value().reads_source()
+                    ):
+                        # The stored frame the table's rows are numbered
+                        # in, one handle per build column in its order,
+                        # which the join reads through row lists.
+                        ref table = self.indexes[][step.join].value()
+                        for column in self.joins[][step.join]._columns:
+                            handles.append(
+                                self.arena.add(
+                                    table.source_column(column.name())
+                                )
+                            )
+                    elif (
+                        self.indexes[][step.join]
                         and self.indexes[][step.join].value().use_dictionary
                     ):
                         # The table's dictionary columns (perfect or
@@ -1627,6 +1641,9 @@ struct _ChunkRunner(Movable):
             if len(self.build) == 0:
                 self.build.append(JoinBuildSink(self.build_layout[0]))
             self.build[0].begin(morsel)
+            if self.build_layout[0][].from_source:
+                # Rows are numbered by their place in the stored frame.
+                self.build[0].next_row = offset
         elif self.retains:
             self._retain_morsel()
             self.retained_morsel = morsel
@@ -2214,9 +2231,12 @@ struct _ChunkRunner(Movable):
         # emission).
         var pointers = List[UInt64]()
         var dictionary_rows = List[UInt32]()
+        # A table over a stored frame's rows: the build columns are read
+        # from the frame by these row numbers.
+        var numbered = table.use_dictionary or table.reads_source()
         if pairs:
             pointers.reserve(columns.height)
-            if table.use_dictionary:
+            if numbered:
                 dictionary_rows.reserve(columns.height)
         for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
             var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
@@ -2243,7 +2263,7 @@ struct _ChunkRunner(Movable):
                     var at = scan.row_pointers.unsafe_ptr()
                     for k in range(n):
                         pointers.append(at[unsafe_offset=k])
-                    if table.use_dictionary:
+                    if numbered:
                         var builds = scan.build_rows.unsafe_ptr()
                         for k in range(n):
                             dictionary_rows.append(
@@ -2276,6 +2296,14 @@ struct _ChunkRunner(Movable):
         # gathered from the matched rows, or the table's dictionaries (a
         # perfect join or dictionary emission).
         var list = -1
+        if table.reads_source():
+            var width = output.width()
+            self._source_columns(result, s, right_keys, dictionary_rows^)
+            if result.width() != width:
+                raise Error(
+                    "pipeline join: output columns differ from its schema"
+                )
+            return result^
         for i in range(right.width()):
             if step.coalesce and i in right_keys:
                 continue
@@ -2303,6 +2331,55 @@ struct _ChunkRunner(Movable):
         if result.width() != output.width():
             raise Error("pipeline join: output columns differ from its schema")
         return result^
+
+    def _source_columns(
+        mut self,
+        mut result: _Columns,
+        s: Int,
+        right_keys: List[Int],
+        var rows: List[UInt32],
+    ) raises:
+        """The build side's output columns of join step `s`, whose table's
+        rows are a stored frame's (`JoinHashTable.reads_source`), read from
+        that frame at the matched rows' numbers `rows` (a number past the
+        frame for a probe row with no match): while every row has a
+        match, each column is the frame's column through one shared row
+        list, so nothing is copied; otherwise each is gathered, null where
+        no row matched."""
+        ref step = self.steps[][s]
+        ref right = self.joins[][step.join]
+        ref handles = self.builds[s]
+        var height = (
+            len(self.arena.columns[handles[0]]) if len(handles) > 0 else 0
+        )
+        var missing = False
+        for r in rows:
+            if Int(r) >= height:
+                missing = True
+                break
+        var picked = List[Int]()
+        if missing:
+            picked.reserve(len(rows))
+            for r in rows:
+                picked.append(Int(r) if Int(r) < height else -1)
+        var list = -1
+        for i in range(right.width()):
+            if step.coalesce and i in right_keys:
+                continue
+            if not missing:
+                if list < 0:
+                    list = len(result.row_lists)
+                    result.row_lists.append(rows.copy())
+                result.handles.append(handles[i])
+                result.starts.append(0)
+                result.lists.append(list)
+            else:
+                var gathered = self.arena.columns[handles[i]].take_or_null(
+                    picked
+                )
+                result.handles.append(self.arena.add(gathered^))
+                result.starts.append(0)
+                result.lists.append(-1)
 
 
 def _sink_chunk[
@@ -3033,8 +3110,20 @@ struct _PipelineJob(Job):
         var right_keys = List[Int]()
         for key in step.right_keys:
             right_keys.append(right._index(key))
+        var numbers = List[Int]()
+        if table.reads_source():
+            # The rows' numbers in the stored frame the build columns are
+            # read from.
+            numbers.reserve(n)
+            for p in pointers:
+                numbers.append(table.build_side_row(p))
         for i in range(right.width()):
             if not right_semi and step.coalesce and i in right_keys:
+                continue
+            if table.reads_source():
+                columns.append(
+                    table.source_column(right._columns[i].name()).take(numbers)
+                )
                 continue
             var t = table.output_index(right._columns[i].name())
             if t < 0:
@@ -3925,6 +4014,8 @@ def _finish_here(mut run: PipelineRun) raises -> DataFrame:
         run.built = JoinHashTable(
             run.build_layout.value(), combined^, defer_finalize=True
         )
+        if run.build_layout.value()[].from_source:
+            run.built.value().set_source(run.frame._columns)
         return schemas[][len(steps)].clear()
     # A top-N's workers' heaps, combined into one, sorted (Finalize).
     var locals = List[TopNSink]()
@@ -4782,9 +4873,16 @@ def begin_pipeline(
             True,
             build_filtered=build_filtered,
             filter_rows=build_filter_rows,
+            # Rows that are an in-memory frame's own, every one in order
+            # (no step or filter between): the table numbers them and
+            # reads the build columns from the frame, rather than copying
+            # every build value into its rows.
+            from_source=len(steps) == 0 and not source and len(pushed) == 0,
         )
         if made:
             trace_path("pipeline.join_build_sink")
+            if made.value().from_source:
+                trace_path("pipeline.join_build_numbered")
             build_layout = ArcPointer(made.take())
             for w in range(len(jobs)):
                 jobs[w].runner.build_layout.append(build_layout.value())

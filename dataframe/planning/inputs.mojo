@@ -176,6 +176,8 @@ struct BuildFinish(Movable, Rounds):
             self.table = JoinHashTable(
                 layout, sinks^, self.defer_finalize, keys^
             )
+            if layout[].from_source:
+                self.table.value().set_source(self.frame._columns)
             self.stage = _BUILD_DONE
         return 0
 
@@ -195,6 +197,10 @@ struct BuildFinish(Movable, Rounds):
             False,
             build_filtered=self.build_filtered,
             filter_rows=self.filter_rows,
+            # The frame is the build's rows, in order and held in memory:
+            # the table numbers them and the join reads the build columns
+            # from the frame, rather than copying every value into rows.
+            from_source=True,
         )
         if not layout:
             return 0
