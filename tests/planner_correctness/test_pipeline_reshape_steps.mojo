@@ -348,12 +348,10 @@ def test_eager_reshapes_run_as_plans() raises:
         o.append(Int64((row // 7) % 4))
         a.append(Int64(row))
         b.append(Int64(row * 2))
-    frame = frame.with_columns(
-        [
-            Series("o", Column[Int64](o^)),
-            Series("a", Column[Int64](a^)),
-            Series("b", Column[Int64](b^)),
-        ]
+    frame = (
+        frame.with_column(Series("o", Column[Int64](o^)))
+        .with_column(Series("a", Column[Int64](a^)))
+        .with_column(Series("b", Column[Int64](b^)))
     )
     var exploded = _paths(frame, 0)
     assert_true(exploded[1].find("dataframe-path: pipeline.run") >= 0)
