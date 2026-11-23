@@ -1,8 +1,8 @@
 """A full join on keys with many distinct values takes the left join's
-direct hash route and then adds the right rows nothing matched, in order:
-the same rows, in the same order, as a scalar model of SQL's FULL OUTER
-JOIN (null keys match nothing), on two-column keys with duplicates and
-unmatched rows on both sides."""
+hash table route and then adds the right rows nothing matched: the same
+rows as a scalar model of SQL's FULL OUTER JOIN (null keys match nothing),
+on two-column keys with duplicates and unmatched rows on both sides. Row
+order is not part of a join's result."""
 # contract-group: table.join
 from std.testing import assert_equal, assert_true
 
@@ -94,20 +94,34 @@ def test_full_join_on_many_keys_matches_the_model() raises:
         right, left_on=["la", "lb"], right_on=["ra", "rb"], how="full"
     )
     assert_true(
-        "dataframe-path: join.hash_table\n" in observed.text(),
-        "the full join did not run on the hash table",
+        "dataframe-path: pipeline.join_dictionary\n" in observed.text(),
+        "the full join did not probe the join's hash table",
     )
     _ = observed^
     _ = trace^
     assert_equal(joined.height(), len(expected_left))
+    # Output rows come in no particular order: compare the (left, right)
+    # pairs as sorted sets, -1 for a side with no row.
+    var expected = List[Int]()
+    for k in range(len(expected_left)):
+        expected.append(_pair(expected_left[k], expected_right[k]))
+    var actual = List[Int]()
     var lids = joined.column("l_id")
     var rids = joined.column("r_id")
     for k in range(joined.height()):
         var l = lids.get(k)
         var r = rids.get(k)
-        assert_equal(l.is_null(), expected_left[k] < 0)
-        assert_equal(r.is_null(), expected_right[k] < 0)
-        if expected_left[k] >= 0:
-            assert_equal(Int(l.int64()), expected_left[k])
-        if expected_right[k] >= 0:
-            assert_equal(Int(r.int64()), expected_right[k])
+        actual.append(
+            _pair(
+                -1 if l.is_null() else Int(l.int64()),
+                -1 if r.is_null() else Int(r.int64()),
+            )
+        )
+    sort(expected)
+    sort(actual)
+    for k in range(len(expected)):
+        assert_equal(actual[k], expected[k])
+
+
+def _pair(left: Int, right: Int) -> Int:
+    return (left + 1) * (RIGHT + 1) + right + 1

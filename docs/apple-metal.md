@@ -275,6 +275,15 @@ The fitter publishes each profile under an immutable, content-addressed
 filename. Selectivity and value distributions can change runtime even for
 the same schema. Recalibrate with representative data after changes.
 
+For a complete resident pipeline with an unfamiliar chunk layout, calibration
+can also identify which CPU executor to use. This requires at least two
+distinct measured layouts for the same pipeline, operator, literals, input
+types, validity bitmap kinds and outputs. Every paired timing at every
+measured scale must favor materializing CPU. The preference applies only in
+the row range covered by all those layouts, with optimization enabled and
+the default batch size. An exact layout entry takes precedence. Metal still
+requires a matching layout and measured device cost.
+
 Profiles must match both source/compiler build IDs, the device/host power
 and thermal state, and the effective CPU worker budget. A CPU rewrite, new
 Metal kernel, compiler/SDK update or thread change requires new measurements.

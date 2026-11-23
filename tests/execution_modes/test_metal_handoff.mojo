@@ -625,6 +625,7 @@ def _calibrate(
     max_rows: Int = 1_000_000_000,
     startup_ns: Int = 0,
     materialized_row_ns: Float64 = -1,
+    materialized_family: String = "",
 ) raises:
     from dataframe.json.value import json_quote
     from dataframe_metal.calibration import (
@@ -638,6 +639,16 @@ def _calibrate(
     var pipeline = pipeline_key(plan)
     var cpu = String('{"fixed_ns":1000,"row_ns":') + String(cpu_row_ns) + "}"
     var text = String('{"schema_version":2,"identity":') + identity_json()
+    if materialized_family:
+        text += (
+            ',"materialized_cpu_ranges":{'
+            + json_quote(pipeline + "|" + materialized_family)
+            + ':{"min_rows":'
+            + String(min_rows)
+            + ',"max_rows":'
+            + String(max_rows)
+            + "}}"
+        )
     text += (
         ',"operators":{'
         + json_quote(pipeline)
@@ -1280,6 +1291,41 @@ def test_metal_calibration_validates_all_identity_dimensions_and_layouts() raise
         shape_key(chunked, region_key(chunked))
         == shape_key(different_geometry, region_key(different_geometry))
     )
+
+
+# requires: metal
+def test_unmeasured_layout_can_choose_cpu_executor_without_a_device_quote() raises:
+    _ = require_metal()
+    from dataframe_metal.accelerator.gpu.identity import runtime_build_id
+    from dataframe_metal.handoff import layout_keys, estimate
+
+    if not runtime_build_id().startswith("dataframe-mojo-metal-v2;cpu="):
+        return
+    var i = _frame().column("i")
+    var exact = DataFrame([i.copy()]).lazy().select(col("i").sum())
+    var chunked = DataFrame(
+        [Series._from_chunks([i.slice(0, 1), i.slice(1, 2)])]
+    )
+    var unseen = chunked.lazy().select(col("i").sum())
+    var keys = layout_keys(exact)
+    var other = layout_keys(unseen)
+    assert_false(keys[0] == other[0])
+    assert_equal(keys[1], other[1])
+    var path = String("build/test-cpu-layout-fallback.json")
+    _calibrate(path, 1, 1000, exact, 3, 3, materialized_family=keys[1])
+    var configured = ScopedEnvironment("DATAFRAME_HANDOFF_CALIBRATION", path)
+    assert_true("; on cpu (materialized)" in unseen.explain(engine="auto"))
+    assert_equal(estimate(unseen, 3)[1], Float64(-1))
+    assert_true(unseen.collect().equals(exact.collect(engine="cpu")))
+    # Exact layout takes precedence, even when its CPU preference differs.
+    assert_false("(materialized)" in exact.explain(engine="auto"))
+    var short = (
+        DataFrame([Series._from_chunks([i.slice(0, 1), i.slice(1, 1)])])
+        .lazy()
+        .select(col("i").sum())
+    )
+    assert_false("(materialized)" in short.explain(engine="auto"))
+    _ = configured^
 
 
 # requires: metal

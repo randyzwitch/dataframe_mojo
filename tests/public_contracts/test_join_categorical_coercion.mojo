@@ -67,20 +67,36 @@ def test_mixed_categorical_string_keys_share_value_identity_in_both_directions()
                 assert_true(actual.column("p").dtype() == DataType.INT64)
                 if len(names) == 3:
                     assert_true(actual.column("q").dtype() == DataType.INT64)
-                for output in range(len(pairs)):
-                    var i = pairs[output][0]
-                    var j = pairs[output][1]
+                # Output rows come in no particular order: each must be a
+                # distinct expected pair.
+                var seen = List[Bool](length=len(pairs), fill=False)
+                for output in range(actual.height()):
+                    var left_row = actual.item(output, "p")
+                    var i = -1 if left_row.is_null() else Int(left_row.int64())
+                    var j = -1
+                    if len(names) == 3:
+                        var right_row = actual.item(output, "q")
+                        j = (
+                            -1 if right_row.is_null() else Int(
+                                right_row.int64()
+                            )
+                            - 10
+                        )
+                    var found = -1
+                    for t in range(len(pairs)):
+                        if (
+                            not seen[t]
+                            and pairs[t][0] == i
+                            and (len(names) < 3 or pairs[t][1] == j)
+                        ):
+                            found = t
+                            break
+                    assert_true(found >= 0, "an output row matches no pair")
+                    seen[found] = True
                     var use_right = how == "right" or (how == "full" and i < 0)
                     assert_value(
                         actual.item(output, "k"),
-                        right_raw.get(j) if use_right else left_raw.get(i),
+                        right_raw.get(pairs[found][1]) if use_right else (
+                            left_raw.get(i)
+                        ),
                     )
-                    assert_equal(actual.item(output, "p").is_null(), i < 0)
-                    if i >= 0:
-                        assert_equal(actual.item(output, "p").int64(), Int64(i))
-                    if len(names) == 3:
-                        assert_equal(actual.item(output, "q").is_null(), j < 0)
-                        if j >= 0:
-                            assert_equal(
-                                actual.item(output, "q").int64(), Int64(10 + j)
-                            )

@@ -2614,18 +2614,20 @@ def _price_unit[
     var features: PipelineFeatures,
     compare_cpu_modes: Bool,
     streaming: Bool,
+    pipeline_key: String,
     mut run_ns: List[Float64],
 ) -> Bool:
     """Price a unit against every supported device and keep the CPU executor
     associated with the lowest matched CPU cost."""
     var matched_cpu = Float64(-1)
     var materialized = False
+    var fallback_materialized = False
     for d in range(len(devices)):
         if not supported[d]:
             continue
         if compare_cpu_modes:
             features.cpu_executor = ArcPointer(
-                CPUExecutorChoice(streaming, False)
+                CPUExecutorChoice(streaming, False, pipeline_key)
             )
         var costs = backend.pipeline_costs(region, devices[d].ordinal, features)
         run_ns[d + 1] = costs[1] if isfinite(costs[1]) and costs[
@@ -2641,9 +2643,14 @@ def _price_unit[
                 Bool(features.cpu_executor)
                 and features.cpu_executor.value()[].materialized
             )
+        elif costs[0] < 0 and costs[1] < 0 and features.cpu_executor:
+            fallback_materialized |= (
+                features.cpu_executor.value()[].materialized
+            )
     if matched_cpu >= 0:
         run_ns[_PLACE_CPU] = matched_cpu
-    return materialized
+        return materialized
+    return fallback_materialized
 
 
 def _solve_devices[
@@ -2726,6 +2733,7 @@ def _solve_devices[
                 features^,
                 compare_cpu_modes,
                 streaming,
+                unit.key,
                 problem.run_ns[p],
             )
     var placement = solve_placement(problem)
@@ -2905,6 +2913,7 @@ def _decide_at_start[
             features^,
             compare_cpu_modes,
             streaming,
+            unit.key,
             problem.run_ns[p],
         )
     return solve_placement(problem)
