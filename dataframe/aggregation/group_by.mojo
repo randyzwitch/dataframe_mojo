@@ -193,19 +193,33 @@ struct GroupBy(Copyable):
         return self._edge_rows(n, True)
 
     def _edge_rows(self, n: Int, tail: Bool) raises -> DataFrame:
+        """`head` or `tail` as the lazy plan's group_by runs it: a plan over
+        this frame with each key column added under a name of its own (so
+        computed keys group as given), whose rows are numbered, counted
+        within their group from the start or the end, kept up to `n`, and
+        put in order of their group's first row, then their own."""
         if n < 0:
             raise Error("GroupBy.head/tail count must be nonnegative")
-        var encoded = encode_rows(self._keys, nulls_equal=True)
-        var rows = List[List[Int]](length=encoded.count(), fill=List[Int]())
-        for row in range(self._frame.height()):
-            rows[encoded.ids[row]].append(row)
-        var selected = List[Int]()
-        for group in rows:
-            var start = max(0, len(group) - n) if tail else 0
-            var end = len(group) if tail else min(len(group), n)
-            for k in range(start, end):
-                selected.append(group[k])
-        return self._frame.take(selected)
+        var taken = Dict[String, Bool]()
+        for column in self._frame._columns:
+            taken[column.name()] = True
+        var columns = self._frame._columns.copy()
+        var grouped = List[String](capacity=len(self._keys))
+        for k in range(len(self._keys)):
+            var name = String("__group_key_") + String(k)
+            while name in taken:
+                name += "_"
+            taken[name] = True
+            columns.append(self._keys[k].renamed(name))
+            grouped.append(name)
+        var input = DataFrame(columns^, height=self._frame.height())
+        var grouping = input.lazy().group_by(
+            grouped, maintain_order=self._maintain_order
+        )
+        var plan = grouping.tail(n) if tail else grouping.head(n)
+        return plan._collect(
+            optimize=False, streaming=True, batch_size=65536
+        ).select(self._frame.columns())
 
     def _key_names(self) -> Dict[String, Bool]:
         var names = Dict[String, Bool]()
