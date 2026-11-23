@@ -924,9 +924,7 @@ def test_a_final_sort_and_eager_sorts_run_as_rounds_of_the_schedule() raises:
             )
         ),
     )
-    var negated = frame.with_columns(
-        [(col("v") * lit(Int64(-1))).alias("neg")]
-    )
+    var negated = frame.with_columns([(col("v") * lit(Int64(-1))).alias("neg")])
     assert_frame(
         by_expression,
         frame.take(negated.arg_sort(["neg", "row"], descending=True)),

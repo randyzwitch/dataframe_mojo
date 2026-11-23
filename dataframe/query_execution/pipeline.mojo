@@ -808,6 +808,8 @@ def _add_input(
             var address = Int(Pointer(to=owned[]))
             ref copy = owned[]
             var inputs = _scheduled_inputs(copy, index, head, batch_size, 0)
+            if len(inputs.wanted) > 0:
+                trace_path("stream.scheduled_inputs")
             return _add_stream(
                 schedule,
                 address,
