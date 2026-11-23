@@ -2097,7 +2097,9 @@ struct JoinHashTable(Copyable, Movable):
         for the join to read build rows from by number."""
         var held = List[Series](capacity=len(columns))
         for column in columns:
-            held.append(column.rechunk() if column.is_chunked() else column.copy())
+            held.append(
+                column.rechunk() if column.is_chunked() else column.copy()
+            )
         self.data[].source = held^
 
     def reads_source(self) -> Bool:
