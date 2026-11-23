@@ -2038,11 +2038,11 @@ struct DataFrame(Copyable, Sized, Writable):
         in their sinks' rounds, and the plan's executor evaluates the rest
         over the whole frame. `batch_size` is the plan's batch size.
 
-        A morsel knows only its own rows, so when the plan fails the
-        kernels evaluate the whole frame again to raise the error as they
-        report it, with rows numbered over the frame (with_columns and
-        filter do the same); the plan's error is raised if they do not
-        fail.
+        When the plan fails, the kernels evaluate the whole frame again
+        (with_columns and filter do the same): their errors number rows
+        over the frame, where a morsel knows only its own, and an
+        expression the plan has no route for still gets the kernels'
+        answer (traced as `eager.kernels_after_plan_error`).
 
         If any expression is row-valued, scalar results broadcast to height,
         including zero rows. An empty selection preserves the input height.
@@ -2060,9 +2060,9 @@ struct DataFrame(Copyable, Sized, Writable):
                 .select_exprs(expanded)
                 ._collect(optimize=False, streaming=True, batch_size=batch_size)
             )
-        except e:
-            _ = self._select_exprs(expanded, batch_size)
-            raise e^
+        except:
+            trace_path("eager.kernels_after_plan_error")
+            return self._select_exprs(expanded, batch_size)
 
     def _reading(self, expressions: List[Expr]) raises -> Self:
         """This frame with only the columns `expressions` read (every column
@@ -2180,9 +2180,9 @@ struct DataFrame(Copyable, Sized, Writable):
                 .with_columns(expanded)
                 ._collect(optimize=False, streaming=True, batch_size=batch_size)
             )
-        except e:
-            _ = self._with_columns(expanded, batch_size)
-            raise e^
+        except:
+            trace_path("eager.kernels_after_plan_error")
+            return self._with_columns(expanded, batch_size)
         var columns = self._columns.copy()
         var done = Dict[String, Bool]()
         for expression in bound:
@@ -2284,9 +2284,9 @@ struct DataFrame(Copyable, Sized, Writable):
             return plan._collect(
                 optimize=False, streaming=True, batch_size=batch_size
             )
-        except e:
-            _ = self._filter(predicate, batch_size, keep)
-            raise e^
+        except:
+            trace_path("eager.kernels_after_plan_error")
+            return self._filter(predicate, batch_size, keep)
 
     def _filter(
         self,
