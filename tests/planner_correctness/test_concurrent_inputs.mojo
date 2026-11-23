@@ -1256,3 +1256,57 @@ def test_reductions_beside_row_values_run_as_rounds_of_the_schedule() raises:
             .collect(optimize=False)
         )
     _ = threads^
+
+
+def test_eager_projections_and_filters_run_as_one_node_plans() raises:
+    """Eager filter, select and with_columns run as plans of one node
+    over the frame: a row-wise filter or projection streams through a
+    pipeline, windows that share a key run in a partitioned sink, ranks
+    over every row in rank rounds, and values read from reductions over
+    every row in reduction rounds. No schedule starts inside another's
+    task, and every result equals the kernels', row for row."""
+    var frame = source().head(50_000).with_row_index("row")
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var kept = frame.filter(col("v") > lit(Int64(0)))
+    var narrow = frame.filter(col("v") > lit(Int64(0)), keep=["s"])
+    var row_wise = frame.select_exprs(
+        [col("row"), (col("k") * lit(Int64(2))).alias("k2")]
+    )
+    var added = frame.with_columns(windows())
+    var ranked = frame.with_columns([col("v").rank("min").alias("r")])
+    var centered = frame.select_exprs(
+        [(col("v") - col("v").max()).alias("c"), col("v").sum().alias("t")]
+    )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    for name in [
+        "window.partitioned_sink",
+        "window.rank_rounds",
+        "window.reduce_row_rounds",
+    ]:
+        assert_true(name in paths, "no " + name)
+    assert_true(
+        "schedule.nested" not in paths, "a schedule ran inside another's task"
+    )
+    assert_frame(kept, frame._filter(col("v") > lit(Int64(0))))
+    assert_frame(narrow, frame._filter(col("v") > lit(Int64(0)), keep=["s"]))
+    assert_frame(
+        row_wise,
+        frame._select_exprs(
+            [col("row"), (col("k") * lit(Int64(2))).alias("k2")]
+        ),
+    )
+    assert_frame(added, frame._with_columns(windows()))
+    assert_frame(ranked, frame._with_columns([col("v").rank("min").alias("r")]))
+    assert_frame(
+        centered,
+        frame._select_exprs(
+            [(col("v") - col("v").max()).alias("c"), col("v").sum().alias("t")]
+        ),
+    )
+    with assert_raises(contains="Boolean"):
+        _ = frame.filter(col("v") + lit(Int64(1)))

@@ -1108,7 +1108,11 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         return DataFrame([self.copy()])
 
     def _apply(self, expr: Expr) raises -> Self:
-        return self._frame().select(expr.alias(self._name)).column(self._name)
+        return (
+            self._frame()
+            ._select_exprs([expr.alias(self._name)])
+            .column(self._name)
+        )
 
     def _pair(self, other: Self, op: String) raises -> Self:
         if len(self) != len(other):
@@ -1154,10 +1158,10 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             e = left | right
         else:
             e = left ^ right
-        return frame.select(e.alias(self._name)).column(self._name)
+        return frame._select_exprs([e.alias(self._name)]).column(self._name)
 
     def _scalar(self, expr: Expr) raises -> AnyValue:
-        return self._frame().select(expr.alias(self._name)).item()
+        return self._frame()._select_exprs([expr.alias(self._name)]).item()
 
     def __add__(self, other: Self) raises -> Self:
         return self._pair(other, "+")

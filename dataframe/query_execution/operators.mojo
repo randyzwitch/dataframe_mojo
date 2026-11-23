@@ -66,7 +66,7 @@ def _set_rows(
         if node.group_keys()[k] not in members:
             constants.append(null(dtypes[k]).alias(node.group_keys()[k]))
     if len(constants) > 0:
-        part = part.with_columns(constants)
+        part = part._with_columns(constants)
     var order = List[Expr]()
     for name in node.group_keys():
         order.append(col(name))
@@ -76,7 +76,7 @@ def _set_rows(
             order.append(col(e._name))
     else:
         order.append(exclude(node.group_keys()))
-    return part.select_exprs(order)
+    return part._select_exprs(order)
 
 
 def _run_grouping_sets(node: PlanNode, input: DataFrame) raises -> DataFrame:
@@ -95,7 +95,7 @@ def _run_grouping_sets(node: PlanNode, input: DataFrame) raises -> DataFrame:
     for one in members:
         var part: DataFrame
         if len(one) == 0:
-            part = input.select_exprs(aggregates)
+            part = input._select_exprs(aggregates)
         else:
             part = input.group_by(one).agg(aggregates)
         parts.append(_set_rows(node, part^, one, dtypes))

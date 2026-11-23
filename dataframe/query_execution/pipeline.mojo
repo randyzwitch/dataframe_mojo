@@ -284,6 +284,15 @@ def plan_stream_execute(
     if len(outcome.head) == 0:
         return None
     var head = outcome.head.pop()
+    if (
+        sink == 0
+        and _operator_only(self, index, head)
+        and _projects_whole(self, index)
+    ):
+        # Windows and reductions over every row read the whole input: an
+        # operator pipeline runs the projection in its sink's rounds, its
+        # computed input a pipeline of the same schedule.
+        return _run_operator(self, index, batch_size)
     # Schedule computed inputs as child pipelines. The probe depends on all
     # child completions, allowing independent builds to overlap. An input
     # that is a stream itself adds its own pipelines (its builds, probe and
@@ -1523,6 +1532,25 @@ def _sorts_whole(plan: QueryContext, index: Int) -> Bool:
     )
 
 
+def _projects_whole(plan: QueryContext, index: Int) -> Bool:
+    """Whether node `index` is a projection that an operator pipeline runs
+    in the rounds of one of its sinks: windows partitioned by keys every
+    window shares (`WindowSink`), ranks or ordered windows over every row
+    (`RankSink`, `OrderedWindowSink`), or reductions over every row read
+    by each row (`ReductionSink`)."""
+    if not (plan._handoff == HANDOFF_OFF):
+        return False
+    ref node = plan._nodes[index]
+    if node.kind != SELECT and node.kind != WITH_COLUMNS:
+        return False
+    return (
+        len(shared_partition_keys(node.exprs)) > 0
+        or whole_input_ranks(node.exprs)
+        or whole_input_windows(node.exprs)
+        or whole_input_reductions(node.exprs)
+    )
+
+
 def _declined_sort(on: QueryContext, index: Int) -> Int:
     """The sort a declined node at `index` is, or slices (a sort limited
     to its first rows under its slice), when it runs as rounds of its own
@@ -1791,7 +1819,7 @@ struct _OperatorPipeline(Movable):
             )
             var gathered = Optional[DataFrame]()
             if top.kind == SELECT:
-                gathered = input.select_exprs(top.exprs)
+                gathered = input._select_exprs(top.exprs)
             var descending = List[Bool]()
             var nulls_last = List[Bool]()
             for i in range(len(node.sort_keys())):

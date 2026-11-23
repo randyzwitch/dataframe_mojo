@@ -420,8 +420,8 @@ struct WindowSink(Movable, Rounds):
 
     def _eager(self) raises -> DataFrame:
         if self.select:
-            return self.input.select_exprs(self.exprs)
-        return self.input.with_columns(self.exprs)
+            return self.input._select_exprs(self.exprs)
+        return self.input._with_columns(self.exprs)
 
     def _start(mut self) raises -> Int:
         self.height = self.input.height()
