@@ -3,7 +3,7 @@ expands into its grouping sets; `grouping()` distinguishes subtotal nulls
 from null key values. Duplicate sets are preserved, the empty set yields
 one row even for empty input, and each set matches a plain `group_by`."""
 # contract-group: reduce.grouping_sets
-from std.testing import assert_equal, assert_true, assert_raises
+from std.testing import assert_equal, assert_false, assert_true, assert_raises
 from dataframe import (
     Column,
     DataFrame,
@@ -16,6 +16,10 @@ from dataframe import (
     null,
 )
 from tests.support.coverage_compare import assert_frame
+from tests.support.group_strategy_reference import (
+    ScopedEnvironment,
+    StrategyTrace,
+)
 
 # Stands for a null in literal expectations.
 comptime NULL = Int64.MIN
@@ -482,6 +486,65 @@ def test_sets_with_reductions_the_table_lacks_match_group_by() raises:
     var keys: List[String] = ["category", "class"]
     var sets: List[List[String]] = [["category", "class"], ["category"], []]
     check_sets_against_group_by(source, keys, sets, plain)
+
+
+def test_sets_with_filtered_and_listed_reductions_match_group_by() raises:
+    """Aggregate filters (a distinct count among them)
+    and imploded values run in the sets' tables, every set to the same rows
+    as its own group-by."""
+    var source = facts().lazy().join(items().lazy(), on="item")
+    var kept = col("x") > 3.0
+    var plain: List[Expr] = [
+        col("m").filter(kept).sum().alias("total"),
+        col("m").filter(kept).n_unique().alias("distinct"),
+        col("m").filter(kept).median().alias("mid"),
+        col("m").filter(kept).implode().alias("listed"),
+    ]
+    var keys: List[String] = ["category", "class"]
+    var sets: List[List[String]] = [["category", "class"], ["category"], []]
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var aggregates = plain.copy()
+    aggregates.append(grouping_id(keys).alias("gid"))
+    _ = source.group_by_grouping_sets(sets).agg(aggregates).collect()
+    var text = observed.text()
+    _ = observed^
+    _ = trace^
+    assert_true("pipeline.group_table" in text)
+    assert_false("inline_table_required" in text)
+    check_sets_against_group_by(source, keys, sets, plain)
+
+
+def test_mode_is_a_list_in_every_set() raises:
+    """A mode is a list of the modes per group, the grand total's too; over
+    no rows the grand total's is a null list."""
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64]([1, 1, 1, 2, 2, 2])),
+            Series("v", Column[Int64]([5, 5, 6, 7, 7, 5])),
+        ]
+    )
+    var aggs: List[Expr] = [col("v").mode().alias("m")]
+    var eager = (
+        frame.group_by_rollup(["k"]).agg(aggs).sort(["k"], nulls_last=True)
+    )
+    var lazy = (
+        frame.lazy()
+        .group_by_rollup(["k"])
+        .agg(aggs)
+        .collect()
+        .sort(["k"], nulls_last=True)
+    )
+    assert_frame(lazy, eager)
+    assert_equal(eager.height(), 3)
+    assert_equal(eager.column("m").dtype().name(), "list[int64]")
+    assert_equal(String(eager.item(0, "m")), "[5]")
+    assert_equal(String(eager.item(1, "m")), "[7]")
+    assert_equal(String(eager.item(2, "m")), "[5]")
+    var empty = frame.head(0).group_by_rollup(["k"]).agg(aggs)
+    assert_equal(empty.height(), 1)
+    assert_equal(empty.column("m").dtype().name(), "list[int64]")
+    assert_true(empty.item(0, "m").is_null())
 
 
 def test_rolled_up_total_row_counts_every_row() raises:

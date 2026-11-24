@@ -1,7 +1,12 @@
 """Eager adapters for grouping sets, time windows, pivot, and gather."""
+from dataframe.aggregation.table_sink import (
+    TOTAL_KEY,
+    typed_total,
+)
 from dataframe.binding import (
     bind,
 )
+from dataframe.storage.column import Column
 from dataframe.dtype import (
     DataType,
 )
@@ -79,6 +84,24 @@ def _set_rows(
     return part._select_exprs(order)
 
 
+def _grand_total(input: DataFrame, aggregates: List[Expr]) raises -> DataFrame:
+    """The empty grouping set's row: every row as one group, so each
+    aggregation has its type per group (a mode is a list of the modes);
+    over no rows, each reduction of no rows, in those types."""
+    var key = Series(
+        TOTAL_KEY, Column[Int64](List[Int64](length=input.height(), fill=0))
+    )
+    var grouped = (
+        input.with_column(key^)
+        .group_by([TOTAL_KEY])
+        .agg(aggregates)
+        .drop([TOTAL_KEY])
+    )
+    if input.height() > 0:
+        return grouped^
+    return typed_total(input._select_exprs(aggregates), grouped)
+
+
 def _run_grouping_sets(node: PlanNode, input: DataFrame) raises -> DataFrame:
     """A GROUPING_SETS node over its collected input: one group-by per set,
     stacked. The stream's single sink replaces this when the aggregate
@@ -95,7 +118,7 @@ def _run_grouping_sets(node: PlanNode, input: DataFrame) raises -> DataFrame:
     for one in members:
         var part: DataFrame
         if len(one) == 0:
-            part = input._select_exprs(aggregates)
+            part = _grand_total(input, aggregates)
         else:
             part = input.group_by(one).agg(aggregates)
         parts.append(_set_rows(node, part^, one, dtypes))

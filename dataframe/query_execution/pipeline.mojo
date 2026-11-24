@@ -508,7 +508,7 @@ def _decide_head(
         for e in terminal.exprs:
             if not is_grouping(e):
                 expressions.append(e.copy())
-        if not _stream_reductions(expressions, True):
+        if not _stream_reductions(expressions, True, True, True):
             return _HeadOutcome()
         keys = terminal.names.copy()
         cursor = terminal.left
