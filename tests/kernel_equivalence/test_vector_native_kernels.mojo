@@ -369,7 +369,8 @@ def test_arithmetic_over_columns_read_in_place_keeps_overflow_errors() raises:
     assert_equal(
         _raised((col("z") + lit(Int64(1))).alias("p"), nulls, 1), String()
     )
-    # A decimal stored in 32 bits, past its precision when scaled.
+    # A decimal stored in 32 bits, past its precision when scaled: the
+    # cast kernel's error, naming the row and its value.
     var cents = List[Int64]()
     for row in range(1000):
         cents.append(Int64(999_999_999) if row == 10 else Int64(row))
@@ -382,5 +383,8 @@ def test_arithmetic_over_columns_read_in_place_keeps_overflow_errors() raises:
             decimals,
             1,
         ),
-        "value exceeds decimal precision 9",
+        (
+            "cast from decimal64[18,0] to decimal[9,0] failed at row 10 for"
+            " value '999999998000000001': value exceeds decimal precision 9"
+        ),
     )

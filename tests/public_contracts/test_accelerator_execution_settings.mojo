@@ -79,11 +79,13 @@ def test_lazy_requested_stream_batch_does_not_override_eager_expression_batches(
     var expression = col("t").cast(DataType.duration("ns")).cast(
         DataType.INT64
     ) + col("x").cast(DataType.INT8).cast(DataType.INT64)
-    # DataFrame's explicit expression batch changes which AST visit fails;
-    # LazyFrame's batch argument configures stream morsels instead.
+    # The batch argument does not change which AST visit fails: an eager
+    # select runs as a plan, which evaluates a data chunk's rows node by
+    # node (the duration cast over both rows before the Int8 cast), and
+    # LazyFrame's batch argument configures stream morsels.
     for implode in [False, True]:
         var output = expression.implode() if implode else expression.copy()
-        with assert_raises(contains="cast from int64 to int8 failed"):
+        with assert_raises(contains="temporal value overflows Int64"):
             _ = frame.select(output, batch_size=1)
         with assert_raises(contains="temporal value overflows Int64"):
             _ = frame.select(output, batch_size=2)

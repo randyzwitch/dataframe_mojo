@@ -279,6 +279,10 @@ struct BoundExpr(Copyable):
     var fusible: List[Bool]
     # Validated constant patterns are immutable and shared by every batch.
     var regexes: Optional[ArcPointer[Dict[Int, Regex]]]
+    # The row of the whole input that row 0 of the columns it is evaluated
+    # over is, which errors naming a row add: a range of an input's rows
+    # numbers its rows as the input does.
+    var first_row: Int
 
     def _regex(self, index: Int) -> Optional[Regex]:
         if self.regexes:
@@ -2131,7 +2135,14 @@ def bind(
     if len(regexes) > 0:
         compiled = ArcPointer(regexes^)
     return BoundExpr(
-        resolved^, types^, shapes^, aggregated^, sources^, fusible^, compiled^
+        resolved^,
+        types^,
+        shapes^,
+        aggregated^,
+        sources^,
+        fusible^,
+        compiled^,
+        0,
     )
 
 
