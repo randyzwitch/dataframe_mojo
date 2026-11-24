@@ -23,6 +23,7 @@ from dataframe.binding import BoundExpr, bind, op_name
 from dataframe.decimal import divide_half_even, pow10, precision_limit
 from dataframe.dtype import CategoricalDictionary, DataType
 from dataframe.execution import evaluate
+from dataframe.kernels.cast import cast_series
 from dataframe.expr import (
     ABS,
     ADD,
@@ -1346,8 +1347,65 @@ struct VectorExpression(Copyable, Movable):
             self._slice(index, left, rows, count)
         elif op == STR_CONCAT:
             self._concat(index, left, right, rows, count)
+        elif op == CAST and self.bound.dtypes[index].is_decimal():
+            try:
+                self._compute(index, count)
+            except e:
+                self._cast_failure(index, input, rows, count)
+                raise e^
         else:
             self._compute(index, count)
+
+    def _cast_failure(
+        self,
+        index: Int,
+        input: DataChunk,
+        rows: SelectionVector,
+        count: Int,
+    ) raises:
+        """A strict cast to a decimal that some computed row does not fit:
+        the column kernels' error for the first such row, which names the
+        row as the input numbers it (`DataChunk.source_row`; its place
+        among the computed rows when that is not known) and its value."""
+        var left = self.bound.expr._nodes[index].left
+        var source = self.bound.dtypes[left]
+        var target = self.bound.dtypes[index]
+        var lane = self.lanes[left]
+        var whole = self.whole[left]
+        var flags = self.valid[left].unsafe_ptr()
+        for k in range(count):
+            if not whole and flags[unsafe_offset=k] == 0:
+                continue
+            var value: Series
+            if lane == _LANE_DECIMAL:
+                value = Series(
+                    "", Column[Int128]([self._i128(left)[unsafe_offset=k]])
+                )
+            else:
+                value = Series(
+                    "", Column[Int64]([self._i64(left)[unsafe_offset=k]])
+                )
+            if source.is_decimal():
+                # The lane's payload at the source's own storage width.
+                var width = source.decimal_width()
+                var payload = Int128(
+                    self._i128(left)[unsafe_offset=k]
+                ) if lane == _LANE_DECIMAL else Int128(
+                    self._i64(left)[unsafe_offset=k]
+                )
+                if width == 32:
+                    value = Series("", Column[Int32]([Int32(payload)]))
+                elif width == 64:
+                    value = Series("", Column[Int64]([Int64(payload)]))
+                else:
+                    value = Series("", Column[Int128]([payload]))
+                value = value.with_dtype(source)
+            elif value.dtype() != source:
+                value = value.cast(source)
+            var row = input.source_row(rows.get_index(k))
+            _ = cast_series(
+                value, target, True, row if row >= 0 else k, List[Bool]()
+            )
 
     def _fill(mut self, index: Int):
         """Constant node `index`'s value on every row of its lane, for a
@@ -1398,9 +1456,33 @@ struct VectorExpression(Copyable, Movable):
                     self.schema[r].dtype(),
                 )
             )
-        var result = evaluate(
-            self.fallback_bound[index].value(), columns, count
-        )
+        # Errors name a row of the pipeline's input where the chunk knows
+        # it (`DataChunk.source_row`): computed rows that are consecutive
+        # rows of the input number theirs from the first; others, rows
+        # selected from the chunk, are run one at a time on an error, so
+        # that it names the first failing row as the input numbers it.
+        var first = input.source_row(rows.get_index(0)) if count > 0 else -1
+        var consecutive = first >= 0 and input.parent == 0 and not rows.is_set()
+        self.fallback_bound[
+            index
+        ].value().first_row = first if consecutive else 0
+        var result: Series
+        try:
+            result = evaluate(
+                self.fallback_bound[index].value(), columns, count
+            )
+        except e:
+            if first < 0 or consecutive:
+                raise e^
+            for k in range(count):
+                var one = List[Series](capacity=len(columns))
+                for column in columns:
+                    one.append(column.slice(k, 1))
+                self.fallback_bound[index].value().first_row = input.source_row(
+                    rows.get_index(k)
+                )
+                _ = evaluate(self.fallback_bound[index].value(), one, 1)
+            raise e^
         if len(result) != count:
             if len(result) == 1:
                 result = result._broadcast(count)

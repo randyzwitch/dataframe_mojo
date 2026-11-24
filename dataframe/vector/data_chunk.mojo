@@ -233,6 +233,14 @@ struct DataChunk(Copyable, Movable):
     var selections_used: Int
     var scratch: List[List[UInt8]]
     var scratch_used: Int
+    # Where its rows come from, for errors that name a row (`source_row`):
+    # row k is row `first_row + k` of the input the pipeline reads, or,
+    # when `parent` is set, the row of the chunk at address `parent` that
+    # `parent_rows` selects (a filter's output over its input). -1 and 0
+    # when not known; `reset` forgets both.
+    var first_row: Int
+    var parent: Int
+    var parent_rows: SelectionVector
 
     def __init__(out self, columns: Int = 0):
         self.data = List[Vector](length=columns, fill=Vector())
@@ -243,6 +251,9 @@ struct DataChunk(Copyable, Movable):
         self.selections_used = 0
         self.scratch = List[List[UInt8]]()
         self.scratch_used = 0
+        self.first_row = -1
+        self.parent = 0
+        self.parent_rows = SelectionVector()
 
     def size(self) -> Int:
         return self.count
@@ -256,8 +267,36 @@ struct DataChunk(Copyable, Movable):
         self.count = 0
         self.selections_used = 0
         self.scratch_used = 0
+        self.first_row = -1
+        self.parent = 0
         for i in range(len(self.data)):
             self.data[i] = Vector()
+
+    def rows_of(mut self, input: DataChunk):
+        """This chunk's rows are `input`'s, row for row (a projection of
+        it, or a filter that kept every row)."""
+        self.first_row = input.first_row
+        self.parent = input.parent
+        self.parent_rows = input.parent_rows
+
+    def rows_through(mut self, input: DataChunk, rows: SelectionVector):
+        """Row k of this chunk is row `rows.get_index(k)` of `input`, which
+        must live as long as this chunk is read."""
+        self.first_row = -1
+        self.parent = Int(Pointer(to=input))
+        self.parent_rows = rows
+
+    def source_row(self, k: Int) -> Int:
+        """The row of the pipeline's input that row `k` is, or -1 when not
+        known."""
+        if self.parent != 0:
+            ref input = Pointer[DataChunk, MutAnyOrigin](
+                unsafe_from_address=self.parent
+            )[]
+            return input.source_row(self.parent_rows.get_index(k))
+        if self.first_row < 0:
+            return -1
+        return self.first_row + k
 
     def set_columns(mut self, columns: Int):
         """Resize to `columns` vectors."""
