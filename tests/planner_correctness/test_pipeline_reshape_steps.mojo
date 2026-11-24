@@ -311,3 +311,122 @@ def test_struct_key_joins_probe_each_morsel() raises:
             query.group_by("k").agg([col("v").sum()]),
             expected.group_by("k").agg([col("v").sum()]),
         )
+
+
+def _paths(frame: DataFrame, kind: Int) raises -> Tuple[DataFrame, String]:
+    """An eager reshape of `frame` on four workers (several morsels), with
+    the paths it took."""
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var result: DataFrame
+    if kind == 0:
+        result = frame.explode("xs")
+    elif kind == 1:
+        result = frame.select(["k", "a", "b"]).unpivot(["a", "b"], ["k"])
+    else:
+        result = frame.pivot(
+            "o", index=["k"], values="a", aggregate_function="sum"
+        )
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    return (result^, paths^)
+
+
+def test_eager_reshapes_run_as_plans() raises:
+    """Eager explode runs as pipeline steps over the frame's morsels, in
+    input order; unpivot and pivot run as sinks over the whole input, a
+    pivot's cells grouped in the aggregate table first."""
+    var rows = 6000
+    var frame = _lists(rows)
+    var o = List[Int64]()
+    var a = List[Int64]()
+    var b = List[Int64]()
+    for row in range(rows):
+        o.append(Int64((row // 7) % 4))
+        a.append(Int64(row))
+        b.append(Int64(row * 2))
+    frame = (
+        frame.with_column(Series("o", Column[Int64](o^)))
+        .with_column(Series("a", Column[Int64](a^)))
+        .with_column(Series("b", Column[Int64](b^)))
+    )
+    var exploded = _paths(frame, 0)
+    assert_true(exploded[1].find("dataframe-path: pipeline.run") >= 0)
+    # One row per element, a null list's or empty list's row once.
+    var expected_rows = 0
+    for row in range(rows):
+        expected_rows += max(1, row % 4) if row % 9 != 4 else 1
+    assert_equal(exploded[0].height(), expected_rows)
+    var at = 0
+    for row in range(rows):
+        var count = max(1, row % 4) if row % 9 != 4 else 1
+        for _ in range(count):
+            assert_equal(exploded[0].item(at, "a").int64(), Int64(row))
+            at += 1
+    var unpivoted = _paths(frame, 1)
+    assert_true(unpivoted[1].find("dataframe-path: unpivot.rounds") >= 0)
+    assert_equal(unpivoted[0].height(), 2 * rows)
+    for row in range(0, rows, 37):
+        assert_equal(unpivoted[0].item(row, "variable").string(), "a")
+        assert_equal(unpivoted[0].item(row, "value").int64(), Int64(row))
+        assert_equal(unpivoted[0].item(rows + row, "variable").string(), "b")
+        assert_equal(
+            unpivoted[0].item(rows + row, "value").int64(), Int64(row * 2)
+        )
+        assert_equal(unpivoted[0].item(rows + row, "k").int64(), Int64(row % 6))
+    var pivoted = _paths(frame, 2)
+    assert_true(pivoted[1].find("dataframe-path: pivot.cells") >= 0)
+    # Keys and columns in order of first appearance.
+    assert_equal(pivoted[0].columns(), ["k", "0", "1", "2", "3"])
+    assert_equal(pivoted[0].height(), 6)
+    for key in range(6):
+        assert_equal(pivoted[0].item(key, "k").int64(), Int64(key))
+        for column in range(4):
+            var total = Int64(0)
+            for row in range(rows):
+                if row % 6 == key and (row // 7) % 4 == column:
+                    total += Int64(row)
+            assert_equal(pivoted[0].item(key, String(column)).int64(), total)
+    # An explode error names the frame's row, not the morsel's.
+    var offsets = List[Int64]()
+    var other = List[Int64]()
+    offsets.append(0)
+    other.append(0)
+    for row in range(rows):
+        offsets.append(Int64(row + 1))
+        other.append(Int64(row + 1 + (1 if row >= 4500 else 0)))
+    var pairs = DataFrame(
+        [
+            Series(
+                "xs",
+                ListColumn(
+                    offsets^,
+                    Series(
+                        "item", Column[Int64](List[Int64](length=rows, fill=0))
+                    ),
+                ),
+            ),
+            Series(
+                "ys",
+                ListColumn(
+                    other^,
+                    Series(
+                        "item",
+                        Column[Int64](List[Int64](length=rows + 1, fill=0)),
+                    ),
+                ),
+            ),
+        ]
+    )
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    try:
+        _ = pairs.explode(["xs", "ys"])
+        assert_true(False, "no error")
+    except e:
+        assert_true(
+            String(e).find("element counts at row 4500") >= 0, String(e)
+        )
+    _ = threads^

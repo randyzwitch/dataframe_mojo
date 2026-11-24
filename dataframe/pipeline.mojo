@@ -1330,9 +1330,9 @@ def _step_schemas(
                 joins[step.join].clear(), "cross", step.suffix
             )
         elif step.kind == STEP_EXPLODE:
-            current = current.explode(step.names)
+            current = current._exploded(step.names)
         elif step.kind == STEP_UNNEST:
-            current = current.unnest(step.names[0])
+            current = current._unnested(step.names[0])
         elif step.kind == STEP_JOIN:
             current = current._join_impl(
                 joins[step.join].clear(),
@@ -1489,6 +1489,9 @@ struct _ChunkRunner(Movable):
     # source offset.
     var scan: Optional[ArcPointer[ScanFilterInfo]]
     var scan_offset: Int
+    # The first row of the morsel running, when it is a range of an
+    # in-memory frame's rows; -1 otherwise.
+    var frame_offset: Int
     # Whether the sink's answer depends on the order its rows come in (a
     # first or last, the position of an extreme, groups in first-appearance
     # order): a cross product then makes its pairs in the join's order, each
@@ -1544,6 +1547,7 @@ struct _ChunkRunner(Movable):
         self.build_layout = List[ArcPointer[JoinBuildLayout]]()
         self.scan = None
         self.scan_offset = -1
+        self.frame_offset = -1
         self.ordered_pairs = False
 
     def begin_morsel(mut self) raises:
@@ -1882,9 +1886,14 @@ struct _ChunkRunner(Movable):
         ref step = self.steps[][s]
         var frame = columns.whole(self.arena, self.schemas[][s])
         if step.kind == STEP_EXPLODE:
-            frame = frame.explode(step.names)
+            # The first step over a morsel of a frame's rows names rows
+            # of the frame in its errors.
+            var first_row = 0
+            if s == 0 and self.scan_offset >= 0 and self.frame_offset >= 0:
+                first_row = self.frame_offset
+            frame = frame._exploded(step.names, first_row)
         else:
-            frame = frame.unnest(step.names[0])
+            frame = frame._unnested(step.names[0])
         return _Columns.of_frame(self.arena, frame)
 
     def _cross_into_sink(mut self, columns: _Columns, s: Int) raises:
@@ -2849,7 +2858,9 @@ struct _PipelineJob(Job):
                 var source = _Columns.of_frame(self.runner.arena, morsel)
                 self._sink_from(source^, k, offset)
                 continue
+            self.runner.frame_offset = offset
             self._morsel(morsel, k, offset, length)
+            self.runner.frame_offset = -1
 
     def _run_source(mut self) raises:
         """Batches from the file source until it is done: each is taken under
