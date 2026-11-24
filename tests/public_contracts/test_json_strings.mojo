@@ -696,7 +696,7 @@ def test_json_int128_expression_and_nested_empty_seeds() raises:
     assert_equal(result.get(0).numeric[DType.int128](), maximum)
     assert_equal(result.get(1).numeric[DType.int128](), -maximum - 1)
     assert_equal(String(result.get(0)), String(maximum))
-    assert_true(result.to_string().find(String(maximum)) >= 0)
+    assert_true(String(maximum) in result.to_string())
     assert_true(result.get(0) != result.get(1))
     assert_true(result._data[Column[Int128]].is_null(2))
     var arrays = DataFrame(

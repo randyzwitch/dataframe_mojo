@@ -110,7 +110,7 @@ def test_ipc_schema_only_and_row_limit_do_not_read_later_corrupt_bodies() raises
         try:
             _ = read(path, stream)
         except error:
-            assert_true(String(error).find("stream:") >= 0)
+            assert_true("stream:" in String(error))
             rejected = True
         assert_true(
             rejected,

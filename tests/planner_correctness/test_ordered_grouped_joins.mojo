@@ -125,7 +125,7 @@ def _assert_table(query: LazyFrame) raises:
     _ = setting^
     _ = threads^
     assert_true(
-        paths.find("dataframe-strategy: table_pipeline") >= 0,
+        "dataframe-strategy: table_pipeline" in paths,
         paths,
     )
 

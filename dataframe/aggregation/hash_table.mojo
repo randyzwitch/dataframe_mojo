@@ -2260,7 +2260,6 @@ struct AggregateSink(Movable):
         var row_entries = self.dictionary_groups.row_entries.unsafe_ptr()
         var entries = self.dictionary_groups.entries.unsafe_ptr()
         var rows = self.dictionary_groups.rows.unsafe_ptr()
-        var addresses = self.dictionary_groups.addresses.unsafe_ptr()
         for k in range(count):
             if has_nulls and not validity.row_is_valid_unsafe(sel.get_index(k)):
                 row_entries[unsafe_offset=k] = size
@@ -2277,7 +2276,6 @@ struct AggregateSink(Movable):
                     rows[unsafe_offset=unique] = first + k
                     unique += 1
             self.dictionary_groups.resolved += unique
-        var group_at = self.groups.unsafe_ptr()
         if unique > 0:
             var word_ptrs = self._word_ptrs()
             self.dictionaries[0].write_entries(
@@ -2294,19 +2292,19 @@ struct AggregateSink(Movable):
                 Int(self.hashes.unsafe_ptr()),
                 Int(self.nulls.unsafe_ptr()),
                 word_ptrs,
-                Int(group_at),
+                Int(self.groups.unsafe_ptr()),
                 Int(rows),
             )
             for i in range(unique):
-                addresses[unsafe_offset=entries[unsafe_offset=i]] = group_at[
-                    unsafe_offset=i
-                ]
-                self.dictionary_groups.saw(group_at[unsafe_offset=i])
+                var group = self.groups[i]
+                var entry = self.dictionary_groups.entries[i]
+                self.dictionary_groups.addresses[entry] = group
+                self.dictionary_groups.saw(group)
         # The adaptive counters see every row.
         self.cycle += count - unique
         for k in range(count):
-            group_at[unsafe_offset=k] = addresses[
-                unsafe_offset=row_entries[unsafe_offset=k]
+            self.groups[k] = self.dictionary_groups.addresses[
+                self.dictionary_groups.row_entries[k]
             ]
 
     def _insert[
@@ -2421,8 +2419,6 @@ struct AggregateSink(Movable):
         var firsts = List[UInt64](length=_BATCH, fill=0)
         var source_at = sources.unsafe_ptr()
         var first_at = firsts.unsafe_ptr()
-        var hashes = self.hashes.unsafe_ptr()
-        var nulls = self.nulls.unsafe_ptr()
         var stride = source.parts.stride
         var count = 0
         for p in range(len(source.parts.blocks)):
@@ -2477,8 +2473,8 @@ struct AggregateSink(Movable):
                         hash = _mix(part) if j == 0 else _hash_combine(
                             hash, part
                         )
-                    hashes[unsafe_offset=count] = hash
-                    nulls[unsafe_offset=count] = null
+                    self.hashes[count] = hash
+                    self.nulls[count] = null
                     source_at[unsafe_offset=count] = address
                     first_at[unsafe_offset=count] = row[unsafe_offset=2]
                     count += 1
@@ -2522,9 +2518,6 @@ struct AggregateSink(Movable):
         var word_ptrs = List[Int](capacity=width)
         for w in range(width):
             word_ptrs.append(Int(self.word_rows[w].unsafe_ptr()))
-        var hashes = self.hashes.unsafe_ptr()
-        var nulls = self.nulls.unsafe_ptr()
-        var group_at = self.groups.unsafe_ptr()
         var value_null = UInt64(1) << UInt64(keys)
         var base = 8 * (self.parts.states_at + self.slots[self.only].offset)
         var firsts = List[Int](length=_BATCH, fill=0)
@@ -2585,8 +2578,8 @@ struct AggregateSink(Movable):
                     part = first
                 w += widths[c]
                 hash = _mix(part) if c == 0 else _hash_combine(hash, part)
-            hashes[unsafe_offset=count] = hash
-            nulls[unsafe_offset=count] = row[unsafe_offset=1] & (value_null - 1)
+            self.hashes[count] = hash
+            self.nulls[count] = row[unsafe_offset=1] & (value_null - 1)
             count += 1
             if count == _BATCH:
                 self._count_batch(count, word_ptrs, base, firsts, adds)
@@ -2606,20 +2599,19 @@ struct AggregateSink(Movable):
         when new, with the first rows `firsts`; one found again keeps the
         earlier), each adding its `adds` to the count at byte `base` of its
         group's row."""
-        var group_at = self.groups.unsafe_ptr()
         self._insert[True](
             count,
             0,
             Int(self.hashes.unsafe_ptr()),
             Int(self.nulls.unsafe_ptr()),
             word_ptrs,
-            Int(group_at),
+            Int(self.groups.unsafe_ptr()),
             Int(firsts.unsafe_ptr()),
         )
         var add_at = adds.unsafe_ptr()
         var first_at = firsts.unsafe_ptr()
         for k in range(count):
-            var group = group_at[unsafe_offset=k]
+            var group = self.groups[k]
             _words_at(group + base)[] += add_at[unsafe_offset=k]
             # A group found again keeps the earlier first row.
             var head = _words_at(group)
@@ -2641,7 +2633,6 @@ struct AggregateSink(Movable):
         var word_ptrs = List[Int](capacity=len(self.addressed))
         for w in range(len(self.addressed)):
             word_ptrs.append(Int(self.word_rows[w].unsafe_ptr()))
-        var group_at = self.groups.unsafe_ptr()
         # A new group's first row starts past any real row, so the earlier
         # of it and the source's wins.
         self._insert[False](
@@ -2650,13 +2641,13 @@ struct AggregateSink(Movable):
             Int(self.hashes.unsafe_ptr()),
             Int(self.nulls.unsafe_ptr()),
             word_ptrs,
-            Int(group_at),
+            Int(self.groups.unsafe_ptr()),
             0,
         )
         var into_states = 8 * self.parts.states_at
         var from_states = 8 * source_states_at
         for k in range(count):
-            var group = group_at[unsafe_offset=k]
+            var group = self.groups[k]
             combine(self.slots, group + into_states, sources[k] + from_states)
             var head = _words_at(group)
             if firsts[k] < head[unsafe_offset=2]:

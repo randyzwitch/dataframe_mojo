@@ -1070,7 +1070,6 @@ def _and_validity(
     var own = bits.unsafe_ptr()
     var own_bytes = len(bits)
     var out = List[UInt8](length=(base + size + 7) // 8, fill=0)
-    var packed = out.unsafe_ptr()
     var source = _BoolInput(flags.owner.value())
     var scalar_truth = UInt8(0)
     if source.scalar and size > 0:
@@ -1117,7 +1116,7 @@ def _and_validity(
             )
             if own_bytes > 0:
                 truth &= own[unsafe_offset=out_bit >> 3]
-            packed[unsafe_offset=out_bit >> 3] = truth
+            out[out_bit >> 3] = truth
             relative += 8
         if relative < span:
             var out_bit = base + row + relative

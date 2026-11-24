@@ -61,8 +61,7 @@ def test_worker_error_drains_all_jobs_and_pool_can_run_again() raises:
             except error:
                 failed = True
                 assert_true(
-                    String(error).find("deliberate lifecycle worker failure 0")
-                    >= 0
+                    "deliberate lifecycle worker failure 0" in String(error)
                 )
             assert_true(failed)
             assert_job_counts(counts, 16, True)
@@ -220,7 +219,7 @@ def test_public_streaming_reductions_allow_partial_overflow_cancellation() raise
             try:
                 _ = positive.finish()
             except error:
-                if String(error).find("expression sum overflow") < 0:
+                if "expression sum overflow" not in String(error):
                     raise error^
                 cannot_finalize = True
             assert_true(
@@ -255,7 +254,7 @@ def test_public_query_late_arithmetic_overflow_raises_and_retry_succeeds() raise
                     )
                 )
             except error:
-                if String(error).find("Int64 sum overflow") < 0:
+                if "Int64 sum overflow" not in String(error):
                     raise error^
                 rejected = True
             assert_true(
@@ -322,8 +321,8 @@ def test_public_csv_late_error_is_not_hidden_by_quotes_eof_or_early_consumer_sto
                 except error:
                     var message = String(error)
                     if (
-                        message.find("CSV record") < 0
-                        or message.find("field 'x'") < 0
+                        "CSV record" not in message
+                        or "field 'x'" not in message
                     ):
                         raise error^
                     rejected = True

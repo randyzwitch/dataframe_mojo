@@ -9,13 +9,10 @@ from max.gpu.host import DeviceBuffer
 from std.sys import size_of
 from .target import METAL_TARGET, MetalContext as DeviceContext
 
-comptime _Int64Buffer = DeviceBuffer[DType.int64] if METAL_TARGET else Int
-comptime _UInt32Buffer = DeviceBuffer[DType.uint32] if METAL_TARGET else Int
-
 
 struct ScratchPool(Movable):
-    var int64_buffers: List[_Int64Buffer]
-    var uint32_buffers: List[_UInt32Buffer]
+    var int64_buffers: List[DeviceBuffer[DType.int64]]
+    var uint32_buffers: List[DeviceBuffer[DType.uint32]]
     var byte_limit: Int
     var entry_limit: Int
     var idle_bytes: Int
@@ -24,8 +21,8 @@ struct ScratchPool(Movable):
     var misses: Int
 
     def __init__(out self, byte_limit: Int, entry_limit: Int):
-        self.int64_buffers = List[_Int64Buffer]()
-        self.uint32_buffers = List[_UInt32Buffer]()
+        self.int64_buffers = List[DeviceBuffer[DType.int64]]()
+        self.uint32_buffers = List[DeviceBuffer[DType.uint32]]()
         self.byte_limit = byte_limit
         self.entry_limit = entry_limit
         self.idle_bytes = 0
@@ -47,18 +44,9 @@ struct ScratchPool(Movable):
         comptime if METAL_TARGET:
             comptime if dtype == DType.int64:
                 for index in range(len(self.int64_buffers)):
-                    if (
-                        len(
-                            rebind[DeviceBuffer[DType.int64]](
-                                self.int64_buffers[index]
-                            )
-                        )
-                        == length
-                    ):
+                    if len(self.int64_buffers[index]) == length:
                         if (
-                            rebind[DeviceBuffer[DType.int64]](
-                                self.int64_buffers[index]
-                            )
+                            self.int64_buffers[index]
                             .context()
                             .into_unknown_target()
                             != context.into_unknown_target()
@@ -74,18 +62,9 @@ struct ScratchPool(Movable):
                         )
             elif dtype == DType.uint32:
                 for index in range(len(self.uint32_buffers)):
-                    if (
-                        len(
-                            rebind[DeviceBuffer[DType.uint32]](
-                                self.uint32_buffers[index]
-                            )
-                        )
-                        == length
-                    ):
+                    if len(self.uint32_buffers[index]) == length:
                         if (
-                            rebind[DeviceBuffer[DType.uint32]](
-                                self.uint32_buffers[index]
-                            )
+                            self.uint32_buffers[index]
                             .context()
                             .into_unknown_target()
                             != context.into_unknown_target()
@@ -125,8 +104,12 @@ struct ScratchPool(Movable):
             ):
                 return
             comptime if dtype == DType.int64:
-                self.int64_buffers.append(rebind[_Int64Buffer](buffer))
+                self.int64_buffers.append(
+                    rebind[DeviceBuffer[DType.int64]](buffer^)
+                )
             else:
-                self.uint32_buffers.append(rebind[_UInt32Buffer](buffer))
+                self.uint32_buffers.append(
+                    rebind[DeviceBuffer[DType.uint32]](buffer^)
+                )
             self.idle_bytes += bytes
             self.idle_entries += 1

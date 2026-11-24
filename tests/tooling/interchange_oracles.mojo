@@ -29,7 +29,7 @@ def _consume_outputs(
         var file = String(part)
         if not file:
             continue
-        var directory = String(file[byte = 0 : file.rfind("/")])
+        var directory = String(file[byte = 0 : file.rfind("/").or_else(-1)])
         run_command(
             [
                 "python3",

@@ -84,7 +84,7 @@ def _key_parts(name: String) -> Tuple[String, String]:
     if not name.startswith(_KEY_SEP):
         return (String(""), String(""))
     var rest = String(name[byte = _KEY_SEP.byte_length() :])
-    var at = rest.find(_KEY_SEP)
+    var at = rest.find(_KEY_SEP).or_else(-1)
     if at < 0:
         return (String(""), String(""))
     return (

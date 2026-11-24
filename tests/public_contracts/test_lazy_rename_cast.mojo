@@ -201,8 +201,8 @@ def test_cast_keeps_evaluation_boundaries_and_requested_outputs() raises:
     var selected = frame.lazy().cast(casts, strict=False).select(["k", "t"])
     check(selected, frame.cast(casts, strict=False).select(["k", "t"]))
     text = selected.explain(streaming=False)
-    assert_true(text.find("WITH_COLUMNS t, f\n") >= 0, text)
-    assert_true(text.find("SCAN frame [project k, f, t]") >= 0, text)
+    assert_true("WITH_COLUMNS t, f\n" in text, text)
+    assert_true("SCAN frame [project k, f, t]" in text, text)
     # The invalid "x" belongs to a row the filter would discard. Neither
     # filtering it out nor selecting only k may hide a preceding strict cast.
     check_fails(frame.lazy().cast(casts).filter(col("k") > 1))

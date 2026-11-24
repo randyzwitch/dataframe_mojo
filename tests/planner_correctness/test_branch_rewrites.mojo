@@ -51,10 +51,10 @@ def test_implied_join_filters_preserve_or_branches_and_nullable_side_values() ra
         if not nullable_branch:
             var text = query.explain(engine="cpu", streaming=False)
             var filters = 0
-            var at = text.find("FILTER")
+            var at = text.find("FILTER").or_else(-1)
             while at >= 0:
                 filters += 1
-                at = text.find("FILTER", at + 1)
+                at = text.find("FILTER", at + 1).or_else(-1)
             assert_true(
                 filters >= 3, "both dimension implications must be exercised"
             )

@@ -229,19 +229,19 @@ def test_display_has_literal_shape_dtype_escaping_and_codepoint_limits() raises:
             String('"\\n"'),
             String("é🙂z"),
         ]:
-            assert_true(text.find(token) >= 0)
-        assert_equal(text.find("hidden payload"), -1)
+            assert_true(token in text)
+        assert_true("hidden payload" not in text)
         var clipped = frame.to_string(max_rows=-1, max_string_length=2)
-        assert_true(clipped.find("é…") >= 0)
-        assert_equal(clipped.find("é🙂z"), -1)
+        assert_true("é…" in clipped)
+        assert_true("é🙂z" not in clipped)
         var series = frame.column("s").to_string(
             max_rows=3, max_string_length=-1
         )
-        assert_true(series.find("shape: (8,)\nSeries: s [str]\n[") == 0)
-        assert_true(series.find('""') >= 0)
-        assert_true(series.find('"null"') >= 0)
-        assert_true(series.find("…") >= 0)
-        assert_equal(series.find("é🙂z"), -1)
+        assert_true(series.startswith("shape: (8,)\nSeries: s [str]\n["))
+        assert_true('""' in series)
+        assert_true('"null"' in series)
+        assert_true("…" in series)
+        assert_true("é🙂z" not in series)
     assert_equal(
         simple.glimpse(max_width=-1), "Rows: 2\nColumns: 1\n$ x <i64> 1, 2"
     )
@@ -270,16 +270,16 @@ def test_display_odd_limits_show_extra_front_row_and_column() raises:
         "c17r12.",
         "…",
     ]:
-        assert_true(bounded.find(token) >= 0)
+        assert_true(token in bounded)
     for token in ["column_2", "column_16", "c0r2.", "c0r11."]:
-        assert_equal(bounded.find(token), -1)
+        assert_true(token not in bounded)
     var none = frame.to_string(max_rows=0, max_columns=0)
-    assert_true(none.find("shape: (13, 18)") >= 0)
-    assert_equal(none.find("column_0"), -1)
-    assert_equal(none.find("c0r0."), -1)
+    assert_true("shape: (13, 18)" in none)
+    assert_true("column_0" not in none)
+    assert_true("c0r0." not in none)
     var all = frame.to_string(max_rows=-1, max_columns=-1, max_string_length=-1)
-    assert_true(all.find("c8r6.") >= 0)
-    assert_equal(all.find("…"), -1)
+    assert_true("c8r6." in all)
+    assert_true("…" not in all)
 
 
 def test_describe_orders_percentiles_and_preserves_typed_statistic_policies() raises:

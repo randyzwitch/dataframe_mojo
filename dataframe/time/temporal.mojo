@@ -286,7 +286,7 @@ def strptime_target(target: DataType, format: String) raises -> DataType:
     if (
         target.is_datetime()
         and target.time_zone().byte_length() == 0
-        and (format.find("%z") >= 0 or format.find("%:z") >= 0)
+        and ("%z" in format or "%:z" in format)
     ):
         return target.with_time_zone("UTC")
     return target

@@ -81,7 +81,7 @@ def test_unread_columns_are_not_scanned() raises:
         .select(["total", "a"])
     )
     var text = plan.explain(streaming=False)
-    assert_true(text.find("unused") < 0, text)
+    assert_true("unused" not in text, text)
 
 
 def test_grouping_sets_with_a_pushed_filter_below() raises:

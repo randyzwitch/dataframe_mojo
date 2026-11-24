@@ -97,7 +97,7 @@ def _assert_pipelined(query: LazyFrame) raises:
     _ = trace^
     _ = setting^
     _ = threads^
-    assert_true(paths.find("dataframe-path: pipeline.run") >= 0, paths)
+    assert_true("dataframe-path: pipeline.run" in paths, paths)
 
 
 def test_cross_products_materialize_every_pair() raises:
@@ -354,7 +354,7 @@ def test_eager_reshapes_run_as_plans() raises:
         .with_column(Series("b", Column[Int64](b^)))
     )
     var exploded = _paths(frame, 0)
-    assert_true(exploded[1].find("dataframe-path: pipeline.run") >= 0)
+    assert_true("dataframe-path: pipeline.run" in exploded[1])
     # One row per element, a null list's or empty list's row once.
     var expected_rows = 0
     for row in range(rows):
@@ -367,7 +367,7 @@ def test_eager_reshapes_run_as_plans() raises:
             assert_equal(exploded[0].item(at, "a").int64(), Int64(row))
             at += 1
     var unpivoted = _paths(frame, 1)
-    assert_true(unpivoted[1].find("dataframe-path: unpivot.rounds") >= 0)
+    assert_true("dataframe-path: unpivot.rounds" in unpivoted[1])
     assert_equal(unpivoted[0].height(), 2 * rows)
     for row in range(0, rows, 37):
         assert_equal(unpivoted[0].item(row, "variable").string(), "a")
@@ -378,7 +378,7 @@ def test_eager_reshapes_run_as_plans() raises:
         )
         assert_equal(unpivoted[0].item(rows + row, "k").int64(), Int64(row % 6))
     var pivoted = _paths(frame, 2)
-    assert_true(pivoted[1].find("dataframe-path: pivot.cells") >= 0)
+    assert_true("dataframe-path: pivot.cells" in pivoted[1])
     # Keys and columns in order of first appearance.
     assert_equal(pivoted[0].columns(), ["k", "0", "1", "2", "3"])
     assert_equal(pivoted[0].height(), 6)
@@ -426,7 +426,5 @@ def test_eager_reshapes_run_as_plans() raises:
         _ = pairs.explode(["xs", "ys"])
         assert_true(False, "no error")
     except e:
-        assert_true(
-            String(e).find("element counts at row 4500") >= 0, String(e)
-        )
+        assert_true("element counts at row 4500" in String(e), String(e))
     _ = threads^
