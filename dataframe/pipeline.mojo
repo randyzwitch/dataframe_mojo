@@ -2205,9 +2205,7 @@ struct _ChunkRunner(Movable):
                         source[], self.arena, selection, kept, target
                     )
                     selection = target
-                    self.counts[2 * n + 1 + s] += (
-                        Int(perf_counter_ns()) - began
-                    )
+                    self.counts[2 * n + 1 + s] += Int(perf_counter_ns()) - began
                 self.counts[2 * s + 2] += kept
                 if kept == 0:
                     break
