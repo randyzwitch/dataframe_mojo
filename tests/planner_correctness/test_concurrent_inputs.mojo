@@ -1316,10 +1316,11 @@ def test_filters_on_windows_and_reductions_run_as_rounds_in_every_mode() raises:
     """A filter whose predicate holds windows or reductions over every row
     computes the predicate as a column below it, with the optimizer on or
     off, eagerly or lazily: the column's sink runs as rounds of the
-    schedule and a filter step reads it. Each partition's first k rows by
-    ordinal rank come from an aggregate of the partitions' k best rows,
-    and a rank over a null value is null. Rows equal the kernels' filter,
-    in order."""
+    schedule and a filter step reads it. A filter that keeps each
+    partition's first k rows by ordinal rank finds them in an aggregate
+    of the partitions' k best rows and gathers them; the same predicate as
+    a column is null where the ranked value is null. Rows equal the
+    kernels' filter, in order."""
     var frame = source().head(50_000).with_row_index("row")
     var top = col("v").rank("ordinal", descending=True).over("k") <= lit(
         Int64(2)
@@ -1342,6 +1343,7 @@ def test_filters_on_windows_and_reductions_run_as_rounds_in_every_mode() raises:
     _ = setting^
     _ = threads^
     for name in [
+        "filter.top_rows_rounds",
         "window.top_rows_rounds",
         "window.partitioned_sink",
         "window.reduce_row_rounds",
@@ -1367,3 +1369,16 @@ def test_filters_on_windows_and_reductions_run_as_rounds_in_every_mode() raises:
     assert_frame(plain_above, expected_above)
     assert_frame(marked, frame._with_columns([top.alias("top")]))
     assert_true(marked["top"].null_count() > 0, "no null rank was kept null")
+    # Ranked strings are not held by the table's state: the filter runs
+    # over its whole input instead.
+    var by_text = col("s").rank("ordinal").over("k") <= lit(Int64(2))
+    var declined = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var watched = StrategyTrace()
+    var eager_text = frame.filter(by_text)
+    assert_true(
+        "filter.top_rows_declined" in watched.text(),
+        "the string ranks did not decline the table",
+    )
+    _ = watched^
+    _ = declined^
+    assert_frame(eager_text, frame._filter(by_text))

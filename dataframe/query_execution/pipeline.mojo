@@ -150,7 +150,10 @@ from dataframe.query_execution.reshape_sink import (
     pivot_cell_rows_name,
     reshape_node,
 )
-from dataframe.optimizer.expressions import shared_partition_keys
+from dataframe.optimizer.expressions import (
+    shared_partition_keys,
+    top_rows_filter,
+)
 from dataframe.query_execution.window_sink import (
     WindowSink,
 )
@@ -297,13 +300,15 @@ def plan_stream_execute(
         _sorts_whole(self, index)
         or _orders_rows(self, index)
         or _reshapes_whole(self, index)
+        or _filters_top_rows(self, index)
     ):
         # A sort of every row reads its whole input, so no morsel
         # pipeline runs it: it is an operator pipeline whose finish sorts
         # in rounds (`SortSink`), its computed input a pipeline of the
         # same schedule. So is an operation that places rows by their
-        # position (`RowOrderSink`), and an unpivot or a pivot
-        # (`ReshapeSink`).
+        # position (`RowOrderSink`), an unpivot or a pivot
+        # (`ReshapeSink`), and a filter that keeps each partition's first
+        # rows by rank (`TopRowsSink`).
         return _run_operator(self, index, batch_size)
     var outcome = _stream_head(self, index, batch_size, sink)
     if len(outcome.plan) > 0:
@@ -1576,6 +1581,19 @@ def _sorts_whole(plan: QueryContext, index: Int) -> Bool:
     )
 
 
+def _filters_top_rows(plan: QueryContext, index: Int) -> Bool:
+    """Whether node `index` is a filter that keeps each partition's first
+    k rows by ordinal rank (`top_rows_filter`), which an operator pipeline
+    runs as a `TopRowsSink` over its whole input."""
+    ref node = plan._nodes[index]
+    return (
+        plan._handoff == HANDOFF_OFF
+        and node.kind == FILTER
+        and len(node.exprs) == 1
+        and top_rows_filter(node.exprs[0])
+    )
+
+
 def _reshapes_whole(plan: QueryContext, index: Int) -> Bool:
     """Whether node `index` is an unpivot or a pivot, which reads its whole
     input, and an operator pipeline runs it as a `ReshapeSink`."""
@@ -1779,6 +1797,9 @@ struct _OperatorPipeline(Movable):
     # The sink of such a projection whose one computed column keeps each
     # partition's first k rows by ordinal rank, while its rounds run.
     var top_rows: List[TopRowsSink]
+    # Whether it is a filter that keeps each partition's first k rows by
+    # ordinal rank, run by that sink too.
+    var top_filter: Bool
     # Whether it is a sort of every row that runs as a `SortSink`, and the
     # sink while its rounds run.
     var sorts: Bool
@@ -1837,6 +1858,7 @@ struct _OperatorPipeline(Movable):
         self.window_keys = List[String]()
         self.window = List[WindowSink]()
         self.top_rows = List[TopRowsSink]()
+        self.top_filter = False
         self.sorts = False
         self.sorting = List[SortSink]()
         self.ranks = False
@@ -1862,6 +1884,7 @@ struct _OperatorPipeline(Movable):
             self.reductions = whole_input_reductions(node.exprs)
         self.sorts = streaming and _sorts_whole(self.plan, index)
         self.orders = streaming and _orders_rows(self.plan, index)
+        self.top_filter = streaming and _filters_top_rows(self.plan, index)
         self.reshapes = (
             streaming
             and _reshapes_whole(self.plan, index)
@@ -1876,6 +1899,23 @@ struct _OperatorPipeline(Movable):
             var ahead = self.plan._prefetched.value()
             for k in range(len(self.wanted)):
                 ahead[][self.wanted[k]] = pipelines[self.at[k]].take_result()
+        if self.top_filter:
+            ref node = self.plan._nodes[self.index]
+            self.began = Int(perf_counter_ns())
+            var input = self.plan._execute(
+                node.left, False, self.streaming, self.batch_size
+            )
+            if top_rows_projection(node.exprs, input._columns) == 0:
+                trace_path("filter.top_rows_rounds")
+                self.top_rows.append(
+                    TopRowsSink.filtering(input^, node.exprs[0].copy())
+                )
+                return
+            # A value or k the table's state does not hold: the filter
+            # over the whole input.
+            trace_path("filter.top_rows_declined")
+            self.result = input._filter(node.exprs[0])
+            return
         if len(self.window_keys) > 0:
             ref node = self.plan._nodes[self.index]
             self.began = Int(perf_counter_ns())
@@ -2032,7 +2072,8 @@ struct _OperatorPipeline(Movable):
             or self.windows
             or self.reductions
             or self.orders
-            or self.reshapes else 0
+            or self.reshapes
+            or self.top_filter else 0
         )
 
     def finalize_tasks(mut self) raises -> Int:

@@ -9,8 +9,11 @@ k best (value, row) pairs (`TopRowsRounds`): each task of the first round
 hashes its morsels' keys where they are, into a table of its own, and the
 table's finish merges the tables partition by partition. The kept rows
 mark the column's true values. A row whose value is null has a null rank,
-so its comparison is null too; every other row not kept is false. A
-filter that reads the column keeps exactly the kept rows.
+so its comparison is null too; every other row not kept is false.
+
+A filter by such a predicate needs no column at all: the kept rows, put in
+input order, are gathered from every column in one more round, each task
+gathering a share of the columns, a chunked column chunk by chunk.
 """
 from std.collections import Optional
 
@@ -138,18 +141,59 @@ def top_rows_projection(exprs: List[Expr], columns: List[Series]) -> Int:
     return found
 
 
+def _gather_rows(column: Series, rows: List[Int]) raises -> Series:
+    """`column`'s values at `rows` (ascending), on the calling thread: a
+    chunked column gathers each chunk's own rows where they lie, and the
+    pieces are the result's chunks."""
+    if not column.is_chunked() or column.is_constant():
+        return column.take(rows)
+    var pieces = List[Series]()
+    var at = 0
+    var start = 0
+    for part in column.chunks():
+        var end = start + len(part)
+        var local = List[Int]()
+        while at < len(rows) and rows[at] < end:
+            local.append(rows[at] - start)
+            at += 1
+        if len(local) > 0:
+            pieces.append(part.take(local))
+        start = end
+    if len(pieces) == 0:
+        return column.slice(0, 0)
+    return Series._from_chunks(pieces)
+
+
 struct TopRowsSink(Movable, Rounds):
     """A SELECT or WITH_COLUMNS over `input` whose expression at `at` is a
-    top-k-per-partition predicate (`top_rows_projection`), as rounds (see
-    the module docstring); `take_result` once no round is left."""
+    top-k-per-partition predicate (`top_rows_projection`), or a filter by
+    such a predicate (`filtering`), as rounds (see the module docstring);
+    `take_result` once no round is left."""
 
     var input: DataFrame
     var exprs: List[Expr]
     var select: Bool
     var at: Int
+    # Whether it filters: the kept rows are gathered from every column,
+    # in input order, one more round with a task per share of the
+    # columns, rather than marked in a column.
+    var keep: Bool
     var value: Series
     var rounds: List[TopRowsRounds]
+    # The kept rows in order and, by column, its gathered rows, while the
+    # gather round runs.
+    var rows: List[Int]
+    var tasks: Int
+    var gathered: List[Series]
     var result: DataFrame
+
+    @staticmethod
+    def filtering(var input: DataFrame, var predicate: Expr) raises -> Self:
+        """The rows of `input` that `predicate`, a top-k-per-partition
+        predicate the table answers, keeps."""
+        var sink = Self(input^, [predicate^], False, 0)
+        sink.keep = True
+        return sink^
 
     def __init__(
         out self,
@@ -181,9 +225,21 @@ struct TopRowsSink(Movable, Rounds):
         self.exprs = exprs^
         self.select = select
         self.at = at
+        self.keep = False
+        self.rows = List[Int]()
+        self.tasks = 0
+        self.gathered = List[Series]()
         self.result = DataFrame(List[Series]())
 
     def next_round(mut self) raises -> Int:
+        if self.tasks > 0:
+            # The gather round ran.
+            var columns = List[Series]()
+            swap(columns, self.gathered)
+            self.result = DataFrame(columns^, height=len(self.rows))
+            self.tasks = 0
+            self._release()
+            return 0
         var rows = List[Int]()
         if len(self.rounds) > 0:
             var tasks = self.rounds[0].next_round()
@@ -191,11 +247,28 @@ struct TopRowsSink(Movable, Rounds):
                 return tasks
             swap(rows, self.rounds[0].rows)
             _ = self.rounds.pop()
-        self._finish(rows)
-        return 0
+        if not self.keep:
+            self._finish(rows)
+            return 0
+        sort(rows)
+        self.rows = rows^
+        var width = self.input.width()
+        self.gathered = List[Series](
+            length=width, fill=Series("", BoolColumn(List[Bool]()))
+        )
+        self.tasks = max(1, min(width, configured_workers()))
+        return self.tasks
 
     def round_task(mut self, task: Int) raises:
-        self.rounds[0].round_task(task)
+        if self.tasks == 0:
+            self.rounds[0].round_task(task)
+            return
+        for c in range(task, self.input.width(), self.tasks):
+            self.gathered[c] = _gather_rows(self.input._columns[c], self.rows)
+
+    def _release(mut self) raises:
+        self.input = DataFrame(List[Series]())
+        self.value = Series("", BoolColumn(List[Bool]()))
 
     def _finish(mut self, rows: List[Int]) raises:
         var height = self.input.height()
@@ -255,8 +328,7 @@ struct TopRowsSink(Movable, Rounds):
             if not placed:
                 columns.append(mask.copy())
         self.result = DataFrame(columns^)
-        self.input = DataFrame(List[Series]())
-        self.value = Series("", BoolColumn(List[Bool]()))
+        self._release()
 
     def take_result(mut self) raises -> DataFrame:
         var result = DataFrame(List[Series]())

@@ -55,6 +55,7 @@ from dataframe.optimizer.expressions import (
     outer_reductions,
     outer_windows,
     shared_partition_keys,
+    top_rows_filter,
     count_shared,
     _fold_casts,
     _fold_constants,
@@ -324,6 +325,9 @@ def plan_lower_whole_input_filters(mut self: QueryContext) raises:
                 has_window(self._nodes[i].exprs[0])
                 or _reduces_input(self._nodes[i].exprs[0])
             )
+            # Each partition's first k rows are found without a rank
+            # column: the filter reads its whole input in one operator.
+            or top_rows_filter(self._nodes[i].exprs[0])
         ):
             continue
         var left = self._nodes[i].left
