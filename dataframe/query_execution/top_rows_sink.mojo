@@ -12,16 +12,103 @@ mark the column's true values. A row whose value is null has a null rank,
 so its comparison is null too; every other row not kept is false. A
 filter that reads the column keeps exactly the kept rows.
 """
+from std.collections import Optional
+
+from dataframe.aggregation.hash_table import TOP_ROWS_INLINE, key_supported
 from dataframe.aggregation.table_sink import TopRowsRounds
+from dataframe.binding import BoundExpr, bind
 from dataframe.dtype import NUMERIC_DTYPES
-from dataframe.expr import COL, Expr
+from dataframe.expr import COL, Expr, split_names
 from dataframe.frame import DataFrame
 from dataframe.kernels.gather import can_filter_aligned_chunks
-from dataframe.kernels.top_k import top_rows_inputs, top_rows_ranges
+from dataframe.kernels.top_k import _pattern, top_rows_ranges
 from dataframe.parallel import Rounds, configured_workers
 from dataframe.series import Series
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
+
+
+struct TopRowsInputs(Movable):
+    """What the aggregate table's top-rows state reads for a
+    top-k-per-partition predicate: the partition keys and the ranked
+    value, cut into chunks at the same rows (`ends`, each chunk's end),
+    k, and whether the rank is descending."""
+
+    var keys: List[Series]
+    var value: Series
+    var ends: List[Int]
+    var k: Int
+    var descending: Bool
+
+    def __init__(
+        out self,
+        var keys: List[Series],
+        var value: Series,
+        var ends: List[Int],
+        k: Int,
+        descending: Bool,
+    ):
+        self.keys = keys^
+        self.value = value^
+        self.ends = ends^
+        self.k = k
+        self.descending = descending
+
+
+def top_rows_inputs(
+    expr: Expr, columns: List[Series]
+) -> Optional[TopRowsInputs]:
+    """The inputs of `expr` over `columns` when it is a top-k-per-partition
+    predicate whose k best pairs fit inline in a group's state, its value
+    a plain number and its keys columns with key words; None otherwise.
+    Columns cut at the same rows stay as they are; others are joined into
+    one chunk each."""
+    var bound: BoundExpr
+    try:
+        bound = bind(expr, columns)
+    except:
+        return None
+    var found = _pattern(bound)
+    var column_node = found[0]
+    if column_node < 0 or found[2] > TOP_ROWS_INLINE:
+        return None
+    ref nodes = bound.expr._nodes
+    var value = columns[bound.sources[column_node]].copy()
+    var numeric = False
+    comptime for t in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[t]
+        numeric = numeric or value._data.isa[Column[Scalar[D]]]()
+    if not numeric or value.dtype().is_decimal():
+        return None
+    var read = List[Series]()
+    for name in split_names(nodes[found[1]].text2):
+        var at = -1
+        for c in range(len(columns)):
+            if columns[c].name() == name:
+                at = c
+        if at < 0 or not key_supported(columns[at]):
+            return None
+        read.append(columns[at].copy())
+    read.append(value^)
+    var ends = List[Int]()
+    if can_filter_aligned_chunks(read):
+        ends = read[0]._chunked.value()[].ends.copy()
+    else:
+        try:
+            for c in range(len(read)):
+                if read[c].is_chunked():
+                    read[c] = read[c].rechunk()
+        except:
+            return None
+        ends.append(len(read[0]))
+    var whole = read.pop()
+    return TopRowsInputs(
+        read^,
+        whole^,
+        ends^,
+        found[2],
+        nodes[nodes[found[1]].left].min_count == 1,
+    )
 
 
 def top_rows_projection(exprs: List[Expr], columns: List[Series]) -> Int:
