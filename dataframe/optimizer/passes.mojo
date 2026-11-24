@@ -160,10 +160,15 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
 
 
 def plan_lower_right_joins(mut self: QueryContext) raises:
-    """Normalize outer-join column naming so the join can stream with an
-    explicit unmatched-build scan. Preserve the left/right column order and
-    decline conflicting, repeated or missing key names so existing
-    validation still reports them."""
+    """Run each coalesced right join as the right join that keeps both
+    sides' keys, under a selection that drops the left keys and names the
+    right columns as the coalesced join does. A matched row's keys are equal
+    on both sides, and an unmatched build row has only the right's, so the
+    right keys are the coalesced keys; the kept-keys join streams, emitting
+    its unmatched build rows after the probe. The selection keeps the
+    left/right column order. Repeated, missing or colliding output names
+    stay on the join, whose validation reports them. Runs with and without
+    the optimizer: an eager right join is a plan of one join."""
     var changed = False
     for i in range(len(self._nodes)):
         if (
@@ -190,29 +195,42 @@ def plan_lower_right_joins(mut self: QueryContext) raises:
                     valid = False
         if not valid:
             continue
-        # Names as the kept-keys join gives them (`kept`) and as the
-        # coalesced one does (`exprs`); both must be free of collisions.
-        var kept = Dict[String, Bool]()
+        # Names as the coalesced join gives them (`shown`), which must be
+        # free of collisions, and as the kept-keys join holds them (`held`).
+        # The kept-keys join's suffix is its own: the selection renames
+        # every right column, so a suffix no column name takes keeps the
+        # held names apart.
+        var held_suffix = suffix
+        var free = False
+        while not free:
+            free = True
+            for c in right_cols:
+                if c in left_cols and (
+                    c + held_suffix in left_cols
+                    or c + held_suffix in right_cols
+                ):
+                    free = False
+                    held_suffix += "_"
+                    break
         var named = Dict[String, Bool]()
         var exprs = List[Expr]()
         for c in left_cols:
-            kept[c] = True
             if c not in node.names:
                 named[c] = True
                 exprs.append(col(c))
         var others = named.copy()
         for c in right_cols:
-            var held = c + suffix if c in left_cols else c
+            var held = c + held_suffix if c in left_cols else c
             var shown = c + suffix if c in others else c
-            if held in kept or shown in named:
+            if shown in named:
                 valid = False
                 break
-            kept[held] = True
             named[shown] = True
             exprs.append(col(held).alias(shown) if held != shown else col(held))
         if not valid:
             continue
         node.coalesce = False
+        node.set_join_suffix(held_suffix)
         self._nodes.append(node^)
         self._nodes[i] = _select_node(left=len(self._nodes) - 1, exprs=exprs)
         changed = True
