@@ -335,8 +335,8 @@ def test_categorical_integer_boolean_decimal_casts_use_values_and_strict_row_rul
         try:
             _ = frame.column("x").cast(DataType.INT8)
         except error:
-            assert_true(String(error).find("failed at row 1") >= 0)
-            assert_true(String(error).find("value 'bad'") >= 0)
+            assert_true("failed at row 1" in String(error))
+            assert_true("value 'bad'" in String(error))
             failed = True
         assert_true(failed)
         var selected = frame.select(
@@ -405,11 +405,8 @@ def test_binary_to_categorical_rejects_unsupported_target_even_for_valid_utf8() 
                     _ = source.cast(DataType.CATEGORICAL, strict=strict)
                 except error:
                     assert_true(
-                        String(error).find("unsupported cast") >= 0
-                        or String(error).find(
-                            "cannot cast binary to categorical"
-                        )
-                        >= 0
+                        "unsupported cast" in String(error)
+                        or "cannot cast binary to categorical" in String(error)
                     )
                     rejected = True
                 assert_true(

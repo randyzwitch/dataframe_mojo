@@ -150,7 +150,7 @@ def test_wkb_malformed_structure_and_nonfinite_bounds_report_global_rows() raise
                 Series.binary("shape", [good.copy(), malformed.copy()])
             )
         except error:
-            assert_true(String(error).find("Invalid WKB at row 1:") >= 0)
+            assert_true("Invalid WKB at row 1:" in String(error))
             raised = True
         assert_true(raised)
     var infinity = point([Float64("inf"), Float64(1)])
@@ -161,7 +161,7 @@ def test_wkb_malformed_structure_and_nonfinite_bounds_report_global_rows() raise
     try:
         _ = chunks.bounding_box()
     except error:
-        assert_true(String(error).find("Invalid WKB at row 1:") >= 0)
+        assert_true("Invalid WKB at row 1:" in String(error))
         raised = True
     assert_true(raised)
 
@@ -361,7 +361,7 @@ def test_shapefile_malformed_shp_shx_dbf_encoding_and_record_counts_reject() rai
         try:
             _ = read_shapefile(stem + ".shp")
         except error:
-            assert_true(String(error).find(diagnostics[scenario]) >= 0)
+            assert_true(diagnostics[scenario] in String(error))
             rejected = True
         assert_true(rejected)
     var stem = getenv("COVERAGE_TEST_TMP") + "/spatial-shape-encoding"
@@ -640,7 +640,7 @@ def test_geoparquet_optional_datum_member_ids_accept_omission_and_reject_conflic
     try:
         _ = read_parquet(spatial_file("datum-id-conflict"))
     except error:
-        if String(error).find("Conflicting GeoParquet/GeoArrow metadata:") < 0:
+        if "Conflicting GeoParquet/GeoArrow metadata:" not in String(error):
             raise error^
         rejected = True
     assert_true(rejected)
@@ -746,7 +746,7 @@ def test_geoparquet_metadata_import_errors_release_actual_native_exports_and_all
         try:
             _ = read_parquet(spatial_file(sources[scenario]))
         except error:
-            if String(error).find(diagnostics[scenario]) < 0:
+            if diagnostics[scenario] not in String(error):
                 raise error^
             rejected = True
         assert_true(rejected)

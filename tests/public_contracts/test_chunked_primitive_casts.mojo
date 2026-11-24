@@ -89,13 +89,11 @@ def _error(
     except error:
         var message = String(error)
         assert_true(
-            message.find(
-                "cast from " + source.dtype().name() + " to " + target.name()
-            )
-            >= 0
+            "cast from " + source.dtype().name() + " to " + target.name()
+            in message
         )
-        assert_true(message.find("failed at row " + String(row)) >= 0)
-        assert_true(message.find(cause) >= 0)
+        assert_true("failed at row " + String(row) in message)
+        assert_true(cause in message)
         rejected = True
     assert_true(rejected, "observed invalid primitive conversion must reject")
 

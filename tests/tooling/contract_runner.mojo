@@ -143,13 +143,13 @@ def discovered_cases(root: String, area: String) raises -> List[String]:
         var path = String(part)
         if not path:
             continue
-        var slash = path.rfind("/")
+        var slash = path.rfind("/").or_else(-1)
         var relative = directory + "/" + String(path[byte = slash + 1 :])
         for part in read_text(path).split("\n"):
             var line = String(part)
             if not line.startswith("def test_"):
                 continue
-            var paren = line.find("(")
+            var paren = line.find("(").or_else(-1)
             if paren < 0 or String(line[byte=paren:]) != "() raises:":
                 raise Error("Unsupported test entry signature in " + relative)
             var entry = relative + "::" + String(line[byte=4:paren])
@@ -188,7 +188,7 @@ def selected_modules(
 
 
 def case_module(entry: String) raises -> String:
-    var split = entry.find("::")
+    var split = entry.find("::").or_else(-1)
     if split < 0:
         raise Error("Invalid entry identifier: " + entry)
     return String(entry[byte=0:split])
@@ -268,11 +268,11 @@ def validate_policy(policy: SuitePolicy, root: String) raises -> List[String]:
 
 
 def case_alias(entry: String, area: String) raises -> String:
-    var split = entry.find("::")
+    var split = entry.find("::").or_else(-1)
     if split < 0:
         raise Error("Invalid entry identifier: " + entry)
     var source = String(entry[byte=0:split])
-    var slash = source.rfind("/")
+    var slash = source.rfind("/").or_else(-1)
     return (
         area
         + "__"
@@ -307,7 +307,7 @@ def generate_driver(
     for i in range(len(areas)):
         run_command(["mkdir", "-p", directory + "/" + areas[i]])
         for entry in cases[i]:
-            var split = entry.find("::")
+            var split = entry.find("::").or_else(-1)
             var module = String(entry[byte = 0 : split - 5]).replace("/", ".")
             result += (
                 "from "
@@ -331,9 +331,9 @@ def generate_driver(
                 + "__known_failure() raises:\n    var failed = False\n   "
                 " try:\n        "
                 + alias
-                + "()\n    except error:\n        if String(error).find("
+                + "()\n    except error:\n        if "
                 + json_quote(failure.diagnostic)
-                + ") < 0:\n            raise error\n        print("
+                + " not in String(error):\n            raise error\n        print("
                 + json_quote("XFAIL: " + entry + ": " + failure.reason)
                 + ", error)\n        failed = True\n    if not failed:\n       "
                 " raise Error("
@@ -398,7 +398,7 @@ def generate_fatal_driver(
     )
     for i in range(len(cases)):
         var entry = cases[i]
-        var split = entry.find("::")
+        var split = entry.find("::").or_else(-1)
         if split < 0:
             raise Error("Invalid entry identifier: " + entry)
         var module = String(entry[byte = 0 : split - 5]).replace("/", ".")
@@ -689,10 +689,7 @@ def execute_suite(options: RunnerOptions, policy: SuitePolicy) raises -> String:
                 )
                 ref failure = policy.failures[policy.failure_index(entry)]
                 var code = failure.exit_code
-                if (
-                    result[0] == code
-                    and result[1].find(failure.diagnostic) >= 0
-                ):
+                if result[0] == code and failure.diagnostic in result[1]:
                     expected += 1
                     print(
                         "XFAIL(process):",

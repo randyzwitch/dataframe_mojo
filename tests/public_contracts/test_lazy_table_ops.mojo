@@ -191,7 +191,9 @@ def test_lazy_unpivot_literal_values_and_errors() raises:
     # A filter on its output stays above it.
     var filtered = plan.filter(col("variable") == "a").explain()
     assert_true(
-        filtered.find("FILTER") < filtered.find("UNPIVOT"), "filter moved"
+        filtered.find("FILTER").or_else(-1)
+        < filtered.find("UNPIVOT").or_else(-1),
+        "filter moved",
     )
     # Eager's errors, raised when the plan runs.
     var invalid: List[LazyFrame] = [

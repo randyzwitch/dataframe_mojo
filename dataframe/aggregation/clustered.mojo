@@ -290,8 +290,7 @@ struct ClusteredAggrState(Movable):
         mut self, mut st: _SlotTab, gid: UInt64, pos: Int
     ) -> UInt64:
         var hash = _slot_hash(gid)
-        var table = self.slots.unsafe_ptr()
-        var s = table[unsafe_offset=st.tab + hash]
+        var s = self.slots[st.tab + hash]
         if s == FREE_SLOT:
             s = self._new_run(st, gid, st.n_runs * _HALF_VEC)
         elif _gid(s) != gid:
@@ -302,7 +301,7 @@ struct ClusteredAggrState(Movable):
             pos
         )
         s += 1
-        table[unsafe_offset=st.tab + hash] = s
+        self.slots[st.tab + hash] = s
         return s
 
     def _mixed_loop(
@@ -316,7 +315,6 @@ struct ClusteredAggrState(Movable):
         """Hot keys found through the table; every other group's rows a
         sequential run."""
         var cur = start
-        var arena = self.arena.unsafe_ptr()
         for pos in range(lo, hi):
             var gid = group_ids[unsafe_offset=pos] & _GID_MASK
             if _gid(cur) != gid:
@@ -328,7 +326,7 @@ struct ClusteredAggrState(Movable):
                     cur = s
                 else:
                     cur = self._new_run(st, gid, st.seq - st.slice)
-            arena[unsafe_offset=st.slice + _cursor(cur)] = UInt32(pos)
+            self.arena[st.slice + _cursor(cur)] = UInt32(pos)
             cur += 1
         if lo < hi:
             self._flush(st, cur)
@@ -344,13 +342,12 @@ struct ClusteredAggrState(Movable):
         """Input in runs: a new sequential run at each change of group, no
         table lookups."""
         var cur = start
-        var arena = self.arena.unsafe_ptr()
         for pos in range(lo, hi):
             var gid = group_ids[unsafe_offset=pos] & _GID_MASK
             if _gid(cur) != gid:
                 self._flush(st, cur)
                 cur = self._new_run(st, gid, st.seq - st.slice)
-            arena[unsafe_offset=st.slice + _cursor(cur)] = UInt32(pos)
+            self.arena[st.slice + _cursor(cur)] = UInt32(pos)
             cur += 1
         if lo < hi:
             self._flush(st, cur)

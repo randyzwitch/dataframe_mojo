@@ -118,8 +118,7 @@ def test_stream_schema_import_and_late_errors_release_partial_exports() raises:
             rejected = True
             if mode != 2:
                 assert_true(
-                    String(error).find("deliberate lifecycle producer failure")
-                    >= 0
+                    "deliberate lifecycle producer failure" in String(error)
                 )
         assert_true(rejected)
         assert_releases(state, 1, 0 if mode == 4 else 1)

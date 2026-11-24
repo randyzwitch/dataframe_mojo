@@ -106,7 +106,7 @@ def _assert_pipelined(query: LazyFrame) raises:
     _ = setting^
     _ = threads^
     assert_true(
-        paths.find("dataframe-strategy: morsel_pipeline") >= 0,
+        "dataframe-strategy: morsel_pipeline" in paths,
         paths,
     )
 

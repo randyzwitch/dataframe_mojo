@@ -312,10 +312,11 @@ def _extreme_dense[
             _chunk_extreme[D, is_max, True](inputs[k], n, values, no_validity)
             continue
         var input = _Input[D](inputs[k])
+        var output = values.unsafe_ptr()
         for start in range(0, main, W):
-            var x = out.unsafe_offset(start).unsafe_load[width=W]()
+            var x = output.unsafe_offset(start).unsafe_load[width=W]()
             var y = input.values[W](start)
-            out.unsafe_offset(start).unsafe_store(
+            output.unsafe_offset(start).unsafe_store(
                 _takes_right[D, W, is_max](x, y).select(y, x)
             )
         for start in range(main, n):

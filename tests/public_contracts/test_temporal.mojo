@@ -1684,7 +1684,7 @@ def test_temporal_subtraction_rejects_unrepresentable_minimum_rhs() raises:
                 try:
                     _ = frame.select(col("a") - col("b"))
                 except error:
-                    if String(error).find("temporal value overflows Int64") < 0:
+                    if "temporal value overflows Int64" not in String(error):
                         raise error^
                     rejected = True
                 assert_true(
@@ -1802,7 +1802,7 @@ def _assert_temporal_boundary_overflow(
     try:
         _ = frame.select(expression.copy())
     except error:
-        if String(error).find("temporal value overflows Int64") < 0:
+        if "temporal value overflows Int64" not in String(error):
             raise error^
         rejected = True
     assert_true(rejected, "unrepresentable temporal result must raise overflow")

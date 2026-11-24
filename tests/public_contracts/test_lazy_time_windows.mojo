@@ -205,8 +205,8 @@ def test_lazy_time_windows_compose_without_crossing_filters_or_slices() raises:
         key_filter, eager.filter(col("g") == 1).select(["t", "len"])
     )
     var text = key_filter.explain()
-    var filter_at = text.find("FILTER")
-    var window_at = text.find("GROUP_BY_DYNAMIC")
+    var filter_at = text.find("FILTER").or_else(-1)
+    var window_at = text.find("GROUP_BY_DYNAMIC").or_else(-1)
     assert_true(filter_at >= 0 and window_at > filter_at)
     # Projection pruning reads only the index, keys and aggregated columns.
     assert_true("unused" not in text)
@@ -226,8 +226,14 @@ def test_lazy_time_windows_compose_without_crossing_filters_or_slices() raises:
         .head(2),
     )
     var rolling_text = rolling_head.explain()
-    assert_true(rolling_text.find("SLICE") < rolling_text.find("ROLLING"))
-    assert_true(rolling_text.find("FILTER") < rolling_text.find("ROLLING"))
+    assert_true(
+        rolling_text.find("SLICE").or_else(-1)
+        < rolling_text.find("ROLLING").or_else(-1)
+    )
+    assert_true(
+        rolling_text.find("FILTER").or_else(-1)
+        < rolling_text.find("ROLLING").or_else(-1)
+    )
     # A sort below supplies the order; sums and lengths ignore tie order.
     var reversed = source.take([5, 4, 3, 2, 1, 0])
     _assert_collects(

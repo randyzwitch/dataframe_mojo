@@ -200,10 +200,8 @@ def test_csv_unterminated_trailing_null_field_preserves_record_width_and_height(
                         )
                     except error:
                         if (
-                            String(error).find(
-                                "Explicit height does not match columns"
-                            )
-                            < 0
+                            "Explicit height does not match columns"
+                            not in String(error)
                         ):
                             raise error
                         assert_true(

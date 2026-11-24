@@ -316,7 +316,7 @@ def test_categorical_file_scan_routes_to_the_morsel_pipeline() raises:
     _ = setting^
     _ = threads^
     assert_true(result.column("s").dtype().is_categorical())
-    assert_true(paths.find("dataframe-strategy: table_pipeline") >= 0, paths)
+    assert_true("dataframe-strategy: table_pipeline" in paths, paths)
 
 
 def test_scan_dictionary_views_share_the_values_they_grow_from() raises:

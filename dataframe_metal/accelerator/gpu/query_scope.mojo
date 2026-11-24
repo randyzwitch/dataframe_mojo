@@ -11,7 +11,7 @@ from .target import MetalContext as DeviceContext
 from .scratch_pool import ScratchPool
 from dataframe.execution_observation import DeviceObservation
 
-comptime ContextCell = Optional[DeviceContext if METAL_TARGET else Int]
+comptime ContextCell = Optional[DeviceContext]
 
 
 def checked_add(a: Int, b: Int) raises -> Int:
@@ -157,14 +157,10 @@ struct DeviceService(Copyable):
                         )
                     else:
                         state[].context = ContextCell(
-                            rebind[DeviceContext if METAL_TARGET else Int](
-                                DeviceContext(state[].device, api="metal")
-                            )
+                            DeviceContext(state[].device, api="metal")
                         )
                         _ = state[].generation.fetch_add(1)
-                var result = rebind[DeviceContext](
-                    state[].context.value()
-                ).copy()
+                var result = state[].context.value().copy()
                 return (result^, True)
             except error:
                 self._lock_pool()
@@ -336,26 +332,18 @@ struct Scope(Copyable):
                         var acquired = state[].service.value()._acquire()
                         var cached_lease = acquired[1]
                         var acquired_context = acquired[0].copy()
-                        state[].context = ContextCell(
-                            rebind[DeviceContext if METAL_TARGET else Int](
-                                acquired_context
-                            )
-                        )
+                        state[].context = ContextCell(acquired_context)
                         state[].cached_context_lease = cached_lease
                     else:
                         state[].context = ContextCell(
-                            rebind[DeviceContext if METAL_TARGET else Int](
-                                DeviceContext(state[].device, api="metal")
-                            )
+                            DeviceContext(state[].device, api="metal")
                         )
                     if state[].profiling:
                         _ = state[].context_ns.fetch_add(
                             Int64(Int(perf_counter_ns()) - started)
                         )
                     state[].context_ready.store(1)
-                var result = rebind[DeviceContext](
-                    state[].context.value()
-                ).copy()
+                var result = state[].context.value().copy()
                 state[].context_lock.store(0)
                 return result^
             except error:

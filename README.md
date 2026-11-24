@@ -122,7 +122,7 @@ pixi run mojo run -I dist /path/to/your/app.mojo
 
 Compiled Mojo packages require the compiler version that built them. Release
 v0.3.0 uses Mojo 1.2.0. The development branch pins Mojo
-1.3.0.dev2026111005 and requires Pixi 0.84.2. To try the features on main,
+1.3.0.dev2026112405 and requires Pixi 0.84.2. To try the features on main,
 clone the default branch, run `pixi install --locked`, then `pixi run example`.
 The public API is experimental and may change between minor releases.
 [Release API](https://github.com/randyzwitch/dataframe_mojo/blob/v0.3.0/docs/api.md) · [Development API](docs/api.md) · [Stability policy](docs/stability.md)

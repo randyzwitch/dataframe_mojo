@@ -626,7 +626,7 @@ def _append_value(
             var text = reader.string_at(reader.nodes[value].start)
             try:
                 if kind == 6 and (
-                    (text.find("T") < 0 and text.find(" ") < 0)
+                    ("T" not in text and " " not in text)
                     or (
                         nodes[index].dtype.time_zone().byte_length() != 0
                         and not has_offset(
@@ -646,7 +646,10 @@ def _append_value(
                     ):
                         # A naive JSON timestamp keeps the written wall time,
                         # including when its text has an explicit offset.
-                        var time = max(text.find("T"), text.find(" "))
+                        var time = max(
+                            text.find("T").or_else(-1),
+                            text.find(" ").or_else(-1),
+                        )
                         var end = text.byte_length()
                         var bytes = text.as_bytes()
                         for at in range(time + 1, end):

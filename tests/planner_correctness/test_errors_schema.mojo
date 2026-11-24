@@ -30,7 +30,7 @@ def _error(
         else:
             _ = plan.collect(optimize=optimize, streaming=False, engine="cpu")
     except error:
-        if String(error).find(fragment) < 0:
+        if fragment not in String(error):
             raise error
         failed = True
     assert_true(failed, "query must reject the specified invalid contract")
@@ -196,7 +196,7 @@ def test_filter_pushdown_preserves_preceding_arithmetic_errors() raises:
     try:
         _ = plan.collect(optimize=True, streaming=False, engine="cpu")
     except error:
-        if String(error).find("overflow") < 0:
+        if "overflow" not in String(error):
             raise error
         rejected = True
     assert_true(
@@ -345,9 +345,9 @@ def _filter_below(plan: LazyFrame, step: String) raises -> Bool:
     line printed above the step's line (the filter sits under it, or in
     the scan)."""
     var text = plan.explain()
-    var at = text.find(step)
+    var at = text.find(step).or_else(-1)
     assert_true(at >= 0, "the plan must hold " + step)
-    var filtered = text.find("FILTER")
+    var filtered = text.find("FILTER").or_else(-1)
     return filtered < 0 or filtered > at
 
 

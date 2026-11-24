@@ -375,10 +375,12 @@ use Brian Grenier's
 under Apache-2.0. Their license texts remain in the upstream repositories
 and are retained in the forks.
 
-The Pixi manifest pins a revision of the
-[EmberJSON fork](https://github.com/randyzwitch/EmberJson/tree/compat/dataframe-nightly),
-which pins the [EmberSerde fork](https://github.com/randyzwitch/EmberSerde/tree/compat/dataframe-nightly).
-Those forks carry compiler API compatibility changes and notices on the
-modified source files. Pixi resolves and builds their committed sources from
-their own manifests. This repository carries no dependency source patches or
-build recipes.
+The Pixi manifest pins the [EmberJSON fork](https://github.com/randyzwitch/EmberJson/tree/d8d338e822252bc1108cd19d845d15a5413e8ee9),
+which pins the [EmberSerde fork](https://github.com/randyzwitch/EmberSerde/tree/c1eece7ac48e5cbde3e41dbf856ba0da5d56064c).
+They build with the November 24 Mojo nightly. EmberJSON also carries parser
+and borrowed-reference changes for the dataframe integration. The forks
+preserve the upstream package names and carry notices on modified library
+sources. Their upstream bases are [EmberJSON `e7feca8`](https://github.com/bgreni/EmberJson/commit/e7feca8ebbdf2a338f586fed737bf8d01e6cad05)
+and [EmberSerde `8a5cde9`](https://github.com/bgreni/EmberSerde/commit/8a5cde9bb7e838cf1e8e6b753c5594ed612f2aa9).
+Once upstream builds with the workspace compiler and passes the dataframe
+integration tests, switch the EmberJSON Git dependency back to upstream.

@@ -187,9 +187,9 @@ def test_gather_keeps_filters_above_and_narrows_its_input() raises:
     var selected = frame.lazy().gather([1, 2]).select(["u"])
     check(selected, frame.gather([1, 2]).select(["u"]))
     text = selected.explain(streaming=False)
-    assert_true(text.find("SCAN frame [project u]") >= 0, text)
+    assert_true("SCAN frame [project u]" in text, text)
     # The index plan is read whole.
-    assert_true(text.find("SCAN frame [project index]") < 0, text)
+    assert_true("SCAN frame [project index]" not in text, text)
 
 
 def test_top_and_bottom_k() raises:
@@ -218,7 +218,7 @@ def test_top_and_bottom_k() raises:
     )
     assert_ints(frame.top_k(2, "u", reverse=True), "u", [0, 10])
     var text = frame.lazy().top_k(2, "u").explain(streaming=False)
-    assert_true(text.find("TOP_K 2 by u") >= 0, text)
+    assert_true("TOP_K 2 by u" in text, text)
     with assert_raises():
         _ = frame.lazy().top_k(-1, "u")
 
@@ -301,8 +301,8 @@ def test_horizontal_concat() raises:
         .filter(col("twice") > 50),
     )
     var text = selected.explain(streaming=False)
-    assert_true(text.find("SCAN frame [project s]") >= 0, text)
-    assert_true(text.find("WITH_COLUMNS twice\n") >= 0, text)
+    assert_true("SCAN frame [project s]" in text, text)
+    assert_true("WITH_COLUMNS twice\n" in text, text)
     assert_true(line_of(text, "FILTER") < line_of(text, "HCONCAT"), text)
     # Heights must match and names must not repeat.
     check_fails(concat([left.lazy(), right.lazy().head(3)], "horizontal"))

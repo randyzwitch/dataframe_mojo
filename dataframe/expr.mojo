@@ -655,7 +655,7 @@ def replace_literals(text: String) raises -> List[Node]:
         var fields = List[String]()
         var rest = item
         for _ in range(5):
-            var at = rest.find(":")
+            var at = rest.find(":").or_else(-1)
             fields.append(String(rest[byte=0:at]))
             var tail = String(rest[byte = at + 1 :])
             rest = tail^

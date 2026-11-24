@@ -259,7 +259,7 @@ def test_parquet_late_corruption_raises_after_valid_batches_and_column_projectio
             for row in range(batch.value().height()):
                 seen.append(batch.value().item(row, "x").int64())
     except error:
-        if String(error).find("read_parquet stream:") < 0:
+        if "read_parquet stream:" not in String(error):
             raise error^
         rejected = True
     assert_true(
@@ -287,7 +287,7 @@ def test_parquet_late_corruption_raises_after_valid_batches_and_column_projectio
             .collect(streaming=True, batch_size=2, engine="cpu")
         )
     except error:
-        if String(error).find("read_parquet stream:") < 0:
+        if "read_parquet stream:" not in String(error):
             raise error^
         public_rejected = True
     assert_true(public_rejected)
@@ -314,7 +314,7 @@ def test_parquet_early_close_consumer_error_and_public_head_release_actual_nativ
     try:
         _ = consume_first_native_batch(fixture("plain"), True)
     except error:
-        if String(error).find("deliberate parquet consumer stop") < 0:
+        if "deliberate parquet consumer stop" not in String(error):
             raise error^
         rejected = True
     assert_true(rejected)
@@ -508,7 +508,7 @@ def test_parquet_library_discovery_uses_actual_explicit_prefix_fallback_and_repo
     try:
         _ = parquet_backend_version()
     except error:
-        if String(error).find("read_parquet could not load " + broken) < 0:
+        if "read_parquet could not load " + broken not in String(error):
             raise error^
         rejected = True
     assert_true(rejected)
@@ -521,10 +521,7 @@ def test_parquet_library_discovery_uses_actual_explicit_prefix_fallback_and_repo
     try:
         _ = parquet_backend_version()
     except error:
-        if (
-            String(error).find("read_parquet needs libdfparquet; looked for")
-            < 0
-        ):
+        if "read_parquet needs libdfparquet; looked for" not in String(error):
             raise error^
         rejected = True
     assert_true(rejected)
@@ -567,10 +564,7 @@ def test_parquet_invalid_requests_and_native_writer_io_errors_leave_sources_and_
                 )
         except error:
             var message = String(error)
-            var valid = (
-                message.find("read_parquet") >= 0
-                or message.find("write_parquet") >= 0
-            )
+            var valid = "read_parquet" in message or "write_parquet" in message
             if not valid:
                 raise error^
             rejected = True
@@ -586,7 +580,7 @@ def test_parquet_invalid_requests_and_native_writer_io_errors_leave_sources_and_
             + "/parquet-nonexistent-parent/output.parquet",
         )
     except error:
-        if String(error).find("write_parquet:") < 0:
+        if "write_parquet:" not in String(error):
             raise error^
         failed_write = True
     assert_true(failed_write)

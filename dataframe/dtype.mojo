@@ -589,7 +589,7 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             or name.startswith("decimal32[")
         ) and name.endswith("]"):
             var body = String(name[byte = open : name.byte_length() - 1])
-            var comma = body.find(",")
+            var comma = body.find(",").or_else(-1)
             if comma < 0:
                 raise Error("Unknown dtype: " + name)
             try:

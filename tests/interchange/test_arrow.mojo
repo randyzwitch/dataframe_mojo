@@ -433,7 +433,7 @@ def expect_rejection(
                 producer.nodes[0].array, producer.nodes[0].schema
             )
     except error:
-        if String(error).find(diagnostic) < 0:
+        if diagnostic not in String(error):
             raise error^
         rejected = True
     assert_true(rejected, "Arrow must reject: " + diagnostic)
@@ -490,7 +490,7 @@ def test_arrow_empty_numeric_array_rejects_missing_required_buffer_slot() raises
             producer.nodes[0].array, producer.nodes[0].schema
         )
     except error:
-        if String(error).find("buffer") < 0:
+        if "buffer" not in String(error):
             raise error^
         rejected = True
     producer.assert_released()

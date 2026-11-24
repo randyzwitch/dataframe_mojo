@@ -153,8 +153,10 @@ def _find_bytes(
     """Find a literal in validated UTF-8 row bytes, returning a byte offset."""
     if len(needle) == 0:
         return start if start <= len(hay) else -1
-    return StringSpan(unsafe_from_utf8=hay).find(
-        StringSpan(unsafe_from_utf8=needle), start
+    return (
+        StringSpan(unsafe_from_utf8=hay)
+        .find(StringSpan(unsafe_from_utf8=needle), start)
+        .or_else(-1)
     )
 
 

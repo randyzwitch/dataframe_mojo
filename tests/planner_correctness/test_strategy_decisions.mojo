@@ -37,9 +37,7 @@ def _run(query: LazyFrame, expected_reason: String) raises -> DataFrame:
     _ = trace^
     _ = setting^
     _ = threads^
-    assert_true(
-        paths.find("dataframe-strategy: " + expected_reason) >= 0, paths
-    )
+    assert_true("dataframe-strategy: " + expected_reason in paths, paths)
     return result^
 
 

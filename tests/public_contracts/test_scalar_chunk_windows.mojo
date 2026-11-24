@@ -127,7 +127,7 @@ def test_chunk_cast_errors_keep_global_rows_and_inactive_rows_unobserved() raise
         _ = frame.select(col("s").cast(DataType.INT64))
     except error:
         rejected = True
-        assert_true(String(error).find("row 3") >= 0)
+        assert_true("row 3" in String(error))
     assert_true(rejected)
     var result = frame.select(
         when(col("take"))
@@ -143,7 +143,7 @@ def test_chunk_cast_errors_keep_global_rows_and_inactive_rows_unobserved() raise
         _ = frame.slice(2, 3).select(col("s").cast(DataType.INT64))
     except error:
         rejected = True
-        assert_true(String(error).find("row 1") >= 0)
+        assert_true("row 1" in String(error))
     assert_true(rejected)
 
 

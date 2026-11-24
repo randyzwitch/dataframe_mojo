@@ -287,14 +287,14 @@ def test_rows_from_the_pipeline_go_to_the_file_as_morsels_complete() raises:
     _ = setting^
     _ = threads^
     assert_true(
-        frame_paths.find("dataframe-path: pipeline.file_sink") >= 0,
+        "dataframe-path: pipeline.file_sink" in frame_paths,
         frame_paths,
     )
     assert_true(
-        file_paths.find("dataframe-path: pipeline.file_sink") >= 0,
+        "dataframe-path: pipeline.file_sink" in file_paths,
         file_paths,
     )
     assert_true(
-        dictionary_paths.find("dataframe-path: pipeline.file_sink") < 0,
+        "dataframe-path: pipeline.file_sink" not in dictionary_paths,
         dictionary_paths,
     )
