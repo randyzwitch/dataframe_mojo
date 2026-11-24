@@ -112,6 +112,8 @@ from .expr import (
     MODE,
     VALUE_COUNTS,
     EXPR_GET,
+    EXPR_MAX_BY,
+    EXPR_MIN_BY,
     LIST_GET,
     STRUCT_PACK,
     STRUCT_FIELD,
@@ -148,7 +150,7 @@ from dataframe.storage.column import (
 from dataframe.storage.string import StringColumn, StringBuilder
 from dataframe.text.predicates import _flip
 from .series import Series
-from .sequence import select_sequence
+from .sequence import extreme_row, select_sequence
 from dataframe.kernels.binary import (
     binary,
     unary,
@@ -584,7 +586,7 @@ def _eval[
                 left,
                 DataType.STRING,
                 node.integer == 1,
-                offset if len(left) == length else 0,
+                bound.first_row + offset if len(left) == length else 0,
                 List[Bool](),
             )
         # Kernel outputs carry physical tags; restore the bound logical type.
@@ -599,7 +601,7 @@ def _eval[
             left,
             node.dtypes[0].value(),
             node.integer == 1,
-            offset if len(left) == length else 0,
+            bound.first_row + offset if len(left) == length else 0,
             observed.copy() if len(observed) == len(left) else List[Bool](),
         )
     if node.op == INT_IS_IN:
@@ -1674,6 +1676,11 @@ def reduce_rows[
         )
 
 
+def _picks_row(op: Int) -> Bool:
+    """Whether a reduction's value is its input at one row it picks."""
+    return op == EXPR_MAX_BY or op == EXPR_MIN_BY
+
+
 def constant_reductions(expr: Expr) -> Bool:
     """Whether `expr` is one value for all of its input's rows made from
     reductions over every row, with at least one reduction, that
@@ -1752,7 +1759,16 @@ struct ReduceRounds(Movable, Rounds):
     A count of a column's values, or of its rows, is a popcount or the
     height, read whole as the rounds are made rather than reduced by rows.
     `reduced(e)` gives expression e's computed reductions by node, for
-    `evaluate`."""
+    `evaluate`.
+
+    A max_by or min_by keeps no running state: each task picks its
+    range's row (`extreme_row`) and keeps that row's value and key, and
+    the merge picks among the ranges' rows in row order the same way, so
+    the first of equal keys over every row wins.
+
+    A task that fails keeps its error, and the merge raises the first
+    range's, so an error names the first failing row whichever task fails
+    first."""
 
     var bound: List[BoundExpr]
     var columns: List[Series]
@@ -1768,6 +1784,12 @@ struct ReduceRounds(Movable, Rounds):
     # states for them (task-major), and whether the round ran.
     var work: List[Tuple[Int, Int]]
     var partials: List[Reducer]
+    # Task-major like `partials`, for a max_by or min_by: the picked row's
+    # value and its key, none when the range has no valid key (empty for
+    # other reductions).
+    var picked: List[Series]
+    var picked_keys: List[Series]
+    var failed: List[Optional[String]]
     var started: Bool
 
     def __init__(
@@ -1800,6 +1822,9 @@ struct ReduceRounds(Movable, Rounds):
         self.computed = List[Dict[Int, Series]]()
         self.work = List[Tuple[Int, Int]]()
         self.partials = List[Reducer]()
+        self.picked = List[Series]()
+        self.picked_keys = List[Series]()
+        self.failed = List[Optional[String]]()
         self.started = False
         for e in range(len(self.bound)):
             ref b = self.bound[e]
@@ -1844,9 +1869,12 @@ struct ReduceRounds(Movable, Rounds):
         if len(self.work) == 0:
             return 0
         for _ in range(self._tasks()):
+            self.failed.append(None)
             for item in self.work:
                 ref b = self.bound[item[0]]
                 self.partials.append(_new_reducer(b, b.expr._nodes[item[1]], 1))
+                self.picked.append(_empty(b.dtypes[item[1]]))
+                self.picked_keys.append(_empty(b.dtypes[item[1]]))
         return self._tasks()
 
     def round_task(mut self, task: Int) raises:
@@ -1856,28 +1884,78 @@ struct ReduceRounds(Movable, Rounds):
         # same column.
         var stats = ArcPointer(List[_ColumnStats]())
         var at = task * len(self.work)
-        for k in range(len(self.work)):
-            var e = self.work[k][0]
-            ref b = self.bound[e]
-            reduce_rows[8](
-                self.partials[at + k],
-                b,
-                self.columns,
-                self.states[e],
-                b.expr._nodes[self.work[k][1]],
-                start,
-                end,
-                self.batch_size,
-                False,
-                List[Int](),
-                stats,
-            )
+        try:
+            for k in range(len(self.work)):
+                var e = self.work[k][0]
+                ref b = self.bound[e]
+                ref node = b.expr._nodes[self.work[k][1]]
+                if _picks_row(node.op):
+                    var values = _batch[8](
+                        b,
+                        self.columns,
+                        self.states[e],
+                        node.left,
+                        start,
+                        end - start,
+                        False,
+                    )
+                    var keys = _batch[8](
+                        b,
+                        self.columns,
+                        self.states[e],
+                        node.right,
+                        start,
+                        end - start,
+                        False,
+                    )
+                    if len(keys) == 1 and len(values) != 1:
+                        keys = keys._broadcast(len(values))
+                    # A range with no valid key picks no row.
+                    var row = extreme_row(node, values, keys)
+                    var rows = [row] if row >= 0 else List[Int]()
+                    self.picked[at + k] = values.take(rows)
+                    self.picked_keys[at + k] = keys.take(rows)
+                    continue
+                reduce_rows[8](
+                    self.partials[at + k],
+                    b,
+                    self.columns,
+                    self.states[e],
+                    node,
+                    start,
+                    end,
+                    self.batch_size,
+                    False,
+                    List[Int](),
+                    stats,
+                )
+        except e:
+            self.failed[task] = String(e)
 
     def _merge(mut self) raises:
         """The round's states, merged in row order and finished."""
         var count = len(self.work)
         if count == 0:
             return
+        for message in self.failed:
+            if message:
+                raise Error(message.value())
+        for k in range(count):
+            ref b = self.bound[self.work[k][0]]
+            ref node = b.expr._nodes[self.work[k][1]]
+            if not _picks_row(node.op):
+                continue
+            # The ranges' picks in row order, picked among the same way.
+            var values = List[Series](capacity=self._tasks())
+            var keys = List[Series](capacity=self._tasks())
+            for t in range(self._tasks()):
+                values.append(self.picked[t * count + k].copy())
+                keys.append(self.picked_keys[t * count + k].copy())
+            self.computed[self.work[k][0]][self.work[k][1]] = select_sequence(
+                node,
+                Series._from_chunks(values).rechunk(),
+                Series._from_chunks(keys).rechunk(),
+            )
         # By reduction, its tasks' states in row order: taken from the
         # back of the task-major list, then reversed.
         var by_reduction = List[List[Reducer]](capacity=count)
@@ -1887,6 +1965,9 @@ struct ReduceRounds(Movable, Rounds):
             by_reduction[index % count].append(self.partials.pop())
         for k in range(count):
             by_reduction[k].reverse()
+            ref b = self.bound[self.work[k][0]]
+            if _picks_row(b.expr._nodes[self.work[k][1]].op):
+                continue
             var merged = by_reduction[k].pop(0)
             for t in range(len(by_reduction[k])):
                 merged.merge(by_reduction[k][t])

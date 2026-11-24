@@ -2337,6 +2337,7 @@ empty dynamic windows are omitted.
 
 - `def agg(self, expression: Expr, *, batch_size: Int = Int(1024)) -> DataFrame`
 - `def agg(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> DataFrame`
+  One row per window: the `group_by` keys, the index column (the window's label) and the aggregations.
 
 ## `to_csv_string`
 

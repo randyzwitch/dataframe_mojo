@@ -13,10 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: prefix-dev/setup-pixi@v0.10.2
-        with:
-          pixi-version: v0.84.2
-          cache: true
+      - uses: ./.github/actions/setup-pixi
 
       - name: Check release version matches the tag
         run: pixi run --locked check-version "$GITHUB_REF_NAME"
