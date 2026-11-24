@@ -63,6 +63,19 @@ def _by_keys(node: Node, by: Series) raises -> List[Series]:
     return keys^
 
 
+def extreme_row(node: Node, input: Series, other: Series) raises -> Int:
+    """The row of `input` a max_by or min_by picks: the one at the largest
+    (smallest) non-null key of `other`, the first such row on ties; -1 when
+    no key is valid."""
+    var by = _aligned(other, len(input))
+    var order = _order(_by_keys(node, by), node.op == EXPR_MAX_BY, True)
+    var valid = validity(by)
+    for row in order:
+        if valid[row]:
+            return row
+    return -1
+
+
 def select_sequence(node: Node, input: Series, other: Series) raises -> Series:
     """Keep source metadata and nulls while selecting at this sequence boundary."""
     var n = len(input)
@@ -104,6 +117,11 @@ def select_sequence(node: Node, input: Series, other: Series) raises -> Series:
         EXPR_MAX_BY,
         EXPR_MIN_BY,
     ]:
+        if node.op == EXPR_MAX_BY or node.op == EXPR_MIN_BY:
+            var row = extreme_row(node, input, other)
+            if row >= 0:
+                return input.take([row])
+            return input.take_or_null([-1])
         var by = _aligned(other, n)
         var keys = _by_keys(node, by)
         var descending = (
@@ -116,12 +134,6 @@ def select_sequence(node: Node, input: Series, other: Series) raises -> Series:
         var order = _order(keys, descending, nulls_last)
         if node.op == EXPR_SORT_BY:
             return input.take(order)
-        if node.op == EXPR_MAX_BY or node.op == EXPR_MIN_BY:
-            var valid = validity(by)
-            for row in order:
-                if valid[row]:
-                    return input.take([row])
-            return input.take_or_null([-1])
         var picks = List[Int](capacity=min(n, Int(node.integer)))
         for k in range(min(n, Int(node.integer))):
             picks.append(order[k])

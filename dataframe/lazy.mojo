@@ -125,7 +125,6 @@ from dataframe.query_execution.operators import (
     _gathered,
     _pivoted,
     _run_grouping_sets,
-    _run_time_window,
     _set_rows,
 )
 from dataframe.query_execution.placement import (

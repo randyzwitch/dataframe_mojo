@@ -33,6 +33,7 @@ rows in the same order as over the whole input, and the results equal the
 whole-input evaluation's.
 """
 from std.atomic import Atomic
+from std.collections import Optional
 from std.memory import ArcPointer, Pointer, unsafe_memcpy
 
 from dataframe.aggregation.expressions import _bind_all
@@ -333,8 +334,10 @@ struct WindowSink(Movable, Rounds):
     var placed_hashes: List[UInt64]
     var key_reads: List[Int]
     var shared_texts: List[String]
-    # By bin: its evaluated columns.
+    # By bin: its evaluated columns, and the error its evaluation raised,
+    # if any.
     var results: List[List[Series]]
+    var failed: List[Optional[String]]
     # The next bin of `order` a merge task takes.
     var next: Atomic[Int64]
     # By evaluated expression: its output, whether it is filled by row
@@ -388,6 +391,7 @@ struct WindowSink(Movable, Rounds):
         self.key_reads = List[Int]()
         self.shared_texts = List[String]()
         self.results = List[List[Series]]()
+        self.failed = List[Optional[String]]()
         self.next = Atomic[Int64](0)
         self.outputs = List[Series]()
         self.fixed = List[Bool]()
@@ -608,6 +612,7 @@ struct WindowSink(Movable, Rounds):
                 i -= 1
             self.order[i] = b
         self.results = List[List[Series]](length=bins, fill=List[Series]())
+        self.failed = List[Optional[String]](length=bins, fill=None)
         self.next.store(0)
         self.stage = _MERGE
         return min(len(self.order), configured_workers())
@@ -667,25 +672,40 @@ struct WindowSink(Movable, Rounds):
                     layouts.id_keys.append(text)
                     layouts.groups.append(groups)
                     layouts.ids.append(List[Int]())
-            var bound = _bind_all(self.evaluated, part)
-            var columns = List[Series](capacity=len(bound))
-            for expression in bound:
-                var value = evaluate(
-                    expression,
-                    part,
-                    rows,
-                    batch_size=8192,
-                    layouts=Int(Pointer(to=layouts)),
-                )
-                if expression.shape() != ROWS:
-                    value = value._broadcast(rows)
-                columns.append(
-                    value.rechunk() if value.is_chunked() else value^
-                )
+            var columns = List[Series]()
+            try:
+                var bound = _bind_all(self.evaluated, part)
+                columns.reserve(len(bound))
+                for expression in bound:
+                    var value = evaluate(
+                        expression,
+                        part,
+                        rows,
+                        batch_size=8192,
+                        layouts=Int(Pointer(to=layouts)),
+                    )
+                    if expression.shape() != ROWS:
+                        value = value._broadcast(rows)
+                    columns.append(
+                        value.rechunk() if value.is_chunked() else value^
+                    )
+            except e:
+                self.failed[b] = String(e)
             _ = layouts^
             self.results[b] = columns^
 
     def _start_gather(mut self) raises -> Int:
+        for b in range(len(self.failed)):
+            if self.failed[b]:
+                # A bin evaluates its rows node by node apart from the
+                # others, so the fault it meets first need not be the one
+                # an evaluation of every row meets first (each node over
+                # every row before the next), whose error is the
+                # projection's: it names the row as the input numbers it.
+                # That evaluation raises it; the bin's error is kept for
+                # an input it would not fail on.
+                _ = self._eager()
+                raise Error(self.failed[b].value())
         # The placed columns are no longer read.
         self.placed = List[Series]()
         if len(self.placed_hashes) > 0:

@@ -391,7 +391,9 @@ struct _Buffer[T: Copyable & Deinitable](Copyable, Sized):
 
     def _shared_owner(self) -> ArcPointer[_ForeignOwner]:
         """An owner that keeps this buffer's data alive."""
-        if self._state[].owner:
+        # Materialized repeated or device values live in the buffer state.
+        # Their producer owner alone does not own that host address.
+        if self._state[].owner and self._state[].address != 0:
             return self._state[].owner.value().copy()
         var pointer = alloc(
             Layout[ArcPointer[_BufferData[Self.T]]](length=1)
