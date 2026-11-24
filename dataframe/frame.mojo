@@ -1137,11 +1137,24 @@ struct DataFrame(Copyable, Sized, Writable):
     def explode(self, columns: List[String]) raises -> Self:
         """One output row per list element; other columns repeat. An empty
         or null list gives one row holding null. Several columns explode
-        together and must have the same element count in every row."""
+        together and must have the same element count in every row.
+
+        Runs as the lazy plan's explode does: a plan of one explode over
+        this frame, executed through the same pipelines as
+        `LazyFrame.collect`, each morsel's rows exploded on its own worker
+        and put back in input order by the pipeline's sink."""
+        _ = self._explode_positions(columns)
+        return (
+            self.lazy()
+            .explode(columns)
+            ._collect(optimize=False, streaming=True, batch_size=65536)
+        )
+
+    def _explode_positions(self, columns: List[String]) raises -> List[Int]:
+        """The positions of the list columns `explode` takes, checked."""
         if len(columns) == 0:
             raise Error("explode needs at least one column")
         var positions = List[Int](capacity=len(columns))
-        var lists = List[ListColumn](capacity=len(columns))
         for name in columns:
             var index = self._index(name)
             for p in positions:
@@ -1155,7 +1168,19 @@ struct DataFrame(Copyable, Sized, Writable):
                     + self._columns[index].dtype().name()
                 )
             positions.append(index)
-            lists.append(self._columns[index].list_column())
+        return positions^
+
+    def _exploded(
+        self, columns: List[String], first_row: Int = 0
+    ) raises -> Self:
+        """`explode` on the calling thread, with no plan: for a pipeline's
+        explode step over one morsel, and for a node the plan's executor
+        runs over its executed input. `first_row`: the input row this
+        frame's first row is, which an error names rows from."""
+        var positions = self._explode_positions(columns)
+        var lists = List[ListColumn](capacity=len(columns))
+        for p in positions:
+            lists.append(self._columns[p].list_column())
         var repeat = List[Int]()
         var child_rows = List[List[Int]](capacity=len(lists))
         for _ in range(len(lists)):
@@ -1166,7 +1191,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 if lists[k].element_count(i) != count:
                     raise Error(
                         "explode: columns have different element counts at"
-                        " row " + String(i)
+                        " row " + String(first_row + i)
                     )
             if count == 0:
                 repeat.append(i)
@@ -1196,7 +1221,20 @@ struct DataFrame(Copyable, Sized, Writable):
 
     def unnest(self, column: String) raises -> Self:
         """Replace a struct column with its fields as top-level columns, in
-        its position. Field names must not clash with other columns."""
+        its position. Field names must not clash with other columns.
+
+        Runs as the lazy plan's unnest does: a plan of one unnest over this
+        frame, executed through the same pipelines as `LazyFrame.collect`,
+        each morsel's rows unnested on its own worker."""
+        _ = self._unnest_position(column)
+        return (
+            self.lazy()
+            .unnest(column)
+            ._collect(optimize=False, streaming=True, batch_size=65536)
+        )
+
+    def _unnest_position(self, column: String) raises -> Int:
+        """The position of the struct column `unnest` takes, checked."""
         var index = self._index(column)
         if not self._columns[index].dtype().is_struct():
             raise Error(
@@ -1205,6 +1243,13 @@ struct DataFrame(Copyable, Sized, Writable):
                 + " is "
                 + self._columns[index].dtype().name()
             )
+        return index
+
+    def _unnested(self, column: String) raises -> Self:
+        """`unnest` on the calling thread, with no plan: for a pipeline's
+        unnest step over one morsel, and for a node the plan's executor
+        runs over its executed input."""
+        var index = self._unnest_position(column)
         var structs = self._columns[index].struct_column()
         var out = List[Series](capacity=self.width() + structs.field_count())
         for c in range(self.width()):
@@ -2115,8 +2160,8 @@ struct DataFrame(Copyable, Sized, Writable):
             # An empty input has no modes: zero rows, not one null row.
             var empty = frame._select_exprs([col(modes[0]).list().len()]).item()
             if empty.int64() == 0:
-                return frame.explode(modes).clear()
-            return frame.explode(modes)
+                return frame._exploded(modes).clear()
+            return frame._exploded(modes)
         return frame^
 
     def with_columns(
@@ -2556,7 +2601,38 @@ struct DataFrame(Copyable, Sized, Writable):
 
         `on` defaults to every non-index column; all `on` columns must share
         one dtype. Output rows follow `on` order, then input row order.
+
+        Runs as the lazy plan's unpivot does: a plan of one unpivot over
+        the columns it reads, executed through the same pipelines as
+        `LazyFrame.collect`, whose sink takes the whole input and copies
+        the output columns as rounds of tasks.
         """
+        var columns_on = self._unpivot_on(on, index, variable_name, value_name)
+        var read = index.copy()
+        for name in columns_on:
+            if name not in read:
+                read.append(name)
+        return (
+            self.select(read)
+            .lazy()
+            .unpivot(
+                columns_on,
+                index,
+                variable_name=variable_name,
+                value_name=value_name,
+            )
+            ._collect(optimize=False, streaming=True, batch_size=65536)
+        )
+
+    def _unpivot_on(
+        self,
+        on: List[String],
+        index: List[String],
+        variable_name: String,
+        value_name: String,
+    ) raises -> List[String]:
+        """The columns `unpivot` turns into rows (`on`, or every non-index
+        column when it is empty), its arguments checked."""
         var index_set = Dict[String, Bool]()
         for name in index:
             _ = self._index(name)
@@ -2593,25 +2669,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 "unpivot output names must be distinct from each other and the"
                 " index"
             )
-        var repeated = List[Int](capacity=self._height * len(columns_on))
-        for _ in range(len(columns_on)):
-            for row in range(self._height):
-                repeated.append(row)
-        var output = List[Series]()
-        for name in index:
-            output.append(self._columns[self._index(name)].take(repeated))
-        var labels = List[String](capacity=len(repeated))
-        for name in columns_on:
-            for _ in range(self._height):
-                labels.append(name)
-        output.append(Series(variable_name, StringColumn(labels)))
-        var values = self._columns[self._index(columns_on[0])].renamed(
-            value_name
-        )
-        for k in range(1, len(columns_on)):
-            values._append_series(self._columns[self._index(columns_on[k])])
-        output.append(values^)
-        return Self(output^, height=len(repeated))
+        return columns_on^
 
     def pivot(
         self,
@@ -2630,7 +2688,40 @@ struct DataFrame(Copyable, Sized, Writable):
         one row. Otherwise it is one of first, last, sum, mean, min, max,
         count, len, or median. Missing cells are null. New column names are
         the `on` values' text, with null rendered as "null".
+
+        Runs as the lazy plan's pivot does: a plan over the columns it
+        reads whose cells (index key and `on` value) are groups of the
+        parallel aggregate table, in order of first appearance, and whose
+        sink spreads them into one column per `on` value. `batch_size` is
+        not used: the table reduces each morsel's rows as they come.
         """
+        _ = self._pivot_checks(on, index, values, aggregate_function)
+        var read = index.copy()
+        read.append(on)
+        if values != on:
+            read.append(values)
+        return (
+            self.select(read)
+            .lazy()
+            ._pivot_found(
+                on,
+                index=index,
+                values=values,
+                aggregate_function=aggregate_function,
+                sort_columns=sort_columns,
+            )
+            ._collect(optimize=False, streaming=True, batch_size=65536)
+        )
+
+    def _pivot_checks(
+        self,
+        on: String,
+        index: List[String],
+        values: String,
+        aggregate_function: String,
+    ) raises -> Expr:
+        """The reduction `pivot` applies to each cell, its arguments
+        checked."""
         var agg = _pivot_aggregate(values, aggregate_function)
         var seen = Dict[String, Bool]()
         for name in index:
@@ -2640,8 +2731,23 @@ struct DataFrame(Copyable, Sized, Writable):
             seen[name] = True
         if on in seen or values in seen:
             raise Error("pivot on/values columns cannot also be index columns")
-        var on_column = self._columns[self._index(on)].copy()
+        _ = self._index(on)
         _ = self._index(values)
+        _ = bind(agg, self._columns)
+        return agg^
+
+    def _pivot_rows(
+        self,
+        on: String,
+        index: List[String],
+        values: String,
+        aggregate_function: String,
+        sort_columns: Bool,
+    ) raises -> Self:
+        """`pivot` on the calling thread, with no plan: for a node the
+        plan's executor runs over its executed input."""
+        var agg = self._pivot_checks(on, index, values, aggregate_function)
+        var on_column = self._columns[self._index(on)].copy()
         var bound = bind(agg, self._columns)
         # Row keys, column keys, and (row, column) cells.
         var row_ids = List[Int](length=self._height, fill=0)
@@ -2676,7 +2782,7 @@ struct DataFrame(Copyable, Sized, Writable):
             bound,
             self._columns,
             self._height,
-            batch_size=batch_size,
+            batch_size=1024,
             grouped=True,
             groups=cells.ids,
             group_count=cells.count(),

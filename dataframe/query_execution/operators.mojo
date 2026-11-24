@@ -107,12 +107,15 @@ def _pivoted(input: DataFrame, node: PlanNode) raises -> DataFrame:
     with nulls of the aggregate's type."""
     var index = List[String](node.pivot_columns()[: node.pivot_index_count()])
     var values = node.pivot_values()
-    var wide = input.pivot(
+    var wide = input._pivot_rows(
         node.pivot_on(),
-        index=index,
-        values=values,
-        aggregate_function=node.text,
+        index,
+        values,
+        node.text,
+        node.pivot_sorts_columns(),
     )
+    if node.pivot_found():
+        return wide^
     var bound = bind(_pivot_aggregate(values, node.text), input._columns)
     var dtype = bound.dtypes[len(bound.dtypes) - 1]
     var present = Dict[String, Bool]()

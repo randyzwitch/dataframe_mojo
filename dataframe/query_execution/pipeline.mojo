@@ -4,6 +4,7 @@ from dataframe.io.csv_reader import _open_csv_batches
 from dataframe.io.csv_types import _CsvScanOptions
 
 from dataframe.planning.node_builders import (
+    _aggregate_node,
     _frame_scan_node,
     _join_node,
 )
@@ -31,12 +32,14 @@ from dataframe.expr import (
     COL,
     Expr,
     MAX,
+    col,
     conjuncts,
     is_grouping,
     lit,
 )
 from dataframe.frame import (
     DataFrame,
+    _pivot_aggregate,
     concat,
 )
 from dataframe.aggregation.expressions import (
@@ -140,6 +143,11 @@ from dataframe.query_execution.row_order_sink import (
     RowOrderSink,
     row_order_node,
 )
+from dataframe.query_execution.reshape_sink import (
+    ReshapeSink,
+    pivot_cell_rows_name,
+    reshape_node,
+)
 from dataframe.optimizer.expressions import shared_partition_keys
 from dataframe.query_execution.window_sink import (
     WindowSink,
@@ -173,6 +181,7 @@ from dataframe.planning.model import (
     FILTER,
     GROUPING_SETS,
     JOIN,
+    PIVOT,
     PlanNode,
     SCAN_CSV,
     SCAN_FRAME,
@@ -183,6 +192,7 @@ from dataframe.planning.model import (
     SLICE,
     SORT,
     UNNEST,
+    UNPIVOT,
     WITH_COLUMNS,
 )
 from dataframe.planning.physical import (
@@ -285,6 +295,7 @@ def plan_stream_execute(
     if sink == 0 and (
         _sorts_whole(self, index)
         or _orders_rows(self, index)
+        or _reshapes_whole(self, index)
         or _windows_time(self, index)
         or _joins_asof(self, index)
     ):
@@ -292,8 +303,9 @@ def plan_stream_execute(
         # pipeline runs it: it is an operator pipeline whose finish sorts
         # in rounds (`SortSink`), its computed input a pipeline of the
         # same schedule. So is an operation that places rows by their
-        # position (`RowOrderSink`), time windows (`TimeWindowSink`) and
-        # an as-of join (`AsofSink`).
+        # position (`RowOrderSink`), an unpivot or a pivot
+        # (`ReshapeSink`), time windows (`TimeWindowSink`) and an as-of
+        # join (`AsofSink`).
         return _run_operator(self, index, batch_size)
     var outcome = _stream_head(self, index, batch_size, sink)
     if len(outcome.plan) > 0:
@@ -867,6 +879,21 @@ def _add_operator(
     """Add node `index` of `self` to `schedule` as an operator pipeline
     that runs it over whole inputs, those inputs added before it as
     pipelines of the same schedule, and return the operator's pipeline."""
+    ref node = self._nodes[index]
+    if (
+        streaming
+        and node.kind == PIVOT
+        and not node.pivot_cells()
+        and _reshapes_whole(self, index)
+    ):
+        # The pivot reads its cells, which a pipeline of this schedule
+        # groups.
+        var owned = ArcPointer(_pivot_cells_plan(self, index))
+        schedule.plans.append(owned)
+        ref cells = owned[]
+        return _add_operator(
+            schedule, cells, index, batch_size, build^, type, streaming
+        )
     var wanted = List[Int]()
     var at = List[Int]()
     if streaming and self._handoff == HANDOFF_OFF:
@@ -1566,6 +1593,42 @@ def _joins_asof(plan: QueryContext, index: Int) -> Bool:
     return plan._handoff == HANDOFF_OFF and plan._nodes[index].kind == ASOF
 
 
+def _reshapes_whole(plan: QueryContext, index: Int) -> Bool:
+    """Whether node `index` is an unpivot or a pivot, which reads its whole
+    input, and an operator pipeline runs it as a `ReshapeSink`."""
+    return plan._handoff == HANDOFF_OFF and reshape_node(
+        plan._nodes[index].kind
+    )
+
+
+def _pivot_cells_plan(plan: QueryContext, index: Int) raises -> QueryContext:
+    """`plan` with the pivot at `index` reading its cells: a grouping of
+    its input by index key and `on` value, in order of first appearance,
+    that reduces each cell's values under the values column's name, and
+    with no aggregate function counts each cell's rows as well. The
+    grouping streams into the parallel aggregate table, and the pivot's
+    sink spreads its rows out (`ReshapeSink`)."""
+    var cells = plan.copy()
+    # Its nodes differ from the plan's: no schema is remembered for them.
+    cells._schema_memo = None
+    ref node = plan._nodes[index]
+    var keys = List[String](node.pivot_columns()[: node.pivot_index_count()])
+    keys.append(node.pivot_on())
+    var values = node.pivot_values()
+    var exprs = List[Expr]()
+    exprs.append(_pivot_aggregate(values, node.text).alias(values))
+    var counted = String("")
+    if node.text.byte_length() == 0:
+        counted = pivot_cell_rows_name(node)
+        exprs.append(col(values).len().alias(counted))
+    cells._nodes.append(
+        _aggregate_node(keys, exprs, maintain_order=True, left=node.left)
+    )
+    cells._nodes[index].left = len(cells._nodes) - 1
+    cells._nodes[index].set_pivot_cells(counted)
+    return cells^
+
+
 def _orders_rows(plan: QueryContext, index: Int) -> Bool:
     """Whether node `index` places rows by their position in its whole
     input, or fills nulls along it, and an operator pipeline runs it as a
@@ -1750,6 +1813,10 @@ struct _OperatorPipeline(Movable):
     # (`RowOrderSink`), and the sink while its rounds run.
     var orders: Bool
     var ordering: List[RowOrderSink]
+    # Whether it is an unpivot or a pivot over its cells (`ReshapeSink`),
+    # and the sink while its rounds run.
+    var reshapes: Bool
+    var reshaping: List[ReshapeSink]
     # Whether it is a time window aggregation (`TimeWindowSink`) or an
     # as-of join (`AsofSink`), and the sink while its rounds run.
     var times: Bool
@@ -1799,6 +1866,8 @@ struct _OperatorPipeline(Movable):
         self.reducing = List[ReductionSink]()
         self.orders = False
         self.ordering = List[RowOrderSink]()
+        self.reshapes = False
+        self.reshaping = List[ReshapeSink]()
         self.times = False
         self.timing = List[TimeWindowSink]()
         self.asof = False
@@ -1816,6 +1885,11 @@ struct _OperatorPipeline(Movable):
             self.reductions = whole_input_reductions(node.exprs)
         self.sorts = streaming and _sorts_whole(self.plan, index)
         self.orders = streaming and _orders_rows(self.plan, index)
+        self.reshapes = (
+            streaming
+            and _reshapes_whole(self.plan, index)
+            and (node.kind == UNPIVOT or node.pivot_cells())
+        )
         self.times = streaming and _windows_time(self.plan, index)
         self.asof = streaming and _joins_asof(self.plan, index)
 
@@ -1921,6 +1995,18 @@ struct _OperatorPipeline(Movable):
             trace_path("row_order.rounds")
             self.ordering.append(RowOrderSink(input^, node))
             return
+        if self.reshapes:
+            ref node = self.plan._nodes[self.index]
+            self.began = Int(perf_counter_ns())
+            var input = self.plan._execute(
+                node.left, False, self.streaming, self.batch_size
+            )
+            if node.kind == UNPIVOT:
+                trace_path("unpivot.rounds")
+            else:
+                trace_path("pivot.cells")
+            self.reshaping.append(ReshapeSink(input^, node))
+            return
         if self.times:
             ref node = self.plan._nodes[self.index]
             self.began = Int(perf_counter_ns())
@@ -1957,6 +2043,7 @@ struct _OperatorPipeline(Movable):
             or len(self.windowing) > 0
             or len(self.reducing) > 0
             or len(self.ordering) > 0
+            or len(self.reshaping) > 0
             or len(self.timing) > 0
             or len(self.matching) > 0
         ):
@@ -1983,6 +2070,7 @@ struct _OperatorPipeline(Movable):
             or self.windows
             or self.reductions
             or self.orders
+            or self.reshapes
             or self.times
             or self.asof else 0
         )
@@ -2080,6 +2168,22 @@ struct _OperatorPipeline(Movable):
                 wall_ns=Int(perf_counter_ns()) - self.began,
             )
             self.finalize()
+        if len(self.reshaping) > 0:
+            var tasks = self.reshaping[0].next_round()
+            if tasks > 0:
+                return tasks
+            var rows = self.reshaping[0].height
+            self.result = self.reshaping[0].take_result()
+            _ = self.reshaping.pop()
+            plan_record(
+                self.plan,
+                self.index,
+                "reshape",
+                rows,
+                self.result.height(),
+                wall_ns=Int(perf_counter_ns()) - self.began,
+            )
+            self.finalize()
         if len(self.timing) > 0:
             var tasks = self.timing[0].next_round()
             if tasks > 0:
@@ -2139,6 +2243,8 @@ struct _OperatorPipeline(Movable):
             self.sorting[0].round_task(task)
         elif len(self.ordering) > 0:
             self.ordering[0].round_task(task)
+        elif len(self.reshaping) > 0:
+            self.reshaping[0].round_task(task)
         elif len(self.timing) > 0:
             self.timing[0].round_task(task)
         elif len(self.matching) > 0:

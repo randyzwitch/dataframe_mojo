@@ -263,6 +263,30 @@ struct PlanNode(Copyable, Deinitable, Movable):
     def pivot_values(self) -> ref[self.names[0]] String:
         return self.names[self.offset + 1]
 
+    def pivot_found(self) -> Bool:
+        """Whether a pivot's output columns are the `on` values its rows
+        hold rather than the names it lists."""
+        return len(self.flags) > 0 and self.flags[0]
+
+    def pivot_sorts_columns(self) -> Bool:
+        """Whether a pivot's found columns are sorted by value."""
+        return len(self.flags) > 1 and self.flags[1]
+
+    def pivot_cells(self) -> Bool:
+        """Whether a pivot's input is its cells already reduced: one row
+        per index key and `on` value, its reduction under the values
+        column's name (`set_pivot_cells`)."""
+        return len(self.names2) > 0
+
+    def pivot_cell_rows(self) -> ref[self.names2[0]] String:
+        """The column of a pivot's cells counting each cell's rows, which
+        may be one at most with no aggregate function; empty when not
+        counted."""
+        return self.names2[0]
+
+    def set_pivot_cells(mut self, cell_rows: String):
+        self.names2 = [cell_rows]
+
     def filter_is_pinned(self) -> Bool:
         return len(self.flags) > 0 and self.flags[0]
 

@@ -112,6 +112,10 @@ from dataframe.query_execution.row_order_sink import (
     row_order,
     row_order_node,
 )
+from dataframe.query_execution.reshape_sink import (
+    reshape,
+    reshape_node,
+)
 from std.collections import (
     Optional,
 )
@@ -504,23 +508,18 @@ def plan_execute_node(
         )
     if node.kind == SLICE:
         return input.slice(node.slice_offset(), node.slice_length())
-    if node.kind == PIVOT:
+    if node.kind == PIVOT and not node.pivot_cells():
         return _pivoted(input, node)
     if node.kind == UNIQUE:
         return input.unique(
             node.names, keep=node.text, maintain_order=node.maintain_order
         )
     if node.kind == EXPLODE:
-        return input.explode(node.names)
+        return input._exploded(node.names)
     if node.kind == UNNEST:
-        return input.unnest(node.text)
-    if node.kind == UNPIVOT:
-        return input.unpivot(
-            node.unpivot_columns(),
-            node.unpivot_index(),
-            variable_name=node.unpivot_output_names()[0],
-            value_name=node.unpivot_output_names()[1],
-        )
+        return input._unnested(node.text)
+    if reshape_node(node.kind):
+        return reshape(input^, node)
     if _is_time_window(node.kind):
         return time_window(input^, node)
     if node.kind == GROUPING_SETS:
