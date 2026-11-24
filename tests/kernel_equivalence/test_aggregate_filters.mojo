@@ -7,19 +7,24 @@ null values and null predicates. Each answer equals a reduction of nulls
 where the filter drops (for reductions that skip nulls), or grouping the
 filtered frame; a group whose rows are all dropped keeps its row with an
 empty reduction's answer; a value that would overflow a sum only on dropped
-rows never reaches it. A group-by with no expressions is the table's groups
+rows never reaches it. Distinct counts, and correlations or covariances of
+two inputs filtered by one predicate, take the table too. A group-by with no expressions is the table's groups
 alone."""
 # contract-group: reduce.grouped
-from std.testing import assert_equal, assert_false, assert_true
+from std.math import isnan
+from std.testing import assert_equal, assert_false, assert_raises, assert_true
 from dataframe import (
     Column,
     DataFrame,
     Expr,
     Series,
     col,
+    corr,
+    cov,
     lit,
     when,
 )
+from tests.support.aggregate_table_reference import assert_close
 from tests.support.coverage_compare import assert_frame
 from tests.support.group_strategy_reference import (
     ScopedEnvironment,
@@ -296,3 +301,118 @@ def test_groups_alone() raises:
     assert_equal(empty.height(), 0)
     var key: List[String] = ["k"]
     assert_equal(empty.columns(), key)
+
+
+def _same_float(actual: Float64, expected: Float64, what: String) raises:
+    if isnan(expected):
+        assert_true(isnan(actual), what)
+    else:
+        assert_close(actual, expected, what)
+
+
+def test_filtered_distinct_counts_and_pairs() raises:
+    """A filtered distinct count and a correlation or covariance of two
+    inputs filtered by one predicate run in the table too: a distinct count
+    counts the values of the kept rows (a null once), a pair reduction pairs
+    the kept rows, and a group with no kept row keeps its row (a count of
+    0, a NaN correlation, a null covariance)."""
+    var source = frame()
+    var y = (col("x") * 3 + col("g")).cast("float64")
+    var exprs: List[Expr] = [
+        filtered().n_unique().alias("u"),
+        col("g").filter(col("p")).n_unique().alias("ug"),
+        col("x").drop_nulls().n_unique().alias("ud"),
+        corr(filtered(), y.filter(col("p"))).alias("r"),
+        cov(filtered(), y.filter(col("p"))).alias("v"),
+    ]
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var observed = StrategyTrace()
+    var piped = source.lazy().group_by(["k"]).agg(exprs).sort(["k"]).collect()
+    var eager = source.group_by(["k"]).agg(exprs).sort(["k"])
+    var text = observed.text()
+    _ = observed^
+    _ = trace^
+    _ = workers^
+    assert_true("dataframe-path: pipeline.group_table\n" in text)
+    assert_false("group_by.row_lists" in text)
+    # Parallel float states merge in no fixed order: those agree closely.
+    var counts: List[String] = ["k", "u", "ug", "ud"]
+    assert_frame(eager.select(counts), piped.select(counts))
+    for name in ["r", "v"]:
+        for row in range(piped.height()):
+            if piped.item(row, name).is_null():
+                assert_true(eager.item(row, name).is_null(), name)
+                continue
+            _same_float(
+                eager.item(row, name).float64(),
+                piped.item(row, name).float64(),
+                name,
+            )
+    # Grouping the filtered frame gives the groups with a kept row.
+    var kept = source.filter(col("p"))
+    var expected = (
+        kept.group_by(["k"])
+        .agg(
+            [
+                col("x").n_unique().alias("u"),
+                col("g").n_unique().alias("ug"),
+                corr(col("x"), y.copy()).alias("r"),
+                cov(col("x"), y.copy()).alias("v"),
+            ]
+        )
+        .sort(["k"])
+    )
+    var live = piped.filter(col("k") != lit("dead"))
+    assert_frame(
+        live.select(["k", "u", "ug"]), expected.select(["k", "u", "ug"])
+    )
+    for name in ["r", "v"]:
+        for row in range(expected.height()):
+            _same_float(
+                live.item(row, name).float64(),
+                expected.item(row, name).float64(),
+                name,
+            )
+    var dropped = (
+        source.filter(col("x").is_not_null())
+        .group_by(["k"])
+        .agg([col("x").n_unique().alias("ud")])
+        .sort(["k"])
+    )
+    assert_frame(piped.select(["k", "ud"]), dropped)
+    var dead = piped.filter(col("k") == lit("dead"))
+    assert_equal(String(dead.item(0, "u")), "0")
+    assert_equal(String(dead.item(0, "ug")), "0")
+    # No pairs: a correlation is NaN, a covariance null.
+    assert_true(isnan(dead.item(0, "r").float64()))
+    assert_true(dead.item(0, "v").is_null())
+
+
+def test_filtered_distinct_counts_alone_and_ordered() raises:
+    """Every reduction a filtered distinct count: the groups come from the
+    distinct tables alone, a group with no kept row among them, in first
+    row order when asked."""
+    var source = frame()
+    var exprs: List[Expr] = [filtered().n_unique().alias("u")]
+    var nulled_count = (
+        source.lazy().group_by(["k"], maintain_order=True).agg(exprs).collect()
+    )
+    var eager = source.group_by(["k"], maintain_order=True).agg(exprs)
+    assert_frame(eager, nulled_count)
+    var order = source.unique(["k"], keep="first", maintain_order=True)
+    assert_frame(nulled_count.select(["k"]), order.select(["k"]))
+    var one_thread = ScopedEnvironment("DATAFRAME_THREADS", "1")
+    var serial = source.group_by(["k"], maintain_order=True).agg(exprs)
+    _ = one_thread^
+    assert_frame(serial, nulled_count)
+
+
+def test_pairs_filtered_differently_keep_their_error() raises:
+    """A correlation whose inputs keep rows by different predicates pairs
+    nothing: the grouped evaluator keeps its error."""
+    var source = frame(1000)
+    with assert_raises(contains="different lengths"):
+        _ = source.group_by(["k"]).agg(
+            [corr(filtered(), col("g").filter(col("x") > 0)).alias("r")]
+        )

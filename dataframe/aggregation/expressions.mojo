@@ -51,6 +51,7 @@ from dataframe.selectors import (
 from dataframe.series import (
     Series,
 )
+from std.memory import bitcast
 from std.collections import (
     Dict,
     Optional,
@@ -162,6 +163,56 @@ def aggregate_filter(expression: Expr, at: Int) -> Optional[Expr]:
     return None
 
 
+def same_nodes(a: Expr, b: Expr) -> Bool:
+    """Whether two expressions are the same nodes, field by field (names
+    aside): they keep the same rows."""
+    if len(a._nodes) != len(b._nodes):
+        return False
+    for k in range(len(a._nodes)):
+        ref x = a._nodes[k]
+        ref y = b._nodes[k]
+        if (
+            x.op != y.op
+            or x.left != y.left
+            or x.right != y.right
+            or x.text != y.text
+            or x.integer != y.integer
+            or bitcast[DType.uint64](x.floating)
+            != bitcast[DType.uint64](y.floating)
+            or x.min_count != y.min_count
+            or x.extra != y.extra
+            or x.text2 != y.text2
+            or len(x.dtypes) != len(y.dtypes)
+        ):
+            return False
+        for d in range(len(x.dtypes)):
+            if Bool(x.dtypes[d]) != Bool(y.dtypes[d]):
+                return False
+            if x.dtypes[d] and (
+                x.dtypes[d].value().name() != y.dtypes[d].value().name()
+            ):
+                return False
+    return True
+
+
+def reduction_filter(expression: Expr, at: Int) -> Optional[Expr]:
+    """The predicate of reduction node `at`'s aggregate filter: its input's
+    (`aggregate_filter`), or for a correlation or covariance, the one
+    predicate both its inputs filter by, since it pairs the rows the two
+    keep. None when the reduction reads no aggregate filter, or a pair's
+    inputs keep rows by different predicates (or one keeps every row)."""
+    ref node = expression._nodes[at]
+    var left = aggregate_filter(expression, node.left)
+    if node.op != CORR and node.op != COV:
+        return left^
+    if not left:
+        return None
+    var right = aggregate_filter(expression, node.right)
+    if not right or not same_nodes(left.value(), right.value()):
+        return None
+    return left^
+
+
 def without_filters(expressions: List[Expr]) -> List[Expr]:
     """`expressions` with each aggregate filter replaced by the values it
     filters: the same reductions, of the same types, over every row."""
@@ -172,8 +223,10 @@ def without_filters(expressions: List[Expr]) -> List[Expr]:
         for i in range(len(nodes)):
             if not is_reduction(nodes[i].op) or nodes[i].left < 0:
                 continue
-            if aggregate_filter(expression, nodes[i].left):
+            if reduction_filter(expression, i):
                 nodes[i].left = filter_value(expression, nodes[i].left)
+                if nodes[i].op == CORR or nodes[i].op == COV:
+                    nodes[i].right = filter_value(expression, nodes[i].right)
                 changed = True
         if changed:
             var compact = Expr(nodes^, expression._name)
@@ -203,9 +256,9 @@ def _stream_reductions(
     """Whether every expression is reductions of row-local inputs, combined
     row by row. `holistic` admits medians and quantiles; `listed` also
     mode and implode, whose states the aggregate table holds by address;
-    `filtered` also a one-input reduction (no distinct count) of an
-    aggregate filter (`aggregate_filter`), which the aggregate table
-    applies per reduction."""
+    `filtered` also a reduction of an aggregate filter
+    (`reduction_filter`), which the aggregate table applies per
+    reduction."""
     if len(expressions) == 0:
         return False
     for expression in expressions:
@@ -259,13 +312,10 @@ def _stream_reductions(
                     PRODUCT,
                 ]:
                     return False
-                if (
-                    filtered
-                    and node.right < 0
-                    and node.op not in [N_UNIQUE, CORR, COV]
-                    and aggregate_filter(expression, node.left)
-                ):
+                if filtered and reduction_filter(expression, i):
                     filters.append(node.left)
+                    if node.op == CORR or node.op == COV:
+                        filters.append(node.right)
                     saw_reduction = True
                     continue
                 # Reduction inputs must be row-local; reduction-of-reduction

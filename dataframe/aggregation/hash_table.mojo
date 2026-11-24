@@ -671,15 +671,29 @@ struct AggregateLayout(Copyable, Movable):
         if self.perfect.used():
             trace_path("aggregate_table.perfect_hash")
 
+    def distinct_flagged(self, d: Int) -> Bool:
+        """Whether distinct count d reads an aggregate filter: its table
+        then keys each pair by the filter's answer too (`distinct_layout`)."""
+        var slot = self.distinct[d]
+        return slot < len(self.filtered) and self.filtered[slot]
+
     def distinct_layout(self, d: Int) -> AggregateLayout:
-        """Distinct count d's table: its keys and no states."""
+        """Distinct count d's table: its keys and no states. A filtered
+        count's pairs take the filter's answer as a last key, so a row the
+        filter drops still makes its group's pair (its group then exists
+        with nothing counted) but never counts as a kept one."""
+        var keys = self.distinct_keys[d].copy()
+        var addressed = self.distinct_addressed[d].copy()
+        if self.distinct_flagged(d):
+            keys.append(Series("", BoolColumn(List[Bool]())))
+            addressed.append(False)
         return AggregateLayout(
             List[AggregateFunction](),
             List[ReducerSpec](),
-            self.distinct_addressed[d].copy(),
+            addressed^,
             0,
             self.distinct_radix[d],
-            self.distinct_keys[d].copy(),
+            keys^,
             List[Int](),
             List[List[Series]](),
             List[List[Bool]](),
@@ -2152,8 +2166,11 @@ struct AggregateSink(Movable):
         """Each distinct count's (keys, value) pairs into its own table, the
         value's vector read as a key where it is."""
         for d in range(len(self.distinct_slots)):
+            var slot = self.distinct_slots[d]
             var pairs = keys.copy()
-            pairs.append(KeyVector.of(inputs[self.distinct_slots[d]]))
+            pairs.append(KeyVector.of(inputs[slot]))
+            if self.filtered[slot]:
+                pairs.append(KeyVector.of(self.filters[slot]))
             self.distinct.at(d).sink_vectors(
                 pairs, List[UnifiedVectorFormat](), hold, first, count
             )
@@ -2478,7 +2495,11 @@ struct AggregateSink(Movable):
             self.held.append(held.copy())
 
     def count_group_rows(
-        mut self, groups: _Groups, widths: List[Int], nulls_count: Bool
+        mut self,
+        groups: _Groups,
+        widths: List[Int],
+        nulls_count: Bool,
+        flagged: Bool = False,
     ) raises:
         """A distinct table's finished (keys, value) groups into this table,
         each adding one to its group's distinct count (`only`): its rows' key
@@ -2490,10 +2511,13 @@ struct AggregateSink(Movable):
         when the workers sank no rows into the main table (every reduction a
         distinct count); each group's first row is its pair's, so the earliest
         pair's row is the group's. Scan distinct pairs in chunks and sink them
-        into the main table, counting each unique pair once.
+        into the main table, counting each unique pair once. With `flagged`,
+        the last key is an aggregate filter's answer, after the value: a pair
+        the filter did not keep (false or null) makes its group and adds
+        nothing.
         """
         self.in_order = False
-        var keys = len(widths) - 1
+        var keys = len(widths) - 1 - Int(flagged)
         var width = len(self.addressed)
         var word_ptrs = List[Int](capacity=width)
         for w in range(width):
@@ -2511,10 +2535,20 @@ struct AggregateSink(Movable):
         for g in range(groups.count()):
             var address = groups.at(g)
             var row = _words_at(address)
-            add_at[unsafe_offset=count] = (
-                UInt64(1) if nulls_count
-                or row[unsafe_offset=1] & value_null == 0 else 0
-            )
+            var adds_one = nulls_count or row[unsafe_offset=1] & value_null == 0
+            if flagged:
+                # A kept row's Boolean key word is 1 (2 is false, and a
+                # null answer keeps nothing either).
+                var flag = keys + 1
+                var w_flag = 0
+                for c in range(flag):
+                    w_flag += widths[c]
+                adds_one = (
+                    adds_one
+                    and (row[unsafe_offset=1] >> UInt64(flag)) & 1 == 0
+                    and row[unsafe_offset=_HEAD + w_flag] == 1
+                )
+            add_at[unsafe_offset=count] = UInt64(1) if adds_one else 0
             first_at[unsafe_offset=count] = Int(row[unsafe_offset=2])
             var hash = UInt64(0)
             var w = 0
@@ -3197,11 +3231,16 @@ struct _DistinctJob(Job):
     def run(mut self) raises:
         var sink = AggregateSink(self.layout, self.workers, distinct=False)
         sink.only = self.slot
+        var flagged = (
+            self.slot < len(self.layout.filtered)
+            and self.layout.filtered[self.slot]
+        )
         for groups in self.groups:
             sink.count_group_rows(
                 Pointer[_Groups, MutAnyOrigin](unsafe_from_address=groups)[],
                 self.widths,
                 self.nulls,
+                flagged,
             )
         self.sinks.append(sink^)
 
@@ -3663,8 +3702,12 @@ struct AggregateFinish(Movable, Rounds):
         *,
         ordered: Bool,
     ):
-        self.sinks = sinks^
         self.layout = layout.copy()
+        # The sinks know which reductions an aggregate filter reads (a
+        # filtered distinct count's tables key by the filter's answer too).
+        if len(sinks) > 0 and sinks[0].any_filtered:
+            self.layout.filtered = sinks[0].filtered.copy()
+        self.sinks = sinks^
         self.filter = filter.copy()
         self.rows_only = rows_only
         self.ordered = ordered
