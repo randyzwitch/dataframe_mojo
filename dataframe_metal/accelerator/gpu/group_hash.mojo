@@ -157,10 +157,14 @@ def atomic_add_signed96(
     var middle = UInt32(raw >> 32)
     var previous = Atomic[UInt32].fetch_add(words, lower)
     var carry = UInt32(previous + lower < previous)
-    previous = Atomic[UInt32].fetch_add(words.unsafe_offset(1), middle)
-    var upper = UInt32.MAX if value < 0 else UInt32(0)
-    upper += UInt32(previous + middle < previous)
-    if carry:
-        previous = Atomic[UInt32].fetch_add(words.unsafe_offset(1), UInt32(1))
-        upper += UInt32(previous == UInt32.MAX)
-    _ = Atomic[UInt32].fetch_add(words.unsafe_offset(2), upper)
+    # Fold the carry into the middle limb before updating the shared word.
+    # Small positive addends usually touch just the low limb.
+    middle += carry
+    var upper = (UInt32.MAX if value < 0 else UInt32(0)) + UInt32(
+        middle < carry
+    )
+    if middle:
+        previous = Atomic[UInt32].fetch_add(words.unsafe_offset(1), middle)
+        upper += UInt32(previous + middle < previous)
+    if upper:
+        _ = Atomic[UInt32].fetch_add(words.unsafe_offset(2), upper)

@@ -8,6 +8,7 @@ from dataframe.storage.string import StringColumn
 from .accelerator.gpu.reduction_inputs import HandoffTimings
 from .group_layout import GENERAL_GROUP_LIMIT
 from .group_reduce import execute_grouped
+from .dictionary_pair_reduce import execute_dictionary_pair
 
 
 @fieldwise_init
@@ -15,6 +16,13 @@ struct DictionaryGroup(Copyable, Movable):
     var keys: List[String]
     var value: String
     var dictionaries: List[DataType]
+
+    def dense_pair(self, rows: Int) -> Bool:
+        if len(self.keys) != 2 or rows == 0 or rows >= Int(Int32.MAX):
+            return False
+        var left = len(self.dictionaries[0].dictionary()[]) + 1
+        var right = len(self.dictionaries[1].dictionary()[]) + 1
+        return left * right <= GENERAL_GROUP_LIMIT
 
 
 def _group_dictionary(source: Series) raises -> Optional[DataType]:
@@ -121,14 +129,25 @@ def execute_dictionary_group(
         inputs.append(_signed_group_codes(source.column(key)))
     inputs.append(source.column(plan.value))
     var frame = DataFrame(inputs^)
-    var lowered = (
-        frame.lazy()
-        .group_by(plan.keys, maintain_order=root.maintain_order)
-        .agg(root.exprs)
-    )
-    lowered._plan._device_observation = region._plan._device_observation
+    var reduced: Tuple[DataFrame, HandoffTimings]
     var preparation = Int(perf_counter_ns()) - started
-    var reduced = execute_grouped(lowered, zero_copy)
+    if plan.dense_pair(frame.height()):
+        reduced = execute_dictionary_pair(
+            region,
+            frame,
+            len(plan.dictionaries[0].dictionary()[]),
+            len(plan.dictionaries[1].dictionary()[]),
+            zero_copy,
+        )
+    else:
+        var lowered = (
+            frame.lazy()
+            .group_by(plan.keys, maintain_order=root.maintain_order)
+            .agg(root.exprs)
+        )
+        lowered._plan._device_observation = region._plan._device_observation
+        preparation = Int(perf_counter_ns()) - started
+        reduced = execute_grouped(lowered, zero_copy)
     started = Int(perf_counter_ns())
     var result = reduced[0].copy()
     for i in range(len(plan.keys)):
