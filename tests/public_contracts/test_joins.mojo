@@ -182,6 +182,72 @@ def test_a_coalesced_right_join_keeps_the_right_key_names() raises:
         assert_equal(same.columns(), List[String](["x", "x_right", "k"]))
 
 
+def test_a_coalesced_right_join_streams_in_every_mode() raises:
+    # The eager join, and a plan run without the optimizer, also run as the
+    # right join keeping both keys. A left column named as the kept-keys
+    # join would name a right key ("k_right") does not keep it from
+    # streaming: that join's own suffix keeps its names apart.
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64]([1, 2, 3, 3])),
+            Series("k_right", Column[Int64]([7, 8, 9, 9])),
+            Series("x", Column[Int64]([10, 20, 30, 31])),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("x", Column[String](["a", "b", "c", "d"])),
+            Series("bk", Column[Int64]([4, 3, 2, 3])),
+            Series("k", Column[Int64]([5, 6, 7, 8])),
+        ]
+    )
+    var names: List[String] = ["k_right", "x", "x_right", "bk", "k"]
+    var expected: List[String] = [
+        "8|20|c|2|7",
+        "9|30|b|3|6",
+        "9|30|d|3|8",
+        "9|31|b|3|6",
+        "9|31|d|3|8",
+        "null|null|a|4|5",
+    ]
+    for empty_left in [False, True]:
+        var probe = left.clear() if empty_left else left.copy()
+        for mode in range(3):
+            var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+            var observed = StrategyTrace()
+            var out: DataFrame
+            if mode == 0:
+                out = probe.join(
+                    right, left_on=["k"], right_on=["bk"], how="right"
+                )
+            else:
+                out = (
+                    probe.lazy()
+                    .join(
+                        right.lazy(),
+                        left_on=["k"],
+                        right_on=["bk"],
+                        how="right",
+                    )
+                    .collect(optimize=mode == 1)
+                )
+            var text = observed.text()
+            _ = observed^
+            _ = trace^
+            var label = "mode=" + String(mode) + " empty=" + String(empty_left)
+            assert_true(
+                "dataframe-path: lazy.lower_right_join\n" in text, label
+            )
+            assert_equal(out.columns(), names, label)
+            var rows = _rows(out, names)
+            if empty_left:
+                assert_equal(len(rows), 4, label)
+                for row in rows:
+                    assert_true(row.startswith("null|null|"), label)
+            else:
+                assert_equal(rows, expected, label)
+
+
 def _decimal_key_frame(
     keys: List[Int], valid: List[Bool], width: Int, value: String, start: Int
 ) raises -> DataFrame:
