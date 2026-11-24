@@ -20,6 +20,7 @@ on:
       - 'scripts/metal_build_identity.py'
       - 'tests/tooling/pixi_git_smoke.sh'
       - '.github/workflows/examples.yml'
+      - '.github/actions/setup-pixi/**'
 
 concurrency:
   group: examples-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -34,10 +35,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: prefix-dev/setup-pixi@v0.10.2
-        with:
-          pixi-version: v0.84.2
-          cache: true
+      - uses: ./.github/actions/setup-pixi
       - name: Build examples
         run: pixi run build
       - name: Smoke test the Git package from a fresh Pixi workspace

@@ -30,7 +30,7 @@ from dataframe.parallel import Rounds, partitions, worker_count
 from dataframe.series import Series
 from dataframe.storage.column import Column
 from dataframe.trace import trace_path
-from std.collections import Dict
+from std.collections import Dict, Optional
 
 # The round that ran last.
 comptime _START = 0
@@ -84,6 +84,10 @@ struct ReductionSink(Movable, Rounds):
     var reduced: List[Dict[Int, Series]]
     var bounds: List[Int]
     var pieces: List[List[Series]]
+    # By range of the row round, the error it raised, if any: the
+    # first range's is raised once the round is over, so the error names
+    # the first failing row whichever task fails first.
+    var failed: List[Optional[String]]
     var result: DataFrame
 
     def __init__(
@@ -99,6 +103,7 @@ struct ReductionSink(Movable, Rounds):
         self.reduced = List[Dict[Int, Series]]()
         self.bounds = List[Int]()
         self.pieces = List[List[Series]]()
+        self.failed = List[Optional[String]]()
         self.result = DataFrame(List[Series]())
 
     def _eager(self) raises -> DataFrame:
@@ -177,6 +182,7 @@ struct ReductionSink(Movable, Rounds):
         self.bounds = partitions(height, max(1, worker_count(height)), _BATCH)
         for _ in range(len(self.bounds) - 1):
             self.pieces.append(List[Series]())
+            self.failed.append(None)
         trace_path("window.reduce_row_rounds")
         self.stage = _ROWS
         return len(self.bounds) - 1
@@ -191,20 +197,30 @@ struct ReductionSink(Movable, Rounds):
         for column in self.input._columns:
             slices.append(column.slice(start, count))
         var values = List[Series](capacity=len(self.rows))
-        for r in range(len(self.rows)):
-            values.append(
-                evaluate(
-                    self.reducing[0].bound[self.rows[r]],
-                    slices,
-                    count,
-                    batch_size=_BATCH,
-                    reduced=self.reduced[r],
-                    workers=1,
+        try:
+            for r in range(len(self.rows)):
+                # The range's rows are numbered as the input's.
+                var bound = self.reducing[0].bound[self.rows[r]].copy()
+                bound.first_row = start
+                values.append(
+                    evaluate(
+                        bound,
+                        slices,
+                        count,
+                        batch_size=_BATCH,
+                        reduced=self.reduced[r],
+                        workers=1,
+                    )
                 )
-            )
+        except e:
+            self.failed[task] = String(e)
+            return
         self.pieces[task] = values^
 
     def _finish(mut self) raises:
+        for message in self.failed:
+            if message:
+                raise Error(message.value())
         ref rounds = self.reducing[0]
         var height = self.input.height()
         # A selection of these values alone is one row, as the projection

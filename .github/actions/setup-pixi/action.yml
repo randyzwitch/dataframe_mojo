@@ -1,0 +1,34 @@
+name: Set up Pixi
+description: >-
+  Install Pixi and the default environment, retrying once if fetching a Git
+  dependency fails.
+runs:
+  using: composite
+  steps:
+    # Pixi fetches Git dependencies into a shared cache and then clones them
+    # locally, sometimes for several environments at once. A fetch that writes
+    # a commit-graph file can race with a local clone that hard-links the same
+    # object directory, and the clone fails with "failed to create link
+    # .../commit-graphs/tmp_graph_*". Without commit-graph writes or automatic
+    # maintenance, git leaves no temporary files there to race on.
+    - name: Keep Git from writing temporary object files during fetches
+      shell: bash
+      run: |
+        git config --global fetch.writeCommitGraph false
+        git config --global gc.auto 0
+        git config --global maintenance.auto false
+    - id: first
+      continue-on-error: true
+      uses: prefix-dev/setup-pixi@v0.10.2
+      with:
+        pixi-version: v0.84.2
+        cache: true
+    - name: Clear partial Git checkouts before retrying
+      if: steps.first.outcome == 'failure'
+      shell: bash
+      run: rm -rf "$HOME/.cache/rattler/cache/git-v0/checkouts"
+    - if: steps.first.outcome == 'failure'
+      uses: prefix-dev/setup-pixi@v0.10.2
+      with:
+        pixi-version: v0.84.2
+        cache: true

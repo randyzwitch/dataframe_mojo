@@ -1313,11 +1313,14 @@ struct _VectorStep(Copyable, Movable):
                 for c in range(input.column_count()):
                     self.output.data[c] = input.data[c]
                 self.output.count = count
+                self.output.rows_of(input)
                 return
             self.output.slice(input, rows, count)
+            self.output.rows_through(input, rows)
             return
         self.output.set_columns(len(self.outputs))
         self.output.count = input.count
+        self.output.rows_of(input)
         for j in range(len(self.outputs)):
             var source = self.outputs[j]
             if source >= 0:
@@ -1507,6 +1510,11 @@ struct _ChunkRunner(Movable):
     # source offset.
     var scan: Optional[ArcPointer[ScanFilterInfo]]
     var scan_offset: Int
+    # The row of the pipeline's input frame that row 0 of the columns the
+    # next `run_until` takes is, when they are a range of that frame's
+    # rows (a morsel read in place); -1 otherwise. Errors that name a row
+    # number it from there (`DataChunk.source_row`).
+    var source_rows: Int
     # The first row of the morsel running, when it is a range of an
     # in-memory frame's rows; -1 otherwise.
     var frame_offset: Int
@@ -1565,6 +1573,7 @@ struct _ChunkRunner(Movable):
         self.build_layout = List[ArcPointer[JoinBuildLayout]]()
         self.scan = None
         self.scan_offset = -1
+        self.source_rows = -1
         self.frame_offset = -1
         self.ordered_pairs = False
 
@@ -1848,6 +1857,10 @@ struct _ChunkRunner(Movable):
         into chunks like any other rows instead."""
         var at = first
         var n = len(self.steps[])
+        # Only these columns are the input's rows: a join or reshape step
+        # makes rows of its own, and a nested run reads other columns.
+        var origin = self.source_rows
+        self.source_rows = -1
         while at < stop:
             if self.stop_empty and columns.height == 0:
                 return columns^
@@ -1870,6 +1883,7 @@ struct _ChunkRunner(Movable):
                     columns = self._reshape(columns, at)
                 self.counts[2 * n + 1 + at] += Int(perf_counter_ns()) - began
                 self.counts[2 * at + 2] += columns.height
+                origin = -1
                 at += 1
                 continue
             var end = at
@@ -1886,9 +1900,10 @@ struct _ChunkRunner(Movable):
                 # Rows a materialize sink keeps as whole columns: the
                 # filters pick the morsel's rows, and each column is
                 # gathered once below, rather than every chunk copied in.
-                columns = self._selected(columns, at, end)
+                columns = self._selected(columns, at, end, origin)
             else:
-                columns = self._vector_steps(columns, at, end)
+                columns = self._vector_steps(columns, at, end, origin)
+            origin = -1
             at = end
         if stop == n and self.sinks_chunks() and columns.height > 0:
             if len(self.ungrouped) > 0 and self.ungrouped[0].counts_only():
@@ -1907,7 +1922,7 @@ struct _ChunkRunner(Movable):
                 return _Columns()
             # A join's output (or the source, with no steps) cut into
             # chunks for the sink.
-            columns = self._vector_steps(columns, n, n)
+            columns = self._vector_steps(columns, n, n, origin)
         return columns^
 
     def _reshape(mut self, columns: _Columns, s: Int) raises -> _Columns:
@@ -2164,13 +2179,14 @@ struct _ChunkRunner(Movable):
         return True
 
     def _selected(
-        mut self, columns: _Columns, first: Int, stop: Int
+        mut self, columns: _Columns, first: Int, stop: Int, origin: Int = -1
     ) raises -> _Columns:
         """Steps [first, stop) (`_selects_only`) over `columns`: each
         chunk's rows go through the filters, each filter reading only the
         rows the ones before kept, and the kept rows' numbers are
         collected; the columns are then read through them, nothing
-        copied."""
+        copied. `origin`, when not -1, is the row of the pipeline's input
+        that row 0 of `columns` is."""
         trace_path("pipeline.filter_rows_whole")
         var n = len(self.steps[])
         var compiled = Pointer[Optional[_VectorStep], MutAnyOrigin](
@@ -2192,6 +2208,7 @@ struct _ChunkRunner(Movable):
                     every = False
                     continue
             columns.fill(bases, self.arena, source[], low, count)
+            source[].first_row = origin + low if origin >= 0 else -1
             var kept = count
             var selection = SelectionVector()
             for s in range(first, stop):
@@ -2234,9 +2251,11 @@ struct _ChunkRunner(Movable):
         return result^
 
     def _vector_steps(
-        mut self, columns: _Columns, first: Int, stop: Int
+        mut self, columns: _Columns, first: Int, stop: Int, origin: Int = -1
     ) raises -> _Columns:
-        """Steps [first, stop), all row-local, chunk by chunk."""
+        """Steps [first, stop), all row-local, chunk by chunk. `origin`,
+        when not -1, is the row of the pipeline's input that row 0 of
+        `columns` is."""
         for s in range(first, stop):
             self._compiled(s)
         var n = len(self.steps[])
@@ -2261,6 +2280,7 @@ struct _ChunkRunner(Movable):
                     trace_path("scan.vector_skip")
                     continue
             columns.fill(bases, self.arena, source[], low, count)
+            source[].first_row = origin + low if origin >= 0 else -1
             var input = source
             var empty = False
             for s in range(first, stop):
@@ -2663,6 +2683,11 @@ struct _PipelineJob(Job):
     # Under a limit, the last morsel any worker still needs: a morsel
     # numbered past it is not read.
     var bound: LimitBound
+    # The morsel running, and once one failed, its number and the error
+    # (`PipelineRun.execute`).
+    var morsel: Int
+    var failed_morsel: Int
+    var failure: Optional[String]
 
     def __init__(
         out self,
@@ -2690,6 +2715,9 @@ struct _PipelineJob(Job):
         )
         self.source = None
         self.bound = LimitBound.none()
+        self.morsel = -1
+        self.failed_morsel = -1
+        self.failure = None
         self.join_filters = join_filters.copy()
         self.join_stats = List[SelectivityStats](
             length=len(join_filters),
@@ -2944,6 +2972,7 @@ struct _PipelineJob(Job):
         return (True, rows^)
 
     def run(mut self) raises:
+        self.morsel = -1
         if self.source and self.first_step == 0 and self.unmatched_step < 0:
             self._run_source()
             return
@@ -2963,6 +2992,7 @@ struct _PipelineJob(Job):
                 self.runner.release_local()
                 return
             var k = self.first_morsel + taken
+            self.morsel = k
             var offset = self.ranges[][2 * taken]
             var length = self.ranges[][2 * taken + 1]
             self.runner.begin_sink(k, offset, length)
@@ -3000,6 +3030,7 @@ struct _PipelineJob(Job):
                 break
             var batch = next.take()
             var k = batch.number
+            self.morsel = k
             var morsel = ScanSource.frame_at(source, batch^)
             var length = morsel.height()
             self.runner.begin_sink(k, 0, length)
@@ -3042,6 +3073,7 @@ struct _PipelineJob(Job):
         if vectors:
             rows = _rows_in_vectors(rows, vectors.value(), length)
         var source: _Columns
+        var in_place = not rows
         if rows:
             if len(rows.value()) == 0:
                 return
@@ -3056,6 +3088,10 @@ struct _PipelineJob(Job):
             self._top_chunks(source^, rows, k, offset, first, True)
             self.runner.scan_offset = -1
             return
+        if in_place and not self.source:
+            # The morsel's rows in place: rows [offset, offset + length)
+            # of the frame the pipeline reads.
+            self.runner.source_rows = offset
         _ = self.runner.run(source^, first)
         self.runner.scan_offset = -1
 
@@ -4441,20 +4477,44 @@ struct PipelineRun(Movable):
         return len(self.jobs)
 
     def execute(mut self, task: Int) raises:
+        """Task `task`'s worker run. A failed morsel's error is kept, not
+        raised: workers take morsels in order, so every morsel before it
+        was already taken, and the others stop taking more. Once every
+        task is done, the error of the first morsel that failed is raised
+        (`raise_failure`), so it names the first failing row of the input
+        whichever worker fails first."""
+        ref job = self.jobs[task]
         try:
-            self.jobs[task].run()
+            job.run()
         except e:
-            if self.jobs[task].runner.writer != 0:
+            if job.runner.writer != 0:
                 # Workers waiting for this one's rows stop waiting.
-                FileSink.fail_at(self.jobs[task].runner.writer)
-            raise e^
+                FileSink.fail_at(job.runner.writer)
+            job.failure = String(e)
+            job.failed_morsel = job.morsel
+            if not job.source and job.cursor != 0:
+                # Every later take is past the last morsel.
+                _ = _Cursor(job.cursor).take(len(job.ranges[]))
+
+    def raise_failure(self) raises:
+        """The error of the first morsel that failed, if any did."""
+        var first = -1
+        for t in range(len(self.jobs)):
+            if self.jobs[t].failure and (
+                first < 0
+                or self.jobs[t].failed_morsel < self.jobs[first].failed_morsel
+            ):
+                first = t
+        if first >= 0:
+            raise Error(self.jobs[first].failure.value())
 
     def begin_round(mut self) raises -> Bool:
         """After probing, partition the build table's rows among workers and
         emit the required matched/unmatched rows. Fill absent probe columns
         with nulls and run the same downstream steps and sinks as ordinary
         join output. Scheduling places this scan after probe completion so
-        match flags are final."""
+        match flags are final. A failed morsel's error is raised first."""
+        self.raise_failure()
         self.end_round()
         if self.source and self.next_round == 0:
             # The morsels the source's batches were numbered as.

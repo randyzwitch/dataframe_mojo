@@ -1,7 +1,16 @@
 """Whole-expression ordering and distinct selection preserve group association."""
 # contract-group: expr.group_sequences
 from std.testing import assert_raises
-from dataframe import Column, DataFrame, DataType, Expr, ListColumn, Series, col
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    Expr,
+    ListColumn,
+    Series,
+    col,
+    lit,
+)
 from tests.support.coverage_compare import assert_frame
 from tests.support.coverage_generators import chunk_layout, offset_layout
 
@@ -230,6 +239,56 @@ def test_multi_key_ordering_scalar_extrema_empty_keys_and_whole_columns() raises
         _ = frame.select(col("x").top_k(-1))
     with assert_raises(contains="different lengths"):
         _ = frame.select(col("x").head(1).sort_by(col("t")))
+
+
+def test_max_by_and_min_by_over_every_row_in_plans() raises:
+    var frame = ordered_group_frame()
+    for source in [frame.copy(), chunk_layout(frame), offset_layout(frame)]:
+        var expressions: List[Expr] = [
+            col("x").max_by("t").alias("max_x"),
+            col("label").min_by("t").alias("min_label"),
+            col("x").max_by([col("t"), -col("r")]).alias("max_x_by_keys"),
+            (col("r").min_by("x") + lit(Int64(1))).alias("after"),
+        ]
+        var expected = DataFrame(
+            [
+                Series("max_x", Column[Int64]([10])),
+                Series("min_label", Column[String](["c"])),
+                Series("max_x_by_keys", Column[Int64]([10])),
+                Series("after", Column[Int64]([1])),
+            ]
+        )
+        assert_frame(source._select_exprs(expressions), expected)
+        assert_frame(source.select_exprs(expressions), expected)
+        assert_frame(
+            source.lazy().select_exprs(expressions).collect(), expected
+        )
+    # Ties over many rows: the first row with the largest key wins,
+    # whichever range of rows it falls in.
+    var n = 200000
+    var values = List[Int64](capacity=n)
+    var keys = List[Int64](capacity=n)
+    var valid = List[Bool](capacity=n)
+    for i in range(n):
+        values.append(Int64(i))
+        keys.append(Int64((i * 7919) % 1000))
+        valid.append(i % 3 != 0)
+    var many = DataFrame(
+        [
+            Series("v", Column[Int64](values^)),
+            Series("k", Column[Int64](keys^, valid^)),
+        ]
+    )
+    var wanted: List[Expr] = [
+        col("v").max_by("k").alias("max"),
+        col("v").min_by("k").alias("min"),
+    ]
+    var kernels = many._select_exprs(wanted)
+    assert_frame(many.select_exprs(wanted), kernels)
+    assert_frame(many.lazy().select_exprs(wanted).collect(), kernels)
+    assert_frame(
+        many.lazy().select_exprs(wanted).collect(streaming=False), kernels
+    )
 
 
 def test_ordering_nan_signed_zero_nulls_and_categorical_labels() raises:
