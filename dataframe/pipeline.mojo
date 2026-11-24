@@ -736,6 +736,24 @@ struct _Columns(Copyable, Movable):
     def width(self) -> Int:
         return len(self.handles)
 
+    def reads_whole(self) -> Bool:
+        """Whether every column is read whole from its row 0."""
+        for c in range(self.width()):
+            if self.lists[c] >= 0 or self.starts[c] != 0:
+                return False
+        return True
+
+    def picked(self, columns: List[Int]) -> _Columns:
+        """The columns at `columns`, in that order, read as they are."""
+        var result = _Columns()
+        for c in columns:
+            result.handles.append(self.handles[c])
+            result.starts.append(self.starts[c])
+            result.lists.append(self.lists[c])
+        result.row_lists = self.row_lists.copy()
+        result.height = self.height
+        return result^
+
     def through(self, rows: List[Int]) -> _Columns:
         """Every column read at its rows `rows` (positions among this one's
         `height`), the dictionaries merged: a row list over a row list is one
@@ -1857,7 +1875,20 @@ struct _ChunkRunner(Movable):
             var end = at
             while end < stop and not _frame_step(self.steps[][end].kind):
                 end += 1
-            columns = self._vector_steps(columns, at, end)
+            if (
+                whole
+                and end == n
+                and stop == n
+                and self.sinks_chunks()
+                and self._sinks_frames()
+                and self._selects_only(at, end)
+            ):
+                # Rows a materialize sink keeps as whole columns: the
+                # filters pick the morsel's rows, and each column is
+                # gathered once below, rather than every chunk copied in.
+                columns = self._selected(columns, at, end)
+            else:
+                columns = self._vector_steps(columns, at, end)
             at = end
         if stop == n and self.sinks_chunks() and columns.height > 0:
             if len(self.ungrouped) > 0 and self.ungrouped[0].counts_only():
@@ -2107,6 +2138,102 @@ struct _ChunkRunner(Movable):
                 self.compiled[s] = _VectorStep(
                     self.steps[][s], self.schemas[][s], self.schemas[][s + 1]
                 )
+
+    def _selects_only(mut self, first: Int, stop: Int) raises -> Bool:
+        """Whether steps [first, stop) are filters, then projections that
+        only pass input columns on: their output is the input's rows
+        that every filter keeps, some of its columns, nothing computed."""
+        var projecting = False
+        for s in range(first, stop):
+            self._compiled(s)
+            ref step = self.compiled[s].value()
+            if step.kind == STEP_FILTER:
+                if projecting:
+                    return False
+                continue
+            if (
+                step.kind != STEP_SELECT
+                and step.kind != STEP_DROP
+                and step.kind != STEP_WITH_COLUMNS
+            ) or len(step.expressions) > 0:
+                return False
+            for c in step.outputs:
+                if c < 0:
+                    return False
+            projecting = True
+        return True
+
+    def _selected(
+        mut self, columns: _Columns, first: Int, stop: Int
+    ) raises -> _Columns:
+        """Steps [first, stop) (`_selects_only`) over `columns`: each
+        chunk's rows go through the filters, each filter reading only the
+        rows the ones before kept, and the kept rows' numbers are
+        collected; the columns are then read through them, nothing
+        copied."""
+        trace_path("pipeline.filter_rows_whole")
+        var n = len(self.steps[])
+        var compiled = Pointer[Optional[_VectorStep], MutAnyOrigin](
+            unsafe_from_address=Int(self.compiled.unsafe_ptr())
+        )
+        var source = Pointer[DataChunk, MutAnyOrigin](
+            unsafe_from_address=Int(Pointer(to=self.source))
+        )
+        var bases = columns.bases(self.arena)
+        var skips = first == 0 and self.scan_offset >= 0 and Bool(self.scan)
+        var rows = List[UInt32](capacity=columns.height)
+        var every = True
+        for low in range(0, columns.height, STANDARD_VECTOR_SIZE):
+            var count = min(STANDARD_VECTOR_SIZE, columns.height - low)
+            if skips:
+                var at = self.scan_offset + low
+                if self.scan.value()[].skip(at, at + count):
+                    trace_path("scan.vector_skip")
+                    every = False
+                    continue
+            columns.fill(bases, self.arena, source[], low, count)
+            var kept = count
+            var selection = SelectionVector()
+            for s in range(first, stop):
+                self.counts[2 * s + 1] += kept
+                ref step = compiled[unsafe_offset=s].value()
+                if step.kind == STEP_FILTER and len(step.expressions) > 0:
+                    var began = Int(perf_counter_ns())
+                    step.output.reset()
+                    var target = step.output.new_selection()
+                    kept = step.expressions[0].select(
+                        source[], self.arena, selection, kept, target
+                    )
+                    selection = target
+                    self.counts[2 * n + 1 + s] += (
+                        Int(perf_counter_ns()) - began
+                    )
+                self.counts[2 * s + 2] += kept
+                if kept == 0:
+                    break
+            if kept < count:
+                every = False
+            if selection.is_set():
+                for i in range(kept):
+                    rows.append(UInt32(low + selection.get_index(i)))
+            else:
+                for i in range(kept):
+                    rows.append(UInt32(low + i))
+        var result: _Columns
+        if every:
+            result = columns.copy()
+        elif columns.reads_whole():
+            result = columns.through_rows(rows^)
+        else:
+            var listed = List[Int](capacity=len(rows))
+            for row in rows:
+                listed.append(Int(row))
+            result = columns.through(listed)
+        for s in range(first, stop):
+            ref step = compiled[unsafe_offset=s].value()
+            if step.kind != STEP_FILTER:
+                result = result.picked(step.outputs)
+        return result^
 
     def _vector_steps(
         mut self, columns: _Columns, first: Int, stop: Int
