@@ -746,7 +746,12 @@ For a sum of one Int32 or Int64 column, Metal can group by one or two
 Parquet string columns that retain dictionary codes. Within each key, all
 chunks must use direct codes into the same fixed dictionary of fewer than
 65,536 unique labels. The two keys can have different dictionaries and
-chunk boundaries. The grouped scan reads the UInt32 codes as Int32 keys
+chunk boundaries. When the product of the two dictionary sizes, including a null slot for
+each key, is at most 65,536, Metal indexes one sum per possible key pair.
+It reads the original numeric buffers across independent chunk boundaries
+and keeps first-row order and an exact wide sum. Larger pair domains use
+tuple hashing with the usual limit on actual groups. The grouped scan
+reads the UInt32 codes as Int32 keys
 and compares tuples, including the validity bit for each key. The host
 decodes each output key with its own dictionary. The usual 65,536-group
 limit, `min_count`, and first-occurrence order with `maintain_order=True`

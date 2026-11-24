@@ -61,3 +61,29 @@ struct NumericView(Copyable, Movable):
             self.tag,
             self.nullable,
         )
+
+
+def intersect_numeric_views(
+    inputs: List[List[NumericView]], rows: Int
+) raises -> List[List[NumericView]]:
+    """Split input views at the union of their column chunk boundaries."""
+    var positions = List[Int](length=len(inputs), fill=0)
+    var offsets = List[Int](length=len(inputs), fill=0)
+    var segments = List[List[NumericView]]()
+    var consumed = 0
+    while consumed < rows:
+        var length = rows - consumed
+        for i in range(len(inputs)):
+            if positions[i] >= len(inputs[i]):
+                raise Error("Metal reduction columns have different lengths")
+            length = min(length, inputs[i][positions[i]].rows - offsets[i])
+        var segment = List[NumericView]()
+        for i in range(len(inputs)):
+            segment.append(inputs[i][positions[i]].view(offsets[i], length))
+            offsets[i] += length
+            if offsets[i] == inputs[i][positions[i]].rows:
+                positions[i] += 1
+                offsets[i] = 0
+        segments.append(segment^)
+        consumed += length
+    return segments^
