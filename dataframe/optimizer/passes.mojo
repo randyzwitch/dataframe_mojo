@@ -230,7 +230,7 @@ def plan_lower_right_joins(mut self: QueryContext) raises:
         if not valid:
             continue
         node.coalesce = False
-        node.names2[0] = held_suffix
+        node.set_join_suffix(held_suffix)
         self._nodes.append(node^)
         self._nodes[i] = _select_node(left=len(self._nodes) - 1, exprs=exprs)
         changed = True
