@@ -3,6 +3,10 @@ from dataframe.storage.column import Column, _validity_bit
 from std.memory import unsafe_memcpy
 
 
+# Runs of consecutive rows shorter than this are copied value by value.
+comptime _SHORT_RUN = 16
+
+
 def gather_scalars[
     D: DType
 ](
@@ -51,9 +55,18 @@ def gather_scalars[
             next += 1
         if next > limit:
             raise Error("Column index out of bounds")
-        unsafe_memcpy(
-            dest=dst.unsafe_offset(k), src=src.unsafe_offset(row), count=end - k
-        )
+        if end - k < _SHORT_RUN:
+            # A short run is copied value by value: the call would cost
+            # more than the copy (a selective filter's rows come in runs
+            # of one or two).
+            for j in range(end - k):
+                dst.unsafe_offset(k + j)[] = src.unsafe_offset(row + j)[]
+        else:
+            unsafe_memcpy(
+                dest=dst.unsafe_offset(k),
+                src=src.unsafe_offset(row),
+                count=end - k,
+            )
         k = end
     ref source_bits = column._bits[]
     var bits = List[UInt8]()
