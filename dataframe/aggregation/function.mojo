@@ -2103,6 +2103,120 @@ def _ordered_rows(
         targets.append(found_group[e])
 
 
+def _listed_rows(
+    slot: AggregateFunction,
+    groups: _Groups,
+    lo: Int,
+    hi: Int,
+    mut owners: List[Int],
+    mut owner_of: List[Int],
+    mut positions: List[Int],
+    mut counts: List[Int],
+) -> Bool:
+    """The buffered rows of groups [lo, hi) (`_K_ORDERED`) group by group,
+    each group's in input order, appended as `_ordered_rows` gives them
+    (each row's buffer, as an index into `owners`, and its position there),
+    with each group's row count. A worker takes its morsels in input order,
+    so a buffer holds a group's rows in rising sequence numbers: a group's
+    rows are a merge of one run a buffer of its chain, with no sort. False,
+    with nothing appended, when some run's sequence numbers do not rise
+    (`_ordered_rows` then sorts)."""
+    var base = 8 * (groups.states_at + slot.offset)
+    var owners_at = len(owners)
+    var rows_at = len(positions)
+    var counts_at = len(counts)
+    # One group's runs: each one's buffer index, next row and end.
+    var run_owner = List[Int]()
+    var run_next = List[Int]()
+    var run_end = List[Int]()
+    var buffers = List[Int]()
+    for g in range(lo, hi):
+        run_owner.clear()
+        run_next.clear()
+        run_end.clear()
+        buffers.clear()
+        var at = groups.at(g) + base
+        var total = 0
+        while at != 0:
+            var state = _words_at(at)
+            if state[] != 0:
+                ref buffer = Pointer[_OrderedBuffer, MutAnyOrigin](
+                    unsafe_from_address=Int(state[])
+                )[]
+                var ordinal = Int(state[unsafe_offset=1]) - 1
+                var first = buffer.starts[ordinal]
+                var end = buffer.starts[ordinal + 1]
+                var last = -1
+                for r in range(first, end):
+                    var sequence = buffer.sequences[buffer.rows[r]]
+                    if sequence <= last:
+                        owners.resize(owners_at, 0)
+                        owner_of.resize(rows_at, 0)
+                        positions.resize(rows_at, 0)
+                        counts.resize(counts_at, 0)
+                        return False
+                    last = sequence
+                if end > first:
+                    run_owner.append(_owner_index(owners, Int(state[])))
+                    run_next.append(first)
+                    run_end.append(end)
+                    buffers.append(Int(state[]))
+                    total += end - first
+            at = Int(state[unsafe_offset=2])
+        counts.append(total)
+        var runs = len(run_owner)
+        if runs == 1:
+            ref buffer = Pointer[_OrderedBuffer, MutAnyOrigin](
+                unsafe_from_address=buffers[0]
+            )[]
+            for r in range(run_next[0], run_end[0]):
+                owner_of.append(run_owner[0])
+                positions.append(buffer.rows[r])
+            continue
+        # Each step takes the run whose next row comes first, and from it
+        # every row before the other runs' next rows: a worker's rows come a
+        # morsel at a time, so the steps are about one a morsel, not a row.
+        var heads = List[Int](capacity=runs)
+        for k in range(runs):
+            ref buffer = Pointer[_OrderedBuffer, MutAnyOrigin](
+                unsafe_from_address=buffers[k]
+            )[]
+            heads.append(buffer.sequences[buffer.rows[run_next[k]]])
+        var left = total
+        while left > 0:
+            var best = -1
+            var second = Int.MAX
+            for k in range(runs):
+                var head = heads[k]
+                if best < 0 or head < heads[best]:
+                    if best >= 0:
+                        second = min(second, heads[best])
+                    best = k
+                else:
+                    second = min(second, head)
+            ref chosen = Pointer[_OrderedBuffer, MutAnyOrigin](
+                unsafe_from_address=buffers[best]
+            )[]
+            var r = run_next[best]
+            var end = run_end[best]
+            var owner = run_owner[best]
+            var head: Int
+            while True:
+                owner_of.append(owner)
+                positions.append(chosen.rows[r])
+                r += 1
+                left -= 1
+                if r == end:
+                    head = Int.MAX
+                    break
+                head = chosen.sequences[chosen.rows[r]]
+                if head > second:
+                    break
+            run_next[best] = r
+            heads[best] = head
+    return True
+
+
 def _gather_rows(
     owners: List[Int], owner_of: List[Int], positions: List[Int]
 ) raises -> Series:
@@ -2357,6 +2471,17 @@ struct _Finalizer(Movable):
                 self.pick_rows.append(positions[e])
             return
         if self.mode == _F_LIST:
+            if _listed_rows(
+                self.slot,
+                groups,
+                lo,
+                hi,
+                self.pick_owners,
+                self.pick_owner,
+                self.pick_rows,
+                self.list_counts,
+            ):
+                return
             # The rows in input order, then by group (a stable counting
             # sort), so each group's list keeps its input order.
             var owner_of = List[Int]()
