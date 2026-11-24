@@ -69,9 +69,9 @@ comptime _MERGE = 2
 comptime _GATHER = 3
 comptime _DONE = 4
 
-# Bins are the top bits of the key hash. There are at least 16, so the
-# threads have bins to pick from when partitions differ in size, and at
-# most 256, so a bin fits in a byte a row and a task's per-bin cursors
+# Bins are the top bits of the key hash. There are at least 16, and at
+# least two a thread, so the threads have bins to pick from when
+# partitions differ in size, and at most 256, so a bin fits in a byte a row and a task's per-bin cursors
 # stay small. Between those, the bits grow two at a time while a bin
 # would average more rows than one row group (122,880 rows): a bin's rows
 # are evaluated by one thread, and bins of bounded size keep any one of
@@ -570,6 +570,13 @@ struct WindowSink(Movable, Rounds):
             samples.append(_contiguous(key, 0, 1))
         if len(self.shared_texts) > 0 and not _integer_key(samples):
             self.placed_hashes = huge_uninit[UInt64](self.height)
+        # At least two bins a thread, so no thread waits for a bin while
+        # others still have two to take.
+        while (
+            self.bits < _MOST_BITS
+            and (1 << self.bits) < 2 * configured_workers()
+        ):
+            self.bits = min(self.bits + 2, _MOST_BITS)
         while self.bits < _MOST_BITS and (self.height >> self.bits) > _BIN_ROWS:
             self.bits = min(self.bits + 2, _MOST_BITS)
         var blocks = (

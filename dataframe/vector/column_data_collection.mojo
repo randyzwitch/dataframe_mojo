@@ -760,9 +760,12 @@ struct MaterializeFinish(Movable, Rounds):
                 # Each column's batches, one under another, as its chunks:
                 # a task per share of the columns.
                 var width = self.schema.width()
-                self.stacked = List[Series](
-                    length=width, fill=self.schema._columns[0].copy()
-                ) if width > 0 else List[Series]()
+                self.stacked = (
+                    List[Series](
+                        length=width, fill=self.schema._columns[0].copy()
+                    ) if width
+                    > 0 else List[Series]()
+                )
                 self.width = round_width(width)
                 if self.width > 0:
                     return self.width
