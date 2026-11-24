@@ -67,7 +67,6 @@ from dataframe.kernels.row_encode import (
 )
 from dataframe.series import (
     Series,
-    sort_indices,
 )
 from std.collections import (
     Dict,
@@ -242,16 +241,27 @@ struct _StreamMergeJob(Job):
 
 
 struct _FinishJob(Job):
-    """Finish one hash part's state into its output frame."""
+    """Finish one hash part's state into its output frame; when `ordered`,
+    its groups put in first-occurrence order first, their first rows then
+    in `firsts`."""
 
     var state: _StreamReduction
     var frame: DataFrame
+    var ordered: Bool
+    var firsts: List[Int]
 
-    def __init__(out self, var state: _StreamReduction) raises:
+    def __init__(
+        out self, var state: _StreamReduction, ordered: Bool = False
+    ) raises:
         self.state = state^
         self.frame = DataFrame(List[Series](), height=0)
+        self.ordered = ordered
+        self.firsts = List[Int]()
 
     def run(mut self) raises:
+        if self.ordered:
+            self.state.order_by_firsts()
+            self.firsts = self.state.firsts.copy()
         self.frame = self.state.finish()
 
 
@@ -326,10 +336,9 @@ struct PartsFinish(Movable, Rounds):
     (`next_round`, `round_task`): each part's states finished into its
     frame by the task that takes it. After the round, the frames are the
     chunks of one frame, or, when `ordered`, their groups interleaved by
-    first occurrence, the order a single state would have produced: each
-    part's groups are already in first-occurrence order, so the
-    interleave is a k-way merge on `firsts` with a binary heap of part
-    cursors. `frame` is the result once `next_round` returns 0."""
+    first occurrence, the order a single state would have produced: the
+    task that finishes a part puts its groups in first-occurrence order
+    first, so the interleave is a merge of ascending runs of `firsts`. `frame` is the result once `next_round` returns 0."""
 
     var jobs: List[_FinishJob]
     # Each part's first-occurrence rows, when `ordered`.
@@ -352,10 +361,7 @@ struct PartsFinish(Movable, Rounds):
         self.done = False
         self.frame = DataFrame(List[Series](), height=0)
         while len(parts) > 0:
-            var part = parts.pop(0)
-            if ordered:
-                self.firsts.append(part.firsts.copy())
-            self.jobs.append(_FinishJob(part^))
+            self.jobs.append(_FinishJob(parts.pop(0), ordered))
 
     @staticmethod
     def of_table(
@@ -371,9 +377,6 @@ struct PartsFinish(Movable, Rounds):
             empty.frame = template.finish()
             empty.done = True
             return empty^
-        if ordered:
-            for p in range(len(parts)):
-                parts[p].order_by_firsts()
         return Self(parts^, ordered)
 
     def next_round(mut self) raises -> Int:
@@ -386,6 +389,10 @@ struct PartsFinish(Movable, Rounds):
                 return self.width
         self.done = True
         if self.ordered:
+            for j in range(len(self.jobs)):
+                var firsts = List[Int]()
+                swap(firsts, self.jobs[j].firsts)
+                self.firsts.append(firsts^)
             self.frame = self._interleaved()
         elif len(self.jobs) == 1:
             self.frame = self.jobs[0].frame.copy()
@@ -405,66 +412,23 @@ struct PartsFinish(Movable, Rounds):
 
     def _interleaved(self) raises -> DataFrame:
         """The parts' frames merged into first-occurrence order."""
-        var bases = List[Int](capacity=len(self.firsts))
         var total = 0
         for p in range(len(self.firsts)):
-            bases.append(total)
             total += len(self.firsts[p])
         ref firsts = self.firsts
         var frames = List[DataFrame](capacity=len(self.jobs))
         for j in range(len(self.jobs)):
             frames.append(self.jobs[j].frame.copy())
-        var sizes = List[Int](capacity=len(firsts))
+        if total == 0:
+            return concat(frames)
+        # Each part's first rows ascend: merged pairwise, run by run.
+        var values = List[Int](capacity=total)
+        var runs = List[Int](capacity=len(firsts) + 1)
+        runs.append(0)
         for p in range(len(firsts)):
-            sizes.append(len(firsts[p]))
-        # Heap entries: the part and its next first-occurrence row, cached
-        # so a comparison reads two flat lists.
-        var heap_part = List[Int]()
-        var heap_key = List[Int]()
-        var cursor = List[Int](length=len(sizes), fill=0)
-        for p in range(len(sizes)):
-            if sizes[p] > 0:
-                heap_part.append(p)
-                heap_key.append(firsts[p][0])
-        var size = len(heap_part)
-
-        @always_inline
-        def sift_down(
-            mut part: List[Int], mut keys: List[Int], size: Int, start: Int
-        ):
-            var i = start
-            while True:
-                var smallest = i
-                var left = 2 * i + 1
-                var right = left + 1
-                if left < size and keys[left] < keys[smallest]:
-                    smallest = left
-                if right < size and keys[right] < keys[smallest]:
-                    smallest = right
-                if smallest == i:
-                    return
-                var swap_key = keys[i]
-                keys[i] = keys[smallest]
-                keys[smallest] = swap_key
-                var swap_part = part[i]
-                part[i] = part[smallest]
-                part[smallest] = swap_part
-                i = smallest
-
-        for i in range(size // 2 - 1, -1, -1):
-            sift_down(heap_part, heap_key, size, i)
-        var order = List[Int](capacity=total)
-        while size > 0:
-            var part = heap_part[0]
-            order.append(bases[part] + cursor[part])
-            cursor[part] += 1
-            if cursor[part] == sizes[part]:
-                size -= 1
-                heap_part[0] = heap_part[size]
-                heap_key[0] = heap_key[size]
-            else:
-                heap_key[0] = firsts[part][cursor[part]]
-            sift_down(heap_part, heap_key, size, 0)
+            values.extend(Span(firsts[p]))
+            runs.append(len(values))
+        var order = _merge_ascending_runs(values, runs)
         return concat(frames).rechunk().take(order)
 
 
@@ -908,7 +872,16 @@ struct _StreamReduction(Movable):
                 break
         if sorted:
             return
-        var order = sort_indices([self.firsts.copy()])
+        # Every group's first row is its own: sorting the rows, each
+        # packed above its group, orders the groups with no comparison of
+        # anything but machine integers.
+        var keyed = List[UInt128](capacity=n)
+        for g in range(n):
+            keyed.append((UInt128(self.firsts[g]) << 64) | UInt128(g))
+        sort(keyed)
+        var order = List[Int](capacity=n)
+        for key in keyed:
+            order.append(Int(UInt64(key & 0xFFFFFFFFFFFFFFFF)))
         var firsts = List[Int](capacity=n)
         for g in order:
             firsts.append(self.firsts[g])
