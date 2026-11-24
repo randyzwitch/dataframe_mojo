@@ -19,16 +19,17 @@ from std.collections import BinaryHeap, Optional
 from std.sys import size_of
 from std.memory import Pointer
 
-from dataframe.binding import BoundExpr
+from dataframe.binding import BoundExpr, bind
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.dtype import NUMERIC_DTYPES
-from dataframe.expr import COL, LE, LIT_INT, LT, OVER, RANK, split_names
+from dataframe.expr import COL, LE, LIT_INT, LT, OVER, RANK, Expr, split_names
 from dataframe.aggregation.hash_table import (
     TOP_ROWS_INLINE,
     key_supported,
 )
 from dataframe.aggregation.table_sink import aggregate_top_rows
+from dataframe.kernels.gather import can_filter_aligned_chunks
 from dataframe.kernels.hashing import encode_rows
 from dataframe.parallel import Job, run_jobs, worker_count
 from dataframe.kernels.partition import encode_partitioned
@@ -212,6 +213,108 @@ def _pattern(bound: BoundExpr) -> Tuple[Int, Int, Int]:
     return (rank.left, compare.left, k)
 
 
+struct TopRowsInputs(Movable):
+    """What the aggregate table's top-rows state reads for a
+    top-k-per-partition predicate: the partition keys and the ranked
+    value, cut into chunks at the same rows (`ends`, each chunk's end),
+    k, and whether the rank is descending."""
+
+    var keys: List[Series]
+    var value: Series
+    var ends: List[Int]
+    var k: Int
+    var descending: Bool
+
+    def __init__(
+        out self,
+        var keys: List[Series],
+        var value: Series,
+        var ends: List[Int],
+        k: Int,
+        descending: Bool,
+    ):
+        self.keys = keys^
+        self.value = value^
+        self.ends = ends^
+        self.k = k
+        self.descending = descending
+
+
+def top_rows_inputs(
+    expr: Expr, columns: List[Series]
+) -> Optional[TopRowsInputs]:
+    """The inputs of `expr` over `columns` when it is a top-k-per-partition
+    predicate whose k best pairs fit inline in a group's state, its value
+    a plain number and its keys columns with key words; None otherwise.
+    Columns cut at the same rows stay as they are; others are joined into
+    one chunk each."""
+    var bound: BoundExpr
+    try:
+        bound = bind(expr, columns)
+    except:
+        return None
+    var found = _pattern(bound)
+    var column_node = found[0]
+    if column_node < 0 or found[2] > TOP_ROWS_INLINE:
+        return None
+    ref nodes = bound.expr._nodes
+    var value = columns[bound.sources[column_node]].copy()
+    var numeric = False
+    comptime for t in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[t]
+        numeric = numeric or value._data.isa[Column[Scalar[D]]]()
+    if not numeric or value.dtype().is_decimal():
+        return None
+    var read = List[Series]()
+    for name in split_names(nodes[found[1]].text2):
+        var at = -1
+        for c in range(len(columns)):
+            if columns[c].name() == name:
+                at = c
+        if at < 0 or not key_supported(columns[at]):
+            return None
+        read.append(columns[at].copy())
+    read.append(value^)
+    var ends = List[Int]()
+    if can_filter_aligned_chunks(read):
+        ends = read[0]._chunked.value()[].ends.copy()
+    else:
+        try:
+            for c in range(len(read)):
+                if read[c].is_chunked():
+                    read[c] = read[c].rechunk()
+        except:
+            return None
+        ends.append(len(read[0]))
+    var whole = read.pop()
+    return TopRowsInputs(
+        read^,
+        whole^,
+        ends^,
+        found[2],
+        nodes[nodes[found[1]].left].min_count == 1,
+    )
+
+
+def top_rows_ranges(ends: List[Int], workers: Int) -> List[Int]:
+    """(offset, length) morsels covering chunks ending at `ends`, for
+    `workers` threads to take from a shared cursor: about four each,
+    between 4,096 and 65,536 rows, none crossing a chunk's end."""
+    var height = ends[len(ends) - 1] if len(ends) > 0 else 0
+    var morsel = max(4096, min(1 << 16, height // (4 * workers) + 1))
+    var ranges = List[Int]()
+    var start = 0
+    for end in ends:
+        var at = start
+        while at < end:
+            var length = min(morsel, end - at)
+            ranges.append(at)
+            ranges.append(length)
+            at += length
+        start = end
+    return ranges^
+
+
 def _table_top_rows(
     keys: List[Series],
     value: Series,
@@ -240,15 +343,9 @@ def _table_top_rows(
             return None
         flat.append(key.rechunk() if key.is_chunked() else key.copy())
     trace_path("filter.top_k_table")
-    var ranges = List[Int]()
-    var morsel = max(4096, min(1 << 16, height // (4 * workers) + 1))
-    var at = 0
-    while at < height:
-        var length = min(morsel, height - at)
-        ranges.append(at)
-        ranges.append(length)
-        at += length
-    return aggregate_top_rows(flat, value, k, descending, ranges, workers)
+    return aggregate_top_rows(
+        flat, value, k, descending, top_rows_ranges([height], workers), workers
+    )
 
 
 def top_k_mask(

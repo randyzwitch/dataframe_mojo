@@ -134,6 +134,10 @@ from dataframe.query_execution.reduction_sink import (
     whole_input_reductions,
 )
 from dataframe.query_execution.sort_sink import SortSink
+from dataframe.query_execution.top_rows_sink import (
+    TopRowsSink,
+    top_rows_projection,
+)
 from dataframe.query_execution.row_order_sink import (
     RowOrderSink,
     row_order_node,
@@ -1706,6 +1710,9 @@ struct _OperatorPipeline(Movable):
     # and when its task started.
     var window_keys: List[String]
     var window: List[WindowSink]
+    # The sink of such a projection whose one computed column keeps each
+    # partition's first k rows by ordinal rank, while its rounds run.
+    var top_rows: List[TopRowsSink]
     # Whether it is a sort of every row that runs as a `SortSink`, and the
     # sink while its rounds run.
     var sorts: Bool
@@ -1759,6 +1766,7 @@ struct _OperatorPipeline(Movable):
         self.filling = False
         self.window_keys = List[String]()
         self.window = List[WindowSink]()
+        self.top_rows = List[TopRowsSink]()
         self.sorts = False
         self.sorting = List[SortSink]()
         self.ranks = False
@@ -1797,6 +1805,15 @@ struct _OperatorPipeline(Movable):
             var input = self.plan._execute(
                 node.left, False, self.streaming, self.batch_size
             )
+            var at = top_rows_projection(node.exprs, input._columns)
+            if at >= 0:
+                trace_path("window.top_rows_rounds")
+                self.top_rows.append(
+                    TopRowsSink(
+                        input^, node.exprs.copy(), node.kind == SELECT, at
+                    )
+                )
+                return
             trace_path("window.partitioned_sink")
             self.window.append(
                 WindowSink(
@@ -1895,6 +1912,7 @@ struct _OperatorPipeline(Movable):
         rounds come first, and the table is made from their result."""
         if (
             len(self.window) > 0
+            or len(self.top_rows) > 0
             or len(self.sorting) > 0
             or len(self.ranking) > 0
             or len(self.windowing) > 0
@@ -1939,6 +1957,21 @@ struct _OperatorPipeline(Movable):
                 self.index,
                 "window",
                 rows,
+                self.result.height(),
+                wall_ns=Int(perf_counter_ns()) - self.began,
+            )
+            self.finalize()
+        if len(self.top_rows) > 0:
+            var tasks = self.top_rows[0].next_round()
+            if tasks > 0:
+                return tasks
+            self.result = self.top_rows[0].take_result()
+            _ = self.top_rows.pop()
+            plan_record(
+                self.plan,
+                self.index,
+                "window",
+                self.result.height(),
                 self.result.height(),
                 wall_ns=Int(perf_counter_ns()) - self.began,
             )
@@ -2036,6 +2069,8 @@ struct _OperatorPipeline(Movable):
     def finalize_task(mut self, task: Int) raises:
         if len(self.window) > 0:
             self.window[0].round_task(task)
+        elif len(self.top_rows) > 0:
+            self.top_rows[0].round_task(task)
         elif len(self.ranking) > 0:
             self.ranking[0].round_task(task)
         elif len(self.windowing) > 0:

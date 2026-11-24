@@ -310,7 +310,8 @@ def plan_lower_whole_input_filters(mut self: QueryContext) raises:
     windows run in the operator that evaluates windows over a whole
     input, split by partition into tasks of the query's schedule, the
     reductions in an aggregate (`plan_lower_reductions`), and the filter
-    left reads one value per row."""
+    left reads one value per row. Plans collected without the optimizer
+    run this pass too, so such a filter takes the same route either way."""
     var count = len(self._nodes)
     var changed = False
     for i in range(count):

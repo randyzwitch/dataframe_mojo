@@ -58,6 +58,7 @@ from dataframe.selectors import expand_all
 from dataframe.series import Series
 from dataframe.sorting.sort_key import STANDARD_VECTOR_SIZE
 from dataframe.storage.allocation import huge_uninit, release_huge
+from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.window_sort import _integer_key, bin_partition_groups
 
@@ -280,6 +281,70 @@ def _gather_values(
     raise Error("window result column has no fixed-width storage")
 
 
+def _boolean(series: Series) -> Bool:
+    """Whether the column's values are bits, one a row, that a task can
+    read at any row (a column of one repeated value aside)."""
+    return series._data.isa[BoolColumn]() and not (
+        series._data[BoolColumn].is_constant()
+    )
+
+
+def _gather_bits(
+    output: Int,
+    lo: Int,
+    hi: Int,
+    bins: Int,
+    inverse: Int,
+    before: Int,
+    values: List[Int],
+    valid: List[Int],
+    first_bit: List[Int],
+    out_bits: Int,
+):
+    """Output rows [lo, hi) of one sink task for a Boolean result: row r's
+    value is bit first_bit[bin] + before[bin] + inverse[r] of its bin's
+    value bits (at values[bin]), set in the output bits at `output`; its
+    validity, when `out_bits` holds an address, from the same bit of that
+    bin's validity bits (valid[bin], 0 for none). `lo` is a multiple of 8,
+    so the task writes whole bytes no other task writes."""
+    var bin_of = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bins)
+    var within = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=inverse)
+    var skip = Pointer[Int, MutAnyOrigin](unsafe_from_address=before)
+    var out = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=output)
+    for r in range(lo, hi):
+        var b = Int(bin_of[unsafe_offset=r])
+        var at = (
+            first_bit[b] + skip[unsafe_offset=b] + Int(within[unsafe_offset=r])
+        )
+        var bit = (
+            Pointer[UInt8, MutAnyOrigin](unsafe_from_address=values[b])[
+                unsafe_offset=at // 8
+            ]
+            >> UInt8(at % 8)
+        ) & 1
+        out[unsafe_offset=r // 8] |= bit << UInt8(r % 8)
+    if out_bits == 0:
+        return
+    var bits = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=out_bits)
+    for r in range(lo, hi):
+        var b = Int(bin_of[unsafe_offset=r])
+        var ok = True
+        if valid[b] != 0:
+            var at = (
+                first_bit[b]
+                + skip[unsafe_offset=b]
+                + Int(within[unsafe_offset=r])
+            )
+            ok = (
+                Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid[b])[
+                    unsafe_offset=at // 8
+                ]
+                >> UInt8(at % 8)
+            ) & 1 == 1
+        if ok:
+            bits[unsafe_offset=r // 8] |= UInt8(1) << UInt8(r % 8)
+
+
 struct WindowSink(Movable, Rounds):
     """A SELECT or WITH_COLUMNS of window functions over `input`, split by
     the windows' shared partition keys (`shared_partition_keys` in
@@ -345,6 +410,10 @@ struct WindowSink(Movable, Rounds):
     # and each gather task's piece, for the columns not filled by row.
     var outputs: List[Series]
     var fixed: List[Bool]
+    # By evaluated expression: whether it is filled by row from Boolean
+    # results' bits, then its output's value bits.
+    var bits_out: List[Bool]
+    var out_values: List[List[UInt8]]
     var values_at: List[List[Int]]
     var valid_at: List[List[Int]]
     var first_bit: List[List[Int]]
@@ -391,6 +460,8 @@ struct WindowSink(Movable, Rounds):
         self.next = Atomic[Int64](0)
         self.outputs = List[Series]()
         self.fixed = List[Bool]()
+        self.bits_out = List[Bool]()
+        self.out_values = List[List[UInt8]]()
         self.values_at = List[List[Int]]()
         self.valid_at = List[List[Int]]()
         self.first_bit = List[List[Int]]()
@@ -710,11 +781,29 @@ struct WindowSink(Movable, Rounds):
                 nulls = nulls or self.results[b][k].null_count() > 0
             ref sample = self.results[first][k]
             var fixed = _fixed_width(sample)
+            var boolean = not fixed
+            for b in self.order:
+                boolean = boolean and _boolean(self.results[b][k])
             self.fixed.append(fixed)
+            self.bits_out.append(boolean)
+            self.out_values.append(
+                List[UInt8](
+                    length=(self.height + 7) // 8, fill=0
+                ) if boolean else List[UInt8]()
+            )
             var values = List[Int](length=bins, fill=0)
             var valid = List[Int](length=bins, fill=0)
             var first_bit = List[Int](length=bins, fill=0)
-            if fixed:
+            if boolean:
+                for b in self.order:
+                    ref column = self.results[b][k]._data[BoolColumn]
+                    values[b] = Int(column.unsafe_values())
+                    if column.null_count() > 0:
+                        valid[b] = Int(column.unsafe_validity())
+                    first_bit[b] = column.validity_offset()
+                self.outputs.append(sample.copy())
+                self.combined.append(sample.copy())
+            elif fixed:
                 for b in self.order:
                     var parts = _value_parts(self.results[b][k])
                     values[b] = parts[0]
@@ -737,7 +826,9 @@ struct WindowSink(Movable, Rounds):
             self.valid_at.append(valid^)
             self.first_bit.append(first_bit^)
             self.out_bits.append(
-                List[UInt8](length=(self.height + 7) // 8, fill=0) if fixed
+                List[UInt8](length=(self.height + 7) // 8, fill=0) if (
+                    fixed or boolean
+                )
                 and nulls else List[UInt8]()
             )
         var tasks = len(self.bounds) - 1
@@ -760,6 +851,23 @@ struct WindowSink(Movable, Rounds):
                     bits = Int(self.out_bits[k].unsafe_ptr())
                 _gather_values(
                     self.outputs[k],
+                    lo,
+                    hi,
+                    Int(bin_of),
+                    Int(inverse),
+                    Int(before),
+                    self.values_at[k],
+                    self.valid_at[k],
+                    self.first_bit[k],
+                    bits,
+                )
+                continue
+            if self.bits_out[k]:
+                var bits = 0
+                if len(self.out_bits[k]) > 0:
+                    bits = Int(self.out_bits[k].unsafe_ptr())
+                _gather_bits(
+                    Int(self.out_values[k].unsafe_ptr()),
                     lo,
                     hi,
                     Int(bin_of),
@@ -795,6 +903,18 @@ struct WindowSink(Movable, Rounds):
                     var bits = List[UInt8]()
                     swap(bits, self.out_bits[k])
                     _set_bits(self.outputs[k], bits^)
+                continue
+            if self.bits_out[k]:
+                var values = List[UInt8]()
+                swap(values, self.out_values[k])
+                var bits = List[UInt8]()
+                swap(bits, self.out_bits[k])
+                var output = Series(
+                    self.outputs[k].name(),
+                    BoolColumn(values=values^, bits=bits^, length=self.height),
+                )
+                output._field_metadata = self.outputs[k]._field_metadata
+                self.outputs[k] = output^
                 continue
             # Each gather task made one piece per column not filled by
             # row, in column order.

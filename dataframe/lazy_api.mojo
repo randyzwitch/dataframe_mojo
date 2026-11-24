@@ -138,6 +138,7 @@ from dataframe.optimizer.passes import (
     plan_prepare_dataset_projections,
     plan_push_slices,
     plan_slice_over_ipc,
+    plan_lower_whole_input_filters,
     plan_unique_as_aggregate,
 )
 from dataframe.parallel import (
@@ -1648,6 +1649,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
+            plan_lower_whole_input_filters(plan._plan)
             plan_align_join_keys(plan._plan)
         var shared = List[QueryContext]()
         if optimize:
@@ -2057,6 +2059,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
+            plan_lower_whole_input_filters(plan._plan)
             plan_align_join_keys(plan._plan)
         var out = String()
         if engine != "cpu":
@@ -2136,6 +2139,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
+            plan_lower_whole_input_filters(plan._plan)
             plan_align_join_keys(plan._plan)
         var shared = List[QueryContext]()
         if optimize:
@@ -2936,6 +2940,7 @@ def _collect_placed[
     var plan = query._optimized() if optimize else query.copy()
     if not optimize:
         plan_unique_as_aggregate(plan._plan)
+        plan_lower_whole_input_filters(plan._plan)
         plan_align_join_keys(plan._plan)
     var solved = _solve_devices(
         plan,
