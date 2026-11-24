@@ -1,17 +1,5 @@
 """An eager CPU dataframe with runtime schema and positional row semantics."""
-from dataframe.time.windows import (
-    positive_period,
-    closed_sides,
-    negate_period,
-    shift_time,
-    truncate_time,
-    check_time_index,
-    sort_time_groups,
-    search_time,
-    rolling_bounds,
-)
-from dataframe.time.temporal import zone_of, parse_interval
-from .window import partitions as window_partitions
+from dataframe.time.windows import negate_period
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import pow10
 from std.collections import Dict, Optional
@@ -85,14 +73,14 @@ from dataframe.storage.nested import ListColumn, StructColumn
 from .trace import trace_path
 from .categorical import (
     recode,
-    unify,
     union_of,
 )
 from dataframe.sorting.sort import sort_rows
 from .value import AnyValue
 from .frame_iter import RowIterator, ColumnIterator, SliceIterator
 from .frame_size import frame_size
-from .asof import asof_rows
+from dataframe.query_execution.asof_sink import asof_outputs
+from dataframe.query_execution.time_window_sink import time_window_bound
 from dataframe.kernels.hashing import (
     RowKeys,
     encode_rows,
@@ -103,6 +91,7 @@ from dataframe.kernels.binary import validity
 from .selectors import expand, expand_all
 from dataframe.planning.expression_inputs import _references
 from .lazy import LazyFrame, _concat_plans
+from .lazy_api import LazyTimeGroupBy
 from .display import render_frame, render_glimpse
 from dataframe.aggregation.keys import (
     _KEY_SEP,
@@ -1646,62 +1635,33 @@ struct DataFrame(Copyable, Sized, Writable):
             right_key = on
         if left_key == "" or right_key == "":
             raise Error("join_asof requires on or both left_on and right_on")
-        var lhs = self.column(left_key)
-        var rhs = right.column(right_key)
-        var groups = by.copy()
-        var seen = Dict[String, Bool]()
-        var stacked = List[Series]()
-        for name in groups:
-            if name in seen or name == left_key or name == right_key:
-                raise Error("join_asof duplicate or ordered key in by: " + name)
-            seen[name] = True
-            var l = self.column(name)
-            var r = right.column(name)
-            if l.dtype().is_categorical() or r.dtype().is_categorical():
-                unify(l, r)
-            if l.dtype() != r.dtype():
-                raise Error("join_asof by dtypes must match: " + name)
-            stacked.append(l.append(r))
-        var left_ids = List[Int]()
-        var right_ids = List[Int]()
-        var matchable = List[Bool]([True])
-        if len(groups):
-            var keys = encode_rows(_expand_struct_keys(stacked), True)
-            matchable = List[Bool](length=keys.count(), fill=True)
-            for g in range(keys.count()):
-                for key in stacked:
-                    if key.get(keys.representatives[g]).is_null():
-                        matchable[g] = False
-            for row in range(self.height()):
-                left_ids.append(keys.ids[row])
-            for row in range(right.height()):
-                right_ids.append(keys.ids[self.height() + row])
-        var rows = asof_rows(
-            lhs,
-            rhs,
-            left_ids,
-            right_ids,
-            matchable,
+        # The request's errors, before any plan is made.
+        _ = asof_outputs(
+            self,
+            right,
+            left_key,
+            right_key,
+            by,
             strategy,
             tolerance,
-            allow_exact_matches,
+            suffix,
         )
-        var columns = self._columns.copy()
-        var names = Dict[String, Bool]()
-        for name in self.columns():
-            names[name] = True
-        var left_names = names.copy()
-        for column in right._columns:
-            var name = column.name()
-            if name in seen or (name == right_key and left_key == right_key):
-                continue
-            if name in left_names:
-                name += suffix
-            if name in names:
-                raise Error("join_asof output name collision: " + name)
-            names[name] = True
-            columns.append(column.take_or_null(rows).renamed(name))
-        return Self(columns^, height=self.height())
+        # A plan of one as-of join over the two frames, run through the
+        # same pipelines as `LazyFrame.collect` (`AsofSink`).
+        return (
+            self.lazy()
+            .join_asof(
+                right.lazy(),
+                left_on=left_key,
+                right_on=right_key,
+                by=by,
+                strategy=strategy,
+                tolerance=tolerance,
+                suffix=suffix,
+                allow_exact_matches=allow_exact_matches,
+            )
+            ._collect(optimize=False, streaming=True, batch_size=65536)
+        )
 
     def join_asof(
         self,
@@ -3832,125 +3792,62 @@ struct TimeGroupBy(Copyable):
     def agg(
         self, expressions: List[Expr], *, batch_size: Int = 1024
     ) raises -> DataFrame:
-        positive_period(self._period)
-        _ = parse_interval(self._offset)
-        var sides = closed_sides(self._closed)
-        if self._label not in ["left", "right", "datapoint"]:
-            raise Error("label must be left, right or datapoint")
-        if batch_size <= 0:
-            raise Error("batch_size must be positive")
-        var index = self._frame.column(self._index).rechunk()
-        var keys = List[Series]()
-        var names = List[String]([self._index])
-        for name in self._by:
-            if name in names:
-                raise Error("duplicate time grouping key: " + name)
-            names.append(name)
-            keys.append(self._frame.column(name))
-        var ids = List[Int]()
-        if len(keys):
-            ids = encode_rows(_expand_struct_keys(keys), True).ids.copy()
-        var groups = window_partitions(self._frame.height(), ids)
-        # Unsorted groups are put in index order; rolling output rows still
-        # follow input row order within each group.
-        var inputs = List[List[Int]]()
-        if not check_time_index(index, groups):
-            if self._rolling:
-                inputs = groups.copy()
-            sort_time_groups(index, groups)
-        var dtype = index.dtype()
-        var zone = zone_of(dtype)
-        ref times = index._data[Column[Int64]]
-        var gathered = List[Int]()
-        var window_ids = List[Int]()
-        var representatives = List[Int]()
-        var labels = List[Int64]()
-        if self._rolling:
-            var bounds = rolling_bounds(
-                index, groups, self._period, self._offset, self._closed
-            )
-            for g in range(len(groups)):
-                ref rows = groups[g]
-                for j in range(len(rows)):
-                    var row = inputs[g][j] if len(inputs) else rows[j]
-                    var id = len(labels)
-                    labels.append(times._get(row))
-                    representatives.append(row)
-                    var begin = bounds[0][row]
-                    var end = bounds[1][row]
-                    for k in range(begin, end):
-                        gathered.append(rows[k])
-                        window_ids.append(id)
-        else:
-            positive_period(self._every)
-            for rows in groups:
-                if len(rows) == 0:
-                    continue
-                var first = times._get(rows[0])
-                var last = times._get(rows[len(rows) - 1])
-                var start = shift_time(
-                    truncate_time(first, dtype, self._every, zone),
-                    dtype,
-                    self._offset,
-                    zone,
-                )
-                while start > first or (start == first and not sides[0]):
-                    var previous = shift_time(
-                        start, dtype, negate_period(self._every), zone
-                    )
-                    if previous >= start:
-                        raise Error("every does not advance the time index")
-                    start = previous
-                # Large negative offsets can start before the first useful window.
-                while shift_time(start, dtype, self._period, zone) < first:
-                    start = shift_time(start, dtype, self._every, zone)
-                while start <= last:
-                    var end = shift_time(start, dtype, self._period, zone)
-                    var lo = search_time(times, rows, start, not sides[0])
-                    var hi = search_time(times, rows, end, sides[1])
-                    if lo < hi:
-                        var id = len(labels)
-                        labels.append(
-                            start if self._label
-                            == "left" else end if self._label
-                            == "right" else times._get(rows[lo])
-                        )
-                        representatives.append(rows[lo])
-                        for k in range(lo, hi):
-                            gathered.append(rows[k])
-                            window_ids.append(id)
-                    var next = shift_time(start, dtype, self._every, zone)
-                    if next <= start:
-                        raise Error("every does not advance the time index")
-                    start = next
-        var bound = _bind_all(expressions, self._frame._columns)
-        for expression in bound:
-            if expression.shape() != AGGREGATE:
-                raise Error(
-                    "Time grouping requires scalar aggregate expressions"
-                )
-            if expression.expr._name in names:
-                raise Error(
-                    "Aggregate output name collides with time grouping key: "
-                    + expression.expr._name
-                )
-        var columns = List[Series]()
-        for key in keys:
-            columns.append(key.take(representatives))
-        columns.append(
-            Series(self._index, Column[Int64](labels.copy())).with_dtype(dtype)
+        """One row per window: the `group_by` keys, the index column (the
+        window's label) and the aggregations.
+
+        Runs as the lazy plan's time window does: a plan of one
+        `group_by_dynamic` or `rolling` node over the columns it reads,
+        executed through the same pipelines as `LazyFrame.collect`, whose
+        finish lists the windows and aggregates them in rounds of tasks
+        (`TimeWindowSink`)."""
+        var plan = self._planned(self._frame).agg(
+            expressions, batch_size=batch_size
         )
-        var input = self._frame.take(gathered)
-        for expression in bound:
-            columns.append(
-                evaluate(
-                    expression,
-                    input._columns,
-                    input.height(),
-                    batch_size=batch_size,
-                    grouped=True,
-                    groups=window_ids,
-                    group_count=len(labels),
+        # The request's errors, before the plan runs.
+        _ = time_window_bound(
+            self._frame, plan._plan._nodes[len(plan._plan._nodes) - 1]
+        )
+        # Only the columns the windows read are cut into the plan's
+        # morsels.
+        var reads = Dict[String, Bool]()
+        reads[self._index] = True
+        for name in self._by:
+            reads[name] = True
+        for expression in expressions:
+            var r = _references(expression)
+            if not r:
+                return plan._collect(
+                    optimize=False, streaming=True, batch_size=65536
                 )
+            for name in r.value():
+                reads[name] = True
+        var columns = List[Series]()
+        for column in self._frame._columns:
+            if column.name() in reads:
+                columns.append(column.copy())
+        var frame = DataFrame(columns^, height=self._frame.height())
+        return (
+            self._planned(frame)
+            .agg(expressions, batch_size=batch_size)
+            ._collect(optimize=False, streaming=True, batch_size=65536)
+        )
+
+    def _planned(self, frame: DataFrame) -> LazyTimeGroupBy:
+        """This request as a lazy time grouping of `frame`."""
+        if self._rolling:
+            return frame.lazy().rolling(
+                self._index,
+                self._period,
+                Optional(self._offset),
+                self._closed,
+                self._by,
             )
-        return DataFrame(columns^, height=len(labels))
+        return frame.lazy().group_by_dynamic(
+            self._index,
+            self._every,
+            Optional(self._period),
+            Optional(self._offset),
+            self._closed,
+            self._label,
+            self._by,
+        )
