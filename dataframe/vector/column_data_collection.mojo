@@ -439,6 +439,14 @@ struct ColumnDataCollection(Movable):
                     columns.append(Series._from_chunks(pieces))
         return DataFrame(columns^, height=self.count)
 
+    def release(mut self):
+        """Drop the rows held: the frame made from them holds them now.
+        `count` stays."""
+        self.raw = List[List[UInt8]]()
+        self.raw_bits = List[List[UInt8]]()
+        self.values = List[List[Series]]()
+        self.windows = List[Series]()
+
     def chunked_columns(self) -> List[Int]:
         """The columns `frame(merge=False)` leaves chunked."""
         var chunked = List[Int]()
@@ -631,6 +639,10 @@ struct _FrameJob(Job):
         )[]
         self.frame = collection.frame(merge=False)
         self.chunked = collection.chunked_columns()
+        # Its rows now live in the frame: what the collection held goes
+        # here, on this task, rather than serially once every task is
+        # done.
+        collection.release()
 
 
 struct MaterializeFinish(Movable, Rounds):
@@ -647,7 +659,12 @@ struct MaterializeFinish(Movable, Rounds):
     second round: a fixed-width number column by ranges of its rows, each
     a piece of the round, any other column whole. The pieces of every
     batch share the round, so one large batch is merged on every thread
-    rather than by the one task that copied it."""
+    rather than by the one task that copied it.
+
+    A third round stacks the batches: each task takes a share of the
+    columns and makes each one's batches its chunks. A filter that keeps
+    few rows leaves many small batches, and stacking them all column after
+    column on one thread would be the finish's longest step."""
 
     var sinks: List[MaterializeSink]
     var schema: DataFrame
@@ -661,6 +678,9 @@ struct MaterializeFinish(Movable, Rounds):
     var merged: List[Tuple[Int, Int]]
     var merges: List[Optional[ChunkMerge]]
     var pieces: List[Tuple[Int, Int, Int]]
+    # The third round: each column's batches stacked, by column.
+    var stacking: Bool
+    var stacked: List[Series]
     var done: Bool
     var frame: DataFrame
     var limit: Int
@@ -680,6 +700,8 @@ struct MaterializeFinish(Movable, Rounds):
         self.merged = List[Tuple[Int, Int]]()
         self.merges = List[Optional[ChunkMerge]]()
         self.pieces = List[Tuple[Int, Int, Int]]()
+        self.stacking = False
+        self.stacked = List[Series]()
         self.done = False
         self.frame = schema.copy()
         self.limit = limit
@@ -724,24 +746,45 @@ struct MaterializeFinish(Movable, Rounds):
             if len(self.pieces) > 0:
                 self.width = round_width(len(self.pieces))
                 return self.width
-        for k in range(len(self.merged)):
-            if self.merges[k]:
-                var at = self.merged[k]
-                self.jobs[at[0]].frame._columns[at[1]] = (
-                    self.merges[k].value().merged.copy()
+        if not self.stacking:
+            for k in range(len(self.merged)):
+                if self.merges[k]:
+                    var at = self.merged[k]
+                    self.jobs[at[0]].frame._columns[at[1]] = (
+                        self.merges[k].value().merged.copy()
+                    )
+            self.merges = List[Optional[ChunkMerge]]()
+            self.pieces = List[Tuple[Int, Int, Int]]()
+            self.stacking = True
+            if len(self.jobs) > 1 and not self._categorical():
+                # Each column's batches, one under another, as its chunks:
+                # a task per share of the columns.
+                var width = self.schema.width()
+                self.stacked = (
+                    List[Series](
+                        length=width, fill=self.schema._columns[0].copy()
+                    ) if width
+                    > 0 else List[Series]()
                 )
-        self.merges = List[Optional[ChunkMerge]]()
-        self.pieces = List[Tuple[Int, Int, Int]]()
+                self.width = round_width(width)
+                if self.width > 0:
+                    return self.width
         self.done = True
-        if len(self.jobs) == 1:
+        if len(self.stacked) > 0:
+            var height = 0
+            for k in range(len(self.jobs)):
+                height += self.jobs[k].frame.height()
+            var columns = List[Series]()
+            swap(columns, self.stacked)
+            self.frame = DataFrame(columns^, height=height)
+        elif len(self.jobs) == 1:
             self.frame = self.jobs[0].frame.copy()
         elif len(self.jobs) > 1:
+            # Categorical columns may each hold a dictionary of their own:
+            # `concat` moves them onto one.
             var parts = List[DataFrame](capacity=len(self.jobs))
             for k in range(len(self.jobs)):
                 parts.append(self.jobs[k].frame.copy())
-            # Batches whose columns are consecutive windows of one stored
-            # column (a column no step changed) join back into one window
-            # of it.
             var whole = concat(parts)
             for c in range(whole.width()):
                 whole._columns[c] = whole._columns[c]._joined_windows()
@@ -767,7 +810,24 @@ struct MaterializeFinish(Movable, Rounds):
             self.pieces.append((k, 0, -1))
         self.merges.append(merge^)
 
+    def _categorical(self) -> Bool:
+        """Whether a column of the schema is categorical."""
+        for column in self.schema._columns:
+            if column.dtype().is_categorical():
+                return True
+        return False
+
     def round_task(mut self, task: Int) raises:
+        if self.stacking:
+            for c in range(task, len(self.stacked), self.width):
+                var pieces = List[Series](capacity=len(self.jobs))
+                for k in range(len(self.jobs)):
+                    pieces.append(self.jobs[k].frame._columns[c].copy())
+                # Batches whose columns are consecutive windows of one
+                # stored column (a column no step changed) join back into
+                # one window of it.
+                self.stacked[c] = Series._from_chunks(pieces)._joined_windows()
+            return
         if self.merging:
             for p in range(task, len(self.pieces), self.width):
                 var piece = self.pieces[p]
