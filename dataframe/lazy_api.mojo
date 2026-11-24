@@ -703,6 +703,31 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             aggregate_function=aggregate_function,
         )
 
+    def _pivot_found(
+        self,
+        on: String,
+        *,
+        index: List[String],
+        values: String,
+        aggregate_function: String,
+        sort_columns: Bool,
+    ) -> Self:
+        """`pivot` with a column for every `on` value the rows hold, in
+        first-appearance order (or sorted by value with `sort_columns`), as
+        DataFrame.pivot makes them: its schema is known only once the rows
+        are read."""
+        return self._push(
+            _pivot_node(
+                index=index,
+                on=on,
+                values=values,
+                output_columns=List[String](),
+                aggregate_function=aggregate_function,
+                found=True,
+                sort_columns=sort_columns,
+            )
+        )
+
     def unique(
         self,
         subset: List[String] = List[String](),

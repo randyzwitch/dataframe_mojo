@@ -316,7 +316,12 @@ def _pivot_node(
     output_columns: List[String],
     aggregate_function: String,
     left: Int = -1,
+    found: Bool = False,
+    sort_columns: Bool = False,
 ) -> PlanNode:
+    """`found`: the output columns are every `on` value the rows hold (in
+    first-appearance order, or sorted with `sort_columns`), not
+    `output_columns`."""
     var node = _plan_node(
         PIVOT,
         left=left,
@@ -324,6 +329,7 @@ def _pivot_node(
         offset=len(index),
         text=aggregate_function,
         right_keys=output_columns,
+        flags=[found, sort_columns] if found else List[Bool](),
     )
     debug_assert(node.payload_layout_valid(), "invalid plan payload layout")
     return node^
