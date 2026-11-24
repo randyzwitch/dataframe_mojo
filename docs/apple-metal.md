@@ -14,7 +14,7 @@ print(plan.explain(accelerator=MetalRuntime()))  # HANDOFF metal: ...
 ```
 
 Metal supports fused global reductions, bounded integer-key grouped
-reductions, and integer sums grouped by a dictionary-backed string key. Numeric value programs read Int32, Int64 and Float32 inputs;
+reductions, and integer sums grouped by one or two dictionary-backed string keys. Numeric value programs read Int32, Int64 and Float32 inputs;
 Boolean, ordered and distinct reductions also read packed Bool columns.
 Accepted expressions and predicates run within the reduction scan.
 
@@ -29,7 +29,7 @@ Accepted expressions and predicates run within the reduction scan.
 | Conditional values | Numeric `when/then/otherwise` chains feeding reductions |
 | Filters | Literal ranges, same-dtype column comparisons, null tests, AND/OR/NOT |
 | Grouping | Up to four native Int32/Int64 keys, at most 65,536 groups including null tuples |
-| String grouping | One dictionary-backed string key and one direct Int32 or Int64 SUM |
+| String grouping | One or two dictionary-backed string keys and one direct Int32 or Int64 SUM |
 | Input layout | Native nullable columns, slices and chunked inputs |
 | CPU execution | Other input types, joins, sorting, windows, row deduplication and unsupported expressions |
 
@@ -742,14 +742,16 @@ values/eight value inputs and a ninth independent predicate can therefore
 share a scan with four keys and row-count aliases. Empty inputs produce typed
 empty columns; all-null groups preserve reduction and minimum-count rules.
 
-A Parquet string column can retain dictionary codes alongside its text. For
-a single string key and a single Int32 or Int64 column sum, Metal can group
-those codes when all chunks use direct codes into the same dictionary of
-fewer than 65,536 unique labels. The host converts the codes to Int32 for
-the native grouped scan and decodes the output keys back to strings. Null
-keys, `min_count`, and first occurrence with `maintain_order=True` follow
-the ordinary grouped sum rules. Plain strings, gathered codes, and
-dictionaries with duplicate labels use the CPU path.
+For a sum of one Int32 or Int64 column, Metal can group by one or two
+Parquet string columns that retain dictionary codes. Within each key, all
+chunks must use direct codes into the same fixed dictionary of fewer than
+65,536 unique labels. The two keys can have different dictionaries and
+chunk boundaries. The grouped scan reads the UInt32 codes as Int32 keys
+and compares tuples, including the validity bit for each key. The host
+decodes each output key with its own dictionary. The usual 65,536-group
+limit, `min_count`, and first-occurrence order with `maintain_order=True`
+apply. Plain strings, gathered codes, and dictionaries with duplicate
+labels use the CPU path.
 
 GPU hashing uses immutable source-row tickets and 32-bit atomics. Ordinary
 single-key, low-cardinality workloads retain per-workgroup partial states.
