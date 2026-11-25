@@ -42,6 +42,7 @@ from .extrema_plan import plan_extrema, extrema_key
 from .extrema_reduce import execute_extrema
 from .predicate_plan import plan_predicates, predicate_key
 from .dictionary_group import plan_dictionary_group, execute_dictionary_group
+from .dictionary_properties import dictionary_properties
 from .group_plan import plan_grouped, grouped_key
 from .group_properties import sample_group_tuples
 from .group_reduce import execute_grouped
@@ -194,13 +195,24 @@ def region_key(region: LazyFrame) raises -> String:
     var dictionary = plan_dictionary_group(region)
     if dictionary:
         ref frame = region._plan._frames[region._plan._nodes[0].source_slot()]
-        var identity = (
-            "dictionary_pair_sum:dense:v1:" if dictionary.value().dense_pair(
-                frame.height()
-            ) else "dictionary_group_sum:v2:"
-        ) + frame.column(dictionary.value().value).dtype().name()
+        var identity = String("dictionary_group_sum:v2:")
+        if dictionary.value().dense_dictionary(frame.height()):
+            identity = (
+                "dictionary_single_sum:dense:v1:" if len(
+                    dictionary.value().keys
+                )
+                == 1 else "dictionary_pair_sum:dense:v1:"
+            )
+        elif (
+            frame.height() > 0
+            and frame.height() < Int(Int32.MAX)
+            and len(dictionary.value().keys) == 2
+        ):
+            identity = "dictionary_pair_sum:sparse:v1:"
+        identity += frame.column(dictionary.value().value).dtype().name()
         for labels in dictionary.value().dictionaries:
             identity += ":labels" + String(len(labels.dictionary()[]))
+        identity += dictionary_properties(frame, dictionary.value())
         return (
             identity
             + ":min_count"
