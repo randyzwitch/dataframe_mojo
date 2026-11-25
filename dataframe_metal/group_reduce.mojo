@@ -2,7 +2,7 @@
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
 from .composition_plan import needs_general_values
-from .chunked_numeric_reduce import uses_chunked_numeric, scan_chunked_numeric
+from .chunked_numeric_reduce import native_numeric_layout, scan_chunked_numeric
 from .group_partials import GroupedPartials
 from .group_properties import sample_group_tuples, sample_group_stride_reuse
 from .group_layout import GROUP_CAPACITY_FAULT, GROUP_CAPACITY_RETRY
@@ -317,7 +317,7 @@ def execute_grouped(
     timings.context_ns = Int(perf_counter_ns()) - started
     var partials: GroupedPartials
     var blocks = min(128, max(1, (frame.height() + 255) // 256))
-    if uses_chunked_numeric(region, plan, frame):
+    if native_numeric_layout(region, plan, frame):
         partials = scan_chunked_numeric(plan, frame, scope, zero_copy, timings)
     elif sample_group_stride_reuse(frame, plan.keys.names, blocks * 256):
         partials = general_partials(

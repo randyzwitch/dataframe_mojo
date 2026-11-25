@@ -45,7 +45,11 @@ from .dictionary_group import plan_dictionary_group, execute_dictionary_group
 from .group_plan import plan_grouped, grouped_key
 from .group_properties import sample_group_tuples
 from .group_reduce import execute_grouped
-from .chunked_numeric_reduce import uses_chunked_numeric
+from .chunked_numeric_reduce import (
+    NUMERIC_SEGMENTED,
+    NUMERIC_SINGLE_SPAN,
+    native_numeric_layout,
+)
 from .predicate_reduce import execute_predicates
 from .moment_plan import plan_moments, moment_key
 from .logical_reduce import plan_packed_logical, execute_packed_logical
@@ -214,8 +218,11 @@ def region_key(region: LazyFrame) raises -> String:
             grouped_key(grouped.value())
             + sample_group_tuples(source, grouped.value().keys.names).key()
         )
-        if uses_chunked_numeric(region, grouped.value(), source):
+        var layout = native_numeric_layout(region, grouped.value(), source)
+        if layout == NUMERIC_SEGMENTED:
             key += ":chunked_native_numeric:v1"
+        elif layout == NUMERIC_SINGLE_SPAN:
+            key += ":single_span_numeric:v1"
         return key^
     var predicates = plan_predicates(region)
     if predicates:

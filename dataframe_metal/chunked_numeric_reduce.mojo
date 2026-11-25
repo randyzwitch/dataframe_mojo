@@ -1,4 +1,4 @@
-"""Submit unfiltered Int32-key aggregates across independently owned chunks."""
+"""Submit unfiltered Int32-key aggregates over native numeric spans."""
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
 from dataframe.expr import COL, MIN, MAX
@@ -28,9 +28,14 @@ from .group_plan import GroupedComposition
 from .group_properties import sample_group_tuples
 
 
-def uses_chunked_numeric(
+comptime NUMERIC_DEFAULT = 0
+comptime NUMERIC_SEGMENTED = 1
+comptime NUMERIC_SINGLE_SPAN = 2
+
+
+def native_numeric_layout(
     region: LazyFrame, plan: GroupedComposition, frame: DataFrame
-) raises -> Bool:
+) raises -> Int:
     if (
         len(region._plan._nodes) != 2
         or len(plan.keys.names) != 1
@@ -38,7 +43,7 @@ def uses_chunked_numeric(
         or frame.height() == 0
         or frame.height() >= Int(Int32.MAX)
     ):
-        return False
+        return NUMERIC_DEFAULT
     ref fields = plan.selected.bundle.fields
     for field in fields:
         if field.op != COL or field.dtype not in [
@@ -46,22 +51,30 @@ def uses_chunked_numeric(
             DataType.INT64,
             DataType.FLOAT32,
         ]:
-            return False
+            return NUMERIC_DEFAULT
     for output in plan.outputs:
         if (
             output.op in [MIN, MAX]
             and fields[output.field].dtype == DataType.INT64
         ):
             # The existing resolver can reread Int64 winners from a single span.
-            return False
+            return NUMERIC_DEFAULT
     var key = frame.column(plan.key)
-    if key.is_chunked() and not single_native_span(key):
-        return True
+    # The composition planner merges aggregates over the same direct column.
+    var multifield_span = len(fields) > 1
+    if (multifield_span or key.is_chunked()) and not single_native_span(key):
+        if key.is_chunked():
+            return NUMERIC_SEGMENTED
+        multifield_span = False
     for field in fields:
         var source = frame.column(field.left)
-        if source.is_chunked() and not single_native_span(source):
-            return True
-    return False
+        if (multifield_span or source.is_chunked()) and not single_native_span(
+            source
+        ):
+            if source.is_chunked():
+                return NUMERIC_SEGMENTED
+            multifield_span = False
+    return NUMERIC_SINGLE_SPAN if multifield_span else NUMERIC_DEFAULT
 
 
 def _descriptor(view: NumericView, flags: UInt64) -> UInt64:
