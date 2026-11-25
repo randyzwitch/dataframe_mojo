@@ -8,7 +8,8 @@ from dataframe.storage.string import StringColumn
 from .accelerator.gpu.reduction_inputs import HandoffTimings
 from .group_layout import GENERAL_GROUP_LIMIT
 from .group_reduce import execute_grouped
-from .dictionary_pair_reduce import execute_dictionary_pair
+from .multi_plan import ReductionOutput
+from .dictionary_pair_reduce import execute_dictionary_sum
 
 
 @fieldwise_init
@@ -17,9 +18,11 @@ struct DictionaryGroup(Copyable, Movable):
     var value: String
     var dictionaries: List[DataType]
 
-    def dense_pair(self, rows: Int) -> Bool:
-        if len(self.keys) != 2 or rows == 0 or rows >= Int(Int32.MAX):
+    def dense_dictionary(self, rows: Int) -> Bool:
+        if rows <= 0 or rows >= Int(Int32.MAX):
             return False
+        if len(self.keys) == 1:
+            return True
         var left = len(self.dictionaries[0].dictionary()[]) + 1
         var right = len(self.dictionaries[1].dictionary()[]) + 1
         return left * right <= GENERAL_GROUP_LIMIT
@@ -131,10 +134,37 @@ def execute_dictionary_group(
     var frame = DataFrame(inputs^)
     var reduced: Tuple[DataFrame, HandoffTimings]
     var preparation = Int(perf_counter_ns()) - started
-    if plan.dense_pair(frame.height()):
-        reduced = execute_dictionary_pair(
-            region,
+    ref expr = root.exprs[0]
+    var output = ReductionOutput(
+        0, expr._name.copy(), SUM, expr._nodes[1].min_count
+    )
+    if plan.dense_dictionary(frame.height()) and len(plan.keys) == 1:
+        reduced = execute_dictionary_sum[True](
             frame,
+            output,
+            region._plan._device_observation,
+            len(plan.dictionaries[0].dictionary()[]),
+            0,
+            zero_copy,
+        )
+    elif plan.dense_dictionary(frame.height()):
+        reduced = execute_dictionary_sum[False](
+            frame,
+            output,
+            region._plan._device_observation,
+            len(plan.dictionaries[0].dictionary()[]),
+            len(plan.dictionaries[1].dictionary()[]),
+            zero_copy,
+        )
+    elif (
+        frame.height() > 0
+        and frame.height() < Int(Int32.MAX)
+        and len(plan.keys) == 2
+    ):
+        reduced = execute_dictionary_sum[False, True](
+            frame,
+            output,
+            region._plan._device_observation,
             len(plan.dictionaries[0].dictionary()[]),
             len(plan.dictionaries[1].dictionary()[]),
             zero_copy,
