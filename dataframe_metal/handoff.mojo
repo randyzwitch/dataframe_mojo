@@ -26,6 +26,7 @@ from .filter_plan import FilterSum, plan_region
 from .region_plan import normalize_region
 from .logical_plan import plan_logical, logical_key, finish_logical
 from .ordered_plan import plan_ordered, ordered_key
+from .ordered_segments import segmented_ordered_supported
 from .ordered_reduce import execute_ordered
 from .distinct_plan import plan_distinct, distinct_key
 from .distinct_properties import cardinality_key
@@ -154,6 +155,8 @@ def region_key(region: LazyFrame) raises -> String:
             key += sample_group_tuples(
                 frame, ordered.value().keys.value().names
             ).key()
+        if segmented_ordered_supported(region, ordered.value()):
+            key += ":segmented_i32:v1"
         return key^
     var logical = plan_logical(region)
     if logical:
