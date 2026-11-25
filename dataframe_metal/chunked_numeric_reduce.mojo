@@ -1,4 +1,7 @@
 """Submit unfiltered Int32-key aggregates over native numeric spans."""
+from max.gpu.host import DeviceBuffer
+from std.ffi import external_call
+from std.memory import unsafe_memcpy
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
 from dataframe.expr import COL, MIN, MAX
@@ -86,12 +89,24 @@ def _descriptor(view: NumericView, flags: UInt64) -> UInt64:
     )
 
 
+def _read_words(storage: List[UInt32], start: Int, count: Int) -> List[UInt32]:
+    # The caller has synchronized all device writes to this owned allocation.
+    var result = List[UInt32](unsafe_uninit_length=count)
+    unsafe_memcpy(
+        dest=result.unsafe_ptr().unsafe_bitcast[UInt8](),
+        src=storage.unsafe_ptr().unsafe_offset(start).unsafe_bitcast[UInt8](),
+        count=count * 4,
+    )
+    return result^
+
+
 def _scan(
     segments: List[List[NumericView]],
     bindings: List[Int],
     flags: List[UInt64],
     layout: GroupLayout,
     scope: Scope,
+    shared_output: Bool,
     mut timings: HandoffTimings,
 ) raises -> GroupedPartials:
     comptime if not METAL_TARGET:
@@ -100,8 +115,33 @@ def _scan(
         var started = Int(perf_counter_ns())
         layout.check()
         var ctx = scope.context()
-        var reservation = _NativeReservation(scope, layout.words() * 4)
-        var scratch = ctx.enqueue_create_buffer[DType.uint32](layout.words())
+        var page_words = (
+            Int(external_call["getpagesize", Int32]())
+            // 4 if shared_output else 1
+        )
+        var mapped_words = (
+            (layout.words() + page_words - 1) // page_words
+        ) * page_words
+        var reservation = _NativeReservation(scope, mapped_words * 4)
+        var backing = List[UInt32]()
+        var offset = 0
+        var scratch: DeviceBuffer[DType.uint32]
+        if shared_output:
+            # Metal requires a page-aligned start and a page-multiple byte size.
+            # Reserve enough padding that the entire mapping is inside the List.
+            backing = List[UInt32](
+                unsafe_uninit_length=mapped_words + page_words - 1
+            )
+            var address_words = Int(backing.unsafe_ptr()) // 4
+            offset = (page_words - address_words % page_words) % page_words
+            scratch = ctx.wrap_host_memory[DType.uint32](
+                backing.unsafe_ptr()
+                .unsafe_offset(offset)
+                .unsafe_origin_cast[MutAnyOrigin](),
+                mapped_words,
+            )
+        else:
+            scratch = ctx.enqueue_create_buffer[DType.uint32](layout.words())
         var state_words = layout.entries() * layout.value_words
         var states = scratch.create_sub_buffer[DType.uint32](
             layout.states_offset(), state_words
@@ -109,9 +149,13 @@ def _scan(
         var first = scratch.create_sub_buffer[DType.uint32](
             layout.first_offset(), layout.capacity
         )
-        var host_first = List[UInt32](length=layout.capacity, fill=UInt32.MAX)
-        var host_rows = List[UInt32](length=layout.capacity, fill=0)
-        var host_states = List[UInt32](length=state_words, fill=0)
+        var host_first = List[UInt32]()
+        var host_rows = List[UInt32]()
+        var host_states = List[UInt32]()
+        if not shared_output:
+            host_first = List[UInt32](length=layout.capacity, fill=UInt32.MAX)
+            host_rows = List[UInt32](length=layout.capacity, fill=0)
+            host_states = List[UInt32](length=state_words, fill=0)
         var control = List[UInt32](length=GROUP_CONTROL_WORDS, fill=0)
         timings.upload_ns += Int(perf_counter_ns()) - started
         started = Int(perf_counter_ns())
@@ -163,28 +207,34 @@ def _scan(
                 )
                 scope.record_launches(1)
                 base += key.rows
-            ctx.enqueue_copy(host_first.unsafe_ptr(), first)
-            ctx.enqueue_copy(
-                host_rows.unsafe_ptr(),
-                scratch.create_sub_buffer[DType.uint32](
-                    layout.rows_offset(), layout.capacity
-                ),
-            )
-            ctx.enqueue_copy(host_states.unsafe_ptr(), states)
-            ctx.enqueue_copy(
-                control.unsafe_ptr(),
-                scratch.create_sub_buffer[DType.uint32](0, len(control)),
-            )
+            if not shared_output:
+                ctx.enqueue_copy(host_first.unsafe_ptr(), first)
+                ctx.enqueue_copy(
+                    host_rows.unsafe_ptr(),
+                    scratch.create_sub_buffer[DType.uint32](
+                        layout.rows_offset(), layout.capacity
+                    ),
+                )
+                ctx.enqueue_copy(host_states.unsafe_ptr(), states)
+                ctx.enqueue_copy(
+                    control.unsafe_ptr(),
+                    scratch.create_sub_buffer[DType.uint32](0, len(control)),
+                )
             scope.synchronize()
-            scope.record_download(
-                4 * (2 * layout.capacity + state_words + len(control))
-            )
+            if shared_output:
+                for i in range(len(control)):
+                    control[i] = backing[offset + i]
+            else:
+                scope.record_download(
+                    4 * (2 * layout.capacity + state_words + len(control))
+                )
         except error:
             try:
                 scope.synchronize()
             except:
                 pass
             _ = (
+                backing^,
                 scratch^,
                 states^,
                 first^,
@@ -195,7 +245,18 @@ def _scan(
                 control^,
             )
             raise error^
-        _ = (scratch^, states^, first^, reservation^)
+        _ = (scratch^, states^, first^)
+        if shared_output and not (control[1] & GROUP_CAPACITY_FAULT):
+            host_first = _read_words(
+                backing, offset + layout.first_offset(), layout.capacity
+            )
+            host_rows = _read_words(
+                backing, offset + layout.rows_offset(), layout.capacity
+            )
+            host_states = _read_words(
+                backing, offset + layout.states_offset(), state_words
+            )
+        _ = (backing^, reservation^)
         timings.kernel_ns += Int(perf_counter_ns()) - started
         if control[1] & GROUP_CAPACITY_FAULT:
             raise Error(GROUP_CAPACITY_RETRY)
@@ -247,14 +308,22 @@ def scan_chunked_numeric(
                 )
             )
         var segments = intersect_numeric_views(inputs, frame.height())
-        var capacity = sample_group_tuples(frame, plan.keys.names).capacity()
+        var sample = sample_group_tuples(frame, plan.keys.names)
+        var capacity = sample.capacity()
+        var shared_output = zero_copy and sample.global_state()
         timings.upload_ns += Int(perf_counter_ns()) - started
         var answer: GroupedPartials
         for attempt in range(2):
             var layout = GroupLayout(capacity, len(fields), 1, True)
             try:
                 answer = _scan(
-                    segments, bindings, flags, layout, scope, timings
+                    segments,
+                    bindings,
+                    flags,
+                    layout,
+                    scope,
+                    shared_output,
+                    timings,
                 )
                 _ = (owners^, segments^, empty^)
                 return answer^
