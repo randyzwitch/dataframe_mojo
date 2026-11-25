@@ -6,6 +6,7 @@ from dataframe.expr import COUNT, MEAN, SUM
 from .multi_plan import ReductionBundle, plan_bundle
 from .exact_float import finish_float_bins
 from .accelerator.faults import data_fault
+from .accelerator.gpu.numeric_view import intersect_numeric_views
 from .accelerator.gpu.erased_input import NumericView, numeric_views
 from .accelerator.gpu.typed_storage import NativeColumnAny
 from .accelerator.gpu.multi_reduce import multi_partials
@@ -73,27 +74,7 @@ def _run[
                     owners,
                 )
             )
-        var positions = List[Int](length=len(inputs), fill=0)
-        var offsets = List[Int](length=len(inputs), fill=0)
-        var segments = List[List[NumericView]]()
-        var consumed = 0
-        while consumed < frame.height():
-            var length = frame.height() - consumed
-            for i in range(len(inputs)):
-                if positions[i] >= len(inputs[i]):
-                    raise Error(
-                        "Metal reduction columns have different lengths"
-                    )
-                length = min(length, inputs[i][positions[i]].rows - offsets[i])
-            var segment = List[NumericView]()
-            for i in range(len(inputs)):
-                segment.append(inputs[i][positions[i]].view(offsets[i], length))
-                offsets[i] += length
-                if offsets[i] == inputs[i][positions[i]].rows:
-                    positions[i] += 1
-                    offsets[i] = 0
-            segments.append(segment^)
-            consumed += length
+        var segments = intersect_numeric_views(inputs, frame.height())
         timings.upload_ns = Int(perf_counter_ns()) - started
         started = Int(perf_counter_ns())
         var total_parts = 0

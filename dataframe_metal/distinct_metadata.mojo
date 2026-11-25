@@ -6,6 +6,17 @@ from .value_program_metadata import predicate_words, write_predicate
 from .accelerator.gpu.erased_input import NumericView
 
 
+def distinct_descriptor(input: NumericView) raises -> UInt64:
+    if input.bit_offset < 0 or input.bit_offset + input.rows > Int(UInt32.MAX):
+        raise Error("Metal distinct bitmap span exceeds its index range")
+    return (
+        UInt64(input.bit_offset)
+        | (UInt64(input.nullable) << 32)
+        | (UInt64(input.tag) << 33)
+        | (UInt64(input.value_bit_offset) << 35)
+    )
+
+
 def distinct_metadata(
     plan: DistinctPlan,
     inputs: List[NumericView],
@@ -74,11 +85,6 @@ def distinct_metadata(
             raise Error("Metal distinct value is not a matching native view")
         ref input = inputs[slot]
         words[16 + field * 2] = UInt64(slot)
-        words[17 + field * 2] = (
-            UInt64(input.bit_offset)
-            | (UInt64(input.nullable) << 32)
-            | (UInt64(input.tag) << 33)
-            | (UInt64(input.value_bit_offset) << 35)
-        )
+        words[17 + field * 2] = distinct_descriptor(input)
     write_predicate(words, start, plan.predicate, inputs)
     return words^

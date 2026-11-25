@@ -92,6 +92,7 @@ from .frame import (
 )
 from dataframe.aggregation.table_sink import (
     TOTAL_KEY,
+    typed_total,
     GroupingSetsLayout,
     GroupingSetsSink,
     TableSink,
@@ -198,6 +199,7 @@ from dataframe.aggregation.expressions import (
     _bind_all,
     _row_local,
     aggregate_filter,
+    same_nodes,
     without_filters,
 )
 from dataframe.vector.data_chunk import (
@@ -397,6 +399,8 @@ def _extract_aggregate_inputs(
     reduction read its input column. This shares expression evaluation and
     avoids materializing the entire intermediate frame."""
     var projected = List[Expr]()
+    # Each projected input as written, before its alias.
+    var inputs = List[Expr]()
     var rewritten = List[Expr](capacity=len(expressions))
     for e in expressions:
         var nodes = e._nodes.copy()
@@ -432,10 +436,22 @@ def _extract_aggregate_inputs(
                     )
                 if not reads or not local or not _row_local([input.copy()]):
                     continue
-                var name = _AGGREGATE_INPUT + String(len(projected))
-                while name in schema.columns():
-                    name += "_"
-                projected.append(input.alias(name))
+                # An input already projected is read again, not computed
+                # twice: a correlation's two filters share one predicate.
+                var seen = -1
+                for q in range(len(inputs)):
+                    if same_nodes(inputs[q], input):
+                        seen = q
+                        break
+                var name: String
+                if seen >= 0:
+                    name = projected[seen]._name
+                else:
+                    name = _AGGREGATE_INPUT + String(len(projected))
+                    while name in schema.columns():
+                        name += "_"
+                    projected.append(input.alias(name))
+                    inputs.append(input^)
                 nodes[child] = col(name)._nodes[0].copy()
                 changed = True
         if changed:
@@ -3891,8 +3907,9 @@ struct PipelineFinish(Movable, Rounds):
                 if len(run.sets[s]) == 0:
                     if finished.height() == 0:
                         # No rows: the grand total is still one row.
-                        finished = run.set_empty[0]._select_exprs(
-                            run.expressions
+                        finished = typed_total(
+                            run.set_empty[0]._select_exprs(run.expressions),
+                            finished,
                         )
                     else:
                         finished = finished.drop([_TOTAL_KEY])
@@ -4672,7 +4689,10 @@ def pipeline_types(
                 var empty_keys = List[Series](capacity=len(names))
                 for name in names:
                     empty_keys.append(typed.column(name))
-                var reduction = _StreamReduction(typed, expressions, names)
+                # The states are the unfiltered reductions'.
+                var reduction = _StreamReduction(
+                    typed, without_filters(expressions), names
+                )
                 layout.append(
                     aggregate_layout(
                         empty_keys, empty_inputs.copy(), table_specs(reduction)

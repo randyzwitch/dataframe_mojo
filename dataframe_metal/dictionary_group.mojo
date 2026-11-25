@@ -8,6 +8,8 @@ from dataframe.storage.string import StringColumn
 from .accelerator.gpu.reduction_inputs import HandoffTimings
 from .group_layout import GENERAL_GROUP_LIMIT
 from .group_reduce import execute_grouped
+from .multi_plan import ReductionOutput
+from .dictionary_pair_reduce import execute_dictionary_sum
 
 
 @fieldwise_init
@@ -15,6 +17,15 @@ struct DictionaryGroup(Copyable, Movable):
     var keys: List[String]
     var value: String
     var dictionaries: List[DataType]
+
+    def dense_dictionary(self, rows: Int) -> Bool:
+        if rows <= 0 or rows >= Int(Int32.MAX):
+            return False
+        if len(self.keys) == 1:
+            return True
+        var left = len(self.dictionaries[0].dictionary()[]) + 1
+        var right = len(self.dictionaries[1].dictionary()[]) + 1
+        return left * right <= GENERAL_GROUP_LIMIT
 
 
 def _group_dictionary(source: Series) raises -> Optional[DataType]:
@@ -121,14 +132,52 @@ def execute_dictionary_group(
         inputs.append(_signed_group_codes(source.column(key)))
     inputs.append(source.column(plan.value))
     var frame = DataFrame(inputs^)
-    var lowered = (
-        frame.lazy()
-        .group_by(plan.keys, maintain_order=root.maintain_order)
-        .agg(root.exprs)
-    )
-    lowered._plan._device_observation = region._plan._device_observation
+    var reduced: Tuple[DataFrame, HandoffTimings]
     var preparation = Int(perf_counter_ns()) - started
-    var reduced = execute_grouped(lowered, zero_copy)
+    ref expr = root.exprs[0]
+    var output = ReductionOutput(
+        0, expr._name.copy(), SUM, expr._nodes[1].min_count
+    )
+    if plan.dense_dictionary(frame.height()) and len(plan.keys) == 1:
+        reduced = execute_dictionary_sum[True](
+            frame,
+            output,
+            region._plan._device_observation,
+            len(plan.dictionaries[0].dictionary()[]),
+            0,
+            zero_copy,
+        )
+    elif plan.dense_dictionary(frame.height()):
+        reduced = execute_dictionary_sum[False](
+            frame,
+            output,
+            region._plan._device_observation,
+            len(plan.dictionaries[0].dictionary()[]),
+            len(plan.dictionaries[1].dictionary()[]),
+            zero_copy,
+        )
+    elif (
+        frame.height() > 0
+        and frame.height() < Int(Int32.MAX)
+        and len(plan.keys) == 2
+    ):
+        reduced = execute_dictionary_sum[False, True](
+            frame,
+            output,
+            region._plan._device_observation,
+            len(plan.dictionaries[0].dictionary()[]),
+            len(plan.dictionaries[1].dictionary()[]),
+            zero_copy,
+        )
+    else:
+        var lowered = (
+            frame.lazy()
+            .group_by(plan.keys, maintain_order=root.maintain_order)
+            .agg(root.exprs)
+        )
+        lowered._plan._device_observation = region._plan._device_observation
+        preparation = Int(perf_counter_ns()) - started
+        reduced = execute_grouped(lowered, zero_copy)
     started = Int(perf_counter_ns())
     var result = reduced[0].copy()
     for i in range(len(plan.keys)):

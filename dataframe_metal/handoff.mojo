@@ -9,7 +9,8 @@ on the CPU in the same query.
 Accepted today: native numeric and Boolean/count reductions over bounded
 predicate and value programs, globally or with native integer grouping keys.
 Int32, Int64, Float32 and Bool predicate inputs retain their physical widths.
-Native chunks are mapped in place on Apple silicon; Float64 input stays on CPU.
+Native chunks map in place on Apple silicon. Direct grouped means also read
+Float64 bit patterns and accumulate them in input order using integer operations.
 """
 from max.gpu.host import DeviceBuffer
 from std.time import perf_counter_ns
@@ -26,8 +27,9 @@ from .filter_plan import FilterSum, plan_region
 from .region_plan import normalize_region
 from .logical_plan import plan_logical, logical_key, finish_logical
 from .ordered_plan import plan_ordered, ordered_key
+from .ordered_segments import segmented_ordered_supported
 from .ordered_reduce import execute_ordered
-from .distinct_plan import plan_distinct, distinct_key
+from .distinct_plan import plan_distinct, distinct_key, chunked_distinct
 from .distinct_properties import cardinality_key
 from .distinct_reduce import execute_distinct
 from .cross_sum import reduce_cross
@@ -41,9 +43,17 @@ from .extrema_plan import plan_extrema, extrema_key
 from .extrema_reduce import execute_extrema
 from .predicate_plan import plan_predicates, predicate_key
 from .dictionary_group import plan_dictionary_group, execute_dictionary_group
+from .dictionary_properties import dictionary_properties
 from .group_plan import plan_grouped, grouped_key
+from .fractional_mean_plan import plan_fractional_means
+from .fractional_mean_reduce import execute_fractional_means
 from .group_properties import sample_group_tuples
 from .group_reduce import execute_grouped
+from .chunked_numeric_reduce import (
+    NUMERIC_SEGMENTED,
+    NUMERIC_SINGLE_SPAN,
+    native_numeric_layout,
+)
 from .predicate_reduce import execute_predicates
 from .moment_plan import plan_moments, moment_key
 from .logical_reduce import plan_packed_logical, execute_packed_logical
@@ -109,6 +119,7 @@ def supports(region: LazyFrame) -> Bool:
             or Bool(plan_extrema(selected))
             or Bool(plan_predicates(selected))
             or Bool(plan_grouped(selected))
+            or Bool(plan_fractional_means(selected))
             or Bool(plan_dictionary_group(selected))
         )
     except:
@@ -143,6 +154,8 @@ def region_key(region: LazyFrame) raises -> String:
             key += sample_group_tuples(
                 frame, distinct.value().keys.value().names
             ).key()
+        if chunked_distinct(distinct.value(), frame):
+            key += ":chunk-native:v1"
         return key^
     var ordered = plan_ordered(region)
     if ordered:
@@ -154,6 +167,8 @@ def region_key(region: LazyFrame) raises -> String:
             key += sample_group_tuples(
                 frame, ordered.value().keys.value().names
             ).key()
+        if segmented_ordered_supported(region, ordered.value()):
+            key += ":segmented_i32:v1"
         return key^
     var logical = plan_logical(region)
     if logical:
@@ -191,24 +206,55 @@ def region_key(region: LazyFrame) raises -> String:
     var dictionary = plan_dictionary_group(region)
     if dictionary:
         ref frame = region._plan._frames[region._plan._nodes[0].source_slot()]
-        var identity = (
-            "dictionary_group_sum:v2:"
-            + frame.column(dictionary.value().value).dtype().name()
-        )
+        var identity = String("dictionary_group_sum:v2:")
+        if dictionary.value().dense_dictionary(frame.height()):
+            identity = (
+                "dictionary_single_sum:dense:v1:" if len(
+                    dictionary.value().keys
+                )
+                == 1 else "dictionary_pair_sum:dense:v1:"
+            )
+        elif (
+            frame.height() > 0
+            and frame.height() < Int(Int32.MAX)
+            and len(dictionary.value().keys) == 2
+        ):
+            identity = "dictionary_pair_sum:sparse:v1:"
+        identity += frame.column(dictionary.value().value).dtype().name()
         for labels in dictionary.value().dictionaries:
             identity += ":labels" + String(len(labels.dictionary()[]))
+        identity += dictionary_properties(frame, dictionary.value())
         return (
             identity
             + ":min_count"
             + String(region._plan._nodes[1].exprs[0]._nodes[1].min_count)
         )
+    var means = plan_fractional_means(region)
+    if means and means.value().wide:
+        ref frame = region._plan._frames[region._plan._nodes[0].source_slot()]
+        var keys: List[String] = [means.value().key.copy()]
+        return means.value().identity() + sample_group_tuples(frame, keys).key()
     var grouped = plan_grouped(region)
     if grouped:
         ref source = region._plan._frames[region._plan._nodes[0].source_slot()]
-        return (
-            grouped_key(grouped.value())
-            + sample_group_tuples(source, grouped.value().keys.names).key()
-        )
+        var sample = sample_group_tuples(source, grouped.value().keys.names)
+        var key = grouped_key(grouped.value()) + sample.key()
+        var layout = native_numeric_layout(region, grouped.value(), source)
+        if layout:
+            if sample.global_state():
+                key += ":shared_group_output:v1"
+            elif sample.samples < sample.population:
+                # An underestimated small table can grow into shared scratch.
+                key += ":shared_group_retry:v1"
+        if layout == NUMERIC_SEGMENTED:
+            key += ":chunked_native_numeric:v1"
+        elif layout == NUMERIC_SINGLE_SPAN:
+            key += ":single_span_numeric:v1"
+        if means:
+            key += ":ordered_mean_retry:v1"
+        return key^
+    if means:
+        return means.value().identity()
     var predicates = plan_predicates(region)
     if predicates:
         return predicate_key(predicates.value())
@@ -689,9 +735,14 @@ def _execute_on_device(
     var dictionary = plan_dictionary_group(region)
     if dictionary:
         return execute_dictionary_group(region, dictionary.value(), zero_copy)
+    var means = plan_fractional_means(region)
+    if means and means.value().wide:
+        return execute_fractional_means(region, means.value(), zero_copy)
     var grouped = plan_grouped(region)
     if grouped:
         return execute_grouped(region, zero_copy)
+    if means:
+        return execute_fractional_means(region, means.value(), zero_copy)
     var accepted = plan_region(region)
     if not accepted:
         if plan_extrema(region):

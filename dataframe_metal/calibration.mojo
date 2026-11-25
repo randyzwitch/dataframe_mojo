@@ -24,6 +24,7 @@ from dataframe.placement import calibration_path, load_costs, LinearCost
 from .accelerator.gpu.identity import hardware, runtime_build_id
 from .accelerator.gpu.erased_input import single_native_span
 from .accelerator.gpu.query_scope import shared_service
+from .dictionary_properties import dictionary_layout
 
 comptime SCHEMA_VERSION = 2
 
@@ -83,6 +84,9 @@ def shape_keys(
                     )
 
     var family = key.copy()
+    var use_code_spans = operator.startswith(
+        "dictionary_single_sum:dense:"
+    ) or operator.startswith("dictionary_pair_sum:sparse:")
     for name in names:
         var series = frame.column(name)
         key += (
@@ -107,6 +111,8 @@ def shape_keys(
                 bitmap = _chunk_has_bitmap[DType.int32](chunk)
             elif chunk.dtype() == DataType.INT64:
                 bitmap = _chunk_has_bitmap[DType.int64](chunk)
+            elif chunk.dtype() == DataType.FLOAT64:
+                bitmap = _chunk_has_bitmap[DType.float64](chunk)
             elif chunk.dtype() == DataType.FLOAT32:
                 bitmap = _chunk_has_bitmap[DType.float32](chunk)
             elif (
@@ -123,6 +129,8 @@ def shape_keys(
             key += String(Int(bitmap)) + ","
             bitmap_kinds |= 1 << Int(bitmap)
         key += "]"
+        if use_code_spans and series.dtype() == DataType.STRING:
+            key += dictionary_layout(series)
         # Keep input types and the presence of validity bitmaps in the CPU
         # comparison. Only chunk geometry and native-span mapping may vary.
         family += ":" + series.dtype().name() + "/" + String(bitmap_kinds)

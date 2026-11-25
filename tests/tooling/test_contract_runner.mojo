@@ -99,18 +99,14 @@ def test_discovery_contract_selection_and_generated_aliases_are_exact() raises:
         empty_policy(),
     )
     assert_true(
-        generated.find(
-            "from tests.public_contracts.test_operations import test_contract as public__test_operations__test_contract"
-        )
-        >= 0
+        "from tests.public_contracts.test_operations import test_contract as public__test_operations__test_contract"
+        in generated
     )
     assert_true(
-        generated.find(
-            "from tests.storage_ownership.test_operations import test_contract as storage__test_operations__test_contract"
-        )
-        >= 0
+        "from tests.storage_ownership.test_operations import test_contract as storage__test_operations__test_contract"
+        in generated
     )
-    assert_true(generated.find('failed.append("public")') >= 0)
+    assert_true('failed.append("public")' in generated)
     var extra = root + "/tests/public_contracts/test_extra.mojo"
     write_text(extra, "def test_unmapped() raises:\n    pass\n")
     assert_equal(len(cases_for(root, "public")), 2)
@@ -241,7 +237,7 @@ def _run_fixture(
             policy,
         )
     except error:
-        if String(error).find("Contract suite failure; provenance:") < 0:
+        if "Contract suite failure; provenance:" not in String(error):
             raise error
         failed = True
     var expected_failure = scenario in [
@@ -440,7 +436,7 @@ def test_fatal_bundle_compiles_once_and_validates_each_fresh_process() raises:
                 policy,
             )
         except error:
-            if String(error).find("Contract suite failure; provenance:") < 0:
+            if "Contract suite failure; provenance:" not in String(error):
                 raise error
             failed = True
         assert_equal(failed, scenario != "process")
@@ -552,8 +548,8 @@ def test_generated_fatal_dispatch_selects_full_ids_and_isolates_fixture_state() 
             ]
         )
         assert_equal(result[0], 0, result[1])
-        assert_true(result[1].find("CASE_" + String(i)) >= 0)
-        assert_true(result[1].find("CASE_" + String(1 - i)) < 0)
+        assert_true("CASE_" + String(i) in result[1])
+        assert_true("CASE_" + String(1 - i) not in result[1])
         var pid_line = String(result[1].split("PID ")[1]).split("\n")
         pids.append(String(pid_line[0].strip()))
     assert_true(pids[0] != pids[1])
@@ -577,8 +573,8 @@ def test_generated_fatal_dispatch_selects_full_ids_and_isolates_fixture_state() 
             1,
             "Invalid selectors are ordinary errors, not native crashes",
         )
-        assert_true(result[1].find("Unknown fatal case selector:") >= 0)
-        assert_true(result[1].find("CASE_") < 0)
+        assert_true("Unknown fatal case selector:" in result[1])
+        assert_true("CASE_" not in result[1])
 
 
 def test_generated_expected_failure_wrappers_match_only_the_named_diagnostic() raises:
@@ -593,12 +589,11 @@ def test_generated_expected_failure_wrappers_match_only_the_named_diagnostic() r
     var generated = generate_driver(
         ["public"], [[entry.copy()]], root + "/driver", policy
     )
-    assert_true(generated.find('String(error).find("precise error") < 0') >= 0)
-    assert_true(generated.find("raise error") >= 0)
-    assert_true(generated.find("XPASS:") >= 0)
+    assert_true('"precise error" not in String(error)' in generated)
+    assert_true("raise error" in generated)
+    assert_true("XPASS:" in generated)
     assert_true(
-        generated.find("public__test_operations__test_contract__known_failure")
-        >= 0
+        "public__test_operations__test_contract__known_failure" in generated
     )
 
 

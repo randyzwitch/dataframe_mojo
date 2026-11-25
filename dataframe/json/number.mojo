@@ -67,9 +67,9 @@ def float_text(value: Float64, json_style: Bool) -> String:
         return ("-" if negative else "") + ("0.0" if json_style else "0")
     var raw = String(abs(value))
     var exponent = 0
-    var exp_at = raw.find("e")
+    var exp_at = raw.find("e").or_else(-1)
     if exp_at < 0:
-        exp_at = raw.find("E")
+        exp_at = raw.find("E").or_else(-1)
     var end = raw.byte_length() if exp_at < 0 else exp_at
     if exp_at >= 0:
         var at = exp_at + 1

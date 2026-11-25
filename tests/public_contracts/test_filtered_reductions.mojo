@@ -163,7 +163,7 @@ def _raises_overflow(plan: LazyFrame, optimize: Bool) raises -> Bool:
     try:
         _ = plan.collect(optimize=optimize)
     except error:
-        if String(error).find("overflow") < 0:
+        if "overflow" not in String(error):
             raise error
         return True
     return False

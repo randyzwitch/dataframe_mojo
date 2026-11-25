@@ -246,4 +246,4 @@ def test_filters_and_projections() raises:
     text = on_cell.explain(streaming=False)
     assert_true(line_of(text, "FILTER") < line_of(text, "PIVOT on o"), text)
     # The scan reads the index, `on` and values columns only.
-    assert_true(text.find("SCAN frame [project k, o, v]") >= 0, text)
+    assert_true("SCAN frame [project k, o, v]" in text, text)

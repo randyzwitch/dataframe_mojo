@@ -1,6 +1,6 @@
 context:
-  mojo: "1.3.0.dev2026111005"
-  max_core: "26.8.0.dev2026111005"
+  mojo: "1.3.0.dev2026112405"
+  max_core: "26.8.0.dev2026112405"
 
 package:
   name: dataframe_mojo

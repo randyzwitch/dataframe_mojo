@@ -22,7 +22,10 @@ from dataframe.aggregation.hash_table import (
     aggregate_layout,
     layout_widths,
 )
-from dataframe.aggregation.expressions import aggregate_filter, filter_value
+from dataframe.aggregation.expressions import (
+    filter_value,
+    reduction_filter,
+)
 from dataframe.dtype import DataType
 from dataframe.expr import COL, CORR, COV, Expr, LEN, is_reduction, subtree
 from dataframe.frame import DataFrame
@@ -82,7 +85,7 @@ struct TableSinkLayout(Copyable, Movable):
     # `as_vectors`, as the chunk's vector.
     var as_columns: List[Bool]
     var as_vectors: List[Bool]
-    # Per reduction with an aggregate filter (`aggregate_filter`), its
+    # Per reduction with an aggregate filter (`reduction_filter`), its
     # predicate as a column of the input (-1 when compiled) or a compiled
     # expression; -1 and None for every other reduction, and both empty
     # when no reduction has one.
@@ -132,10 +135,11 @@ struct TableSinkLayout(Copyable, Movable):
         var seconds = List[Optional[Expr]]()
         var predicates = List[Optional[Expr]]()
         for expression in expressions:
-            for node in expression._nodes:
+            for i in range(len(expression._nodes)):
+                ref node = expression._nodes[i]
                 if not is_reduction(node.op):
                     continue
-                var predicate = aggregate_filter(expression, node.left)
+                var predicate = reduction_filter(expression, i)
                 if node.left < 0:
                     given.append(None)
                 else:
@@ -144,7 +148,11 @@ struct TableSinkLayout(Copyable, Movable):
                     )
                 predicates.append(predicate^)
                 if node.op == CORR or node.op == COV:
-                    seconds.append(subtree(expression, node.right))
+                    seconds.append(
+                        subtree(
+                            expression, filter_value(expression, node.right)
+                        )
+                    )
         for second in seconds:
             given.append(second.copy())
         if len(given) != len(inputs):
@@ -917,6 +925,22 @@ struct TableSink(Sink):
 comptime TOTAL_KEY = "__grouping_total"
 
 
+def typed_total(total: DataFrame, typed: DataFrame) raises -> DataFrame:
+    """The grand total's one row over no rows, from `total` (each
+    reduction over no rows) in the types the sets' groups give (`typed`,
+    its columns by name): a reduction whose answer is a list per group but
+    a column without one (a mode is a column of the modes, none here) is a
+    null list there."""
+    var columns = List[Series](capacity=total.width())
+    for column in total._columns:
+        var dtype = typed.column(column.name()).dtype()
+        if column.dtype() == dtype and len(column) == 1:
+            columns.append(column.copy())
+        else:
+            columns.append(Series.full_null(column.name(), dtype, 1))
+    return DataFrame(columns^, height=1)
+
+
 struct GroupingSetsLayout(Copyable, Movable):
     """What every worker's grouping sets sink shares: the reader of the
     group columns (every key of every set) and the reductions' inputs;
@@ -950,8 +974,15 @@ struct GroupingSetsLayout(Copyable, Movable):
         derived_columns: List[List[Int]],
         derive_order: List[Int],
     ):
+        # Every set's table applies the reductions' aggregate filters, as
+        # the reader marks its own layout's.
+        var filtered = inputs.layout.filtered.copy()
         self.inputs = inputs^
-        self.layouts = layouts.copy()
+        self.layouts = List[AggregateLayout](capacity=len(layouts))
+        for layout in layouts:
+            var marked = layout.copy()
+            marked.filtered = filtered.copy()
+            self.layouts.append(marked^)
         self.sets = sets.copy()
         self.derived_from = derived_from.copy()
         self.derived_columns = derived_columns.copy()
@@ -1016,7 +1047,13 @@ struct GroupingSetsSink(Sink):
                 for j in range(len(one)):
                     keys.append(all_keys[one[j]])
             self.tables[s].sink_vectors(
-                keys, inputs, hold, self.sequence, n, self.inputs.read
+                keys,
+                inputs,
+                hold,
+                self.sequence,
+                n,
+                self.inputs.read,
+                self.inputs.filter_vectors,
             )
         self.sequence += n
 

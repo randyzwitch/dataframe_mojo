@@ -126,7 +126,9 @@ def test_metal_dictionary_pair_groups_by_both_labels() raises:
     var plan = (
         frame.lazy().group_by(keys, maintain_order=True).agg([total.copy()])
     )
-    assert_true(Bool(plan_dictionary_group(plan)))
+    assert_true(
+        plan_dictionary_group(plan).value().dense_dictionary(frame.height())
+    )
     var direct = _signed_group_codes(left.slice(1, 3)).numeric[DType.int32]()
     ref string = left._data[StringColumn]
     assert_equal(
@@ -154,7 +156,8 @@ def test_metal_dictionary_pair_groups_by_both_labels() raises:
         var launches = Int64(0)
         for row in range(profiled[1].height()):
             launches += profiled[1].item(row, "gpu_completed_launches").int64()
-        assert_true(launches > 0)
+        # Three intersections of the independent key and value chunk ranges.
+        assert_equal(launches, Int64(3))
         var copied = execute_dictionary_group(
             plan, plan_dictionary_group(plan).value(), False
         )
@@ -167,3 +170,166 @@ def test_metal_dictionary_pair_groups_by_both_labels() raises:
                 declined.collect(engine="cpu")
             )
         )
+
+
+def test_metal_dense_pair_domain_and_wide_sums() raises:
+    from std.testing import assert_raises
+
+    var labels = List[String]()
+    for i in range(255):
+        labels.append(String(i))
+    var keys: List[String] = ["a", "b"]
+    var a = _coded_key("a", labels, [1, 1, 1, 0], [True, True, True, True])
+    var b = _coded_key("b", labels, [0, 0, 0, 1], [True, True, True, True])
+    var large = Int64(1) << 40
+    var sums = Series(
+        "v", Column[Int64]([large, -large, -1, 3], [True, True, True, False])
+    )
+    var frame = DataFrame([a.copy(), b.copy(), sums.copy()])
+    var plan = (
+        frame.lazy()
+        .group_by(keys, maintain_order=True)
+        .agg([col("v").sum(min_count=2).alias("s")])
+    )
+    var matched = plan_dictionary_group(plan)
+    assert_true(matched.value().dense_dictionary(4))
+    assert_false(matched.value().dense_dictionary(0))
+    assert_false(matched.value().dense_dictionary(Int(Int32.MAX)))
+    labels.append("outside")
+    var wider = frame.with_column(
+        _coded_key("a", labels, [1, 1, 1, 0], [True, True, True, True])
+    )
+    var sparse = (
+        wider.lazy()
+        .group_by(keys, maintain_order=True)
+        .agg([col("v").sum(min_count=1)])
+    )
+    assert_false(plan_dictionary_group(sparse).value().dense_dictionary(4))
+    comptime if METAL_TARGET:
+        assert_true(
+            plan.collect(accelerator=MetalRuntime()).equals(
+                plan.collect(engine="cpu")
+            )
+        )
+        assert_true(
+            sparse.collect(accelerator=MetalRuntime()).equals(
+                sparse.collect(engine="cpu")
+            )
+        )
+        for negative in [False, True]:
+            var boundary = Int64.MIN if negative else Int64.MAX
+            var delta = Int64(-1) if negative else Int64(1)
+            var bad = frame.with_column(
+                Series("v", Column[Int64]([boundary, delta, 0, 0]))
+            )
+            var overflow = bad.lazy().group_by(keys).agg([col("v").sum()])
+            with assert_raises(contains="int64 expression sum overflow"):
+                _ = execute_dictionary_group(
+                    overflow, plan_dictionary_group(overflow).value(), True
+                )
+            var narrow = frame.with_column(
+                Series(
+                    "v",
+                    Column[Int32](
+                        [
+                            Int32.MIN if negative else Int32.MAX,
+                            Int32(delta),
+                            0,
+                            0,
+                        ]
+                    ),
+                )
+            )
+            var overflow32 = narrow.lazy().group_by(keys).agg([col("v").sum()])
+            with assert_raises(contains="int32 expression sum overflow"):
+                _ = execute_dictionary_group(
+                    overflow32, plan_dictionary_group(overflow32).value(), True
+                )
+
+
+def test_dictionary_sums_keep_sparse_pairs_across_native_chunks() raises:
+    from dataframe.execution_observation import DeviceObservation
+
+    var labels = List[String]()
+    for i in range(300):
+        labels.append("value " + String(i))
+    var l = _coded_key(
+        "zone",
+        labels,
+        [299, 1, 7, 299, 0, 299, 1],
+        [True, True, False, True, False, True, True],
+    )
+    var r = _coded_key(
+        "kind",
+        labels,
+        [2, 0, 44, 2, 0, 2, 0],
+        [True, False, True, True, False, True, False],
+    )
+    var v = Series("delta", Column[Int64]([11, 8, 3, -5, 4, 2, -4]))
+    var frame = DataFrame(
+        [
+            Series._from_chunks([l.slice(0, 2), l.slice(3, 4)]),
+            Series._from_chunks([r.slice(1, 3), r.slice(0, 3)]),
+            Series._from_chunks([v.slice(2, 1), v.slice(0, 5)]),
+        ]
+    )
+    var keys: List[String] = ["zone", "kind"]
+    for count in [1, 2]:
+        var selected = List[String]()
+        for i in range(count):
+            selected.append(keys[i].copy())
+        var plan = (
+            frame.lazy()
+            .group_by(selected, maintain_order=True)
+            .agg([col("delta").sum(min_count=1).alias("net")])
+        )
+        var matched = plan_dictionary_group(plan)
+        assert_true(Bool(matched))
+        assert_equal(
+            matched.value().dense_dictionary(frame.height()), count == 1
+        )
+        comptime if METAL_TARGET:
+            var expected = plan.collect(engine="cpu")
+            for wrap in [False, True]:
+                var obs = ArcPointer(DeviceObservation())
+                plan._plan._device_observation = obs
+                var actual = execute_dictionary_group(
+                    plan, matched.value(), wrap
+                )
+                assert_true(actual[0].equals(expected))
+                assert_true(obs[].completed_launches.load() > 0)
+                if wrap:
+                    assert_equal(obs[].upload_bytes.load(), Int64(0))
+
+
+def test_sparse_dictionary_sum_all_null_tuple_and_highest_packed_code() raises:
+    from dataframe.expr import SUM
+    from dataframe_metal.dictionary_pair_reduce import execute_dictionary_sum
+    from dataframe_metal.multi_plan import ReductionOutput
+
+    comptime if METAL_TARGET:
+        var hi = Int32(65534)
+        var frame = DataFrame(
+            [
+                Series(
+                    "a",
+                    Column[Int32]([hi, 0, hi, hi], [True, False, True, False]),
+                ),
+                Series(
+                    "b",
+                    Column[Int32]([hi, hi, hi, 0], [True, False, True, False]),
+                ),
+                Series("v", Column[Int64]([9, 2, -4, -3])),
+            ]
+        )
+        var output = ReductionOutput(0, "total", SUM, 1)
+        var result = execute_dictionary_sum[False, True](
+            frame, output, None, 65535, 65535, True
+        )
+        assert_equal(result[0].height(), 2)
+        assert_equal(result[0].item(0, "a").int32(), hi)
+        assert_equal(result[0].item(0, "b").int32(), hi)
+        assert_equal(result[0].item(0, "total").int64(), Int64(5))
+        assert_true(result[0].item(1, "a").is_null())
+        assert_true(result[0].item(1, "b").is_null())
+        assert_equal(result[0].item(1, "total").int64(), Int64(-1))

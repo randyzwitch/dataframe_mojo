@@ -65,9 +65,9 @@ def _error(
         _ = cast_series(source, target, True, offset, mask)
     except error:
         var message = String(error)
-        assert_true(message.find("failed at row " + String(row)) >= 0)
-        assert_true(message.find("for value '" + text + "'") >= 0)
-        assert_true(message.find("out of ") >= 0)
+        assert_true("failed at row " + String(row) in message)
+        assert_true("for value '" + text + "'" in message)
+        assert_true("out of " in message)
         rejected = True
     assert_true(rejected, "an observed out-of-range integer must reject")
 

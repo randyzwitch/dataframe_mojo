@@ -1,7 +1,8 @@
 """Native exact distinct GPU submission and bounded resource retries."""
 from std.time import perf_counter_ns
 from dataframe import DataFrame, LazyFrame
-from .distinct_plan import plan_distinct
+from .distinct_plan import chunked_distinct, plan_distinct
+from .chunked_distinct_reduce import execute_chunked_distinct
 from .distinct_layout import (
     DistinctLayout,
     DISTINCT_CAPACITY_FAULT,
@@ -57,6 +58,10 @@ def execute_distinct(
         )
         var ctx = scope.context()
         timings.context_ns = Int(perf_counter_ns()) - started
+        if zero_copy and chunked_distinct(plan, frame):
+            var result = execute_chunked_distinct(frame, plan, scope, timings)
+            scope.mark_success()
+            return (result^, timings^)
         started = Int(perf_counter_ns())
         var empty = ctx.enqueue_create_buffer[DType.uint8](1)
         var owners = List[NativeColumnAny]()

@@ -2,6 +2,10 @@
 from std.time import perf_counter_ns
 from dataframe import DataFrame, LazyFrame
 from .ordered_plan import plan_ordered
+from .ordered_segments import (
+    segmented_ordered_supported,
+    execute_segmented_ordered,
+)
 from .ordered_metadata import ordered_metadata, ordered_scratch_words
 from .ordered_finish import finish_ordered
 from .group_layout import GroupLayout, GROUP_CAPACITY_FAULT
@@ -56,6 +60,11 @@ def execute_ordered(
         )
         var ctx = scope.context()
         timings.context_ns = Int(perf_counter_ns()) - started
+        if segmented_ordered_supported(region, plan):
+            var segmented = execute_segmented_ordered(
+                plan, frame, scope, zero_copy, timings
+            )
+            return (segmented^, timings^)
         started = Int(perf_counter_ns())
         var empty = ctx.enqueue_create_buffer[DType.uint8](1)
         var owners = List[NativeColumnAny]()

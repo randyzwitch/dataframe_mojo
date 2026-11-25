@@ -209,6 +209,9 @@ struct PlanNode(Copyable, Deinitable, Movable):
     def join_suffix(self) -> ref[self.names2[0]] String:
         return self.names2[0]
 
+    def set_join_suffix(mut self, suffix: String):
+        self.names2[0] = suffix
+
     def join_build_slot(self) -> Int:
         return self.offset
 

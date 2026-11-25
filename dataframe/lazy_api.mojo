@@ -130,6 +130,7 @@ from dataframe.optimizer.passes import (
     plan_fold_casts,
     plan_fuse_top_k,
     plan_join_input_columns,
+    plan_lower_right_joins,
     plan_narrow_join_inputs,
     plan_optimized,
     plan_prune_outputs,
@@ -1675,6 +1676,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
             plan_lower_whole_input_filters(plan._plan)
+            plan_lower_right_joins(plan._plan)
             plan_align_join_keys(plan._plan)
         var shared = List[QueryContext]()
         if optimize:
@@ -2085,6 +2087,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
             plan_lower_whole_input_filters(plan._plan)
+            plan_lower_right_joins(plan._plan)
             plan_align_join_keys(plan._plan)
         var out = String()
         if engine != "cpu":
@@ -2165,6 +2168,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
             plan_lower_whole_input_filters(plan._plan)
+            plan_lower_right_joins(plan._plan)
             plan_align_join_keys(plan._plan)
         var shared = List[QueryContext]()
         if optimize:
@@ -2966,6 +2970,7 @@ def _collect_placed[
     if not optimize:
         plan_unique_as_aggregate(plan._plan)
         plan_lower_whole_input_filters(plan._plan)
+        plan_lower_right_joins(plan._plan)
         plan_align_join_keys(plan._plan)
     var solved = _solve_devices(
         plan,

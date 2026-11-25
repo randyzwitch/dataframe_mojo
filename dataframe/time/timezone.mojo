@@ -233,7 +233,7 @@ def canonical_zone_syntax(name: String) raises -> String:
     if _fixed_offset(name):
         return name
     var bytes = name.as_bytes()
-    if bytes[0] == 47 or name.find("..") >= 0:  # leading '/'
+    if bytes[0] == 47 or ".." in name:  # leading '/'
         raise Error("invalid time zone name '" + name + "'")
     for byte in bytes:
         var ok = (

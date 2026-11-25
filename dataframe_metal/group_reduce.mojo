@@ -2,6 +2,7 @@
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
 from .composition_plan import needs_general_values
+from .chunked_numeric_reduce import native_numeric_layout, scan_chunked_numeric
 from .group_partials import GroupedPartials
 from .group_properties import sample_group_tuples, sample_group_stride_reuse
 from .group_layout import GROUP_CAPACITY_FAULT, GROUP_CAPACITY_RETRY
@@ -9,7 +10,13 @@ from .group_general_reduce import general_partials
 
 from .group_plan import GroupedComposition, plan_grouped
 from .group_metadata import group_metadata
-from .group_finish import finish_grouped
+from .group_finish import (
+    finish_grouped,
+    GROUP_ROUNDED_FLOAT,
+    GROUP_NONFINITE_FLOAT,
+)
+from .fractional_mean_plan import plan_fractional_means
+from .fractional_mean_reduce import scan_fractional_means
 from .accelerator.faults import data_fault
 from .accelerator.gpu.erased_input import (
     NumericView,
@@ -316,7 +323,9 @@ def execute_grouped(
     timings.context_ns = Int(perf_counter_ns()) - started
     var partials: GroupedPartials
     var blocks = min(128, max(1, (frame.height() + 255) // 256))
-    if sample_group_stride_reuse(frame, plan.keys.names, blocks * 256):
+    if native_numeric_layout(region, plan, frame):
+        partials = scan_chunked_numeric(plan, frame, scope, zero_copy, timings)
+    elif sample_group_stride_reuse(frame, plan.keys.names, blocks * 256):
         partials = general_partials(
             plan, frame, scope, zero_copy, timings, cached=True
         )
@@ -334,16 +343,31 @@ def execute_grouped(
     else:
         partials = general_partials(plan, frame, scope, zero_copy, timings)
     started = Int(perf_counter_ns())
-    var result = finish_grouped(
-        plan,
-        frame,
-        partials.blocks,
-        partials.first,
-        partials.rows,
-        partials.states,
-        partials.extrema,
-    )
-    timings.finish_ns = Int(perf_counter_ns()) - started
+    var result: DataFrame
+    try:
+        result = finish_grouped(
+            plan,
+            frame,
+            partials.blocks,
+            partials.first,
+            partials.rows,
+            partials.states,
+            partials.extrema,
+        )
+        timings.finish_ns = Int(perf_counter_ns()) - started
+    except error:
+        if String(error) not in [
+            String(data_fault(GROUP_ROUNDED_FLOAT)),
+            String(data_fault(GROUP_NONFINITE_FLOAT)),
+        ]:
+            raise error^
+        var means = plan_fractional_means(region)
+        if not means:
+            raise error^
+        timings.finish_ns = Int(perf_counter_ns()) - started
+        result = scan_fractional_means(
+            frame, means.value(), scope, zero_copy, timings
+        )
     scope.mark_success()
     return (result^, timings^)
 
