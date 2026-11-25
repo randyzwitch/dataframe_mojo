@@ -14,8 +14,10 @@ print(plan.explain(accelerator=MetalRuntime()))  # HANDOFF metal: ...
 ```
 
 Metal supports fused global reductions, bounded integer-key grouped
-reductions, and integer sums grouped by one or two dictionary-backed string keys. Numeric value programs read Int32, Int64 and Float32 inputs;
-Boolean, ordered and distinct reductions also read packed Bool columns.
+reductions, and integer sums grouped by one or two dictionary-backed string
+keys. Numeric value programs read Int32, Int64 and Float32 inputs. Direct
+grouped means also read Float64 columns. Boolean, ordered and distinct
+reductions read packed Bool columns.
 Accepted expressions and predicates run within the reduction scan.
 
 | Area | Accepted regions |
@@ -55,7 +57,7 @@ returns Int64, mean returns Float64, and sums preserve their input dtype and
 `min_count`. Empty means are null; empty counts are zero. Integer means do
 not overflow merely because a same-dtype sum would overflow.
 
-Float32 means accumulate exact integer exponent bins on the GPU and finish
+Global Float32 means accumulate exact integer exponent bins on the GPU and finish
 in Float64 on the host, without GPU Float64 arithmetic. If the finite input's
 significant-bit span and count cannot prove the CPU's Float64 additions
 exact, the CPU adjudicates the result in its own accumulation order. This
@@ -480,13 +482,12 @@ things hold: Metal supports the operator on the column types natively, and
 measured costs on the device say it will be faster. Everything else stays on
 the CPU, in the same query.
 
-- **No emulated types.** Apple GPUs have no 64-bit floating point, and Metal
-  has no 64-bit atomic add on any Apple GPU. Work on Float64 columns, or work
-  that would need those atomics, runs on the CPU, which does it better than
-  an emulation would.
-- **Kernels.** Typed column buffers, fused and compiled kernels, and
-  parallel reductions with no emulation of the CPU's evaluation order. Each
-  operator first checks MAX's GPU kernel libraries (warp and block
+- **Arithmetic.** Apple GPU kernels use native integer and Float32 operations.
+  Direct grouped means can read Float64 bit patterns and use integer operations
+  for each correctly rounded addition in input order. Other Float64 arithmetic
+  runs on the CPU.
+- **Kernels.** The backend uses typed column buffers, fused kernels and
+  parallel reductions. Each operator first checks MAX's GPU kernel libraries (warp and block
   reductions, 32-bit atomics and `elementwise` run on Apple GPUs) before
   writing its own.
 - **Visibility.** `explain(engine="auto")` shows pipeline placement; the
@@ -770,8 +771,10 @@ limit and checked data faults retain CPU adjudication.
 
 Exact wide integer sums, Float32 exponent bins and winning row tickets for
 Int64 extrema retain the existing numeric policies without 64-bit atomics.
-Float32 sums/means require the CPU-order proof; non-finite sums and ambiguous
-extrema use CPU adjudication. Device measurements reject adjudication as a
+Float32 exponent bins require a proof that the total agrees with input-order
+addition. Direct grouped means can replay an inconclusive bin result in input
+order on Metal. Other grouped non-finite sums and ambiguous extrema use CPU
+adjudication. Device measurements reject adjudication as a
 Metal timing. Scratch buffers share one bounded allocation; native key,
 value and bitmap buffers remain separate mapped views. Independent chunk
 allocations use an explicit upload when random ticket lookup requires one
@@ -796,6 +799,24 @@ Checked expressions still evaluate every selected row. Moment reductions retain
 their existing scan. A bounded stride-reuse sample chooses this path; sampling
 describes cost only and never discovers the complete groups.
 
+An unfiltered group-by with one Int32 or Int64 key can compute direct means
+on Metal over up to four distinct Int32, Int64, Float32 or Float64 columns in one aggregation containing
+at least one floating input. An ordered GPU scan reads the native value and
+validity windows. It assigns each key to one hash bucket and visits that
+bucket’s rows in their original order across chunk boundaries. Integer fields
+retain a signed 96-bit total. Floating fields widen Float32 exactly and round
+each binary64 addition to nearest, ties to even, using integer operations.
+The host divides each group total by its own non-null count in Float64. A field
+with no valid values in a group produces a null mean. NaNs and infinities participate in floating addition.
+
+The floating addition order matches a single-worker CPU group sum. Parallel
+CPU hash aggregation can combine worker partials in a different order and give
+different low bits. [Floating-point reductions](expressions.md)
+
+When all floating inputs are Float32, the existing exponent-bin scan can finish directly
+where it proves equivalence. The ordered scan has a separate calibration
+identity for Float64 inputs and requires measured costs for automatic placement.
+
 ### Native casts inside aggregate values
 
 Explicit casts between Int32, Int64 and Float32 can share the existing
@@ -803,7 +824,7 @@ aggregate scan, including bounded arithmetic trees and integer-key grouping.
 For example, `(col("quantity").cast(DataType.FLOAT32) * col("price")).sum()`
 reads the original integer and Float32 buffers without a cast result column.
 Arithmetic operands must have matching types after casting, as the CPU API
-requires. Float64 input columns and Float64 cast targets remain on CPU.
+requires. Expressions that cast from or to Float64 run on the CPU.
 
 Integer-to-Float32 conversion rounds to nearest, ties to even using integer
 bit operations. Float32-to-integer conversion truncates toward zero and

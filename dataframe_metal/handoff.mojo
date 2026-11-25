@@ -9,7 +9,8 @@ on the CPU in the same query.
 Accepted today: native numeric and Boolean/count reductions over bounded
 predicate and value programs, globally or with native integer grouping keys.
 Int32, Int64, Float32 and Bool predicate inputs retain their physical widths.
-Native chunks are mapped in place on Apple silicon; Float64 input stays on CPU.
+Native chunks map in place on Apple silicon. Direct grouped means also read
+Float64 bit patterns and accumulate them in input order using integer operations.
 """
 from max.gpu.host import DeviceBuffer
 from std.time import perf_counter_ns
@@ -44,6 +45,8 @@ from .predicate_plan import plan_predicates, predicate_key
 from .dictionary_group import plan_dictionary_group, execute_dictionary_group
 from .dictionary_properties import dictionary_properties
 from .group_plan import plan_grouped, grouped_key
+from .fractional_mean_plan import plan_fractional_means
+from .fractional_mean_reduce import execute_fractional_means
 from .group_properties import sample_group_tuples
 from .group_reduce import execute_grouped
 from .chunked_numeric_reduce import (
@@ -116,6 +119,7 @@ def supports(region: LazyFrame) -> Bool:
             or Bool(plan_extrema(selected))
             or Bool(plan_predicates(selected))
             or Bool(plan_grouped(selected))
+            or Bool(plan_fractional_means(selected))
             or Bool(plan_dictionary_group(selected))
         )
     except:
@@ -225,6 +229,11 @@ def region_key(region: LazyFrame) raises -> String:
             + ":min_count"
             + String(region._plan._nodes[1].exprs[0]._nodes[1].min_count)
         )
+    var means = plan_fractional_means(region)
+    if means and means.value().wide:
+        ref frame = region._plan._frames[region._plan._nodes[0].source_slot()]
+        var keys: List[String] = [means.value().key.copy()]
+        return means.value().identity() + sample_group_tuples(frame, keys).key()
     var grouped = plan_grouped(region)
     if grouped:
         ref source = region._plan._frames[region._plan._nodes[0].source_slot()]
@@ -237,7 +246,11 @@ def region_key(region: LazyFrame) raises -> String:
             key += ":chunked_native_numeric:v1"
         elif layout == NUMERIC_SINGLE_SPAN:
             key += ":single_span_numeric:v1"
+        if means:
+            key += ":ordered_mean_retry:v1"
         return key^
+    if means:
+        return means.value().identity()
     var predicates = plan_predicates(region)
     if predicates:
         return predicate_key(predicates.value())
@@ -718,9 +731,14 @@ def _execute_on_device(
     var dictionary = plan_dictionary_group(region)
     if dictionary:
         return execute_dictionary_group(region, dictionary.value(), zero_copy)
+    var means = plan_fractional_means(region)
+    if means and means.value().wide:
+        return execute_fractional_means(region, means.value(), zero_copy)
     var grouped = plan_grouped(region)
     if grouped:
         return execute_grouped(region, zero_copy)
+    if means:
+        return execute_fractional_means(region, means.value(), zero_copy)
     var accepted = plan_region(region)
     if not accepted:
         if plan_extrema(region):
