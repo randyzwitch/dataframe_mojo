@@ -262,7 +262,7 @@ performance results.
 
 For grouped `first`, `last`, `arg_min` and `arg_max`, the ordered calibration
 driver generates balanced and skewed Int32 keys with one or eight independently
-allocated chunks per column. Run it against the same identified packages:
+allocated chunks per column. Use the same identified packages for this run.
 
 ```sh
 mojo build -j 1 -O3 -I dist benchmarks/bench_ordered_calibration.mojo -o build/ordered-calibration

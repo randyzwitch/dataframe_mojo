@@ -4,6 +4,7 @@ from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, LazyFrame, Series, col
 from dataframe.json.value import json_quote
 from dataframe_metal.calibration_capture import capture
+from dataframe_metal.handoff import layout_key
 from dataframe_metal.metal import MetalRuntime
 
 
@@ -177,16 +178,18 @@ def main() raises:
         raise Error(
             "Expected at least 128 rows, 1..rows chunks, balanced|skew and positive repetitions"
         )
+    var item = _case(rows, chunks, distribution == "skew", mode != "capture")
+    ref plan = item[0]
+    ref expected = item[1]
     if len(args) == 7:
         var warmup_rows = Int(String(args[6]))
         if mode == "capture" or warmup_rows < max(chunks, 128):
             raise Error("Prewarming requires a supported audit shape")
         var warmup = _case(warmup_rows, chunks, distribution == "skew", True)
+        if layout_key(warmup[0]) != layout_key(plan):
+            raise Error("Warmup and target have different calibration keys")
         if not _profile(warmup[0], "auto", warmup[1], 0, False):
             raise Error("Warmup did not execute the calibrated shape on Metal")
-    var item = _case(rows, chunks, distribution == "skew", mode != "capture")
-    ref plan = item[0]
-    ref expected = item[1]
     if mode == "export":
         var result = plan.collect(engine="auto")
         if not result.equals(expected):
