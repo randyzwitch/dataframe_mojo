@@ -28,7 +28,7 @@ from .logical_plan import plan_logical, logical_key, finish_logical
 from .ordered_plan import plan_ordered, ordered_key
 from .ordered_segments import segmented_ordered_supported
 from .ordered_reduce import execute_ordered
-from .distinct_plan import plan_distinct, distinct_key
+from .distinct_plan import plan_distinct, distinct_key, chunked_distinct
 from .distinct_properties import cardinality_key
 from .distinct_reduce import execute_distinct
 from .cross_sum import reduce_cross
@@ -144,6 +144,8 @@ def region_key(region: LazyFrame) raises -> String:
             key += sample_group_tuples(
                 frame, distinct.value().keys.value().names
             ).key()
+        if chunked_distinct(distinct.value(), frame):
+            key += ":chunk-native:v1"
         return key^
     var ordered = plan_ordered(region)
     if ordered:
