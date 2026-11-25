@@ -3,7 +3,6 @@ from max.gpu import global_idx
 from std.atomic import Atomic
 from std.memory import Pointer, bitcast
 from .filter_sum import _valid
-from .group_hash import _key_hash
 from .multi_reduce import Bytes, read_integer
 from .soft_binary64 import add_binary64, widen_binary32
 
@@ -21,8 +20,17 @@ def _present(bits: Bytes, desc: UInt64, row: Int) -> Bool:
 
 
 @always_inline
-def _hash_key(raw: Int64, present: Bool) -> UInt32:
-    return _key_hash(raw) if present else UInt32(0xD1B54A35)
+def _hash_key(raw: Int64, present: Bool) -> UInt64:
+    # MurmurHash3's bijective 64-bit finalizer mixes both halves of an Int64.
+    # The owner, initial table position and odd probe step use distinct bits.
+    var h = bitcast[DType.uint64](raw) if present else UInt64(
+        0xD1B54A32D192ED03
+    )
+    h ^= h >> 33
+    h *= UInt64(0xFF51AFD7ED558CCD)
+    h ^= h >> 33
+    h *= UInt64(0xC4CEB9FE1A85EC53)
+    return h ^ (h >> 33)
 
 
 def bucket_mean_rows(
@@ -127,7 +135,9 @@ def reduce_mean_buckets(
                 keys, UInt32(key_desc & 1), row
             ) if present else Int64(0)
             var hashed = _hash_key(raw, present)
-            var slot = hashed & (capacity - 1)
+            var slot = UInt32(hashed >> 32) & (capacity - 1)
+            var step = UInt32(hashed >> 7) | 1
+            var probes = UInt32(0)
             var low = UInt32(bitcast[DType.uint64](raw))
             var high = UInt32(bitcast[DType.uint64](raw) >> 32)
             while True:
@@ -141,7 +151,7 @@ def reduce_mean_buckets(
                             Atomic[UInt32].fetch_add(control, UInt32(1))
                             >= capacity // 2
                         ):
-                            Atomic[UInt32].store(
+                            _ = Atomic[UInt32].max(
                                 control.unsafe_offset(1), UInt32(1)
                             )
                             return
@@ -187,4 +197,9 @@ def reduce_mean_buckets(
                             field.unsafe_offset(3 * MEAN_FIELD_WORDS),
                         )
                     break
-                slot = (slot + 1) & (capacity - 1)
+                # An odd step visits every power-of-two table slot once.
+                probes += 1
+                if probes == capacity:
+                    _ = Atomic[UInt32].max(control.unsafe_offset(1), UInt32(2))
+                    return
+                slot = (slot + step) & (capacity - 1)

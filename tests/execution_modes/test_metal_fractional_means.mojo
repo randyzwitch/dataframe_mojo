@@ -156,3 +156,40 @@ def test_metal_fractional_grouped_means_preserve_rounding_nulls_and_order() rais
         assert_equal(result.item(1, "f").float64(), Float64(sub32))
         assert_true(isnan(result.item(2, "f").float64()))
         assert_true(result.item(4, "f").is_null())
+
+
+# requires: metal
+def test_metal_fractional_means_separate_full_width_keys_with_correlated_halves() raises:
+    var runtime = require_metal()
+    var keys = List[Int64]()
+    var values = List[Float64]()
+    for pass_index in range(2):
+        for i in range(2048):
+            # Every distinct key would have the same hash if the upper/lower
+            # words were folded as low ^ (high * 0x9E3779B9) before mixing.
+            var low = UInt32(i) * UInt32(0x9E3779B9)
+            keys.append(bitcast[DType.int64]((UInt64(i) << 32) | UInt64(low)))
+            values.append(Float64(i) + (0.25 if pass_index == 0 else 0.75))
+    var frame = DataFrame(
+        [
+            Series("key", Column[Int64](keys.copy())),
+            Series("value", Column[Float64](values^)),
+        ]
+    )
+    var plan = (
+        frame.lazy()
+        .group_by("key", maintain_order=True)
+        .agg([col("value").mean().alias("answer")])
+    )
+    var profiled = plan.profile(accelerator=runtime)
+    var launches = Int64(0)
+    for r in range(profiled[1].height()):
+        assert_equal(
+            profiled[1].item(r, "fallback_reason").string(), String("")
+        )
+        launches += profiled[1].item(r, "gpu_completed_launches").int64()
+    assert_true(launches > 0)
+    assert_equal(profiled[0].height(), 2048)
+    for i in range(2048):
+        assert_equal(profiled[0].item(i, "key").int64(), keys[i])
+        assert_equal(profiled[0].item(i, "answer").float64(), Float64(i) + 0.5)

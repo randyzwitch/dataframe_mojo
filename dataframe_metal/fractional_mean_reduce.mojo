@@ -238,6 +238,10 @@ def scan_fractional_means(
             timings.kernel_ns += Int(perf_counter_ns()) - started
             if status[1]:
                 if capacity == GENERAL_TABLE_LIMIT:
+                    if status[1] == 2:
+                        raise Error(
+                            "Metal grouped mean exhausted a complete table probe cycle"
+                        )
                     raise data_fault("grouped reduction exceeded 65536 groups")
                 capacity = GENERAL_TABLE_LIMIT
                 continue
