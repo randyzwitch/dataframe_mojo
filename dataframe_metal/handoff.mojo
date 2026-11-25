@@ -241,13 +241,13 @@ def region_key(region: LazyFrame) raises -> String:
             grouped_key(grouped.value())
             + sample_group_tuples(source, grouped.value().keys.names).key()
         )
-        if means:
-            key += ":ordered_mean_retry:v1"
         var layout = native_numeric_layout(region, grouped.value(), source)
         if layout == NUMERIC_SEGMENTED:
             key += ":chunked_native_numeric:v1"
         elif layout == NUMERIC_SINGLE_SPAN:
             key += ":single_span_numeric:v1"
+        if means:
+            key += ":ordered_mean_retry:v1"
         return key^
     if means:
         return means.value().identity()
