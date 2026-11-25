@@ -37,14 +37,14 @@ def bucket_mean_rows(
     keys: Bytes,
     bits: Bytes,
     desc: UInt64,
-    length: Int,
+    length: UInt32,
     heads: Words,
     links: Words,
     control: Words,
 ):
     var tile = global_idx.x
     var start = tile * MEAN_TILE
-    if start >= length:
+    if start >= Int(length):
         return
     if tile == 0:
         _ = Atomic[UInt32].fetch_add(control.unsafe_offset(2), UInt32(1))
@@ -52,7 +52,7 @@ def bucket_mean_rows(
     for bucket in range(MEAN_BUCKETS):
         local[unsafe_offset=bucket] = 0
     # One writer per tile. Prepending backwards links every bucket in source order.
-    for row in reversed(range(start, min(start + MEAN_TILE, length))):
+    for row in reversed(range(start, min(start + MEAN_TILE, Int(length)))):
         var present = _present(bits, desc, row)
         var raw = read_integer(
             keys, UInt32(desc & 1), row
@@ -108,8 +108,8 @@ def reduce_mean_buckets(
     b3: Bytes,
     d3: UInt64,
     base: UInt32,
-    length: Int,
-    fields: Int,
+    length: UInt32,
+    fields: UInt32,
     capacity: UInt32,
     heads: Words,
     links: Words,
@@ -122,8 +122,8 @@ def reduce_mean_buckets(
     if bucket == 0:
         _ = Atomic[UInt32].fetch_add(control.unsafe_offset(3), UInt32(1))
     var owner = UInt32(bucket + 1)
-    var stride = MEAN_KEY_WORDS + fields * MEAN_FIELD_WORDS
-    for tile in range((length + MEAN_TILE - 1) // MEAN_TILE):
+    var stride = MEAN_KEY_WORDS + Int(fields) * MEAN_FIELD_WORDS
+    for tile in range((Int(length) + MEAN_TILE - 1) // MEAN_TILE):
         var next_row = heads[unsafe_offset=tile * MEAN_BUCKETS + bucket]
         while next_row:
             var row = Int(next_row) - 1
