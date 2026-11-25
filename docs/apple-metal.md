@@ -266,13 +266,16 @@ allocated chunks per column. Run it against the same identified packages:
 
 ```sh
 mojo build -j 1 -O3 -I dist benchmarks/bench_ordered_calibration.mojo -o build/ordered-calibration
-DATAFRAME_THREADS=8 python3 benchmarks/tools/bench_ordered_calibration.py build/ordered-calibration build/ordered-study
+DATAFRAME_THREADS=8 pixi run -e oracle python3 benchmarks/tools/bench_ordered_calibration.py build/ordered-calibration build/ordered-study
 ```
 
 Each training case starts in a fresh process and checks a scalar reference.
 The controller fits the normal placement profile, then compares public CPU,
 materialized CPU, forced Metal and automatic collection at separate row counts.
-The first and final collections in each process are reported separately.
+Held-out inputs use different key labels and payload values, with nullable
+endpoints and an all-null group. DuckDB independently checks every group,
+its order and its group-local extrema positions. The first and final
+collections in each process are reported separately.
 `holdout.jsonl` contains the original samples and actual completed GPU launch
 counts from separate profile runs. `summary.jsonl` records the observed device
 choice and faster measured engine for each held-out case.

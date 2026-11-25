@@ -8,7 +8,7 @@ from dataframe_metal.metal import MetalRuntime
 
 
 def _case(
-    rows: Int, chunks: Int, skew: Bool
+    rows: Int, chunks: Int, skew: Bool, held_out: Bool
 ) raises -> Tuple[LazyFrame, DataFrame]:
     comptime groups = 32
     var counts = List[UInt32](length=groups, fill=0)
@@ -26,35 +26,46 @@ def _case(
         var end = rows * (part + 1) // chunks
         var keys = List[Int32](capacity=end - start)
         var values = List[Int32](capacity=end - start)
+        var valid = List[Bool](capacity=end - start)
         for row in range(start, end):
             var k = row % groups
             if skew:
                 k = 0 if row % 3 else 1 + (row // 3) % (groups - 1)
             var v = Int32((row * 73 + row // 97) % 503 - 251)
-            keys.append(Int32(k))
+            if held_out:
+                v = Int32((row * 67 + row // 131) % 503 - 251)
+            var present = row % 11 != 0 and k != groups - 1
+            valid.append(present)
+            keys.append(Int32(300 - 7 * k if held_out else k))
             values.append(v)
             # Scalar oracle retains the first tied extremum in each group's
             # encounter order. Chunk boundaries never reset its local rank.
             if counts[k] == 0:
-                first[k] = v
+                first[k] = v if present else Int32.MIN
                 order.append(k)
-            last[k] = v
-            if v < minimum[k]:
+            last[k] = v if present else Int32.MIN
+            if present and v < minimum[k]:
                 minimum[k] = v
                 arg_min[k] = counts[k]
-            if v > maximum[k]:
+            if present and v > maximum[k]:
                 maximum[k] = v
                 arg_max[k] = counts[k]
             counts[k] += 1
         key_parts.append(Series("k", Column[Int32](keys^)))
-        value_parts.append(Series("v", Column[Int32](values^)))
+        value_parts.append(Series("v", Column[Int32](values^, valid^)))
     var group_keys = List[Int32]()
     var first_values = List[Int32]()
     var last_values = List[Int32]()
     var min_at = List[UInt32]()
     var max_at = List[UInt32]()
+    var first_valid = List[Bool]()
+    var last_valid = List[Bool]()
+    var any_valid = List[Bool]()
     for k in order:
-        group_keys.append(Int32(k))
+        first_valid.append(first[k] != Int32.MIN)
+        last_valid.append(last[k] != Int32.MIN)
+        any_valid.append(minimum[k] != Int32.MAX)
+        group_keys.append(Int32(300 - 7 * k if held_out else k))
         first_values.append(first[k])
         last_values.append(last[k])
         min_at.append(arg_min[k])
@@ -62,10 +73,10 @@ def _case(
     var expected = DataFrame(
         [
             Series("k", Column[Int32](group_keys^)),
-            Series("first", Column[Int32](first_values^)),
-            Series("last", Column[Int32](last_values^)),
-            Series("min_at", Column[UInt32](min_at^)),
-            Series("max_at", Column[UInt32](max_at^)),
+            Series("first", Column[Int32](first_values^, first_valid^)),
+            Series("last", Column[Int32](last_values^, last_valid^)),
+            Series("min_at", Column[UInt32](min_at^, any_valid)),
+            Series("max_at", Column[UInt32](max_at^, any_valid^)),
         ]
     )
     var frame = DataFrame(
@@ -107,10 +118,13 @@ def _profile(
     var launches = Int64(0)
     var complete = Int64(0)
     var metal = False
+    var decision = String()
     for row in range(profile.height()):
         var reason = profile.item(row, "fallback_reason").string()
         if reason:
-            raise Error("Unexpected execution fallback: " + reason)
+            if mode != "auto" or reason != "cost_model_prefers_cpu":
+                raise Error("Unexpected execution fallback: " + reason)
+            decision = reason.copy()
         launches += profile.item(row, "gpu_launches").int64()
         complete += profile.item(row, "gpu_completed_launches").int64()
         if profile.item(row, "result_device").string() == "metal":
@@ -128,6 +142,8 @@ def _profile(
         + String(rep)
         + ',"device":'
         + json_quote("metal" if metal else "cpu")
+        + ',"cpu_reason":'
+        + json_quote(decision)
         + ',"completed_launches":'
         + String(complete)
         + "}"
@@ -155,9 +171,27 @@ def main() raises:
         raise Error(
             "Expected at least 128 rows, 1..rows chunks, balanced|skew and positive repetitions"
         )
-    var item = _case(rows, chunks, distribution == "skew")
+    var item = _case(rows, chunks, distribution == "skew", mode != "capture")
     ref plan = item[0]
     ref expected = item[1]
+    if mode == "export":
+        var result = plan.collect(engine="auto")
+        if not result.equals(expected):
+            raise Error(
+                "Automatic result differs from scalar ordered reference"
+            )
+        for row in range(result.height()):
+            var cells = List[String]()
+            for name in result.columns():
+                var cell = result.item(row, name)
+                if cell.is_null():
+                    cells.append("null")
+                elif name == "min_at" or name == "max_at":
+                    cells.append(String(cell.uint32()))
+                else:
+                    cells.append(String(cell.int32()))
+            print("[" + String(",").join(cells) + "]")
+        return
     if mode == "capture":
         print(capture(plan, expected, reps, distribution == "skew"))
         return

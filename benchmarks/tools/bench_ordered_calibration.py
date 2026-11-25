@@ -8,6 +8,8 @@ from statistics import median
 import subprocess
 import sys
 
+import duckdb
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from metal_calibration import fit, publish
@@ -21,9 +23,33 @@ def invoke(binary, env, mode, rows, chunks, distribution, repetitions):
     if result.returncode:
         raise RuntimeError(f"{mode} {rows}/{chunks}/{distribution}: {result.stderr}{result.stdout}")
     records = [json.loads(line) for line in result.stdout.splitlines()]
-    if len(records) != (1 if mode == "capture" else repetitions):
+    if mode != "export" and len(records) != (1 if mode == "capture" else repetitions):
         raise ValueError(f"Unexpected {mode} record count: {len(records)}")
     return records
+
+
+def reference(rows, distribution):
+    with duckdb.connect() as db:
+        # Window position counts every input row. FILTER excludes null values
+        # when choosing extrema, while first()/last() retain null endpoints.
+        answer = db.execute("""
+            WITH keys AS (
+                SELECT r, CASE WHEN $skew THEN
+                    CASE WHEN r % 3 = 0 THEN 1 + ((r // 3) % 31) ELSE 0 END
+                    ELSE r % 32 END AS slot
+                FROM range($rows) t(r)
+            ), ranked AS (
+                SELECT r, 300 - 7 * slot AS k, CASE WHEN r % 11 <> 0 AND slot <> 31
+                    THEN (r * 67 + r // 131) % 503 - 251 END AS v,
+                    row_number() OVER (PARTITION BY slot ORDER BY r) - 1 AS pos
+                FROM keys
+            )
+            SELECT k, first(v ORDER BY r), last(v ORDER BY r),
+                first(pos ORDER BY v ASC, r) FILTER (WHERE v IS NOT NULL),
+                first(pos ORDER BY v DESC, r) FILTER (WHERE v IS NOT NULL)
+            FROM ranked GROUP BY k ORDER BY min(r)
+        """, {"rows": rows, "skew": distribution == "skew"}).fetchall()
+        return [list(row) for row in answer]
 
 
 def emit(stream, record):
@@ -54,6 +80,11 @@ def measure(args):
     with (directory / "holdout.jsonl").open("x") as raw, (directory / "summary.jsonl").open("x") as summary:
         for rows, (chunks, distribution) in product(args.holdout, shapes):
             shape = dict(rows=rows, chunks=chunks, distribution=distribution)
+            actual = invoke(binary, env, "export", rows, chunks, distribution, 1)
+            expected = reference(rows, distribution)
+            if actual != expected:
+                raise ValueError(f"DuckDB ordered result differs for {shape}: {actual} != {expected}")
+            emit(raw, {**shape, "mode": "duckdb", "version": duckdb.__version__, "rows_checked": actual})
             samples = {}
             for mode in ("profile-metal", "profile-auto"):
                 records = invoke(binary, env, mode, rows, chunks, distribution, args.reps)
@@ -77,6 +108,7 @@ def measure(args):
                     **shape, "temperature": thermal, "ns": timings,
                     "fastest": fastest, "selected": observed["device"],
                     "completed_launches": observed["completed_launches"],
+                    "cpu_reason": observed["cpu_reason"],
                 }
                 emit(summary, record)
                 print(json.dumps(record), flush=True)
