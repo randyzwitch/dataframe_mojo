@@ -13,6 +13,7 @@ from .accelerator.gpu.chunked_numeric import (
     chunked_numeric_partials,
 )
 from .accelerator.gpu.erased_input import numeric_views, single_native_span
+from .accelerator.gpu.group_hash import HASH_CAPACITY
 from .accelerator.gpu.group_state import initialize_group_states
 from .accelerator.gpu.numeric_view import NumericView, intersect_numeric_views
 from .accelerator.gpu.query_scope import Scope
@@ -308,9 +309,7 @@ def scan_chunked_numeric(
                 )
             )
         var segments = intersect_numeric_views(inputs, frame.height())
-        var sample = sample_group_tuples(frame, plan.keys.names)
-        var capacity = sample.capacity()
-        var shared_output = zero_copy and sample.global_state()
+        var capacity = sample_group_tuples(frame, plan.keys.names).capacity()
         timings.upload_ns += Int(perf_counter_ns()) - started
         var answer: GroupedPartials
         for attempt in range(2):
@@ -322,7 +321,7 @@ def scan_chunked_numeric(
                     flags,
                     layout,
                     scope,
-                    shared_output,
+                    zero_copy and capacity > Int(HASH_CAPACITY),
                     timings,
                 )
                 _ = (owners^, segments^, empty^)
