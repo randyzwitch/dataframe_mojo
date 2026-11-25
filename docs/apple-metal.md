@@ -260,6 +260,23 @@ CPU-adjudicated cases explicitly. Every Metal timing requires direct GPU
 execution. These are development calibration workloads, not external-suite
 performance results.
 
+For grouped `first`, `last`, `arg_min` and `arg_max`, the ordered calibration
+driver generates balanced and skewed Int32 keys with one or eight independently
+allocated chunks per column. Run it against the same identified packages:
+
+```sh
+mojo build -j 1 -O3 -I dist benchmarks/bench_ordered_calibration.mojo -o build/ordered-calibration
+DATAFRAME_THREADS=8 python3 benchmarks/tools/bench_ordered_calibration.py build/ordered-calibration build/ordered-study
+```
+
+Each training case starts in a fresh process and checks a scalar reference.
+The controller fits the normal placement profile, then compares public CPU,
+materialized CPU, forced Metal and automatic collection at separate row counts.
+The first and final collections in each process are reported separately.
+`holdout.jsonl` contains the original samples and actual completed GPU launch
+counts from separate profile runs. `summary.jsonl` records the observed device
+choice and faster measured engine for each held-out case.
+
 For application workloads, call `dataframe_metal.calibration_capture.capture`
 with a supported `LazyFrame`, independently computed expected `DataFrame`
 and at least three repetitions; save its returned JSON as one line. Capture
