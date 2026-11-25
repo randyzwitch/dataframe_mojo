@@ -363,3 +363,179 @@ def test_metal_distinct_public_growth_and_resource_limit_fallback_are_exact() ra
             query.collect(accelerator=runtime).item(0, "count").int64(),
             Int64(rows),
         )
+
+
+def _fragmented_distinct_input() raises -> DataFrame:
+    # Independently allocated key and value owners, different boundaries,
+    # unaligned validity bitmaps, zero/null keys and repeated extrema.
+    var k1 = Series(
+        "region",
+        Column[Int32](
+            [1, 0, -7, 0, Int32.MAX], [True, True, True, False, True]
+        ),
+    )
+    var k2 = Series(
+        "region",
+        Column[Int32](
+            [1, 0, 0, -7, Int32.MAX], [True, False, True, True, True]
+        ),
+    )
+    var key = Series._from_chunks([k1.slice(1, 4), k2.slice(1, 4)])
+    var v1 = Series(
+        "value",
+        Column[Int64]([7, Int64.MIN, Int64.MAX, -5], [True, True, True, False]),
+    )
+    var v2 = Series(
+        "value",
+        Column[Int64](
+            [9, -1, 4, Int64.MIN, Int64.MAX, -1],
+            [True, True, False, True, True, True],
+        ),
+    )
+    var value = Series._from_chunks([v1.slice(1, 3), v2.slice(1, 5)])
+    return DataFrame([key^, value^])
+
+
+def test_exact_distinct_segment_admission_uses_physical_owners() raises:
+    from dataframe_metal.distinct_plan import chunked_distinct
+
+    var frame = _fragmented_distinct_input()
+    var agg = col("value").n_unique().alias("counts")
+    var query = frame.lazy().group_by("region").agg([agg.copy()])
+    assert_true(chunked_distinct(plan_distinct(query).value(), frame))
+    var contiguous = frame.rechunk()
+    var direct = contiguous.lazy().group_by("region").agg([agg.copy()])
+    assert_false(chunked_distinct(plan_distinct(direct).value(), contiguous))
+    var filtered = (
+        frame.lazy()
+        .filter(col("value") > 0)
+        .group_by("region")
+        .agg([agg.copy()])
+    )
+    assert_false(chunked_distinct(plan_distinct(filtered).value(), frame))
+    var mixed = (
+        frame.lazy()
+        .group_by(["region", "value"])
+        .agg([col("value").n_unique().alias("counts")])
+    )
+    assert_false(chunked_distinct(plan_distinct(mixed).value(), frame))
+
+
+# requires: metal
+def test_metal_distinct_chunk_records_preserve_cross_span_classes_and_first_rows() raises:
+    from dataframe.execution_observation import DeviceObservation
+    from std.memory import ArcPointer
+    from dataframe_metal.distinct_reduce import execute_distinct
+    from tests.support.metal_outcomes import require_metal
+
+    var runtime = require_metal()
+    var frame = _fragmented_distinct_input()
+    var full = (
+        frame.lazy()
+        .group_by("region", maintain_order=True)
+        .agg(
+            [
+                col("value").n_unique().alias("all"),
+                col("value").n_unique(ignore_nulls=True).alias("nonnull"),
+            ]
+        )
+    )
+    var expected = full.collect(engine="cpu")
+    var obs = ArcPointer(DeviceObservation())
+    full._plan._device_observation = obs
+    assert_true(execute_distinct(full)[0].equals(expected))
+    assert_equal(obs[].upload_bytes.load(), Int64(0))
+    assert_true(obs[].completed_launches.load() > 1)
+    assert_true(full.collect(accelerator=runtime).equals(expected))
+    assert_true(execute_distinct(full, False)[0].equals(expected))
+
+    # The same physical column can serve as both key and distinct input.
+    var alias = (
+        frame.lazy()
+        .group_by("region", maintain_order=True)
+        .agg(
+            [
+                col("region").n_unique().alias("all"),
+                col("region").drop_nulls().n_unique().alias("nonnull"),
+            ]
+        )
+    )
+    assert_true(execute_distinct(alias)[0].equals(alias.collect(engine="cpu")))
+
+
+# requires: metal
+def test_metal_distinct_fragmented_retry_replays_every_segment_once() raises:
+    from dataframe_metal.distinct_reduce import execute_distinct
+    from tests.support.metal_outcomes import require_metal
+
+    _ = require_metal()
+    var keys = List[Series]()
+    var fields = List[Series]()
+    for _ in range(2):
+        var k = List[Int32]()
+        var v = List[Int32]()
+        for i in range(9000):
+            k.append(Int32(i % 2))
+            v.append(Int32(i // 2))
+        keys.append(Series("g", Column[Int32](k^)))
+        fields.append(Series("n", Column[Int32](v^)))
+    var frame = DataFrame(
+        [Series._from_chunks(keys^), Series._from_chunks(fields^)]
+    )
+    var query = (
+        frame.lazy()
+        .group_by("g", maintain_order=True)
+        .agg([col("n").n_unique().alias("cardinality")])
+    )
+    var result = execute_distinct(query)[0].copy()
+    assert_equal(result.height(), 2)
+    assert_equal(result.item(0, "cardinality").int64(), Int64(4500))
+    assert_equal(result.item(1, "cardinality").int64(), Int64(4500))
+
+
+# requires: metal
+def test_metal_distinct_chunked_float_and_packed_boolean_classes() raises:
+    from dataframe_metal.distinct_reduce import execute_distinct
+    from tests.support.metal_outcomes import require_metal
+
+    _ = require_metal()
+    var nan1 = bitcast[DType.float32](UInt32(0x7FC12345))
+    var nan2 = bitcast[DType.float32](UInt32(0xFFC54321))
+    var negzero = bitcast[DType.float32](UInt32(0x80000000))
+    var f1 = Series("measure", Column[Float32]([8, nan1, 0, 3]))
+    var f2 = Series(
+        "measure",
+        Column[Float32](
+            [8, 8, negzero, 3, nan2, negzero, 3],
+            [True, True, True, False, True, True, True],
+        ),
+    )
+    var b1 = Series("flag", Column[Bool]([False, True, False, True]))
+    var b2 = Series(
+        "flag",
+        Column[Bool](
+            [False, True, False, False, True, False, True],
+            [True, True, True, False, True, True, True],
+        ),
+    )
+    var frame = DataFrame(
+        [
+            _fragmented_distinct_input().column("region"),
+            Series._from_chunks([f1.slice(1, 3), f2.slice(2, 5)]),
+            Series._from_chunks([b1.slice(1, 3), b2.slice(2, 5)]),
+        ]
+    )
+    for name in ["measure", "flag"]:
+        var query = (
+            frame.lazy()
+            .group_by("region", maintain_order=True)
+            .agg(
+                [
+                    col(name).n_unique().alias("all"),
+                    col(name).n_unique(ignore_nulls=True).alias("nonnull"),
+                ]
+            )
+        )
+        assert_true(
+            execute_distinct(query)[0].equals(query.collect(engine="cpu"))
+        )

@@ -1,6 +1,6 @@
 """Schema-only exact N_UNIQUE matching over native values and tuple keys."""
 from std.memory import bitcast
-from dataframe import DataType, LazyFrame
+from dataframe import DataFrame, DataType, LazyFrame
 from dataframe.binding import bind
 from dataframe.expr import COL, N_UNIQUE, DROP_NULLS
 from dataframe.lazy import SCAN_FRAME, FILTER, SELECT, AGG
@@ -136,6 +136,26 @@ def plan_distinct(region: LazyFrame) raises -> Optional[DistinctPlan]:
     if not bind_predicate_inputs(predicate, inputs):
         return None
     return DistinctPlan(fields^, outputs^, inputs^, predicate^, keys^)
+
+
+def chunked_distinct(plan: DistinctPlan, frame: DataFrame) raises -> Bool:
+    """The word-key scan handles one distinct field and direct, unfiltered grouping."""
+    from .accelerator.gpu.erased_input import single_native_span
+
+    if (
+        frame.height() == 0
+        or not plan.keys
+        or len(plan.keys.value().dtypes) != 1
+        or plan.keys.value().dtypes[0] != DataType.INT32
+        or len(plan.fields) != 1
+        or plan.predicate.clauses
+    ):
+        return False
+    var key = frame.column(plan.keys.value().names[0])
+    var value = frame.column(plan.fields[0].column)
+    return (key.is_chunked() and not single_native_span(key)) or (
+        value.is_chunked() and not single_native_span(value)
+    )
 
 
 def distinct_key(plan: DistinctPlan) -> String:
