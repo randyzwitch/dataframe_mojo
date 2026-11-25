@@ -43,6 +43,8 @@ from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
     ALL,
     ANY,
+    EXPR_MAX_BY,
+    EXPR_MIN_BY,
     ARG_MAX,
     ARG_MIN,
     CORR,
@@ -68,6 +70,7 @@ from dataframe.expr import (
     VAR,
 )
 from dataframe.aggregation.selected_rows import _canonical_int
+from dataframe.sequence import extreme_rows
 from dataframe.storage.allocation import huge_uninit
 from dataframe.kernels.nested_keys import (
     decode_nested_keys,
@@ -157,8 +160,7 @@ def table_reduction(op: Int) -> Bool:
     """Whether the aggregate table holds a reduction's state for groups:
     an `AggregateFunction` of its own (`reduction_supported`), or a state by
     address (`_K_STATE`, `_K_ORDERED`) for the positional, product and
-    moment reductions, mode and
-    implode."""
+    moment reductions, mode, implode, max_by and min_by."""
     return reduction_supported(op) or op in [
         ARG_MIN,
         ARG_MAX,
@@ -167,7 +169,17 @@ def table_reduction(op: Int) -> Bool:
         PRODUCT,
         MODE,
         IMPLODE,
+        EXPR_MAX_BY,
+        EXPR_MIN_BY,
     ]
+
+
+def reads_second_input(op: Int) -> Bool:
+    """Whether a reduction reads a second input in the aggregate table:
+    a correlation's or covariance's other column, or the key a max_by or
+    min_by picks its row by. Second inputs follow every reduction's own
+    (`_second_input`)."""
+    return op == CORR or op == COV or op == EXPR_MAX_BY or op == EXPR_MIN_BY
 
 
 # What a state slot holds, in words after the group's key words.
@@ -236,7 +248,8 @@ comptime _K_STATE = 21
 # input rows and their sequence numbers. The finish sorts the group's
 # buffered rows by sequence (their input order) and only then reduces them:
 # first and last take the row at either end, the others replay the rows
-# into a `Reducer` in that order.
+# into a `Reducer` in that order. A max_by or min_by buffers each row's
+# key with its value and picks the group's row at the finish.
 comptime _K_ORDERED = 22
 # The most pairs a group row holds inline: 33 state words, four cache lines.
 comptime TOP_ROWS_INLINE = 16
@@ -651,7 +664,7 @@ def _second_input(specs: List[ReducerSpec], s: Int) -> Int:
     the two-input reductions follow the reductions' own, in order."""
     var at = len(specs)
     for r in range(s):
-        if specs[r].op == CORR or specs[r].op == COV:
+        if reads_second_input(specs[r].op):
             at += 1
     return at
 
@@ -689,6 +702,9 @@ def vector_input(
             return reads_vectors(op, second)
         return True
     if kind == _K_ORDERED:
+        # A max_by or min_by buffers its values with their keys.
+        if op == EXPR_MAX_BY or op == EXPR_MIN_BY:
+            return False
         return (
             physical_size(storage) > 0
             and storage != PHYSICAL_BOOL
@@ -703,7 +719,7 @@ def _address_kind(op: Int) -> Int:
     `_K_ORDERED` for one whose answer depends on the order of the group's
     rows (first, last, the position of an extreme), `_K_STATE` for any
     other a `Reducer` holds, or -1."""
-    if op in [FIRST, LAST, ARG_MIN, ARG_MAX, IMPLODE]:
+    if op in [FIRST, LAST, ARG_MIN, ARG_MAX, IMPLODE, EXPR_MAX_BY, EXPR_MIN_BY]:
         return _K_ORDERED
     if op in [
         SUM,
@@ -1839,6 +1855,10 @@ struct _OrderedBuffer(Movable):
     var sequences: List[Int]
     var groups: Int
     var values: Optional[Series]
+    # A max_by's or min_by's keys, row for row with the values: a batch
+    # for each value batch, then one column.
+    var key_batches: List[Series]
+    var keys: Optional[Series]
     # Rows taken straight from vectors (`add_vector`): fixed-width values
     # appended as raw bytes of their storage type, a packed validity bitmap
     # (empty while every row is valid), and their count. They follow every
@@ -1860,6 +1880,8 @@ struct _OrderedBuffer(Movable):
         self.sequences = List[Int]()
         self.groups = 0
         self.values = None
+        self.key_batches = List[Series]()
+        self.keys = None
         self.starts = List[Int]()
         self.rows = List[Int]()
         self.raw = List[UInt8]()
@@ -1958,10 +1980,16 @@ struct _OrderedBuffer(Movable):
         self.raw_rows = 0
 
     def add(
-        mut self, batch: Series, ordinals: List[Int], first: Int, groups: Int
+        mut self,
+        batch: Series,
+        ordinals: List[Int],
+        first: Int,
+        groups: Int,
+        key: Optional[Series] = None,
     ) raises:
         """A batch's rows, the k-th of group ordinal `ordinals[k]` (-1 for a
-        row that joins no group) and sequence number `first + k`."""
+        row that joins no group) and sequence number `first + k`; with
+        `key`, each row's key too (a max_by or min_by)."""
         self._flush_raw()
         var kept = List[Int]()
         for k in range(len(ordinals)):
@@ -1972,8 +2000,12 @@ struct _OrderedBuffer(Movable):
             self.sequences.append(first + k)
         if len(kept) == len(ordinals):
             self.batches.append(batch.copy())
+            if key:
+                self.key_batches.append(key.value().copy())
         elif len(kept) > 0:
             self.batches.append(batch.take(kept))
+            if key:
+                self.key_batches.append(key.value().take(kept))
         self.groups = groups
 
     def prepare(mut self) raises:
@@ -1987,6 +2019,14 @@ struct _OrderedBuffer(Movable):
             > 1 else self.batches[0].copy()
         )
         self.batches = List[Series]()
+        if len(self.key_batches) > 0:
+            self.keys = (
+                Series._from_chunks(self.key_batches).rechunk() if len(
+                    self.key_batches
+                )
+                > 1 else self.key_batches[0].copy()
+            )
+            self.key_batches = List[Series]()
         self.starts = List[Int](length=self.groups + 1, fill=0)
         for o in self.ordinals:
             self.starts[o + 1] += 1
@@ -2218,11 +2258,15 @@ def _listed_rows(
 
 
 def _gather_rows(
-    owners: List[Int], owner_of: List[Int], positions: List[Int]
+    owners: List[Int],
+    owner_of: List[Int],
+    positions: List[Int],
+    keys: Bool = False,
 ) raises -> Series:
     """The values of buffered rows, the k-th at `positions[k]` of buffer
     `owners[owner_of[k]]`, in that order: gathered buffer by buffer, then
-    put in order when they come from more than one."""
+    put in order when they come from more than one. With `keys`, the
+    rows' keys instead (a max_by or min_by)."""
     var picks = List[List[Int]](capacity=len(owners))
     for _ in range(len(owners)):
         picks.append(List[Int]())
@@ -2233,7 +2277,10 @@ def _gather_rows(
         ref buffer = Pointer[_OrderedBuffer, MutAnyOrigin](
             unsafe_from_address=owners[o]
         )[]
-        pieces.append(buffer.values.value().take(picks[o]))
+        if keys:
+            pieces.append(buffer.keys.value().take(picks[o]))
+        else:
+            pieces.append(buffer.values.value().take(picks[o]))
     if len(pieces) == 1:
         return pieces[0].copy()
     var starts = List[Int](capacity=len(owners))
@@ -2296,6 +2343,9 @@ comptime _F_PICK = 12
 # An ordered implode (`_K_ORDERED`): every row of
 # the group in input order, as a list.
 comptime _F_LIST = 13
+# An ordered max_by or min_by (`_K_ORDERED`): the value of the group's row
+# at its largest (smallest) key, the earliest such row on ties.
+comptime _F_PICK_BY = 14
 
 
 def _finalize_mode(slot: AggregateFunction, template: Reducer) -> Int:
@@ -2310,6 +2360,10 @@ def _finalize_mode(slot: AggregateFunction, template: Reducer) -> Int:
         return _F_PICK
     if kind == _K_ORDERED and template.op == IMPLODE:
         return _F_LIST
+    if kind == _K_ORDERED and (
+        template.op == EXPR_MAX_BY or template.op == EXPR_MIN_BY
+    ):
+        return _F_PICK_BY
     if kind == _K_STATE or kind == _K_ORDERED:
         return _F_STATES
     if (
@@ -2386,6 +2440,9 @@ struct _Finalizer(Movable):
     var pick_owner: List[Int]
     var pick_rows: List[Int]
     var list_counts: List[Int]
+    # A max_by's or min_by's picked values (`_F_PICK_BY`), a piece per
+    # scan, in group order.
+    var picked: List[Series]
 
     def __init__(
         out self,
@@ -2421,6 +2478,7 @@ struct _Finalizer(Movable):
         self.pick_owner = List[Int](capacity=n if self.mode == _F_PICK else 0)
         self.pick_rows = List[Int](capacity=n if self.mode == _F_PICK else 0)
         self.list_counts = List[Int](capacity=n if self.mode == _F_LIST else 0)
+        self.picked = List[Series]()
         self.nulls = False
         self.values = List[_ValueColumn]()
         if self.mode == _F_VALUE:
@@ -2469,6 +2527,35 @@ struct _Finalizer(Movable):
                 var e = chosen[g]
                 self.pick_owner.append(owner_of[e])
                 self.pick_rows.append(positions[e])
+            return
+        if self.mode == _F_PICK_BY:
+            # The groups' rows in input order, their values and keys: one
+            # pass picks every group's row (`extreme_rows`).
+            var owners = List[Int]()
+            var owner_of = List[Int]()
+            var positions = List[Int]()
+            var targets = List[Int]()
+            _ordered_rows(
+                self.slot,
+                groups,
+                lo,
+                hi,
+                owners,
+                owner_of,
+                positions,
+                targets,
+            )
+            if len(positions) == 0:
+                self.picked.append(Series.full_null("", self.logical, hi - lo))
+                return
+            var values = _gather_rows(owners, owner_of, positions)
+            var keys = _gather_rows(owners, owner_of, positions, keys=True)
+            for e in range(len(targets)):
+                targets[e] -= lo
+            var rows = extreme_rows(
+                self.op, self.method, keys, targets, hi - lo
+            )
+            self.picked.append(values.take_or_null(rows))
             return
         if self.mode == _F_LIST:
             if _listed_rows(
@@ -2708,6 +2795,14 @@ struct _Finalizer(Movable):
                 state,
                 _gather_rows(self.pick_owners, self.pick_owner, self.pick_rows),
             )
+            return state^
+        if self.mode == _F_PICK_BY:
+            if len(self.picked) == 0:
+                return state^
+            state.finished = (
+                Series._from_chunks(self.picked).rechunk() if len(self.picked)
+                > 1 else self.picked[0].copy()
+            ).renamed("")
             return state^
         if self.mode == _F_LIST:
             if len(self.list_counts) == 0:

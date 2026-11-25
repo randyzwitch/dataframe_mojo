@@ -10,6 +10,7 @@ from dataframe.aggregation.function import (
     ReducerSpec,
     _K_LEN,
     _K_TOP_ROWS,
+    reads_second_input,
 )
 from dataframe.aggregation.hash_table import (
     AggregateLayout,
@@ -26,7 +27,7 @@ from dataframe.aggregation.expressions import (
     reduction_filter,
 )
 from dataframe.dtype import DataType
-from dataframe.expr import COL, CORR, COV, Expr, LEN, is_reduction, subtree
+from dataframe.expr import COL, Expr, LEN, is_reduction, subtree
 from dataframe.frame import DataFrame
 from dataframe.kernels.canonical_labels import canonical_code_map
 from dataframe.kernels.nested_keys import encode_nested_keys
@@ -127,7 +128,7 @@ struct TableSinkLayout(Copyable, Movable):
             self.key_types.append(empty._columns[at].dtype())
             self.key_physical.append(storage_physical(empty._columns[at]))
         # In `table_inputs`' order: each reduction's input, then the
-        # second input of each correlation or covariance.
+        # second input of each correlation, covariance, max_by or min_by.
         # An aggregate filter's input is the values it filters, its
         # predicate the reduction's filter.
         var given = List[Optional[Expr]]()
@@ -146,7 +147,7 @@ struct TableSinkLayout(Copyable, Movable):
                         subtree(expression, filter_value(expression, node.left))
                     )
                 predicates.append(predicate^)
-                if node.op == CORR or node.op == COV:
+                if reads_second_input(node.op):
                     seconds.append(
                         subtree(
                             expression, filter_value(expression, node.right)
@@ -259,7 +260,7 @@ def _as_columns(layout: AggregateLayout, inputs: Int) -> List[Bool]:
             continue
         if s < inputs:
             columns[s] = True
-        if layout.templates[s].op == CORR or layout.templates[s].op == COV:
+        if reads_second_input(layout.templates[s].op):
             if layout.slots[s].k < inputs:
                 columns[layout.slots[s].k] = True
     return columns^
@@ -275,7 +276,7 @@ def _as_vectors(layout: AggregateLayout, inputs: Int) -> List[Bool]:
             continue
         if s < inputs:
             vectors[s] = True
-        if layout.templates[s].op == CORR or layout.templates[s].op == COV:
+        if reads_second_input(layout.templates[s].op):
             if layout.slots[s].k < inputs:
                 vectors[layout.slots[s].k] = True
     return vectors^
