@@ -544,3 +544,37 @@ def test_metal_distinct_chunked_float_and_packed_boolean_classes() raises:
         assert_true(
             execute_distinct(query)[0].equals(query.collect(engine="cpu"))
         )
+
+
+# requires: metal
+def test_metal_distinct_rare_value_retry_keeps_small_group_result() raises:
+    from std.memory import ArcPointer
+    from dataframe.execution_observation import DeviceObservation
+    from dataframe_metal.distinct_reduce import execute_distinct
+    from tests.support.metal_outcomes import require_metal
+
+    _ = require_metal()
+    var keys = List[Series]()
+    var fields = List[Series]()
+    for chunk in range(4):
+        var k = List[Int32]()
+        var v = List[Int32]()
+        for i in range(65536):
+            k.append(Int32(i % 2))
+            v.append(Int32(i) if chunk == 3 and i >= 64512 else Int32(0))
+        keys.append(Series("g", Column[Int32](k^)))
+        fields.append(Series("v", Column[Int32](v^)))
+    var frame = DataFrame(
+        [Series._from_chunks(keys^), Series._from_chunks(fields^)]
+    )
+    var query = frame.lazy().group_by("g", maintain_order=True).agg(
+        [col("v").n_unique().alias("n")]
+    )
+    var expected = query.collect(engine="cpu")
+    var obs = ArcPointer(DeviceObservation())
+    query._plan._device_observation = obs
+    assert_true(execute_distinct(query)[0].equals(expected))
+    assert_equal(obs[].completed_launches.load(), Int64(8))
+    # The first attempt downloads control. The successful replay downloads
+    # control again and three arrays for the original 512 group slots.
+    assert_equal(obs[].download_bytes.load(), Int64(32 + 3 * 512 * 4))
