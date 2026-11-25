@@ -102,7 +102,7 @@ def audit_case(binary, env, shape, args, raw, summary, warmup_rows):
     rows, chunks, distribution = shape["rows"], shape["chunks"], shape["distribution"]
     samples = {}
     shape = {**shape, "prewarm_rows": warmup_rows}
-    reps = args.reps if warmup_rows is None else 1
+    reps = args.reps
     for mode in ("profile-metal", "profile-auto"):
         records = invoke(binary, env, mode, rows, chunks, distribution, reps, warmup_rows)
         samples[mode] = records
@@ -113,7 +113,10 @@ def audit_case(binary, env, shape, args, raw, summary, warmup_rows):
             records = invoke(binary, env, mode, rows, chunks, distribution, reps, warmup_rows)
             samples.setdefault(mode, []).append(records)
             emit(raw, {**shape, "mode": mode, "round": turn, "records": records})
-    phases = [("cold", 0), ("repeated", -1)] if warmup_rows is None else [("prewarmed", 0)]
+    phases = (
+        [("cold", 0), ("repeated", -1)] if warmup_rows is None
+        else [("prewarmed", 0), ("prewarmed_repeated", -1)]
+    )
     for thermal, rep in phases:
         timings = {
             mode: median(trial[rep]["ns"] for trial in samples[mode])

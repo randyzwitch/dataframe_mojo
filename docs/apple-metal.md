@@ -282,7 +282,7 @@ choice and faster measured engine for each held-out case. To compare fully
 resident Metal, add `--warmup-rows N` with a measured row count at which
 auto selects Metal for each layout. Each fresh process first submits that
 larger ordered query through public auto placement and checks that its GPU
-launches completed, then measures the target. `--reuse-capture FILE` reuses
+launches completed, then measures both the first and final target collections. `--reuse-capture FILE` reuses
 the original training records when comparing fitters.
 
 For application workloads, call `dataframe_metal.calibration_capture.capture`
