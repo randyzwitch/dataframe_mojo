@@ -1,15 +1,20 @@
 """Numeric group state spans native allocations and preserves logical row order."""
 # contract-group: execution.backends
 from std.memory import ArcPointer
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, LazyFrame, Series, col
 from dataframe.execution_observation import DeviceObservation
 from dataframe_metal.chunked_numeric_reduce import (
+    NUMERIC_DEFAULT,
+    NUMERIC_SEGMENTED,
+    NUMERIC_SINGLE_SPAN,
+    native_numeric_layout,
     scan_chunked_numeric,
-    uses_chunked_numeric,
 )
 from dataframe_metal.group_finish import finish_grouped
 from dataframe_metal.group_plan import plan_grouped
+from dataframe_metal.group_reduce import execute_grouped
+from dataframe_metal.handoff import region_key
 from dataframe_metal.accelerator.gpu.query_scope import Scope, shared_service
 from dataframe_metal.accelerator.gpu.reduction_inputs import HandoffTimings
 
@@ -81,13 +86,34 @@ def test_chunked_numeric_matcher_selects_native_columns_and_single_int32_key() r
     var plan = _query(frame)
     var matched = plan_grouped(plan)
     assert_true(Bool(matched))
-    assert_true(uses_chunked_numeric(plan, matched.value(), frame))
+    assert_equal(
+        native_numeric_layout(plan, matched.value(), frame), NUMERIC_SEGMENTED
+    )
+    assert_true(region_key(plan).endswith(":chunked_native_numeric:v1"))
     var contiguous = frame.rechunk()
     var contiguous_plan = _query(contiguous)
-    assert_false(
-        uses_chunked_numeric(
+    assert_equal(
+        native_numeric_layout(
             contiguous_plan, plan_grouped(contiguous_plan).value(), contiguous
+        ),
+        NUMERIC_SINGLE_SPAN,
+    )
+    assert_true(region_key(contiguous_plan).endswith(":single_span_numeric:v1"))
+    var repeated = (
+        contiguous.lazy()
+        .group_by("zone")
+        .agg(
+            [
+                col("reading").mean().alias("avg"),
+                col("reading").count().alias("n"),
+            ]
         )
+    )
+    assert_equal(
+        native_numeric_layout(
+            repeated, plan_grouped(repeated).value(), contiguous
+        ),
+        NUMERIC_DEFAULT,
     )
     var unrelated = DataFrame(
         [
@@ -97,8 +123,9 @@ def test_chunked_numeric_matcher_selects_native_columns_and_single_int32_key() r
         ]
     )
     var simple = unrelated.lazy().group_by("zone").agg(col("reading").mean())
-    assert_false(
-        uses_chunked_numeric(simple, plan_grouped(simple).value(), unrelated)
+    assert_equal(
+        native_numeric_layout(simple, plan_grouped(simple).value(), unrelated),
+        NUMERIC_DEFAULT,
     )
     var filtered = (
         frame.lazy()
@@ -106,16 +133,19 @@ def test_chunked_numeric_matcher_selects_native_columns_and_single_int32_key() r
         .group_by("zone")
         .agg([col("reading").mean()])
     )
-    assert_false(
-        uses_chunked_numeric(filtered, plan_grouped(filtered).value(), frame)
+    assert_equal(
+        native_numeric_layout(filtered, plan_grouped(filtered).value(), frame),
+        NUMERIC_DEFAULT,
     )
     var extrema = frame.lazy().group_by("zone").agg(col("balance").max())
-    assert_false(
-        uses_chunked_numeric(extrema, plan_grouped(extrema).value(), frame)
+    assert_equal(
+        native_numeric_layout(extrema, plan_grouped(extrema).value(), frame),
+        NUMERIC_DEFAULT,
     )
     var computed = frame.lazy().group_by("zone").agg((col("balance") + 1).sum())
-    assert_false(
-        uses_chunked_numeric(computed, plan_grouped(computed).value(), frame)
+    assert_equal(
+        native_numeric_layout(computed, plan_grouped(computed).value(), frame),
+        NUMERIC_DEFAULT,
     )
 
 
@@ -172,3 +202,32 @@ def test_chunked_numeric_groups_reuse_nullable_keys_and_accumulate_four_fields()
         assert_equal(scope.info()[0], 0)
         scope.mark_success()
     assert_true(query.collect(accelerator=runtime).equals(expected))
+
+
+# requires: metal
+def test_metal_single_span_numeric_groups_match_cpu_for_shared_slices() raises:
+    from tests.support.metal_outcomes import require_metal
+
+    var runtime = require_metal()
+    var contiguous = _frame().rechunk()
+    var pieces = List[Series]()
+    for name in contiguous.columns():
+        var source = contiguous.column(name)
+        pieces.append(
+            Series._from_chunks(
+                [source.slice(0, 3), source.slice(3, len(source) - 3)]
+            )
+        )
+    var shared = DataFrame(pieces^)
+    assert_equal(shared.column("reading").n_chunks(), 2)
+    var expected = _query(contiguous).collect(engine="cpu")
+    for frame in [contiguous^, shared^]:
+        var plan = _query(frame)
+        assert_true(region_key(plan).endswith(":single_span_numeric:v1"))
+        var observation = ArcPointer(DeviceObservation())
+        plan._plan._device_observation = observation
+        var answer = execute_grouped(plan, True)
+        assert_true(answer[0].equals(expected))
+        assert_equal(observation[].completed_launches.load(), Int64(2))
+        assert_equal(observation[].upload_bytes.load(), Int64(0))
+        assert_true(plan.collect(accelerator=runtime).equals(expected))
