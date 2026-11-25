@@ -231,3 +231,72 @@ def test_metal_single_span_numeric_groups_match_cpu_for_shared_slices() raises:
         assert_equal(observation[].completed_launches.load(), Int64(2))
         assert_equal(observation[].upload_bytes.load(), Int64(0))
         assert_true(plan.collect(accelerator=runtime).equals(expected))
+
+
+# requires: metal
+def test_metal_numeric_shared_group_state_survives_capacity_retry() raises:
+    from dataframe_metal.group_properties import sample_group_tuples
+    from tests.support.metal_outcomes import require_metal
+
+    _ = require_metal()
+    var n = 65536
+    for common in [1, 300]:
+        var keys = List[Int32]()
+        var wide = List[Int64]()
+        var value = List[Float32]()
+        var key_valid = List[Bool]()
+        var value_valid = List[Bool]()
+        # A long repeated prefix keeps the sampled table below the actual number
+        # of groups. The two prefix sizes exercise both initial table sizes.
+        for i in range(n):
+            var key = Int32(
+                i % common if i < n - 2500 else common + i - (n - 2500)
+            )
+            keys.append(key - 150)
+            key_valid.append(i % 113 != 0)
+            wide.append((Int64(1) << 40) + Int64(i % 7))
+            value.append(Float32(i % 41 - 22) / 8)
+            value_valid.append(i % 17 != 0 and key != 42)
+        var frame = DataFrame(
+            [
+                Series("team", Column[Int32](keys^, key_valid)),
+                Series("income", Column[Int64](wide^)),
+                Series("reading", Column[Float32](value^, value_valid)),
+            ]
+        )
+        var query = (
+            frame.lazy()
+            .group_by("team", maintain_order=True)
+            .agg(
+                [
+                    col("reading").mean().alias("avg"),
+                    col("reading").min().alias("lo"),
+                    col("income").sum().alias("total"),
+                    col("reading").len().alias("rows"),
+                ]
+            )
+        )
+        var expected = query.collect(engine="cpu")
+        var sample = sample_group_tuples(frame, [String("team")])
+        assert_equal(sample.global_state(), common == 300)
+        assert_true(sample.capacity() // 2 < expected.height())
+        var variant = (
+            ":shared_group_output:v1" if common
+            == 300 else ":shared_group_retry:v1"
+        )
+        assert_true(variant in region_key(query))
+        for wrap in [True, False]:
+            var observation = ArcPointer(DeviceObservation())
+            query._plan._device_observation = observation
+            var result = execute_grouped(query, wrap)
+            assert_true(result[0].equals(expected))
+            assert_equal(observation[].completed_launches.load(), Int64(4))
+            var copied = observation[].download_bytes.load()
+            if not wrap:
+                assert_true(copied > 32 * 1024 * 1024)
+            elif sample.global_state():
+                assert_equal(copied, Int64(0))
+            else:
+                # Only the first 512-slot attempt copied output back. Replay wrote
+                # its large table directly into CPU-visible storage.
+                assert_equal(copied, Int64(4 * (2 * 512 + 512 * 2 * 32 + 4)))

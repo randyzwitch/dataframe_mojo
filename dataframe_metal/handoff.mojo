@@ -237,11 +237,15 @@ def region_key(region: LazyFrame) raises -> String:
     var grouped = plan_grouped(region)
     if grouped:
         ref source = region._plan._frames[region._plan._nodes[0].source_slot()]
-        var key = (
-            grouped_key(grouped.value())
-            + sample_group_tuples(source, grouped.value().keys.names).key()
-        )
+        var sample = sample_group_tuples(source, grouped.value().keys.names)
+        var key = grouped_key(grouped.value()) + sample.key()
         var layout = native_numeric_layout(region, grouped.value(), source)
+        if layout:
+            if sample.global_state():
+                key += ":shared_group_output:v1"
+            elif sample.samples < sample.population:
+                # An underestimated small table can grow into shared scratch.
+                key += ":shared_group_retry:v1"
         if layout == NUMERIC_SEGMENTED:
             key += ":chunked_native_numeric:v1"
         elif layout == NUMERIC_SINGLE_SPAN:
