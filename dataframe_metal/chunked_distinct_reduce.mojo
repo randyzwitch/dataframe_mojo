@@ -14,7 +14,7 @@ from .distinct_layout import DISTINCT_CAPACITY_FAULT, MAX_DISTINCT_CAPACITY
 from .distinct_metadata import distinct_descriptor
 from .distinct_plan import DistinctPlan
 from .group_layout import GENERAL_TABLE_LIMIT, GROUP_CAPACITY_FAULT
-from .group_properties import sample_group_tuples
+from .distinct_sizing import chunked_distinct_capacities
 
 
 def execute_chunked_distinct(
@@ -51,14 +51,15 @@ def execute_chunked_distinct(
                 )
             )
         var spans = intersect_numeric_views(columns, frame.height())
-        var groups = sample_group_tuples(
-            frame, plan.keys.value().names
-        ).capacity()
-        var values = 16384
+        var sizes = chunked_distinct_capacities(frame, key, field.column)
+        var groups = sizes[0]
+        var values = sizes[1]
         var record_words = 3 + Int(field.dtype == DataType.INT64)
         timings.upload_ns += Int(perf_counter_ns()) - started
 
-        for attempt in range(2):
+        # Each table can reach its independent maximum once. If a group
+        # overflow masks a value overflow (or conversely), allow both retries.
+        for attempt in range(3):
             started = Int(perf_counter_ns())
             var words = 4 + 4 * groups + record_words * values
             var reservation = _NativeReservation(scope, words * 4)
@@ -96,22 +97,25 @@ def execute_chunked_distinct(
                     control.unsafe_ptr(),
                     scratch.create_sub_buffer[DType.uint32](0, 4),
                 )
-                ctx.enqueue_copy(
-                    first.unsafe_ptr(),
-                    scratch.create_sub_buffer[DType.uint32](4, groups),
-                )
-                ctx.enqueue_copy(
-                    counts.unsafe_ptr(),
-                    scratch.create_sub_buffer[DType.uint32](4 + groups, groups),
-                )
-                ctx.enqueue_copy(
-                    nulls.unsafe_ptr(),
-                    scratch.create_sub_buffer[DType.uint32](
-                        4 + 2 * groups, groups
-                    ),
-                )
                 scope.synchronize()
-                scope.record_download((4 + 3 * groups) * 4)
+                scope.record_download(4 * 4)
+                if not control[1]:
+                    ctx.enqueue_copy(
+                        first.unsafe_ptr(),
+                        scratch.create_sub_buffer[DType.uint32](4, groups),
+                    )
+                    ctx.enqueue_copy(
+                        counts.unsafe_ptr(),
+                        scratch.create_sub_buffer[DType.uint32](4 + groups, groups),
+                    )
+                    ctx.enqueue_copy(
+                        nulls.unsafe_ptr(),
+                        scratch.create_sub_buffer[DType.uint32](
+                            4 + 2 * groups, groups
+                        ),
+                    )
+                    scope.synchronize()
+                    scope.record_download(3 * groups * 4)
             except error:
                 try:
                     scope.synchronize()
@@ -131,12 +135,18 @@ def execute_chunked_distinct(
             _ = (scratch^, reservation^)
             timings.kernel_ns += Int(perf_counter_ns()) - started
             if control[1] & (GROUP_CAPACITY_FAULT | DISTINCT_CAPACITY_FAULT):
-                if attempt:
+                var grow_groups = Bool(control[1] & GROUP_CAPACITY_FAULT)
+                var grow_values = Bool(control[1] & DISTINCT_CAPACITY_FAULT)
+                if (grow_groups and groups == GENERAL_TABLE_LIMIT) or (
+                    grow_values and values == MAX_DISTINCT_CAPACITY
+                ):
                     raise data_fault(
                         "exact distinct exceeded bounded group/value table capacity"
                     )
-                groups = GENERAL_TABLE_LIMIT
-                values = MAX_DISTINCT_CAPACITY
+                if grow_groups:
+                    groups = GENERAL_TABLE_LIMIT
+                if grow_values:
+                    values = MAX_DISTINCT_CAPACITY
                 continue
             if control[1] or control[2] != UInt32(len(spans)):
                 raise Error(
