@@ -139,6 +139,33 @@ class MetalCalibrationTests(unittest.TestCase):
                 choose_gpu,
             )
 
+    def test_affine_guard_covers_a_bend_without_pricing_it_as_per_row_growth(self):
+        # CPU grows linearly. GPU latency rises quickly at small sizes,
+        # then flattens. Relative headroom at the bend must protect that
+        # measured CPU win without hiding the later GPU crossover.
+        template = self.captures()[0]
+        records = []
+        for rows, gpu in [(1, 1), (3, 5), (7, 9), (31, 10), (127, 18)]:
+            records.append(dict(template, rows=rows, cpu_ns=[0.6 * rows] * 3, accel_ns=[gpu] * 3))
+        region = fit(records)["regions"][template["key"]]
+        def cost(model, n):
+            return model["fixed_ns"] + model["row_ns"] * n
+        for record in records:
+            self.assertGreaterEqual(
+                cost(region["accel"], record["rows"]) + 1e-12,
+                1.05 * record["accel_ns"][0],
+            )
+        self.assertGreater(cost(region["accel"], 7), cost(region["cpu"], 7))
+        self.assertLess(cost(region["accel"], 19), cost(region["cpu"], 19))
+
+    def test_decreasing_paired_bounds_use_nonnegative_coefficients(self):
+        records = self.captures()
+        for entry, gpu in zip(records, (90, 80, 70)):
+            entry["cpu_ns"] = [entry["rows"]] * 3
+            entry["accel_ns"] = [gpu] * 3
+        region = fit(records)["regions"][records[0]["key"]]
+        self.assertEqual(region["accel"], {"fixed_ns": 94.5, "row_ns": 0.0})
+
     def test_a_consistently_losing_scale_is_not_hidden_by_the_fit(self):
         records = self.captures()
         for entry in records:

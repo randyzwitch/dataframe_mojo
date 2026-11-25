@@ -107,8 +107,12 @@ def _collect(plan: LazyFrame, mode: String) raises -> DataFrame:
 
 
 def _profile(
-    plan: LazyFrame, mode: String, expected: DataFrame, rep: Int
-) raises:
+    plan: LazyFrame,
+    mode: String,
+    expected: DataFrame,
+    rep: Int,
+    report: Bool = True,
+) raises -> Bool:
     var observed = plan.profile(
         engine="auto"
     ) if mode == "auto" else plan.profile(accelerator=MetalRuntime())
@@ -137,24 +141,26 @@ def _profile(
         or (mode == "metal" and not metal)
     ):
         raise Error("Profile does not confirm the observed device")
-    print(
-        '{"rep":'
-        + String(rep)
-        + ',"device":'
-        + json_quote("metal" if metal else "cpu")
-        + ',"cpu_reason":'
-        + json_quote(decision)
-        + ',"completed_launches":'
-        + String(complete)
-        + "}"
-    )
+    if report:
+        print(
+            '{"rep":'
+            + String(rep)
+            + ',"device":'
+            + json_quote("metal" if metal else "cpu")
+            + ',"cpu_reason":'
+            + json_quote(decision)
+            + ',"completed_launches":'
+            + String(complete)
+            + "}"
+        )
+    return metal
 
 
 def main() raises:
     var args = argv()
-    if len(args) != 6:
+    if len(args) != 6 and len(args) != 7:
         raise Error(
-            "Usage: ordered-calibration MODE ROWS CHUNKS balanced|skew REPS"
+            "Usage: ordered-calibration MODE ROWS CHUNKS balanced|skew REPS [WARMUP_ROWS]"
         )
     var mode = String(args[1])
     var rows = Int(String(args[2]))
@@ -171,6 +177,13 @@ def main() raises:
         raise Error(
             "Expected at least 128 rows, 1..rows chunks, balanced|skew and positive repetitions"
         )
+    if len(args) == 7:
+        var warmup_rows = Int(String(args[6]))
+        if mode == "capture" or warmup_rows < max(chunks, 128):
+            raise Error("Prewarming requires a supported audit shape")
+        var warmup = _case(warmup_rows, chunks, distribution == "skew", True)
+        if not _profile(warmup[0], "auto", warmup[1], 0, False):
+            raise Error("Warmup did not execute the calibrated shape on Metal")
     var item = _case(rows, chunks, distribution == "skew", mode != "capture")
     ref plan = item[0]
     ref expected = item[1]
@@ -197,7 +210,7 @@ def main() raises:
         return
     if mode == "profile-auto" or mode == "profile-metal":
         for rep in range(reps):
-            _profile(
+            _ = _profile(
                 plan,
                 "auto" if mode == "profile-auto" else "metal",
                 expected,

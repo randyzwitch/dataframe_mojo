@@ -15,9 +15,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from metal_calibration import fit, publish
 
 
-def invoke(binary, env, mode, rows, chunks, distribution, repetitions):
+def invoke(binary, env, mode, rows, chunks, distribution, repetitions, warmup_rows=None):
+    command = [str(binary), mode, str(rows), str(chunks), distribution, str(repetitions)]
+    if warmup_rows is not None:
+        command.append(str(warmup_rows))
     result = subprocess.run(
-        [str(binary), mode, str(rows), str(chunks), distribution, str(repetitions)],
+        command,
         env=env, capture_output=True, text=True, check=False,
     )
     if result.returncode:
@@ -66,14 +69,20 @@ def measure(args):
     directory.mkdir(parents=True, exist_ok=False)
     env = dict(os.environ, DATAFRAME_HANDOFF_CALIBRATION="")
     shapes = list(product((1, 8), ("balanced", "skew")))
-    training = []
-    with (directory / "capture.jsonl").open("x") as capture:
+    if args.reuse_capture:
+        training = [json.loads(line) for line in args.reuse_capture.read_text().splitlines()]
+        if {record["rows"] for record in training} != set(args.train):
+            raise ValueError("Reused capture must match the requested training row counts")
+    else:
+        training = []
         for rows, (chunks, distribution) in product(args.train, shapes):
             record, = invoke(binary, env, "capture", rows, chunks, distribution, args.reps)
+            training.append(record)
+    with (directory / "capture.jsonl").open("x") as capture:
+        for record in training:
             emit(capture, record)
             if record.get("status") != "measured" or "first_accel_ns" not in record:
                 raise ValueError(f"Expected checked warm and first-use samples: {record}")
-            training.append(record)
     profile = publish(fit(training), directory)
     env["DATAFRAME_HANDOFF_CALIBRATION"] = str(profile)
     print(f"Using {profile}", flush=True)
@@ -85,33 +94,45 @@ def measure(args):
             if actual != expected:
                 raise ValueError(f"DuckDB ordered result differs for {shape}: {actual} != {expected}")
             emit(raw, {**shape, "mode": "duckdb", "version": duckdb.__version__, "rows_checked": actual})
-            samples = {}
-            for mode in ("profile-metal", "profile-auto"):
-                records = invoke(binary, env, mode, rows, chunks, distribution, args.reps)
-                samples[mode] = records
-                emit(raw, {**shape, "mode": mode, "records": records})
-            modes = ("cpu", "materialized", "metal", "auto")
-            for turn in range(args.rounds):
-                for mode in (modes if turn % 2 == 0 else reversed(modes)):
-                    records = invoke(binary, env, mode, rows, chunks, distribution, args.reps)
-                    samples.setdefault(mode, []).append(records)
-                    emit(raw, {**shape, "mode": mode, "round": turn, "records": records})
-            for thermal, rep in (("cold", 0), ("repeated", -1)):
-                timings = {
-                    mode: median(trial[rep]["ns"] for trial in samples[mode])
-                    for mode in modes
-                }
-                winner_ns = min(timings["cpu"], timings["materialized"])
-                fastest = "metal" if timings["metal"] < winner_ns else "cpu"
-                observed = samples["profile-auto"][rep]
-                record = {
-                    **shape, "temperature": thermal, "ns": timings,
-                    "fastest": fastest, "selected": observed["device"],
-                    "completed_launches": observed["completed_launches"],
-                    "cpu_reason": observed["cpu_reason"],
-                }
-                emit(summary, record)
-                print(json.dumps(record), flush=True)
+            for warmup_rows in ([None, args.warmup_rows] if args.warmup_rows else [None]):
+                audit_case(binary, env, shape, args, raw, summary, warmup_rows)
+
+
+def audit_case(binary, env, shape, args, raw, summary, warmup_rows):
+    rows, chunks, distribution = shape["rows"], shape["chunks"], shape["distribution"]
+    samples = {}
+    shape = {**shape, "prewarm_rows": warmup_rows}
+    reps = args.reps if warmup_rows is None else 1
+    for mode in ("profile-metal", "profile-auto"):
+        records = invoke(binary, env, mode, rows, chunks, distribution, reps, warmup_rows)
+        samples[mode] = records
+        emit(raw, {**shape, "mode": mode, "records": records})
+    modes = ("cpu", "materialized", "metal", "auto")
+    for turn in range(args.rounds):
+        for mode in (modes if turn % 2 == 0 else reversed(modes)):
+            records = invoke(binary, env, mode, rows, chunks, distribution, reps, warmup_rows)
+            samples.setdefault(mode, []).append(records)
+            emit(raw, {**shape, "mode": mode, "round": turn, "records": records})
+    phases = [("cold", 0), ("repeated", -1)] if warmup_rows is None else [("prewarmed", 0)]
+    for thermal, rep in phases:
+        timings = {
+            mode: median(trial[rep]["ns"] for trial in samples[mode])
+            for mode in modes
+        }
+        winner_ns = min(timings["cpu"], timings["materialized"])
+        fastest = "metal" if timings["metal"] < winner_ns else "cpu"
+        observed = samples["profile-auto"][rep]
+        record = {
+            **shape, "temperature": thermal, "ns": timings,
+            "fastest": fastest, "selected": observed["device"],
+            "completed_launches": observed["completed_launches"],
+            "cpu_reason": observed["cpu_reason"],
+            "metal_warm_before_auto": warmup_rows is not None or (
+                rep != 0 and any(p["device"] == "metal" for p in samples["profile-auto"][:rep])
+            ),
+        }
+        emit(summary, record)
+        print(json.dumps(record), flush=True)
 
 
 if __name__ == "__main__":
@@ -119,7 +140,9 @@ if __name__ == "__main__":
     parser.add_argument("binary", type=Path)
     parser.add_argument("output", type=Path, help="new directory for capture, profile and held-out evidence")
     parser.add_argument("--train", type=int, nargs="+", default=[256, 8192, 32768, 131072, 1048576])
-    parser.add_argument("--holdout", type=int, nargs="+", default=[1024, 65536, 786432])
+    parser.add_argument("--holdout", type=int, nargs="+", default=[1024, 49152, 65536, 98304, 524288, 786432])
+    parser.add_argument("--reuse-capture", type=Path, help="refit the same training samples")
+    parser.add_argument("--warmup-rows", type=int, help="also compare after a verified auto Metal submission of the same layout at this size")
     parser.add_argument("--reps", type=int, default=5)
     parser.add_argument("--rounds", type=int, default=3)
     measure(parser.parse_args())
