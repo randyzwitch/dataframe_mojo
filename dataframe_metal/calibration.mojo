@@ -111,6 +111,8 @@ def shape_keys(
                 bitmap = _chunk_has_bitmap[DType.int32](chunk)
             elif chunk.dtype() == DataType.INT64:
                 bitmap = _chunk_has_bitmap[DType.int64](chunk)
+            elif chunk.dtype() == DataType.FLOAT64:
+                bitmap = _chunk_has_bitmap[DType.float64](chunk)
             elif chunk.dtype() == DataType.FLOAT32:
                 bitmap = _chunk_has_bitmap[DType.float32](chunk)
             elif (

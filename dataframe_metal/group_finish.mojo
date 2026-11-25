@@ -8,6 +8,10 @@ from .accelerator.faults import data_fault
 from .accelerator.gpu.group_state import GROUP_STATE_WORDS
 
 
+comptime GROUP_NONFINITE_FLOAT = "grouped non-finite Float32 sums require CPU adjudication"
+comptime GROUP_ROUNDED_FLOAT = "grouped Float32 sum needs CPU accumulation order"
+
+
 def finish_grouped(
     plan: GroupedComposition,
     frame: DataFrame,
@@ -110,9 +114,7 @@ def finish_grouped(
                             numeric += count
             if dtype == DataType.FLOAT32 and bundle.fields[field].needs_sum:
                 if special & 7:
-                    raise data_fault(
-                        "grouped non-finite Float32 sums require CPU adjudication"
-                    )
+                    raise data_fault(GROUP_NONFINITE_FLOAT)
                 floating[field] = finish_float_bins(
                     bins,
                     Bool(special & 1),
@@ -129,9 +131,7 @@ def finish_grouped(
                     and least < 512
                     and greatest - least + 1 + growth > 53
                 ):
-                    raise data_fault(
-                        "grouped Float32 sum needs CPU accumulation order"
-                    )
+                    raise data_fault(GROUP_ROUNDED_FLOAT)
             extrema[field * 4] = minimum
             extrema[field * 4 + 1] = maximum
             extrema[field * 4 + 2] = Int64(numeric)

@@ -50,7 +50,7 @@ struct NumericView(Copyable, Movable):
                 self.nullable,
                 first % 8,
             )
-        var width = 8 if self.tag == 1 else 4
+        var width = 8 if self.tag == 1 or self.tag == 4 else 4
         return Self(
             self.values.create_sub_buffer[DType.uint8](
                 start * width, length * width
