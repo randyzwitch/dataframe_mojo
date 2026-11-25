@@ -157,6 +157,34 @@ def test_metal_fractional_grouped_means_preserve_rounding_nulls_and_order() rais
         assert_true(isnan(result.item(2, "f").float64()))
         assert_true(result.item(4, "f").is_null())
 
+    # A Float32-only query takes the existing bin scan first. Its exact
+    # mathematical result here would be 1/3. CPU input-order addition loses
+    # the middle unit so the ordered GPU replay must produce positive zero.
+    var big = bitcast[DType.float32](UInt32(0x5D800000))
+    var key32: List[Int32] = [7, 7, 7]
+    var values32: List[Float32] = [big, 1, -big]
+    var ok = List[Bool](length=3, fill=True)
+    var narrow = DataFrame(
+        [
+            _split[DType.int32]("zone", key32, ok, 1),
+            _split[DType.float32]("sample", values32, ok, 2),
+        ]
+    )
+    var narrow_plan = (
+        narrow.lazy().group_by("zone").agg([col("sample").mean().alias("mean")])
+    )
+    var replayed = narrow_plan.profile(accelerator=runtime)
+    assert_equal(
+        bitcast[DType.uint64](replayed[0].item(0, "mean").float64()), UInt64(0)
+    )
+    var completed = Int64(0)
+    for row in range(replayed[1].height()):
+        assert_equal(
+            replayed[1].item(row, "fallback_reason").string(), String("")
+        )
+        completed += replayed[1].item(row, "gpu_completed_launches").int64()
+    assert_true(completed > 3)
+
 
 # requires: metal
 def test_metal_fractional_means_separate_full_width_keys_with_correlated_halves() raises:
