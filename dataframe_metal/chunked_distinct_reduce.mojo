@@ -106,7 +106,9 @@ def execute_chunked_distinct(
                     )
                     ctx.enqueue_copy(
                         counts.unsafe_ptr(),
-                        scratch.create_sub_buffer[DType.uint32](4 + groups, groups),
+                        scratch.create_sub_buffer[DType.uint32](
+                            4 + groups, groups
+                        ),
                     )
                     ctx.enqueue_copy(
                         nulls.unsafe_ptr(),

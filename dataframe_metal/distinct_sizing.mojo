@@ -68,4 +68,3 @@ def chunked_distinct_capacities(
     )
     var ngroups = GroupSample(len(groups), 0, 0, samples, rows).capacity()
     return (ngroups, nvalues)
-

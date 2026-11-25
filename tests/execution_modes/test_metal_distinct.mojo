@@ -567,8 +567,10 @@ def test_metal_distinct_rare_value_retry_keeps_small_group_result() raises:
     var frame = DataFrame(
         [Series._from_chunks(keys^), Series._from_chunks(fields^)]
     )
-    var query = frame.lazy().group_by("g", maintain_order=True).agg(
-        [col("v").n_unique().alias("n")]
+    var query = (
+        frame.lazy()
+        .group_by("g", maintain_order=True)
+        .agg([col("v").n_unique().alias("n")])
     )
     var expected = query.collect(engine="cpu")
     var obs = ArcPointer(DeviceObservation())
