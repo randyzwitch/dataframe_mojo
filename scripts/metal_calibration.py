@@ -61,6 +61,32 @@ def _typical(points):
     return {"fixed_ns": fixed, "row_ns": slope}
 
 
+def _relative_upper_bound(points):
+    """Least average relative excess for a nonnegative affine upper bound.
+
+    Sum((fixed + slope * x) / y) is proportional to the line's height at
+    the mean x weighted by 1/y. A supporting line of the upper hull at
+    that point minimizes the objective while covering every training cost.
+    Including (0, 0) enforces a nonnegative intercept.
+    """
+    hull = [(0, 0.0)]
+    for x, y in points:
+        while len(hull) >= 2:
+            x0, y0 = hull[-2]
+            x1, y1 = hull[-1]
+            if (y1 - y0) * (x - x1) > (y - y1) * (x1 - x0):
+                break
+            hull.pop()
+        hull.append((x, y))
+    pivot = sum(x / y for x, y in points) / sum(1 / y for _, y in points)
+    for (x0, y0), (x1, y1) in zip(hull, hull[1:]):
+        if x1 >= pivot:
+            slope = max(0.0, (y1 - y0) / (x1 - x0))
+            break
+    fixed = max(0.0, max(y - slope * x for x, y in points))
+    return {"fixed_ns": fixed, "row_ns": slope}
+
+
 def _ns(model, rows):
     return model["fixed_ns"] + model["row_ns"] * rows
 
@@ -221,7 +247,7 @@ def fit(records):
         # Robust scale medians protect against individual timing outliers;
         # no consistently slower measured scale may be fitted as a GPU win.
         errors = []
-        optimism = 1.0
+        required = []
         for n in rows:
             sample_key = "cpu_ns"
             cpu_ns = _ns(cpu_model, n)
@@ -235,10 +261,12 @@ def fit(records):
                 for c, a in zip(e[sample_key], e["accel_ns"])
             ]
             observed = median(paired)
-            predicted = cpu_ns / _ns(accel_model, n)
-            optimism = max(optimism, predicted / observed)
+            required.append((n, cpu_ns / observed))
             errors.extend(abs(r / observed - 1) for r in paired)
-        margin = max(0.05, optimism * (1 + 2 * median(errors)) - 1)
+        # A localized residual need not multiply both startup and per-row
+        # cost. Bound every observed paired ratio, then apply timing noise.
+        guarded = _relative_upper_bound(required)
+        margin = max(0.05, 2 * median(errors))
         if key.startswith("pipeline:"):
             raise ValueError(
                 "region key uses the reserved CPU pipeline namespace"
@@ -250,7 +278,7 @@ def fit(records):
             "cpu": cpu_model,
             "accel_typical": accel_model,
             "switch_margin": margin,
-            "accel": {k: v * (1 + margin) for k, v in accel_model.items()},
+            "accel": {k: v * (1 + margin) for k, v in guarded.items()},
             "min_rows": rows[0],
             "max_rows": rows[-1],
             "measured_rows": rows,

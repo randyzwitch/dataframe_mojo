@@ -262,6 +262,31 @@ CPU-adjudicated cases explicitly. Every Metal timing requires direct GPU
 execution. These are development calibration workloads, not external-suite
 performance results.
 
+For grouped `first`, `last`, `arg_min` and `arg_max`, the ordered calibration
+driver generates balanced and skewed Int32 keys with one or eight independently
+allocated chunks per column. Use the same identified packages for this run.
+
+```sh
+mojo build -j 1 -O3 -I dist benchmarks/bench_ordered_calibration.mojo -o build/ordered-calibration
+DATAFRAME_THREADS=8 pixi run -e oracle python3 benchmarks/tools/bench_ordered_calibration.py build/ordered-calibration build/ordered-study
+```
+
+Each training case starts in a fresh process and checks a scalar reference.
+The controller fits the normal placement profile, then compares public CPU,
+materialized CPU, forced Metal and automatic collection at separate row counts.
+Held-out inputs use different key labels and payload values, with nullable
+endpoints and an all-null group. DuckDB independently checks every group,
+its order and its group-local extrema positions. The first and final
+collections in each process are reported separately.
+`holdout.jsonl` contains the original samples and actual completed GPU launch
+counts from separate profile runs. `summary.jsonl` records the observed device
+choice and faster measured engine for each held-out case. To compare fully
+resident Metal, add `--warmup-rows N` with a measured row count at which
+auto selects Metal for each layout. Each fresh process first submits that
+larger ordered query through public auto placement and checks that its GPU
+launches completed, then measures both the first and final target collections. `--reuse-capture FILE` reuses
+the original training records when comparing fitters.
+
 For application workloads, call `dataframe_metal.calibration_capture.capture`
 with a supported `LazyFrame`, independently computed expected `DataFrame`
 and at least three repetitions; save its returned JSON as one line. Capture
@@ -271,8 +296,9 @@ profile. Query constants, output work, chunk counts and bitmap presence are
 part of the key; calibrating one layout does not measure another.
 
 The fitter estimates time per executor from median samples at each size.
-It adds a switching margin to Metal based on paired timings against the
-selected CPU executor. Placement stays within the measured row range.
+For Metal placement it fits a nonnegative line that covers every observed
+paired CPU-to-Metal time ratio, giving each training scale equal weight in
+relative error. It adds a switching margin for timing noise. Placement stays within the measured row range.
 The fitter publishes each profile under an immutable, content-addressed
 filename. Selectivity and value distributions can change runtime even for
 the same schema. Recalibrate with representative data after changes.
