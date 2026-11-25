@@ -464,7 +464,9 @@ def test_metal_distinct_chunk_records_preserve_cross_span_classes_and_first_rows
 
 
 # requires: metal
-def test_metal_distinct_fragmented_retry_replays_every_segment_once() raises:
+def test_metal_distinct_fragmented_repeated_pairs_fit_first_table() raises:
+    from dataframe.execution_observation import DeviceObservation
+    from std.memory import ArcPointer
     from dataframe_metal.distinct_reduce import execute_distinct
     from tests.support.metal_outcomes import require_metal
 
@@ -487,7 +489,10 @@ def test_metal_distinct_fragmented_retry_replays_every_segment_once() raises:
         .group_by("g", maintain_order=True)
         .agg([col("n").n_unique().alias("cardinality")])
     )
+    var obs = ArcPointer(DeviceObservation())
+    query._plan._device_observation = obs
     var result = execute_distinct(query)[0].copy()
+    assert_equal(obs[].completed_launches.load(), Int64(2))
     assert_equal(result.height(), 2)
     assert_equal(result.item(0, "cardinality").int64(), Int64(4500))
     assert_equal(result.item(1, "cardinality").int64(), Int64(4500))
