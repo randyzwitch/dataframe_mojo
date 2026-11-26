@@ -188,7 +188,8 @@ def memory_usage() -> Int:
 def memory_limit() -> Int:
     """The memory limit in bytes (`Int64.MAX` when there is none): the
     last `set_memory_limit`, else `DATAFRAME_MEMORY_LIMIT`, else 80% of
-    the memory available to the process (see `available_memory`)."""
+    the memory available to the process: physical memory, or the memory
+    limit of the control group it runs in when that is lower."""
     ref limit = _memory_state().limit
     var value = limit.load()
     if value != _UNSET:
