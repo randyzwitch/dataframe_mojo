@@ -36,6 +36,7 @@ from dataframe.parallel import (
     worker_count,
 )
 from dataframe.planning.model import PlanNode, ROLLING
+from dataframe.dtype import DataType
 from dataframe.series import Series
 from dataframe.storage.column import Column
 from dataframe.time.temporal import parse_interval, zone_of
@@ -56,6 +57,19 @@ comptime _START = 0
 comptime _WINDOWS = 1
 comptime _AGGREGATE = 2
 comptime _DONE = 3
+
+
+def _fixed_width(interval: String, dtype: DataType) raises -> Bool:
+    """Whether shifting a time of `dtype` by `interval` always moves it by
+    the same amount: no months (their lengths vary), no calendar days in a
+    time zone (23 or 25 hours across a clock change), and for a Date no
+    unit below a day (a Date holds whole days)."""
+    var parts = parse_interval(interval)
+    if parts[0] != 0:
+        return False
+    if parts[1] != 0 and dtype.is_datetime() and dtype.time_zone() != "":
+        return False
+    return not (parts[2] != 0 and dtype.is_date())
 
 
 def time_window_bound(
@@ -95,6 +109,18 @@ def time_window_bound(
                 + expression.expr._name
             )
     return bound^
+
+
+@always_inline
+def _skip_to(start: Int64, time: Int64, step: Int64, span: Int64) -> Int64:
+    """The latest window start reached from `start` in whole steps of
+    `step` whose window (of length `span`) cannot reach past `time`: every
+    window skipped ends before `time`, so it holds no row at or after
+    `time`, and none of the windows that can hold `time` is skipped."""
+    var gap = time - start
+    if gap <= step + span:
+        return start
+    return start + ((gap - span) // step) * step
 
 
 struct TimeWindowSink(Movable, Rounds):
@@ -279,15 +305,38 @@ struct TimeWindowSink(Movable, Rounds):
             self.node.window_offset(),
             zone,
         )
+        # When every window start is the previous one plus a constant step
+        # and every window spans a constant length, the windows that hold
+        # no row up to some time can be stepped over in one move: work
+        # then follows the rows and windows found, not the length of the
+        # gaps between rows.
+        var fixed = _fixed_width(every, dtype) and _fixed_width(period, dtype)
+        var step = Int64(0)
+        var span = Int64(0)
+        if fixed:
+            step = shift_time(start, dtype, every, zone) - start
+            span = shift_time(start, dtype, period, zone) - start
+            fixed = step > 0 and span > 0
+        if fixed and start > first:
+            # Back to within one step after the first row.
+            start -= ((start - first) // step) * step
         while start > first or (start == first and not sides[0]):
             var previous = shift_time(start, dtype, negate_period(every), zone)
             if previous >= start:
                 raise Error("every does not advance the time index")
             start = previous
         # Large negative offsets can start before the first useful window.
+        if fixed:
+            start = _skip_to(start, first, step, span)
         while shift_time(start, dtype, period, zone) < first:
             start = shift_time(start, dtype, every, zone)
         while start <= last:
+            if fixed:
+                # The first row this window or a later one can hold.
+                var next_row = search_time(times, rows, start, not sides[0])
+                if next_row == len(rows):
+                    break
+                start = _skip_to(start, times._get(rows[next_row]), step, span)
             var end = shift_time(start, dtype, period, zone)
             var lo = search_time(times, rows, start, not sides[0])
             var hi = search_time(times, rows, end, sides[1])
