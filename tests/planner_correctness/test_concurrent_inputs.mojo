@@ -1382,3 +1382,40 @@ def test_filters_on_windows_and_reductions_run_as_rounds_in_every_mode() raises:
     _ = watched^
     _ = declined^
     assert_frame(eager_text, frame._filter(by_text))
+
+
+def _cut(column: Series, step: Int) raises -> Series:
+    """`column` as chunks of `step` rows."""
+    var pieces = List[Series]()
+    var at = 0
+    while at < len(column):
+        var n = min(step, len(column) - at)
+        pieces.append(column.slice(at, n))
+        at += n
+    return Series._from_chunks(pieces)
+
+
+def test_top_rows_filter_keeps_input_order_across_chunks() raises:
+    """A filter keeping each partition's first k rows gathers them range by
+    range; with columns cut at different rows and a constant column, every
+    range still lies in one chunk of each column, and the kept rows come
+    out in input order, whether almost every row is kept or few are."""
+    var frame = source().head(20_000).with_row_index("row")
+    var columns = List[Series]()
+    var steps: List[Int] = [1_000, 1_700, 2_300, 999]
+    for c in range(frame.width()):
+        columns.append(_cut(frame._columns[c], steps[c]))
+    var cut = DataFrame(columns^).with_columns([lit(Int64(7)).alias("seven")])
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    for k in [1, 2, 20]:
+        var top = col("v").rank("ordinal", descending=True).over("k") <= lit(
+            Int64(k)
+        )
+        var expected = frame.with_columns(
+            [lit(Int64(7)).alias("seven")]
+        )._filter(top)
+        assert_frame(cut.filter(top), expected)
+        assert_frame(cut.lazy().filter(top).collect(), expected)
+        var many = col("v").rank("ordinal").over("row") <= lit(Int64(k))
+        assert_frame(cut.filter(many), cut._filter(many))
+    _ = threads^
