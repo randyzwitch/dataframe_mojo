@@ -14,6 +14,7 @@ null flags. Quantiles retain value chains. Reductions requiring input order
 buffer values and sequence numbers, then sort before finalizing.
 """
 from dataframe.storage.buffer import _Buffer, _BufferData
+from dataframe.storage.memory_limit import charge, uncharge
 from std.collections import Optional
 from std.math import isnan
 from std.memory import (
@@ -71,7 +72,7 @@ from dataframe.expr import (
 )
 from dataframe.aggregation.selected_rows import _canonical_int
 from dataframe.sequence import extreme_rows
-from dataframe.storage.allocation import huge_uninit
+from dataframe.storage.allocation import huge_uninit, reserve_memory
 from dataframe.kernels.nested_keys import (
     decode_nested_keys,
     nested_key_supported,
@@ -493,15 +494,37 @@ struct _Groups(Movable):
         var addressed: List[Bool],
         state_words: Int,
         capacity: Int,
+        *,
+        reserved: Bool = False,
     ):
-        """Room for `capacity` groups, allocated once."""
+        """Room for `capacity` groups, allocated once. The rows count
+        toward the memory limit; `reserved` when `reserved` already
+        counted them."""
         self.states_at = _HEAD + width
         self.stride = _HEAD + width + state_words
-        self.rows = List[UInt64](
-            unsafe_uninit_length=max(1, capacity) * self.stride
-        )
+        var length = max(1, capacity) * self.stride
+        self.rows = List[UInt64](unsafe_uninit_length=length)
+        charge(8 * (self.rows.capacity() - (length if reserved else 0)))
         self.addressed = addressed^
         self.n = 0
+
+    def __deinit__(deinit self):
+        uncharge(8 * self.rows.capacity())
+
+    @staticmethod
+    def reserved(
+        width: Int,
+        var addressed: List[Bool],
+        state_words: Int,
+        capacity: Int,
+    ) raises -> Self:
+        """`_Groups` whose rows are reserved against the memory limit
+        before they are allocated (`reserve_memory`). The merged groups of a
+        large aggregate are among its largest allocations, and several
+        workers make theirs at once: reserving first keeps them from all
+        fitting under the limit by each seeing room for its own."""
+        reserve_memory(8 * max(1, capacity) * (_HEAD + width + state_words))
+        return Self(width, addressed^, state_words, capacity, reserved=True)
 
     def count(self) -> Int:
         return self.n
