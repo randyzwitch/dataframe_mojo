@@ -801,6 +801,16 @@ def _as_float(input: Series) raises -> Series:
     raise Error("numeric window input has unsupported storage")
 
 
+@no_inline
+def _rounded_product(a: Float64, b: Float64) -> Float64:
+    """`a * b` rounded to Float64 on its own. Kept out of line so the
+    compiler cannot fuse it with the following addition into one
+    multiply-add, which rounds once and can differ in the last bit; the
+    interpolated value is then low + d * slope with two roundings on
+    every target."""
+    return a * b
+
+
 def _interpolate(
     input: Series, groups: List[List[Int]], method: String
 ) raises -> Series:
@@ -832,7 +842,9 @@ def _interpolate(
                     if nearest:
                         source[row] = before if k - previous < j - k else after
                     else:
-                        out[row] = low + Float64(k - previous) * slope
+                        out[row] = low + _rounded_product(
+                            Float64(k - previous), slope
+                        )
                         source[row] = row
             previous = j
     if nearest:
@@ -898,7 +910,7 @@ def _fill_gaps_by[
             for k in range(previous + 1, j):
                 var gap_row = rows[k]
                 var offset = _axis_difference[D](axis._get(gap_row), start)
-                out[gap_row] = low + offset * slope
+                out[gap_row] = low + _rounded_product(offset, slope)
                 out_valid[gap_row] = True
         previous = j
 

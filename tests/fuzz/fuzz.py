@@ -1732,6 +1732,12 @@ def check_order(p, case):
     for k in plan_children(p):
         if not check_order(p[k], case):
             return False
+    if op in ("rolling", "dynamic") and not (
+        p[1][0] == "sort" and list(p[1][2][1:]) == [p[2]]
+    ):
+        # Both engines need the index sorted; Polars may give windows of
+        # unsorted input without an error.
+        return False
     if op in ("head", "tail", "slice", "with_row_index"):
         return plan_ordered(p[1], case)
     if op == "unique" and (len(p[2]) > 1 or p[3] in ("first", "last")):

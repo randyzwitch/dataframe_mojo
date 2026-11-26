@@ -527,6 +527,31 @@ def test_coordinate_interpolation_follows_axis_order() raises:
     assert_true(isnan(tied.select(expr).item(1, "y").float64()))
 
 
+def test_interpolation_rounds_distance_times_slope_then_adds() raises:
+    # 0.5 + 3 * (-2 / 6) is -0.5 with the product rounded first; a fused
+    # multiply-add would give -0.49999999999999994.
+    var frame = DataFrame(
+        [
+            Series(
+                "y",
+                Column[Float64](
+                    [0.5, 0, 0, 0, 0, 0, -1.5],
+                    [True, False, False, False, False, False, True],
+                ),
+            ),
+            Series("x", Column[Int64]([0, 1, 2, 3, 4, 5, 6])),
+        ]
+    )
+    var actual = frame.select_exprs(
+        [
+            col("y").interpolate().alias("linear"),
+            col("y").interpolate_by(col("x")).alias("by"),
+        ]
+    )
+    assert_equal(actual.item(3, "linear").float64(), -0.5)
+    assert_equal(actual.item(3, "by").float64(), -0.5)
+
+
 def test_interpolation_fills_long_gaps_in_one_pass() raises:
     # A long interior gap and a trailing gap; each gap row is computed from
     # its own distance to the shared endpoints (#1382).
