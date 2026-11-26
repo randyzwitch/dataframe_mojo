@@ -4,6 +4,7 @@ setting. Filters written above a gather stay above it, filters and column
 selections above a diagonal concat reach every input, and column
 selections above a horizontal concat reach both inputs."""
 # contract-group: lazy.frame_verbs
+from std.memory import ArcPointer
 from std.os import getenv, makedirs
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
@@ -345,6 +346,47 @@ def test_concat_of_joins_pruned_apart() raises:
                 .sort("k"),
                 narrowed,
             )
+        _ = workers^
+
+
+def test_selected_columns_keep_field_metadata_in_a_union() raises:
+    """A column passed through a select keeps its Arrow field metadata,
+    both in the rows and in the schema the plan derives for the select,
+    so a union of a selected input and an unselected one stacks. Found by
+    the differential fuzzer (tests/fuzz): projection pushdown put a
+    selection on one input of a union over Parquet data, and the derived
+    schemas disagreed on a labelled column's metadata."""
+    # Packed Arrow metadata: one entry, "tag" -> "raw".
+    var metadata: List[UInt8] = [1, 0, 0, 0, 3, 0, 0, 0, 116, 97, 103]
+    metadata += [3, 0, 0, 0, 114, 97, 119]
+    var label = Series(
+        "s", Column[String](["a", "b", "c"], [True, False, True])
+    )
+    label._field_metadata = ArcPointer(metadata^)
+    var frame = DataFrame([label^, Series("u", Column[Int64]([1, 2, 3]))])
+    var expected = concat([frame.copy(), frame.copy()])
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        var plans = List[LazyFrame]()
+        plans.append(concat([frame.lazy(), frame.lazy().select(["s", "u"])]))
+        plans.append(
+            concat(
+                [
+                    frame.lazy().select_exprs([col("s"), col("u")]),
+                    frame.lazy().with_columns([col("u").alias("u")]),
+                ]
+            )
+        )
+        plans.append(
+            concat([frame.lazy(), frame.lazy().filter(col("u") > 0)]).select(
+                ["s"]
+            )
+        )
+        for k in range(len(plans)):
+            var result = plans[k].collect()
+            assert_true(Bool(result.column("s")._field_metadata), String(k))
+            if k < 2:
+                check(plans[k], expected)
         _ = workers^
 
 
