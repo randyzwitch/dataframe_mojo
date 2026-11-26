@@ -1,6 +1,8 @@
 """Runtime-tagged, named columns without per-element type erasure."""
 from dataframe.kernels.scalar_gather import gather_scalars
+from dataframe.storage.allocation import check_memory
 from dataframe.storage.buffer import _Buffer
+from std.sys import size_of
 from dataframe.storage.retained import RetainedBuffers
 from dataframe.storage.field_metadata import (
     _equal_metadata,
@@ -640,17 +642,21 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             merged._field_metadata = self._field_metadata
             return merged^
         # Fixed-width numbers merge on every worker: each copies the rows
-        # of its share of the output, values and validity bits.
+        # of its share of the output, values and validity bits. Every
+        # route below makes a whole new copy of the column, of a size known
+        # here, so it is checked against the memory limit first.
         if worker_count(len(self)) > 1:
             comptime for d in range(len(NUMERIC_DTYPES)):
                 comptime D = NUMERIC_DTYPES[d]
                 if result._data.isa[Column[Scalar[D]]]():
+                    check_memory(len(self) * size_of[Scalar[D]]())
                     var merged = Self(self._name, _merge_scalars[D](parts))
                     merged._dtype = self._dtype
                     merged._field_metadata = self._field_metadata
                     return merged^
             # decimal128 storage, 16 bytes a row.
             if result._data.isa[Column[Int128]]():
+                check_memory(16 * len(self))
                 var merged = Self(
                     self._name, _merge_scalars[DType.int128](parts)
                 )
@@ -667,6 +673,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                     any_views or part._data[StringColumn]._is_view_storage()
                 )
         if any_views:
+            check_memory(16 * len(self))
             var storages = List[StringViewStorage](capacity=len(parts))
             var offsets = List[Int](capacity=len(parts))
             var lengths = List[Int](capacity=len(parts))
@@ -2522,6 +2529,9 @@ struct ChunkMerge(Movable):
                     starts.append(total)
                     total += len(chunk)
                     nulls = nulls or chunk.null_count() > 0
+                # A new copy of the whole column: checked against the
+                # memory limit before it is allocated.
+                check_memory(total * size_of[Scalar[D]]())
                 var values = List[Scalar[D]](unsafe_uninit_length=total)
                 var bits = List[UInt8]()
                 if nulls:

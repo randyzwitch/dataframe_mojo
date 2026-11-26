@@ -10,6 +10,7 @@ from dataframe import (
     StringColumn,
     StructColumn,
     col,
+    concat,
 )
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.group_strategy_reference import ScopedEnvironment
@@ -363,4 +364,43 @@ def test_unmatched_build_rows_keep_the_probe_side_field_metadata() raises:
                             ),
                             how + " " + name,
                         )
+        _ = workers^
+
+
+def test_join_with_an_empty_left_keeps_the_left_field_metadata() raises:
+    """A right or full join whose left input has no rows outputs the right
+    rows with the left's columns null. Those null columns are the same
+    fields as the left's, Arrow metadata included, so they stack with
+    the output of the same join over a left that has rows. Found by the
+    differential fuzzer (tests/fuzz)."""
+    # Packed Arrow metadata: one entry, "tag" -> "raw".
+    var metadata: List[UInt8] = [1, 0, 0, 0, 3, 0, 0, 0, 116, 97, 103]
+    metadata += [3, 0, 0, 0, 114, 97, 119]
+    var key = Series("k", Column[Int32]([1, 2, 3]))
+    var label = Series("e", StringColumn(["red", "blue", "green"]))
+    label._field_metadata = ArcPointer(metadata^)
+    var left = DataFrame([key^, label^])
+    var right = DataFrame([Series("k", Column[Int32]([2, 3, 4]))])
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        for how in ["right", "full"]:
+            for coalesce in [False, True]:
+                var empty = left.head(0).join(
+                    right, on="k", how=how, coalesce=coalesce
+                )
+                var full = left.join(right, on="k", how=how, coalesce=coalesce)
+                assert_true(Bool(empty.column("e")._field_metadata), how)
+                var stacked = concat([empty.copy(), full.copy()])
+                assert_equal(stacked.height(), empty.height() + full.height())
+                var lazy = concat(
+                    [
+                        left.lazy()
+                        .head(0)
+                        .join(right.lazy(), on="k", how=how, coalesce=coalesce),
+                        left.lazy().join(
+                            right.lazy(), on="k", how=how, coalesce=coalesce
+                        ),
+                    ]
+                ).collect()
+                assert_equal(lazy.height(), stacked.height())
         _ = workers^

@@ -180,7 +180,7 @@ from dataframe.kernels.gather import (
     take_parallel,
     true_rows,
 )
-from dataframe.storage.allocation import huge_list
+from dataframe.storage.allocation import check_memory, huge_list
 from dataframe.kernels.mask_filter import filter_columns
 from .parallel import Job, Rounds, morsel_ranges, run_jobs, source_tasks
 from .series import Series
@@ -3003,6 +3003,9 @@ struct _PipelineJob(Job):
                 return
             var k = self.first_morsel + taken
             self.morsel = k
+            # A morsel's rows add to the sink's tables: the memory limit is
+            # checked before each, and crossing it fails the morsel.
+            check_memory()
             var offset = self.ranges[][2 * taken]
             var length = self.ranges[][2 * taken + 1]
             self.runner.begin_sink(k, offset, length)
@@ -3039,6 +3042,7 @@ struct _PipelineJob(Job):
             var batch = next.take()
             var k = batch.number
             self.morsel = k
+            check_memory()
             var morsel = ScanSource.frame_at(source, batch^)
             var length = morsel.height()
             self.runner.begin_sink(k, 0, length)
