@@ -1353,7 +1353,15 @@ def _import_views(
     var sizes = _buffer(array, Int(array.n_buffers) - 1)
     if array.n_buffers > 3 and sizes == 0:
         raise Error("Arrow view array has no variadic buffer sizes")
-    for k in range(Int(array.n_buffers) - 3):
+    # Copied descriptors that are all inline read no variadic buffer, so
+    # none is copied (a null row's descriptor included: it is inline too).
+    var external = Bool(owner)
+    if not external:
+        for i in range(count):
+            if not descriptors[][i].is_inline():
+                external = True
+                break
+    for k in range(Int(array.n_buffers) - 3 if external else 0):
         var size = Int(_read[Int64](sizes, k))
         if size < 0 or size > Int.MAX - total:
             raise Error("Arrow view buffer sizes are invalid")
