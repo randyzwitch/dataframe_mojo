@@ -26,8 +26,8 @@ bytes. Storage that is never released is freed the ordinary way: the pool
 is an optimization that a caller can always skip.
 
 Retained blocks are still memory the process holds, so they count toward
-the memory limit (`memory_limit`), and the pool keeps at most a quarter of
-the limit. When the limit would be crossed, every retained block is freed
+the memory limit (`memory_limit`). When the limit would be crossed, every
+retained block is freed
 before an `out of memory` error is raised (`check_memory`): memory kept
 only for speed never decides whether a query fits. The row blocks of hash
 tables and aggregates have a pool of their own here (`_RowBlockPool`),
@@ -43,7 +43,6 @@ from std.time import monotonic
 
 from dataframe.storage.memory_limit import (
     charge,
-    memory_limit,
     out_of_memory,
     over_limit,
     over_limit_reserved,
@@ -94,8 +93,7 @@ struct _Retained(Copyable, ImplicitlyCopyable, Movable):
 
 def _retain_limit() -> Int:
     """The most bytes the pool keeps: a quarter of physical memory, so
-    retained blocks never crowd out the tables that are live (and a
-    quarter of the memory limit, `_retain_budget`)."""
+    retained blocks never crowd out the tables that are live."""
     comptime if not CompilationTarget.is_linux():
         return 0
     var pages = Int(external_call["sysconf", Int64](Int32(_SC_PHYS_PAGES)))
@@ -103,13 +101,6 @@ def _retain_limit() -> Int:
     if pages <= 0 or size <= 0:
         return 0
     return pages * size // 4
-
-
-def _retain_budget() -> Int:
-    """The most bytes a pool of freed blocks keeps under the memory limit:
-    a quarter of it, so memory held only for reuse is never most of what a
-    query may use."""
-    return memory_limit() // 4
 
 
 def _free_block(address: Int, bytes: Int):
@@ -262,7 +253,7 @@ struct _BlockPool(Movable):
             return False
         var now = monotonic()
         self._expire(now, expired)
-        var limit = min(self.limit, _retain_budget())
+        var limit = self.limit
         if bytes > limit:
             expired.append(_Retained(address, bytes, now))
         else:
@@ -408,8 +399,7 @@ struct _RowBlockPool(Movable):
     partitions would wait on that lock, then fault the pages in again. The
     pool keeps at most ROW_BLOCKS_KEPT_PER_THREAD blocks for each worker
     thread, the most freed memory a thread holds before handing it on, and
-    at most a quarter of the memory limit (`_retain_budget`); it frees the
-    rest. Kept blocks count toward the limit."""
+    frees the rest. Kept blocks count toward the limit."""
 
     var lock: Atomic[Int64]
     var free: List[List[UInt8]]
@@ -464,9 +454,7 @@ struct _RowBlockPool(Movable):
         var bytes = len(block)
         if bytes == 0:
             return
-        var most = min(
-            ROW_BLOCKS_KEPT_PER_THREAD * workers, _retain_budget() // bytes
-        )
+        var most = ROW_BLOCKS_KEPT_PER_THREAD * workers
         _RowBlockPool._acquire()
         _row_block_pool()._push_locked(block^, most)
         _RowBlockPool._release()

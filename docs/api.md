@@ -1735,7 +1735,7 @@ def mean_horizontal(exprs: List[Expr], ignore_nulls: Bool = True) -> Expr
 
 ## `memory_limit`
 
-The memory limit in bytes (`Int64.MAX` when there is none): the last `set_memory_limit`, else `DATAFRAME_MEMORY_LIMIT`, else 80% of the memory available to the process: physical memory, or the memory limit of the control group it runs in when that is lower.
+The memory limit in bytes (`Int64.MAX` when there is none): the last `set_memory_limit`, else `DATAFRAME_MEMORY_LIMIT`, else 80% of physical memory.
 
 ```mojo
 def memory_limit() -> Int
