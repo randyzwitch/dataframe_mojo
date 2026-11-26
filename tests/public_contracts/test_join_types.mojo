@@ -11,6 +11,7 @@ from dataframe import (
     StructColumn,
 )
 from tests.support.coverage_generators import offset_layout, chunk_layout
+from tests.support.group_strategy_reference import ScopedEnvironment
 from tests.support.join_typed_reference import (
     typed_join_values,
     fixture_join_ranks,
@@ -257,3 +258,61 @@ def test_lazy_join_payloads_keep_field_metadata_from_a_gathered_build() raises:
                 .equals(eager.column(name).cast(DataType.STRING)),
                 name,
             )
+
+
+def test_unmatched_build_rows_keep_the_probe_side_field_metadata() raises:
+    """An outer join emits the build rows nothing matched after the probe,
+    with the probe side's columns null. Those null columns are the same
+    fields as the probe's matched rows, Arrow metadata included, so both
+    stack into one column. Found by the differential fuzzer (tests/fuzz):
+    a right join of a file's labelled key failed with conflicting field
+    metadata. The answer matches the same join without metadata."""
+    # Packed Arrow metadata: one entry, "tag" -> "raw".
+    var metadata: List[UInt8] = [1, 0, 0, 0, 3, 0, 0, 0, 116, 97, 103]
+    metadata += [3, 0, 0, 0, 114, 97, 119]
+    var key = Series(
+        "k",
+        StringColumn(["", "green", "red", "blue"], [False, True, True, True]),
+    )
+    var payload = Series("e", Column[Int32]([1, 2, 3, 4]))
+    var plain = DataFrame([key.copy(), payload.copy()])
+    key._field_metadata = ArcPointer(metadata.copy())
+    payload._field_metadata = ArcPointer(metadata^)
+    var labelled = DataFrame([key^, payload^])
+    var right = labelled.head(3)
+    var plain_right = plain.head(3)
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        for how in ["right", "full", "left"]:
+            for coalesce in [False, True]:
+                var expected = (
+                    plain.tail(2)
+                    .join(plain_right, on="k", how=how, coalesce=coalesce)
+                    .sort(["e", "e_right"], nulls_last=True)
+                )
+                var eager = labelled.tail(2).join(
+                    right, on="k", how=how, coalesce=coalesce
+                )
+                var lazy = (
+                    labelled.lazy()
+                    .tail(2)
+                    .join(right.lazy(), on="k", how=how, coalesce=coalesce)
+                    .collect()
+                )
+                var results = List[DataFrame]()
+                results.append(eager^)
+                results.append(lazy^)
+                for result in results:
+                    var sorted = result.sort(["e", "e_right"], nulls_last=True)
+                    assert_equal(sorted.columns(), expected.columns())
+                    assert_equal(sorted.height(), expected.height())
+                    for name in expected.columns():
+                        assert_true(
+                            sorted.column(name)
+                            .cast(DataType.STRING)
+                            .equals(
+                                expected.column(name).cast(DataType.STRING)
+                            ),
+                            how + " " + name,
+                        )
+        _ = workers^

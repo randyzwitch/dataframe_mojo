@@ -4,9 +4,12 @@ setting. Filters written above a gather stay above it, filters and column
 selections above a diagonal concat reach every input, and column
 selections above a horizontal concat reach both inputs."""
 # contract-group: lazy.frame_verbs
+from std.os import getenv, makedirs
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
+    CsvField,
+    CsvSchema,
     DataFrame,
     DataType,
     LazyFrame,
@@ -14,8 +17,11 @@ from dataframe import (
     col,
     concat,
     lit,
+    read_csv,
+    scan_csv,
 )
 from tests.support.coverage_compare import assert_frame
+from tests.support.group_strategy_reference import ScopedEnvironment
 
 # Stands for a null Int64 in literal expectations.
 comptime NULL = Int64.MIN
@@ -267,6 +273,79 @@ def test_vertical_and_diagonal_concat() raises:
     with assert_raises():
         _ = concat([first.lazy()], "sideways")
     check(concat([first.lazy()], "diagonal"), first)
+
+
+def test_concat_of_joins_pruned_apart() raises:
+    """A union of two joins whose inputs keep different columns: a filter
+    above the second join reads a right column that nothing above the
+    union reads, so the second join's right input keeps one more column
+    than the first's. The union still stacks the same columns from both,
+    over files and over frames, on one worker and on eight."""
+    var directory = getenv("COVERAGE_TEST_TMP")
+    assert_true(Bool(directory))
+    directory += "/concat-of-joins"
+    makedirs(directory, exist_ok=True)
+    var path = directory + "/rows.csv"
+    var text = String("k,a,d\n")
+    for row in range(40):
+        text += String(row % 3) + "," + String(row % 7) + ","
+        text += String(row * 5) + "\n"
+    with open(path, "w") as file:
+        file.write(text)
+    var schema = CsvSchema(
+        [CsvField.int64("k"), CsvField.int64("a"), CsvField.int64("d")]
+    )
+    var frame = read_csv(path, schema)
+    var sources = List[LazyFrame]()
+    sources.append(scan_csv(path, schema))
+    sources.append(frame.lazy())
+    var eager = frame.head(3).join(
+        frame.filter(col("a").is_in([lit(Int64(0)), lit(Int64(4))])),
+        on=["k"],
+        how="left",
+    )
+    var expected = (
+        concat([eager.copy(), eager.filter(col("a_right") == col("a_right"))])
+        .group_by(["a"])
+        .agg([col("d_right").count().alias("n")])
+        .sort("a")
+    )
+    var narrowed = (
+        concat([frame.filter(col("a") > 2), frame.filter(col("d") > 50)])
+        .select(["k"])
+        .sort("k")
+    )
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        for source in sources:
+            var joined = source.head(3).join(
+                source.filter(col("a").is_in([lit(Int64(0)), lit(Int64(4))])),
+                on=["k"],
+                how="left",
+            )
+            check(
+                concat(
+                    [
+                        joined.copy(),
+                        joined.filter(col("a_right") == col("a_right")),
+                    ]
+                )
+                .group_by(["a"])
+                .agg([col("d_right").count().alias("n")])
+                .sort("a"),
+                expected,
+            )
+            # Two filters that read different columns, neither of them
+            # read above the union.
+            check(
+                concat(
+                    [source.filter(col("a") > 2), source.filter(col("d") > 50)]
+                )
+                .select(["k"])
+                .sort("k"),
+                narrowed,
+            )
+        _ = workers^
 
 
 def test_horizontal_concat() raises:
