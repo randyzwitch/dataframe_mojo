@@ -427,11 +427,23 @@ def build_expr(t: Tree, i: Int) raises -> Expr:
         return ea(t, i, 1).list().max()
     if op == "list.first":
         return ea(t, i, 1).list().first()
+    if op == "interpolate":
+        return ea(t, i, 1).interpolate(t.text(t.kid(i, 2)))
+    if op == "interpolate_by":
+        return ea(t, i, 1).interpolate_by(ea(t, i, 2))
     if op == "list.get":
         return ea(t, i, 1).list().get(t.int(t.kid(i, 2)))
     if op == "field":
         return ea(t, i, 1).field(t.text(t.kid(i, 2)))
     raise Error("fuzz driver: unknown expression " + op)
+
+
+def optional_text(t: Tree, i: Int) -> Optional[String]:
+    """An optional string argument: the empty string means none."""
+    var text = t.text(i)
+    if text.byte_length() == 0:
+        return None
+    return text
 
 
 def build_exprs(t: Tree, i: Int) raises -> List[Expr]:
@@ -568,6 +580,27 @@ def run_eager(t: Tree, i: Int, mut inputs: Inputs) raises -> DataFrame:
         return df.with_row_index(t.text(t.kid(i, 2)))
     if op == "unnest":
         return df.unnest(t.text(t.kid(i, 2)))
+    if op == "rolling":
+        # (rolling P INDEX PERIOD OFFSET CLOSED (list KEYS) (list AGGS))
+        return df.rolling(
+            t.text(t.kid(i, 2)),
+            t.text(t.kid(i, 3)),
+            optional_text(t, t.kid(i, 4)),
+            t.text(t.kid(i, 5)),
+            t.strings(t.kid(i, 6)),
+        ).agg(build_exprs(t, t.kid(i, 7)))
+    if op == "dynamic":
+        # (dynamic P INDEX EVERY PERIOD OFFSET CLOSED LABEL (list KEYS)
+        #  (list AGGS))
+        return df.group_by_dynamic(
+            t.text(t.kid(i, 2)),
+            t.text(t.kid(i, 3)),
+            optional_text(t, t.kid(i, 4)),
+            optional_text(t, t.kid(i, 5)),
+            t.text(t.kid(i, 6)),
+            t.text(t.kid(i, 7)),
+            t.strings(t.kid(i, 8)),
+        ).agg(build_exprs(t, t.kid(i, 9)))
     raise Error("fuzz driver: unknown plan op " + op)
 
 
@@ -639,6 +672,24 @@ def run_lazy(
         return lf.with_row_index(t.text(t.kid(i, 2)))
     if op == "unnest":
         return lf.unnest(t.text(t.kid(i, 2)))
+    if op == "rolling":
+        return lf.rolling(
+            t.text(t.kid(i, 2)),
+            t.text(t.kid(i, 3)),
+            optional_text(t, t.kid(i, 4)),
+            t.text(t.kid(i, 5)),
+            t.strings(t.kid(i, 6)),
+        ).agg(build_exprs(t, t.kid(i, 7)))
+    if op == "dynamic":
+        return lf.group_by_dynamic(
+            t.text(t.kid(i, 2)),
+            t.text(t.kid(i, 3)),
+            optional_text(t, t.kid(i, 4)),
+            optional_text(t, t.kid(i, 5)),
+            t.text(t.kid(i, 6)),
+            t.text(t.kid(i, 7)),
+            t.strings(t.kid(i, 8)),
+        ).agg(build_exprs(t, t.kid(i, 9)))
     raise Error("fuzz driver: unknown plan op " + op)
 
 
