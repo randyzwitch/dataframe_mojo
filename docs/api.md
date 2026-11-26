@@ -1733,6 +1733,22 @@ Mean of the inputs in each row: Float32 when their common type is Float32, other
 def mean_horizontal(exprs: List[Expr], ignore_nulls: Bool = True) -> Expr
 ```
 
+## `memory_limit`
+
+The memory limit in bytes (`Int64.MAX` when there is none): the last `set_memory_limit`, else `DATAFRAME_MEMORY_LIMIT`, else 80% of physical memory.
+
+```mojo
+def memory_limit() -> Int
+```
+
+## `memory_usage`
+
+Bytes the engine holds against the memory limit: column buffers, hash table and aggregate blocks, and freed blocks kept for reuse.
+
+```mojo
+def memory_usage() -> Int
+```
+
 ## `min_horizontal`
 
 Least input in each row, at the inputs' common type. Nulls and NaN are skipped; a row with no other value is null (NaN when only NaN).
@@ -2119,6 +2135,18 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def append(self, other: Self) -> Self`
   Return a new series with other's rows after this one's.
 - `def reverse(self) -> Self`
+
+## `set_memory_limit`
+
+Limit the memory the engine holds to `bytes`; 0 or less removes the limit. Work that would go over it raises an `out of memory` error. Tables already held count toward it, so a limit below what the program holds makes the next query fail.
+
+```mojo
+def set_memory_limit(bytes: Int)
+```
+
+```mojo
+def set_memory_limit(text: String)
+```
 
 ## `SliceIterator`
 

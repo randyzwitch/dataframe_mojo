@@ -12,13 +12,11 @@ with their owners; allocating only when rows arrive makes empty partitions
 cost no row or heap storage.
 
 Row blocks are all one size, so a freed one can serve the next request
-as it is. Freed row blocks go to a process-wide pool instead of back to
-the general allocator, which would return their pages to the system and
-take a global lock for each block: many threads each starting a few
-partitions would wait on that lock, then fault the pages in again. The
-pool keeps at most ROW_BLOCKS_KEPT_PER_THREAD blocks for each worker
-thread, the most freed memory a thread holds before handing it on, and
-frees the rest.
+as it is: freed row blocks go to a process-wide pool
+(`take_row_block`/`give_row_block`) instead of back to the general
+allocator. Every block counts toward the memory limit while it lives
+(it is a `_Buffer`, which counts the bytes it owns), and the pool's kept
+blocks count too.
 """
 from dataframe.vector.tuple_data_layout import (
     TUPLE_DATA_BLOCK_SIZE,
@@ -26,129 +24,38 @@ from dataframe.vector.tuple_data_layout import (
 )
 from dataframe.vector.tuple_data_states import TupleDataChunkState
 from dataframe.parallel import configured_workers
+from dataframe.storage.allocation import give_row_block, take_row_block
+from dataframe.storage.buffer import _Buffer
 from dataframe.vector.types import STANDARD_VECTOR_SIZE
-from std.atomic import Atomic
-from std.ffi import _get_global
-from std.memory import ArcPointer, Layout, Pointer, alloc
-
-# Freed row blocks the pool keeps per worker thread: one batch of blocks,
-# what a thread's cache of freed blocks holds before it passes them on.
-comptime ROW_BLOCKS_KEPT_PER_THREAD = 128
-
-
-struct _RowBlockPool(Movable):
-    """Freed row blocks (each TUPLE_DATA_BLOCK_SIZE bytes, pages already
-    touched) and a spin lock over them. Taking or returning a block holds
-    the lock for one list push or pop."""
-
-    var lock: Atomic[Int64]
-    var free: List[List[UInt8]]
-    var limit: Int
-
-    def __init__(out self):
-        self.lock = Atomic[Int64](0)
-        self.free = List[List[UInt8]]()
-        self.limit = ROW_BLOCKS_KEPT_PER_THREAD * configured_workers()
-
-    # Every thread shares the one pool, so its methods reach it by address
-    # (`_row_block_pool`) rather than as a `mut self` argument: a `mut`
-    # argument promises the callee sole access to the value's memory, which
-    # lets the compiler move the list's reads and writes across the lock's
-    # atomics, and two threads could then change it at once. The list
-    # changes run under the lock in functions that are not inlined, so they
-    # are complete before it is released.
-
-    @staticmethod
-    def _acquire():
-        ref lock = _row_block_pool().lock
-        while True:
-            var expected = Int64(0)
-            if lock.compare_exchange(expected, 1):
-                return
-
-    @staticmethod
-    def _release():
-        _row_block_pool().lock.store(0)
-
-    @staticmethod
-    def take() -> List[UInt8]:
-        """A free block, or a new one when the pool is empty."""
-        _RowBlockPool._acquire()
-        var block = _row_block_pool()._pop_locked()
-        _RowBlockPool._release()
-        if block:
-            return block.take()
-        return List[UInt8](unsafe_uninit_length=TUPLE_DATA_BLOCK_SIZE)
-
-    @no_inline
-    def _pop_locked(mut self) -> Optional[List[UInt8]]:
-        if len(self.free) > 0:
-            return self.free.pop()
-        return None
-
-    @staticmethod
-    def give(var block: List[UInt8]):
-        """Keep a freed block for reuse, unless the pool is full (then it
-        is freed when `block` goes out of scope)."""
-        if len(block) != TUPLE_DATA_BLOCK_SIZE:
-            return
-        _RowBlockPool._acquire()
-        _row_block_pool()._push_locked(block^)
-        _RowBlockPool._release()
-
-    @no_inline
-    def _push_locked(mut self, var block: List[UInt8]):
-        if len(self.free) < self.limit:
-            self.free.append(block^)
-
-
-def _pool_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
-    var pointer = alloc(Layout[_RowBlockPool](length=1)).unsafe_leak()
-    pointer.unsafe_write(_RowBlockPool())
-    return pointer.unsafe_bitcast[NoneType]()
-
-
-def _pool_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
-    # Blocks may still be returned while the process tears down.
-    pass
-
-
-def _row_block_pool() -> ref[MutAnyOrigin] _RowBlockPool:
-    var address = _get_global[
-        "DATAFRAME_ROW_BLOCK_POOL", _pool_init, _pool_keep
-    ]()
-    return Pointer[_RowBlockPool, MutAnyOrigin](
-        unsafe_from_address=Int(address.value())
-    )[]
 
 
 comptime _INVALID_INDEX = -1
 
 
 struct TupleDataBlock(Copyable, Movable):
-    """TupleDataBlock: an allocation, its capacity and the bytes used. The
-    allocation is shared: a column gathered from the rows references a
-    heap block's strings in place and keeps the block alive after the
-    collection is gone (the result vector's heap reference)."""
+    """TupleDataBlock: an allocation, its address, its capacity and the
+    bytes used. The allocation is shared: a column gathered from the rows
+    references a heap block's strings in place and keeps the block alive
+    after the collection is gone (the result vector's heap reference)."""
 
-    var data: ArcPointer[List[UInt8]]
+    var data: _Buffer[UInt8]
+    var _address: Int
     var capacity: Int
     var size: Int
 
     def __init__(out self, capacity: Int):
-        self.data = ArcPointer(List[UInt8](unsafe_uninit_length=capacity))
-        self.capacity = capacity
-        self.size = 0
+        self = Self(List[UInt8](unsafe_uninit_length=capacity))
 
     def __init__(out self, var bytes: List[UInt8]):
         """A block over `bytes`, whose length is its capacity."""
         self.capacity = len(bytes)
-        self.data = ArcPointer(bytes^)
+        self._address = Int(bytes.unsafe_ptr())
+        self.data = _Buffer[UInt8](bytes^)
         self.size = 0
 
     @always_inline
     def address(self) -> Int:
-        return Int(self.data[].unsafe_ptr())
+        return self._address
 
     @always_inline
     def remaining_capacity(self) -> Int:
@@ -262,12 +169,12 @@ struct TupleDataAllocator(Copyable, Movable):
         for b in range(len(self.row_blocks)):
             ref block = self.row_blocks[b]
             if block.data.count() == 1:
-                var bytes = List[UInt8]()
-                swap(bytes, block.data[])
-                _RowBlockPool.give(bytes^)
+                give_row_block(block.data.take_values(), configured_workers())
 
     def create_row_block(mut self):
-        self.row_blocks.append(TupleDataBlock(_RowBlockPool.take()))
+        self.row_blocks.append(
+            TupleDataBlock(take_row_block(TUPLE_DATA_BLOCK_SIZE))
+        )
         self.block_allocation_size += TUPLE_DATA_BLOCK_SIZE
 
     def create_heap_block(mut self, size: Int):
