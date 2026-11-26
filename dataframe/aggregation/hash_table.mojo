@@ -103,6 +103,7 @@ from dataframe.aggregation.function import (
     combine,
     reducer_input,
     reaggregable,
+    reads_second_input,
     reduction_supported,
     states_supported,
     table_kind,
@@ -730,7 +731,7 @@ def aggregate_layout(
     var state_words = 0
     for s in range(len(templates)):
         var second = 0
-        if templates[s].op == CORR or templates[s].op == COV:
+        if reads_second_input(templates[s].op):
             second = _second_input(templates, s)
         var kind = table_kind(templates, inputs, s)
         if kind < 0:
@@ -2137,6 +2138,16 @@ struct AggregateSink(Movable):
                     )
                 continue
             if ordered:
+                if reads_second_input(self.owned[s].op):
+                    # A max_by or min_by: each row's value with its key.
+                    self.buffered[s].add(
+                        columns[s],
+                        ordinals,
+                        first,
+                        made,
+                        Optional(columns[slot.k].copy()),
+                    )
+                    continue
                 self.buffered[s].add(columns[s], ordinals, first, made)
                 continue
             self.owned[s].grow(made)

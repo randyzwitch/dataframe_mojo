@@ -6,6 +6,8 @@ from dataframe.binding import (
 from dataframe.expr import (
     ALL,
     ANY,
+    EXPR_MAX_BY,
+    EXPR_MIN_BY,
     ARG_MAX,
     ARG_MIN,
     COL,
@@ -255,7 +257,7 @@ def _stream_reductions(
 ) -> Bool:
     """Whether every expression is reductions of row-local inputs, combined
     row by row. `holistic` admits medians and quantiles; `listed` also
-    mode and implode, whose states the aggregate table holds by address;
+    mode, implode, max_by and min_by, whose states the aggregate table holds by address;
     `filtered` also a reduction of an aggregate filter
     (`reduction_filter`), which the aggregate table applies per
     reduction."""
@@ -274,9 +276,14 @@ def _stream_reductions(
             ref node = nodes[i]
             if i in filters:
                 continue
+            # A max_by or min_by, a sequence step over a group's rows, is
+            # a reduction the table holds by address (`listed`).
+            var picks = node.op == EXPR_MAX_BY or node.op == EXPR_MIN_BY
             if (
-                is_window(node.op)
-                or is_sequence(node.op)
+                (
+                    (is_window(node.op) or is_sequence(node.op))
+                    and not (listed and picks)
+                )
                 or node.op == OVER
                 or node.op == SELECTOR
             ):
@@ -286,7 +293,12 @@ def _stream_reductions(
             if is_reduction(node.op):
                 if holistic and (node.op == MEDIAN or node.op == QUANTILE):
                     pass
-                elif listed and (node.op == MODE or node.op == IMPLODE):
+                elif listed and node.op in [
+                    MODE,
+                    IMPLODE,
+                    EXPR_MAX_BY,
+                    EXPR_MIN_BY,
+                ]:
                     pass
                 elif node.op not in [
                     SUM,

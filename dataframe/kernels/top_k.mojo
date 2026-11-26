@@ -212,6 +212,25 @@ def _pattern(bound: BoundExpr) -> Tuple[Int, Int, Int]:
     return (rank.left, compare.left, k)
 
 
+def top_rows_ranges(ends: List[Int], workers: Int) -> List[Int]:
+    """(offset, length) morsels covering chunks ending at `ends`, for
+    `workers` threads to take from a shared cursor: about four each,
+    between 4,096 and 65,536 rows, none crossing a chunk's end."""
+    var height = ends[len(ends) - 1] if len(ends) > 0 else 0
+    var morsel = max(4096, min(1 << 16, height // (4 * workers) + 1))
+    var ranges = List[Int]()
+    var start = 0
+    for end in ends:
+        var at = start
+        while at < end:
+            var length = min(morsel, end - at)
+            ranges.append(at)
+            ranges.append(length)
+            at += length
+        start = end
+    return ranges^
+
+
 def _table_top_rows(
     keys: List[Series],
     value: Series,
@@ -240,15 +259,9 @@ def _table_top_rows(
             return None
         flat.append(key.rechunk() if key.is_chunked() else key.copy())
     trace_path("filter.top_k_table")
-    var ranges = List[Int]()
-    var morsel = max(4096, min(1 << 16, height // (4 * workers) + 1))
-    var at = 0
-    while at < height:
-        var length = min(morsel, height - at)
-        ranges.append(at)
-        ranges.append(length)
-        at += length
-    return aggregate_top_rows(flat, value, k, descending, ranges, workers)
+    return aggregate_top_rows(
+        flat, value, k, descending, top_rows_ranges([height], workers), workers
+    )
 
 
 def top_k_mask(

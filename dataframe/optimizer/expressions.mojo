@@ -1,4 +1,5 @@
 """Expression folding and common-subexpression helpers."""
+from dataframe.aggregation.function import TOP_ROWS_INLINE
 from dataframe.binding import (
     BoundExpr,
     bind,
@@ -59,6 +60,7 @@ from dataframe.expr import (
     OVER,
     OVER_GLOBAL,
     OVER_MAPPING_MASK,
+    RANK,
     SELECTOR,
     UNTYPED,
     VALUE_COUNTS,
@@ -576,6 +578,48 @@ def _emit_folded(
     _set_node_children(copy, children)
     out.append(copy^)
     return len(out) - 1
+
+
+def top_rows_filter(expr: Expr) -> Bool:
+    """Whether `expr` keeps each partition's first k rows by ordinal rank:
+    `col(v).rank("ordinal").over(keys) <= k` (or `< k`), its partitions
+    named keys, k small enough for a partition's state to hold its k best
+    rows. A filter of that shape needs only those rows, not every row's
+    rank."""
+    var n = len(expr._nodes)
+    if n == 0:
+        return False
+    ref compare = expr._nodes[n - 1]
+    if (compare.op != LE and compare.op != LT) or compare.left < 0:
+        return False
+    if compare.right < 0 or expr._nodes[compare.right].op != LIT_INT:
+        return False
+    # At most `TOP_ROWS_INLINE` rows a partition: the k best are held in
+    # the partition's own state.
+    var k = Int(expr._nodes[compare.right].integer)
+    if k - Int(compare.op == LT) > TOP_ROWS_INLINE:
+        return False
+    ref over = expr._nodes[compare.left]
+    if over.op != OVER or over.left < 0:
+        return False
+    if (over.integer & OVER_GLOBAL) != 0 or (
+        over.integer & OVER_MAPPING_MASK
+    ) != 0:
+        return False
+    var keys = 0
+    for name in split_names(over.text2):
+        if name.byte_length() == 0:
+            return False
+        keys += 1
+    if keys == 0:
+        return False
+    ref rank = expr._nodes[over.left]
+    return (
+        rank.op == RANK
+        and rank.text == "ordinal"
+        and rank.left >= 0
+        and expr._nodes[rank.left].op == COL
+    )
 
 
 def shared_partition_keys(exprs: List[Expr]) -> List[String]:

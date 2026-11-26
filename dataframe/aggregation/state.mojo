@@ -7,6 +7,7 @@ from dataframe.aggregation.hash_table import (
     AggregateResult,
     ReducerSpec,
     key_supported,
+    reads_second_input,
     table_reduction,
     table_states_supported,
 )
@@ -30,8 +31,6 @@ from dataframe.dtype import (
 from dataframe.execution import _ColumnStats, _ReduceInputs, _ReduceJob
 from dataframe.expr import (
     COL,
-    CORR,
-    COV,
     Expr,
     col,
     is_reduction,
@@ -464,7 +463,7 @@ def table_inputs(
             if not is_reduction(node.op):
                 continue
             inputs.append(_table_input(frame, keys, expression, node.left))
-            if node.op == CORR or node.op == COV:
+            if reads_second_input(node.op):
                 seconds.append(
                     _table_input(frame, keys, expression, node.right)
                 )

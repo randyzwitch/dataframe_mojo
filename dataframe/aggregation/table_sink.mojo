@@ -10,8 +10,10 @@ from dataframe.aggregation.function import (
     ReducerSpec,
     _K_LEN,
     _K_TOP_ROWS,
+    reads_second_input,
 )
 from dataframe.aggregation.hash_table import (
+    AggregateFinish,
     AggregateLayout,
     AggregateResult,
     AggregateSink,
@@ -26,7 +28,7 @@ from dataframe.aggregation.expressions import (
     reduction_filter,
 )
 from dataframe.dtype import DataType
-from dataframe.expr import COL, CORR, COV, Expr, LEN, is_reduction, subtree
+from dataframe.expr import COL, Expr, LEN, is_reduction, subtree
 from dataframe.frame import DataFrame
 from dataframe.kernels.canonical_labels import canonical_code_map
 from dataframe.kernels.nested_keys import encode_nested_keys
@@ -41,7 +43,7 @@ from dataframe.vector.data_chunk import (
     storage_physical,
     to_series,
 )
-from dataframe.parallel import Job, run_jobs
+from dataframe.parallel import Job, Rounds, run_jobs, run_rounds
 from dataframe.vector.expression import VectorExpression
 from dataframe.vector.sink import Sink
 from std.memory import Pointer
@@ -127,7 +129,7 @@ struct TableSinkLayout(Copyable, Movable):
             self.key_types.append(empty._columns[at].dtype())
             self.key_physical.append(storage_physical(empty._columns[at]))
         # In `table_inputs`' order: each reduction's input, then the
-        # second input of each correlation or covariance.
+        # second input of each correlation, covariance, max_by or min_by.
         # An aggregate filter's input is the values it filters, its
         # predicate the reduction's filter.
         var given = List[Optional[Expr]]()
@@ -146,7 +148,7 @@ struct TableSinkLayout(Copyable, Movable):
                         subtree(expression, filter_value(expression, node.left))
                     )
                 predicates.append(predicate^)
-                if node.op == CORR or node.op == COV:
+                if reads_second_input(node.op):
                     seconds.append(
                         subtree(
                             expression, filter_value(expression, node.right)
@@ -259,7 +261,7 @@ def _as_columns(layout: AggregateLayout, inputs: Int) -> List[Bool]:
             continue
         if s < inputs:
             columns[s] = True
-        if layout.templates[s].op == CORR or layout.templates[s].op == COV:
+        if reads_second_input(layout.templates[s].op):
             if layout.slots[s].k < inputs:
                 columns[layout.slots[s].k] = True
     return columns^
@@ -275,7 +277,7 @@ def _as_vectors(layout: AggregateLayout, inputs: Int) -> List[Bool]:
             continue
         if s < inputs:
             vectors[s] = True
-        if layout.templates[s].op == CORR or layout.templates[s].op == COV:
+        if reads_second_input(layout.templates[s].op):
             if layout.slots[s].k < inputs:
                 vectors[layout.slots[s].k] = True
     return vectors^
@@ -774,22 +776,97 @@ def aggregate_top_rows(
     first by ordinal rank (ties: the earlier row), over the (offset,
     length) morsels `ranges` on `workers` threads, in no order: each
     group's row in the table holds its k best (value, row) pairs, merged
-    across workers at the finish. `k` is at most `TOP_ROWS_INLINE`; nulls
-    are never kept."""
-    var count_spec = ReducerSpec(
-        LEN, DataType.INT64, 0, 0, 0.0, String(), DataType.INT64, None
-    )
-    var layout = aggregate_layout(keys, [value.copy()], [count_spec^])
-    var dtype = layout.slots[0].dtype
-    layout.slots[0] = AggregateFunction(
-        _K_TOP_ROWS, 0, value.dtype().is_float(), dtype, k, descending
-    )
-    layout.state_words = layout.slots[0].state_size()
-    var sinks = _sink_jobs(keys, [value.copy()], layout, ranges, workers)
-    var result = aggregate_finish(sinks, layout, ordered=False)
+    across workers at the finish (`TopRowsRounds`, its rounds run here).
+    `k` is at most `TOP_ROWS_INLINE`; nulls are never kept."""
+    var rounds = TopRowsRounds(keys, value, k, descending, ranges, workers)
+    run_rounds(rounds)
     var rows = List[Int]()
-    swap(rows, result.top_rows)
+    swap(rows, rounds.rows)
     return rows^
+
+
+struct TopRowsRounds(Movable, Rounds):
+    """`aggregate_top_rows` as rounds of tasks (`next_round`,
+    `round_task`): one round where each task sinks morsels from a shared
+    cursor into a table of its own, then the table's finish
+    (`AggregateFinish`); `rows` once no round is left."""
+
+    var layout: AggregateLayout
+    var jobs: List[_SinkJob]
+    var cursor: _Cursor
+    var finish: List[AggregateFinish]
+    var stage: Int
+    var rows: List[Int]
+
+    def __init__(
+        out self,
+        keys: List[Series],
+        value: Series,
+        k: Int,
+        descending: Bool,
+        ranges: List[Int],
+        workers: Int,
+    ) raises:
+        var count_spec = ReducerSpec(
+            LEN, DataType.INT64, 0, 0, 0.0, String(), DataType.INT64, None
+        )
+        self.layout = aggregate_layout(keys, [value.copy()], [count_spec^])
+        var dtype = self.layout.slots[0].dtype
+        self.layout.slots[0] = AggregateFunction(
+            _K_TOP_ROWS, 0, value.dtype().is_float(), dtype, k, descending
+        )
+        self.layout.state_words = self.layout.slots[0].state_size()
+        self.cursor = _Cursor.new()
+        var tasks = max(1, min(workers, len(ranges) // 2))
+        self.jobs = List[_SinkJob](capacity=tasks)
+        for _ in range(tasks):
+            self.jobs.append(
+                _SinkJob(
+                    keys,
+                    [value.copy()],
+                    self.layout,
+                    ranges,
+                    self.cursor,
+                    tasks,
+                )
+            )
+        self.finish = List[AggregateFinish]()
+        self.stage = 0
+        self.rows = List[Int]()
+
+    def __del__(deinit self):
+        if self.cursor.address != 0:
+            self.cursor.free()
+
+    def next_round(mut self) raises -> Int:
+        if self.stage == 0:
+            self.stage = 1
+            return len(self.jobs)
+        if self.stage == 1:
+            self.cursor.free()
+            self.cursor.address = 0
+            var sinks = List[AggregateSink](capacity=len(self.jobs))
+            while len(self.jobs) > 0:
+                var job = self.jobs.pop()
+                sinks.append(job^.take_sink())
+            self.finish.append(
+                AggregateFinish(sinks^, self.layout, ordered=False)
+            )
+            self.stage = 2
+        if self.stage == 2:
+            var tasks = self.finish[0].next_round()
+            if tasks > 0:
+                return tasks
+            swap(self.rows, self.finish[0].result.top_rows)
+            _ = self.finish.pop()
+            self.stage = 3
+        return 0
+
+    def round_task(mut self, task: Int) raises:
+        if self.stage == 1:
+            self.jobs[task].run()
+        else:
+            self.finish[0].round_task(task)
 
 
 struct TableSink(Sink):
