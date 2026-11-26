@@ -95,4 +95,6 @@ Replay a saved case (after a fix, it should print PASS):
 pixi run -e oracle python3 tests/fuzz/fuzz.py replay build/fuzz/failures/seed123
 ```
 
-Set `FUZZ_DRIVER` to use a driver built elsewhere.
+Set `FUZZ_DRIVER` to use a driver built elsewhere. Set `FUZZ_FOCUS` to a
+comma-separated list of plan step kinds (for example
+`interpolate,time_window`) to make those steps 20 times as likely.

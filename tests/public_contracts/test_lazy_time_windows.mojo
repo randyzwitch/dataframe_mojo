@@ -1,5 +1,6 @@
 """Lazy group_by_dynamic and rolling against the eager methods and literals."""
 # contract-group: lazy.time_windows
+from std.collections import Optional
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Expr, LazyFrame, Series, col
 from tests.support.coverage_compare import assert_frame
@@ -495,3 +496,119 @@ def test_lazy_time_windows_run_on_the_cpu_under_automatic_placement() raises:
         assert_true(
             plan.collect(engine="auto").equals(plan.collect(engine="cpu"))
         )
+
+
+def _check_dynamic(
+    frame: DataFrame,
+    every: String,
+    period: Optional[String],
+    offset: Optional[String],
+    closed: String,
+    labels: List[Int64],
+    sums: List[Int64],
+) raises:
+    var aggs: List[Expr] = [col("x").sum().alias("s")]
+    var eager = frame.group_by_dynamic(
+        "t", every, period=period, offset=offset, closed=closed
+    ).agg(aggs)
+    _assert_ints(eager, "t", labels)
+    _assert_ints(eager, "s", sums)
+    var lazy = (
+        frame.lazy()
+        .group_by_dynamic(
+            "t", every, period=period, offset=offset, closed=closed
+        )
+        .agg(aggs)
+        .collect(engine="cpu")
+    )
+    assert_frame(lazy, eager)
+
+
+def test_dynamic_windows_step_over_empty_intervals() raises:
+    """Two rows a day apart with one-microsecond windows: the windows that
+    hold a row come out without visiting the ~8.6e10 empty ones between
+    them (#1383), with boundaries, overlaps and offsets as before."""
+    var day = Int64(86400) * 1000000
+    var frame = DataFrame(
+        [
+            Series("t", Column[Int64]([0, day])).with_dtype(
+                DataType.datetime("us")
+            ),
+            Series("x", Column[Int64]([1, 2])),
+        ]
+    )
+    var aggs: List[Expr] = [col("x").sum().alias("s")]
+
+    _check_dynamic(frame, "1us", None, None, "left", [0, day], [1, 2])
+    _check_dynamic(
+        frame,
+        "1us",
+        String("3us"),
+        None,
+        "left",
+        [0, day - 2, day - 1, day],
+        [1, 2, 2, 2],
+    )
+    _check_dynamic(
+        frame,
+        "1us",
+        String("1us"),
+        None,
+        "both",
+        [0, day - 1, day],
+        [1, 2, 2],
+    )
+    _check_dynamic(frame, "1us", None, None, "right", [-1, day - 1], [1, 2])
+    _check_dynamic(
+        frame,
+        "2us",
+        String("5us"),
+        None,
+        "none",
+        [-2, day - 4, day - 2],
+        [1, 2, 2],
+    )
+    _check_dynamic(
+        frame,
+        "1us",
+        String("3us"),
+        String("-7us"),
+        "left",
+        [-2, -1, 0, day - 2, day - 1, day],
+        [1, 1, 1, 2, 2, 2],
+    )
+    _check_dynamic(frame, "3us", String("2us"), String("1us"), "left", [], [])
+    # Grouped: each group steps over its own gap.
+    var grouped = frame.vstack(frame).hstack(
+        DataFrame([Series("g", Column[Int64]([0, 0, 1, 1]))])
+    )
+    var out = grouped.group_by_dynamic("t", "1us", group_by=["g"]).agg(aggs)
+    _assert_ints(out, "t", [0, day, 0, day])
+    _assert_ints(out, "s", [1, 2, 1, 2])
+
+
+def test_calendar_window_starts_count_from_the_origin() raises:
+    """Monthly windows start whole months after the first window, not a
+    month after the previous one, so a month-end clamp is not carried on:
+    Jan 30, Feb 29, Mar 30, Apr 30 (not Mar 29, Apr 29)."""
+    var frame = DataFrame(
+        [
+            Series("t", Column[Int64]([18291, 18351, 18382])).with_dtype(
+                DataType.DATE
+            ),
+            Series("x", Column[Int64]([1, 2, 3])),
+        ]
+    )
+    var aggs: List[Expr] = [col("x").sum().alias("s")]
+    var eager = frame.group_by_dynamic(
+        "t", "1mo", period="1d", offset="29d"
+    ).agg(aggs)
+    _assert_ints(eager, "t", [18291, 18351, 18382])
+    _assert_ints(eager, "s", [1, 2, 3])
+    var lazy = (
+        frame.lazy()
+        .group_by_dynamic("t", "1mo", period="1d", offset="29d")
+        .agg(aggs)
+        .collect(engine="cpu")
+    )
+    assert_frame(lazy, eager)
