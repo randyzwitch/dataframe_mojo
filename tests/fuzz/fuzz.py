@@ -44,6 +44,9 @@ MODES = ["eager", "lazy", "lazy_noopt", "lazy_mem"]
 ORACLE_ENGINE = "in-memory"
 RTOL = 1e-6
 MAX_ROWS = 600_000
+# What a Polars run can fail with: a panic (raised for some invalid
+# requests, such as an unsorted time window index) is not an Exception.
+ORACLE_FAILURES = (Exception, pl.exceptions.PanicException)
 ATOL = 1e-8
 
 # Our errors that are documented choices rather than bugs: integer
@@ -1091,6 +1094,11 @@ class PlanGen:
         """rolling or group_by_dynamic over a temporal column, on input
         sorted by it (both engines need that) with null times dropped."""
         r = self.rng
+        # Polars' optimized plan miscounts a time window over another
+        # time window's output (each step collected alone agrees with us),
+        # so a plan holds at most one.
+        if "'rolling'" in repr(plan) or "'dynamic'" in repr(plan):
+            return None
         g = Gen(r, schema, ordered)
         times = g.cols(lambda s: s in ("date", "datetime"))
         if not times:
@@ -1200,7 +1208,7 @@ def gen_case(rng):
                 continue
             try:
                 result = to_pl_plan(new_plan, srcs).collect(engine=ORACLE_ENGINE)
-            except Exception:
+            except ORACLE_FAILURES:
                 continue
             # Keep results small: joins on low-cardinality keys multiply.
             if result.width == 0 or result.height > MAX_ROWS:
@@ -1472,7 +1480,7 @@ def evaluate(case, work, threads_list=(1, 8)):
     srcs = oracle_sources(case, paths)
     try:
         expected = to_pl_plan(case["plan"], srcs).collect(engine=ORACLE_ENGINE)
-    except Exception as exc:
+    except ORACLE_FAILURES as exc:
         return [("oracle-error", "-", 0, str(exc)[:300])], None
     case_file = work / "case.sexp"
     case_file.write_text(case_sexp(case, paths))
@@ -1847,7 +1855,7 @@ def process(job):
     crng = random.Random(seed)
     try:
         case = gen_case(crng)
-    except Exception:
+    except ORACLE_FAILURES:
         return n, seed, "skipped", None
     failures, expected = evaluate(case, work, args.threads)
     if failures and failures[0][0] == "oracle-error":
@@ -1877,7 +1885,7 @@ def shrink_job(job):
     case, failures, expected, seed, args = job
     try:
         return seed, shrink_and_save(case, failures, expected, seed, args)
-    except Exception as exc:
+    except ORACLE_FAILURES as exc:
         return seed, f"shrink failed: {exc}"
 
 
