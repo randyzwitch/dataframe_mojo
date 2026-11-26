@@ -196,3 +196,33 @@ def test_checked_decimal_multiple_occurrences_follow_original_ast_order() raises
                 with assert_raises(contains=message):
                     _ = frame.select(expression.over("g"))
     _ = worker^
+
+
+def test_checked_decimal_window_arguments_fault_in_argument_order() raises:
+    # Each window's argument is computed over every row before the next
+    # one's, on any number of workers: a fault of the first argument in a
+    # later range of rows comes before one of the second argument in the
+    # first range.
+    var rows = 40_000
+    var maximum = pow10(38) - 1
+    var a = List[Int128](length=rows, fill=1)
+    var b = List[Int128](length=rows, fill=1)
+    a[30_000] = maximum
+    b[30_000] = 2
+    b[5] = maximum
+    var frame = DataFrame(
+        [
+            Series("g", Column[Int32](List[Int32](length=rows, fill=0))),
+            Series("a", Column[Int128](a^)).with_dtype(DataType.decimal(38, 0)),
+            Series("b", Column[Int128](b^)).with_dtype(DataType.decimal(38, 0)),
+        ]
+    )
+    var product = (col("a") * col("b")).sum().over("g").alias("product")
+    var shifted = (col("b") + col("a")).max().over("g").alias("shifted")
+    for workers in [1, 2, 4]:
+        var setting = WorkerSetting(workers)
+        with assert_raises(contains="decimal multiplication overflow"):
+            _ = frame.select_exprs([product.copy(), shifted.copy()])
+        with assert_raises(contains="decimal precision 38"):
+            _ = frame.select_exprs([shifted.copy(), product.copy()])
+        _ = setting^
