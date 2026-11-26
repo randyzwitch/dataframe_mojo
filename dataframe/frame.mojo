@@ -3772,9 +3772,11 @@ def _percent_label(q: Float64) -> String:
 struct TimeGroupBy(Copyable):
     """A snapshot plus a duration grouping request, evaluated by agg.
 
-    Overlapping membership is gathered once, then existing grouped expression
-    reducers process all windows together. Empty rolling windows are retained;
-    empty dynamic windows are omitted.
+    Each window is a range of its group's time-ordered rows. Counts of rows,
+    values and nulls are read from those ranges, so their cost does not grow
+    with how much windows overlap; other aggregations gather each window's
+    rows and run the grouped reducers. Empty rolling windows are
+    retained; empty dynamic windows are omitted.
     """
 
     var _frame: DataFrame

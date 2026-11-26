@@ -1,7 +1,16 @@
 """Lazy group_by_dynamic and rolling against the eager methods and literals."""
 # contract-group: lazy.time_windows
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, DataType, Expr, LazyFrame, Series, col
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    Expr,
+    LazyFrame,
+    Series,
+    col,
+    len as row_len,
+)
 from tests.support.coverage_compare import assert_frame
 
 comptime HOUR = 3600000
@@ -495,3 +504,74 @@ def test_lazy_time_windows_run_on_the_cpu_under_automatic_placement() raises:
         assert_true(
             plan.collect(engine="auto").equals(plan.collect(engine="cpu"))
         )
+
+
+def test_time_window_counts_read_from_window_bounds() raises:
+    """Counts come from each window's bounds: n rows at one time give n in
+    each of n rolling windows (#1380), with or without other aggregations
+    gathering rows, grouped or not, for sorted and unsorted input."""
+    var n = 300
+    var times = List[Int64](length=n, fill=7 * HOUR)
+    var x = List[Int64](length=n, fill=1)
+    var valid = List[Bool](length=n, fill=True)
+    var g = List[Int64](length=n, fill=0)
+    for i in range(n):
+        valid[i] = i % 3 != 0
+        g[i] = Int64(i % 2)
+    var frame = DataFrame(
+        [
+            _times("t", times),
+            Series("g", Column[Int64](g^)),
+            Series("x", Column[Int64](x^, valid)),
+        ]
+    )
+    var counts: List[Expr] = [
+        col("x").count().alias("count"),
+        col("x").null_count().alias("nulls"),
+        col("x").len().alias("len"),
+        row_len().alias("rows"),
+    ]
+    var mixed = counts.copy()
+    mixed.append(col("x").sum().alias("sum"))
+    for aggs in [counts.copy(), mixed.copy()]:
+        var out = frame.rolling("t", "1h").agg(aggs)
+        assert_equal(out.height(), n)
+        for row in [0, 1, n // 2, n - 1]:
+            assert_equal(out.item(row, "len").int64(), Int64(n))
+            assert_equal(out.item(row, "rows").int64(), Int64(n))
+            assert_equal(out.item(row, "count").int64(), Int64(n - n // 3))
+            assert_equal(out.item(row, "nulls").int64(), Int64(n // 3))
+        assert_true(out.column("count").dtype() == DataType.INT64)
+        var lazy = frame.lazy().rolling("t", "1h").agg(aggs).collect()
+        assert_frame(lazy, out)
+        var grouped = frame.rolling("t", "1h", group_by=["g"]).agg(aggs)
+        assert_equal(grouped.height(), n)
+        assert_equal(grouped.item(0, "len").int64(), Int64(n // 2))
+        assert_equal(grouped.item(0, "count").int64(), Int64(n // 2 - 50))
+        assert_equal(grouped.item(0, "nulls").int64(), Int64(50))
+        assert_equal(grouped.item(n - 1, "count").int64(), Int64(n // 2 - 50))
+    # Overlapping dynamic windows and unsorted input: windows [t, t + 3h)
+    # every hour over rows at hours 4, 0, 2, 1 with x null at hour 2.
+    var unsorted = DataFrame(
+        [
+            _times("t", [4 * HOUR, 0, 2 * HOUR, HOUR]),
+            Series("x", Column[Int64]([1, 1, 1, 1], [True, True, False, True])),
+        ]
+    )
+    for aggs in [counts.copy(), mixed.copy()]:
+        var out = unsorted.group_by_dynamic("t", "1h", period="3h").agg(aggs)
+        _assert_ints(out, "t", [0, HOUR, 2 * HOUR, 3 * HOUR, 4 * HOUR])
+        _assert_ints(out, "len", [3, 2, 2, 1, 1])
+        _assert_ints(out, "count", [2, 1, 1, 1, 1])
+        _assert_ints(out, "nulls", [1, 1, 1, 0, 0])
+        # Windows that do not overlap: counts read each window's rows.
+        var single = unsorted.group_by_dynamic("t", "1h").agg(aggs)
+        _assert_ints(single, "t", [0, HOUR, 2 * HOUR, 4 * HOUR])
+        _assert_ints(single, "len", [1, 1, 1, 1])
+        _assert_ints(single, "count", [1, 1, 0, 1])
+        _assert_ints(single, "nulls", [0, 0, 1, 0])
+        var rolled = unsorted.rolling("t", "2h").agg(aggs)
+        # Rows keep input order: windows (t - 2h, t].
+        _assert_ints(rolled, "t", [4 * HOUR, 0, 2 * HOUR, HOUR])
+        _assert_ints(rolled, "len", [1, 1, 2, 2])
+        _assert_ints(rolled, "count", [1, 1, 1, 2])
