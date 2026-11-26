@@ -585,3 +585,30 @@ def test_dynamic_windows_step_over_empty_intervals() raises:
     var out = grouped.group_by_dynamic("t", "1us", group_by=["g"]).agg(aggs)
     _assert_ints(out, "t", [0, day, 0, day])
     _assert_ints(out, "s", [1, 2, 1, 2])
+
+
+def test_calendar_window_starts_count_from_the_origin() raises:
+    """Monthly windows start whole months after the first window, not a
+    month after the previous one, so a month-end clamp is not carried on:
+    Jan 30, Feb 29, Mar 30, Apr 30 (not Mar 29, Apr 29)."""
+    var frame = DataFrame(
+        [
+            Series("t", Column[Int64]([18291, 18351, 18382])).with_dtype(
+                DataType.DATE
+            ),
+            Series("x", Column[Int64]([1, 2, 3])),
+        ]
+    )
+    var aggs: List[Expr] = [col("x").sum().alias("s")]
+    var eager = frame.group_by_dynamic(
+        "t", "1mo", period="1d", offset="29d"
+    ).agg(aggs)
+    _assert_ints(eager, "t", [18291, 18351, 18382])
+    _assert_ints(eager, "s", [1, 2, 3])
+    var lazy = (
+        frame.lazy()
+        .group_by_dynamic("t", "1mo", period="1d", offset="29d")
+        .agg(aggs)
+        .collect(engine="cpu")
+    )
+    assert_frame(lazy, eager)

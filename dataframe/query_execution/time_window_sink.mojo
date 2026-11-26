@@ -40,6 +40,7 @@ from dataframe.dtype import DataType
 from dataframe.series import Series
 from dataframe.storage.column import Column
 from dataframe.time.temporal import parse_interval, zone_of
+from dataframe.time.timezone import TimeZone
 from dataframe.time.windows import (
     check_time_index,
     closed_sides,
@@ -299,44 +300,59 @@ struct TimeWindowSink(Movable, Rounds):
         starts.append(0)
         var first = times._get(rows[0])
         var last = times._get(rows[len(rows) - 1])
-        var start = shift_time(
+        var origin = shift_time(
             truncate_time(first, dtype, every, zone),
             dtype,
             self.node.window_offset(),
             zone,
         )
-        # When every window start is the previous one plus a constant step
-        # and every window spans a constant length, the windows that hold
-        # no row up to some time can be stepped over in one move: work
-        # then follows the rows and windows found, not the length of the
-        # gaps between rows.
+        # Window k starts `every` times k after the origin, each computed
+        # from the origin: stepping from the previous start instead would
+        # carry a month-end clamp forward (Jan 30, Feb 28, Mar 28, ...).
+        # When every and period move a time by a constant amount, start k
+        # is the origin plus k steps, and the windows that hold no row up
+        # to some time can be stepped over in one move: work then follows
+        # the rows and windows found, not the length of the gaps between
+        # rows.
         var fixed = _fixed_width(every, dtype) and _fixed_width(period, dtype)
         var step = Int64(0)
         var span = Int64(0)
         if fixed:
-            step = shift_time(start, dtype, every, zone) - start
-            span = shift_time(start, dtype, period, zone) - start
+            step = shift_time(origin, dtype, every, zone) - origin
+            span = shift_time(origin, dtype, period, zone) - origin
             fixed = step > 0 and span > 0
+        var k = 0
+        var start = origin
         if fixed and start > first:
             # Back to within one step after the first row.
-            start -= ((start - first) // step) * step
+            k -= Int((start - first) // step)
+            start = origin + Int64(k) * step
         while start > first or (start == first and not sides[0]):
-            var previous = shift_time(start, dtype, negate_period(every), zone)
+            var previous = self._window_start(
+                origin, k - 1, fixed, step, every, dtype, zone
+            )
             if previous >= start:
                 raise Error("every does not advance the time index")
+            k -= 1
             start = previous
         # Large negative offsets can start before the first useful window.
         if fixed:
-            start = _skip_to(start, first, step, span)
+            k += Int((_skip_to(start, first, step, span) - start) // step)
+            start = origin + Int64(k) * step
         while shift_time(start, dtype, period, zone) < first:
-            start = shift_time(start, dtype, every, zone)
+            k += 1
+            start = self._window_start(
+                origin, k, fixed, step, every, dtype, zone
+            )
         while start <= last:
             if fixed:
                 # The first row this window or a later one can hold.
                 var next_row = search_time(times, rows, start, not sides[0])
                 if next_row == len(rows):
                     break
-                start = _skip_to(start, times._get(rows[next_row]), step, span)
+                var target = times._get(rows[next_row])
+                k += Int((_skip_to(start, target, step, span) - start) // step)
+                start = origin + Int64(k) * step
             var end = shift_time(start, dtype, period, zone)
             var lo = search_time(times, rows, start, not sides[0])
             var hi = search_time(times, rows, end, sides[1])
@@ -350,14 +366,43 @@ struct TimeWindowSink(Movable, Rounds):
                 for k in range(lo, hi):
                     gathered.append(rows[k])
                 starts.append(len(gathered))
-            var next = shift_time(start, dtype, every, zone)
+            var next = self._window_start(
+                origin, k + 1, fixed, step, every, dtype, zone
+            )
             if next <= start:
                 raise Error("every does not advance the time index")
+            k += 1
             start = next
         self.labels[p] = labels^
         self.firsts[p] = firsts^
         self.rows[p] = gathered^
         self.starts[p] = starts^
+
+    def _window_start(
+        self,
+        origin: Int64,
+        k: Int,
+        fixed: Bool,
+        step: Int64,
+        every: String,
+        dtype: DataType,
+        zone: TimeZone,
+    ) raises -> Int64:
+        """Where window `k` starts: `every` times `k` after `origin`."""
+        if fixed:
+            return origin + Int64(k) * step
+        if k == 0:
+            return origin
+        var parts = parse_interval(every)
+        var scale = Int64(abs(k))
+        var text = String("-") if k < 0 else String("")
+        if parts[0] != 0:
+            text += String(parts[0] * scale) + "mo"
+        if parts[1] != 0:
+            text += String(parts[1] * scale) + "d"
+        if parts[2] != 0:
+            text += String(parts[2] * scale) + "ns"
+        return shift_time(origin, dtype, text, zone)
 
     def _cut(mut self) raises -> Int:
         """The aggregate round: the windows cut into ranges of about the
