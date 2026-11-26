@@ -31,8 +31,10 @@ between use the last reading: a process cannot grow by more than a few tens
 of MB in a millisecond (memory bandwidth bounds how fast pages are
 written), which is small against any limit.
 
-The default limit is 80% of the memory available to the process (physical
-memory). The remaining fifth is headroom for what is allocated between two
+The default limit is 80% of the memory available to the process: physical
+memory, or the control group's limit when the process runs under one (a
+container, a systemd scope) and that is lower. The remaining fifth is
+headroom for uncounted allocations and for what is allocated between two
 checks. `DATAFRAME_MEMORY_LIMIT` sets it at startup and `set_memory_limit`
 at any time.
 """
@@ -186,7 +188,8 @@ def memory_usage() -> Int:
 def memory_limit() -> Int:
     """The memory limit in bytes (`Int64.MAX` when there is none): the
     last `set_memory_limit`, else `DATAFRAME_MEMORY_LIMIT`, else 80% of
-    physical memory."""
+    the memory available to the process: physical memory, or the memory
+    limit of the control group it runs in when that is lower."""
     ref limit = _memory_state().limit
     var value = limit.load()
     if value != _UNSET:
@@ -317,8 +320,14 @@ def physical_memory() -> Int:
 
 
 def available_memory() -> Int:
-    """Memory the process may use: physical memory; 0 where unknown."""
-    return physical_memory()
+    """Memory the process may use: physical memory, or the memory limit of
+    the control group it runs in (and of every group above it) when that is
+    lower. 0 where neither is known."""
+    var physical = physical_memory()
+    var group = cgroup_memory_limit()
+    if group > 0 and (physical <= 0 or group < physical):
+        return group
+    return physical
 
 
 def _read_file(path: String) -> String:
@@ -330,8 +339,8 @@ def _read_file(path: String) -> String:
 
 
 def _parse_bytes_value(text: String) -> Int:
-    """A whole number at the start of `text`, up to a space or newline; 0
-    for an empty or unreadable one."""
+    """A control group limit file's value: a byte count, or 0 for `max`,
+    an empty file or anything else unreadable."""
     var value = 0
     var digits = 0
     for b in text.as_bytes():
@@ -346,6 +355,72 @@ def _parse_bytes_value(text: String) -> Int:
         else:
             return 0
     return value if digits > 0 else 0
+
+
+def _smaller_limit(current: Int, found: Int) -> Int:
+    if found <= 0:
+        return current
+    if current <= 0 or found < current:
+        return found
+    return current
+
+
+def cgroup_memory_limit(
+    proc_cgroup: String = "/proc/self/cgroup",
+    root: String = "/sys/fs/cgroup",
+) -> Int:
+    """The lowest memory limit of the control group this process runs in
+    and of the groups above it, in bytes; 0 when there is none.
+
+    `/proc/self/cgroup` names the group: a `0::PATH` line under cgroup v2,
+    a `N:...memory...:PATH` line under v1. The limit is in `memory.max`
+    (v2) or `memory.limit_in_bytes` (v1) of that group's directory. A
+    limit set on a parent group binds the child too, so every directory up
+    to the root is read and the smallest limit wins. A container often
+    mounts its own group as the root, so the root directory's file is
+    read as well. The arguments exist for tests."""
+    comptime if not CompilationTarget.is_linux():
+        return 0
+    var text = _read_file(proc_cgroup)
+    var limit = 0
+    for line_slice in text.split("\n"):
+        var line = String(line_slice)
+        # hierarchy-id:controllers:path, where the path may hold colons.
+        var first = line.find(":").or_else(-1)
+        if first < 0:
+            continue
+        var second = line.find(":", first + 1).or_else(-1)
+        if second < 0:
+            continue
+        var hierarchy = String(line[byte=0:first])
+        var controllers = String(line[byte = first + 1 : second])
+        var path = String(line[byte = second + 1 :])
+        var directory: String
+        var file: String
+        if hierarchy == "0" and controllers == "":
+            directory = root
+            file = "memory.max"
+        else:
+            var has_memory = False
+            for c in controllers.split(","):
+                if String(c) == "memory":
+                    has_memory = True
+            if not has_memory:
+                continue
+            directory = root + "/memory"
+            file = "memory.limit_in_bytes"
+        # The group's own directory, each parent's, then the root's.
+        var current = path
+        while True:
+            var dir = directory + (current if current != "/" else "")
+            limit = _smaller_limit(
+                limit, _parse_bytes_value(_read_file(dir + "/" + file))
+            )
+            if current == "/" or current == "":
+                break
+            var slash = current.rfind("/").or_else(-1)
+            current = String(current[byte=0:slash]) if slash > 0 else "/"
+    return limit
 
 
 def format_bytes(bytes: Int) -> String:

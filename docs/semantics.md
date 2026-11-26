@@ -318,7 +318,9 @@ that would go over it raises an `Error` whose message starts with
 the failed operation held is freed, so the program can catch the error and
 go on.
 
-- Default: 80% of physical memory.
+- Default: 80% of the memory available to the process, which is physical
+  memory or, when lower, the memory limit of the control group (container or
+  systemd scope) the process runs in.
 - `DATAFRAME_MEMORY_LIMIT` sets it at startup: a size such as `8GB` or
   `512MiB`, a share such as `50%`, or `none`.
 - `set_memory_limit(8 << 30)` or `set_memory_limit("8GB")` sets it at any
