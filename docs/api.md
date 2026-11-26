@@ -2331,10 +2331,11 @@ def time(hour: Expr = Int(0), minute: Expr = Int(0), second: Expr = Int(0), micr
 
 A snapshot plus a duration grouping request, evaluated by agg.
 
-Each window is a range of its group's time-ordered rows. Counts of rows,
-values and nulls are read from those ranges, so their cost does not grow
-with how much windows overlap; other aggregations gather each window's
-rows and run the grouped reducers. Empty rolling windows are
+Each window is a range of its group's time-ordered rows. Counts, and
+sums, means, minimums and maximums of numeric columns, are read from
+those ranges, so their cost does not grow with how much windows overlap;
+other aggregations gather each window's rows and run the grouped
+reducers. Empty rolling windows are
 retained; empty dynamic windows are omitted.
 
 - `def agg(self, expression: Expr, *, batch_size: Int = Int(1024)) -> DataFrame`

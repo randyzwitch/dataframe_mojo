@@ -20,21 +20,33 @@ parts:
 - a round aggregates them: the windows are cut into contiguous ranges of
   about the same number of rows, and each task reduces its range's
   windows. A count of rows is read from the bounds. When windows hold
-  more rows in all than the input has, a count of values or nulls is the
-  difference of a running count of nulls in time order at the bounds, so
-  it costs one pass over the input plus a step per window. Other
-  aggregations (and those counts, when windows overlap little) gather the
-  range's rows and reduce them with the grouped reducers, a window a
-  group. A task's output columns are one chunk of the result's, in window
-  order.
+  more rows in all than the input has, a count of values or nulls, and a
+  sum, mean, minimum or maximum of a numeric column, are read from the
+  bounds too: from running counts and integer sums in time order (one
+  step) or a segment tree of float sums or extremes (O(log n) steps),
+  each built in one pass over the input. Other aggregations, and all of
+  these when windows overlap little, gather the range's rows and reduce
+  them with the grouped reducers, a window a group. A task's output
+  columns are one chunk of the result's, in window order.
 """
 from std.collections import Dict, Optional
+from std.math import isnan
 
 from dataframe.aggregation.expressions import _bind_all
 from dataframe.aggregation.keys import _expand_struct_keys
 from dataframe.binding import AGGREGATE, BoundExpr
-from dataframe.dtype import DataType
-from dataframe.expr import COL, COUNT, LEN, NULL_COUNT, ROW_LEN
+from dataframe.dtype import DataType, NUMERIC_DTYPES
+from dataframe.expr import (
+    COL,
+    COUNT,
+    LEN,
+    MAX,
+    MEAN,
+    MIN,
+    NULL_COUNT,
+    ROW_LEN,
+    SUM,
+)
 from dataframe.kernels.binary import validity
 from dataframe.execution import evaluate
 from dataframe.frame import DataFrame
@@ -68,34 +80,113 @@ comptime _WINDOWS = 1
 comptime _AGGREGATE = 2
 comptime _DONE = 3
 
-# What a count read from a window's bounds counts.
-comptime _NOT_A_COUNT = 0
+# How an aggregation is computed: from each window's rows gathered and
+# reduced, or from the window's bounds (a count of rows, values or nulls,
+# or a sum, mean, minimum or maximum of a numeric column).
+comptime _GATHER = 0
 comptime _ROWS = 1
 comptime _VALUES = 2
 comptime _NULLS = 3
+comptime _SUM = 4
+comptime _MEAN = 5
+comptime _MIN = 6
+comptime _MAX = 7
 
 
-def _window_count(expression: BoundExpr) -> Tuple[Int, Int]:
-    """Whether `expression` is a count that a window's bounds answer: the
-    kind (`_ROWS`, `_VALUES`, `_NULLS`, or `_NOT_A_COUNT`) and the input
-    column it counts (-1 for rows)."""
+def _numeric_column(column: Series) -> Bool:
+    """Whether `column` holds plain numbers (no decimal, temporal or
+    Boolean meaning on top of its storage)."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if column.dtype() == DataType.of(D):
+            return True
+    return False
+
+
+def _window_reduction(
+    expression: BoundExpr, columns: List[Series]
+) -> Tuple[Int, Int]:
+    """How `expression` is computed over windows: the kind (`_GATHER`, or
+    a reduction a window's bounds answer) and the input column it reads
+    (-1 for none)."""
     ref nodes = expression.expr._nodes
-    if expression.dtypes[len(nodes) - 1] != DataType.INT64:
-        return (_NOT_A_COUNT, -1)
+    var dtype = expression.dtypes[len(nodes) - 1]
     if len(nodes) == 1 and nodes[0].op == ROW_LEN:
-        return (_ROWS, -1)
+        return (_ROWS, -1) if dtype == DataType.INT64 else (_GATHER, -1)
     if len(nodes) != 2 or nodes[0].op != COL or nodes[1].left != 0:
-        return (_NOT_A_COUNT, -1)
+        return (_GATHER, -1)
     var source = expression.sources[0]
     if source < 0:
-        return (_NOT_A_COUNT, -1)
-    if nodes[1].op == LEN:
-        return (_ROWS, -1)
-    if nodes[1].op == COUNT:
-        return (_VALUES, source)
-    if nodes[1].op == NULL_COUNT:
-        return (_NULLS, source)
-    return (_NOT_A_COUNT, -1)
+        return (_GATHER, -1)
+    var op = nodes[1].op
+    if op == LEN or op == COUNT or op == NULL_COUNT:
+        if dtype != DataType.INT64:
+            return (_GATHER, -1)
+        if op == LEN:
+            return (_ROWS, -1)
+        return (_VALUES if op == COUNT else _NULLS, source)
+    if not _numeric_column(columns[source]):
+        return (_GATHER, -1)
+    if op == SUM:
+        return (_SUM, source)
+    if op == MEAN and dtype == DataType.FLOAT64:
+        return (_MEAN, source)
+    if op == MIN:
+        return (_MIN, source)
+    if op == MAX:
+        return (_MAX, source)
+    return (_GATHER, -1)
+
+
+@always_inline
+def _combine[op: Int, T: DType](a: Scalar[T], b: Scalar[T]) -> Scalar[T]:
+    comptime if op == _SUM:
+        return a + b
+    elif op == _MIN:
+        return min(a, b)
+    else:
+        return max(a, b)
+
+
+def _tree[
+    op: Int, T: DType
+](var leaves: List[Scalar[T]], identity: Scalar[T]) -> List[Scalar[T]]:
+    """A segment tree over `leaves`: node i combines nodes 2i and 2i + 1,
+    and the leaves start at the first power of two not below their
+    count, so any range combines O(log n) nodes."""
+    var size = 1
+    while size < len(leaves):
+        size *= 2
+    var tree = List[Scalar[T]](length=2 * size, fill=identity)
+    for i in range(len(leaves)):
+        tree[size + i] = leaves[i]
+    for i in range(size - 1, 0, -1):
+        tree[i] = _combine[op, T](tree[2 * i], tree[2 * i + 1])
+    return tree^
+
+
+@always_inline
+def _tree_range[
+    op: Int, T: DType
+](tree: List[Scalar[T]], first: Int, end: Int, identity: Scalar[T]) -> Scalar[
+    T
+]:
+    """Leaves [first, end) of `tree` combined, left to right."""
+    var size = len(tree) // 2
+    var lo = first + size
+    var hi = end + size
+    var left = identity
+    var right = identity
+    while lo < hi:
+        if lo & 1:
+            left = _combine[op, T](left, tree[lo])
+            lo += 1
+        if hi & 1:
+            hi -= 1
+            right = _combine[op, T](tree[hi], right)
+        lo >>= 1
+        hi >>= 1
+    return _combine[op, T](left, right)
 
 
 def time_window_bound(
@@ -160,16 +251,23 @@ struct TimeWindowSink(Movable, Rounds):
     var firsts: List[List[Int]]
     var lows: List[List[Int]]
     var highs: List[List[Int]]
-    # By expression its count kind and column (`_window_count`), and
-    # whether any expression gathers rows. By input column (empty when
-    # none is counted, it has no nulls, or windows hold too few rows for
-    # a running count to pay) the nulls before each position of the
-    # groups' time-ordered rows laid end to end (`offsets` is where each
-    # group starts in that order).
+    # By expression how it is computed and the column it reads
+    # (`_window_reduction`), and whether any expression gathers rows.
+    # Reductions read from window bounds use the groups' time-ordered
+    # rows laid end to end (`offsets` is where each group starts in that
+    # order): by input column (empty when it has no nulls) the nulls
+    # before each position, and by expression the running Int128 sums
+    # of an integer column, a segment tree of a float column's sums or of
+    # a column's extremes, and the NaNs before each position of a float
+    # column whose extremes are taken.
     var counts: List[Tuple[Int, Int]]
     var gathers: Bool
     var offsets: List[Int]
     var nulls: List[List[Int]]
+    var int_sums: List[List[Int128]]
+    var float_trees: List[List[Float64]]
+    var int_trees: List[List[Int128]]
+    var nans: List[List[Int]]
     # The windows before each piece, and the first window of each
     # aggregate task (then the window count); by task its output columns.
     var before: List[Int]
@@ -197,6 +295,10 @@ struct TimeWindowSink(Movable, Rounds):
         self.gathers = False
         self.offsets = List[Int]()
         self.nulls = List[List[Int]]()
+        self.int_sums = List[List[Int128]]()
+        self.float_trees = List[List[Float64]]()
+        self.int_trees = List[List[Int128]]()
+        self.nans = List[List[Int]]()
         self.before = List[Int]()
         self.cuts = List[Int]()
         self.parts = List[List[Series]]()
@@ -273,24 +375,33 @@ struct TimeWindowSink(Movable, Rounds):
         return self.width
 
     def _classify(mut self):
-        """Each expression's count kind."""
+        """How each expression is computed."""
         for expression in self.bound:
-            var count = _window_count(expression)
+            var count = _window_reduction(expression, self.input._columns)
             self.counts.append(count)
-            if count[0] == _NOT_A_COUNT:
+            if count[0] == _GATHER:
                 self.gathers = True
 
-    def _count_nulls(mut self):
-        """For every counted column with nulls, the running count of its
-        nulls in the groups' time order (a window's nulls are the
-        difference of the counts at its bounds)."""
+    def _prepare_bounds(mut self):
+        """What the reductions read from window bounds use (see the
+        fields): one pass over the input for each."""
         self.offsets = List[Int](capacity=len(self.groups) + 1)
         self.offsets.append(0)
         for g in range(len(self.groups)):
             self.offsets.append(self.offsets[g] + len(self.groups[g]))
-        self.nulls = List[List[Int]](
-            length=len(self.input._columns), fill=List[Int]()
+        var columns = len(self.input._columns)
+        var expressions = len(self.counts)
+        self.nulls = List[List[Int]](length=columns, fill=List[Int]())
+        self.int_sums = List[List[Int128]](
+            length=expressions, fill=List[Int128]()
         )
+        self.float_trees = List[List[Float64]](
+            length=expressions, fill=List[Float64]()
+        )
+        self.int_trees = List[List[Int128]](
+            length=expressions, fill=List[Int128]()
+        )
+        self.nans = List[List[Int]](length=expressions, fill=List[Int]())
         for count in self.counts:
             var c = count[1]
             if c < 0 or len(self.nulls[c]) > 0:
@@ -306,6 +417,92 @@ struct TimeWindowSink(Movable, Rounds):
                         running[len(running) - 1] + (0 if valid[row] else 1)
                     )
             self.nulls[c] = running^
+        for e in range(expressions):
+            var kind = self.counts[e][0]
+            if kind >= _SUM:
+                self._prepare_reduction(e)
+
+    def _prepare_reduction(mut self, e: Int):
+        """Expression `e`'s sums or extremes over its column, in the
+        groups' time order. Null values add nothing and are never an
+        extreme; NaN is never an extreme either (a window's extreme is NaN
+        only when all its values are NaN, from the NaN counts)."""
+        var kind = self.counts[e][0]
+        ref column = self.input._columns[self.counts[e][1]]
+        var valid = validity(column)
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if column._data.isa[Column[Scalar[D]]]():
+                ref values = column._data[Column[Scalar[D]]]
+                comptime if D.is_integral():
+                    var leaves = List[Int128](capacity=self.height)
+                    for rows in self.groups:
+                        for row in rows:
+                            leaves.append(
+                                values._get(row).cast[DType.int128]() if valid[
+                                    row
+                                ] else 0
+                            )
+                    if kind == _SUM or kind == _MEAN:
+                        var running = List[Int128](capacity=self.height + 1)
+                        running.append(0)
+                        for i in range(len(leaves)):
+                            running.append(running[i] + leaves[i])
+                        self.int_sums[e] = running^
+                    else:
+                        var low = kind == _MIN
+                        var identity = Int128.MAX if low else Int128.MIN
+                        var at = 0
+                        for rows in self.groups:
+                            for row in rows:
+                                if not valid[row]:
+                                    leaves[at] = identity
+                                at += 1
+                        if low:
+                            self.int_trees[e] = _tree[_MIN, DType.int128](
+                                leaves^, identity
+                            )
+                        else:
+                            self.int_trees[e] = _tree[_MAX, DType.int128](
+                                leaves^, identity
+                            )
+                else:
+                    var extreme = kind == _MIN or kind == _MAX
+                    var inf = Float64(1) / Float64(0)
+                    var identity = Float64(0)
+                    if kind == _MIN:
+                        identity = inf
+                    elif kind == _MAX:
+                        identity = -inf
+                    var leaves = List[Float64](capacity=self.height)
+                    var nans = List[Int](capacity=self.height + 1)
+                    nans.append(0)
+                    for rows in self.groups:
+                        for row in rows:
+                            var value = values._get(row).cast[DType.float64]()
+                            var is_nan = valid[row] and isnan(value)
+                            if extreme:
+                                nans.append(
+                                    nans[len(nans) - 1] + (1 if is_nan else 0)
+                                )
+                            if not valid[row] or (extreme and is_nan):
+                                value = identity
+                            leaves.append(value)
+                    if kind == _MIN:
+                        self.float_trees[e] = _tree[_MIN, DType.float64](
+                            leaves^, identity
+                        )
+                    elif kind == _MAX:
+                        self.float_trees[e] = _tree[_MAX, DType.float64](
+                            leaves^, identity
+                        )
+                    else:
+                        self.float_trees[e] = _tree[_SUM, DType.float64](
+                            leaves^, identity
+                        )
+                    if extreme:
+                        self.nans[e] = nans^
+                return
 
     def _rolling(mut self, p: Int) raises:
         """Piece `p`'s windows: one for each of its rows, from the row's
@@ -400,28 +597,22 @@ struct TimeWindowSink(Movable, Rounds):
         """The aggregate round: the windows cut into ranges of about the
         same work, a task a range. Gathering or reading a window's rows
         costs its row count; reading a count from its bounds costs one."""
-        # A count of values or nulls costs the window's rows when its
-        # rows are gathered and reduced, or one step when read from a
-        # running count of nulls, which costs one pass over the input to
-        # build. The running count is built when windows hold more rows
-        # in all than the input has; otherwise such counts are gathered.
+        # A reduction costs the window's rows when they are gathered and
+        # reduced. Read from the window's bounds it costs one step (a
+        # count) or O(log n) (an extreme or a float sum), after one pass
+        # over the input to prepare. Bounds are used when windows hold
+        # more rows in all than the input has; otherwise every reduction
+        # but a count of rows is gathered.
         var members = 0
-        var counts_nulls = False
         for p in range(len(self.pieces)):
             for j in range(len(self.labels[p])):
                 members += self.highs[p][j] - self.lows[p][j]
-        for count in self.counts:
-            if count[0] == _VALUES or count[0] == _NULLS:
-                counts_nulls = counts_nulls or (
-                    self.input._columns[count[1]].null_count() > 0
-                )
-        if counts_nulls and members > self.height:
-            self._count_nulls()
-        elif counts_nulls:
+        if members > self.height:
+            self._prepare_bounds()
+        else:
             for e in range(len(self.counts)):
-                var kind = self.counts[e][0]
-                if kind == _VALUES or kind == _NULLS:
-                    self.counts[e] = (_NOT_A_COUNT, -1)
+                if self.counts[e][0] != _ROWS:
+                    self.counts[e] = (_GATHER, -1)
                     self.gathers = True
         var reads_rows = self.gathers
         self.before = List[Int](capacity=len(self.pieces) + 1)
@@ -533,7 +724,7 @@ struct TimeWindowSink(Movable, Rounds):
                 gathered.append(column.take(rows))
         for e in range(len(self.bound)):
             var count = self.counts[e]
-            if count[0] == _NOT_A_COUNT:
+            if count[0] == _GATHER:
                 columns.append(
                     evaluate(
                         self.bound[e],
@@ -547,29 +738,137 @@ struct TimeWindowSink(Movable, Rounds):
                     )
                 )
                 continue
-            var values = List[Int64](capacity=len(lows))
-            var c = count[1]
-            var has_nulls = (
-                c >= 0 and len(self.nulls) > 0 and len(self.nulls[c]) > 0
-            )
+            var flat_lows = List[Int](capacity=len(lows))
+            var flat_highs = List[Int](capacity=len(lows))
             for w in range(len(lows)):
-                var total = highs[w] - lows[w]
-                var missing = 0
-                if has_nulls:
-                    var offset = self.offsets[groups[w]]
-                    missing = (
-                        self.nulls[c][offset + highs[w]]
-                        - self.nulls[c][offset + lows[w]]
-                    )
-                if count[0] == _VALUES:
-                    total -= missing
-                elif count[0] == _NULLS:
-                    total = missing
-                values.append(Int64(total))
-            columns.append(
-                Series(self.bound[e].expr._name, Column[Int64](values^))
-            )
+                var offset = (
+                    self.offsets[groups[w]] if len(self.offsets) > 0 else 0
+                )
+                flat_lows.append(offset + lows[w])
+                flat_highs.append(offset + highs[w])
+            columns.append(self._from_bounds(e, flat_lows, flat_highs))
         self.parts[t] = columns^
+
+    def _from_bounds(
+        self, e: Int, lows: List[Int], highs: List[Int]
+    ) raises -> Series:
+        """Expression `e` over the windows whose rows are positions
+        [lows[w], highs[w]) of the groups' time-ordered rows laid end to
+        end, read from what `_prepare_bounds` made."""
+        var kind = self.counts[e][0]
+        var c = self.counts[e][1]
+        ref expression = self.bound[e]
+        var name = expression.expr._name
+        var dtype = expression.dtypes[len(expression.dtypes) - 1]
+        var n = len(lows)
+        # Each window's count of values.
+        var counts = List[Int](capacity=n)
+        for w in range(n):
+            var total = highs[w] - lows[w]
+            if c >= 0 and len(self.nulls[c]) > 0:
+                total -= self.nulls[c][highs[w]] - self.nulls[c][lows[w]]
+            counts.append(total)
+        if kind == _ROWS or kind == _VALUES or kind == _NULLS:
+            var values = List[Int64](capacity=n)
+            for w in range(n):
+                var rows = highs[w] - lows[w]
+                if kind == _ROWS:
+                    values.append(Int64(rows))
+                elif kind == _VALUES:
+                    values.append(Int64(counts[w]))
+                else:
+                    values.append(Int64(rows - counts[w]))
+            return Series(name, Column[Int64](values^))
+        var valid = List[Bool](capacity=n)
+        var min_count = expression.expr._nodes[1].min_count
+        for w in range(n):
+            if kind == _SUM:
+                valid.append(counts[w] >= min_count)
+            else:
+                valid.append(counts[w] > 0)
+        if len(self.int_sums[e]) > 0:
+            ref sums = self.int_sums[e]
+            if kind == _MEAN:
+                var means = List[Float64](length=n, fill=0)
+                for w in range(n):
+                    if valid[w]:
+                        var total = sums[highs[w]] - sums[lows[w]]
+                        means[w] = total.cast[DType.float64]() / Float64(
+                            counts[w]
+                        )
+                return Series(name, Column[Float64](means^, valid))
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[k]
+                comptime if D.is_integral():
+                    if dtype == DataType.of(D):
+                        var out = List[Scalar[D]](length=n, fill=0)
+                        for w in range(n):
+                            if not valid[w]:
+                                continue
+                            var total = sums[highs[w]] - sums[lows[w]]
+                            if (
+                                total > Scalar[D].MAX.cast[DType.int128]()
+                                or total < Scalar[D].MIN.cast[DType.int128]()
+                            ):
+                                raise Error(
+                                    dtype.name() + " expression sum overflow"
+                                )
+                            out[w] = total.cast[D]()
+                        return Series(name, Column[Scalar[D]](out^, valid))
+            raise Error("Unsupported sum type " + dtype.name())
+        if len(self.int_trees[e]) > 0:
+            ref tree = self.int_trees[e]
+            var low = kind == _MIN
+            var identity = Int128.MAX if low else Int128.MIN
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[k]
+                comptime if D.is_integral():
+                    if dtype == DataType.of(D):
+                        var out = List[Scalar[D]](length=n, fill=0)
+                        for w in range(n):
+                            if not valid[w]:
+                                continue
+                            var value: Int128
+                            if low:
+                                value = _tree_range[_MIN, DType.int128](
+                                    tree, lows[w], highs[w], identity
+                                )
+                            else:
+                                value = _tree_range[_MAX, DType.int128](
+                                    tree, lows[w], highs[w], identity
+                                )
+                            out[w] = value.cast[D]()
+                        return Series(name, Column[Scalar[D]](out^, valid))
+            raise Error("Unsupported extreme type " + dtype.name())
+        # A float column: its sums or extremes from the tree.
+        ref tree = self.float_trees[e]
+        var inf = Float64(1) / Float64(0)
+        var nan = Float64(0) / Float64(0)
+        var out = List[Float64](length=n, fill=0)
+        for w in range(n):
+            if not valid[w]:
+                continue
+            if kind == _SUM or kind == _MEAN:
+                var total = _tree_range[_SUM, DType.float64](
+                    tree, lows[w], highs[w], 0
+                )
+                out[w] = total / Float64(counts[w]) if kind == _MEAN else total
+            elif self.nans[e][highs[w]] - self.nans[e][lows[w]] == counts[w]:
+                out[w] = nan
+            elif kind == _MIN:
+                out[w] = _tree_range[_MIN, DType.float64](
+                    tree, lows[w], highs[w], inf
+                )
+            else:
+                out[w] = _tree_range[_MAX, DType.float64](
+                    tree, lows[w], highs[w], -inf
+                )
+        if dtype == DataType.FLOAT32:
+            var narrow = List[Float32](capacity=n)
+            for value in out:
+                narrow.append(value.cast[DType.float32]())
+            return Series(name, Column[Float32](narrow^, valid))
+        return Series(name, Column[Float64](out^, valid))
 
     def _assemble(mut self) raises:
         """The output: each task's columns, one chunk each in window
@@ -593,6 +892,10 @@ struct TimeWindowSink(Movable, Rounds):
         self.lows = List[List[Int]]()
         self.highs = List[List[Int]]()
         self.nulls = List[List[Int]]()
+        self.int_sums = List[List[Int128]]()
+        self.float_trees = List[List[Float64]]()
+        self.int_trees = List[List[Int128]]()
+        self.nans = List[List[Int]]()
         self.result = DataFrame(columns^, height=self.cuts[len(self.cuts) - 1])
         self.stage = _DONE
 

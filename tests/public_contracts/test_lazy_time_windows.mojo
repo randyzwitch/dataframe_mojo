@@ -575,3 +575,77 @@ def test_time_window_counts_read_from_window_bounds() raises:
         _assert_ints(rolled, "t", [4 * HOUR, 0, 2 * HOUR, HOUR])
         _assert_ints(rolled, "len", [1, 1, 2, 2])
         _assert_ints(rolled, "count", [1, 1, 1, 2])
+
+
+def _assert_floats(
+    frame: DataFrame, name: String, values: List[Float64], valid: List[Bool]
+) raises:
+    assert_equal(frame.height(), len(values))
+    for row in range(len(values)):
+        var cell = frame.item(row, name)
+        assert_equal(cell.is_null(), not valid[row])
+        if not valid[row]:
+            continue
+        if values[row] != values[row]:
+            assert_true(cell.float64() != cell.float64())
+        else:
+            assert_equal(cell.float64(), values[row])
+
+
+def test_overlapping_windows_reduce_from_bounds() raises:
+    """Sums, means, minimums and maximums of overlapping windows, read
+    from window bounds: nulls skipped, NaN propagating through sums and
+    ignored by extremes, all-null windows null."""
+    var nan = Float64(0) / Float64(0)
+    var frame = DataFrame(
+        [
+            _times("t", [0, HOUR, 2 * HOUR, 3 * HOUR]),
+            Series(
+                "x",
+                Column[Float64]([1.5, 0, nan, -2.0], [True, False, True, True]),
+            ),
+            Series(
+                "y", Column[Int64]([5, 0, -3, 7], [True, False, True, True])
+            ),
+            Series(
+                "z", Column[Int64]([0, 0, 1, 2], [False, False, True, True])
+            ),
+        ]
+    )
+    var aggs: List[Expr] = [
+        col("x").sum().alias("xs"),
+        col("x").mean().alias("xm"),
+        col("x").min().alias("xmin"),
+        col("x").max().alias("xmax"),
+        col("y").sum().alias("ys"),
+        col("y").mean().alias("ym"),
+        col("y").min().alias("ymin"),
+        col("y").max().alias("ymax"),
+        col("z").min().alias("zmin"),
+        col("y").count().alias("yc"),
+    ]
+    # Windows [t - 2h, t]: {0}, {0, 1}, {0, 1, 2}, {1, 2, 3}.
+    var out = frame.rolling("t", "2h", closed="both").agg(aggs)
+    var all: List[Bool] = [True, True, True, True]
+    _assert_floats(out, "xs", [1.5, 1.5, nan, nan], all)
+    _assert_floats(out, "xm", [1.5, 1.5, nan, nan], all)
+    _assert_floats(out, "xmin", [1.5, 1.5, 1.5, -2.0], all)
+    _assert_floats(out, "xmax", [1.5, 1.5, 1.5, -2.0], all)
+    _assert_ints(out, "ys", [5, 5, 2, 4])
+    _assert_floats(out, "ym", [5.0, 5.0, 1.0, 2.0], all)
+    _assert_ints(out, "ymin", [5, 5, -3, -3])
+    _assert_ints(out, "ymax", [5, 5, 5, 7])
+    _assert_ints(out, "yc", [1, 1, 2, 2])
+    assert_true(out.item(0, "zmin").is_null())
+    assert_true(out.item(1, "zmin").is_null())
+    assert_equal(out.item(2, "zmin").int64(), 1)
+    assert_equal(out.item(3, "zmin").int64(), 1)
+    assert_true(out.column("ys").dtype() == DataType.INT64)
+    assert_true(out.column("xm").dtype() == DataType.FLOAT64)
+    assert_frame(
+        frame.lazy()
+        .rolling("t", "2h", closed="both")
+        .agg(aggs)
+        .collect(engine="cpu"),
+        out,
+    )
