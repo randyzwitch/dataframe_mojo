@@ -189,7 +189,9 @@ def execute_dictionary_sum[
         _ = (state^, segments^, owners^)
         timings.kernel_ns = Int(perf_counter_ns()) - started
         var result_words = Span[UInt32, ImmutAnyOrigin](
-            unsafe_ptr=Pointer[UInt32, ImmutAnyOrigin](unsafe_from_address=address),
+            unsafe_ptr=Pointer[UInt32, ImmutAnyOrigin](
+                unsafe_from_address=address
+            ),
             length=words,
         )
         var control_at = words - (4 if sparse else 2)
