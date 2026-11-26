@@ -11,11 +11,21 @@ table's finish merges the tables partition by partition. The kept rows
 mark the column's true values. A row whose value is null has a null rank,
 so its comparison is null too; every other row not kept is false.
 
-A filter by such a predicate needs no column at all: the kept rows, put in
-input order, are gathered from every column in one more round, each task
-gathering a share of the columns, a chunked column chunk by chunk.
+A filter by such a predicate needs no column at all. The table hands back
+the kept rows partition by partition, in no row order, and a filter must
+keep its input's order. Sorting them would compare every pair on one
+thread; but they are distinct row numbers below the input's height, so a
+flag per row puts them in order with no comparison. One round sets the
+flags, each task for a share of the kept rows (distinct rows, so distinct
+bytes: no two tasks write the same one). The next round cuts the input
+into row ranges, none crossing a chunk's end in any column; each task
+reads its ranges' flags in row order and gathers those rows from every
+column, and each range's rows become one chunk of every result column, so
+the chunks in range order are the kept rows in input order.
 """
+from std.bit import count_trailing_zeros
 from std.collections import Optional
+from std.memory import bitcast
 
 from dataframe.aggregation.hash_table import TOP_ROWS_INLINE, key_supported
 from dataframe.aggregation.table_sink import TopRowsRounds
@@ -25,7 +35,7 @@ from dataframe.expr import COL, Expr, split_names
 from dataframe.frame import DataFrame
 from dataframe.kernels.gather import can_filter_aligned_chunks
 from dataframe.kernels.top_k import _pattern, top_rows_ranges
-from dataframe.parallel import Rounds, configured_workers
+from dataframe.parallel import Rounds, configured_workers, task_count
 from dataframe.series import Series
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
@@ -141,27 +151,61 @@ def top_rows_projection(exprs: List[Expr], columns: List[Series]) -> Int:
     return found
 
 
-def _gather_rows(column: Series, rows: List[Int]) raises -> Series:
-    """`column`'s values at `rows` (ascending), on the calling thread: a
-    chunked column gathers each chunk's own rows where they lie, and the
-    pieces are the result's chunks."""
+def _gather_ranges(columns: List[Series], height: Int, tasks: Int) -> List[Int]:
+    """Bounds of the row ranges a filter's gather round splits [0, height)
+    into: cut at every column's chunk ends, so each range lies in one chunk
+    of every column, and cut further into pieces of about a quarter of a
+    task's share, so a task whose rows hold more kept rows than the others
+    is not the one every other task waits for. Each range's kept rows
+    become one chunk of the result, which is why the pieces are not cut
+    finer than that. Returns the ranges' starts followed by `height`."""
+    var cuts = List[Int]()
+    for column in columns:
+        if column.is_chunked():
+            for end in column._chunked.value()[].ends:
+                if end > 0 and end < height:
+                    cuts.append(end)
+    cuts.append(height)
+    sort(cuts)
+    var piece = max(1, (height + 4 * tasks - 1) // (4 * tasks))
+    var bounds: List[Int] = [0]
+    for end in cuts:
+        var start = bounds[len(bounds) - 1]
+        if end <= start:
+            continue
+        var count = (end - start + piece - 1) // piece
+        for p in range(1, count):
+            bounds.append(start + (end - start) * p // count)
+        bounds.append(end)
+    return bounds^
+
+
+def _gather_range(column: Series, rows: List[Int], start: Int) raises -> Series:
+    """`column`'s values at `rows` (ascending, all in one chunk of
+    `column` at or after row `start`), on the calling thread."""
     if not column.is_chunked() or column.is_constant():
         return column.take(rows)
-    var pieces = List[Series]()
-    var at = 0
-    var start = 0
-    for part in column.chunks():
-        var end = start + len(part)
-        var local = List[Int]()
-        while at < len(rows) and rows[at] < end:
-            local.append(rows[at] - start)
-            at += 1
-        if len(local) > 0:
-            pieces.append(part.take(local))
-        start = end
-    if len(pieces) == 0:
-        return column.slice(0, 0)
-    return Series._from_chunks(pieces)
+    ref ends = column._chunked.value()[].ends
+    var chunk = 0
+    while ends[chunk] <= start:
+        chunk += 1
+    var offset = ends[chunk - 1] if chunk > 0 else 0
+    var local = List[Int](capacity=len(rows))
+    for row in rows:
+        local.append(row - offset)
+    return Series(
+        column._name,
+        column._chunked.value()[].arrays[chunk].copy(),
+        column._dtype,
+        column._field_metadata,
+    ).take(local)
+
+
+# The filter's rounds after the table's: setting the kept rows' flags,
+# then gathering the flagged rows range by range.
+comptime _TABLE = 0
+comptime _FLAG_ROWS = 1
+comptime _GATHER_RANGES = 2
 
 
 struct TopRowsSink(Movable, Rounds):
@@ -175,16 +219,21 @@ struct TopRowsSink(Movable, Rounds):
     var select: Bool
     var at: Int
     # Whether it filters: the kept rows are gathered from every column,
-    # in input order, one more round with a task per share of the
-    # columns, rather than marked in a column.
+    # in input order, rather than marked in a column (two more rounds,
+    # see the module docstring).
     var keep: Bool
     var value: Series
     var rounds: List[TopRowsRounds]
-    # The kept rows in order and, by column, its gathered rows, while the
-    # gather round runs.
-    var rows: List[Int]
+    # While the filter's rounds run: the round (_FLAG_ROWS or
+    # _GATHER_RANGES), its task count, the kept rows in the table's order,
+    # a flag per input row, the gather's range bounds (`_gather_ranges`),
+    # and by range, its gathered piece of every column.
+    var stage: Int
     var tasks: Int
-    var gathered: List[Series]
+    var rows: List[Int]
+    var marks: List[UInt8]
+    var bounds: List[Int]
+    var gathered: List[List[Series]]
     var result: DataFrame
 
     @staticmethod
@@ -226,19 +275,19 @@ struct TopRowsSink(Movable, Rounds):
         self.select = select
         self.at = at
         self.keep = False
-        self.rows = List[Int]()
+        self.stage = _TABLE
         self.tasks = 0
-        self.gathered = List[Series]()
+        self.rows = List[Int]()
+        self.marks = List[UInt8]()
+        self.bounds = List[Int]()
+        self.gathered = List[List[Series]]()
         self.result = DataFrame(List[Series]())
 
     def next_round(mut self) raises -> Int:
-        if self.tasks > 0:
-            # The gather round ran.
-            var columns = List[Series]()
-            swap(columns, self.gathered)
-            self.result = DataFrame(columns^, height=len(self.rows))
-            self.tasks = 0
-            self._release()
+        if self.stage == _FLAG_ROWS:
+            return self._start_gather()
+        if self.stage == _GATHER_RANGES:
+            self._finish_gather()
             return 0
         var rows = List[Int]()
         if len(self.rounds) > 0:
@@ -250,21 +299,89 @@ struct TopRowsSink(Movable, Rounds):
         if not self.keep:
             self._finish(rows)
             return 0
-        sort(rows)
         self.rows = rows^
-        var width = self.input.width()
-        self.gathered = List[Series](
-            length=width, fill=Series("", BoolColumn(List[Bool]()))
-        )
-        self.tasks = max(1, min(width, configured_workers()))
+        self.marks = List[UInt8](length=self.input.height(), fill=0)
+        self.stage = _FLAG_ROWS
+        self.tasks = task_count(len(self.rows), configured_workers())
         return self.tasks
 
     def round_task(mut self, task: Int) raises:
-        if self.tasks == 0:
-            self.rounds[0].round_task(task)
+        if self.stage == _FLAG_ROWS:
+            # A share of the kept rows; every row is kept once, so no other
+            # task writes these bytes.
+            var n = len(self.rows)
+            var rows = self.rows.unsafe_ptr()
+            var flags = self.marks.unsafe_ptr()
+            for i in range(
+                n * task // self.tasks, n * (task + 1) // self.tasks
+            ):
+                flags[rows[i]] = 1
             return
-        for c in range(task, self.input.width(), self.tasks):
-            self.gathered[c] = _gather_rows(self.input._columns[c], self.rows)
+        if self.stage == _GATHER_RANGES:
+            var flags = self.marks.unsafe_ptr()
+            for r in range(task, len(self.bounds) - 1, self.tasks):
+                var start = self.bounds[r]
+                var end = self.bounds[r + 1]
+                var rows = List[Int]()
+                var i = start
+                # Eight flags a load: most loads in a sparse filter are
+                # all zero and skip their rows at once.
+                while i + 8 <= end:
+                    var word = bitcast[DType.uint64, 1](
+                        flags.unsafe_offset(i).unsafe_load[width=8]()
+                    )
+                    while word != 0:
+                        rows.append(i + Int(count_trailing_zeros(word)) // 8)
+                        word &= word - 1
+                    i += 8
+                while i < end:
+                    if flags[i] != 0:
+                        rows.append(i)
+                    i += 1
+                if len(rows) == 0:
+                    continue
+                var pieces = List[Series](capacity=self.input.width())
+                for column in self.input._columns:
+                    pieces.append(_gather_range(column, rows, start))
+                self.gathered[r] = pieces^
+            return
+        self.rounds[0].round_task(task)
+
+    def _start_gather(mut self) raises -> Int:
+        """The gather round, over ranges of the input's rows."""
+        self.rows = List[Int]()
+        var height = self.input.height()
+        var tasks = task_count(height, configured_workers())
+        self.bounds = _gather_ranges(self.input._columns, height, tasks)
+        var ranges = len(self.bounds) - 1
+        self.gathered = List[List[Series]](length=ranges, fill=List[Series]())
+        self.stage = _GATHER_RANGES
+        self.tasks = max(1, min(tasks, ranges))
+        return self.tasks
+
+    def _finish_gather(mut self) raises:
+        """Every column's pieces, in range order, as its chunks."""
+        var height = 0
+        var columns = List[Series](capacity=self.input.width())
+        for c in range(self.input.width()):
+            var pieces = List[Series]()
+            for r in range(len(self.gathered)):
+                if len(self.gathered[r]) > 0:
+                    pieces.append(self.gathered[r][c].copy())
+            if len(pieces) == 0:
+                columns.append(self.input._columns[c].slice(0, 0))
+            elif len(pieces) == 1:
+                columns.append(pieces[0].copy())
+            else:
+                columns.append(Series._from_chunks(pieces))
+            height = len(columns[c])
+        self.result = DataFrame(columns^, height=height)
+        self.gathered = List[List[Series]]()
+        self.marks = List[UInt8]()
+        self.bounds = List[Int]()
+        self.stage = _TABLE
+        self.tasks = 0
+        self._release()
 
     def _release(mut self) raises:
         self.input = DataFrame(List[Series]())

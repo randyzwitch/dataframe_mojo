@@ -45,6 +45,17 @@ def test_parquet_text_arrives_as_views_with_its_codes() raises:
     observer.assert_balanced()
 
 
+def test_inline_text_holds_no_byte_buffer() raises:
+    """Text whose every value fits in its view holds no byte buffer: the
+    views alone are the values."""
+    var frame = read_parquet("tests/fixtures/parquet/plain.parquet")
+    for part in frame.column("s").chunks():
+        ref column = part._data[StringColumn]
+        assert_true(column._is_view_storage())
+        assert_equal(column._view_storage_unchecked().buffer_count(), 0)
+    assert_equal(frame.item(2, "s").string(), "blue")
+
+
 def word(row: Int) -> String:
     """Values that share lengths and first four bytes with each other,
     inline (up to twelve bytes) and long, empty and Unicode."""
