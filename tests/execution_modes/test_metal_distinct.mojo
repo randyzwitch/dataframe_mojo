@@ -546,8 +546,7 @@ def test_metal_distinct_chunked_float_and_packed_boolean_classes() raises:
         )
 
 
-# requires: metal
-def test_metal_distinct_rare_value_retry_keeps_small_group_result() raises:
+def _late_distinct_capacity(grow_groups: Bool) raises:
     from std.memory import ArcPointer
     from dataframe.execution_observation import DeviceObservation
     from dataframe_metal.distinct_reduce import execute_distinct
@@ -559,9 +558,14 @@ def test_metal_distinct_rare_value_retry_keeps_small_group_result() raises:
     for chunk in range(4):
         var k = List[Int32]()
         var v = List[Int32]()
-        for i in range(65536):
-            k.append(Int32(i % 2))
-            v.append(Int32(i) if chunk == 3 and i >= 64512 else Int32(0))
+        for i in range(262144):
+            k.append(
+                Int32(i) if grow_groups
+                and chunk == 3
+                and i < 512 else Int32(i % 2)
+            )
+            # These 12,288 values arrive before the optional late groups.
+            v.append(Int32(i) if chunk == 2 and i >= 249856 else Int32(0))
         keys.append(Series("g", Column[Int32](k^)))
         fields.append(Series("v", Column[Int32](v^)))
     var frame = DataFrame(
@@ -577,6 +581,18 @@ def test_metal_distinct_rare_value_retry_keeps_small_group_result() raises:
     query._plan._device_observation = obs
     assert_true(execute_distinct(query)[0].equals(expected))
     assert_equal(obs[].completed_launches.load(), Int64(8))
-    # The first attempt downloads control. The successful replay downloads
-    # control again and three arrays for the original 512 group slots.
-    assert_equal(obs[].download_bytes.load(), Int64(32 + 3 * 512 * 4))
+    # Each attempt copies control and the three result arrays together.
+    var replay_groups = 131072 if grow_groups else 512
+    assert_equal(
+        obs[].download_bytes.load(), Int64(32 + 3 * (512 + replay_groups) * 4)
+    )
+
+
+# requires: metal
+def test_metal_distinct_rare_value_retry_keeps_small_group_result() raises:
+    _late_distinct_capacity(False)
+
+
+# requires: metal
+def test_metal_distinct_late_group_and_value_overflow_share_one_retry() raises:
+    _late_distinct_capacity(True)

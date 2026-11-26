@@ -3,18 +3,41 @@ from std.bit import next_power_of_two
 from std.collections import Dict
 from std.memory import bitcast
 from std.random.philox import Random
-from dataframe import DataFrame, DataType
+from dataframe import AnyValue, DataFrame, DataType, Series
 from .accelerator.gpu.distinct_value import distinct_canonical
 from .distinct_layout import MAX_DISTINCT_CAPACITY
 from .group_properties import GroupSample
 
 
+struct _RowSample(Movable):
+    """Read increasing row positions, reusing each physical chunk view."""
+
+    var source: Series
+    var part: Series
+    var start: Int
+    var end: Int
+
+    def __init__(out self, var source: Series):
+        self.start = 0
+        self.end = 0 if source.is_chunked() else len(source)
+        self.part = source.copy()
+        self.source = source^
+
+    def get(mut self, row: Int) raises -> AnyValue:
+        if row >= self.end:
+            var current = self.source._chunk_at(row)
+            self.start = row - current[1]
+            self.part = current[0].copy()
+            self.end = self.start + len(self.part)
+        return self.part.get(row - self.start)
+
+
 def chunked_distinct_capacities(
     frame: DataFrame, key: String, field: String
 ) raises -> Tuple[Int, Int]:
-    var keys = frame.column(key)
-    var vals = frame.column(field)
-    var dtype = vals.dtype()
+    var keys = _RowSample(frame.column(key))
+    var vals = _RowSample(frame.column(field))
+    var dtype = vals.source.dtype()
     var rows = frame.height()
     var samples = min(4096, rows)
     var groups = Dict[Int64, Int]()
@@ -27,7 +50,10 @@ def chunked_distinct_capacities(
         if samples < rows:
             var draw = random.step()
             var word = (UInt64(draw[0]) << 32) | UInt64(draw[1])
-            row = Int(word % UInt64(rows))
+            # One random position in each stratum, in increasing row order.
+            var start = i * rows // samples
+            var stop = (i + 1) * rows // samples
+            row = start + Int(word % UInt64(stop - start))
         var k = keys.get(row)
         # 2^32 is distinct from every valid unsigned 32-bit key.
         var key_id = Int64(1) << 32
@@ -64,7 +90,12 @@ def chunked_distinct_capacities(
         else:
             estimated += (singles * (singles - 1)) // (2 * (doubles + 1))
     var nvalues = next_power_of_two(
-        max(512, min(MAX_DISTINCT_CAPACITY, 2 * min(rows, estimated)))
+        max(
+            512,
+            min(
+                min(2 * rows, MAX_DISTINCT_CAPACITY), max(16384, 2 * estimated)
+            ),
+        )
     )
     var ngroups = GroupSample(len(groups), 0, 0, samples, rows).capacity()
     return (ngroups, nvalues)

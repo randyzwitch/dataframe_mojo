@@ -57,9 +57,7 @@ def execute_chunked_distinct(
         var record_words = 3 + Int(field.dtype == DataType.INT64)
         timings.upload_ns += Int(perf_counter_ns()) - started
 
-        # Each table can reach its independent maximum once. If a group
-        # overflow masks a value overflow (or conversely), allow both retries.
-        for attempt in range(3):
+        for attempt in range(2):
             started = Int(perf_counter_ns())
             var words = 4 + 4 * groups + record_words * values
             var reservation = _NativeReservation(scope, words * 4)
@@ -97,27 +95,22 @@ def execute_chunked_distinct(
                     control.unsafe_ptr(),
                     scratch.create_sub_buffer[DType.uint32](0, 4),
                 )
+                ctx.enqueue_copy(
+                    first.unsafe_ptr(),
+                    scratch.create_sub_buffer[DType.uint32](4, groups),
+                )
+                ctx.enqueue_copy(
+                    counts.unsafe_ptr(),
+                    scratch.create_sub_buffer[DType.uint32](4 + groups, groups),
+                )
+                ctx.enqueue_copy(
+                    nulls.unsafe_ptr(),
+                    scratch.create_sub_buffer[DType.uint32](
+                        4 + 2 * groups, groups
+                    ),
+                )
                 scope.synchronize()
-                scope.record_download(4 * 4)
-                if not control[1]:
-                    ctx.enqueue_copy(
-                        first.unsafe_ptr(),
-                        scratch.create_sub_buffer[DType.uint32](4, groups),
-                    )
-                    ctx.enqueue_copy(
-                        counts.unsafe_ptr(),
-                        scratch.create_sub_buffer[DType.uint32](
-                            4 + groups, groups
-                        ),
-                    )
-                    ctx.enqueue_copy(
-                        nulls.unsafe_ptr(),
-                        scratch.create_sub_buffer[DType.uint32](
-                            4 + 2 * groups, groups
-                        ),
-                    )
-                    scope.synchronize()
-                    scope.record_download(3 * groups * 4)
+                scope.record_download((4 + 3 * groups) * 4)
             except error:
                 try:
                     scope.synchronize()
@@ -137,18 +130,15 @@ def execute_chunked_distinct(
             _ = (scratch^, reservation^)
             timings.kernel_ns += Int(perf_counter_ns()) - started
             if control[1] & (GROUP_CAPACITY_FAULT | DISTINCT_CAPACITY_FAULT):
-                var grow_groups = Bool(control[1] & GROUP_CAPACITY_FAULT)
-                var grow_values = Bool(control[1] & DISTINCT_CAPACITY_FAULT)
-                if (grow_groups and groups == GENERAL_TABLE_LIMIT) or (
-                    grow_values and values == MAX_DISTINCT_CAPACITY
-                ):
+                if attempt:
                     raise data_fault(
                         "exact distinct exceeded bounded group/value table capacity"
                     )
-                if grow_groups:
+                if control[1] & GROUP_CAPACITY_FAULT:
+                    # A missing group can hide unseen pairs. Reserve room for
+                    # both tables when group discovery itself was incomplete.
                     groups = GENERAL_TABLE_LIMIT
-                if grow_values:
-                    values = MAX_DISTINCT_CAPACITY
+                values = MAX_DISTINCT_CAPACITY
                 continue
             if control[1] or control[2] != UInt32(len(spans)):
                 raise Error(
