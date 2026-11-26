@@ -73,6 +73,8 @@ from dataframe.expr import (
     CORR,
     COUNT,
     COV,
+    EXPR_MAX_BY,
+    EXPR_MIN_BY,
     Expr,
     LEN,
     MAX,
@@ -207,7 +209,12 @@ def ungrouped_layout(
         for node in expression._nodes:
             if not is_reduction(node.op):
                 continue
-            if not table_reduction(node.op):
+            if not table_reduction(node.op) or node.op in [
+                EXPR_MAX_BY,
+                EXPR_MIN_BY,
+            ]:
+                # Their buffered rows have no ungrouped finish here: the
+                # reduction rounds pick their rows.
                 return None
             ops.append(node.op)
             if node.left < 0:

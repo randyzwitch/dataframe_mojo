@@ -1,5 +1,5 @@
 """The aggregate table's list states against a scalar model of each group:
-implode and mode, through the eager group-by and a
+implode, mode, max_by and min_by, through the eager group-by and a
 pipeline's grouped sink after a filter, on tables that clear (eight
 workers) and on one worker. Expressions the table has no state for (a
 filtered sum, a sorted head) are evaluated over the groups the table
@@ -165,6 +165,80 @@ def test_pipeline_list_states_after_a_filter() raises:
     check_lists(actual, rows, groups, start)
     _ = trace^
     _ = workers^
+
+
+def picking_reductions() -> List[Expr]:
+    return [
+        col("r").max_by("x").alias("top"),
+        col("r").min_by("x").alias("low"),
+    ]
+
+
+def check_pick(result: DataFrame, name: String, i: Int, row: Int) raises:
+    var got = result.item(i, name)
+    if row < 0:
+        assert_true(got.is_null(), name)
+    else:
+        assert_equal(got.int64(), Int64(row), name)
+
+
+def check_picks(
+    result: DataFrame, rows: Int, groups: Int, start: Int = 0
+) raises:
+    """max_by and min_by take the first row of the group's largest
+    (smallest) valid value, null when the group has none."""
+    var model = group_rows(rows, groups, start)
+    for i in range(result.height()):
+        var g = key_group(result, i)
+        ref want = model[g]
+        var top = -1
+        var low = -1
+        for row in want:
+            if not valid(row):
+                continue
+            if top < 0 or value(row) > value(top):
+                top = row
+            if low < 0 or value(row) < value(low):
+                low = row
+        check_pick(result, "top", i, top)
+        check_pick(result, "low", i, low)
+
+
+def picked_states(threads: Int, rows: Int, groups: Int) raises:
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", String(threads))
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    for ordered in [False, True]:
+        var observed = StrategyTrace()
+        var result = (
+            frame(rows, groups)
+            .group_by(["k"], maintain_order=ordered)
+            .agg(picking_reductions())
+        )
+        var text = observed.text()
+        _ = observed^
+        assert_true("dataframe-path: pipeline.group_table\n" in text)
+        assert_true("group_by.row_lists" not in text)
+        check_picks(result, rows, groups)
+    var start = 1_234
+    var lazy = (
+        frame(rows, groups)
+        .lazy()
+        .filter(col("r") >= lit(Int64(start)))
+        .group_by(["k"])
+        .agg(picking_reductions())
+        .collect()
+    )
+    check_picks(lazy, rows, groups, start)
+    _ = trace^
+    _ = workers^
+
+
+def test_picks_with_tables_that_clear() raises:
+    picked_states(8, 120_000, 9_000)
+
+
+def test_picks_on_one_worker() raises:
+    picked_states(1, 20_000, 700)
 
 
 def row_list_expressions() -> List[Expr]:

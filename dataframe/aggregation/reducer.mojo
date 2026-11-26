@@ -37,6 +37,8 @@ from dataframe.expr import (
     LAST,
     N_UNIQUE,
     APPROX_N_UNIQUE,
+    EXPR_MAX_BY,
+    EXPR_MIN_BY,
     STD,
     VAR,
     MEDIAN,
@@ -2992,6 +2994,10 @@ struct Reducer(Movable):
     def finish(self) raises -> Series:
         if self.finished:
             return self.finished.value().copy()
+        if self.op == EXPR_MAX_BY or self.op == EXPR_MIN_BY:
+            # No rows reached the groups (the aggregate table fills
+            # `finished` for groups that have rows): each picks no value.
+            return Series.full_null("", self.logical, self.group_count)
         if self.op == IMPLODE:
             # No rows reached the groups' lists (the aggregate table fills
             # `finished` for groups that have rows): each list is empty.
