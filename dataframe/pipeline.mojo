@@ -1401,20 +1401,18 @@ def join_keys_need_unifying(
     those values: a file scan's dictionary keeps growing until its last
     batch, and a join that emits build rows no probe row matched emits them
     once, not per morsel. The pipeline runs it as an eager join instead."""
+    # A quick look first: with no categorical column anywhere, no key can
+    # be one. A step's key may be a column an earlier step brought in from
+    # its build side (a right semi join emits the build's rows), so every
+    # column of every build counts, not only the build keys.
     var categorical = False
     for column in frame._columns:
         categorical = categorical or column.dtype().is_categorical()
     for s in range(len(steps)):
         if steps[s].kind != STEP_JOIN or _cross_step(steps[s]):
             continue
-        ref right = joins[steps[s].join]
-        for name in steps[s].right_keys:
-            try:
-                categorical = (
-                    categorical or right.column(name).dtype().is_categorical()
-                )
-            except:
-                pass
+        for column in joins[steps[s].join]._columns:
+            categorical = categorical or column.dtype().is_categorical()
     if not categorical:
         return False
     try:

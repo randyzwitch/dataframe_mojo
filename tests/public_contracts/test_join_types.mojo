@@ -9,6 +9,7 @@ from dataframe import (
     Series,
     StringColumn,
     StructColumn,
+    col,
 )
 from tests.support.coverage_generators import offset_layout, chunk_layout
 from tests.support.group_strategy_reference import ScopedEnvironment
@@ -27,6 +28,53 @@ def _layout(frame: DataFrame, layout: Int) raises -> DataFrame:
         == 0 else offset_layout(frame) if layout
         == 1 else chunk_layout(frame)
     )
+
+
+def test_categorical_key_brought_in_by_an_earlier_join_is_unified() raises:
+    """A join compares a categorical key with a string key, and the
+    categorical column reaches it through an earlier join of the same
+    pipeline (a semi join, run as a right semi join that emits the build
+    side's rows). Its keys are still moved onto one dictionary first, so
+    lazy plans give the eager result for every join kind, on one worker
+    and on eight. Found by the differential fuzzer (tests/fuzz): the right
+    and full joins failed with "cannot tag string storage as categorical"
+    and a vertical concat of mismatched types."""
+    var a = DataFrame(
+        [
+            Series("k", Column[Bool]([False, True])),
+            Series("c", StringColumn(["green", "red"])).cast(
+                DataType.CATEGORICAL
+            ),
+        ]
+    )
+    var b = DataFrame(
+        [
+            Series("k", Column[Bool]([True, False, True])),
+            Series("c", StringColumn(["red", "green", "blue"])),
+            Series("v", Column[Int64]([1, 2, 3])),
+        ]
+    )
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        for how in ["right", "full", "inner", "left"]:
+            var expected = (
+                a.join(b, on=["k"], how="semi")
+                .join(b, on=["c", "k"], how=how)
+                .with_columns([col("c").cast(DataType.STRING)])
+                .sort(["v"], nulls_last=True)
+            )
+            var lazy = (
+                a.lazy()
+                .join(b.lazy(), on=["k"], how="semi")
+                .join(b.lazy(), on=["c", "k"], how=how)
+                .collect()
+            )
+            var actual = lazy.with_columns(
+                [col("c").cast(DataType.STRING)]
+            ).sort(["v"], nulls_last=True)
+            assert_equal(actual.columns(), expected.columns(), how)
+            assert_true(actual.equals(expected), how)
+        _ = workers^
 
 
 def test_join_reference_has_literal_multiplicity_null_and_order_anchors() raises:
