@@ -45,6 +45,53 @@ def test_parquet_text_arrives_as_views_with_its_codes() raises:
     observer.assert_balanced()
 
 
+def codes_pending(series: Series) -> Bool:
+    for part in series.chunks():
+        ref column = part._data[StringColumn]
+        if not column._codes or not column._codes.value()[].codes.pending():
+            return False
+    return True
+
+
+def test_parquet_codes_are_derived_only_when_read() raises:
+    """A dictionary column loads with codes that nothing has computed yet;
+    reading its text, filtering and gathering it keep them uncomputed, and
+    the first reader of the codes gets each row's dictionary code."""
+    var observer = Observer()
+    var coded = read_parquet("tests/fixtures/parquet/dictionary.parquet")
+    assert_true(codes_pending(coded.column("s")))
+    assert_equal(coded.item(0, "s").string(), "red")
+    var picked = coded.take([2, 0, 4])
+    assert_true(codes_pending(coded.column("s")))
+    assert_true(codes_pending(picked.column("s")))
+    var codes = picked.column("s")._dictionary_codes()
+    assert_true(Bool(codes))
+    var values = codes.value().copy()
+    var dtype = values.dtype()
+    for row in range(3):
+        var code = Int(values._data[Column[UInt32]]._get(row))
+        assert_equal(
+            String(dtype.dictionary()[].get(code)),
+            picked.item(row, "s").string(),
+        )
+    assert_true(not codes_pending(picked.column("s")))
+    assert_true(codes_pending(coded.column("s")))
+    _ = coded^
+    _ = picked^
+    observer.assert_balanced()
+
+
+def test_inline_text_holds_no_byte_buffer() raises:
+    """Text whose every value fits in its view holds no byte buffer: the
+    views alone are the values."""
+    var frame = read_parquet("tests/fixtures/parquet/plain.parquet")
+    for part in frame.column("s").chunks():
+        ref column = part._data[StringColumn]
+        assert_true(column._is_view_storage())
+        assert_equal(column._view_storage_unchecked().buffer_count(), 0)
+    assert_equal(frame.item(2, "s").string(), "blue")
+
+
 def word(row: Int) -> String:
     """Values that share lengths and first four bytes with each other,
     inline (up to twelve bytes) and long, empty and Unicode."""

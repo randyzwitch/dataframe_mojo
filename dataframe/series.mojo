@@ -18,7 +18,7 @@ from std.utils import Variant
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column, SCALAR_DTYPES, _copy_validity
 from dataframe.storage.nested import ListColumn, StructColumn, _fields_at
-from dataframe.storage.string import StringCodes, StringColumn
+from dataframe.storage.string import StringCodes, StringColumn, deferred_codes
 from dataframe.storage.string_view import StringViewStorage
 from .value import AnyValue
 from .display import render_series
@@ -608,6 +608,23 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             ):
                 return merged^
             total += len(column)
+        var lookup = parts[0]._data[StringColumn]._codes.value()[].lookup
+        var dtype = parts[0]._data[StringColumn]._codes.value()[].dtype
+        var pending = False
+        for part in parts:
+            pending = (
+                pending
+                or part._data[StringColumn]._codes.value()[].codes.pending()
+            )
+        if pending and lookup:
+            # Some part's codes were never read: derive the merged column's
+            # from its strings when read, rather than computing every part's
+            # now to copy them.
+            var derived = deferred_codes(
+                merged._data[StringColumn], dtype, lookup.value()
+            )
+            merged._data[StringColumn]._codes = ArcPointer(derived^)
+            return merged^
         var codes = List[UInt32](unsafe_uninit_length=total)
         var at = 0
         for part in parts:

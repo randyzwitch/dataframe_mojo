@@ -12,6 +12,9 @@ from dataframe.storage.residence import (
 )
 
 comptime _ReleaseForeign = def(Int) thin abi("C") -> None
+# Writes a deferred buffer's elements: (context, destination address,
+# element count).
+comptime _FillDeferred = def(Int, Int, Int) thin abi("C") -> None
 
 
 struct _ForeignOwner(Movable):
@@ -103,6 +106,60 @@ struct _Repeat[T: Copyable & Deinitable](Movable):
             _ = external_call["sched_yield", Int32]()
 
 
+struct _Deferred(Movable):
+    """Elements that are computed only when a reader first needs them:
+    the storage of a buffer that can be derived from other data, so that
+    holding it costs nothing until it is used.
+
+    `fill` writes the elements from `context` (an opaque source, freed
+    by its owner's release once the buffer is gone). The first reader to
+    arrive through `_BufferData.unsafe_ptr` computes them, however many
+    threads ask at once, and every later reader gets that one copy."""
+
+    var context: _ForeignOwner
+    var fill: Int
+    var _state: Atomic[Int64]
+    var _filled: List[UInt8]
+    # `_filled`'s storage address, published before `_state` turns filled
+    # (see `_Repeat`).
+    var _address: Atomic[Int64]
+
+    def __init__(out self, var context: _ForeignOwner, fill: Int):
+        self.context = context^
+        self.fill = fill
+        self._state = Atomic[Int64](_UNFILLED)
+        self._filled = List[UInt8]()
+        self._address = Atomic[Int64](0)
+
+    def is_filled(self) -> Bool:
+        return self._state.load() == _FILLED
+
+    def filled(self, bytes: Int, length: Int) -> Int:
+        """The address of the `length` elements (`bytes` in all), computed
+        once."""
+        var cell = Pointer(to=self._state).unsafe_mut_cast[True]()
+        var address = Pointer(to=self._address).unsafe_mut_cast[True]()
+        var out = Pointer(to=self._filled).unsafe_mut_cast[True]()
+        while True:
+            var state = cell[].load()
+            if state == _FILLED:
+                return Int(address[].load())
+            var expected = Int64(_UNFILLED)
+            if cell[].compare_exchange(expected, Int64(_FILLING)):
+                # 16 bytes at least, so the storage is aligned for any
+                # element type.
+                out[] = List[UInt8](unsafe_uninit_length=max(bytes, 16))
+                var filled = Int(out[].unsafe_ptr())
+                var callback = self.fill
+                Pointer(to=callback).unsafe_bitcast[_FillDeferred]()[](
+                    self.context.context, filled, length
+                )
+                address[].store(Int64(filled))
+                cell[].store(_FILLED)
+                return filled
+            _ = external_call["sched_yield", Int32]()
+
+
 struct _StatsRecord(Movable):
     """A buffer's segment statistics: one `BaseStatistics` per `STATISTICS_VECTOR_SIZE` rows of the
     buffer from its first element, and one per `ROW_GROUP_VECTORS` vectors.
@@ -152,6 +209,9 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
     # Set on a buffer whose every element is one value (`_Repeat`); `address`
     # is then 0 and host reads go through the repeat's one-time fill.
     var repeat: Optional[ArcPointer[_Repeat[Self.T]]]
+    # Set on a buffer whose elements are computed on first read
+    # (`_Deferred`); `address` is then 0.
+    var deferred: Optional[ArcPointer[_Deferred]]
     # The address of a heap `ArcPointer[_StatsRecord]`, 0 until statistics
     # are published (once; `publish_statistics`).
     var _stats: Atomic[Int64]
@@ -164,6 +224,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.residence = None
         self.selection = None
         self.repeat = None
+        self.deferred = None
         self._stats = Atomic[Int64](0)
 
     def __init__(
@@ -176,6 +237,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.residence = None
         self.selection = None
         self.repeat = None
+        self.deferred = None
         self._stats = Atomic[Int64](0)
 
     def __init__(
@@ -190,6 +252,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.residence = residence
         self.selection = None
         self.repeat = None
+        self.deferred = None
         self._stats = Atomic[Int64](0)
 
     def __deinit__(deinit self):
@@ -243,6 +306,12 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
                     return Pointer[Self.T, MutAnyOrigin](
                         unsafe_from_address=self.repeat.value()[].filled(
                             self.length
+                        )
+                    )
+                if self.deferred:
+                    return Pointer[Self.T, MutAnyOrigin](
+                        unsafe_from_address=self.deferred.value()[].filled(
+                            self.length * size_of[Self.T](), self.length
                         )
                     )
             return Pointer[Self.T, MutAnyOrigin](
@@ -329,6 +398,22 @@ struct _Buffer[T: Copyable & Deinitable](Copyable, Sized):
         )
         data.repeat = ArcPointer(_Repeat[Self.T](value^))
         return Self(data^)
+
+    @staticmethod
+    def deferring(length: Int, var deferred: _Deferred) -> Self:
+        """`length` elements that `deferred` computes when a reader first
+        needs them."""
+        var data = _BufferData[Self.T](
+            0, length, ArcPointer(_ForeignOwner(0, 0))
+        )
+        data.deferred = ArcPointer(deferred^)
+        return Self(data^)
+
+    def pending(self) -> Bool:
+        """Whether the elements are deferred and not computed yet."""
+        return Bool(self._state[].deferred) and not (
+            self._state[].deferred.value()[].is_filled()
+        )
 
     def repeats(self) -> Bool:
         """Whether every element is one value (`repeating`)."""

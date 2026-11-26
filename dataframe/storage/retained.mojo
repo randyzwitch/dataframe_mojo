@@ -64,7 +64,7 @@ struct RetainedBuffers(Movable):
                     unsafe_from_address=owner.context
                 )[]
                 self.list(held[])
-            elif not data.residence and not data.repeat:
+            elif not data.residence and not data.repeat and not data.deferred:
                 self.add(data.address, data.length * size_of[T]())
         else:
             self.list(data.values)
@@ -74,6 +74,11 @@ struct RetainedBuffers(Movable):
             self.add(Int(Pointer(to=repeat)), size_of[T]())
             if repeat.is_filled():
                 self.list(repeat._filled)
+        if data.deferred:
+            # Derived elements hold memory only once something has read them.
+            ref deferred = data.deferred.value()[]
+            if deferred.is_filled():
+                self.list(deferred._filled)
         if data.residence:
             ref residence = data.residence.value()[]
             # Use the residence identity: inspecting usage must never trigger
