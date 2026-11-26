@@ -50,6 +50,7 @@ from dataframe.parallel import (
     in_shared_task,
     set_shared_task,
 )
+from dataframe.storage.allocation import check_memory
 from dataframe.trace import trace_path
 
 # The five events of a pipeline, in the order each depends on the last.
@@ -634,6 +635,9 @@ struct _Executor[P: SchedulablePipeline](Movable):
         if shared != was:
             set_shared_task(shared)
         try:
+            # Every task may add to the query's tables: the memory limit is
+            # checked before each, and crossing it fails the query.
+            check_memory()
             if stage == STAGE_INITIALIZE:
                 pipeline.initialize()
             elif stage == STAGE_EXECUTE:

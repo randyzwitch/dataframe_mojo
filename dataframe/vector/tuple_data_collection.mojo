@@ -5,7 +5,7 @@ builders use separate collections and combine their segments after the
 build, avoiding shared append state. Heap allocations retain stable
 addresses for as long as the collection is alive.
 """
-from std.memory import ArcPointer
+from dataframe.storage.buffer import _Buffer
 from dataframe.dtype import DataType
 from dataframe.series import Series
 from dataframe.storage.nested import ListColumn, StructColumn
@@ -76,11 +76,11 @@ struct TupleDataCollection(Movable):
     def heaps(self) -> TupleDataHeaps:
         """Every segment's heap blocks, for gathers that reference their
         strings in place."""
-        var blocks = List[ArcPointer[List[UInt8]]]()
+        var blocks = List[_Buffer[UInt8]]()
         for s in range(len(self.segments)):
             ref heap_blocks = self.segments[s].allocator.heap_blocks
             for b in range(len(heap_blocks)):
-                blocks.append(heap_blocks[b].data)
+                blocks.append(heap_blocks[b].data.copy())
         return TupleDataHeaps(blocks)
 
     def tuples_per_block(self) -> Int:

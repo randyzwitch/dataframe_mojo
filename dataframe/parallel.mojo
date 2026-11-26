@@ -43,6 +43,7 @@ from std.time import perf_counter_ns
 from std.reflection import reflect
 from std.sys import num_performance_cores, num_physical_cores, size_of, stderr
 
+from .storage.allocation import check_memory
 from .trace import trace_path
 
 from .vector.types import STANDARD_VECTOR_SIZE
@@ -588,10 +589,12 @@ struct Pool(Movable):
         the first error in job order is re-raised once the round has
         finished. With no workers, every job runs on the caller. `claim`
         dynamically schedules coarse, uneven jobs; the default preserves the
-        static shares used by sort's fine, balanced rounds.
+        static shares used by sort's fine, balanced rounds. The memory
+        limit is checked before the round (`check_memory`).
         """
         if len(jobs) == 0:
             return
+        check_memory()
         if len(jobs) > 1 and in_shared_task():
             # One task's share of a schedule's event: the jobs run here.
             for j in range(len(jobs)):
@@ -1452,8 +1455,15 @@ def run_jobs[J: Job](mut jobs: List[J]) raises:
     caller, claim jobs one at a time until none are left: a caller may cut
     work finer than the thread count for balance, and a job that starts
     jobs while every helper is busy runs them on its own thread.
+
+    The memory limit is checked before and after the jobs run
+    (`check_memory`): a round of jobs is where a kernel's large outputs are
+    allocated, and the check raises the `out of memory` error on the
+    calling thread.
     """
+    check_memory()
     _run_jobs(jobs, Int.MAX)
+    check_memory()
 
 
 def _run_jobs[J: Job](mut jobs: List[J], limit: Int) raises:
