@@ -329,11 +329,14 @@ def join_frames(
     for c in range(self.width()):
         for k in range(len(left_keys)):
             if left_keys[k] == c and sides_mixed and not keep_right_keys:
-                # One output column takes rows of both keys, as a
-                # concatenation does: their Arrow field metadata must agree.
-                self._columns[c]._check_metadata(right._columns[right_keys[k]])
+                # One output column takes rows of both keys. It is the left
+                # key's field, as every left column of the result is: its
+                # Arrow field metadata is the left key's, whatever the right
+                # key carries.
+                var key = right._columns[right_keys[k]].copy()
+                key._field_metadata = self._columns[c]._field_metadata
                 coalesced.append(c)
-                right_sources.append(right._columns[right_keys[k]].copy())
+                right_sources.append(key^)
     for k in range(len(right_output)):
         right_sources.append(right._columns[right_output[k]].copy())
     var from_right = take_parallel(
@@ -348,11 +351,13 @@ def join_frames(
         var use_left = List[Bool](capacity=len(left_rows))
         for i in left_rows:
             use_left.append(i >= 0)
-        columns[c] = (
+        var key = (
             _coalesced(use_left, columns[c], from_right[j])
             .with_dtype(self._columns[c].dtype())
             .renamed(self._columns[c].name())
         )
+        key._field_metadata = self._columns[c]._field_metadata
+        columns[c] = key^
     for k in range(len(right_output)):
         columns.append(from_right[len(coalesced) + k].renamed(right_names[k]))
     return DataFrame(columns^, height=len(left_rows))
