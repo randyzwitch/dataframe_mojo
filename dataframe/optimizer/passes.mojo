@@ -1621,6 +1621,7 @@ def plan_push_projections(
     var all_needed = List[Bool](length=len(self._nodes), fill=False)
     all_needed[len(self._nodes) - 1] = True
     var owned = plan_remember_schemas(self)
+    var parents = plan_parents(self)
     # (join index, right side?, columns) for join inputs to narrow.
     var narrow_joins = List[Int]()
     var narrow_sides = List[Bool]()
@@ -1668,13 +1669,9 @@ def plan_push_projections(
                     len(keep) > 0 or node.kind == SCAN_IPC or node.has_dataset()
                 ) and len(keep) < len(columns):
                     self._nodes[i].set_scan_projection(keep^)
-                    # Only this scan's schema changes among the nodes
-                    # still to visit: they come before it, and none
-                    # reads it (children precede their parents).
-                    try:
-                        _ = self._schema_memo.value()[].pop(i)
-                    except:
-                        pass
+                    # The nodes above it may have remembered its wider
+                    # schema in an earlier pass; a union compares them.
+                    plan_forget_schemas_above(self, i, parents)
             continue
         # What this node reads from its input(s).
         var reads = List[String]()
@@ -1751,11 +1748,14 @@ def plan_push_projections(
             else:
                 needed[child] = reads.copy()
     if prune_outputs:
-        var aligned = plan_align_union_inputs(self, unions, union_columns)
-        plan_narrow_join_inputs(
+        # Join inputs are narrowed first: that changes the joins' outputs,
+        # and a union over two joins can only see whether its inputs
+        # agree once they have their final columns.
+        var narrowed = plan_narrow_join_inputs(
             self, narrow_joins, narrow_sides, narrow_columns
         )
-        if aligned:
+        var aligned = plan_align_union_inputs(self, unions, union_columns)
+        if narrowed or aligned:
             plan_reorder(self)
     if owned:
         self._schema_memo = None
@@ -1913,12 +1913,13 @@ def plan_narrow_join_inputs(
     joins: List[Int],
     right_sides: List[Bool],
     columns: List[List[String]],
-) raises:
+) raises -> Bool:
     """Select only the kept columns above join inputs that are not scans.
 
     Scans already read only those columns. Other inputs (a filter, a
     computed column) would otherwise hand the join every column they
-    produce. The selection is only added when it drops a column.
+    produce. The selection is only added when it drops a column. True
+    when a node was added; the caller renumbers the plan.
     """
     var added = False
     var parents = plan_parents(self)
@@ -1944,8 +1945,7 @@ def plan_narrow_join_inputs(
         else:
             self._nodes[join].left = len(self._nodes) - 1
         added = True
-    if added:
-        plan_reorder(self)
+    return added
 
 
 def plan_mask_only_union(self: QueryContext, index: Int) -> Bool:
