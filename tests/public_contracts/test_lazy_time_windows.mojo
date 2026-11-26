@@ -623,6 +623,9 @@ def test_overlapping_windows_reduce_from_bounds() raises:
         col("y").max().alias("ymax"),
         col("z").min().alias("zmin"),
         col("y").count().alias("yc"),
+        col("y").var().alias("yv"),
+        col("y").var(0).alias("yv0"),
+        col("y").std().alias("ysd"),
     ]
     # Windows [t - 2h, t]: {0}, {0, 1}, {0, 1, 2}, {1, 2, 3}.
     var out = frame.rolling("t", "2h", closed="both").agg(aggs)
@@ -640,6 +643,10 @@ def test_overlapping_windows_reduce_from_bounds() raises:
     assert_true(out.item(1, "zmin").is_null())
     assert_equal(out.item(2, "zmin").int64(), 1)
     assert_equal(out.item(3, "zmin").int64(), 1)
+    _assert_floats(out, "yv", [0, 0, 32.0, 50.0], [False, False, True, True])
+    _assert_floats(out, "yv0", [0.0, 0.0, 16.0, 25.0], all)
+    assert_true(out.item(2, "ysd").float64() > 5.6568542)
+    assert_true(out.item(2, "ysd").float64() < 5.6568543)
     assert_true(out.column("ys").dtype() == DataType.INT64)
     assert_true(out.column("xm").dtype() == DataType.FLOAT64)
     assert_frame(

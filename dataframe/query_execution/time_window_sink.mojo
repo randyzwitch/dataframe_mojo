@@ -21,16 +21,17 @@ parts:
   about the same number of rows, and each task reduces its range's
   windows. A count of rows is read from the bounds. When windows hold
   more rows in all than the input has, a count of values or nulls, and a
-  sum, mean, minimum or maximum of a numeric column, are read from the
-  bounds too: from running counts and integer sums in time order (one
-  step) or a segment tree of float sums or extremes (O(log n) steps),
+  sum, mean, minimum, maximum, standard deviation or variance of a
+  numeric column, are read from the bounds too: from running counts and
+  integer sums in time order (one step) or a segment tree of float sums,
+  extremes or running moments (O(log n) steps),
   each built in one pass over the input. Other aggregations, and all of
   these when windows overlap little, gather the range's rows and reduce
   them with the grouped reducers, a window a group. A task's output
   columns are one chunk of the result's, in window order.
 """
 from std.collections import Dict, Optional
-from std.math import isnan
+from std.math import isnan, sqrt
 
 from dataframe.aggregation.expressions import _bind_all
 from dataframe.aggregation.keys import _expand_struct_keys
@@ -45,8 +46,11 @@ from dataframe.expr import (
     MIN,
     NULL_COUNT,
     ROW_LEN,
+    STD,
     SUM,
+    VAR,
 )
+from dataframe.aggregation.scalar_states import VarState
 from dataframe.kernels.binary import validity
 from dataframe.execution import evaluate
 from dataframe.frame import DataFrame
@@ -82,7 +86,8 @@ comptime _DONE = 3
 
 # How an aggregation is computed: from each window's rows gathered and
 # reduced, or from the window's bounds (a count of rows, values or nulls,
-# or a sum, mean, minimum or maximum of a numeric column).
+# or a sum, mean, minimum, maximum, standard deviation or variance of a
+# numeric column).
 comptime _GATHER = 0
 comptime _ROWS = 1
 comptime _VALUES = 2
@@ -91,6 +96,8 @@ comptime _SUM = 4
 comptime _MEAN = 5
 comptime _MIN = 6
 comptime _MAX = 7
+comptime _STD = 8
+comptime _VAR = 9
 
 
 def _numeric_column(column: Series) -> Bool:
@@ -135,7 +142,47 @@ def _window_reduction(
         return (_MIN, source)
     if op == MAX:
         return (_MAX, source)
+    if (op == STD or op == VAR) and dtype == DataType.FLOAT64:
+        return (_STD if op == STD else _VAR, source)
     return (_GATHER, -1)
+
+
+def _moment_tree(var leaves: List[VarState]) -> List[VarState]:
+    """A segment tree of running moments (as `_tree`): node i merges
+    nodes 2i and 2i + 1."""
+    var size = 1
+    while size < len(leaves):
+        size *= 2
+    var tree = List[VarState](length=2 * size, fill=VarState())
+    for i in range(len(leaves)):
+        tree[size + i] = leaves[i].copy()
+    for i in range(size - 1, 0, -1):
+        var node = tree[2 * i].copy()
+        node.merge(tree[2 * i + 1])
+        tree[i] = node^
+    return tree^
+
+
+def _moment_range(tree: List[VarState], first: Int, end: Int) -> VarState:
+    """The moments of leaves [first, end) of `tree`."""
+    var size = len(tree) // 2
+    var lo = first + size
+    var hi = end + size
+    var left = VarState()
+    var right = VarState()
+    while lo < hi:
+        if lo & 1:
+            left.merge(tree[lo])
+            lo += 1
+        if hi & 1:
+            hi -= 1
+            var node = tree[hi].copy()
+            node.merge(right)
+            right = node^
+        lo >>= 1
+        hi >>= 1
+    left.merge(right)
+    return left^
 
 
 @always_inline
@@ -267,6 +314,7 @@ struct TimeWindowSink(Movable, Rounds):
     var int_sums: List[List[Int128]]
     var float_trees: List[List[Float64]]
     var int_trees: List[List[Int128]]
+    var moment_trees: List[List[VarState]]
     var nans: List[List[Int]]
     # The windows before each piece, and the first window of each
     # aggregate task (then the window count); by task its output columns.
@@ -298,6 +346,7 @@ struct TimeWindowSink(Movable, Rounds):
         self.int_sums = List[List[Int128]]()
         self.float_trees = List[List[Float64]]()
         self.int_trees = List[List[Int128]]()
+        self.moment_trees = List[List[VarState]]()
         self.nans = List[List[Int]]()
         self.before = List[Int]()
         self.cuts = List[Int]()
@@ -382,7 +431,7 @@ struct TimeWindowSink(Movable, Rounds):
             if count[0] == _GATHER:
                 self.gathers = True
 
-    def _prepare_bounds(mut self):
+    def _prepare_bounds(mut self) raises:
         """What the reductions read from window bounds use (see the
         fields): one pass over the input for each."""
         self.offsets = List[Int](capacity=len(self.groups) + 1)
@@ -400,6 +449,9 @@ struct TimeWindowSink(Movable, Rounds):
         )
         self.int_trees = List[List[Int128]](
             length=expressions, fill=List[Int128]()
+        )
+        self.moment_trees = List[List[VarState]](
+            length=expressions, fill=List[VarState]()
         )
         self.nans = List[List[Int]](length=expressions, fill=List[Int]())
         for count in self.counts:
@@ -422,7 +474,7 @@ struct TimeWindowSink(Movable, Rounds):
             if kind >= _SUM:
                 self._prepare_reduction(e)
 
-    def _prepare_reduction(mut self, e: Int):
+    def _prepare_reduction(mut self, e: Int) raises:
         """Expression `e`'s sums or extremes over its column, in the
         groups' time order. Null values add nothing and are never an
         extreme; NaN is never an extreme either (a window's extreme is NaN
@@ -430,6 +482,18 @@ struct TimeWindowSink(Movable, Rounds):
         var kind = self.counts[e][0]
         ref column = self.input._columns[self.counts[e][1]]
         var valid = validity(column)
+        if kind == _STD or kind == _VAR:
+            var floats = column.cast(DataType.FLOAT64)
+            ref values = floats._data[Column[Float64]]
+            var leaves = List[VarState](capacity=self.height)
+            for rows in self.groups:
+                for row in rows:
+                    var state = VarState()
+                    if valid[row]:
+                        state.add(values._get(row))
+                    leaves.append(state^)
+            self.moment_trees[e] = _moment_tree(leaves^)
+            return
         comptime for k in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[k]
             if column._data.isa[Column[Scalar[D]]]():
@@ -779,6 +843,19 @@ struct TimeWindowSink(Movable, Rounds):
                 else:
                     values.append(Int64(rows - counts[w]))
             return Series(name, Column[Int64](values^))
+        if kind == _STD or kind == _VAR:
+            var ddof = Int(expression.expr._nodes[1].integer)
+            var out = List[Float64](length=n, fill=0)
+            var present = List[Bool](length=n, fill=False)
+            for w in range(n):
+                var variance = _moment_range(
+                    self.moment_trees[e], lows[w], highs[w]
+                ).variance(ddof)
+                if variance:
+                    var value = variance.value()
+                    out[w] = sqrt(value) if kind == _STD else value
+                    present[w] = True
+            return Series(name, Column[Float64](out^, present))
         var valid = List[Bool](capacity=n)
         var min_count = expression.expr._nodes[1].min_count
         for w in range(n):
@@ -895,6 +972,7 @@ struct TimeWindowSink(Movable, Rounds):
         self.int_sums = List[List[Int128]]()
         self.float_trees = List[List[Float64]]()
         self.int_trees = List[List[Int128]]()
+        self.moment_trees = List[List[VarState]]()
         self.nans = List[List[Int]]()
         self.result = DataFrame(columns^, height=self.cuts[len(self.cuts) - 1])
         self.stage = _DONE
