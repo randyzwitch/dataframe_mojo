@@ -459,14 +459,26 @@ def test_metal_group_tuple_sampling_does_not_prove_actual_cardinality() raises:
 
     # Identical tuples repeat across independent chunk boundaries. A null
     # prefix, a null suffix and valid signed endpoints must stay distinct.
-    var left = Series._from_chunks([
-        Series("a", Column[Int32]([0, 0], [False, True])),
-        Series("a", Column[Int32]([0, 0, 0, 0, 0], [False, True, True, True, False])),
-    ])
-    var right = Series._from_chunks([
-        Series("b", Column[Int64]([Int64.MIN, 0, Int64.MIN], [True, False, True])),
-        Series("b", Column[Int64]([0, Int64.MIN, Int64.MAX, Int64.MAX])),
-    ])
+    var left = Series._from_chunks(
+        [
+            Series("a", Column[Int32]([0, 0], [False, True])),
+            Series(
+                "a",
+                Column[Int32](
+                    [0, 0, 0, 0, 0], [False, True, True, True, False]
+                ),
+            ),
+        ]
+    )
+    var right = Series._from_chunks(
+        [
+            Series(
+                "b",
+                Column[Int64]([Int64.MIN, 0, Int64.MIN], [True, False, True]),
+            ),
+            Series("b", Column[Int64]([0, Int64.MIN, Int64.MAX, Int64.MAX])),
+        ]
+    )
     var mixed = sample_group_tuples(DataFrame([left^, right^]), ["a", "b"])
     assert_equal(mixed.distinct, 6)
     assert_equal(mixed.hottest, 2)

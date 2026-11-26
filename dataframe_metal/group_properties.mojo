@@ -94,8 +94,13 @@ struct GroupSample(Copyable, Movable):
         )
 
 
-def _extend_sample[D: DType](
-    source: Series, positions: List[Int], mut codes: List[Int], mut nulls: List[Bool]
+def _extend_sample[
+    D: DType
+](
+    source: Series,
+    positions: List[Int],
+    mut codes: List[Int],
+    mut nulls: List[Bool],
 ) raises -> Int:
     # A pair of the previous tuple's code and the next signed integer identifies
     # a new tuple exactly. Complementing the nonnegative prefix marks a null at
@@ -106,10 +111,9 @@ def _extend_sample[D: DType](
         # Borrow only the next sampled array. A column may have more physical
         # chunks than there are samples, so building views for all is unbounded.
         var position = positions[at]
-        var window = (
-            source._chunk_at(position) if source.is_chunked() else (
-                source.copy(), position
-            )
+        var window = source._chunk_at(position) if source.is_chunked() else (
+            source.copy(),
+            position,
         )
         var base = position - window[1]
         ref column = window[0]._data[Column[Scalar[D]]]
@@ -117,11 +121,15 @@ def _extend_sample[D: DType](
         var constant = column.is_constant()
         while at < len(positions) and positions[at] < end:
             var row = positions[at] - base
-            var present = column.constant_valid() if constant else column.is_valid(row)
+            var present = (
+                column.constant_valid() if constant else column.is_valid(row)
+            )
             var prefix = codes[at]
             var value = Int64(0)
             if present:
-                value = Int64(column.constant_value() if constant else column._get(row))
+                value = Int64(
+                    column.constant_value() if constant else column._get(row)
+                )
             else:
                 prefix = ~prefix
                 nulls[at] = True
@@ -164,9 +172,13 @@ def sample_group_tuples(
     var distinct = Int(samples > 0)
     for column in columns:
         if column.dtype() == DataType.INT32:
-            distinct = _extend_sample[DType.int32](column, positions, codes, has_null)
+            distinct = _extend_sample[DType.int32](
+                column, positions, codes, has_null
+            )
         elif column.dtype() == DataType.INT64:
-            distinct = _extend_sample[DType.int64](column, positions, codes, has_null)
+            distinct = _extend_sample[DType.int64](
+                column, positions, codes, has_null
+            )
         else:
             raise Error("Grouped Metal samples require integer keys")
     var counts = List[Int](length=distinct, fill=0)
