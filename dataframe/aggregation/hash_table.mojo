@@ -182,6 +182,13 @@ comptime _HLL_BITS = 10
 # Bytes of groups a finish partition holds at most: half of a 256 KiB
 # block; exceeding this budget increases the partition count.
 comptime _PARTITION_BYTES = 128 * 1024
+# Finish jobs per worker. A job holds its merged groups whole (a copy of
+# its share of the sinks' rows) until it has read them out, and every
+# worker runs one job at a time, so the merged copies held at once are
+# about one job per worker: with one job per worker that is a second copy
+# of the whole table; with four, a quarter of it. More jobs mean more
+# result chunks, each with a small fixed cost downstream.
+comptime _FINISH_JOBS_PER_WORKER = 4
 # Initial partition bits: log2 of the workers to start,
 # at most 4 (MAXIMUM_INITIAL_SINK_RADIX_BITS); more once a worker's rows per
 # partition pass half a 256 KiB block (BLOCK_FILL_FACTOR), up to 8.
@@ -3427,9 +3434,11 @@ def _finish_jobs(
     shared partition bits. Runs: consecutive partitions holding about
     half a 256 KiB block of rows, each merged in its own cache-sized
     table. Jobs: consecutive runs holding about an equal share of the
-    rows per worker, and at least a run's, each one chunk of the result,
-    so each thread finishes separate partitions (a chunk per run made
-    later steps pay their per-chunk cost hundreds of times). `held` is
+    rows, `_FINISH_JOBS_PER_WORKER` shares per worker, and at least a
+    run's, each one chunk of the result, so each thread finishes separate
+    partitions and holds a small part of the merged groups at a time (a
+    chunk per run made later steps pay their per-chunk cost hundreds of
+    times). `held` is
     the address of the sinks' `_HeldBuffers`."""
     var bits = Int(layout.radix[].bits.load())
     var stride = sinks[0].parts.stride
@@ -3461,7 +3470,8 @@ def _finish_jobs(
         weight[p] += 8 * stride * rows[p]
         total += weight[p]
     var per_job = max(
-        _PARTITION_BYTES, -(-total // max(1, configured_workers()))
+        _PARTITION_BYTES,
+        -(-total // max(1, _FINISH_JOBS_PER_WORKER * configured_workers())),
     )
     var finishes = List[_FinishJob]()
     var lo = 0
