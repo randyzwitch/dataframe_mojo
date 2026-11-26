@@ -656,3 +656,34 @@ def test_overlapping_windows_reduce_from_bounds() raises:
         .collect(engine="cpu"),
         out,
     )
+
+
+def test_gathered_window_aggregations_run_in_batches() raises:
+    """Aggregations without a bounds form (median, n_unique, first) over
+    windows holding many times the input's rows in all run in batches of
+    windows and give each window's own answer."""
+    var n = 200
+    var times = List[Int64](length=n, fill=0)
+    var x = List[Int64](length=n, fill=0)
+    for i in range(n):
+        times[i] = Int64(i // 50) * HOUR
+        x[i] = Int64(i)
+    var frame = DataFrame([_times("t", times), Series("x", Column[Int64](x^))])
+    var aggs: List[Expr] = [
+        col("x").median().alias("med"),
+        col("x").n_unique().alias("nu"),
+        col("x").first().alias("first"),
+    ]
+    # Windows (t - 2h, t]: rows of the same and the previous hour.
+    var out = frame.rolling("t", "2h").agg(aggs)
+    assert_equal(out.height(), n)
+    for row in [0, 49, 50, 120, 199]:
+        var hour = row // 50
+        var lo = 0 if hour == 0 else (hour - 1) * 50
+        var hi = (hour + 1) * 50
+        assert_equal(out.item(row, "nu").int64(), Int64(hi - lo))
+        assert_equal(out.item(row, "first").int64(), Int64(lo))
+        assert_equal(out.item(row, "med").float64(), Float64(lo + hi - 1) / 2.0)
+    assert_frame(
+        frame.lazy().rolling("t", "2h").agg(aggs).collect(engine="cpu"), out
+    )

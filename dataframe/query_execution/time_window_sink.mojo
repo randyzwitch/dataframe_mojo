@@ -768,39 +768,58 @@ struct TimeWindowSink(Movable, Rounds):
                 self.index.dtype()
             )
         )
-        var rows = List[Int]()
-        var ids = List[Int]()
-        var gathered = List[Series]()
-        if self.gathers:
+        # Gathered aggregations run over batches of windows holding at most
+        # as many rows as the input (one window never holds more), so the
+        # rows gathered stay within the input's size however much the
+        # windows overlap; by expression the batches' outputs.
+        var batches = List[List[Series]](
+            length=len(self.bound), fill=List[Series]()
+        )
+        var w = 0
+        while self.gathers and (w < len(lows) or w == 0):
+            var end = w
             var members = 0
-            for w in range(len(lows)):
-                members += highs[w] - lows[w]
-            rows = List[Int](capacity=members)
-            ids = List[Int](capacity=members)
-            for w in range(len(lows)):
-                ref group = self.groups[groups[w]]
-                for k in range(lows[w], highs[w]):
+            while end < len(lows) and (
+                end == w or members + highs[end] - lows[end] <= self.height
+            ):
+                members += highs[end] - lows[end]
+                end += 1
+            var rows = List[Int](capacity=members)
+            var ids = List[Int](capacity=members)
+            for v in range(w, end):
+                ref group = self.groups[groups[v]]
+                for k in range(lows[v], highs[v]):
                     rows.append(group[k])
-                    ids.append(w)
-            # The task's rows of each column, on this task's thread.
-            gathered = List[Series](capacity=self.input.width())
+                    ids.append(v - w)
+            # The batch's rows of each column, on this task's thread.
+            var gathered = List[Series](capacity=self.input.width())
             for column in self.input._columns:
                 gathered.append(column.take(rows))
+            for e in range(len(self.bound)):
+                if self.counts[e][0] == _GATHER:
+                    batches[e].append(
+                        evaluate(
+                            self.bound[e],
+                            gathered,
+                            len(rows),
+                            batch_size=self.node.window_batch_size(),
+                            grouped=True,
+                            groups=ids,
+                            group_count=end - w,
+                            workers=1,
+                        )
+                    )
+            if end == len(lows):
+                break
+            w = end
         for e in range(len(self.bound)):
             var count = self.counts[e]
             if count[0] == _GATHER:
-                columns.append(
-                    evaluate(
-                        self.bound[e],
-                        gathered,
-                        len(rows),
-                        batch_size=self.node.window_batch_size(),
-                        grouped=True,
-                        groups=ids,
-                        group_count=len(firsts),
-                        workers=1,
-                    )
-                )
+                if len(batches[e]) == 1:
+                    columns.append(batches[e][0].copy())
+                else:
+                    # One array per task, as the output assembly expects.
+                    columns.append(Series._from_chunks(batches[e]).rechunk())
                 continue
             var flat_lows = List[Int](capacity=len(lows))
             var flat_highs = List[Int](capacity=len(lows))
