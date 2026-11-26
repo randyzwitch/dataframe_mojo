@@ -1531,9 +1531,6 @@ struct _ChunkRunner(Movable):
     # rows (a morsel read in place); -1 otherwise. Errors that name a row
     # number it from there (`DataChunk.source_row`).
     var source_rows: Int
-    # The first row of the morsel running, when it is a range of an
-    # in-memory frame's rows; -1 otherwise.
-    var frame_offset: Int
     # Whether the sink's answer depends on the order its rows come in (a
     # first or last, the position of an extreme, groups in first-appearance
     # order): a cross product then makes its pairs in the join's order, each
@@ -1590,7 +1587,6 @@ struct _ChunkRunner(Movable):
         self.scan = None
         self.scan_offset = -1
         self.source_rows = -1
-        self.frame_offset = -1
         self.ordered_pairs = False
 
     def begin_morsel(mut self) raises:
@@ -1896,7 +1892,7 @@ struct _ChunkRunner(Movable):
                 if kind == STEP_JOIN:
                     columns = self._join(columns, at)
                 else:
-                    columns = self._reshape(columns, at)
+                    columns = self._reshape(columns, at, origin)
                 self.counts[2 * n + 1 + at] += Int(perf_counter_ns()) - began
                 self.counts[2 * at + 2] += columns.height
                 origin = -1
@@ -1941,19 +1937,19 @@ struct _ChunkRunner(Movable):
             columns = self._vector_steps(columns, n, n, origin)
         return columns^
 
-    def _reshape(mut self, columns: _Columns, s: Int) raises -> _Columns:
+    def _reshape(
+        mut self, columns: _Columns, s: Int, origin: Int
+    ) raises -> _Columns:
         """An explode or unnest step over a morsel's collected columns: the
         operator over them as a frame, its output the columns the next
-        steps read."""
+        steps read. `origin` is the first row of the frame they are, when
+        they are its rows in place (`source_rows`); -1 otherwise."""
         ref step = self.steps[][s]
         var frame = columns.whole(self.arena, self.schemas[][s])
         if step.kind == STEP_EXPLODE:
-            # The first step over a morsel of a frame's rows names rows
-            # of the frame in its errors.
-            var first_row = 0
-            if s == 0 and self.scan_offset >= 0 and self.frame_offset >= 0:
-                first_row = self.frame_offset
-            frame = frame._exploded(step.names, first_row)
+            # A step over a frame's rows in place names rows of the frame
+            # in its errors.
+            frame = frame._exploded(step.names, max(origin, 0))
         else:
             frame = frame._unnested(step.names[0])
         return _Columns.of_frame(self.arena, frame)
@@ -3029,9 +3025,7 @@ struct _PipelineJob(Job):
                 var source = _Columns.of_frame(self.runner.arena, morsel)
                 self._sink_from(source^, k, offset)
                 continue
-            self.runner.frame_offset = offset
             self._morsel(morsel, k, offset, length)
-            self.runner.frame_offset = -1
 
     def _run_source(mut self) raises:
         """Batches from the file source until it is done: each is taken under
