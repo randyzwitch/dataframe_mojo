@@ -231,7 +231,7 @@ struct TopRowsSink(Movable, Rounds):
     var stage: Int
     var tasks: Int
     var rows: List[Int]
-    var flags: List[UInt8]
+    var marks: List[UInt8]
     var bounds: List[Int]
     var gathered: List[List[Series]]
     var result: DataFrame
@@ -278,7 +278,7 @@ struct TopRowsSink(Movable, Rounds):
         self.stage = _TABLE
         self.tasks = 0
         self.rows = List[Int]()
-        self.flags = List[UInt8]()
+        self.marks = List[UInt8]()
         self.bounds = List[Int]()
         self.gathered = List[List[Series]]()
         self.result = DataFrame(List[Series]())
@@ -300,7 +300,7 @@ struct TopRowsSink(Movable, Rounds):
             self._finish(rows)
             return 0
         self.rows = rows^
-        self.flags = List[UInt8](length=self.input.height(), fill=0)
+        self.marks = List[UInt8](length=self.input.height(), fill=0)
         self.stage = _FLAG_ROWS
         self.tasks = task_count(len(self.rows), configured_workers())
         return self.tasks
@@ -311,14 +311,14 @@ struct TopRowsSink(Movable, Rounds):
             # task writes these bytes.
             var n = len(self.rows)
             var rows = self.rows.unsafe_ptr()
-            var flags = self.flags.unsafe_ptr()
+            var flags = self.marks.unsafe_ptr()
             for i in range(
                 n * task // self.tasks, n * (task + 1) // self.tasks
             ):
                 flags[rows[i]] = 1
             return
         if self.stage == _GATHER_RANGES:
-            var flags = self.flags.unsafe_ptr()
+            var flags = self.marks.unsafe_ptr()
             for r in range(task, len(self.bounds) - 1, self.tasks):
                 var start = self.bounds[r]
                 var end = self.bounds[r + 1]
@@ -377,7 +377,7 @@ struct TopRowsSink(Movable, Rounds):
             height = len(columns[c])
         self.result = DataFrame(columns^, height=height)
         self.gathered = List[List[Series]]()
-        self.flags = List[UInt8]()
+        self.marks = List[UInt8]()
         self.bounds = List[Int]()
         self.stage = _TABLE
         self.tasks = 0
