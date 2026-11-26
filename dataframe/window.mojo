@@ -843,30 +843,6 @@ def _interpolate(
     return Series("", Column[Float64](out^, out_valid))
 
 
-def _exact_axis(by: Series) raises -> Optional[List[Int128]]:
-    """Return an integer-valued axis as exact Int128 values, or None for a
-    floating axis. Decimals keep their unscaled values: interpolation only
-    uses ratios of differences, so the common scale cancels."""
-    var contiguous = by.rechunk()
-    if contiguous.dtype().is_decimal():
-        var wide = contiguous._decimal128()
-        ref column = wide._data[Column[Int128]]
-        var values = List[Int128](capacity=len(column))
-        for i in range(len(column)):
-            values.append(column._get(i))
-        return values^
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        comptime if D.is_integral():
-            if contiguous._data.isa[Column[Scalar[D]]]():
-                ref column = contiguous._data[Column[Scalar[D]]]
-                var values = List[Int128](capacity=len(column))
-                for i in range(len(column)):
-                    values.append(column._get(i).cast[DType.int128]())
-                return values^
-    return None
-
-
 @always_inline
 def _exact_difference(high: Int128, low: Int128) -> Float64:
     """`high - low` as Float64, rounded once. Values with the same sign cannot
@@ -877,6 +853,98 @@ def _exact_difference(high: Int128, low: Int128) -> Float64:
     return high.cast[DType.float64]() - low.cast[DType.float64]()
 
 
+@always_inline
+def _axis_difference[D: DType](high: Scalar[D], low: Scalar[D]) -> Float64:
+    """The distance from `low` to `high` on an interpolation axis. Integer
+    coordinates subtract exactly before converting: converting first would
+    round nearby wide values together (2**53 + 1 becomes 2**53)."""
+    comptime if D.is_integral():
+        return _exact_difference(
+            high.cast[DType.int128](), low.cast[DType.int128]()
+        )
+    else:
+        return high.cast[DType.float64]() - low.cast[DType.float64]()
+
+
+def _fill_gaps_by[
+    D: DType
+](
+    rows: List[Int],
+    axis: Column[Scalar[D]],
+    valid: List[Bool],
+    values: Column[Float64],
+    mut out: List[Float64],
+    mut out_valid: List[Bool],
+):
+    """Fill the null values among `rows` (in coordinate order, every
+    coordinate valid) between their nearest valid neighbors. A gap is
+    filled when its closing endpoint is reached, so each row is visited a
+    constant number of times."""
+    var nan = Float64(0) / Float64(0)
+    var previous = -1
+    for j in range(len(rows)):
+        var row = rows[j]
+        if not valid[row]:
+            continue
+        if previous >= 0 and j - previous > 1:
+            var before = rows[previous]
+            var low = values._get(before)
+            var rise = values._get(row) - low
+            var start = axis._get(before)
+            var span = _axis_difference[D](axis._get(row), start)
+            for k in range(previous + 1, j):
+                var gap_row = rows[k]
+                var offset = _axis_difference[D](axis._get(gap_row), start)
+                # Endpoints at one coordinate leave the slope undefined.
+                out[gap_row] = (
+                    low + rise * (offset / span) if span != 0 else nan
+                )
+                out_valid[gap_row] = True
+        previous = j
+
+
+def _interpolate_by_axis[
+    D: DType
+](
+    axis: Column[Scalar[D]],
+    by: Series,
+    by_valid: List[Bool],
+    valid: List[Bool],
+    values: Column[Float64],
+    parts: List[List[Int]],
+    mut out: List[Float64],
+    mut out_valid: List[Bool],
+) raises:
+    for part in parts:
+        # Rows are taken in coordinate order (stable among equal
+        # coordinates); a row with a null coordinate has no place on the
+        # axis and stays as it is.
+        var ordered = True
+        var complete = True
+        var last = -1
+        for row in part:
+            if not by_valid[row]:
+                complete = False
+                continue
+            if last >= 0 and axis._get(last) > axis._get(row):
+                ordered = False
+            last = row
+        if ordered and complete:
+            _fill_gaps_by[D](part, axis, valid, values, out, out_valid)
+            continue
+        var rows = List[Int](capacity=len(part))
+        for row in part:
+            if by_valid[row]:
+                rows.append(row)
+        if not ordered:
+            var order = by.take(rows).argsort()
+            var sorted = List[Int](capacity=len(rows))
+            for k in order:
+                sorted.append(rows[k])
+            rows = sorted^
+        _fill_gaps_by[D](rows, axis, valid, values, out, out_valid)
+
+
 def interpolate_by_op(
     input: Series, by: Series, ids: List[Int]
 ) raises -> Series:
@@ -884,78 +952,43 @@ def interpolate_by_op(
     var valid = validity(input)
     var by_valid = validity(by)
     ref values = floats._data[Column[Float64]]
-    # Converting a wide integer axis to Float64 first would round nearby
-    # coordinates together (2**53 + 1 becomes 2**53), so integer axes take
-    # differences exactly and convert only the difference.
-    var exact = _exact_axis(by)
-    var is_exact = Bool(exact)
-    var ints = exact.value().copy() if is_exact else List[Int128]()
-    var axis = Series("", Column[Float64](List[Float64]()))
-    if not is_exact:
-        axis = _as_float(by)
-    ref positions = axis._data[Column[Float64]]
     var out = List[Float64](length=len(input), fill=0)
     var out_valid = valid.copy()
     for i in range(len(input)):
         if valid[i]:
             out[i] = values._get(i)
-    var nan = Float64(0) / Float64(0)
-    for part in partitions(len(input), ids):
-        # Rows are taken in coordinate order (stable among equal
-        # coordinates); a row with a null coordinate has no place on the
-        # axis and stays as it is.
-        var rows = List[Int](capacity=len(part))
-        var ordered = True
-        for row in part:
-            if not by_valid[row]:
-                continue
-            if len(rows) > 0:
-                var last = rows[len(rows) - 1]
-                if is_exact:
-                    ordered = ordered and ints[last] <= ints[row]
-                else:
-                    ordered = ordered and not (
-                        positions._get(last) > positions._get(row)
-                    )
-            rows.append(row)
-        if not ordered:
-            var order = by.take(rows).argsort()
-            var sorted = List[Int](capacity=len(rows))
-            for k in order:
-                sorted.append(rows[k])
-            rows = sorted^
-        # A gap is filled when its closing endpoint is reached, so each row
-        # is visited a constant number of times.
-        var previous = -1
-        for j in range(len(rows)):
-            var row = rows[j]
-            if not valid[row]:
-                continue
-            if previous >= 0 and j - previous > 1:
-                var before = rows[previous]
-                var low = values._get(before)
-                var rise = values._get(row) - low
-                var span: Float64
-                if is_exact:
-                    span = _exact_difference(ints[row], ints[before])
-                else:
-                    span = positions._get(row) - positions._get(before)
-                for k in range(previous + 1, j):
-                    var gap_row = rows[k]
-                    var offset: Float64
-                    if is_exact:
-                        offset = _exact_difference(ints[gap_row], ints[before])
-                    else:
-                        offset = positions._get(gap_row) - positions._get(
-                            before
-                        )
-                    # Endpoints at one coordinate leave the slope undefined.
-                    out[gap_row] = (
-                        low + rise * (offset / span) if span != 0 else nan
-                    )
-                    out_valid[gap_row] = True
-            previous = j
-    return Series("", Column[Float64](out^, out_valid))
+    var parts = partitions(len(input), ids)
+    var axis = by.rechunk()
+    if axis.dtype().is_decimal():
+        # Unscaled values: interpolation uses only ratios of coordinate
+        # differences, so the common scale cancels.
+        var wide = axis._decimal128()
+        _interpolate_by_axis[DType.int128](
+            wide._data[Column[Int128]],
+            axis,
+            by_valid,
+            valid,
+            values,
+            parts,
+            out,
+            out_valid,
+        )
+        return Series("", Column[Float64](out^, out_valid))
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if axis._data.isa[Column[Scalar[D]]]():
+            _interpolate_by_axis[D](
+                axis._data[Column[Scalar[D]]],
+                axis,
+                by_valid,
+                valid,
+                values,
+                parts,
+                out,
+                out_valid,
+            )
+            return Series("", Column[Float64](out^, out_valid))
+    raise Error("interpolate_by axis has unsupported storage")
 
 
 def _edge_text(value: Float64) -> String:
