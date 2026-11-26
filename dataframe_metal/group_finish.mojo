@@ -28,9 +28,7 @@ def _finish_group_float(
     # radix digits preserves this bound for every partial sum.
     var result = Float64(0)
     for bin in range(least // 32, greatest // 32 + 1):
-        var scale = bitcast[DType.float64](
-            UInt64(1023 - 149 + 32 * bin) << 52
-        )
+        var scale = bitcast[DType.float64](UInt64(1023 - 149 + 32 * bin) << 52)
         result += bins[bin].cast[DType.float64]() * scale
     return result
 
@@ -48,12 +46,18 @@ def _gather_keys[D: DType](source: Series, indices: List[Int]) raises -> Series:
         if first < last:
             ref column = part._data[Column[Scalar[D]]]
             if column.is_constant():
-                parts.append(Series(source.name(), column._resized(last - first)))
+                parts.append(
+                    Series(source.name(), column._resized(last - first))
+                )
             else:
-                parts.append(Series(
-                    source.name(),
-                    gather_scalars[D](column, indices, False, first, last, base),
-                ))
+                parts.append(
+                    Series(
+                        source.name(),
+                        gather_scalars[D](
+                            column, indices, False, first, last, base
+                        ),
+                    )
+                )
         first = last
         base = end
         if first == len(indices):
