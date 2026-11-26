@@ -2484,8 +2484,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         joins: List[Int],
         right_sides: List[Bool],
         columns: List[List[String]],
-    ) raises:
-        plan_narrow_join_inputs(
+    ) raises -> Bool:
+        return plan_narrow_join_inputs(
             self._plan, joins=joins, right_sides=right_sides, columns=columns
         )
 
