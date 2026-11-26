@@ -6,7 +6,11 @@ from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.execution_observation import DeviceObservation
 from .accelerator.faults import data_fault
-from .accelerator.gpu.dictionary_pair import PAIR_WORDS, dictionary_pair_sum
+from .accelerator.gpu.dictionary_pair import (
+    PAIR_WORDS,
+    dictionary_pair_sum,
+    dictionary_pair_sum_two_spans,
+)
 from .accelerator.gpu.erased_input import numeric_views
 from .accelerator.gpu.numeric_view import NumericView, intersect_numeric_views
 from .accelerator.gpu.query_scope import Scope, shared_service
@@ -75,6 +79,20 @@ def _finish_dictionary[
     return DataFrame(columns^)
 
 
+@always_inline
+def _pair_offsets(one: NumericView, two: NumericView) -> UInt64:
+    return UInt64(one.bit_offset) | (UInt64(two.bit_offset) << 32)
+
+
+@always_inline
+def _validity_flags(a: NumericView, b: NumericView, v: NumericView) -> UInt32:
+    return (
+        UInt32(a.nullable)
+        | (UInt32(b.nullable) << 1)
+        | (UInt32(v.nullable) << 2)
+    )
+
+
 def execute_dictionary_sum[
     single_key: Bool, sparse: Bool = False
 ](
@@ -109,7 +127,7 @@ def execute_dictionary_sum[
                 )
             )
         var segments = intersect_numeric_views(inputs, frame.height())
-        var launches = len(segments)
+        var span_count = len(segments)
         var slots = (left_labels + 1) * (right_labels + 1)
         comptime if sparse:
             var capacity = 2
@@ -142,15 +160,52 @@ def execute_dictionary_sum[
         try:
             ctx.enqueue_memset(state, UInt32(0))
             var base = 0
-            for segment in segments:
+            var index = 0
+            while index < span_count:
+                ref segment = segments[index]
                 ref a = segment[0]
                 ref b = segment[0 if single_key else 1]
                 ref v = segment[1 if single_key else 2]
-                var flags = (
-                    UInt32(a.nullable)
-                    | (UInt32(b.nullable) << 1)
-                    | (UInt32(v.nullable) << 2)
-                )
+                var flags = _validity_flags(a, b, v)
+                if index + 1 < span_count:
+                    ref second = segments[index + 1]
+                    ref c = second[0]
+                    ref d = second[0 if single_key else 1]
+                    ref w = second[1 if single_key else 2]
+                    ctx.enqueue_function[
+                        dictionary_pair_sum_two_spans[single_key, sparse]
+                    ](
+                        a.values,
+                        b.values,
+                        v.values,
+                        a.bits,
+                        b.bits,
+                        v.bits,
+                        c.values,
+                        d.values,
+                        w.values,
+                        c.bits,
+                        d.bits,
+                        w.bits,
+                        _pair_offsets(a, c),
+                        _pair_offsets(b, d),
+                        _pair_offsets(v, w),
+                        flags | (_validity_flags(c, d, w) << 3),
+                        UInt32(left_labels),
+                        UInt32(right_labels),
+                        UInt32(v.tag),
+                        UInt32(base),
+                        UInt32(v.rows),
+                        UInt32(w.rows),
+                        UInt32(slots),
+                        state,
+                        grid_dim=(v.rows + w.rows + 255) // 256,
+                        block_dim=256,
+                    )
+                    scope.record_launches(1)
+                    base += v.rows + w.rows
+                    index += 2
+                    continue
                 ctx.enqueue_function[dictionary_pair_sum[single_key, sparse]](
                     a.values,
                     b.values,
@@ -174,6 +229,7 @@ def execute_dictionary_sum[
                 )
                 scope.record_launches(1)
                 base += v.rows
+                index += 1
             if not shared_output:
                 ctx.enqueue_copy(host.unsafe_ptr(), state)
             scope.synchronize()
@@ -204,7 +260,7 @@ def execute_dictionary_sum[
                 raise data_fault("grouped reduction exceeded 65536 groups")
         if result_words[control_at + 1]:
             raise data_fault("dictionary code outside its key domain")
-        if Int(result_words[control_at]) != launches:
+        if Int(result_words[control_at]) != span_count:
             raise Error("Metal dictionary scan did not complete")
         started = Int(perf_counter_ns())
         var result = _finish_dictionary[single_key, sparse](
