@@ -435,6 +435,10 @@ def to_pl_expr(e, types):
         return E(1).cast(pl.String).str.replace_all(e[2], e[3], literal=True)
     if op == "str.pad_start":
         return E(1).cast(pl.String).str.pad_start(e[2], e[3])
+    if op == "interpolate":
+        return E(1).interpolate(e[2])
+    if op == "interpolate_by":
+        return E(1).interpolate_by(E(2))
     if op == "list.get":
         return E(1).list.get(e[2], null_on_oob=True)
     if op == "field":
@@ -548,6 +552,27 @@ def to_pl_plan(p, srcs):
         return lf.with_row_index(p[2])
     if op == "unnest":
         return lf.unnest(p[2])
+    if op == "rolling":
+        # (rolling P INDEX PERIOD OFFSET CLOSED (list KEYS) (list AGGS))
+        return lf.rolling(
+            p[2],
+            period=p[3],
+            offset=p[4] or None,
+            closed=p[5],
+            group_by=list(p[6][1:]) or None,
+        ).agg([X(e) for e in p[7][1:]])
+    if op == "dynamic":
+        # (dynamic P INDEX EVERY PERIOD OFFSET CLOSED LABEL (list KEYS)
+        #  (list AGGS))
+        return lf.group_by_dynamic(
+            p[2],
+            every=p[3],
+            period=p[4] or None,
+            offset=p[5] or None,
+            closed=p[6],
+            label=p[7],
+            group_by=list(p[8][1:]) or None,
+        ).agg([X(e) for e in p[9][1:]])
     raise ValueError("unknown plan op " + op)
 
 
@@ -870,8 +895,9 @@ class PlanGen:
         kind = r.choices(
             ["filter", "with_columns", "select", "group_by", "join", "sort",
              "unique", "head", "explode", "concat", "drop_nulls", "agg_select",
-             "with_row_index", "reverse", "unnest", "drop"],
-            weights=[14, 12, 6, 14, 12, 9, 6, 5, 3, 3, 2, 3, 1, 1, 2, 1],
+             "with_row_index", "reverse", "unnest", "drop", "interpolate",
+             "time_window"],
+            weights=[14, 12, 6, 14, 12, 9, 6, 5, 3, 3, 2, 3, 1, 1, 2, 1, 3, 4],
         )[0]
         if kind == "filter":
             p = g.predicate()
@@ -1011,7 +1037,90 @@ class PlanGen:
             if len(names) < 2:
                 return None
             return ("drop", plan, ("list",) + tuple(r.sample(names, k=1))), ordered
+        if kind == "interpolate":
+            return self.interpolate_step(plan, schema, ordered)
+        if kind == "time_window":
+            return self.time_window_step(plan, schema, ordered)
         return None
+
+    def interpolate_step(self, plan, schema, ordered):
+        """with_columns of interpolate / interpolate_by. Row interpolation
+        needs a defined row order; coordinate interpolation runs on an axis
+        derived from a row index, so its coordinates are unique (Polars
+        orders tied coordinates arbitrarily) and it stays defined after
+        later steps reorder rows."""
+        r = self.rng
+        if not ordered and "_ri" not in schema:
+            return None
+        if "_ri" not in schema:
+            plan = ("with_row_index", plan, "_ri")
+            schema = dict(schema, _ri="uint32")
+        g = Gen(r, schema, ordered)
+        # Float32 linear interpolation is Float64 here (as for mean), and
+        # decimals are not interpolated.
+        nums = g.cols(lambda s: is_numeric(s) and s != "float32")
+        if not nums:
+            return None
+        es = []
+        for _ in range(r.randint(1, 3)):
+            c = ("col", r.choice(nums))
+            if ordered and r.random() < 0.5:
+                e = ("interpolate", c, r.choice(["linear", "nearest"]))
+                keys = g.cols(is_key)
+                if keys and r.random() < 0.3:
+                    e = ("over", e, ("list", r.choice(keys)), ("list",), False, False)
+            else:
+                axis = ("cast", ("col", "_ri"), "int64", False)
+                if r.random() < 0.6:
+                    # A shuffled order of the rows.
+                    axis = ("mod", ("mul", axis, 7919), 1000003)
+                if r.random() < 0.3:
+                    # Coordinates past 2**53, one unit apart.
+                    axis = ("add", axis, 9007199254740992)
+                elif r.random() < 0.3:
+                    axis = ("cast", axis, "float64", False)
+                e = ("interpolate_by", c, axis)
+            es.append(("alias", e, g.name("p")))
+        return ("with_columns", plan, ("list",) + tuple(es)), ordered
+
+    def time_window_step(self, plan, schema, ordered):
+        """rolling or group_by_dynamic over a temporal column, on input
+        sorted by it (both engines need that) with null times dropped."""
+        r = self.rng
+        g = Gen(r, schema, ordered)
+        times = g.cols(lambda s: s in ("date", "datetime"))
+        if not times:
+            return None
+        index = r.choice(times)
+        is_date = schema[index] == "date"
+        keys = [k for k in g.cols(is_key) if k != index]
+        ks = r.sample(keys, k=min(len(keys), r.choice([0, 0, 1, 2])))
+        sub = Gen(
+            r, {k: v for k, v in schema.items() if k not in ks and k != index},
+            ordered,
+        )
+        aggs = [sub.agg(allow_order=ordered) for _ in range(r.randint(1, 3))]
+        aggs = [a for a in aggs if a is not None]
+        if not aggs:
+            return None
+        sizes = ["1d", "2d", "3d", "1w", "1mo"]
+        if not is_date:
+            sizes += ["30s", "1h", "90m", "6h"]
+        plan = ("drop_nulls", plan, ("list", index))
+        plan = ("sort", plan, ("list", index), ("list", False), ("list", False), True)
+        closed = r.choice(["left", "right", "both", "none"])
+        offset = r.choice(["", "", "0d", "-1d", "1d"] + ([] if is_date else ["-2h"]))
+        aggs = ("list",) + tuple(aggs)
+        if r.random() < 0.5:
+            return (
+                "rolling", plan, index, r.choice(sizes), offset, closed,
+                ("list",) + tuple(ks), aggs,
+            ), False
+        return (
+            "dynamic", plan, index, r.choice(sizes), r.choice([""] + sizes),
+            offset, closed, r.choice(["left", "right", "datapoint"]),
+            ("list",) + tuple(ks), aggs,
+        ), False
 
 
 def fix_unique_order(plan, ordered):
@@ -1568,7 +1677,7 @@ def plan_ordered(p, case):
     op = p[0]
     if op == "src":
         return True
-    if op in ("join", "cross"):
+    if op in ("join", "cross", "rolling", "dynamic"):
         return False
     if op == "concat":
         return all(plan_ordered(k, case) for k in p[2:])
@@ -1613,7 +1722,7 @@ def check_order(p, case):
         return plan_ordered(p[1], case)
     if op == "unique" and (len(p[2]) > 1 or p[3] in ("first", "last")):
         return plan_ordered(p[1], case)
-    if op in ("group_by", "with_columns", "select", "filter"):
+    if op in ("group_by", "with_columns", "select", "filter", "rolling", "dynamic"):
         if uses_order(p) and not plan_ordered(p[1], case):
             return False
     return True
@@ -1622,7 +1731,7 @@ def check_order(p, case):
 def uses_order(node):
     if isinstance(node, tuple) and node:
         if node[0] in ("first", "last", "arg_min", "arg_max", "cum_sum", "cum_max",
-                       "cum_min", "cum_count", "shift", "diff"):
+                       "cum_min", "cum_count", "shift", "diff", "interpolate"):
             return True
         return any(uses_order(k) for k in node[1:] if isinstance(k, tuple))
     return False

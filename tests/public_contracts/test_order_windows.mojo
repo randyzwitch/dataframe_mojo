@@ -458,6 +458,117 @@ def test_coordinate_interpolation_accepts_chunked_equal_length_columns() raises:
     )
 
 
+def test_coordinate_interpolation_keeps_wide_integer_axis_exact() raises:
+    # 2**53 + 1 has no Float64 form; the midpoint must still be 5 (#1378).
+    var b: Int64 = 1 << 53
+    var y = Column[Int64]([0, 0, 10], [True, False, True])
+    var wide = DataFrame(
+        [Series("x", Column[Int64]([b, b + 1, b + 2])), Series("y", y.copy())]
+    )
+    var small = DataFrame(
+        [Series("x", Column[Int64]([0, 1, 2])), Series("y", y.copy())]
+    )
+    var extreme = DataFrame(
+        [
+            Series("x", Column[Int64]([Int64.MIN, Int64.MIN + 1, Int64.MAX])),
+            Series("y", Column[Int64]([0, 0, 10], [True, False, True])),
+        ]
+    )
+    var unsigned = DataFrame(
+        [
+            Series(
+                "x",
+                Column[UInt64]([UInt64.MAX - 2, UInt64.MAX - 1, UInt64.MAX]),
+            ),
+            Series("y", y.copy()),
+        ]
+    )
+    var expr = col("y").interpolate_by(col("x"))
+    for frame in [wide.copy(), small.copy(), unsigned.copy()]:
+        assert_equal(frame.select(expr).item(1, "y").float64(), 5.0)
+        var lazy = frame.lazy().select(expr).collect()
+        assert_equal(lazy.item(1, "y").float64(), 5.0)
+    # Opposite-sign endpoints: 1 / (2**64 - 1) of the way from 0 to 10.
+    var tiny = extreme.select(expr).item(1, "y").float64()
+    assert_true(tiny > 0 and tiny < 1e-17)
+
+
+def test_coordinate_interpolation_follows_axis_order() raises:
+    # Rows are interpolated in coordinate order, not row order; a row after
+    # the last valid coordinate stays null, and endpoints sharing one
+    # coordinate leave the slope undefined (NaN).
+    var frame = DataFrame(
+        [
+            Series(
+                "y",
+                Column[Int64](
+                    [0, 0, 10, 0, 0, 4],
+                    [True, False, True, False, False, True],
+                ),
+            ),
+            Series("x", Column[Int64]([0, 5, 2, 1, 3, 4])),
+        ]
+    )
+    var expr = col("y").interpolate_by(col("x"))
+    for actual in [
+        frame.select(expr),
+        frame.lazy().select(expr).collect(),
+    ]:
+        assert_true(actual.item(1, "y").is_null())
+        assert_equal(actual.item(3, "y").float64(), 5.0)
+        assert_equal(actual.item(4, "y").float64(), 7.0)
+        assert_equal(actual.item(5, "y").float64(), 4.0)
+    var tied = DataFrame(
+        [
+            Series("y", Column[Int64]([0, 0, 10], [True, False, True])),
+            Series("x", Column[Int64]([1, 1, 1])),
+        ]
+    )
+    assert_true(isnan(tied.select(expr).item(1, "y").float64()))
+
+
+def test_interpolation_fills_long_gaps_in_one_pass() raises:
+    # A long interior gap and a trailing gap; each gap row is computed from
+    # its own distance to the shared endpoints (#1382).
+    var n = 2001
+    var values = List[Int64](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=False)
+    var axis = List[Int64](length=n, fill=0)
+    var axis_valid = List[Bool](length=n, fill=True)
+    values[0] = 0
+    valid[0] = True
+    values[1000] = 1000
+    valid[1000] = True
+    for i in range(n):
+        axis[i] = Int64(i * 2)
+    axis_valid[500] = False
+    var frame = DataFrame(
+        [
+            Series("x", Column[Int64](values^, valid^)),
+            Series("axis", Column[Int64](axis^, axis_valid^)),
+        ]
+    )
+    var actual = frame.select_exprs(
+        [
+            col("x").interpolate().alias("linear"),
+            col("x").interpolate("nearest").alias("nearest"),
+            col("x").interpolate_by(col("axis")).alias("by"),
+        ]
+    )
+    for row in [1, 499, 500, 501, 999]:
+        assert_equal(actual.item(row, "linear").float64(), Float64(row))
+        var near = 0 if row < 500 else 1000
+        assert_equal(actual.item(row, "nearest").int64(), Int64(near))
+        if row == 500:
+            assert_true(actual.item(row, "by").is_null())
+        else:
+            assert_equal(actual.item(row, "by").float64(), Float64(row))
+    for row in [1001, 1500, 2000]:
+        assert_true(actual.item(row, "linear").is_null())
+        assert_true(actual.item(row, "nearest").is_null())
+        assert_true(actual.item(row, "by").is_null())
+
+
 def test_cut_qcut_edges_labels_nulls_and_breakpoint_struct_are_explicit() raises:
     var nan = Float64(0) / Float64(0)
     var inf = Float64(1) / Float64(0)
