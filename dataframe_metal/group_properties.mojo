@@ -102,9 +102,17 @@ def _extend_sample[D: DType](
     # this position, leaving every Int64 value available as a real key.
     var seen = Dict[Tuple[Int, Int64], Int]()
     var at = 0
-    var base = 0
-    for part in source.chunks():
-        ref column = part._data[Column[Scalar[D]]]
+    while at < len(positions):
+        # Borrow only the next sampled array. A column may have more physical
+        # chunks than there are samples, so building views for all is unbounded.
+        var position = positions[at]
+        var window = (
+            source._chunk_at(position) if source.is_chunked() else (
+                source.copy(), position
+            )
+        )
+        var base = position - window[1]
+        ref column = window[0]._data[Column[Scalar[D]]]
         var end = base + len(column)
         var constant = column.is_constant()
         while at < len(positions) and positions[at] < end:
@@ -124,9 +132,6 @@ def _extend_sample[D: DType](
                 seen[key] = code
             codes[at] = code
             at += 1
-        base = end
-        if at == len(positions):
-            break
     return len(seen)
 
 
