@@ -363,8 +363,8 @@ struct TimeWindowSink(Movable, Rounds):
                     == "right" else times._get(rows[lo])
                 )
                 firsts.append(rows[lo])
-                for k in range(lo, hi):
-                    gathered.append(rows[k])
+                for r in range(lo, hi):
+                    gathered.append(rows[r])
                 starts.append(len(gathered))
             var next = self._window_start(
                 origin, k + 1, fixed, step, every, dtype, zone
