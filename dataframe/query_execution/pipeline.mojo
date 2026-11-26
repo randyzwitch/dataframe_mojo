@@ -137,6 +137,10 @@ from dataframe.query_execution.reduction_sink import (
     whole_input_reductions,
 )
 from dataframe.query_execution.sort_sink import SortSink
+from dataframe.query_execution.top_rows_sink import (
+    TopRowsSink,
+    top_rows_projection,
+)
 from dataframe.query_execution.asof_sink import AsofSink
 from dataframe.query_execution.time_window_sink import TimeWindowSink
 from dataframe.query_execution.row_order_sink import (
@@ -148,7 +152,10 @@ from dataframe.query_execution.reshape_sink import (
     pivot_cell_rows_name,
     reshape_node,
 )
-from dataframe.optimizer.expressions import shared_partition_keys
+from dataframe.optimizer.expressions import (
+    shared_partition_keys,
+    top_rows_filter,
+)
 from dataframe.query_execution.window_sink import (
     WindowSink,
 )
@@ -296,6 +303,7 @@ def plan_stream_execute(
         _sorts_whole(self, index)
         or _orders_rows(self, index)
         or _reshapes_whole(self, index)
+        or _filters_top_rows(self, index)
         or _windows_time(self, index)
         or _joins_asof(self, index)
     ):
@@ -304,8 +312,9 @@ def plan_stream_execute(
         # in rounds (`SortSink`), its computed input a pipeline of the
         # same schedule. So is an operation that places rows by their
         # position (`RowOrderSink`), an unpivot or a pivot
-        # (`ReshapeSink`), time windows (`TimeWindowSink`) and an as-of
-        # join (`AsofSink`).
+        # (`ReshapeSink`), time windows (`TimeWindowSink`), an as-of
+        # join (`AsofSink`), and a filter that keeps each partition's
+        # first rows by rank (`TopRowsSink`).
         return _run_operator(self, index, batch_size)
     var outcome = _stream_head(self, index, batch_size, sink)
     if len(outcome.plan) > 0:
@@ -1578,6 +1587,19 @@ def _sorts_whole(plan: QueryContext, index: Int) -> Bool:
     )
 
 
+def _filters_top_rows(plan: QueryContext, index: Int) -> Bool:
+    """Whether node `index` is a filter that keeps each partition's first
+    k rows by ordinal rank (`top_rows_filter`), which an operator pipeline
+    runs as a `TopRowsSink` over its whole input."""
+    ref node = plan._nodes[index]
+    return (
+        plan._handoff == HANDOFF_OFF
+        and node.kind == FILTER
+        and len(node.exprs) == 1
+        and top_rows_filter(node.exprs[0])
+    )
+
+
 def _windows_time(plan: QueryContext, index: Int) -> Bool:
     """Whether node `index` is a `group_by_dynamic` or `rolling`
     aggregation, which reads its whole input, and an operator pipeline runs
@@ -1793,6 +1815,12 @@ struct _OperatorPipeline(Movable):
     # and when its task started.
     var window_keys: List[String]
     var window: List[WindowSink]
+    # The sink of such a projection whose one computed column keeps each
+    # partition's first k rows by ordinal rank, while its rounds run.
+    var top_rows: List[TopRowsSink]
+    # Whether it is a filter that keeps each partition's first k rows by
+    # ordinal rank, run by that sink too.
+    var top_filter: Bool
     # Whether it is a sort of every row that runs as a `SortSink`, and the
     # sink while its rounds run.
     var sorts: Bool
@@ -1856,6 +1884,8 @@ struct _OperatorPipeline(Movable):
         self.filling = False
         self.window_keys = List[String]()
         self.window = List[WindowSink]()
+        self.top_rows = List[TopRowsSink]()
+        self.top_filter = False
         self.sorts = False
         self.sorting = List[SortSink]()
         self.ranks = False
@@ -1885,6 +1915,7 @@ struct _OperatorPipeline(Movable):
             self.reductions = whole_input_reductions(node.exprs)
         self.sorts = streaming and _sorts_whole(self.plan, index)
         self.orders = streaming and _orders_rows(self.plan, index)
+        self.top_filter = streaming and _filters_top_rows(self.plan, index)
         self.reshapes = (
             streaming
             and _reshapes_whole(self.plan, index)
@@ -1901,12 +1932,38 @@ struct _OperatorPipeline(Movable):
             var ahead = self.plan._prefetched.value()
             for k in range(len(self.wanted)):
                 ahead[][self.wanted[k]] = pipelines[self.at[k]].take_result()
+        if self.top_filter:
+            ref node = self.plan._nodes[self.index]
+            self.began = Int(perf_counter_ns())
+            var input = self.plan._execute(
+                node.left, False, self.streaming, self.batch_size
+            )
+            if top_rows_projection(node.exprs, input._columns) == 0:
+                trace_path("filter.top_rows_rounds")
+                self.top_rows.append(
+                    TopRowsSink.filtering(input^, node.exprs[0].copy())
+                )
+                return
+            # A value or k the table's state does not hold: the filter
+            # over the whole input.
+            trace_path("filter.top_rows_declined")
+            self.result = input._filter(node.exprs[0])
+            return
         if len(self.window_keys) > 0:
             ref node = self.plan._nodes[self.index]
             self.began = Int(perf_counter_ns())
             var input = self.plan._execute(
                 node.left, False, self.streaming, self.batch_size
             )
+            var at = top_rows_projection(node.exprs, input._columns)
+            if at >= 0:
+                trace_path("window.top_rows_rounds")
+                self.top_rows.append(
+                    TopRowsSink(
+                        input^, node.exprs.copy(), node.kind == SELECT, at
+                    )
+                )
+                return
             trace_path("window.partitioned_sink")
             self.window.append(
                 WindowSink(
@@ -2038,6 +2095,7 @@ struct _OperatorPipeline(Movable):
         rounds come first, and the table is made from their result."""
         if (
             len(self.window) > 0
+            or len(self.top_rows) > 0
             or len(self.sorting) > 0
             or len(self.ranking) > 0
             or len(self.windowing) > 0
@@ -2071,6 +2129,7 @@ struct _OperatorPipeline(Movable):
             or self.reductions
             or self.orders
             or self.reshapes
+            or self.top_filter
             or self.times
             or self.asof else 0
         )
@@ -2088,6 +2147,21 @@ struct _OperatorPipeline(Movable):
                 self.index,
                 "window",
                 rows,
+                self.result.height(),
+                wall_ns=Int(perf_counter_ns()) - self.began,
+            )
+            self.finalize()
+        if len(self.top_rows) > 0:
+            var tasks = self.top_rows[0].next_round()
+            if tasks > 0:
+                return tasks
+            self.result = self.top_rows[0].take_result()
+            _ = self.top_rows.pop()
+            plan_record(
+                self.plan,
+                self.index,
+                "window",
+                self.result.height(),
                 self.result.height(),
                 wall_ns=Int(perf_counter_ns()) - self.began,
             )
@@ -2233,6 +2307,8 @@ struct _OperatorPipeline(Movable):
     def finalize_task(mut self, task: Int) raises:
         if len(self.window) > 0:
             self.window[0].round_task(task)
+        elif len(self.top_rows) > 0:
+            self.top_rows[0].round_task(task)
         elif len(self.ranking) > 0:
             self.ranking[0].round_task(task)
         elif len(self.windowing) > 0:

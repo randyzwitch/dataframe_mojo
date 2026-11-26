@@ -1310,3 +1310,75 @@ def test_eager_projections_and_filters_run_as_one_node_plans() raises:
     )
     with assert_raises(contains="Boolean"):
         _ = frame.filter(col("v") + lit(Int64(1)))
+
+
+def test_filters_on_windows_and_reductions_run_as_rounds_in_every_mode() raises:
+    """A filter whose predicate holds windows or reductions over every row
+    computes the predicate as a column below it, with the optimizer on or
+    off, eagerly or lazily: the column's sink runs as rounds of the
+    schedule and a filter step reads it. A filter that keeps each
+    partition's first k rows by ordinal rank finds them in an aggregate
+    of the partitions' k best rows and gathers them; the same predicate as
+    a column is null where the ranked value is null. Rows equal the
+    kernels' filter, in order."""
+    var frame = source().head(50_000).with_row_index("row")
+    var top = col("v").rank("ordinal", descending=True).over("k") <= lit(
+        Int64(2)
+    )
+    var dense = col("v").rank("dense").over("k") <= lit(Int64(2))
+    var above = col("v").cast(DataType.FLOAT64) > col("v").mean()
+    var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")
+    var setting = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var trace = StrategyTrace()
+    var eager_top = frame.filter(top)
+    var lazy_top = frame.lazy().filter(top).collect()
+    var plain_top = frame.lazy().filter(top).collect(optimize=False)
+    var eager_dense = frame.filter(dense)
+    var plain_dense = frame.lazy().filter(dense).collect(optimize=False)
+    var eager_above = frame.filter(above)
+    var plain_above = frame.lazy().filter(above).collect(optimize=False)
+    var marked = frame.with_columns([top.alias("top")])
+    var paths = trace.text()
+    _ = trace^
+    _ = setting^
+    _ = threads^
+    for name in [
+        "filter.top_rows_rounds",
+        "window.top_rows_rounds",
+        "window.partitioned_sink",
+        "window.reduce_row_rounds",
+    ]:
+        assert_true(name in paths, "no " + name)
+    assert_true(
+        "filter.top_k_per_partition" not in paths,
+        "a filter computed its mask over the whole frame",
+    )
+    assert_true(
+        "parallel.jobs_in_task" not in paths,
+        "a task started parallel work of its own",
+    )
+    var expected_top = frame._filter(top)
+    assert_frame(eager_top, expected_top)
+    assert_frame(lazy_top, expected_top)
+    assert_frame(plain_top, expected_top)
+    var expected_dense = frame._filter(dense)
+    assert_frame(eager_dense, expected_dense)
+    assert_frame(plain_dense, expected_dense)
+    var expected_above = frame._filter(above)
+    assert_frame(eager_above, expected_above)
+    assert_frame(plain_above, expected_above)
+    assert_frame(marked, frame._with_columns([top.alias("top")]))
+    assert_true(marked["top"].null_count() > 0, "no null rank was kept null")
+    # Ranked strings are not held by the table's state: the filter runs
+    # over its whole input instead.
+    var by_text = col("s").rank("ordinal").over("k") <= lit(Int64(2))
+    var declined = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var watched = StrategyTrace()
+    var eager_text = frame.filter(by_text)
+    assert_true(
+        "filter.top_rows_declined" in watched.text(),
+        "the string ranks did not decline the table",
+    )
+    _ = watched^
+    _ = declined^
+    assert_frame(eager_text, frame._filter(by_text))
