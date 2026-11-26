@@ -827,7 +827,7 @@ def test_grouped_float_bins_preserve_proven_sums_and_replay_boundary() raises:
             for i in range(10):
                 var bit = least + (i * (width - 1)) // 9
                 var sign = Int128(-1 if i % 3 == 0 else 1)
-                bins[bit // 32] += sign << (bit % 32)
+                bins[bit // 32] += sign << Int128(bit % 32)
             var actual = _finish_group_float(bins, 10, least, greatest, 0)
             var expected = finish_float_bins(bins, False, False, False)
             assert_equal(
