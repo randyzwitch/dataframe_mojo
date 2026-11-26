@@ -825,14 +825,14 @@ def _interpolate(
                 var before = rows[previous]
                 var after = rows[j]
                 var low = values._get(before)
-                var rise = values._get(after) - low
-                var width = Float64(j - previous)
+                # The value per row of distance, applied as low + d * slope.
+                var slope = (values._get(after) - low) / Float64(j - previous)
                 for k in range(previous + 1, j):
                     var row = rows[k]
                     if nearest:
                         source[row] = before if k - previous < j - k else after
                     else:
-                        out[row] = low + rise * (Float64(k - previous) / width)
+                        out[row] = low + Float64(k - previous) * slope
                         source[row] = row
             previous = j
     if nearest:
@@ -880,7 +880,6 @@ def _fill_gaps_by[
     coordinate valid) between their nearest valid neighbors. A gap is
     filled when its closing endpoint is reached, so each row is visited a
     constant number of times."""
-    var nan = Float64(0) / Float64(0)
     var previous = -1
     for j in range(len(rows)):
         var row = rows[j]
@@ -889,16 +888,17 @@ def _fill_gaps_by[
         if previous >= 0 and j - previous > 1:
             var before = rows[previous]
             var low = values._get(before)
-            var rise = values._get(row) - low
             var start = axis._get(before)
-            var span = _axis_difference[D](axis._get(row), start)
+            # The value per unit of coordinate. Endpoints at one coordinate
+            # leave it undefined (infinite or NaN), and the rows between
+            # them come out NaN.
+            var slope = (values._get(row) - low) / _axis_difference[D](
+                axis._get(row), start
+            )
             for k in range(previous + 1, j):
                 var gap_row = rows[k]
                 var offset = _axis_difference[D](axis._get(gap_row), start)
-                # Endpoints at one coordinate leave the slope undefined.
-                out[gap_row] = (
-                    low + rise * (offset / span) if span != 0 else nan
-                )
+                out[gap_row] = low + offset * slope
                 out_valid[gap_row] = True
         previous = j
 

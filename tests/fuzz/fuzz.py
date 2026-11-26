@@ -1097,7 +1097,9 @@ class PlanGen:
             return None
         index = r.choice(times)
         is_date = schema[index] == "date"
-        keys = [k for k in g.cols(is_key) if k != index]
+        # Float keys made by earlier aggregations can differ in the last
+        # bit between engines and split groups, so they are not used.
+        keys = [k for k in g.cols(is_key) if k != index and not is_float(schema[k])]
         ks = r.sample(keys, k=min(len(keys), r.choice([0, 0, 1, 2])))
         sub = Gen(
             r, {k: v for k, v in schema.items() if k not in ks and k != index},
