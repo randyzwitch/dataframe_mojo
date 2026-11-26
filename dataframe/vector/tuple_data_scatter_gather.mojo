@@ -840,7 +840,7 @@ struct TupleDataHeaps(Copyable, Movable):
         self.buffers = List[_Buffer[UInt8]]()
         self.bytes = 0
 
-    def __init__(out self, blocks: List[ArcPointer[List[UInt8]]]):
+    def __init__(out self, blocks: List[_Buffer[UInt8]]):
         """The heaps `blocks`, put in address order."""
         self.starts = List[Int](capacity=len(blocks))
         self.ends = List[Int](capacity=len(blocks))
@@ -848,15 +848,15 @@ struct TupleDataHeaps(Copyable, Movable):
         self.bytes = 0
         var at = Dict[Int, Int]()
         for b in range(len(blocks)):
-            var address = Int(blocks[b][].unsafe_ptr())
+            var address = Int(blocks[b].unsafe_ptr())
             at[address] = b
             self.starts.append(address)
         sort(self.starts)
         for b in range(len(self.starts)):
             ref block = blocks[at.get(self.starts[b], 0)]
-            self.ends.append(self.starts[b] + len(block[]))
-            self.buffers.append(_Buffer[UInt8](block))
-            self.bytes += len(block[])
+            self.ends.append(self.starts[b] + len(block))
+            self.buffers.append(block.copy())
+            self.bytes += len(block)
 
     def add_buffers(mut self, extra: List[_Buffer[UInt8]]):
         """Add `extra`, buffers that rows reference strings in (a

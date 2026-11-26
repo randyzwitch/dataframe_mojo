@@ -304,9 +304,36 @@ name, and requires matching height. An initially empty zero-row frame cannot
 acquire nonzero height via `with_column`; construct with columns or explicit height.
 
 Invalid shape, names, indices, masks, dtype requests, join modes, and integer
-sum overflow raise Mojo `Error`. Allocation failure behavior follows Mojo's
-standard containers. Underscored storage fields are implementation details;
-mutating them directly is outside this contract.
+sum overflow raise Mojo `Error`. Underscored storage fields are implementation
+details; mutating them directly is outside this contract.
+
+## Memory limit
+
+The engine counts the large memory it holds (column buffers, hash table and
+aggregate blocks, and freed blocks it keeps for reuse) against one
+process-wide limit, and also compares the process's resident memory with it
+(read at most once a millisecond), which covers what the count misses. Work
+that would go over it raises an `Error` whose message starts with
+`out of memory`, instead of the operating system killing the process. What
+the failed operation held is freed, so the program can catch the error and
+go on.
+
+- Default: 80% of the memory available to the process, which is physical
+  memory or, when lower, the memory limit of the control group (container or
+  systemd scope) the process runs in.
+- `DATAFRAME_MEMORY_LIMIT` sets it at startup: a size such as `8GB` or
+  `512MiB`, a share such as `50%`, or `none`.
+- `set_memory_limit(8 << 30)` or `set_memory_limit("8GB")` sets it at any
+  time; `memory_limit()` and `memory_usage()` read it and the bytes held.
+- Tables the program holds count toward the limit, so a limit below them
+  makes the next operation fail.
+- Nothing spills to disk: an operation that needs more than the limit
+  fails.
+- The limit is checked between pieces of work (each morsel, scheduled task
+  and round of worker jobs) and before allocations of known size, so memory
+  can grow past it by what one piece of work allocates. The default's
+  headroom covers that; a limit set close to a container's own limit can
+  still let the container kill the process.
 
 ## Threads
 

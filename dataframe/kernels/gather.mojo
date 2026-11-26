@@ -20,7 +20,8 @@ from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer
 from dataframe.storage.boolean import BoolColumn, _bits64
 from dataframe.storage.column import Column
-from dataframe.storage.allocation import huge_uninit
+from dataframe.storage.allocation import check_memory, huge_uninit
+from std.sys import size_of
 
 # Fixed-width payloads a gather copies: the numeric types plus Int128, the
 # storage of decimal columns, which joins used to return as nulls.
@@ -1070,6 +1071,9 @@ def _allocate(column: Series, m: Int) raises -> Series:
     comptime for d in range(len(GATHER_DTYPES)):
         comptime D = GATHER_DTYPES[d]
         if column._data.isa[Column[Scalar[D]]]():
+            # The output's size is known: check it fits under the memory
+            # limit before allocating it, not after.
+            check_memory(m * size_of[Scalar[D]]())
             var output = Series(
                 column.name(),
                 Column[Scalar[D]](huge_uninit[Scalar[D]](m)),

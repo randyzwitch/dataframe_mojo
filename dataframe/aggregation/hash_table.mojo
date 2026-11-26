@@ -133,7 +133,17 @@ from dataframe.expr import (
     COV,
     LEN,
 )
-from dataframe.storage.allocation import huge_list, huge_uninit, release_huge
+from dataframe.storage.memory_limit import charge, uncharge
+from dataframe.storage.allocation import (
+    MemoryReservation,
+    check_memory,
+    reserve_memory,
+    counted_huge_list,
+    huge_list,
+    huge_uninit,
+    release_counted_huge,
+    release_huge,
+)
 from dataframe.storage.nested import _leak, _reclaim
 from dataframe.parallel import (
     Job,
@@ -268,6 +278,9 @@ struct _Partitioned(Movable):
     var arenas: List[List[UInt8]]
     var arena_next: Int
     var arena_end: Int
+    # Bytes already counted toward the memory limit for arenas not yet
+    # allocated (`repartitioned`): the next arenas use them up first.
+    var prepaid: Int
 
     def __init__(out self, bits: Int, addressed: List[Bool], state_words: Int):
         var width = len(addressed)
@@ -284,12 +297,14 @@ struct _Partitioned(Movable):
         self.arenas = List[List[UInt8]]()
         self.arena_next = 0
         self.arena_end = 0
+        self.prepaid = 0
 
     def __deinit__(deinit self):
         # Nothing reads the rows once their table is gone: keep the
         # arenas' pages for the next table rather than faulting fresh ones.
         while len(self.arenas) > 0:
-            release_huge(self.arenas.pop())
+            release_counted_huge(self.arenas.pop())
+        uncharge(self.prepaid)
 
     @no_inline
     def _new_block(mut self, p: Int):
@@ -305,7 +320,13 @@ struct _Partitioned(Movable):
         var bytes = 8 * rows * self.stride
         if self.arena_next + bytes > self.arena_end:
             var size = max(_ARENA_BYTES, bytes)
-            self.arenas.append(huge_uninit[UInt8](size))
+            # Arenas count toward the memory limit (and are freed by
+            # `release_counted_huge`); prepaid bytes cover them first.
+            var arena = huge_uninit[UInt8](size)
+            var cover = min(self.prepaid, arena.capacity())
+            self.prepaid -= cover
+            charge(arena.capacity() - cover)
+            self.arenas.append(arena^)
             self.arena_next = Int(
                 self.arenas[len(self.arenas) - 1].unsafe_ptr()
             )
@@ -358,16 +379,26 @@ struct _Partitioned(Movable):
             return self.block_rows[p][b]
         return (self.next[p] - self.blocks[p][b]) // (8 * self.stride)
 
-    def repartitioned(self, bits: Int) -> _Partitioned:
+    def row_bytes(self) -> Int:
+        """Bytes of the rows written."""
+        var rows = 0
+        for p in range(len(self.blocks)):
+            for b in range(len(self.blocks[p])):
+                rows += self.rows_in(p, b)
+        return 8 * rows * self.stride
+
+    def repartitioned(self, bits: Int, prepaid: Int = 0) -> _Partitioned:
         """Move these rows into `bits` partitions: each partition's rows
         go, in order, to the
         partitions its hash bits extend to, so a partition's rows keep
-        their first-row order."""
+        their first-row order. `prepaid` bytes, already counted toward the
+        memory limit, cover the new arenas first."""
         var out = _Partitioned(
             bits,
             List[Bool](length=self.states_at - _HEAD, fill=False),
             self.stride - self.states_at,
         )
+        out.prepaid = prepaid
         var stride = self.stride
         var bytes = 8 * stride
         var shift = UInt64(48 - bits)
@@ -387,6 +418,9 @@ struct _Partitioned(Movable):
                         into[unsafe_offset=w] = row[unsafe_offset=w]
                     out.next.unsafe_ptr()[unsafe_offset=q] = to + bytes
                     at += bytes
+        # Reserved bytes no arena used are no longer held.
+        uncharge(out.prepaid)
+        out.prepaid = 0
         return out^
 
 
@@ -1638,7 +1672,7 @@ struct AggregateSink(Movable):
     def __deinit__(deinit self):
         # The entries are scratch over this worker's rows: keep their pages
         # for the next table rather than faulting fresh ones in.
-        release_huge(self.entries^)
+        release_counted_huge(self.entries^)
 
     @always_inline
     def _ensure_table(mut self):
@@ -1648,7 +1682,7 @@ struct AggregateSink(Movable):
 
     @no_inline
     def _make_table(mut self):
-        self.entries = huge_list(self.capacity, UInt64(0))
+        self.entries = counted_huge_list(self.capacity, UInt64(0))
 
     def _full(mut self, count: Int):
         """Handle a table without room for `count` more groups: grow it
@@ -1657,8 +1691,8 @@ struct AggregateSink(Movable):
         if self.grow:
             while 3 * (self.live + count) >= 2 * self.capacity:
                 self.capacity *= 2
-            release_huge(self.entries^)
-            self.entries = huge_list(self.capacity, UInt64(0))
+            release_counted_huge(self.entries^)
+            self.entries = counted_huge_list(self.capacity, UInt64(0))
             self._reinsert()
             return
         self.abandoned = True
@@ -1677,8 +1711,8 @@ struct AggregateSink(Movable):
             )
         if grown > 0:
             self.capacity = grown
-            release_huge(self.entries^)
-            self.entries = huge_list(self.capacity, UInt64(0))
+            release_counted_huge(self.entries^)
+            self.entries = counted_huge_list(self.capacity, UInt64(0))
         else:
             if (
                 not self.skip
@@ -1707,12 +1741,20 @@ struct AggregateSink(Movable):
         var bits = self.parts.bits
         if 8 * self.made * self.parts.stride > (_BLOCK_BYTES // 2) << bits:
             bits = self.radix[].raise_to(self.max_bits)
-        self.repartition(max(bits, Int(self.radix[].bits.load())))
+        # One worker's rows mid-sink: the next morsel's check covers them.
+        var to = max(bits, Int(self.radix[].bits.load()))
+        if to > self.parts.bits:
+            self.parts = self.parts.repartitioned(to)
+            self.dictionary_groups.reset()
 
-    def repartition(mut self, bits: Int):
-        """This sink's rows in `bits` partitions, when it has fewer."""
+    def repartition(mut self, bits: Int) raises:
+        """This sink's rows in `bits` partitions, when it has fewer. Every
+        worker copies its rows at once, so the copy is reserved against
+        the memory limit before it is made (`reserve_memory`)."""
         if bits > self.parts.bits:
-            self.parts = self.parts.repartitioned(bits)
+            var bytes = self.parts.row_bytes()
+            reserve_memory(bytes)
+            self.parts = self.parts.repartitioned(bits, bytes)
             self.dictionary_groups.reset()
 
     def _word_ptrs(self) -> List[Int]:
@@ -2881,7 +2923,7 @@ struct _FinishJob(Job):
             unsafe_from_address=self.sinks
         )[]
         ref addressed = jobs[0].addressed
-        var final = _Groups(
+        var final = _Groups.reserved(
             len(addressed),
             addressed.copy(),
             jobs[0].parts.stride - jobs[0].parts.states_at,
@@ -3053,7 +3095,7 @@ struct _FinishJob(Job):
                 var place = (UInt128(part) << 56) | UInt128(final.first(g))
                 keyed.append((place << 64) | UInt128(g))
             sort(keyed)
-            var sorted = _Groups(
+            var sorted = _Groups.reserved(
                 final.width(),
                 final.addressed.copy(),
                 final.stride - final.states_at,
@@ -3070,7 +3112,7 @@ struct _FinishJob(Job):
             # stably, so groups keep their first-row order within each and
             # every run returns the same order whatever partitions the
             # sinks reached.
-            var into = _Groups(
+            var into = _Groups.reserved(
                 final.width(),
                 final.addressed.copy(),
                 final.stride - final.states_at,
@@ -3117,6 +3159,11 @@ def _scan_groups(
     groups it keeps; then every reduction's state finalized and every key
     column read, a vector of groups at a time, into `states`, `keys`,
     `firsts_out` (each group's first row) and `top_rows`."""
+    # The groups become output columns about the size of their rows (a
+    # key or state word becomes about one output value), and every worker
+    # writes its share at once: that much is reserved against the memory
+    # limit until the columns exist and count themselves.
+    var reservation = MemoryReservation(8 * final.stride * final.count())
     if filter and final.count() > 0:
         # The reductions the filter reads, finished over every group,
         # then only the kept groups' rows, in order, for the scan.
@@ -3129,7 +3176,7 @@ def _scan_groups(
             results.append(one^.reducer())
         var kept = chosen.keep(chosen.context, results)
         if len(kept) < final.count():
-            var into = _Groups(
+            var into = _Groups.reserved(
                 final.width(),
                 final.addressed.copy(),
                 final.stride - final.states_at,
@@ -3180,6 +3227,7 @@ def _scan_groups(
         states.append(outputs.pop(0).reducer())
     while len(key_columns) > 0:
         keys.append(key_columns.pop(0).column())
+    _ = reservation^
 
 
 struct _CombineJob(Job):
@@ -3325,7 +3373,7 @@ struct _PerfectScanJob(Job):
                 if theirs[unsafe_offset=2] < mine[unsafe_offset=2]:
                     mine[unsafe_offset=2] = theirs[unsafe_offset=2]
             count += Int(mine[unsafe_offset=1] != 0)
-        var final = _Groups(
+        var final = _Groups.reserved(
             len(jobs[0].addressed),
             jobs[0].addressed.copy(),
             stride - jobs[0].parts.states_at,
@@ -3613,17 +3661,22 @@ struct _TableFinish(Movable):
                 return self.width
 
     def round_task(mut self, task: Int) raises:
+        # Each job merges groups into new rows: the memory limit is checked
+        # before each.
         var j = task
         if self.stage == 1:
             while j < len(self.combines):
+                check_memory()
                 self.combines[j].run()
                 j += self.width
         elif len(self.scans) > 0:
             while j < len(self.scans):
+                check_memory()
                 self.scans[j].run()
                 j += self.width
         else:
             while j < len(self.finishes):
+                check_memory()
                 self.finishes[j].run()
                 j += self.width
 

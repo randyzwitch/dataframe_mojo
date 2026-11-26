@@ -5,6 +5,7 @@ from std.ffi import external_call
 from std.sys import size_of
 from std.memory import ArcPointer, Pointer, Layout, Allocation, alloc, dealloc
 from dataframe.storage.allocation import release_huge
+from dataframe.storage.memory_limit import charge, uncharge
 from dataframe.storage.statistics import BaseStatistics
 from dataframe.storage.residence import (
     _DeviceResidence,
@@ -155,8 +156,13 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
     # The address of a heap `ArcPointer[_StatsRecord]`, 0 until statistics
     # are published (once; `publish_statistics`).
     var _stats: Atomic[Int64]
+    # Bytes of `values` counted toward the memory limit (`charge`), given
+    # back when the buffer is freed or its values are taken.
+    var charged: Int
 
     def __init__(out self, var values: List[Self.T]):
+        self.charged = values.capacity() * size_of[Self.T]()
+        charge(self.charged)
         self.values = values^
         self.address = 0
         self.length = 0
@@ -177,6 +183,7 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.selection = None
         self.repeat = None
         self._stats = Atomic[Int64](0)
+        self.charged = 0
 
     def __init__(
         out self, length: Int, residence: ArcPointer[_DeviceResidence]
@@ -191,8 +198,10 @@ struct _BufferData[T: Copyable & Deinitable](Movable, Sized):
         self.selection = None
         self.repeat = None
         self._stats = Atomic[Int64](0)
+        self.charged = 0
 
     def __deinit__(deinit self):
+        uncharge(self.charged)
         _drop_statistics(Int(self._stats.load()))
         # A large column's storage is kept for the next large table or
         # column (`release_huge`) rather than returned to the kernel.
@@ -442,6 +451,20 @@ struct _Buffer[T: Copyable & Deinitable](Copyable, Sized):
         return Pointer[_BufferData[Self.T], ImmutAnyOrigin](
             unsafe_from_address=Int(self._state.ptr())
         )
+
+    def take_values(mut self) -> List[Self.T]:
+        """The values themselves, leaving this buffer empty; only for a
+        buffer that owns its values and has no other holder. They no
+        longer count toward the memory limit: the caller keeps or frees
+        them."""
+        ref data = Pointer(to=self._state[]).unsafe_origin_cast[
+            MutAnyOrigin
+        ]()[]
+        uncharge(data.charged)
+        data.charged = 0
+        var values = List[Self.T]()
+        swap(values, data.values)
+        return values^
 
     def writable(mut self) -> ref[MutAnyOrigin] List[Self.T]:
         if self._state.count() != 1 or self.is_borrowed():
