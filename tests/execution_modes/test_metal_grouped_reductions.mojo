@@ -806,3 +806,37 @@ def test_metal_grouped_large_result_order_uses_first_selected_row() raises:
                 assert_true(first[ordered[i - 1]] < first[slot])
         for present in seen:
             assert_true(present)
+
+
+def test_grouped_float_bins_preserve_proven_sums_and_replay_boundary() raises:
+    from std.testing import assert_raises
+    from std.memory import bitcast
+    from dataframe_metal.exact_float import finish_float_bins
+    from dataframe_metal.group_finish import (
+        _finish_group_float,
+        GROUP_NONFINITE_FLOAT,
+        GROUP_ROUNDED_FLOAT,
+    )
+
+    # Ten signed inputs across a window that fits the exact-width proof.
+    # Shift through every limb boundary, including subnormal contributions.
+    for least in range(230):
+        for width in [1, 17, 33, 49]:
+            var greatest = least + width - 1
+            var bins = List[Int128](length=9, fill=0)
+            for i in range(10):
+                var bit = least + (i * (width - 1)) // 9
+                var sign = Int128(-1 if i % 3 == 0 else 1)
+                bins[bit // 32] += sign << (bit % 32)
+            var actual = _finish_group_float(bins, 10, least, greatest, 0)
+            var expected = finish_float_bins(bins, False, False, False)
+            assert_equal(
+                bitcast[DType.uint64](actual), bitcast[DType.uint64](expected)
+            )
+    var empty = List[Int128](length=9, fill=0)
+    assert_equal(_finish_group_float(empty, 0, 512, 0, 0), Float64(0))
+    with assert_raises(contains=GROUP_ROUNDED_FLOAT):
+        _ = _finish_group_float(empty, 10, 0, 49, 0)
+    for flags in [UInt32(1), 2, 4, 6]:
+        with assert_raises(contains=GROUP_NONFINITE_FLOAT):
+            _ = _finish_group_float(empty, 1, 0, 52, flags)
