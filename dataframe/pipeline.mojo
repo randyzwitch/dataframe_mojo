@@ -3290,9 +3290,14 @@ struct _PipelineJob(Job):
                     gathered._field_metadata = column._field_metadata
                     columns.append(gathered^)
                 else:
-                    columns.append(
-                        Series.full_null(column.name(), column.dtype(), n)
+                    # The probe column's rows: null here, but the same
+                    # field as the probe's own output, so they stack with
+                    # it.
+                    var nulls = Series.full_null(
+                        column.name(), column.dtype(), n
                     )
+                    nulls._field_metadata = column._field_metadata
+                    columns.append(nulls^)
         var right_keys = List[Int]()
         for key in step.right_keys:
             right_keys.append(right._index(key))

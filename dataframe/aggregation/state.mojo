@@ -533,8 +533,10 @@ def table_frame(
 
 def chunks_frame(frames: List[DataFrame]) raises -> DataFrame:
     """Frames of the same columns as one frame whose columns keep each
-    frame's rows as a chunk, in order: no copy of the values. Empty
-    frames add no chunk; with none left, the first frame's empty shape."""
+    frame's rows as a chunk, in order: no copy of the values, except a
+    categorical column whose frames hold codes of different dictionaries.
+    Empty frames add no chunk; with none left, the first frame's empty
+    shape."""
     var kept = List[Int]()
     for j in range(len(frames)):
         if frames[j].height() > 0:
@@ -551,7 +553,20 @@ def chunks_frame(frames: List[DataFrame]) raises -> DataFrame:
         var pieces = List[Series](capacity=len(kept))
         for j in kept:
             pieces.append(frames[j]._columns[c].copy())
-        columns.append(Series._from_chunks(pieces))
+        var one_type = True
+        for k in range(1, len(pieces)):
+            if pieces[k].dtype() != pieces[0].dtype():
+                one_type = False
+        if not one_type and pieces[0].dtype().is_categorical():
+            # Each part may encode its labels into a dictionary of its
+            # own, so a code means different labels in two parts: the
+            # pieces move onto the union of the dictionaries as they join.
+            var parts = List[DataFrame](capacity=len(pieces))
+            for k in range(len(pieces)):
+                parts.append(DataFrame([pieces[k].copy()]))
+            columns.append(concat(parts)._columns[0].copy())
+        else:
+            columns.append(Series._from_chunks(pieces))
     return DataFrame(columns^, height=height)
 
 
