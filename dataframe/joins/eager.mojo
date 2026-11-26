@@ -186,9 +186,11 @@ def join_frames(
                     .renamed(column.name())
                 )
             else:
-                columns.append(
-                    Series.full_null(column.name(), column.dtype(), m)
-                )
+                # Null, but the same field as the left column, metadata
+                # included, as in a join whose left side has rows.
+                var nulls = Series.full_null(column.name(), column.dtype(), m)
+                nulls._field_metadata = column._field_metadata
+                columns.append(nulls^)
         for k in range(len(right_output)):
             columns.append(
                 right._columns[right_output[k]].renamed(right_names[k])
