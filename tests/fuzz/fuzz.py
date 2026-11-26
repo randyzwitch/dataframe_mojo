@@ -892,13 +892,15 @@ class PlanGen:
         r = self.rng
         g = Gen(r, schema, ordered)
         names = list(schema)
-        kind = r.choices(
-            ["filter", "with_columns", "select", "group_by", "join", "sort",
-             "unique", "head", "explode", "concat", "drop_nulls", "agg_select",
-             "with_row_index", "reverse", "unnest", "drop", "interpolate",
-             "time_window"],
-            weights=[14, 12, 6, 14, 12, 9, 6, 5, 3, 3, 2, 3, 1, 1, 2, 1, 3, 4],
-        )[0]
+        kinds = ["filter", "with_columns", "select", "group_by", "join", "sort",
+                 "unique", "head", "explode", "concat", "drop_nulls", "agg_select",
+                 "with_row_index", "reverse", "unnest", "drop", "interpolate",
+                 "time_window"]
+        weights = [14, 12, 6, 14, 12, 9, 6, 5, 3, 3, 2, 3, 1, 1, 2, 1, 3, 4]
+        # FUZZ_FOCUS=kind,kind makes those steps 20 times as likely.
+        focus = os.environ.get("FUZZ_FOCUS", "").split(",")
+        weights = [w * 20 if k in focus else w for k, w in zip(kinds, weights)]
+        kind = r.choices(kinds, weights=weights)[0]
         if kind == "filter":
             p = g.predicate()
             if p is None:
@@ -1048,13 +1050,15 @@ class PlanGen:
         needs a defined row order; coordinate interpolation runs on an axis
         derived from a row index, so its coordinates are unique (Polars
         orders tied coordinates arbitrarily) and it stays defined after
-        later steps reorder rows."""
+        later steps reorder rows. The row index is named to start with
+        "i" so later steps leave it untyped (UInt32 in Polars, Int64
+        here)."""
         r = self.rng
-        if not ordered and "_ri" not in schema:
+        if not ordered and "i_ri" not in schema:
             return None
-        if "_ri" not in schema:
-            plan = ("with_row_index", plan, "_ri")
-            schema = dict(schema, _ri="uint32")
+        if "i_ri" not in schema:
+            plan = ("with_row_index", plan, "i_ri")
+            schema = dict(schema, i_ri=None)
         g = Gen(r, schema, ordered)
         # Float32 linear interpolation is Float64 here (as for mean), and
         # decimals are not interpolated.
@@ -1070,7 +1074,7 @@ class PlanGen:
                 if keys and r.random() < 0.3:
                     e = ("over", e, ("list", r.choice(keys)), ("list",), False, False)
             else:
-                axis = ("cast", ("col", "_ri"), "int64", False)
+                axis = ("cast", ("col", "i_ri"), "int64", False)
                 if r.random() < 0.6:
                     # A shuffled order of the rows.
                     axis = ("mod", ("mul", axis, 7919), 1000003)
