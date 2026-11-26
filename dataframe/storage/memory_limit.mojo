@@ -45,6 +45,11 @@ from std.os import getenv
 from std.sys import CompilationTarget
 from std.time import monotonic
 
+# Linux `openat` arguments. (The standard library declares `open` and
+# `pread` with signatures of its own, so these are called by other names.)
+comptime _AT_FDCWD = -100
+comptime _O_RDONLY = 0
+
 # Linux `sysconf` names.
 comptime _SC_PAGESIZE = 30
 comptime _SC_PHYS_PAGES = 85
@@ -56,6 +61,18 @@ comptime UNLIMITED = Int64.MAX
 # The share of available memory the default limit allows, in percent.
 comptime DEFAULT_LIMIT_PERCENT = 80
 
+# Small changes to the count gather in one of _SLOTS per-CPU slots and move
+# to the shared total once a slot's sum passes _FLUSH_BYTES either way
+# (`_count`). Every worker making buffers at once and adding to one shared
+# atomic would bounce its cache line between cores on every buffer (about
+# 160 ns an update at 8 threads, against 9 ns uncontended); a slot is
+# mostly touched by one core. The shared total is then off by at most
+# _SLOTS * _FLUSH_BYTES (64 MiB), small against any useful limit, and
+# changes of _FLUSH_BYTES or more go to it at once.
+comptime _SLOTS = 64
+comptime _SLOT_BYTES = 64
+comptime _FLUSH_BYTES = Int64(1 << 20)
+
 
 struct _MemoryState(Movable):
     """Bytes held (`used`) and the limit, shared by every thread. Both are
@@ -64,16 +81,29 @@ struct _MemoryState(Movable):
 
     var used: Atomic[Int64]
     var limit: Atomic[Int64]
+    # The address of _SLOTS counters, one per _SLOT_BYTES (a cache line).
+    var slots: Int
     # The last reading of resident anonymous memory and when it was taken
     # (`monotonic` nanoseconds; 0 before the first).
     var resident: Atomic[Int64]
     var resident_at: Atomic[Int64]
+    # `/proc/self/statm`, opened at the first reading (-1 before).
+    var statm_fd: Atomic[Int64]
 
     def __init__(out self):
         self.used = Atomic[Int64](0)
         self.limit = Atomic[Int64](_UNSET)
+        var words = (_SLOTS + 1) * _SLOT_BYTES // 8
+        var block = alloc(Layout[Int64](length=words)).unsafe_leak()
+        for i in range(words):
+            block.unsafe_offset(i).unsafe_write(0)
+        # Slots start at a cache line boundary inside the block.
+        self.slots = (
+            (Int(block) + _SLOT_BYTES - 1) // _SLOT_BYTES * (_SLOT_BYTES)
+        )
         self.resident = Atomic[Int64](0)
         self.resident_at = Atomic[Int64](0)
+        self.statm_fd = Atomic[Int64](-1)
 
 
 def _state_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
@@ -98,25 +128,61 @@ def _memory_state() -> ref[MutAnyOrigin] _MemoryState:
 
 
 @always_inline
+def _slot(state: _MemoryState, index: Int) -> ref[MutAnyOrigin] Atomic[Int64]:
+    return Pointer[Atomic[Int64], MutAnyOrigin](
+        unsafe_from_address=state.slots + _SLOT_BYTES * index
+    )[]
+
+
+@always_inline
+def _cpu() -> Int:
+    comptime if CompilationTarget.is_linux():
+        return Int(external_call["sched_getcpu", Int32]()) & (_SLOTS - 1)
+    else:
+        return 0
+
+
+@always_inline
+def _count(delta: Int64):
+    """Add `delta` to the count: through this CPU's slot when small (see
+    _SLOTS)."""
+    ref state = _memory_state()
+    if delta >= _FLUSH_BYTES or delta <= -_FLUSH_BYTES:
+        _ = state.used.fetch_add(delta)
+        return
+    ref slot = _slot(state, _cpu())
+    var drift = slot.fetch_add(delta) + delta
+    if drift >= _FLUSH_BYTES or drift <= -_FLUSH_BYTES:
+        # Exactly what leaves the slot reaches the total, whatever other
+        # threads add to the slot meanwhile.
+        _ = slot.fetch_sub(drift)
+        _ = state.used.fetch_add(drift)
+
+
+@always_inline
 def charge(bytes: Int):
     """Count `bytes` the engine now holds. Never fails: the caller has the
     memory already, and the next check raises if it went over the limit.
     """
     if bytes > 0:
-        _ = _memory_state().used.fetch_add(Int64(bytes))
+        _count(Int64(bytes))
 
 
 @always_inline
 def uncharge(bytes: Int):
     """`bytes` counted by `charge` were freed."""
     if bytes > 0:
-        _ = _memory_state().used.fetch_sub(Int64(bytes))
+        _count(-Int64(bytes))
 
 
 def memory_usage() -> Int:
     """Bytes the engine holds against the memory limit: column buffers,
     hash table and aggregate blocks, and freed blocks kept for reuse."""
-    return Int(_memory_state().used.load())
+    ref state = _memory_state()
+    var total = state.used.load()
+    for i in range(_SLOTS):
+        total += _slot(state, i).load()
+    return Int(total)
 
 
 def memory_limit() -> Int:
@@ -382,15 +448,48 @@ def resident_memory() -> Int:
     """
     comptime if not CompilationTarget.is_linux():
         return 0
-    var text = _read_file("/proc/self/statm")
-    # size resident shared text lib data dt, in pages.
-    var fields = text.split(" ")
-    if len(fields) < 3:
+    # The file stays open and is read from its start each time: one
+    # system call a reading, and no allocation.
+    ref state = _memory_state()
+    var fd = state.statm_fd.load()
+    if fd < 0:
+        var path = String("/proc/self/statm")
+        var c_path = path.as_c_string_span()
+        var opened = Int64(
+            external_call["openat", Int32](
+                Int32(_AT_FDCWD), c_path.ptr(), Int32(_O_RDONLY)
+            )
+        )
+        _ = path^
+        if opened < 0:
+            return 0
+        var unset = Int64(-1)
+        if state.statm_fd.compare_exchange(unset, opened):
+            fd = opened
+        else:
+            _ = external_call["close", Int32](Int32(opened))
+            fd = state.statm_fd.load()
+    var buffer = List[UInt8](length=128, fill=0)
+    var length = external_call["pread64", Int](
+        Int32(fd), buffer.unsafe_ptr(), 127, 0
+    )
+    if length <= 0:
         return 0
-    var resident = _parse_bytes_value(String(fields[1]))
-    var shared = _parse_bytes_value(String(fields[2]))
+    # size resident shared text lib data dt, in pages: the 2nd and 3rd.
+    var fields = List[Int](length=3, fill=0)
+    var field = 0
+    var i = 0
+    while i < length and field < 3:
+        var c = Int(buffer[i])
+        if c >= 48 and c <= 57:
+            fields[field] = 10 * fields[field] + c - 48
+        elif c == 32:
+            field += 1
+        else:
+            break
+        i += 1
     var page = Int(external_call["sysconf", Int64](Int32(_SC_PAGESIZE)))
-    return max(0, resident - shared) * max(page, 0)
+    return max(0, fields[1] - fields[2]) * max(page, 0)
 
 
 @no_inline
