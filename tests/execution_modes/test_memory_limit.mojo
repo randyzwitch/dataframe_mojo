@@ -1,6 +1,7 @@
 """The memory limit: settings, the count of memory held, and the clean
 `out of memory` error raised in place of being killed by the system."""
 # contract-group: execution.lifecycle
+from std.os import makedirs
 from std.testing import assert_equal, assert_true
 from dataframe import (
     Column,
@@ -15,6 +16,7 @@ from dataframe.storage.allocation import release_retained
 from dataframe.storage.memory_limit import (
     UNLIMITED,
     available_memory,
+    cgroup_memory_limit,
     parse_memory_limit,
 )
 
@@ -72,6 +74,43 @@ def test_memory_limit_setting_round_trips() raises:
     set_memory_limit(0)
     assert_equal(memory_limit(), Int(UNLIMITED))
     set_memory_limit(default)
+
+
+def _write(path: String, text: String) raises:
+    with open(path, "w") as file:
+        file.write(text)
+
+
+def test_cgroup_limit_takes_the_smallest_limit_up_the_tree() raises:
+    var base = String("build/memory-limit-cgroup-test")
+    # cgroup v2: the scope has no limit of its own, its parent does.
+    makedirs(base + "/v2/user.slice/app.scope", exist_ok=True)
+    _write(base + "/proc_v2", "0::/user.slice/app.scope\n")
+    _write(base + "/v2/user.slice/app.scope/memory.max", "max\n")
+    _write(base + "/v2/user.slice/memory.max", "3221225472\n")
+    assert_equal(
+        cgroup_memory_limit(base + "/proc_v2", base + "/v2"), 3221225472
+    )
+    # A lower limit on the group itself wins.
+    _write(base + "/v2/user.slice/app.scope/memory.max", "1073741824\n")
+    assert_equal(
+        cgroup_memory_limit(base + "/proc_v2", base + "/v2"), 1073741824
+    )
+    # cgroup v1: the memory controller's line names the group.
+    makedirs(base + "/v1/memory/docker/abc", exist_ok=True)
+    _write(
+        base + "/proc_v1",
+        "12:cpu,cpuacct:/docker/abc\n4:memory:/docker/abc\n",
+    )
+    _write(base + "/v1/memory/docker/abc/memory.limit_in_bytes", "536870912\n")
+    assert_equal(
+        cgroup_memory_limit(base + "/proc_v1", base + "/v1"), 536870912
+    )
+    # No group file, or no limit anywhere: none.
+    _write(base + "/v2/user.slice/memory.max", "max\n")
+    _write(base + "/v2/user.slice/app.scope/memory.max", "max\n")
+    assert_equal(cgroup_memory_limit(base + "/proc_v2", base + "/v2"), 0)
+    assert_equal(cgroup_memory_limit(base + "/missing", base + "/v2"), 0)
 
 
 def test_memory_usage_counts_column_buffers_while_they_live() raises:
