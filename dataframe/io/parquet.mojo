@@ -50,6 +50,7 @@ from .native_library import (
     _raise_backend_error,
     parquet_library_candidates,
 )
+from dataframe.storage.buffer import _Buffer
 from std.collections import Dict, Optional
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer
@@ -88,11 +89,7 @@ from ..categorical import decode_contiguous
 from dataframe.storage.column import Column
 from ..dtype import DataType
 from ..series import Series
-from dataframe.storage.string import (
-    DictionaryLookup,
-    StringColumn,
-    deferred_codes,
-)
+from dataframe.storage.string import StringCodes, StringColumn
 
 # int dfq_read_parquet_stream(path, threads, columns, n_columns,
 #     row_groups, n_row_groups, out_stream, error_out)
@@ -514,10 +511,9 @@ def _read_with_dfparquet(
     """
     var library = _load_library()
     if library.read_dict != 0:
-        # String columns dictionary-encoded in the file can give codes
-        # beside the strings (`StringCodes`, derived when first read), so
-        # grouping by them groups the codes. The strings are what the file
-        # declares.
+        # String columns dictionary-encoded in the file keep their codes
+        # beside the strings (`StringCodes`), so grouping by them groups
+        # the codes. The strings are what the file declares.
         var coded = _open_parquet_stream(
             path, columns, row_groups, group_count, use_threads, True
         )
@@ -636,35 +632,30 @@ struct _CodedStringsJob(Job):
 
     var chunk: Series
     var final: DataType
-    var lookup: ArcPointer[DictionaryLookup]
     var result: Series
 
-    def __init__(
-        out self,
-        var chunk: Series,
-        final: DataType,
-        lookup: ArcPointer[DictionaryLookup],
-    ):
+    def __init__(out self, var chunk: Series, final: DataType):
         self.chunk = chunk^
         self.final = final
-        self.lookup = lookup
         self.result = Series("", Column[UInt32](List[UInt32]()))
 
     def run(mut self) raises:
         var chunk = self.chunk.rechunk() if self.chunk.is_chunked() else (
             self.chunk.copy()
         )
+        ref coded = chunk._data[Column[UInt32]]
+        var shared = coded._data.copy()
+        if coded._offset != 0 or len(coded._data[]) != len(coded):
+            var copied = List[UInt32](capacity=len(coded))
+            for i in range(len(coded)):
+                copied.append(coded._get(i))
+            shared = _Buffer(copied^)
         var strings = decode_contiguous(chunk.with_dtype(self.final))
         if strings.is_chunked():
             strings = strings.rechunk()
-        # The file's codes are dropped once the strings are decoded: each
-        # row's view is its code's, so the codes come back from the strings
-        # if something reads them, and a column nothing groups by holds
-        # none.
-        var codes = deferred_codes(
-            strings._data[StringColumn], self.final, self.lookup
+        strings._data[StringColumn]._codes = ArcPointer(
+            StringCodes(shared, self.final)
         )
-        strings._data[StringColumn]._codes = ArcPointer(codes^)
         strings._field_metadata = self.chunk._field_metadata
         self.result = strings^
 
@@ -683,11 +674,8 @@ def _strings_with_codes(var frames: List[DataFrame]) raises -> List[DataFrame]:
         var final = frames[last]._columns[c].dtype()
         if not final.is_categorical():
             continue
-        var lookup = ArcPointer(DictionaryLookup(final))
         for f in range(len(frames)):
-            jobs.append(
-                _CodedStringsJob(frames[f]._columns[c].copy(), final, lookup)
-            )
+            jobs.append(_CodedStringsJob(frames[f]._columns[c].copy(), final))
             places.append((f, c))
     run_jobs(jobs)
     for k in range(len(jobs)):

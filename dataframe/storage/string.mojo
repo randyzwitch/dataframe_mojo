@@ -11,15 +11,7 @@ mutated while shared.
 Internal kernels read rows as borrowed `StringSlice`s via `_get`; public
 accessors return owned `String`s.
 """
-from std.atomic import Atomic
-from std.ffi import external_call
-from dataframe.storage.buffer import (
-    _Buffer,
-    _Deferred,
-    _FillDeferred,
-    _ForeignOwner,
-)
-from dataframe.storage.nested import _leak, _reclaim
+from dataframe.storage.buffer import _Buffer
 from std.memory import ArcPointer, Pointer, unsafe_memcpy
 from dataframe.storage.string_view import (
     StringView,
@@ -28,7 +20,7 @@ from dataframe.storage.string_view import (
     _external_view,
     _inline_view,
 )
-from dataframe.dtype import CategoricalDictionary, DataType
+from dataframe.dtype import DataType
 from dataframe.storage.column import (
     Column,
     _pack_bits,
@@ -38,315 +30,6 @@ from dataframe.storage.column import (
     _append_validity,
     _append_validity_bit,
 )
-
-
-comptime _LOOKUP_EMPTY = 0
-comptime _LOOKUP_BUILDING = 1
-comptime _LOOKUP_BUILT = 2
-
-
-@always_inline
-def _mix(low: UInt64, high: UInt64) -> UInt64:
-    var h = (low ^ (high * 0x9E3779B97F4A7C15)) * 0xBF58476D1CE4E5B9
-    return h ^ (h >> 31)
-
-
-def _bytes_hash(bytes: Pointer[UInt8, ImmutAnyOrigin], length: Int) -> UInt64:
-    """A hash of a value longer than a view holds inline, eight bytes at a
-    time."""
-    var h = UInt64(length) * 0x9E3779B97F4A7C15
-    var at = 0
-    while at + 8 <= length:
-        var word = (
-            bytes.unsafe_offset(at)
-            .unsafe_bitcast[UInt64]()
-            .unsafe_load[width=1]()
-        )
-        h = (h ^ word) * 0x9E3779B97F4A7C15
-        h ^= h >> 29
-        at += 8
-    var tail = UInt64(0)
-    for b in range(at, length):
-        tail |= UInt64(bytes[unsafe_offset=b]) << UInt64(8 * (b - at))
-    return _mix(h, tail)
-
-
-@always_inline
-def _value_key(
-    bytes: Pointer[UInt8, ImmutAnyOrigin], length: Int
-) -> Tuple[UInt64, UInt64]:
-    """A value's two lookup words: a short value's inline view exactly (its
-    length and bytes, zero past the end), a long one's length and first
-    four bytes, then a hash of all its bytes."""
-    if length <= STRING_VIEW_INLINE_BYTES:
-        var words = SIMD[DType.uint64, 2](UInt64(length), 0)
-        var view = Pointer(to=words).unsafe_bitcast[UInt8]()
-        for b in range(length):
-            view[unsafe_offset=4 + b] = bytes[unsafe_offset=b]
-        return (words[0], words[1])
-    var prefix = UInt64(0)
-    for b in range(4):
-        prefix |= UInt64(bytes[unsafe_offset=b]) << UInt64(8 * b)
-    return (UInt64(length) | (prefix << 32), _bytes_hash(bytes, length))
-
-
-struct _LookupTable(Movable):
-    """Each dictionary value's code, by its lookup words (`_value_key`), in
-    an open-addressed table at least twice the dictionary's size."""
-
-    var keys: List[UInt64]
-    # Per slot, its code plus one; 0 marks an empty slot.
-    var codes: List[UInt32]
-    var shift: UInt64
-    var mask: Int
-
-    def __init__(out self, dictionary: CategoricalDictionary):
-        var entries = len(dictionary)
-        var capacity = 16
-        var bits = 4
-        while capacity < 2 * entries:
-            capacity *= 2
-            bits += 1
-        self.keys = List[UInt64](length=2 * capacity, fill=0)
-        self.codes = List[UInt32](length=capacity, fill=0)
-        self.shift = UInt64(64 - bits)
-        self.mask = capacity - 1
-        var base = (
-            dictionary.bytes.unsafe_ptr()
-            .unsafe_mut_cast[False]()
-            .unsafe_origin_cast[ImmutAnyOrigin]()
-        )
-        for code in range(entries):
-            var start = Int(dictionary.offsets[code])
-            var length = Int(dictionary.offsets[code + 1]) - start
-            var key = _value_key(base.unsafe_offset(start), length)
-            var slot = Int(_mix(key[0], key[1]) >> self.shift)
-            while True:
-                var held = Int(self.codes[slot])
-                if held == 0:
-                    self.keys[2 * slot] = key[0]
-                    self.keys[2 * slot + 1] = key[1]
-                    self.codes[slot] = UInt32(code + 1)
-                    break
-                if (
-                    self.keys[2 * slot] == key[0]
-                    and self.keys[2 * slot + 1] == key[1]
-                    and _same_entry(dictionary, held - 1, code)
-                ):
-                    # A repeated label keeps its first code.
-                    break
-                slot = (slot + 1) & self.mask
-
-    def find(
-        self,
-        dictionary: CategoricalDictionary,
-        bytes: Pointer[UInt8, ImmutAnyOrigin],
-        length: Int,
-    ) -> UInt32:
-        """The code of the value at `bytes`, 0 when it is not in the
-        dictionary."""
-        var key = _value_key(bytes, length)
-        var slot = Int(_mix(key[0], key[1]) >> self.shift)
-        var keys = self.keys.unsafe_ptr()
-        var codes = self.codes.unsafe_ptr()
-        while True:
-            var held = Int(codes[unsafe_offset=slot])
-            if held == 0:
-                return 0
-            if (
-                keys[unsafe_offset=2 * slot] == key[0]
-                and keys[unsafe_offset=2 * slot + 1] == key[1]
-            ):
-                if length <= STRING_VIEW_INLINE_BYTES:
-                    return UInt32(held - 1)
-                var start = Int(dictionary.offsets[held - 1])
-                var same = Int(
-                    dictionary.offsets[held]
-                ) - start == length and _same_bytes(
-                    dictionary.bytes.unsafe_ptr()
-                    .unsafe_offset(start)
-                    .unsafe_mut_cast[False]()
-                    .unsafe_origin_cast[ImmutAnyOrigin](),
-                    bytes,
-                    length,
-                )
-                if same:
-                    return UInt32(held - 1)
-            slot = (slot + 1) & self.mask
-
-
-def _same_bytes(
-    a: Pointer[UInt8, ImmutAnyOrigin],
-    b: Pointer[UInt8, ImmutAnyOrigin],
-    length: Int,
-) -> Bool:
-    for i in range(length):
-        if a[unsafe_offset=i] != b[unsafe_offset=i]:
-            return False
-    return True
-
-
-def _same_entry(dictionary: CategoricalDictionary, x: Int, y: Int) -> Bool:
-    var x_start = Int(dictionary.offsets[x])
-    var y_start = Int(dictionary.offsets[y])
-    var length = Int(dictionary.offsets[x + 1]) - x_start
-    if Int(dictionary.offsets[y + 1]) - y_start != length:
-        return False
-    var base = (
-        dictionary.bytes.unsafe_ptr()
-        .unsafe_mut_cast[False]()
-        .unsafe_origin_cast[ImmutAnyOrigin]()
-    )
-    return _same_bytes(
-        base.unsafe_offset(x_start), base.unsafe_offset(y_start), length
-    )
-
-
-struct DictionaryLookup(Movable):
-    """A dictionary's values mapped back to their codes, built the first
-    time a column's codes are derived (`deferred_codes`) and shared by
-    every column whose strings come from that dictionary."""
-
-    var dtype: DataType
-    var _state: Atomic[Int64]
-    # The built `_LookupTable`'s heap address, published before `_state`
-    # turns built.
-    var _address: Atomic[Int64]
-
-    def __init__(out self, dtype: DataType):
-        self.dtype = dtype
-        self._state = Atomic[Int64](_LOOKUP_EMPTY)
-        self._address = Atomic[Int64](0)
-
-    def __deinit__(deinit self):
-        var address = Int(self._address.load())
-        if address != 0:
-            _ = _reclaim[_LookupTable](address)
-
-    def table(self) -> Int:
-        """The address of the built table, built once whichever thread
-        asks first."""
-        var cell = Pointer(to=self._state).unsafe_mut_cast[True]()
-        var address = Pointer(to=self._address).unsafe_mut_cast[True]()
-        while True:
-            var state = cell[].load()
-            if state == _LOOKUP_BUILT:
-                return Int(address[].load())
-            var expected = Int64(_LOOKUP_EMPTY)
-            if cell[].compare_exchange(expected, Int64(_LOOKUP_BUILDING)):
-                var built = _leak(_LookupTable(self.dtype.dictionary()[]))
-                address[].store(Int64(built))
-                cell[].store(_LOOKUP_BUILT)
-                return built
-            _ = external_call["sched_yield", Int32]()
-
-
-struct _CodesSource(Movable):
-    """What a column's deferred codes are computed from: the column's rows
-    (without codes of their own) and its dictionary's lookup."""
-
-    var column: StringColumn
-    var lookup: ArcPointer[DictionaryLookup]
-
-    def __init__(
-        out self, var column: StringColumn, lookup: ArcPointer[DictionaryLookup]
-    ):
-        self.column = column^
-        self.lookup = lookup
-
-
-def _release_codes_source(context: Int) abi("C"):
-    _ = _reclaim[_CodesSource](context)
-
-
-def _fill_codes(context: Int, dest: Int, length: Int) abi("C"):
-    """Each row's code into the UInt32 buffer at `dest`: its value looked
-    up in the dictionary. A null row's code is 0 (unspecified)."""
-    ref source = Pointer[_CodesSource, MutAnyOrigin](
-        unsafe_from_address=context
-    )[]
-    ref lookup = source.lookup[]
-    ref dictionary = lookup.dtype.dictionary()[]
-    ref table = Pointer[_LookupTable, MutAnyOrigin](
-        unsafe_from_address=lookup.table()
-    )[]
-    ref column = source.column
-    var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=dest)
-    var nulls = column.null_count() > 0
-    if column._is_view_storage():
-        ref storage = column._view_storage.value()
-        var bases = List[Int](capacity=len(storage._buffers[]))
-        for b in range(len(storage._buffers[])):
-            bases.append(Int(storage._buffers[][b][].unsafe_ptr()))
-        var views = storage._views[].unsafe_ptr()
-        for r in range(length):
-            if nulls and not column._valid(r):
-                out[unsafe_offset=r] = 0
-                continue
-            ref view = views[unsafe_offset=storage._descriptor(r)]
-            var size = Int(view.length)
-            var bytes: Pointer[UInt8, ImmutAnyOrigin]
-            if size <= STRING_VIEW_INLINE_BYTES:
-                bytes = (
-                    Pointer(to=view)
-                    .unsafe_bitcast[UInt8]()
-                    .unsafe_offset(4)
-                    .unsafe_mut_cast[False]()
-                    .unsafe_origin_cast[ImmutAnyOrigin]()
-                )
-            else:
-                bytes = Pointer[UInt8, ImmutAnyOrigin](
-                    unsafe_from_address=bases[Int(view.buffer_index)]
-                    + Int(view.offset)
-                )
-            out[unsafe_offset=r] = table.find(dictionary, bytes, size)
-        _ = bases^
-        return
-    for r in range(length):
-        if nulls and not column._valid(r):
-            out[unsafe_offset=r] = 0
-            continue
-        var text = column._row_bytes(r)
-        out[unsafe_offset=r] = table.find(
-            dictionary, text.unsafe_ptr(), len(text)
-        )
-
-
-def deferred_codes(
-    column: StringColumn,
-    dtype: DataType,
-    lookup: ArcPointer[DictionaryLookup],
-) -> StringCodes:
-    """Codes for every row of `column`'s storage (`StringCodes`), computed
-    from its strings the first time something reads them. A column whose
-    codes are never read (never grouped, joined or compared by them) then
-    holds none: four bytes a row, which for short strings is a fifth or
-    more of the column."""
-    var rows = column.copy()
-    rows._codes = None
-    rows._offset = 0
-    rows._length = (
-        len(rows._view_storage.value()) if rows._is_view_storage() else len(
-            rows._offsets[]
-        )
-        - 1
-    )
-    var length = rows._length
-    var callback: _FillDeferred = _fill_codes
-    var release: _ReleaseCodes = _release_codes_source
-    var deferred = _Deferred(
-        _ForeignOwner(
-            _leak(_CodesSource(rows^, lookup)),
-            Pointer(to=release).unsafe_bitcast[Int]()[],
-        ),
-        Pointer(to=callback).unsafe_bitcast[Int]()[],
-    )
-    var codes = StringCodes(_Buffer[UInt32].deferring(length, deferred^), dtype)
-    codes.lookup = lookup
-    return codes^
-
-
-comptime _ReleaseCodes = def(Int) thin abi("C") -> None
 
 
 struct StringCodes(Copyable):
@@ -369,10 +52,6 @@ struct StringCodes(Copyable):
     var rows: Optional[ArcPointer[List[Int]]]
     var first: Int
     var shift: Int
-    # Set when the codes are derived from the strings on first read
-    # (`deferred_codes`): the dictionary's lookup, which a column gathered
-    # from this one uses to derive its own codes the same way.
-    var lookup: Optional[ArcPointer[DictionaryLookup]]
 
     def __init__(out self, codes: _Buffer[UInt32], dtype: DataType):
         self.codes = codes.copy()
@@ -380,7 +59,6 @@ struct StringCodes(Copyable):
         self.rows = None
         self.first = 0
         self.shift = 0
-        self.lookup = None
 
     def __init__(
         out self,
@@ -395,7 +73,6 @@ struct StringCodes(Copyable):
         self.rows = Optional(rows)
         self.first = first
         self.shift = shift
-        self.lookup = None
 
     def __init__(out self, codes: ArcPointer[List[UInt32]], dtype: DataType):
         self = Self(_Buffer(codes), dtype)
@@ -917,15 +594,6 @@ struct StringColumn(Copyable, Sized):
         if not self._codes:
             return
         ref held = self._codes.value()[]
-        if held.lookup and held.codes.pending():
-            # Codes nothing has read yet: the result derives its own from
-            # its strings, if anything ever reads them, rather than reading
-            # (and so computing) this column's to gather them.
-            var derived = deferred_codes(
-                result, held.dtype, held.lookup.value()
-            )
-            result._codes = ArcPointer(derived^)
-            return
         if shared and not held.rows:
             result._codes = ArcPointer(
                 StringCodes(
