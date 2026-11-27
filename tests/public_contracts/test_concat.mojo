@@ -1,7 +1,7 @@
 """Concatenation follows independently constructed schemas and ordered rows."""
 # contract-group: table.sets_reshape
-from std.testing import assert_raises
-from dataframe import DataFrame, Series, concat
+from std.testing import assert_raises, assert_true
+from dataframe import DataFrame, DataType, Series, concat
 from tests.support.reference_model import generated_model
 from tests.support.reference_relations import concatenated_model
 from tests.support.coverage_generators import frame_from_model, chunk_layout
@@ -79,14 +79,19 @@ def test_concat_rejects_incompatible_schemas_before_producing_rows() raises:
         for other in [
             source.select(["i"]),
             source.select(["s", "f", "i", "b"]),
-            source.cast({"i": "float64"}),
+            source.cast({"i": "string"}),
         ]:
             with assert_raises():
                 _ = concat([source.copy(), source.copy(), other.copy()])
         with assert_raises():
             _ = concat(
-                [source.copy(), source.cast({"i": "float64"})], "diagonal"
+                [source.copy(), source.cast({"i": "string"})], "diagonal"
             )
+        # Numeric types that differ promote instead.
+        var widened = concat(
+            [source.copy(), source.cast({"i": "float64"})], "diagonal"
+        )
+        assert_true(widened.column("i").dtype() == DataType.FLOAT64)
         with assert_raises():
             _ = source.hstack(source.select(["i"]))
         with assert_raises():
