@@ -480,8 +480,8 @@ def test_branch_fill_and_coalesce_types_match_the_matrix_eager_and_lazy() raises
                         + (" (lazy)" if lazy else " (eager)")
                     )
                 var values = column.cast(DataType.FLOAT64)
-                assert_equal(values.item(0).float64(), 2.0)
-                assert_equal(values.item(1).float64(), 7.0)
+                assert_equal(values.get(0).float64(), 2.0)
+                assert_equal(values.get(1).float64(), 7.0)
         checked += 1
     assert_equal(checked, 13 * 12)
 
