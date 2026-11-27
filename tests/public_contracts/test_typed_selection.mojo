@@ -294,18 +294,18 @@ def test_membership_and_interval_endpoints_use_kleene_null_rules() raises:
     for lazy in [False, True]:
         var listed: List[Expr] = [lit(Int64(1)), lit(Int64(300))]
         var found = (
-            narrow.lazy().select(col("x").is_in(listed)).collect() if lazy else narrow.select(
-                col("x").is_in(listed)
-            )
+            narrow.lazy()
+            .select(col("x").is_in(listed))
+            .collect() if lazy else narrow.select(col("x").is_in(listed))
         )
         assert_true(found.item(0, "x").bool())
         assert_true(not found.item(1, "x").bool())
         assert_true(not found.item(2, "x").bool())
         var outside: List[Expr] = [lit(Int64(300)), lit(Int64(-1000))]
         var none = (
-            narrow.lazy().select(col("x").is_in(outside)).collect() if lazy else narrow.select(
-                col("x").is_in(outside)
-            )
+            narrow.lazy()
+            .select(col("x").is_in(outside))
+            .collect() if lazy else narrow.select(col("x").is_in(outside))
         )
         for row in range(3):
             assert_true(not none.item(row, "x").bool())
