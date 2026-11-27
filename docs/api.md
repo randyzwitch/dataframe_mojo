@@ -1755,7 +1755,7 @@ Expressions on list columns. A null list gives a null result.
 
 ## `lit`
 
-A typed scalar literal; there is no implicit numeric promotion.
+A typed scalar literal; it keeps its type, and mixed numeric operands promote as described in docs/expressions.md.
 
 ```mojo
 def lit(value: AnyValue) -> Expr
