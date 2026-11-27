@@ -136,6 +136,51 @@ def is_signed(s):
     return s in ("int8", "int16", "int32", "int64")
 
 
+def _bits(s):
+    return int(s.lstrip("uint"))
+
+
+def _holds(wide, narrow):
+    if is_signed(wide) == is_signed(narrow):
+        return _bits(wide) >= _bits(narrow)
+    return is_signed(wide) and _bits(wide) > _bits(narrow)
+
+
+def int_promotion(a, b, arithmetic):
+    """Our type for two integer specs combined (docs/expressions.md): the
+    one that holds the other; otherwise Int64 for arithmetic and the
+    narrowest signed type holding both for comparisons and branches. None
+    for UInt64 beside a signed type, which raises here."""
+    if _holds(a, b):
+        return a
+    if _holds(b, a):
+        return b
+    unsigned = a if not is_signed(a) else b
+    signed = b if unsigned == a else a
+    if _bits(unsigned) >= 64:
+        return None
+    if arithmetic:
+        return "int64"
+    bits = max(_bits(signed), 2 * _bits(unsigned))
+    return "int%d" % max(8, 1 << (bits - 1).bit_length())
+
+
+def promotable_with(schema, t, arithmetic):
+    """Columns an expression of spec t may meet: the same type, or for
+    integers any integer type that promotes with it."""
+    out = []
+    for k, v in schema.items():
+        if v is None:
+            continue
+        if v == t:
+            out.append((k, t))
+        elif is_int(t) and is_int(v):
+            p = int_promotion(t, v, arithmetic)
+            if p is not None:
+                out.append((k, p))
+    return out
+
+
 def is_orderable(s):
     return s in SCALAR_TYPES
 
@@ -310,9 +355,7 @@ def to_pl_expr(e, types):
     if op == "null":
         return pl.lit(None, dtype=pl_dtype(e[1]))
     if op == "len":
-        # Counts are Int64 here (README); typed alike, later steps that
-        # read them build the same types on both sides.
-        return pl.len().cast(pl.Int64)
+        return pl.len()
     if op == "alias":
         return E(1).alias(e[2])
     if op == "cast":
@@ -366,13 +409,12 @@ def to_pl_expr(e, types):
         "min": lambda a: a.min(),
         "max": lambda a: a.max(),
         "median": lambda a: a.median(),
-        # Counts are Int64 here (README): cast so later steps type alike.
-        "count": lambda a: a.count().cast(pl.Int64),
-        "null_count": lambda a: a.null_count().cast(pl.Int64),
-        "n_unique": lambda a: a.n_unique().cast(pl.Int64),
+        "count": lambda a: a.count(),
+        "null_count": lambda a: a.null_count(),
+        "n_unique": lambda a: a.n_unique(),
         "first": lambda a: a.first(),
         "last": lambda a: a.last(),
-        "elen": lambda a: a.len().cast(pl.Int64),
+        "elen": lambda a: a.len(),
         "any": lambda a: a.any(),
         "all": lambda a: a.all(),
         # The first row holding the extreme. Polars' own arg_min/arg_max
@@ -663,9 +705,9 @@ def to_pl_plan(p, srcs):
 
 
 # ---------------------------------------------------------------------------
-# Random expressions and plans. The generator keeps operand types equal
-# (our engine has no implicit numeric promotion) and only uses
-# order-dependent operations where the input order is defined.
+# Random expressions and plans. The generator mixes integer widths, which
+# promote (docs/expressions.md), keeps other operand types equal, and only
+# uses order-dependent operations where the input order is defined.
 
 
 class Gen:
@@ -719,8 +761,9 @@ class Gen:
         if choice == 0:
             return ("add", e, self.small_int(t)), t
         if choice == 1:
-            same = [k for k in cs if self.schema[k] == t]
-            return (r.choice(["add", "sub", "mul"]), e, ("col", r.choice(same))), t
+            # Integers of different widths promote (docs/expressions.md).
+            k, p = r.choice(promotable_with(self.schema, t, True))
+            return (r.choice(["add", "sub", "mul"]), e, ("col", k)), p
         if choice == 2 and is_int(t):
             return (r.choice(["floordiv", "mod"]), e, r.choice([2, 3, 0, 7])), t
         if choice == 3:
@@ -742,6 +785,14 @@ class Gen:
                 other = self.numeric(depth + 1)
                 if other is not None and other[1] == t:
                     return ("when", p, e, other[0]), t
+                if other is not None and is_int(t) and is_int(other[1]):
+                    common = int_promotion(t, other[1], False)
+                    if common is not None:
+                        return ("when", p, e, other[0]), common
+                if is_int(t) and r.random() < 0.5:
+                    # A typed null of another integer width.
+                    n = r.choice([s for s in INTS if int_promotion(t, s, False)])
+                    return ("when", p, e, ("null", n)), int_promotion(t, n, False)
                 return ("when", p, e, ("null", t)), t
         if choice == 9:
             target = r.choice(["int64", "float64", "int32"])
@@ -806,8 +857,8 @@ class Gen:
             if n is None:
                 return None
             e, t = n
-            same = [k for k in self.cols(is_numeric) if self.schema[k] == t]
-            if t in self.schema.values() and same:
+            same = [k for k, _ in promotable_with(self.schema, t, False)]
+            if same:
                 return (r.choice(["lt", "gt", "eq", "le"]), e, ("col", r.choice(same)))
             return ("gt", e, 0 if is_int(t) else 0.0)
         if choice == 4:

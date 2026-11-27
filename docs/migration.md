@@ -1,9 +1,10 @@
 # Coming from pandas or Polars
 
 The API follows Polars' expression style (via Narwhals) closely. The main
-differences: expressions are built with `col`/`lit` and there is no implicit
-type promotion: a bare number adopts the other operand's dtype (`col("a") > 1`)
-and errors if it cannot (`col("i") * 2.5` on an integer column); `lit(Int64(1))` fixes a type explicitly;
+differences: expressions are built with `col`/`lit`; a bare number adopts the
+other operand's dtype when it fits (`col("a") > 1`) and otherwise takes its own
+type and promotes (`col("i") * 2.5` on an integer column is Float64);
+`lit(Int64(1))` fixes a type explicitly;
 equality is `==` or `.eq()`, and builds an expression rather than a Bool; there is no index; and results are eager dataframes.
 
 | Task | pandas | Polars | dataframe_mojo |
@@ -47,6 +48,10 @@ Behavioral differences worth knowing:
 - Group output order is unspecified unless `maintain_order=True`.
 - Rows with equal sort keys come out in an unspecified order unless
   `sort(..., maintain_order=True)` keeps their input order, as in Polars.
-- Numeric dtypes are Int8–Int64, UInt8–UInt64, Float32, and Float64, with
-  no implicit promotion: mixed widths need an explicit `cast`. Sums of 8- and
+- Numeric dtypes are Int8–Int64, UInt8–UInt64, Float32, Float64 and decimals.
+  Mixed numeric types promote with DuckDB's result types, which differ from
+  Polars in a few cases (`Int64 + Float32` is Float32, `decimal[10,2] + Int64`
+  is `decimal[22,2]`, `Int8 + UInt8` is Int64); see
+  [Expressions: Binding and shape](expressions.md#binding-and-shape). UInt64
+  beside a signed integer still needs an explicit `cast`. Sums of 8- and
   16-bit integers produce Int64, as in Polars.

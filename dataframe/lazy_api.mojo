@@ -4,6 +4,7 @@ from dataframe.aggregation.expressions import count_rows_by
 from dataframe.io.file_sources import has_pattern, resolve_paths
 from dataframe.io.dataset_options import DatasetOptions, DatasetSpec
 from dataframe.io.sinks import FileSink
+from dataframe.promotion import common_type
 from dataframe.planning.node_builders import (
     _aggregate_node,
     _concat_node,
@@ -813,8 +814,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """This plan's rows followed by `other`'s (SQL UNION ALL), as one
         plan: both inputs are optimized with the rest of it, and a column
         selection above reaches both scans. The inputs must have the same
-        column names and types; `other`'s columns are taken in this plan's
-        order. SQL UNION is `concat` followed by `unique`."""
+        column names; a numeric column typed differently in the two takes
+        the type that holds both, as in `concat`, and other types must
+        match. `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`."""
         return self._binary(other, _concat_node())
 
     def _binary(self, other: Self, var node: PlanNode) -> Self:
@@ -3672,6 +3674,8 @@ def _concat_plans(frames: List[LazyFrame], how: String) raises -> LazyFrame:
     """The plan `concat(frames, how)` builds (see frame.concat)."""
     if len(frames) == 0:
         raise Error("concat requires at least one dataframe")
+    if how == "vertical_relaxed" or how == "diagonal_relaxed":
+        return _concat_plans(frames, String(how[byte = 0 : how.find("_")]))
     if how != "vertical" and how != "diagonal" and how != "horizontal":
         raise Error(
             "concat how must be 'vertical', 'diagonal', or 'horizontal'"
@@ -3679,7 +3683,7 @@ def _concat_plans(frames: List[LazyFrame], how: String) raises -> LazyFrame:
     var inputs = frames.copy()
     if how == "diagonal":
         # The union of the columns in first-seen order; a name shared by
-        # inputs must have one type in all of them.
+        # inputs takes the type that holds its values in all of them.
         var names = List[String]()
         var dtypes = Dict[String, DataType]()
         var schemas = List[DataFrame](capacity=len(frames))
@@ -3689,7 +3693,11 @@ def _concat_plans(frames: List[LazyFrame], how: String) raises -> LazyFrame:
                 if field.name not in dtypes:
                     dtypes[field.name] = field.dtype
                     names.append(field.name)
-                elif dtypes[field.name] != field.dtype:
+                    continue
+                var found = common_type(dtypes[field.name], field.dtype)
+                if found:
+                    dtypes[field.name] = found.value()
+                else:
                     raise Error(
                         "concat diagonal: column "
                         + field.name

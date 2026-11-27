@@ -263,8 +263,9 @@ def test_vertical_and_diagonal_concat() raises:
     var text = narrowed.explain(streaming=False)
     assert_true(line_of(text, "CONCAT") < line_of(text, "FILTER"), text)
     assert_equal(len(text.split("FILTER")), 4, text)
-    # A name the inputs give two types raises, as eagerly.
-    var other = DataFrame([Series("k", Column[Float64]([1.5]))])
+    # A name the inputs give two types that do not promote raises, as
+    # eagerly.
+    var other = DataFrame([Series("k", Column[String](["x"]))])
     with assert_raises(contains="concat diagonal: column k"):
         _ = concat([first.lazy(), other.lazy()], "diagonal")
     with assert_raises(contains="concat diagonal: column k"):
