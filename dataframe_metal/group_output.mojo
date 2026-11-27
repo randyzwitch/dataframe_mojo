@@ -18,7 +18,11 @@ struct GroupOutput(Movable):
     var valid: List[Bool]
 
     def __init__(
-        out self, output: ReductionOutput, dtype: DataType, row_count: Bool
+        out self,
+        output: ReductionOutput,
+        dtype: DataType,
+        row_count: Bool,
+        capacity: Int = 0,
     ):
         self.output = output.copy()
         self.dtype = dtype
@@ -28,6 +32,18 @@ struct GroupOutput(Movable):
         self.single = List[Float32]()
         self.double = List[Float64]()
         self.valid = List[Bool]()
+        if row_count or output.op == COUNT:
+            self.wide.reserve(capacity)
+        else:
+            self.valid.reserve(capacity)
+            if output.op == MEAN:
+                self.double.reserve(capacity)
+            elif dtype == DataType.FLOAT32:
+                self.single.reserve(capacity)
+            elif dtype == DataType.INT32:
+                self.narrow.reserve(capacity)
+            else:
+                self.wide.reserve(capacity)
 
     def append(
         mut self,

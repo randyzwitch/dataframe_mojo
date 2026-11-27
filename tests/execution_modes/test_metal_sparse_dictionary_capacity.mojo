@@ -48,6 +48,7 @@ def test_sparse_dictionary_sum_reserves_all_null_within_group_limit() raises:
         assert_equal(result.height(), GENERAL_GROUP_LIMIT)
         assert_true(obs[].completed_launches.load() >= 2)
         assert_equal(obs[].upload_bytes.load(), Int64(0))
+        assert_equal(obs[].download_bytes.load(), Int64(0))
         var left = result.column("a").numeric[DType.int32]()
         var right = result.column("b").numeric[DType.int32]()
         var sums = result.column("net").numeric[DType.int64]()
