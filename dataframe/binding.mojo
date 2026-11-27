@@ -117,9 +117,11 @@ from .expr import (
     is_rolling_by,
     ROLLING_MEAN,
     ROLLING_MAX,
+    ROLLING_MIN,
     ROLLING_QUANTILE,
     ROLLING_QUANTILE_BY,
     rolling_options,
+    is_fixed_rolling,
     FORWARD_FILL,
     BACKWARD_FILL,
     INTERPOLATE,
@@ -573,6 +575,42 @@ def op_name(op: Int) -> String:
 
 def _numeric(dtype: DataType) -> Bool:
     return dtype.is_numeric()
+
+
+def _weighted_rolling_type(
+    node: Node, input: DataType
+) raises -> Optional[DataType]:
+    """The type of a fixed rolling window with weights, after checking
+    them (None without weights): Float64, Float32 for a sum, extreme or
+    quantile of Float32, as the products of values and weights are."""
+    var options = rolling_options(node)
+    if len(options.weights) == 0:
+        return None
+    if not _numeric(input):
+        raise Error(
+            "weighted rolling windows require a numeric expression, found "
+            + input.name()
+        )
+    if len(options.weights) != Int(node.integer):
+        raise Error("weights must hold window_size values")
+    var total = Float64(0)
+    for w in options.weights:
+        total += w
+    if (
+        total == 0
+        and node.op != ROLLING_SUM
+        and (node.op != ROLLING_MIN and node.op != ROLLING_MAX)
+    ):
+        raise Error("weights must not sum to zero")
+    var keeps = (
+        node.op == ROLLING_SUM
+        or node.op == ROLLING_MIN
+        or node.op == ROLLING_MAX
+        or node.op == ROLLING_QUANTILE
+    )
+    if keeps and input == DataType.FLOAT32:
+        return DataType.FLOAT32
+    return DataType.FLOAT64
 
 
 def _rolling_quantile_type(node: Node, input: DataType) raises -> DataType:
@@ -1782,6 +1820,10 @@ def bind(
                     raise Error("window_size must be at least 1")
                 if node.floating < -1:
                     raise Error("min_samples must be nonnegative")
+            if is_fixed_rolling(node.op):
+                var weighted = _weighted_rolling_type(node, input)
+                if weighted:
+                    dtype = weighted.value()
             if (
                 node.op == FORWARD_FILL or node.op == BACKWARD_FILL
             ) and node.integer < -1:

@@ -449,16 +449,24 @@ def to_pl_expr(e, types):
     if op == "interpolate_by":
         return E(1).interpolate_by(E(2))
     if op == "rolling_agg":
-        # (rolling_agg EXPR FN WINDOW MIN_SAMPLES), -1 for the default.
+        # (rolling_agg EXPR FN WINDOW MIN_SAMPLES CENTER (list WEIGHTS)),
+        # -1 for the default minimum.
         ms = None if e[4] < 0 else e[4]
-        return getattr(E(1), "rolling_" + e[2])(e[3], min_samples=ms)
+        ws = list(e[6][1:]) or None
+        return getattr(E(1), "rolling_" + e[2])(
+            e[3], ws, min_samples=ms, center=e[5]
+        )
     if op == "rolling_quantile":
-        # (rolling_quantile EXPR Q METHOD WINDOW MIN_SAMPLES)
+        # (rolling_quantile EXPR Q METHOD WINDOW MIN_SAMPLES CENTER (list W))
         ms = None if e[5] < 0 else e[5]
-        return E(1).rolling_quantile(e[2], e[3], e[4], min_samples=ms)
+        ws = list(e[7][1:]) or None
+        return E(1).rolling_quantile(
+            e[2], e[3], e[4], ws, min_samples=ms, center=e[6]
+        )
     if op == "rolling_median":
         ms = None if e[3] < 0 else e[3]
-        return E(1).rolling_median(e[2], min_samples=ms)
+        ws = list(e[5][1:]) or None
+        return E(1).rolling_median(e[2], ws, min_samples=ms, center=e[4])
     if op == "rolling_agg_by":
         # (rolling_agg_by EXPR BY FN PERIOD CLOSED MIN_SAMPLES)
         return getattr(E(1), "rolling_" + e[3] + "_by")(
@@ -1212,12 +1220,26 @@ class PlanGen:
             if not fresh or r.random() < 0.5:
                 w = r.choice([1, 2, 3, 4, 7, 16, 100])
                 ms = r.choice([-1, 1, min(2, w), w])
+                center = r.random() < 0.3
+                weights = ("list",)
+                if plain and r.random() < 0.3:
+                    # Polars has no weighted windows over nulls, so the
+                    # values are filled first.
+                    c = ("fill_null", c, 0.0 if schema[name] == "float64" else 0)
+                    weights += tuple(
+                        r.choice([0.5, 1.0, 2.0, 3.0]) for _ in range(w)
+                    )
+                    if method in ("lower", "midpoint") and ms < 2:
+                        # Polars reads 0 for these from a window of one
+                        # weighted value.
+                        ms = -1 if w >= 2 else ms
+                        method = "linear" if w < 2 else method
                 if fn == "median":
-                    e = ("rolling_median", c, w, ms)
+                    e = ("rolling_median", c, w, ms, center, weights)
                 elif fn == "quantile":
-                    e = ("rolling_quantile", c, q, method, w, ms)
+                    e = ("rolling_quantile", c, q, method, w, ms, center, weights)
                 else:
-                    e = ("rolling_agg", c, fn, w, ms)
+                    e = ("rolling_agg", c, fn, w, ms, center, weights)
                 keys = g.cols(is_key)
                 if keys and r.random() < 0.3:
                     e = ("over", e, ("list", r.choice(keys)), ("list",), False, False)
