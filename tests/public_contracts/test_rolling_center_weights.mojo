@@ -423,3 +423,15 @@ def test_weighted_variance_of_an_infinite_value_is_nan() raises:
         assert_true(isnan(column.get(0).float64()))
         assert_true(isnan(column.get(1).float64()))
         assert_true(column.get(2).float64() > 0)
+
+
+def test_weighted_median_of_one_infinite_value_is_that_value() raises:
+    var frame = DataFrame(
+        [Series("x", Column[Float64]([-FloatLiteral.infinity, 1]))]
+    )
+    var w: List[Float64] = [2.0]
+    var result = frame.select_exprs([col("x").rolling_median(1, weights=w)])
+    assert_equal(
+        result.column("x").get(0).float64(), -Float64(FloatLiteral.infinity)
+    )
+    assert_equal(result.column("x").get(1).float64(), 1.0)
