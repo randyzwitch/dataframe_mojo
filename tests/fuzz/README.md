@@ -100,4 +100,7 @@ pixi run -e oracle python3 tests/fuzz/fuzz.py replay build/fuzz/failures/seed123
 
 Set `FUZZ_DRIVER` to use a driver built elsewhere. Set `FUZZ_FOCUS` to a
 comma-separated list of plan step kinds (for example
-`interpolate,time_window`) to make those steps 20 times as likely.
+`interpolate,time_window`) to make those steps 20 times as likely. Join
+options have their own focus names: `join_validate` (a `validate` check on
+most inner and left joins) and `join_expr` (computed join keys on most
+joins); use them with `join`.

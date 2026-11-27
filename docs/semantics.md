@@ -291,6 +291,13 @@ right key columns are kept as ordinary right columns. `semi` and `anti` return
 only left columns. Empty inputs keep the joined schema; `cross` checks that the
 output row count does not overflow.
 
+Keys may also be expressions: `join(right, left_on=[col("email").str().to_lowercase()],
+right_on=[col("email").str().to_lowercase()])`. Each key is computed once per
+side, as a hidden column the output drops, so the output holds the inputs'
+columns and not the computed keys. When any key is more than a plain column,
+both sides' columns are all kept (the right ones suffixed where names collide),
+as with `coalesce=False`; keys that are all plain columns join as key names do.
+
 `validate="1:m" | "m:1" | "1:1"` checks that join keys are unique where the
 join expects them to be: the left input's for `1:m`, the right input's for
 `m:1`, both for `1:1`. The default `m:m` checks nothing. A repeated key raises
