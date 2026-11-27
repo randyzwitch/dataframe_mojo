@@ -1315,57 +1315,52 @@ def _ewm_window(node: Node, input: Series, ids: List[Int]) raises -> Series:
 def ewm_by_op(
     node: Node, input: Series, index: Series, ids: List[Int]
 ) raises -> Series:
-    """`ewm_mean_by` / `ewm_sum_by`: each partition's rows in stable time
-    order (rows with a null time keep their place and stay null), the
-    decay applied between consecutive times, and the result put back in
-    row order."""
+    """`ewm_mean_by` / `ewm_sum_by`: each partition's rows visited in
+    stable time order (rows with a null time stay null), the decay applied
+    between consecutive times. Rows already in time order within
+    contiguous partitions are read in place; otherwise only the visiting
+    order is sorted, and results are written back to their rows."""
     from dataframe.time.windows import ewm_half_life
 
     var values = input.rechunk()
     if values.dtype() != DataType.FLOAT32:
         values = _as_float(values)
-    var times = index.rechunk().cast(DataType.INT64)
+    var stamps = index.rechunk()
+    if not stamps._data.isa[Column[Int64]]():
+        stamps = stamps.cast(DataType.INT64)
+    ref times = stamps._data[Column[Int64]]
     var half_life = ewm_half_life(node.text, index.dtype())
-    var groups = partitions(len(values), ids)
     var n = len(values)
-    var order = List[Int](capacity=n)
-    var starts = List[Int](capacity=len(groups) + 1)
-    for rows in groups:
-        starts.append(len(order))
-        var sorted = True
-        for k in range(1, len(rows)):
-            if times._data[Column[Int64]]._get(rows[k]) < times._data[
-                Column[Int64]
-            ]._get(rows[k - 1]):
+    var parts = _contiguous(n, ids)
+    var tp = times._ptr()
+    var visit = parts.order.copy()
+    var sorted = True
+    for p in range(len(parts.starts) - 1):
+        for k in range(parts.starts[p] + 1, parts.starts[p + 1]):
+            var a = visit[k - 1] if len(visit) > 0 else k - 1
+            var b = visit[k] if len(visit) > 0 else k
+            if tp[unsafe_offset=b] < tp[unsafe_offset=a]:
                 sorted = False
                 break
-        if sorted:
-            for row in rows:
-                order.append(row)
-        else:
-            var by_time = times.take(rows).argsort()
-            for k in by_time:
-                order.append(rows[k])
-    starts.append(len(order))
-    var laid_times = times.take(order)
-    ref stored = laid_times._data[Column[Int64]]
-    var stamps = List[Int64](capacity=n)
-    var present = List[Bool](capacity=n)
-    for k in range(n):
-        stamps.append(stored._get(k))
-        present.append(stored._valid(k))
-    var result = ewm_by_frames(
-        values.take(order),
-        stamps,
-        present,
-        starts,
-        half_life,
-        node.text2 == "mean",
+        if not sorted:
+            break
+    if not sorted:
+        if len(visit) == 0:
+            visit = List[Int](unsafe_uninit_length=n)
+            for k in range(n):
+                visit[k] = k
+        for p in range(len(parts.starts) - 1):
+            var lo = parts.starts[p]
+            var hi = parts.starts[p + 1]
+            var rows = List[Int](capacity=hi - lo)
+            for k in range(lo, hi):
+                rows.append(visit[k])
+            var by_time = stamps.take(rows).argsort()
+            for k in range(len(by_time)):
+                visit[lo + k] = rows[by_time[k]]
+    return ewm_by_frames(
+        values, times, parts.starts, visit, half_life, node.text2 == "mean"
     )
-    var inverse = List[Int](unsafe_uninit_length=n)
-    for k in range(n):
-        inverse[order[k]] = k
-    return result.take(inverse)
 
 
 def _weighted_window(

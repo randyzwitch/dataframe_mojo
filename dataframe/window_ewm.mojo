@@ -14,7 +14,7 @@ A row is null until `min_samples` values have been seen.
 With a time index (`ewm_mean_by`, `ewm_sum_by`), the earlier result decays
 by 0.5^(elapsed / half_life) between consecutive rows in time order.
 """
-from std.math import sqrt
+from std.math import sqrt, exp, log
 from dataframe.storage.column import Column
 from .dtype import DataType
 from .series import Series
@@ -180,14 +180,15 @@ def _ewm[
 
 def ewm_by_frames(
     input: Series,
-    times: List[Int64],
-    times_valid: List[Bool],
+    times: Column[Int64],
     starts: List[Int],
+    visit: List[Int],
     half_life: Float64,
     mean: Bool,
 ) raises -> Series:
-    """`ewm_mean_by` (mean) or `ewm_sum_by` of `input`, whose rows lie in
-    time order within each partition (row ranges at `starts`); `times`
+    """`ewm_mean_by` (mean) or `ewm_sum_by` of `input`: partition p's rows
+    are visited at positions [starts[p], starts[p + 1]) of `visit` (or of
+    the rows themselves when `visit` is empty), in time order; `times`
     and `half_life` share a unit. A row whose value or time is null stays
     null and leaves the state as it is. Float32 is computed and returned
     as Float32, other numbers as Float64."""
@@ -196,8 +197,8 @@ def ewm_by_frames(
         return _ewm_by[DType.float32](
             narrow._data[Column[Float32]],
             times,
-            times_valid,
             starts,
+            visit,
             half_life,
             mean,
         )
@@ -205,8 +206,8 @@ def ewm_by_frames(
     return _ewm_by[DType.float64](
         floats._data[Column[Float64]],
         times,
-        times_valid,
         starts,
+        visit,
         half_life,
         mean,
     )
@@ -216,9 +217,9 @@ def _ewm_by[
     D: DType
 ](
     column: Column[Scalar[D]],
-    times: List[Int64],
-    times_valid: List[Bool],
+    times: Column[Int64],
     starts: List[Int],
+    visit: List[Int],
     half_life: Float64,
     mean: Bool,
 ) raises -> Series:
@@ -227,27 +228,57 @@ def _ewm_by[
     var out = List[T](length=n, fill=T(0))
     var ok = List[Bool](length=n, fill=False)
     var span = T(half_life)
+    var vp = column._ptr()
+    var tp = times._ptr()
+    var checks = column.null_count() > 0 or times.null_count() > 0
+    var reorder = len(visit) > 0
+    # Each row's decay from the row before it in time, for all rows at
+    # once: the gaps are gathered in one pass and their powers taken a
+    # vector at a time (0.5^r as exp(-r ln 2), in Float64, rounded once to
+    # the values' type), so the recurrence below only multiplies and adds.
+    var decays = List[Float64](length=n, fill=1)
+    var dp = decays.unsafe_ptr()
+    for p in range(len(starts) - 1):
+        var started = False
+        var last = Int64(0)
+        for k in range(starts[p], starts[p + 1]):
+            var j = visit[k] if reorder else k
+            if checks and not (column._valid(j) and times._valid(j)):
+                continue
+            var t = tp[unsafe_offset=j]
+            if started:
+                dp[unsafe_offset=k] = (T(t - last) / span).cast[DType.float64]()
+            else:
+                dp[unsafe_offset=k] = 0
+                started = True
+            last = t
+    comptime width = 8
+    var scale = -log(Float64(2))
+    var k = 0
+    while k + width <= n:
+        dp.unsafe_store(k, exp(dp.unsafe_load[width=width](k) * scale))
+        k += width
+    while k < n:
+        dp[unsafe_offset=k] = exp(dp[unsafe_offset=k] * scale)
+        k += 1
     for p in range(len(starts) - 1):
         var started = False
         var previous = T(0)
-        var last = Int64(0)
-        for j in range(starts[p], starts[p + 1]):
-            if not column._valid(j) or not times_valid[j]:
+        for k in range(starts[p], starts[p + 1]):
+            var j = visit[k] if reorder else k
+            if checks and not (column._valid(j) and times._valid(j)):
                 continue
-            var x = column._get(j)
+            var x = vp[unsafe_offset=j]
             if not started:
                 previous = x
                 started = True
             elif not (mean and x == previous):
-                # The power is taken in Float64 and rounded once, so a
-                # Float32 decay is the correctly rounded one.
-                var ratio = T(times[j] - last) / span
-                var decay = (Float64(0.5) ** ratio.cast[DType.float64]()).cast[
-                    D
-                ]()
+                var decay = dp[unsafe_offset=k].cast[D]()
                 var gain = T(1) - decay if mean else T(1)
                 previous = _product[D](decay, previous) + _product[D](gain, x)
-            last = times[j]
             out[j] = previous
             ok[j] = True
-    return Series("", Column[T](out^, ok))
+    _ = decays^
+    if checks:
+        return Series("", Column[T](out^, ok))
+    return Series("", Column[T](out^))
