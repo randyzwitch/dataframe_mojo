@@ -1,6 +1,6 @@
 """Dictionary calibration separates physical code spans and sampled tuples."""
 # contract-group: execution.backends
-from std.testing import assert_equal, assert_false
+from std.testing import assert_equal, assert_false, assert_true
 from dataframe import Column, DataFrame, DataType, Series, col
 from dataframe_metal.dictionary_group import plan_dictionary_group
 from dataframe_metal.dictionary_properties import dictionary_properties
@@ -74,3 +74,46 @@ def test_metal_sparse_dictionary_calibration_samples_code_tuples() raises:
         dictionary_properties(varied, matched.value()),
         ":code_sample:v1:philox:groups4:hot4:null2",
     )
+
+
+def test_single_dictionary_cost_identity_tracks_stripes_and_value_boundaries() raises:
+    var labels = List[String]()
+    for i in range(32):
+        labels.append(String(i))
+    var high = List[UInt32]()
+    var low = List[UInt32]()
+    var valid = List[Bool](length=1024, fill=True)
+    var values = List[Int64]()
+    for i in range(1024):
+        # Both multisets have each key exactly 32 times.
+        high.append(UInt32(i % 32))
+        low.append(UInt32(i // 32))
+        values.append(Int64((i // 32 + i % 32) % 32))
+    var key = _coded_key("k", labels, high^, valid)
+    var value = Series("v", Column[Int64](values^))
+    var frame = DataFrame([key.copy(), value.copy()])
+    var fast = frame.lazy().group_by("k").agg([col("v").sum()])
+    var reordered = frame.with_column(_coded_key("k", labels, low^, valid))
+    var slow = reordered.lazy().group_by("k").agg([col("v").sum()])
+    var a = layout_keys(fast)
+    var b = layout_keys(slow)
+    assert_true(String(":kernel=striped") in a[0])
+    assert_true(String(":kernel=striped") in a[1])
+    assert_true(String(":kernel=direct") in b[0])
+    assert_true(String(":kernel=direct") in b[1])
+    # Shared slices still coalesce. Independent value spans prevent the
+    # stride-32 reuse even though key codes, histogram and value rows match.
+    var shared = List[Series]()
+    var independent = List[Series]()
+    for i in range(32):
+        shared.append(value.slice(i * 32, 32))
+        var block = List[Int64]()
+        for j in range(32):
+            block.append(Int64((i + j) % 32))
+        independent.append(Series("v", Column[Int64](block^)))
+    var joined = frame.with_column(Series._from_chunks(shared^))
+    var split = frame.with_column(Series._from_chunks(independent^))
+    var shared_query = joined.lazy().group_by("k").agg([col("v").sum()])
+    var separate_query = split.lazy().group_by("k").agg([col("v").sum()])
+    assert_true(String(":kernel=striped") in region_key(shared_query))
+    assert_true(String(":kernel=direct") in region_key(separate_query))

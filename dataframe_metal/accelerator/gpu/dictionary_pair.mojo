@@ -1,7 +1,7 @@
 """Direct-address SUM for one or two bounded dictionaries, including null keys."""
 from max.gpu import global_idx
 from std.atomic import Atomic
-from std.memory import Pointer
+from std.memory import Pointer, bitcast
 from .filter_sum import _valid
 from .group_hash import atomic_add_signed96, _key_hash
 from .multi_reduce import Bytes, read_integer
@@ -53,9 +53,112 @@ def _claim_dictionary_codes(
     return UInt32.MAX
 
 
+# Each lane scans a stripe. Adjacent lanes still read neighboring rows, while
+# repetitions inside a stripe can share a count, first-row ticket and sum.
+comptime DICTIONARY_STRIPE = 4
+comptime SIMD_WIDTH = 32
+
+
+@always_inline
+def _publish_sum(
+    slot: Pointer[UInt32, MutUntrackedOrigin],
+    first: UInt32,
+    count: UInt32,
+    total: Int64,
+):
+    var ticket = ~first
+    if ticket > Atomic[UInt32].load(slot):
+        _ = Atomic[UInt32].max(slot, ticket)
+    if count:
+        _ = Atomic[UInt32].fetch_add(slot.unsafe_offset(1), count)
+        atomic_add_signed96(slot.unsafe_offset(2), total)
+
+
+@always_inline
+def _single_sum_stripe(
+    lane: Int,
+    left: Bytes,
+    values: Bytes,
+    left_bits: Bytes,
+    value_bits: Bytes,
+    left_offset: UInt32,
+    value_offset: UInt32,
+    flags: UInt32,
+    labels: UInt32,
+    value_tag: UInt32,
+    base: UInt32,
+    length: UInt32,
+    slots: UInt32,
+    state: Pointer[UInt32, MutUntrackedOrigin],
+):
+    var first = (lane // SIMD_WIDTH) * (
+        SIMD_WIDTH * DICTIONARY_STRIPE
+    ) + lane % SIMD_WIDTH
+    if first >= Int(length):
+        return
+    var control = state.unsafe_offset(Int(slots) * PAIR_WORDS)
+    if first == 0:
+        _ = Atomic[UInt32].fetch_add(control, UInt32(1))
+    var pivot = UInt32.MAX
+    var pivot_first = UInt32(0)
+    var count = UInt32(0)
+    var total = Int64(0)
+    for step in range(DICTIONARY_STRIPE):
+        var row = first + step * SIMD_WIDTH
+        if row >= Int(length):
+            break
+        var code = labels
+        if not (flags & 1) or _valid(left_bits, left_offset, row):
+            code = left.unsafe_bitcast[UInt32]()[unsafe_offset=row]
+            if code >= labels:
+                _ = Atomic[UInt32].max(control.unsafe_offset(1), UInt32(1))
+                continue
+        if pivot == UInt32.MAX:
+            pivot = code
+            pivot_first = base + UInt32(row)
+        var valid = not (flags & 4) or _valid(value_bits, value_offset, row)
+        var value = read_integer(values, value_tag, row) if valid else Int64(0)
+        var slot = state.unsafe_offset(Int(code) * PAIR_WORDS)
+        if code != pivot:
+            _publish_sum(slot, base + UInt32(row), UInt32(valid), value)
+        elif valid:
+            count += 1
+            var updated = bitcast[DType.int64](
+                bitcast[DType.uint64](total) + bitcast[DType.uint64](value)
+            )
+            # An Int64 stripe can exceed 64 bits before cancellation. Flush the
+            # prior subtotal into the exact 96-bit accumulator on signed overflow.
+            if (
+                value_tag != 0
+                and (total < 0) == (value < 0)
+                and (updated < 0) != (total < 0)
+            ):
+                atomic_add_signed96(slot.unsafe_offset(2), total)
+                total = value
+            else:
+                total = updated
+    if pivot != UInt32.MAX:
+        _publish_sum(
+            state.unsafe_offset(Int(pivot) * PAIR_WORDS),
+            pivot_first,
+            count,
+            total,
+        )
+
+
+@always_inline
+def dictionary_span_lanes[striped: Bool](rows: Int) -> Int:
+    """Threads needed for this span, including its incomplete last tile."""
+    comptime if striped:
+        comptime tile = SIMD_WIDTH * DICTIONARY_STRIPE
+        return (rows // tile) * SIMD_WIDTH + min(rows % tile, SIMD_WIDTH)
+    else:
+        return rows
+
+
 @always_inline
 def _dictionary_sum_row[
-    single_key: Bool = False, sparse: Bool = False
+    single_key: Bool = False, sparse: Bool = False, striped: Bool = False
 ](
     i: Int,
     left: Bytes,
@@ -76,6 +179,25 @@ def _dictionary_sum_row[
     slots: UInt32,
     state: Pointer[UInt32, MutUntrackedOrigin],
 ):
+    comptime if striped:
+        if Int(length) > SIMD_WIDTH:
+            _single_sum_stripe(
+                i,
+                left,
+                values,
+                left_bits,
+                value_bits,
+                left_offset,
+                value_offset,
+                flags,
+                left_labels,
+                value_tag,
+                base,
+                length,
+                slots,
+                state,
+            )
+            return
     if i >= Int(length):
         return
     var table = state.unsafe_offset(Int(slots) * PAIR_WORDS)
@@ -118,7 +240,7 @@ def _dictionary_sum_row[
 
 
 def dictionary_pair_sum[
-    single_key: Bool = False, sparse: Bool = False
+    single_key: Bool = False, sparse: Bool = False, striped: Bool = False
 ](
     left: Bytes,
     right: Bytes,
@@ -138,7 +260,7 @@ def dictionary_pair_sum[
     slots: UInt32,
     state: Pointer[UInt32, MutUntrackedOrigin],
 ):
-    _dictionary_sum_row[single_key, sparse](
+    _dictionary_sum_row[single_key, sparse, striped](
         global_idx.x,
         left,
         right,
@@ -161,7 +283,7 @@ def dictionary_pair_sum[
 
 
 def dictionary_pair_sum_two_spans[
-    single_key: Bool, sparse: Bool
+    single_key: Bool, sparse: Bool, striped: Bool = False
 ](
     left0: Bytes,
     right0: Bytes,
@@ -191,8 +313,9 @@ def dictionary_pair_sum_two_spans[
     # Each lane reads its owner's original buffers. The two spans share the
     # same atomic result slots; first-row tickets retain their global offsets.
     var i = global_idx.x
-    if i < Int(first_rows):
-        _dictionary_sum_row[single_key, sparse](
+    var first_lanes = dictionary_span_lanes[striped](Int(first_rows))
+    if i < first_lanes:
+        _dictionary_sum_row[single_key, sparse, striped](
             i,
             left0,
             right0,
@@ -213,8 +336,8 @@ def dictionary_pair_sum_two_spans[
             state,
         )
     else:
-        _dictionary_sum_row[single_key, sparse](
-            i - Int(first_rows),
+        _dictionary_sum_row[single_key, sparse, striped](
+            i - first_lanes,
             left1,
             right1,
             values1,

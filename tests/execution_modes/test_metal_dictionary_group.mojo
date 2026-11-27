@@ -7,6 +7,7 @@ from dataframe.categorical import decode
 from dataframe.dtype import CategoricalDictionary
 from dataframe.storage.string import StringCodes
 from dataframe_metal.metal import MetalRuntime
+from dataframe_metal.dictionary_pair_reduce import _combine_dictionary_stripes
 from dataframe_metal.dictionary_group import (
     plan_dictionary_group,
     execute_dictionary_group,
@@ -333,3 +334,114 @@ def test_sparse_dictionary_sum_all_null_tuple_and_highest_packed_code() raises:
         assert_true(result[0].item(1, "a").is_null())
         assert_true(result[0].item(1, "b").is_null())
         assert_equal(result[0].item(1, "total").int64(), Int64(-1))
+
+
+# requires: metal
+def test_single_dictionary_sum_combines_full_width_addends_without_overflow() raises:
+    comptime if METAL_TARGET:
+        var keys = List[UInt32](length=129, fill=0)
+        var valid = List[Bool](length=129, fill=True)
+        var values = List[Int64](capacity=129)
+        for row in range(128):
+            values.append(Int64.MAX if row < 64 else -Int64.MAX)
+        values.append(17)
+        var key = _coded_key("key", ["hot"], keys^, valid^)
+        var frame = DataFrame([key^, Series("v", Column[Int64](values^))])
+        var plan = (
+            frame.lazy()
+            .group_by("key", maintain_order=True)
+            .agg([col("v").sum(min_count=1).alias("total")])
+        )
+        var result = plan.collect(accelerator=MetalRuntime())
+        assert_true(result.equals(plan.collect(engine="cpu")))
+        assert_equal(
+            result.column("total").numeric[DType.int64]().value(0), Int64(17)
+        )
+
+
+def test_dictionary_stripe_sampling_respects_keys_nulls_and_dispatch_boundaries() raises:
+    var unique = List[Int32]()
+    var local = List[Int32]()
+    var striped = List[Int32]()
+    var hot = List[Int32]()
+    for i in range(1024):
+        unique.append(Int32(i))
+        local.append(Int32(i // 32))
+        striped.append(Int32(i % 32))
+        hot.append(1)
+    var full: List[Int] = [1024]
+    assert_false(
+        _combine_dictionary_stripes(Series("key", Column[Int32](unique^)), full)
+    )
+    assert_false(
+        _combine_dictionary_stripes(Series("key", Column[Int32](local^)), full)
+    )
+    var stripes = Series("key", Column[Int32](striped^))
+    assert_true(_combine_dictionary_stripes(stripes, full))
+    assert_false(
+        _combine_dictionary_stripes(stripes, List[Int](length=32, fill=32))
+    )
+    var nulls = Series(
+        "key", Column[Int32](hot^, List[Bool](length=1024, fill=False))
+    )
+    assert_true(_combine_dictionary_stripes(nulls, full))
+    assert_false(_combine_dictionary_stripes(nulls.slice(0, 12), [12]))
+
+
+# requires: metal
+def test_single_dictionary_batches_offset_spans_for_direct_and_striped_keys() raises:
+    from dataframe.execution_observation import DeviceObservation
+    from dataframe.expr import SUM
+    from dataframe_metal.dictionary_pair_reduce import execute_dictionary_sum
+    from dataframe_metal.multi_plan import ReductionOutput
+
+    comptime if METAL_TARGET:
+        for striped in [False, True]:
+            var keys = List[Series]()
+            var start = 0
+            for length in [193, 257, 79]:
+                var data = List[Int32]()
+                var valid = List[Bool]()
+                var pad = 3 + start % 5
+                for i in range(pad + length):
+                    var row = start + i - pad
+                    var key = Int32(row % 4 if striped else row % 197)
+                    # Discover a fresh group in each of the second span and odd tail.
+                    if row == 135 or row == 200 or row == 450:
+                        key = Int32(row + 200)
+                    data.append(key)
+                    valid.append(row % 17 != 4)
+                keys.append(
+                    Series("k", Column[Int32](data^, valid^)).slice(pad, length)
+                )
+                start += length
+            var values = List[Series]()
+            start = 0
+            for length in [135, 65, 329]:
+                var data = List[Int64]()
+                var valid = List[Bool]()
+                var pad = 5 + start % 3
+                for i in range(pad + length):
+                    var row = start + i - pad
+                    data.append(Int64(row % 13 - 6) * (Int64(1) << 34))
+                    valid.append(row % 11 != 1)
+                values.append(
+                    Series("v", Column[Int64](data^, valid^)).slice(pad, length)
+                )
+                start += length
+            var key = Series._from_chunks(keys^)
+            var lengths: List[Int] = [135, 58, 7, 250, 79]
+            assert_equal(_combine_dictionary_stripes(key, lengths), striped)
+            var frame = DataFrame([key^, Series._from_chunks(values^)])
+            var expected = (
+                frame.lazy()
+                .group_by("k", maintain_order=True)
+                .agg([col("v").sum(min_count=1).alias("total")])
+                .collect(engine="cpu")
+            )
+            var obs = ArcPointer(DeviceObservation())
+            var actual = execute_dictionary_sum[True](
+                frame, ReductionOutput(0, "total", SUM, 1), obs, 651, 0, True
+            )
+            assert_true(actual[0].equals(expected))
+            assert_equal(obs[].completed_launches.load(), Int64(3))
