@@ -1,5 +1,6 @@
 """Whole-expression row operations, restarted within each aggregation group."""
 from dataframe.expr import (
+    EXPR_EXPLODE,
     Node,
     EXPR_FILTER,
     EXPR_SLICE,
@@ -20,6 +21,7 @@ from dataframe.expr import (
     split_names,
 )
 from dataframe.dtype import DataType
+from dataframe.kernels.list_transforms import explode
 from dataframe.series import Series, sort_indices
 from dataframe.categorical import sort_ranks as categorical_sort_ranks
 from dataframe.kernels.binary import validity
@@ -134,6 +136,21 @@ def select_sequence(node: Node, input: Series, other: Series) raises -> Series:
         return input.slice(start, length)
     if node.op == EXPR_REVERSE:
         return input.reverse()
+    if node.op == EXPR_EXPLODE:
+        # Each chunk explodes on its own, so a chunked input (batches of
+        # rows onto one child) is never merged first.
+        var parts = List[Series]()
+        for chunk in input.chunks():
+            parts.append(
+                explode(
+                    chunk.list_column(),
+                    (node.integer & 1) != 0,
+                    (node.integer & 2) != 0,
+                )
+            )
+        return parts[0].copy() if len(parts) == 1 else Series._from_chunks(
+            parts
+        )
     if node.op == EXPR_UNIQUE:
         return input.unique(maintain_order=node.integer != 0)
     if node.op == EXPR_UNIQUE_COUNTS:

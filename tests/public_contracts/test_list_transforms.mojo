@@ -670,3 +670,103 @@ def test_list_eval_filter_agg() raises:
     )
     with assert_raises(contains="Bool predicate"):
         _ = frame.select_exprs([col("a").list().filter(e + 1)])
+
+
+def test_list_to_struct() raises:
+    var frame = DataFrame(
+        [int_lists("a", [[1, 2, 3], [], [], [4]], [True, False, True, True])]
+    )
+    var expr = col("a").list().to_struct(["x", "y"])
+    for lazy in [False, True]:
+        var result = (
+            frame.lazy()
+            .select_exprs([expr.alias("s")])
+            .collect() if lazy else frame.select_exprs([expr.alias("s")])
+        )
+        var s = result.column("s")
+        assert_equal(
+            s.dtype(),
+            DataType.struct(["x", "y"], [DataType.INT64, DataType.INT64]),
+        )
+        var fields = result.select_exprs(
+            [
+                col("s").field("x").alias("x"),
+                col("s").field("y").alias("y"),
+                col("s").is_null().alias("n"),
+            ]
+        )
+        assert_true(
+            fields.column("x").equals(
+                Series(
+                    "x", Column[Int64]([1, 0, 0, 4], [True, False, False, True])
+                )
+            )
+        )
+        assert_true(
+            fields.column("y").equals(
+                Series(
+                    "y",
+                    Column[Int64]([2, 0, 0, 0], [True, False, False, False]),
+                )
+            )
+        )
+        assert_true(
+            fields.column("n").equals(
+                Series("n", BoolColumn([False, True, False, False]))
+            )
+        )
+
+
+def check_explode(
+    frame: DataFrame, empty_as_null: Bool, keep_nulls: Bool, rows: List[Int]
+) raises:
+    var expr = col("a").explode(
+        empty_as_null=empty_as_null, keep_nulls=keep_nulls
+    )
+    var values = List[Int64]()
+    var valid = List[Bool]()
+    for v in rows:
+        values.append(Int64(0) if v == N else Int64(v))
+        valid.append(v != N)
+    var want = Series("a", Column[Int64](values^, valid))
+    assert_true(frame.select_exprs([expr.copy()]).column("a").equals(want))
+    assert_true(
+        frame.lazy()
+        .select_exprs([expr.copy()])
+        .collect()
+        .column("a")
+        .equals(want)
+    )
+    var through_list = (
+        col("a")
+        .list()
+        .explode(empty_as_null=empty_as_null, keep_nulls=keep_nulls)
+    )
+    assert_true(
+        frame.select_exprs([through_list.copy()]).column("a").equals(want)
+    )
+
+
+def test_explode_expression() raises:
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64]([1, 2, 3, 4])),
+            int_lists("a", [[1, 2, 3], [], [], [4]], [True, False, True, True]),
+        ]
+    )
+    # A null list gives one null row and an empty list none, by default.
+    check_explode(frame, False, True, [1, 2, 3, N, 4])
+    check_explode(frame, True, True, [1, 2, 3, N, N, 4])
+    check_explode(frame, False, False, [1, 2, 3, 4])
+    with assert_raises(contains="explode requires a list"):
+        _ = frame.select_exprs([col("k").explode()])
+    # Inside an aggregation each group's lists explode into that group's
+    # list.
+    var grouped = frame.group_by(["k"], maintain_order=True).agg(
+        [col("a").explode().alias("a")]
+    )
+    assert_true(
+        grouped.column("a").equals(
+            int_lists("a", [[1, 2, 3], [N], [], [4]], [True, True, True, True])
+        )
+    )

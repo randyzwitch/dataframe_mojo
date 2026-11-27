@@ -23,6 +23,7 @@ from std.math import isnan
 from std.memory import Pointer, unsafe_memcmp
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
+    LIST_TO_STRUCT,
     LIST_SET_DIFFERENCE,
     LIST_SET_INTERSECTION,
     LIST_SET_SYMMETRIC_DIFFERENCE,
@@ -60,11 +61,11 @@ from dataframe.expr import (
 )
 from dataframe.kernels.hashing import RowKeys, encode_rows
 from dataframe.kernels.partition import encode_partitioned
-from dataframe.parallel import Job, run_jobs, worker_count
+from dataframe.parallel import Job, morsel_size, run_jobs, worker_count
 from dataframe.series import Series
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column, _append_validity
-from dataframe.storage.nested import ListColumn
+from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.storage.string import StringColumn
 from dataframe.text.bytes import _Bytes
 
@@ -133,6 +134,8 @@ def list_op_name(op: Int) -> String:
         return "list.count_matches"
     if op == LIST_HAS:
         return "list.contains"
+    if op == LIST_TO_STRUCT:
+        return "list.to_struct"
     if op == LIST_SET_UNION:
         return "list.set_union"
     if op == LIST_SET_INTERSECTION:
@@ -1343,9 +1346,104 @@ def _pack(valid: List[Bool]) -> List[UInt8]:
 # --- Entry -----------------------------------------------------------------
 
 
+def _explode_rows(lists: ListColumn, flags: Int) raises -> Series:
+    """explode of one stretch of rows on the calling thread."""
+    var n = len(lists)
+    var view = _View(lists)
+    var total = 0
+    var nulls = False
+    for i in range(n):
+        var count = view.count(i)
+        if count == 0:
+            var bit = 1 if view.valid(i) else 2
+            if (flags & bit) != 0:
+                total += 1
+                nulls = True
+        total += count
+    var elements = _elements(lists)
+    if not nulls and total == len(elements):
+        return elements.renamed("")
+    var positions = List[Int](unsafe_uninit_length=total)
+    var at = 0
+    for i in range(n):
+        var count = view.count(i)
+        if count == 0:
+            var bit = 1 if view.valid(i) else 2
+            if (flags & bit) != 0:
+                positions[at] = -1
+                at += 1
+            continue
+        var start = view.start(i)
+        for j in range(count):
+            positions[at + j] = start + j
+        at += count
+    if nulls:
+        return elements.take_or_null(positions).renamed("")
+    return elements.take(positions).renamed("")
+
+
+struct _ExplodeJob(Job):
+    """explode of one morsel of rows."""
+
+    var lists: ListColumn
+    var flags: Int
+    var result: List[Series]
+
+    def __init__(out self, lists: ListColumn, flags: Int):
+        self.lists = lists.copy()
+        self.flags = flags
+        self.result = List[Series]()
+
+    def run(mut self) raises:
+        self.result.append(_explode_rows(self.lists, self.flags))
+
+
+def explode(
+    lists: ListColumn, empty_as_null: Bool, keep_nulls: Bool
+) raises -> Series:
+    """One row per element, in order; an empty list gives one null row with
+    empty_as_null and a null list one null row with keep_nulls. The rows
+    are cut into morsels, each exploded on one worker, and the pieces kept
+    as the result's chunks; a morsel that adds no null row and hides no
+    elements under a null list is its elements, without a copy."""
+    var flags = Int(empty_as_null) | (Int(keep_nulls) << 1)
+    var n = len(lists)
+    var view = _View(lists)
+    var size = morsel_size(n, worker_count(view.start(n) - view.start(0)))
+    if n <= size:
+        return _explode_rows(lists, flags)
+    var jobs = List[_ExplodeJob]()
+    var first = 0
+    while first < n:
+        var length = min(size, n - first)
+        jobs.append(_ExplodeJob(lists.slice(first, length), flags))
+        first += length
+    _run(jobs)
+    var parts = List[Series](capacity=len(jobs))
+    for w in range(len(jobs)):
+        parts.append(jobs[w].result[0].copy())
+    return Series._from_chunks(parts)
+
+
+def _to_struct(lists: ListColumn, names: List[String]) raises -> Series:
+    """Field j holds each row's element j, or null past the row's end."""
+    var n = len(lists)
+    var view = _View(lists)
+    var elements = _elements(lists)
+    var fields = List[Series](capacity=len(names))
+    for f in range(len(names)):
+        var rows = List[Int](unsafe_uninit_length=n)
+        for i in range(n):
+            rows[i] = view.start(i) + f if f < view.count(i) else -1
+        fields.append(elements.take_or_null(rows).renamed(names[f]))
+    return Series("", StructColumn(fields^, _row_bits(lists), n))
+
+
 def list_transform(node: Node, lists: ListColumn) raises -> Series:
     """Evaluate a one-input list transform (see `is_list_transform`)."""
     var op = node.op
+    if op == LIST_TO_STRUCT:
+        return _to_struct(lists, split_names(node.text))
     if op == LIST_SORT or op == LIST_UNIQUE or op == LIST_N_UNIQUE:
         return _compared(lists, op, Int(node.integer))
     if op == LIST_DIFF:

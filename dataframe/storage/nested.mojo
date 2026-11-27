@@ -253,44 +253,52 @@ struct ListColumn(Copyable, Deinitable, Movable, Sized):
 
     def take(self, indices: List[Int]) raises -> Self:
         """Rows by index; gathers the child rows each list refers to."""
-        var offsets = List[Int64](capacity=len(indices) + 1)
-        offsets.append(0)
-        var child_rows = List[Int]()
-        var valid = List[Bool](capacity=len(indices))
-        var total = 0
         for i in indices:
             if i < 0 or i >= self._length:
                 raise Error("Row index out of bounds")
-            valid.append(self._valid(i))
-            for r in range(self._start(i), self._end(i)):
-                child_rows.append(r)
-            total += self._physical_count(i)
-            offsets.append(Int64(total))
-        var bits = List[UInt8]()
-        if len(self._bits[]) != 0:
-            bits = _pack_bits(valid)
-        return Self(offsets^, self.child().take(child_rows), bits^)
+        return self._gather(indices, False)
 
     def take_or_null(self, indices: List[Int]) raises -> Self:
         """Like take, but a negative index yields a null row."""
-        var offsets = List[Int64](capacity=len(indices) + 1)
-        offsets.append(0)
-        var child_rows = List[Int]()
-        var valid = List[Bool](capacity=len(indices))
-        var total = 0
         for i in indices:
             if i >= self._length:
                 raise Error("Row index out of bounds")
+        return self._gather(indices, True)
+
+    def _gather(self, indices: List[Int], nulls: Bool) raises -> Self:
+        """take (nulls False) or take_or_null over checked indices. The
+        offsets come first, so the child positions are written into one
+        buffer of the final size."""
+        var n = len(indices)
+        var offsets = List[Int64](unsafe_uninit_length=n + 1)
+        offsets[0] = 0
+        var total = 0
+        var any_null = False
+        for k in range(n):
+            var i = indices[k]
+            if i >= 0:
+                total += self._physical_count(i)
+                any_null = any_null or not self._valid(i)
+            else:
+                any_null = True
+            offsets[k + 1] = Int64(total)
+        var child_rows = List[Int](unsafe_uninit_length=total)
+        var at = 0
+        for k in range(n):
+            var i = indices[k]
             if i < 0:
-                valid.append(False)
-                offsets.append(Int64(total))
                 continue
-            valid.append(self._valid(i))
-            for r in range(self._start(i), self._end(i)):
-                child_rows.append(r)
-            total += self._physical_count(i)
-            offsets.append(Int64(total))
-        return Self(offsets^, self.child().take(child_rows), _pack_bits(valid))
+            var start = self._start(i)
+            for r in range(self._physical_count(i)):
+                child_rows[at + r] = start + r
+            at += self._physical_count(i)
+        var bits = List[UInt8]()
+        if any_null:
+            var valid = List[Bool](unsafe_uninit_length=n)
+            for k in range(n):
+                valid[k] = indices[k] >= 0 and self._valid(indices[k])
+            bits = _pack_bits(valid)
+        return Self(offsets^, self.child().take(child_rows), bits^)
 
     def _broadcast(self, length: Int) raises -> Self:
         if self._length != 1:

@@ -561,6 +561,20 @@ def build_expr(t: Tree, i: Int) raises -> Expr:
         if op == "list.count_matches":
             return ea(t, i, 1).list().count_matches(item)
         return ea(t, i, 1).list().contains(item)
+    if op == "list.explode":
+        return (
+            ea(t, i, 1)
+            .list()
+            .explode(
+                empty_as_null=t.flag(t.kid(i, 2)),
+                keep_nulls=t.flag(t.kid(i, 3)),
+            )
+        )
+    if op == "list.to_struct":
+        var names = List[String]()
+        for f in range(t.int(t.kid(i, 2))):
+            names.append("f" + String(f))
+        return ea(t, i, 1).list().to_struct(names)
     if op == "list.eval":
         var body = t.text(t.kid(i, 2))
         var el = element()

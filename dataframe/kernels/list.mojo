@@ -12,6 +12,7 @@ from dataframe.expr import (
     LIST_LEN,
     LIST_MEAN,
     LIST_MEDIAN,
+    LIST_HAS,
     LIST_MIN,
     LIST_SUM,
     STR_EXTRACT_ALL,
@@ -86,7 +87,7 @@ def nested_op(
         return _struct_field(input, node.text)
     var lists = input.list_column()
     if is_list_transform(node.op):
-        if node.op >= LIST_MEDIAN:
+        if node.op >= LIST_MEDIAN and node.op <= LIST_HAS:
             return list_reduce(node, lists)
         return list_transform(node, lists)
     if node.op == LIST_LEN:

@@ -1040,6 +1040,8 @@ A flat, topologically ordered tree; composition never evaluates data.
   Int64 positions in stable sorted order, relative to each group.
 - `def reverse(self) -> Self`
   Reverse value order, independently within each aggregation group.
+- `def explode(self, *, empty_as_null: Bool = False, keep_nulls: Bool = True) -> Self`
+  One row per element of a list expression, in order. An empty list gives no row (one null row with empty_as_null), and a null list one null row (none without keep_nulls).
 - `def unique(self, maintain_order: Bool = False) -> Self`
   Distinct values, including one null; optionally keep first appearance.
 - `def unique_counts(self) -> Self`
@@ -1726,6 +1728,10 @@ Expressions on list columns. A null list gives a null result.
   The elements of each list for which predicate, written with `element()`, is true.
 - `def agg(self, expr: Expr) -> Expr`
   Like eval, but an aggregation gives its value itself rather than a one-element list.
+- `def to_struct(self, fields: List[String]) -> Expr`
+  A struct with one field per name holding each list's element at that position; null where the list is shorter, and a null struct for a null list.
+- `def explode(self, *, empty_as_null: Bool = False, keep_nulls: Bool = True) -> Expr`
+  One row per element; see Expr.explode.
 - `def set_union(self, other: Expr) -> Expr`
   The distinct elements of each list and other's list in the same row: this list's in order, then other's that it lacks. A null list on either side gives null; a null element is one value.
 - `def set_intersection(self, other: Expr) -> Expr`

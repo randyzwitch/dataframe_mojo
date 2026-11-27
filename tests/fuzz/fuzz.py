@@ -499,6 +499,10 @@ def to_pl_expr(e, types):
         return E(1).list.count_matches(e[2])
     if op == "list.contains":
         return E(1).list.contains(e[2])
+    if op == "list.explode":
+        return E(1).list.explode(empty_as_null=e[2], keep_nulls=e[3])
+    if op == "list.to_struct":
+        return E(1).list.to_struct(fields=[f"f{i}" for i in range(e[2])])
     if op == "list.eval":
         el = pl.element()
         body = {
@@ -1082,6 +1086,15 @@ class PlanGen:
             cs = g.cols(lambda s: s in ("list[int64]", "list[string]"))
             if not cs:
                 return None
+            if r.random() < 0.15:
+                # explode as an expression: one row per element.
+                c = r.choice(cs)
+                e = ("list.explode", ("col", c), r.random() < 0.5, r.random() < 0.7)
+                return ("select", plan, ("list", ("alias", e, g.name()))), ordered
+            if r.random() < 0.1 and g.cols(lambda s: s == "list[int64]"):
+                c = r.choice(g.cols(lambda s: s == "list[int64]"))
+                e = ("field", ("list.to_struct", ("col", c), 2), "f1")
+                return ("with_columns", plan, ("list", ("alias", e, g.name()))), ordered
             es = [("alias", g.list_expr(r.choice(cs))[0], g.name()) for _ in range(r.randint(1, 3))]
             return ("with_columns", plan, ("list",) + tuple(es)), ordered
         if kind == "select":
