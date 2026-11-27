@@ -1348,7 +1348,11 @@ def _sliding_int_frames[
 def rolling_by_op(
     node: Node, input: Series, index: Series, ids: List[Int]
 ) raises -> Series:
-    from dataframe.time.windows import rolling_bounds, negate_period
+    from dataframe.time.windows import (
+        rolling_bounds,
+        negate_period,
+        sorted_range_bounds,
+    )
 
     if input.is_chunked() or index.is_chunked():
         return rolling_by_op(node, input.rechunk(), index.rechunk(), ids)
@@ -1370,6 +1374,23 @@ def rolling_by_op(
             _narrow_sum(result, input.dtype().sum_type()) if node.op
             == ROLLING_SUM_BY else result^
         )
+    var parts = _contiguous(len(input), ids)
+    if len(parts.order) == 0:
+        # Partitions that are row ranges already in time order: the frames
+        # are read where the rows are, as a fixed window's are.
+        var direct = sorted_range_bounds(
+            index, parts.starts, node.text, negate_period(node.text), node.text2
+        )
+        if direct:
+            ref found = direct.value()
+            return _frames(
+                node,
+                input,
+                found[0],
+                found[1],
+                parts.starts,
+                Int(node.floating),
+            )
     var groups = partitions(len(input), ids)
     var bounds = rolling_bounds(
         index, groups, node.text, negate_period(node.text), node.text2
