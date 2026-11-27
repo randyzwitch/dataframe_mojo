@@ -53,9 +53,11 @@ def _claim_dictionary_codes(
     return UInt32.MAX
 
 
-def dictionary_pair_sum[
+@always_inline
+def _dictionary_sum_row[
     single_key: Bool = False, sparse: Bool = False
 ](
+    i: Int,
     left: Bytes,
     right: Bytes,
     values: Bytes,
@@ -74,7 +76,6 @@ def dictionary_pair_sum[
     slots: UInt32,
     state: Pointer[UInt32, MutUntrackedOrigin],
 ):
-    var i = global_idx.x
     if i >= Int(length):
         return
     var table = state.unsafe_offset(Int(slots) * PAIR_WORDS)
@@ -113,4 +114,122 @@ def dictionary_pair_sum[
         _ = Atomic[UInt32].fetch_add(slot.unsafe_offset(1), UInt32(1))
         atomic_add_signed96(
             slot.unsafe_offset(2), read_integer(values, value_tag, i)
+        )
+
+
+def dictionary_pair_sum[
+    single_key: Bool = False, sparse: Bool = False
+](
+    left: Bytes,
+    right: Bytes,
+    values: Bytes,
+    left_bits: Bytes,
+    right_bits: Bytes,
+    value_bits: Bytes,
+    left_offset: UInt32,
+    right_offset: UInt32,
+    value_offset: UInt32,
+    flags: UInt32,
+    left_labels: UInt32,
+    right_labels: UInt32,
+    value_tag: UInt32,
+    base: UInt32,
+    length: UInt32,
+    slots: UInt32,
+    state: Pointer[UInt32, MutUntrackedOrigin],
+):
+    _dictionary_sum_row[single_key, sparse](
+        global_idx.x,
+        left,
+        right,
+        values,
+        left_bits,
+        right_bits,
+        value_bits,
+        left_offset,
+        right_offset,
+        value_offset,
+        flags,
+        left_labels,
+        right_labels,
+        value_tag,
+        base,
+        length,
+        slots,
+        state,
+    )
+
+
+def dictionary_pair_sum_two_spans[
+    single_key: Bool, sparse: Bool
+](
+    left0: Bytes,
+    right0: Bytes,
+    values0: Bytes,
+    lbits0: Bytes,
+    rbits0: Bytes,
+    vbits0: Bytes,
+    left1: Bytes,
+    right1: Bytes,
+    values1: Bytes,
+    lbits1: Bytes,
+    rbits1: Bytes,
+    vbits1: Bytes,
+    left_offsets: UInt64,
+    right_offsets: UInt64,
+    value_offsets: UInt64,
+    flags: UInt32,
+    left_labels: UInt32,
+    right_labels: UInt32,
+    value_tag: UInt32,
+    base: UInt32,
+    first_rows: UInt32,
+    second_rows: UInt32,
+    slots: UInt32,
+    state: Pointer[UInt32, MutUntrackedOrigin],
+):
+    # Each lane reads its owner's original buffers. The two spans share the
+    # same atomic result slots; first-row tickets retain their global offsets.
+    var i = global_idx.x
+    if i < Int(first_rows):
+        _dictionary_sum_row[single_key, sparse](
+            i,
+            left0,
+            right0,
+            values0,
+            lbits0,
+            rbits0,
+            vbits0,
+            UInt32(left_offsets),
+            UInt32(right_offsets),
+            UInt32(value_offsets),
+            flags & 7,
+            left_labels,
+            right_labels,
+            value_tag,
+            base,
+            first_rows,
+            slots,
+            state,
+        )
+    else:
+        _dictionary_sum_row[single_key, sparse](
+            i - Int(first_rows),
+            left1,
+            right1,
+            values1,
+            lbits1,
+            rbits1,
+            vbits1,
+            UInt32(left_offsets >> 32),
+            UInt32(right_offsets >> 32),
+            UInt32(value_offsets >> 32),
+            flags >> 3,
+            left_labels,
+            right_labels,
+            value_tag,
+            base + first_rows,
+            second_rows,
+            slots,
+            state,
         )

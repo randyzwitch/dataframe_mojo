@@ -47,6 +47,15 @@ from .expr import (
     ROLLING_MEAN,
     ROLLING_MIN,
     ROLLING_MAX,
+    ROLLING_QUANTILE,
+    ROLLING_QUANTILE_BY,
+    rolling_options,
+    is_fixed_rolling,
+    RollingOptions,
+    EWM,
+    EWM_ADJUST,
+    EWM_BIAS,
+    EWM_IGNORE_NULLS,
     BACKWARD_FILL,
     INTERPOLATE,
     CUT,
@@ -63,6 +72,19 @@ from dataframe.aggregation.function import ReducerSpec
 from .series import Series, FixedElements
 from .window_segment_tree import frame_states_supported, window_segment_tree
 from .window_sort import rank_rows
+from .window_quantile import quantile_frames, fixed_quantiles
+from .window_ewm import ewm_frames, ewm_by_frames, ewm_kind
+from .window_weights import (
+    weighted_frames,
+    window_bounds,
+    W_SUM,
+    W_MEAN,
+    W_MIN,
+    W_MAX,
+    W_VAR,
+    W_STD,
+    W_QUANTILE,
+)
 from std.collections import Optional
 from std.math import isnan, floor, sqrt, isfinite
 
@@ -220,6 +242,12 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
     var op_code = node.op
     if is_distinct_flag(op_code):
         return _distinct_flags(op_code, input, ids)
+    if is_fixed_rolling(op_code):
+        var options = rolling_options(node)
+        if len(options.weights) > 0:
+            return _weighted_window(node, input, ids, options)
+    if op_code == EWM:
+        return _ewm_window(node, input, ids)
     if op_code == CUM_PROD:
         return _cum_prod(input, ids, node.min_count == 1)
     if op_code == CUM_SUM and input.dtype() == DataType.BOOL:
@@ -405,6 +433,7 @@ def _window_ranges(
         or op == ROLLING_MEAN
         or op == ROLLING_MIN
         or op == ROLLING_MAX
+        or op == ROLLING_QUANTILE
     ):
         return _rolling_frames(input, starts, node)
     # The remaining operations gather a source row per output row.
@@ -1129,6 +1158,17 @@ def _frames(
     Fewer than `needed` valid values give null, and a frame without any
     gives null unless it is an empty sum. A minimum or maximum over a frame
     holding a NaN is NaN."""
+    if node.op == ROLLING_QUANTILE or node.op == ROLLING_QUANTILE_BY:
+        var options = rolling_options(node)
+        return quantile_frames(
+            input,
+            begins,
+            ends,
+            starts,
+            needed,
+            options.quantile,
+            options.method,
+        )
     var reduction = _reduction_of(node.op)
     var moments = reduction == STD or reduction == VAR
     var feed = _origin_shifted(input, starts) if moments else input.copy()
@@ -1245,16 +1285,154 @@ def _ranked_frames(
     return input.take_or_null(source)
 
 
+def _ewm_window(node: Node, input: Series, ids: List[Int]) raises -> Series:
+    """An exponentially weighted function (`ewm_frames`) within each
+    partition, the partitions laid out one after another and the result
+    put back in row order."""
+    var values = (
+        input.copy() if input.dtype() == DataType.FLOAT32 else _as_float(input)
+    )
+    var parts = _contiguous(len(values), ids)
+    var laid = values.take(parts.order) if len(parts.order) > 0 else values^
+    var result = ewm_frames(
+        laid,
+        parts.starts,
+        ewm_kind(node.text),
+        node.floating,
+        (node.min_count & EWM_ADJUST) != 0,
+        (node.min_count & EWM_BIAS) != 0,
+        Int(node.integer),
+        (node.min_count & EWM_IGNORE_NULLS) != 0,
+    )
+    if len(parts.order) > 0:
+        var inverse = List[Int](unsafe_uninit_length=len(parts.order))
+        for k in range(len(parts.order)):
+            inverse[parts.order[k]] = k
+        result = result.take(inverse)
+    return result^
+
+
+def ewm_by_op(
+    node: Node, input: Series, index: Series, ids: List[Int]
+) raises -> Series:
+    """`ewm_mean_by` / `ewm_sum_by`: each partition's rows visited in
+    stable time order (rows with a null time stay null), the decay applied
+    between consecutive times. Rows already in time order within
+    contiguous partitions are read in place; otherwise only the visiting
+    order is sorted, and results are written back to their rows."""
+    from dataframe.time.windows import ewm_half_life
+
+    var values = input.rechunk()
+    if values.dtype() != DataType.FLOAT32:
+        values = _as_float(values)
+    var stamps = index.rechunk()
+    if not stamps._data.isa[Column[Int64]]():
+        stamps = stamps.cast(DataType.INT64)
+    ref times = stamps._data[Column[Int64]]
+    var half_life = ewm_half_life(node.text, index.dtype())
+    var n = len(values)
+    var parts = _contiguous(n, ids)
+    var tp = times._ptr()
+    var visit = parts.order.copy()
+    var sorted = True
+    for p in range(len(parts.starts) - 1):
+        for k in range(parts.starts[p] + 1, parts.starts[p + 1]):
+            var a = visit[k - 1] if len(visit) > 0 else k - 1
+            var b = visit[k] if len(visit) > 0 else k
+            if tp[unsafe_offset=b] < tp[unsafe_offset=a]:
+                sorted = False
+                break
+        if not sorted:
+            break
+    if not sorted:
+        if len(visit) == 0:
+            visit = List[Int](unsafe_uninit_length=n)
+            for k in range(n):
+                visit[k] = k
+        for p in range(len(parts.starts) - 1):
+            var lo = parts.starts[p]
+            var hi = parts.starts[p + 1]
+            var rows = List[Int](capacity=hi - lo)
+            for k in range(lo, hi):
+                rows.append(visit[k])
+            var by_time = stamps.take(rows).argsort()
+            for k in range(len(by_time)):
+                visit[lo + k] = rows[by_time[k]]
+    return ewm_by_frames(
+        values, times, parts.starts, visit, half_life, node.text2 == "mean"
+    )
+
+
+def _weighted_window(
+    node: Node, input: Series, ids: List[Int], options: RollingOptions
+) raises -> Series:
+    """A fixed-size rolling window with weights (`weighted_frames`), its
+    partitions laid out one after another and the result put back in row
+    order. Sums, extremes and quantiles of Float32 stay Float32."""
+    var kind = W_QUANTILE
+    if node.op == ROLLING_SUM:
+        kind = W_SUM
+    elif node.op == ROLLING_MEAN:
+        kind = W_MEAN
+    elif node.op == ROLLING_MIN:
+        kind = W_MIN
+    elif node.op == ROLLING_MAX:
+        kind = W_MAX
+    elif node.op == ROLLING_VAR:
+        kind = W_VAR
+    elif node.op == ROLLING_STD:
+        kind = W_STD
+    var window = Int(node.integer)
+    var needed = window if node.floating < 0 else Int(node.floating)
+    var floats = _as_float(input)
+    var parts = _contiguous(len(floats), ids)
+    var laid = floats.take(parts.order) if len(parts.order) > 0 else floats^
+    var result = weighted_frames(
+        laid,
+        parts.starts,
+        kind,
+        window,
+        needed,
+        options.center,
+        options.weights,
+        options.quantile,
+        options.method,
+    )
+    if len(parts.order) > 0:
+        var inverse = List[Int](unsafe_uninit_length=len(parts.order))
+        for k in range(len(parts.order)):
+            inverse[parts.order[k]] = k
+        result = result.take(inverse)
+    if input.dtype() == DataType.FLOAT32 and (
+        kind == W_SUM or kind == W_MIN or kind == W_MAX or kind == W_QUANTILE
+    ):
+        return result.cast(DataType.FLOAT32)
+    return result^
+
+
 def _rolling_frames(
     input: Series, starts: List[Int], node: Node
 ) raises -> Series:
     """Fixed-size rolling aggregates: each row's frame is the window_size
     rows ending at it within its partition (ROWS BETWEEN window_size - 1
-    PRECEDING AND CURRENT ROW). Fewer than min_samples valid values
-    (default window_size) give null."""
+    PRECEDING AND CURRENT ROW), or centered on it (the extra row of an
+    even window before it), cut short at the partition's edges. Fewer
+    than min_samples valid values (default window_size) give null."""
     var n = len(input)
     var window = Int(node.integer)
     var needed = window if node.floating < 0 else Int(node.floating)
+    var center = rolling_options(node).center
+    if node.op == ROLLING_QUANTILE:
+        var options = rolling_options(node)
+        return fixed_quantiles(
+            input,
+            starts,
+            window,
+            center,
+            needed,
+            options.quantile,
+            options.method,
+        )
     if (
         (node.op == ROLLING_SUM or node.op == ROLLING_MEAN)
         and window >= 1
@@ -1263,22 +1441,32 @@ def _rolling_frames(
         var mean = node.op == ROLLING_MEAN
         if input.null_count() > 0:
             return _sliding_int_frames[True](
-                input, starts, window, needed, mean
+                input, starts, window, needed, mean, center
             )
-        return _sliding_int_frames[False](input, starts, window, needed, mean)
+        return _sliding_int_frames[False](
+            input, starts, window, needed, mean, center
+        )
     var begins = List[Int](unsafe_uninit_length=n)
     var ends = List[Int](unsafe_uninit_length=n)
     for p in range(len(starts) - 1):
         for j in range(starts[p], starts[p + 1]):
-            begins[j] = max(starts[p], j - window + 1)
-            ends[j] = j + 1
+            var bounds = window_bounds(
+                j, starts[p], starts[p + 1], window, center
+            )
+            begins[j] = bounds[0]
+            ends[j] = bounds[1]
     return _frames(node, input, begins, ends, starts, needed)
 
 
 def _sliding_int_frames[
     nulls: Bool
 ](
-    input: Series, starts: List[Int], window: Int, needed: Int, mean: Bool
+    input: Series,
+    starts: List[Int],
+    window: Int,
+    needed: Int,
+    mean: Bool,
+    center: Bool,
 ) raises -> Series:
     """Fixed-size rolling sums (or means) of an Int64 column, partition by
     partition: one running 128-bit total adds the row entering the frame
@@ -1300,20 +1488,30 @@ def _sliding_int_frames[
     var lowest = Int64.MIN.cast[DType.int128]()
     var highest = Int64.MAX.cast[DType.int128]()
     var any_null = False
+    # Row j's frame is [j - before, j + after) inside its partition.
+    var after = (window + 1) // 2 if center else 1
+    var before = window - after
     for p in range(len(starts) - 1):
         var lo = starts[p]
+        var hi = starts[p + 1]
         var total = Int128(0)
         var count = 0
-        for j in range(lo, starts[p + 1]):
-            comptime if nulls:
-                if column._valid(j):
-                    total += values[unsafe_offset=j].cast[DType.int128]()
+        var entering = lo
+        var leaving = lo
+        for j in range(lo, hi):
+            var end = min(hi, j + after)
+            while entering < end:
+                comptime if nulls:
+                    if column._valid(entering):
+                        total += values[unsafe_offset=entering].cast[
+                            DType.int128
+                        ]()
+                        count += 1
+                else:
+                    total += values[unsafe_offset=entering].cast[DType.int128]()
                     count += 1
-            else:
-                total += values[unsafe_offset=j].cast[DType.int128]()
-                count += 1
-            var leaving = j - window
-            if leaving >= lo:
+                entering += 1
+            while leaving < j - before:
                 comptime if nulls:
                     if column._valid(leaving):
                         total -= values[unsafe_offset=leaving].cast[
@@ -1323,6 +1521,7 @@ def _sliding_int_frames[
                 else:
                     total -= values[unsafe_offset=leaving].cast[DType.int128]()
                     count -= 1
+                leaving += 1
             var good = count >= needed and count > 0
             ok_out[unsafe_offset=j] = good
             any_null = any_null or not good
@@ -1352,12 +1551,20 @@ def rolling_by_op(
 
     if input.is_chunked() or index.is_chunked():
         return rolling_by_op(node, input.rechunk(), index.rechunk(), ids)
-    if input.dtype().is_decimal():
+    var closed = node.text2
+    if node.op == ROLLING_QUANTILE_BY:
+        # Quantiles read every numeric type as it is.
+        closed = rolling_options(node).closed
+    elif input.dtype().is_decimal():
         if node.op != ROLLING_SUM_BY and (
             node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY
         ):
             return rolling_by_op(node, _as_float(input), index, ids)
-    var numeric = node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY
+    var numeric = (
+        node.op != ROLLING_MIN_BY
+        and node.op != ROLLING_MAX_BY
+        and node.op != ROLLING_QUANTILE_BY
+    )
     if numeric and node.op != ROLLING_SUM_BY and _is_narrow(input.dtype()):
         return rolling_by_op(node, input.cast(DataType.FLOAT64), index, ids)
     if (
@@ -1372,7 +1579,7 @@ def rolling_by_op(
         )
     var groups = partitions(len(input), ids)
     var bounds = rolling_bounds(
-        index, groups, node.text, negate_period(node.text), node.text2
+        index, groups, node.text, negate_period(node.text), closed
     )
     # The partitions laid out one after another, frames at their positions
     # there, and the results put back in row order.

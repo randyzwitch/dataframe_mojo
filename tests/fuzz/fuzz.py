@@ -450,6 +450,47 @@ def to_pl_expr(e, types):
         return E(1).interpolate(e[2])
     if op == "interpolate_by":
         return E(1).interpolate_by(E(2))
+    if op == "rolling_agg":
+        # (rolling_agg EXPR FN WINDOW MIN_SAMPLES CENTER (list WEIGHTS)),
+        # -1 for the default minimum.
+        ms = None if e[4] < 0 else e[4]
+        ws = list(e[6][1:]) or None
+        return getattr(E(1), "rolling_" + e[2])(
+            e[3], ws, min_samples=ms, center=e[5]
+        )
+    if op == "rolling_quantile":
+        # (rolling_quantile EXPR Q METHOD WINDOW MIN_SAMPLES CENTER (list W))
+        ms = None if e[5] < 0 else e[5]
+        ws = list(e[7][1:]) or None
+        return E(1).rolling_quantile(
+            e[2], e[3], e[4], ws, min_samples=ms, center=e[6]
+        )
+    if op == "rolling_median":
+        ms = None if e[3] < 0 else e[3]
+        ws = list(e[5][1:]) or None
+        return E(1).rolling_median(e[2], ws, min_samples=ms, center=e[4])
+    if op == "ewm":
+        # (ewm EXPR FN ALPHA ADJUST BIAS MIN_SAMPLES IGNORE_NULLS)
+        kw = dict(alpha=e[3], min_samples=e[6], ignore_nulls=e[7])
+        if e[2] != "sum":
+            kw["adjust"] = e[4]
+        if e[2] in ("var", "std"):
+            kw["bias"] = e[5]
+        return getattr(E(1), "ewm_" + e[2])(**kw)
+    if op == "ewm_by":
+        # (ewm_by EXPR BY FN HALF_LIFE)
+        return getattr(E(1), "ewm_" + e[3] + "_by")(E(2), half_life=e[4])
+    if op == "rolling_agg_by":
+        # (rolling_agg_by EXPR BY FN PERIOD CLOSED MIN_SAMPLES)
+        return getattr(E(1), "rolling_" + e[3] + "_by")(
+            E(2), e[4], closed=e[5], min_samples=e[6]
+        )
+    if op == "rolling_quantile_by":
+        # (rolling_quantile_by EXPR BY PERIOD Q METHOD CLOSED MIN_SAMPLES)
+        return E(1).rolling_quantile_by(
+            E(2), e[3], quantile=e[4], interpolation=e[5], closed=e[6],
+            min_samples=e[7],
+        )
     if op == "list.get":
         return E(1).list.get(e[2], null_on_oob=True)
     if op in ("list.median", "list.arg_min", "list.arg_max"):
@@ -460,6 +501,8 @@ def to_pl_expr(e, types):
         return E(1).list.count_matches(e[2])
     if op == "list.contains":
         return E(1).list.contains(e[2])
+    if op.startswith("list.set_"):
+        return getattr(E(1).list, op[5:])(E(2))
     if op == "list.unique":
         return E(1).list.unique(maintain_order=e[2])
     if op == "list.sort":
@@ -523,6 +566,10 @@ def expr_type(e, types):
         if a in ("int_lit", "float_lit"):
             return b if b not in ("int_lit", "float_lit") else a
         return a
+    if op in ("rolling_quantile", "rolling_median", "rolling_quantile_by",
+              "ewm", "ewm_by"):
+        a = expr_type(e[1], types)
+        return "float32" if a == "float32" else "float64"
     if op in ("truediv", "sqrt", "mean", "median", "std", "var", "quantile"):
         a = expr_type(e[1], types)
         return "float32" if a == "float32" else "float64"
@@ -859,7 +906,7 @@ class Gen:
     def list_transform(self, e, t):
         """One list -> list transform of e, a list[int64] or list[string]."""
         r = self.rng
-        k = r.randrange(13)
+        k = r.randrange(14)
         if k == 0:
             maintain = r.random() < 0.5
             u = ("list.unique", e, maintain)
@@ -890,6 +937,12 @@ class Gen:
             ints = self.cols(lambda s: s == "int64")
             if ints:
                 return ("concat_list", e, ("col", r.choice(ints)))
+        if k == 12:
+            same = self.cols(lambda s: s == t)
+            op = r.choice(["list.set_union", "list.set_intersection", "list.set_difference", "list.set_symmetric_difference"])
+            s = (op, e, ("col", r.choice(same)))
+            # Polars orders a difference by hashing; compare it sorted.
+            return ("list.sort", s, False, False) if "difference" in op else s
         return ("list.reverse", e)
 
     def list_expr(self, c):
@@ -1000,8 +1053,8 @@ class PlanGen:
         kinds = ["filter", "with_columns", "select", "group_by", "join", "sort",
                  "unique", "head", "explode", "concat", "drop_nulls", "agg_select",
                  "with_row_index", "reverse", "unnest", "drop", "interpolate",
-                 "time_window", "list_ops"]
-        weights = [14, 12, 6, 14, 12, 9, 6, 5, 3, 3, 2, 3, 1, 1, 2, 1, 3, 4, 2]
+                 "time_window", "list_ops", "rolling_expr"]
+        weights = [14, 12, 6, 14, 12, 9, 6, 5, 3, 3, 2, 3, 1, 1, 2, 1, 3, 4, 2, 3]
         # FUZZ_FOCUS=kind,kind makes those steps 20 times as likely.
         focus = os.environ.get("FUZZ_FOCUS", "").split(",")
         weights = [w * 20 if k in focus else w for k, w in zip(kinds, weights)]
@@ -1165,7 +1218,102 @@ class PlanGen:
             return self.interpolate_step(plan, schema, ordered)
         if kind == "time_window":
             return self.time_window_step(plan, schema, ordered)
+        if kind == "rolling_expr":
+            return self.rolling_expr_step(plan, schema, ordered)
         return None
+
+    def rolling_expr_step(self, plan, schema, ordered):
+        """with_columns of rolling expressions: fixed windows (which need a
+        defined row order) and duration windows over a Datetime axis made
+        from a row index, so its times are unique and stay defined after
+        later steps reorder rows (as in interpolate_step). Decimals are
+        left out (a rolling quantile of one keeps the decimal type here,
+        as DuckDB does, where Polars gives Float64)."""
+        r = self.rng
+        # Duration windows need an index without nulls: one added here
+        # (an index from an earlier step can be null after an outer join),
+        # which needs a defined row order, as fixed windows do.
+        if not ordered:
+            return None
+        fresh = "i_ri" not in schema
+        if fresh:
+            plan = ("with_row_index", plan, "i_ri")
+            schema = dict(schema, i_ri=None)
+        g = Gen(r, schema, ordered)
+        nums = g.cols(is_numeric)
+        if not nums:
+            return None
+        es = []
+        for _ in range(r.randint(1, 3)):
+            name = r.choice(nums)
+            c = ("col", name)
+            plain = schema[name] in ("int64", "float64")
+            q = r.choice([0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, r.random()])
+            method = r.choice(["nearest", "lower", "higher", "midpoint",
+                               "linear", "equiprobable"])
+            fns = ["median", "quantile"]
+            if plain:
+                # Other types type a rolling sum or mean differently from
+                # Polars (sums widen, float32 means are Float64 here).
+                fns += ["sum", "mean", "min", "max", "std", "var"]
+            fn = r.choice(fns)
+            if r.random() < 0.2:
+                e = ("ewm", c, r.choice(["mean", "var", "std", "sum"]),
+                     r.choice([0.1, 0.5, 0.9, 1.0, r.uniform(0.01, 1.0)]),
+                     r.random() < 0.7, r.random() < 0.3,
+                     r.choice([0, 1, 2, 5]), r.random() < 0.3)
+                keys = g.cols(is_key)
+                if keys and r.random() < 0.3:
+                    e = ("over", e, ("list", r.choice(keys)), ("list",), False, False)
+                es.append(("alias", e, g.name("r")))
+                continue
+            if not fresh or r.random() < 0.5:
+                w = r.choice([1, 2, 3, 4, 7, 16, 100])
+                ms = r.choice([-1, 1, min(2, w), w])
+                center = r.random() < 0.3
+                weights = ("list",)
+                if plain and r.random() < 0.3:
+                    # Polars has no weighted windows over nulls, so the
+                    # values are filled first.
+                    c = ("fill_null", c, 0.0 if schema[name] == "float64" else 0)
+                    weights += tuple(
+                        r.choice([0.5, 1.0, 2.0, 3.0]) for _ in range(w)
+                    )
+                    if method in ("lower", "midpoint") and ms < 2:
+                        # Polars reads 0 for these from a window of one
+                        # weighted value.
+                        ms = -1 if w >= 2 else ms
+                        method = "linear" if w < 2 else method
+                if fn == "median":
+                    e = ("rolling_median", c, w, ms, center, weights)
+                elif fn == "quantile":
+                    e = ("rolling_quantile", c, q, method, w, ms, center, weights)
+                else:
+                    e = ("rolling_agg", c, fn, w, ms, center, weights)
+                keys = g.cols(is_key)
+                if keys and r.random() < 0.3:
+                    e = ("over", e, ("list", r.choice(keys)), ("list",), False, False)
+            else:
+                axis = ("cast", ("col", "i_ri"), "int64", False)
+                if r.random() < 0.6:
+                    # A shuffled order of the rows.
+                    axis = ("mod", ("mul", axis, 7919), 1000003)
+                # Minutes, as microseconds.
+                axis = ("cast", ("mul", axis, 60000000), "datetime", False)
+                period = r.choice(["1m", "2m", "5m", "30m", "1h", "1d"])
+                closed = r.choice(["right", "left", "both", "none"])
+                ms = r.choice([0, 1, 1, 2])
+                if fn == "median":
+                    fn, q, method = "quantile", 0.5, "linear"
+                if r.random() < 0.15:
+                    e = ("ewm_by", c, axis, r.choice(["mean", "sum"]), period)
+                elif fn == "quantile":
+                    e = ("rolling_quantile_by", c, axis, period, q, method,
+                         closed, ms)
+                else:
+                    e = ("rolling_agg_by", c, axis, fn, period, closed, ms)
+            es.append(("alias", e, g.name("r")))
+        return ("with_columns", plan, ("list",) + tuple(es)), ordered
 
     def interpolate_step(self, plan, schema, ordered):
         """with_columns of interpolate / interpolate_by. Row interpolation
@@ -1926,7 +2074,9 @@ def check_order(p, case):
 def uses_order(node):
     if isinstance(node, tuple) and node:
         if node[0] in ("first", "last", "arg_min", "arg_max", "cum_sum", "cum_max",
-                       "cum_min", "cum_count", "shift", "diff", "interpolate"):
+                       "cum_min", "cum_count", "shift", "diff", "interpolate",
+                       "rolling_agg", "rolling_quantile", "rolling_median",
+                       "ewm"):
             return True
         return any(uses_order(k) for k in node[1:] if isinstance(k, tuple))
     return False

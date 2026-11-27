@@ -23,6 +23,23 @@ def positive_period(period: String) raises:
         raise Error("window duration must be positive: " + period)
 
 
+def ewm_half_life(half_life: String, index: DataType) raises -> Float64:
+    """`half_life` in the units of `index` (days for a Date, its ticks for
+    a Datetime). A half-life must be positive and fixed: months vary in
+    length."""
+    var parts = parse_interval(half_life)
+    if parts[0] != 0:
+        raise Error(
+            "ewm half_life must be a fixed duration (no months): " + half_life
+        )
+    var nanoseconds = Float64(parts[1]) * 86400e9 + Float64(parts[2])
+    if not nanoseconds > 0:
+        raise Error("ewm half_life must be positive: " + half_life)
+    if index.is_date():
+        return nanoseconds / 86400e9
+    return nanoseconds * Float64(index.per_second()) / 1e9
+
+
 def closed_sides(closed: String) raises -> Tuple[Bool, Bool]:
     if closed not in ["left", "right", "both", "none"]:
         raise Error("closed must be left, right, both or none")

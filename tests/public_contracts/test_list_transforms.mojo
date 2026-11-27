@@ -539,3 +539,72 @@ def test_list_reduction_errors() raises:
         )
     with assert_raises(contains="element type"):
         _ = frame.select_exprs([col("a").list().contains(lit("x"))])
+
+
+def test_list_set_operations() raises:
+    var frame = DataFrame(
+        [
+            int_lists(
+                "a",
+                [[3, 1, N, 1, 2], [], [], [5, 5], [1, 2]],
+                [True, False, True, True, True],
+            ),
+            int_lists(
+                "b",
+                [[2, 4, N, 3], [1], [1], [], [2, 1]],
+                [True, True, True, True, True],
+            ),
+        ]
+    )
+    var valid: List[Bool] = [True, False, True, True, True]
+    check(
+        frame,
+        col("a").list().set_union(col("b")),
+        int_lists("", [[3, 1, N, 2, 4], [], [1], [5], [1, 2]], valid),
+    )
+    check(
+        frame,
+        col("a").list().set_intersection(col("b")),
+        int_lists("", [[3, N, 2], [], [], [], [1, 2]], valid),
+    )
+    check(
+        frame,
+        col("a").list().set_difference(col("b")),
+        int_lists("", [[1], [], [], [5], []], valid),
+    )
+    check(
+        frame,
+        col("a").list().set_symmetric_difference(col("b")),
+        int_lists("", [[1, 4], [], [1], [5], []], valid),
+    )
+    var strings = DataFrame(
+        [
+            str_lists("s", [["a", "b", "a", "~"]], [True]),
+            str_lists("t", [["b", "c", "~"]], [True]),
+        ]
+    )
+    check(
+        strings,
+        col("s").list().set_symmetric_difference(col("t")),
+        str_lists("", [["a", "c"]], [True]),
+    )
+    # Rows longer than one worker's share take the encoder path.
+    var long = List[Int]()
+    var other = List[Int]()
+    for i in range(20000):
+        long.append(i % 5000)
+        other.append(2500 + i % 5000)
+    var big = DataFrame(
+        [
+            int_lists("a", [long.copy()], [True]),
+            int_lists("b", [other.copy()], [True]),
+        ]
+    )
+    var result = big.select_exprs(
+        [
+            col("a").list().set_intersection(col("b")).list().len().alias("i"),
+            col("a").list().set_union(col("b")).list().len().alias("u"),
+        ]
+    )
+    assert_equal(result.item(0, "i").int64(), 2500)
+    assert_equal(result.item(0, "u").int64(), 7500)
