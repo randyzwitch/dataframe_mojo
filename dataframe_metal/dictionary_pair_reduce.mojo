@@ -3,11 +3,15 @@ from max.gpu.host import DeviceBuffer
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast
 from std.time import perf_counter_ns
+from std.random.philox import Random
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.execution_observation import DeviceObservation
 from .accelerator.faults import data_fault
 from .accelerator.gpu.dictionary_pair import (
     PAIR_WORDS,
+    DICTIONARY_STRIPE,
+    SIMD_WIDTH,
+    dictionary_span_lanes,
     dictionary_pair_sum,
     dictionary_pair_sum_two_spans,
 )
@@ -16,11 +20,53 @@ from .accelerator.gpu.numeric_view import NumericView, intersect_numeric_views
 from .accelerator.gpu.query_scope import Scope, shared_service
 from .accelerator.gpu.reduction_inputs import HandoffTimings
 from .accelerator.gpu.shared_pages import SharedPages
-from .accelerator.gpu.target import METAL_TARGET
+from .accelerator.gpu.target import METAL_TARGET, MetalContext
 from .accelerator.gpu.typed_storage import NativeColumnAny, _NativeReservation
 from .group_layout import GENERAL_GROUP_LIMIT
 from .group_output import GroupOutput, group_order
 from .multi_plan import ReductionOutput
+
+
+def _combine_dictionary_stripes(
+    keys: Series, lengths: List[Int]
+) raises -> Bool:
+    """Estimate eliminated global updates in the same stripes the GPU will scan."""
+    var rows = len(keys)
+    if rows <= SIMD_WIDTH:
+        return False
+    comptime tile = SIMD_WIDTH * DICTIONARY_STRIPE
+    # Limit the inspection to one SIMD group's worth of lane stripes in total.
+    # Stratified positions weight every input span by its rows, including tails.
+    var samples = min(SIMD_WIDTH, rows)
+    var random = Random(seed=0xBADC0FFEE)
+    var segment = 0
+    var start = 0
+    var stop = lengths[0]
+    var repeats = 0
+    for i in range(samples):
+        var lo = rows * i // samples
+        var hi = rows * (i + 1) // samples
+        var draw = random.step()
+        var row = lo + Int(draw[0] % UInt32(hi - lo))
+        while row >= stop:
+            segment += 1
+            start = stop
+            stop += lengths[segment]
+        var offset = row - start
+        var pivot = start + (offset // tile) * tile + offset % SIMD_WIDTH
+        var first = keys.get(pivot)
+        for step in range(1, DICTIONARY_STRIPE):
+            var other = pivot + step * SIMD_WIDTH
+            if other >= stop:
+                break
+            var key = keys.get(other)
+            if first.is_null() or key.is_null():
+                repeats += Int(first.is_null() and key.is_null())
+            else:
+                repeats += Int(first.int32() == key.int32())
+    # Pay for a register accumulator only when the sample eliminates at least
+    # one global first-row/count/sum publication per lane stripe on average.
+    return repeats >= samples
 
 
 def _finish_dictionary[
@@ -93,6 +139,92 @@ def _validity_flags(a: NumericView, b: NumericView, v: NumericView) -> UInt32:
     )
 
 
+def _submit_dictionary_spans[
+    single_key: Bool, sparse: Bool, striped: Bool
+](
+    ctx: MetalContext,
+    scope: Scope,
+    segments: List[List[NumericView]],
+    state: DeviceBuffer[DType.uint32],
+    left_labels: Int,
+    right_labels: Int,
+    slots: Int,
+) raises:
+    var base = 0
+    var index = 0
+    while index < len(segments):
+        ref segment = segments[index]
+        ref a = segment[0]
+        ref b = segment[0 if single_key else 1]
+        ref v = segment[1 if single_key else 2]
+        var flags = _validity_flags(a, b, v)
+        var lanes = dictionary_span_lanes[striped](v.rows)
+        if index + 1 < len(segments):
+            ref second = segments[index + 1]
+            ref c = second[0]
+            ref d = second[0 if single_key else 1]
+            ref w = second[1 if single_key else 2]
+            ctx.enqueue_function[
+                dictionary_pair_sum_two_spans[single_key, sparse, striped]
+            ](
+                a.values,
+                b.values,
+                v.values,
+                a.bits,
+                b.bits,
+                v.bits,
+                c.values,
+                d.values,
+                w.values,
+                c.bits,
+                d.bits,
+                w.bits,
+                _pair_offsets(a, c),
+                _pair_offsets(b, d),
+                _pair_offsets(v, w),
+                flags | (_validity_flags(c, d, w) << 3),
+                UInt32(left_labels),
+                UInt32(right_labels),
+                UInt32(v.tag),
+                UInt32(base),
+                UInt32(v.rows),
+                UInt32(w.rows),
+                UInt32(slots),
+                state,
+                grid_dim=(lanes + dictionary_span_lanes[striped](w.rows) + 255)
+                // 256,
+                block_dim=256,
+            )
+            scope.record_launches(1)
+            base += v.rows + w.rows
+            index += 2
+            continue
+        ctx.enqueue_function[dictionary_pair_sum[single_key, sparse, striped]](
+            a.values,
+            b.values,
+            v.values,
+            a.bits,
+            b.bits,
+            v.bits,
+            UInt32(a.bit_offset),
+            UInt32(b.bit_offset),
+            UInt32(v.bit_offset),
+            flags,
+            UInt32(left_labels),
+            UInt32(right_labels),
+            UInt32(v.tag),
+            UInt32(base),
+            UInt32(v.rows),
+            UInt32(slots),
+            state,
+            grid_dim=(lanes + 255) // 256,
+            block_dim=256,
+        )
+        scope.record_launches(1)
+        base += v.rows
+        index += 1
+
+
 def execute_dictionary_sum[
     single_key: Bool, sparse: Bool = False
 ](
@@ -127,6 +259,15 @@ def execute_dictionary_sum[
                 )
             )
         var segments = intersect_numeric_views(inputs, frame.height())
+        var combine = False
+        comptime if single_key and not sparse:
+            if frame.height() > SIMD_WIDTH:
+                var lengths = List[Int](capacity=len(segments))
+                for segment in segments:
+                    lengths.append(segment[0].rows)
+                combine = _combine_dictionary_stripes(
+                    frame._columns[0], lengths
+                )
         var span_count = len(segments)
         var slots = (left_labels + 1) * (right_labels + 1)
         comptime if sparse:
@@ -159,77 +300,18 @@ def execute_dictionary_sum[
         started = Int(perf_counter_ns())
         try:
             ctx.enqueue_memset(state, UInt32(0))
-            var base = 0
-            var index = 0
-            while index < span_count:
-                ref segment = segments[index]
-                ref a = segment[0]
-                ref b = segment[0 if single_key else 1]
-                ref v = segment[1 if single_key else 2]
-                var flags = _validity_flags(a, b, v)
-                if index + 1 < span_count:
-                    ref second = segments[index + 1]
-                    ref c = second[0]
-                    ref d = second[0 if single_key else 1]
-                    ref w = second[1 if single_key else 2]
-                    ctx.enqueue_function[
-                        dictionary_pair_sum_two_spans[single_key, sparse]
-                    ](
-                        a.values,
-                        b.values,
-                        v.values,
-                        a.bits,
-                        b.bits,
-                        v.bits,
-                        c.values,
-                        d.values,
-                        w.values,
-                        c.bits,
-                        d.bits,
-                        w.bits,
-                        _pair_offsets(a, c),
-                        _pair_offsets(b, d),
-                        _pair_offsets(v, w),
-                        flags | (_validity_flags(c, d, w) << 3),
-                        UInt32(left_labels),
-                        UInt32(right_labels),
-                        UInt32(v.tag),
-                        UInt32(base),
-                        UInt32(v.rows),
-                        UInt32(w.rows),
-                        UInt32(slots),
+            comptime for mode in range(2 if single_key and not sparse else 1):
+                comptime striped = mode == 1
+                if striped == combine:
+                    _submit_dictionary_spans[single_key, sparse, striped](
+                        ctx,
+                        scope,
+                        segments,
                         state,
-                        grid_dim=(v.rows + w.rows + 255) // 256,
-                        block_dim=256,
+                        left_labels,
+                        right_labels,
+                        slots,
                     )
-                    scope.record_launches(1)
-                    base += v.rows + w.rows
-                    index += 2
-                    continue
-                ctx.enqueue_function[dictionary_pair_sum[single_key, sparse]](
-                    a.values,
-                    b.values,
-                    v.values,
-                    a.bits,
-                    b.bits,
-                    v.bits,
-                    UInt32(a.bit_offset),
-                    UInt32(b.bit_offset),
-                    UInt32(v.bit_offset),
-                    flags,
-                    UInt32(left_labels),
-                    UInt32(right_labels),
-                    UInt32(v.tag),
-                    UInt32(base),
-                    UInt32(v.rows),
-                    UInt32(slots),
-                    state,
-                    grid_dim=(v.rows + 255) // 256,
-                    block_dim=256,
-                )
-                scope.record_launches(1)
-                base += v.rows
-                index += 1
             if not shared_output:
                 ctx.enqueue_copy(host.unsafe_ptr(), state)
             scope.synchronize()

@@ -43,7 +43,7 @@ from .extrema_plan import plan_extrema, extrema_key
 from .extrema_reduce import execute_extrema
 from .predicate_plan import plan_predicates, predicate_key
 from .dictionary_group import plan_dictionary_group, execute_dictionary_group
-from .dictionary_properties import dictionary_properties
+from .dictionary_properties import dictionary_properties, dictionary_stripe_key
 from .group_plan import plan_grouped, grouped_key
 from .fractional_mean_plan import plan_fractional_means
 from .fractional_mean_reduce import execute_fractional_means
@@ -209,7 +209,7 @@ def region_key(region: LazyFrame) raises -> String:
         var identity = String("dictionary_group_sum:v2:")
         if dictionary.value().dense_dictionary(frame.height()):
             identity = (
-                "dictionary_single_sum:dense:v1:" if len(
+                "dictionary_single_sum:dense:v3:" if len(
                     dictionary.value().keys
                 )
                 == 1 else "dictionary_pair_sum:dense:v1:"
@@ -223,7 +223,12 @@ def region_key(region: LazyFrame) raises -> String:
         identity += frame.column(dictionary.value().value).dtype().name()
         for labels in dictionary.value().dictionaries:
             identity += ":labels" + String(len(labels.dictionary()[]))
-        identity += dictionary_properties(frame, dictionary.value())
+        if len(
+            dictionary.value().keys
+        ) == 1 and dictionary.value().dense_dictionary(frame.height()):
+            identity += dictionary_stripe_key(frame, dictionary.value())
+        else:
+            identity += dictionary_properties(frame, dictionary.value())
         return (
             identity
             + ":min_count"
