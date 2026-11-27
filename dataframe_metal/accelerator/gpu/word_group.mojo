@@ -5,7 +5,9 @@ from .group_hash import NO_GROUP, _key_hash, mark_capacity_fault
 
 
 @always_inline
-def claim_word_group(
+def claim_word_group[
+    abort_mask: UInt32 = UInt32.MAX
+](
     raw: UInt32,
     present: Bool,
     table: Pointer[UInt32, MutUntrackedOrigin],
@@ -30,7 +32,7 @@ def claim_word_group(
     var fault = control.unsafe_offset(1)
     var probes = UInt32(0)
     while probes < capacity:
-        if Atomic[UInt32].load(fault):
+        if Atomic[UInt32].load(fault) & abort_mask:
             return NO_GROUP
         var address = table.unsafe_offset(Int(slot))
         var found = Atomic[UInt32].load(address)
