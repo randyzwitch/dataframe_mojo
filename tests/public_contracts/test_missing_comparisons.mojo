@@ -449,5 +449,6 @@ def test_missing_comparisons_preserve_guarded_errors_and_reject_incompatible_dty
     _flags(
         frame.lazy().select(guarded).collect(engine="cpu"), "h", [False, True]
     )
+    # Numbers of different types promote; a string beside a number does not.
     with assert_raises(contains="matching dtypes"):
-        _ = frame.select(col("a").eq_missing(lit(Float64(1))))
+        _ = frame.select(col("a").eq_missing(lit("1")))
