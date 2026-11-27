@@ -1094,9 +1094,13 @@ class PlanGen:
         left out (a rolling quantile of one keeps the decimal type here,
         as DuckDB does, where Polars gives Float64)."""
         r = self.rng
-        if not ordered and "i_ri" not in schema:
+        # Duration windows need an index without nulls: one added here
+        # (an index from an earlier step can be null after an outer join),
+        # which needs a defined row order, as fixed windows do.
+        if not ordered:
             return None
-        if "i_ri" not in schema:
+        fresh = "i_ri" not in schema
+        if fresh:
             plan = ("with_row_index", plan, "i_ri")
             schema = dict(schema, i_ri=None)
         g = Gen(r, schema, ordered)
@@ -1117,7 +1121,7 @@ class PlanGen:
                 # Polars (sums widen, float32 means are Float64 here).
                 fns += ["sum", "mean", "min", "max", "std", "var"]
             fn = r.choice(fns)
-            if ordered and r.random() < 0.5:
+            if not fresh or r.random() < 0.5:
                 w = r.choice([1, 2, 3, 4, 7, 16, 100])
                 ms = r.choice([-1, 1, min(2, w), w])
                 center = r.random() < 0.3
