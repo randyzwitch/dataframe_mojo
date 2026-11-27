@@ -2601,7 +2601,8 @@ def last() -> Expr:
 
 
 def lit(value: Int64) -> Expr:
-    """A typed scalar literal; there is no implicit numeric promotion."""
+    """A typed scalar literal; it keeps its type, and mixed numeric operands
+    promote as described in docs/expressions.md."""
     return Expr([_node(LIT_INT, integer=value)], "literal")
 
 

@@ -198,6 +198,8 @@ from .expr import (
     IMPLODE,
     STRUCT_PACK,
     node_children,
+    _set_node_children,
+    _node,
     struct_pack_names,
     HORIZONTAL,
     HORIZONTAL_ARGS,
@@ -251,6 +253,7 @@ from dataframe.kernels.replace import values_dtype, replace_supertype
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import common_decimal, decimal_add_type, decimal_mul_type
+from .promotion import promoted_operands
 from dataframe.kernels.horizontal import (
     horizontal_input,
     horizontal_result,
@@ -1313,8 +1316,130 @@ def _replace_dtype(
     return result
 
 
+def _adoptable(
+    nodes: List[Node], types: List[DataType], root: Int, target: DataType
+) -> Bool:
+    """Whether every untyped literal under `root` can take `target`."""
+    if root < 0 or not types[root].is_untyped():
+        return True
+    ref node = nodes[root]
+    if (node.op == LIT_INT or node.op == LIT_FLOAT) and node.text == UNTYPED:
+        try:
+            _check_adoption(node, target)
+        except:
+            return False
+        return True
+    return (
+        _adoptable(nodes, types, node.left, target)
+        and _adoptable(nodes, types, node.right, target)
+        and _adoptable(nodes, types, node.extra, target)
+    )
+
+
+def _adopt_beside(
+    mut nodes: List[Node],
+    mut types: List[DataType],
+    root: Int,
+    other: DataType,
+) raises:
+    """Type the untyped operand at `root` for an operation with a typed
+    `other` operand. A literal that fits takes `other`'s type, so
+    `col("u8") + 1` stays UInt8. Beside a number it cannot take exactly (an
+    integer out of range, a float beside an integer, or any literal beside
+    a decimal, whose stored integers are scaled), it takes a type of its
+    own: Float64 for a float, Int32 for an integer that fits it and Int64
+    otherwise. Promotion then combines the two types."""
+    var target = _target(other)
+    if other.is_decimal() or (
+        other.is_numeric() and not _adoptable(nodes, types, root, target)
+    ):
+        if types[root] == DataType.UNTYPED_FLOAT:
+            target = DataType.FLOAT64
+        elif _adoptable(nodes, types, root, DataType.INT32):
+            target = DataType.INT32
+        else:
+            target = DataType.INT64
+    _adopt(nodes, types, root, target)
+
+
+def _promotes(op: Int) -> Int:
+    """How a binary operation promotes mixed numeric operands: 1 for the
+    arithmetic type, 0 for the common type, -1 for no promotion."""
+    if (
+        op == ADD
+        or op == SUB
+        or op == MUL
+        or op == DIV
+        or op == FLOORDIV
+        or op == MOD
+        or op == POW
+    ):
+        return 1
+    if is_comparison(op) or op == EQ_MISSING or op == NE_MISSING:
+        return 0
+    return -1
+
+
+@fieldwise_init
+struct _Cast(Copyable):
+    """A conversion of one operand of node `parent` to `target`; `slot` is
+    0, 1 or 2 for its left, right or extra input."""
+
+    var parent: Int
+    var slot: Int
+    var target: DataType
+
+
+def _with_casts(nodes: List[Node], casts: List[_Cast]) -> List[Node]:
+    """`nodes` with a cast node inserted before each parent named in
+    `casts`, between it and the operand it converts. Order stays
+    topological: each cast follows its input and precedes its parent."""
+    var out = List[Node](capacity=len(nodes) + len(casts))
+    var moved = List[Int](capacity=len(nodes))
+    for k in range(len(nodes)):
+        var node = nodes[k].copy()
+        var children = node_children(node)
+        for j in range(len(children)):
+            children[j] = moved[children[j]]
+        _set_node_children(node, children)
+        for c in casts:
+            if c.parent != k:
+                continue
+            var input = node.left if c.slot == 0 else (
+                node.right if c.slot == 1 else node.extra
+            )
+            out.append(
+                _node(
+                    CAST,
+                    input,
+                    text=c.target.name(),
+                    integer=1,
+                    dtypes=[Optional(c.target)],
+                )
+            )
+            var at = len(out) - 1
+            if c.slot == 0:
+                node.left = at
+            elif c.slot == 1:
+                node.right = at
+            else:
+                node.extra = at
+        moved.append(len(out))
+        out.append(node^)
+    return out^
+
+
 def bind(
     expr: Expr, columns: List[Series], fuse: Bool = True
+) raises -> BoundExpr:
+    """Resolve types and shapes of `expr` over `columns`. Operands of mixed
+    numeric types get explicit casts to their promoted types, so every
+    kernel sees matching operand types."""
+    return _bind(expr, columns, fuse, True)
+
+
+def _bind(
+    expr: Expr, columns: List[Series], fuse: Bool, promote: Bool
 ) raises -> BoundExpr:
     if len(expr._nodes) == 0:
         raise Error("An expression must contain at least one node")
@@ -1323,6 +1448,7 @@ def bind(
     var aggregated = List[Bool]()
     var sources = List[Int]()
     var regexes = Dict[Int, Regex]()
+    var casts = List[_Cast]()
     # Untyped literals are resolved in place, so bind works on a copy.
     var nodes = expr._nodes.copy()
     for i in range(len(nodes)):
@@ -2096,10 +2222,17 @@ def bind(
                         node.op, types[node.left], types[node.right]
                     )
             else:
+                var promotes = _promotes(node.op)
                 if left.is_untyped():
-                    _adopt(nodes, types, node.left, _target(right))
+                    if promotes >= 0:
+                        _adopt_beside(nodes, types, node.left, right)
+                    else:
+                        _adopt(nodes, types, node.left, _target(right))
                 elif right.is_untyped():
-                    _adopt(nodes, types, node.right, _target(left))
+                    if promotes >= 0:
+                        _adopt_beside(nodes, types, node.right, left)
+                    else:
+                        _adopt(nodes, types, node.right, _target(left))
                 # A string literal compared with binary stands for its
                 # UTF-8 bytes; both share one storage layout.
                 if (
@@ -2113,9 +2246,31 @@ def bind(
                         right.is_binary() and nodes[node.left].op == LIT_STRING
                     ):
                         types[node.left] = DataType.BINARY
-                dtype = _binary_dtype(
-                    node.op, types[node.left], types[node.right]
-                )
+                var operands = Optional[Tuple[DataType, DataType]](None)
+                if (
+                    node.op == DIV
+                    and types[node.left].is_integer()
+                    and types[node.right].is_integer()
+                    and types[node.left] != types[node.right]
+                ):
+                    # Integer division yields Float64 whatever the widths,
+                    # so mixed integers divide as Float64 directly.
+                    operands = Optional((DataType.FLOAT64, DataType.FLOAT64))
+                elif promotes >= 0:
+                    operands = promoted_operands(
+                        types[node.left], types[node.right], promotes == 1
+                    )
+                if operands:
+                    var pair = operands.value()
+                    if pair[0] != types[node.left]:
+                        casts.append(_Cast(i, 0, pair[0]))
+                    if pair[1] != types[node.right]:
+                        casts.append(_Cast(i, 1, pair[1]))
+                    dtype = _binary_dtype(node.op, pair[0], pair[1])
+                else:
+                    dtype = _binary_dtype(
+                        node.op, types[node.left], types[node.right]
+                    )
             has_aggregate = aggregated[node.left] or aggregated[node.right]
             if shapes[node.left] == ROWS or shapes[node.right] == ROWS:
                 shape = ROWS
@@ -2127,6 +2282,14 @@ def bind(
         shapes.append(shape)
         aggregated.append(has_aggregate)
         sources.append(source)
+    if len(casts) > 0:
+        # Bind again with the casts in place, so the bound expression,
+        # its types and every kernel that runs it agree.
+        if not promote:
+            raise Error("Operand promotion did not settle")
+        return _bind(
+            Expr(_with_casts(nodes, casts), expr._name), columns, fuse, False
+        )
     # A standalone untyped result takes its default type.
     _default(nodes, types, len(nodes) - 1)
     var resolved = Expr(nodes^, expr._name)

@@ -45,13 +45,40 @@ The reduction table's "same" and "input type" refer to this decoded input.
 Direct table operations such as filtering, sorting, taking rows, and joining
 retain categorical metadata under their own contracts.
 
-Operands must have matching dtypes; there is no implicit promotion or index
-alignment (`cast` mixed widths explicitly). Nulls propagate through every
-operator below; NaN is distinct from null. Numeric types are Int8, Int16,
-Int32, Int64, UInt8, UInt16, UInt32, UInt64 ("integers") and Float32, Float64
-("floats"). Integer arithmetic checks overflow per valid element at the
-operand's width and raises (`int8 addition overflow`); widths below 64 bits
-and UInt64 compute in 128 bits and range-check the result.
+There is no index alignment. Nulls propagate through every operator below;
+NaN is distinct from null. Numeric types are Int8, Int16, Int32, Int64, UInt8,
+UInt16, UInt32, UInt64 ("integers"), Float32, Float64 ("floats") and decimals.
+Integer arithmetic checks overflow per valid element at the operand's width
+and raises (`int8 addition overflow`); widths below 64 bits and UInt64 compute
+in 128 bits and range-check the result.
+
+Numeric operands of different types promote before the operation, with
+DuckDB's result types (the binder inserts the casts, so every execution path
+sees the same types):
+
+- Arithmetic (`+ - * / // % **`) on two integers computes in the type that
+  holds every value of the other operand when there is one (`Int16 + UInt8`
+  is Int16); otherwise, for a signed and an unsigned type where neither
+  holds the other, in Int64 (`Int8 + UInt8` and `Int32 + UInt32` are Int64).
+- Comparisons use the narrowest type that holds both (`Int8` against
+  `UInt8` compares in Int16), so `-1 < UInt8(255)` is true.
+- An integer with a float computes in the float type: `Int64 + Float32` is
+  Float32. Float32 with Float64 is Float64.
+- A decimal with an integer treats the integer as a decimal of scale 0 with
+  enough digits for its type (Int64 as `decimal[19,0]`, UInt8 as
+  `decimal[3,0]`), then follows the decimal rules: `decimal[10,2] + Int64` is
+  `decimal[22,2]`. A decimal with a float computes in the float type.
+- UInt64 beside a signed integer would need 128-bit integers and raises; cast
+  one operand. Strings, booleans, temporal types and categoricals never
+  promote: mixing them with another type raises.
+
+Promotion happens before the operation, so overflow is checked at the
+promoted width: `Int64 + UInt32` raises on Int64 overflow, while `Int8 +
+UInt8` computes in Int64 and cannot overflow. A bare literal takes the other
+operand's type when it fits (`col("u8") + 1` stays UInt8). An integer literal
+that does not fit is Int32 (Int64 when it needs more), and a float literal
+beside an integer or decimal is Float64; promotion then applies, so
+`col("u8") + 300` is Int32 and `col("i") + 0.5` is Float64.
 
 | Operation | Operands | Result | Notes |
 |---|---|---|---|
@@ -91,8 +118,8 @@ trigonometric and hyperbolic functions and `arctan2` call the platform's IEEE
 Float64. `sqrt`, `exp`, `log`, and `pow` use
 Mojo's `std.math`, whose results can differ from the correctly rounded value by
 about 1e-12 relative; tests compare them with a tolerance. Binder errors name
-the operator and dtypes, for example `/ requires matching dtypes, found int64
-and float64; use typed literals`.
+the operator and dtypes, for example `+ requires matching dtypes, found int64
+and bool; use typed literals`.
 
 Decimal arithmetic determines result types from the operand precision and scale: `+`, `-`, `*`, and `/`
 return precision 38 with the larger operand scale. Multiplication and division
