@@ -1,7 +1,7 @@
 """List element transforms: unique, sort, reverse, slices, gathers,
 drop_nulls, shift, diff and concatenation, eager and lazy."""
 # contract-group: expr.list
-from std.math import isnan, nan as std_nan
+from std.math import isnan, nan as std_nan, sqrt
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
@@ -13,6 +13,7 @@ from dataframe import (
     col,
     concat_list,
     lit,
+    null,
 )
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.string import StringBuilder
@@ -400,3 +401,134 @@ def test_list_transforms_inside_aggregation() raises:
             int_lists("v", [[1, 3], [4, 5]], [True, True])
         )
     )
+
+
+def floats(values: List[Float64], valid: List[Bool]) raises -> Series:
+    return Series("", Column[Float64](values.copy(), valid))
+
+
+def test_list_reductions() raises:
+    var frame = fixture()
+    var valid: List[Bool] = [True, False, True, True]
+    # Rows: [3, 1, null, 1, 2], null, [], [5].
+    check(frame, col("a").list().median(), floats([1.5, 0, 0, 5], [True, False, False, True]))
+    var var1 = 2.75 / 3.0
+    check(
+        frame,
+        col("a").list().var(),
+        floats([var1, 0, 0, 0], [True, False, False, False]),
+    )
+    check(
+        frame,
+        col("a").list().std(ddof=0),
+        floats([sqrt(0.6875), 0, 0, 0], [True, False, False, True]),
+    )
+    check(
+        frame,
+        col("a").list().arg_min(),
+        Series("", Column[UInt32]([1, 0, 0, 0], [True, False, False, True])),
+    )
+    check(
+        frame,
+        col("a").list().arg_max(),
+        Series("", Column[UInt32]([0, 0, 0, 0], [True, False, False, True])),
+    )
+    # A bare literal takes the element type; a null item counts nulls.
+    check(
+        frame,
+        col("a").list().count_matches(1),
+        Series("", Column[UInt32]([2, 0, 0, 0], valid)),
+    )
+    check(
+        frame,
+        col("a").list().count_matches(lit(Int64(1))),
+        Series("", Column[UInt32]([2, 0, 0, 0], valid)),
+    )
+    check(
+        frame,
+        col("a").list().count_matches(null(DataType.INT8)),
+        Series("", Column[UInt32]([1, 0, 0, 0], valid)),
+    )
+    # The item may differ per row: x is 1, null, 3, 4.
+    check(
+        frame,
+        col("a").list().contains(col("x")),
+        Series("", BoolColumn([True, False, False, False], valid)),
+    )
+    check(
+        frame,
+        col("a").list().contains(5),
+        Series("", BoolColumn([False, False, False, True], valid)),
+    )
+
+
+def test_list_bool_and_string_reductions() raises:
+    var bools = DataFrame(
+        [
+            Series(
+                "b",
+                ListColumn(
+                    [0, 2, 2, 3, 4],
+                    Series(
+                        "item",
+                        BoolColumn(
+                            [True, False, False, False], [True, False, True, True]
+                        ),
+                    ),
+                ),
+            )
+        ]
+    )
+    # Rows: [true, null], [], [false], [false].
+    check(
+        bools,
+        col("b").list().any(),
+        Series("", BoolColumn([True, False, False, False])),
+    )
+    check(
+        bools,
+        col("b").list().all(),
+        Series("", BoolColumn([True, True, False, False])),
+    )
+    check(
+        bools,
+        col("b").list().contains(False),
+        Series("", BoolColumn([False, False, True, True])),
+    )
+    var strings = DataFrame(
+        [str_lists("s", [["b", "~", "a", "a"], [], ["x"]], [True, True, False])]
+    )
+    check(
+        strings,
+        col("s").list().arg_min(),
+        Series("", Column[UInt32]([2, 0, 0], [True, False, False])),
+    )
+    check(
+        strings,
+        col("s").list().count_matches("a"),
+        Series("", Column[UInt32]([2, 0, 0], [True, True, False])),
+    )
+    check(
+        strings,
+        col("s").list().contains(lit("b")),
+        Series("", BoolColumn([True, False, False], [True, True, False])),
+    )
+    var nan = std_nan[DType.float64]()
+    var withnan = DataFrame([float_lists("f", [[1.5, nan, Float64(N)]], [True])])
+    check(
+        withnan,
+        col("f").list().arg_max(),
+        Series("", Column[UInt32]([0])),
+    )
+
+
+def test_list_reduction_errors() raises:
+    var frame = fixture()
+    with assert_raises(contains="list.any needs a Bool list"):
+        _ = frame.select_exprs([col("a").list().any()])
+    with assert_raises(contains="list.median needs a numeric list"):
+        _ = DataFrame([str_lists("s", [["a"]], [True])]).select_exprs(
+            [col("s").list().median()]
+        )
+    with assert_raises(contains="element type"):
+        _ = frame.select_exprs([col("a").list().contains(lit("x"))])

@@ -116,6 +116,8 @@ from .expr import (
     EXPR_MIN_BY,
     LIST_GET,
     LIST_CONCAT,
+    LIST_COUNT_MATCHES,
+    LIST_HAS,
     STRUCT_PACK,
     STRUCT_FIELD,
     node_children,
@@ -131,6 +133,7 @@ from dataframe.kernels.binary import integer_is_in
 from dataframe.kernels.replace import replace_values
 from dataframe.kernels.list import nested_op
 from dataframe.kernels.list_transforms import list_concat
+from dataframe.kernels.list_reductions import list_match
 from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.kernels.cast import cast_series
 from .categorical import (
@@ -629,6 +632,11 @@ def _eval[
                 )
             )
         return list_concat(operands, bound.dtypes[index])
+    if node.op == LIST_COUNT_MATCHES or node.op == LIST_HAS:
+        var item = _eval[width](
+            bound, columns, aggregates, node.right, offset, length, grouped, mask
+        )
+        return list_match(left, item, node.op)
     if is_nested_op(node.op):
         var value = nested_op(
             node, left, bound.dtypes[node.left], bound._regex(index)

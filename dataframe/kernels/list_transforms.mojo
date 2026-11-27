@@ -23,6 +23,15 @@ from std.math import isnan
 from std.memory import Pointer, unsafe_memcmp
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
+    LIST_ALL,
+    LIST_ANY,
+    LIST_ARG_MAX,
+    LIST_ARG_MIN,
+    LIST_COUNT_MATCHES,
+    LIST_HAS,
+    LIST_MEDIAN,
+    LIST_STD,
+    LIST_VAR,
     LIST_CONCAT,
     LIST_DIFF,
     LIST_DROP_NULLS,
@@ -45,6 +54,8 @@ from dataframe.expr import (
     Node,
     split_names,
 )
+from dataframe.kernels.hashing import RowKeys, encode_rows
+from dataframe.kernels.partition import encode_partitioned
 from dataframe.parallel import Job, run_jobs, worker_count
 from dataframe.series import Series
 from dataframe.storage.boolean import BoolColumn
@@ -100,6 +111,24 @@ def list_op_name(op: Int) -> String:
         return "list.diff"
     if op == LIST_CONCAT:
         return "list.concat"
+    if op == LIST_MEDIAN:
+        return "list.median"
+    if op == LIST_STD:
+        return "list.std"
+    if op == LIST_VAR:
+        return "list.var"
+    if op == LIST_ANY:
+        return "list.any"
+    if op == LIST_ALL:
+        return "list.all"
+    if op == LIST_ARG_MIN:
+        return "list.arg_min"
+    if op == LIST_ARG_MAX:
+        return "list.arg_max"
+    if op == LIST_COUNT_MATCHES:
+        return "list.count_matches"
+    if op == LIST_HAS:
+        return "list.contains"
     return "list operation " + String(op)
 
 
@@ -570,6 +599,10 @@ trait _Order(Copyable, Deinitable, Movable):
     def same(self, a: Int, b: Int) -> Bool:
         ...
 
+    def nan(self, a: Int) -> Bool:
+        """Whether the element is a float NaN."""
+        ...
+
 
 struct _NumberOrder[D: DType](_Order):
     """Numeric order with NaN after every number and equal to itself."""
@@ -604,6 +637,16 @@ struct _NumberOrder[D: DType](_Order):
             if isnan(x):
                 return isnan(y)
         return x == y
+
+    @always_inline
+    def nan(self, a: Int) -> Bool:
+        comptime if Self.D.is_floating_point():
+            return isnan(
+                Pointer[Scalar[Self.D], MutAnyOrigin](
+                    unsafe_from_address=self.values
+                )[unsafe_offset=a]
+            )
+        return False
 
 
 struct _BytesOrder(_Order):
@@ -647,6 +690,10 @@ struct _BytesOrder(_Order):
             )
             == 0
         )
+
+    @always_inline
+    def nan(self, a: Int) -> Bool:
+        return False
 
 
 @always_inline
@@ -988,12 +1035,20 @@ def _ordered[
     return _gathered(lists, _Chosen(offsets^, positions^, False))
 
 
+def row_keys(keys: List[Series]) raises -> RowKeys:
+    """Ids for the distinct rows of keys (nulls equal), each id's
+    representative its first row; bucketed across workers when the rows
+    warrant several."""
+    var workers = worker_count(len(keys[0]))
+    if workers > 1:
+        return encode_partitioned(keys, workers, nulls_equal=True)
+    return encode_rows(keys, nulls_equal=True)
+
+
 def _first_rows(values: Series) raises -> List[Int]:
     """Positions of the first occurrence of each distinct value (null
     counted once), in position order."""
-    from dataframe.frame import DataFrame
-
-    var keys = DataFrame([values.renamed("v")])._subset_row_keys(List[String]())
+    var keys = row_keys([values.copy()])
     var chosen = List[Bool](length=len(values), fill=False)
     for row in keys.representatives:
         chosen[row] = True
@@ -1007,7 +1062,6 @@ def _first_rows(values: Series) raises -> List[Int]:
 def _encoded(lists: ListColumn, op: Int, flag: Int) raises -> Series:
     """sort, unique, or n_unique for any element type, through the general
     encoders keyed by (row, element)."""
-    from dataframe.frame import DataFrame
     from dataframe.sorting.sort import sort_rows
 
     var n = len(lists)
@@ -1041,7 +1095,7 @@ def _encoded(lists: ListColumn, op: Int, flag: Int) raises -> Series:
         return _gathered(
             lists, _Chosen(every^.into_offsets(), positions^, False)
         )
-    var keys = DataFrame([owners^, elements^])._subset_row_keys(List[String]())
+    var keys = row_keys([owners^, elements^])
     var chosen = List[Bool](length=len(every.positions), fill=False)
     for row in keys.representatives:
         chosen[row] = True
