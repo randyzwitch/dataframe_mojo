@@ -1483,7 +1483,9 @@ def join_rows(p, srcs):
     if p[0] == "join_where":
         n = left.select(pl.len()).collect().item()
         m = right.select(pl.len()).collect().item()
-        if n * m <= MAX_ROWS:
+        # Counted by running it only where pairing every row stays cheap
+        # for Polars (it may pair every row for some predicates).
+        if n * m <= MAX_ROWS or n * m > 50_000_000:
             return n * m
         return to_pl_plan(p, srcs).select(pl.len()).collect().item() + n + m
     if p[0] == "cross":

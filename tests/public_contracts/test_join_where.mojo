@@ -192,6 +192,14 @@ def test_equalities_use_the_hash_join_and_filter_the_rest() raises:
         ],
         "mixed",
     )
+    # Two equalities on one left column: one is the hash key, the other
+    # filters.
+    _check(
+        events,
+        sessions,
+        [col("user") == col("user_right"), col("user") == col("start")],
+        "repeated key",
+    )
     # Float equality keys stay in the filter too: NaN matches nothing.
     var a = DataFrame([_floats("f", 200, 19, 20), _row_ids("i", 200)])
     var b = DataFrame([_floats("f", 150, 20, 20), _row_ids("j", 150)])
@@ -231,6 +239,16 @@ def test_expressions_extra_predicates_dates_and_empty_inputs() raises:
         [_row_ids("k", 80), _ints("d", 80, 26, 60).with_dtype(DataType.DATE)]
     )
     _check(dl, dr, [col("d") < col("d_right")], "dates")
+    # A date comparison and a float one: one inequality join takes keys of
+    # one kind, the other comparison filters.
+    var dfl = dl.with_column(_floats("f", 100, 30, 40))
+    var dfr = dr.with_column(_floats("f", 80, 31, 40))
+    _check(
+        dfl,
+        dfr,
+        [col("d") >= col("d_right"), col("f") >= col("f_right")],
+        "date and float",
+    )
     # No rows on one side: the joined schema.
     var empty = right.clear()
     var out = left.join_where(empty, [col("x") < col("lo")])

@@ -58,6 +58,7 @@ comptime _PAIRS = 4
 comptime _GATHER_LEFT = 5
 comptime _GATHER_RIGHT = 6
 comptime _DONE = 7
+comptime _POINTS = 8
 
 
 def range_join_ops(node: PlanNode) raises -> List[Int]:
@@ -209,6 +210,14 @@ struct RangeJoinSink(Movable, Rounds):
                     return tasks
                 self._sorted()
                 continue
+            if self.stage == _POINTS:
+                if not self.scanned:
+                    self.scanned = True
+                    if self.width > 0:
+                        return self.width
+                self.scanned = False
+                self._counting()
+                continue
             if self.stage == _COUNT:
                 if self.width > 0:
                     # The count round ran: offsets, then the fill round.
@@ -280,6 +289,9 @@ struct RangeJoinSink(Movable, Rounds):
     def round_task(mut self, task: Int) raises:
         if self.stage == _SORT:
             self.sorting[0].round_task(task)
+        elif self.stage == _POINTS:
+            for r in range(task, len(self.ranges) - 1, self.width):
+                self._fill_points(self.ranges[r], self.ranges[r + 1])
         elif self.stage == _COUNT:
             for r in range(task, len(self.ranges) - 1, self.width):
                 if self.floats:
@@ -343,6 +355,18 @@ struct RangeJoinSink(Movable, Rounds):
                 )
             if target.value() == DataType.FLOAT64:
                 self.floats = True
+        # One number type serves every comparison: all integer or all float
+        # (planning pairs only comparisons of one kind).
+        for k in range(len(self.ops)):
+            var t = range_key_type(
+                self.left.column(left_on[k]).dtype(),
+                self.right.column(right_on[k]).dtype(),
+            )
+            if (t.value() == DataType.FLOAT64) != self.floats:
+                raise Error(
+                    "An inequality join compares integer and float keys"
+                    " together"
+                )
         var target = DataType.FLOAT64 if self.floats else DataType.INT64
         for k in range(len(self.ops)):
             self.left_keys.append(
@@ -436,17 +460,33 @@ struct RangeJoinSink(Movable, Rounds):
         interval side's rows."""
         var side = 0 if self.point_left else 1
         ref keys = self.left_keys if self.point_left else self.right_keys
+        var count = len(self.sorted_rows[side])
+        if self.floats:
+            self.points_float = List[Float64](length=count, fill=0)
+        else:
+            self.points_int = List[Int64](length=count, fill=0)
+        # The keys in sorted order, a range of positions a task.
+        self.ranges = partitions(count, worker_count(count), 64)
+        self.width = round_width(len(self.ranges) - 1)
+        self.stage = _POINTS
+
+    def _fill_points(mut self, first: Int, end: Int):
+        """Points task: the point side's keys at sorted positions [first,
+        end)."""
+        var side = 0 if self.point_left else 1
+        ref keys = self.left_keys if self.point_left else self.right_keys
         ref order = self.sorted_rows[side]
         if self.floats:
             ref column = keys[0]._data[Column[Float64]]
-            self.points_float = List[Float64](capacity=len(order))
-            for row in order:
-                self.points_float.append(column._get(row))
+            for i in range(first, end):
+                self.points_float[i] = column._get(order[i])
         else:
             ref column = keys[0]._data[Column[Int64]]
-            self.points_int = List[Int64](capacity=len(order))
-            for row in order:
-                self.points_int.append(column._get(row))
+            for i in range(first, end):
+                self.points_int[i] = column._get(order[i])
+
+    def _counting(mut self) raises:
+        """The count round over the interval side's rows."""
         var n = self.right.height() if self.point_left else self.left.height()
         self.starts = List[Int](length=n, fill=0)
         self.stops = List[Int](length=n, fill=0)

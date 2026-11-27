@@ -72,6 +72,9 @@ struct _Comparison(Copyable, Movable):
     var op: Int
     var part: Int
     var left_float: Bool
+    # Whether the comparison runs on floats (else on 64-bit integers): the
+    # comparisons one inequality join uses share this.
+    var float_keys: Bool
 
 
 def _ie_code(op: Int) -> Int:
@@ -236,15 +239,27 @@ def _lower(mut self: QueryContext, f: Int, c: Int) raises -> Bool:
             ):
                 equal.append(
                     _Comparison(
-                        a.copy(), rb.copy(), op, p, ltype.value().is_float()
+                        a.copy(),
+                        rb.copy(),
+                        op,
+                        p,
+                        ltype.value().is_float(),
+                        False,
                     )
                 )
-        elif range_key_type(ltype.value(), rtype.value()):
-            unequal.append(
-                _Comparison(
-                    a.copy(), rb.copy(), op, p, ltype.value().is_float()
+        else:
+            var key_type = range_key_type(ltype.value(), rtype.value())
+            if key_type:
+                unequal.append(
+                    _Comparison(
+                        a.copy(),
+                        rb.copy(),
+                        op,
+                        p,
+                        ltype.value().is_float(),
+                        key_type.value() == DataType.FLOAT64,
+                    )
                 )
-            )
     if len(equal) == 0 and len(unequal) == 0:
         return False
     var used = List[Bool](length=len(parts), fill=False)
@@ -255,8 +270,14 @@ def _lower(mut self: QueryContext, f: Int, c: Int) raises -> Bool:
         var left_keys = List[String]()
         var right_keys = List[String]()
         for e in equal:
-            left_keys.append(_plain_column(e.left).value())
-            right_keys.append(_plain_column(e.right).value())
+            var lname = _plain_column(e.left).value()
+            var rname = _plain_column(e.right).value()
+            # A column is a key once; a second equality on it stays in the
+            # filter.
+            if lname in left_keys or rname in right_keys:
+                continue
+            left_keys.append(lname)
+            right_keys.append(rname)
             # A float pair stays in the filter as well: the hash table
             # matches NaN with NaN, the comparison matches NaN with
             # nothing.
@@ -382,12 +403,12 @@ def _key_name(
 def _choose(comparisons: List[_Comparison]) -> List[Int]:
     """The comparisons an inequality join uses: a pair bounding one key of
     a side from both directions (a range), else the first two, else the
-    one."""
+    first; a pair compares keys of one kind (all integer or all float)."""
     for i in range(len(comparisons)):
         for j in range(i):
             ref a = comparisons[j]
             ref b = comparisons[i]
-            if ie_less(a.op) == ie_less(b.op):
+            if ie_less(a.op) == ie_less(b.op) or a.float_keys != b.float_keys:
                 continue
             var same_left = _expr_signature(a.left) == _expr_signature(b.left)
             var same_right = _expr_signature(a.right) == _expr_signature(
@@ -395,6 +416,8 @@ def _choose(comparisons: List[_Comparison]) -> List[Int]:
             )
             if same_left or same_right:
                 return [j, i]
-    if len(comparisons) >= 2:
-        return [0, 1]
+    for i in range(len(comparisons)):
+        for j in range(i):
+            if comparisons[j].float_keys == comparisons[i].float_keys:
+                return [j, i]
     return [0]
