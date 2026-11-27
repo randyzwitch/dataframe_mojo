@@ -1648,8 +1648,14 @@ Expressions on list columns. A null list gives a null result.
   Element at index (negative counts from the end); null when out of range.
 - `def first(self) -> Expr`
 - `def last(self) -> Expr`
+- `def contains(self, item: Expr) -> Expr`
+  Whether each list holds the row's value of item, for any element type; a null item matches a null element. Numbers of different types compare by value; a bare literal takes the element type.
+- `def contains(self, value: Bool) -> Expr`
+  Whether a Bool list holds the value.
 - `def contains(self, value: Float64) -> Expr`
   Whether a float list holds the value.
+- `def contains(self, value: Int) -> Expr`
+  Whether a numeric list holds the value; the bare literal takes the element type.
 - `def contains(self, value: Int64) -> Expr`
   Whether an integer list holds the value.
 - `def contains(self, value: String) -> Expr`
@@ -1660,6 +1666,23 @@ Expressions on list columns. A null list gives a null result.
 - `def min(self) -> Expr`
 - `def max(self) -> Expr`
 - `def mean(self) -> Expr`
+- `def median(self) -> Expr`
+  The median of each list's valid elements as Float64; null when there are none.
+- `def std(self, ddof: Int = Int(1)) -> Expr`
+  The standard deviation of each list's valid elements as Float64; null when there are no more than ddof of them.
+- `def var(self, ddof: Int = Int(1)) -> Expr`
+  The variance of each list's valid elements as Float64; null when there are no more than ddof of them.
+- `def any(self) -> Expr`
+  Whether any valid element of a Bool list is true (false for an empty list).
+- `def all(self) -> Expr`
+  Whether every valid element of a Bool list is true (true for an empty list).
+- `def arg_min(self) -> Expr`
+  The position of each list's smallest valid element (the first on ties) as UInt32; null when there is none.
+- `def arg_max(self) -> Expr`
+  The position of each list's largest valid element (the first on ties; a number before NaN) as UInt32; null when there is none.
+- `def count_matches(self, item: Expr) -> Expr`
+  How many elements of each list equal the row's value of item, as UInt32; a null item counts null elements.
+- `def count_matches(self, value: String) -> Expr`
 - `def unique(self, maintain_order: Bool = False) -> Expr`
   The distinct elements of each list, one null at most. The order is unspecified unless maintain_order, which keeps each value's first position.
 - `def n_unique(self) -> Expr`

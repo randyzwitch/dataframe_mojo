@@ -415,6 +415,18 @@ comptime LIST_DROP_NULLS = 317
 comptime LIST_SHIFT = 318
 comptime LIST_DIFF = 319
 comptime LIST_CONCAT = 320
+# List reductions: one value per row from that row's elements. LIST_STD
+# and LIST_VAR: min_count is ddof. LIST_COUNT_MATCHES and LIST_HAS (contains
+# with an expression) read the value in `right`, one per row.
+comptime LIST_MEDIAN = 321
+comptime LIST_STD = 322
+comptime LIST_VAR = 323
+comptime LIST_ANY = 324
+comptime LIST_ALL = 325
+comptime LIST_ARG_MIN = 326
+comptime LIST_ARG_MAX = 327
+comptime LIST_COUNT_MATCHES = 328
+comptime LIST_HAS = 329
 
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
@@ -618,7 +630,7 @@ def is_nested_op(op: Int) -> Bool:
 def is_list_transform(op: Int) -> Bool:
     """Whether op builds each row's result from that row's list elements
     (list_transforms.mojo)."""
-    return op >= LIST_UNIQUE and op <= LIST_CONCAT
+    return op >= LIST_UNIQUE and op <= LIST_HAS
 
 
 def is_conditional(op: Int) -> Bool:
@@ -3335,11 +3347,26 @@ struct ListNamespace(Copyable):
 
     def contains(self, value: String) -> Expr:
         """Whether a string list holds the value."""
-        return self._op(LIST_CONTAINS, text=value, min_count=0)
+        return self.contains(lit(value))
+
+    def contains(self, item: Expr) -> Expr:
+        """Whether each list holds the row's value of item, for any element
+        type; a null item matches a null element. Numbers of different
+        types compare by value; a bare literal takes the element type."""
+        return self._binary(item, LIST_HAS)
+
+    def contains(self, value: Bool) -> Expr:
+        """Whether a Bool list holds the value."""
+        return self.contains(lit(value))
+
+    def contains(self, value: Int) -> Expr:
+        """Whether a numeric list holds the value; the bare literal takes the
+        element type."""
+        return self._binary(Expr(value), LIST_HAS)
 
     def contains(self, value: Int64) -> Expr:
         """Whether an integer list holds the value."""
-        return self._op(LIST_CONTAINS, integer=value, min_count=1)
+        return self.contains(lit(value))
 
     def contains(self, value: Float64) -> Expr:
         """Whether a float list holds the value."""
@@ -3360,6 +3387,56 @@ struct ListNamespace(Copyable):
 
     def mean(self) -> Expr:
         return self._op(LIST_MEAN)
+
+    def median(self) -> Expr:
+        """The median of each list's valid elements as Float64; null when
+        there are none."""
+        return self._op(LIST_MEDIAN)
+
+    def std(self, ddof: Int = 1) -> Expr:
+        """The standard deviation of each list's valid elements as Float64;
+        null when there are no more than ddof of them."""
+        return self._op(LIST_STD, min_count=ddof)
+
+    def var(self, ddof: Int = 1) -> Expr:
+        """The variance of each list's valid elements as Float64; null when
+        there are no more than ddof of them."""
+        return self._op(LIST_VAR, min_count=ddof)
+
+    def any(self) -> Expr:
+        """Whether any valid element of a Bool list is true (false for an
+        empty list)."""
+        return self._op(LIST_ANY)
+
+    def all(self) -> Expr:
+        """Whether every valid element of a Bool list is true (true for an
+        empty list)."""
+        return self._op(LIST_ALL)
+
+    def arg_min(self) -> Expr:
+        """The position of each list's smallest valid element (the first
+        on ties) as UInt32; null when there is none."""
+        return self._op(LIST_ARG_MIN)
+
+    def arg_max(self) -> Expr:
+        """The position of each list's largest valid element (the first on
+        ties; a number before NaN) as UInt32; null when there is none."""
+        return self._op(LIST_ARG_MAX)
+
+    def count_matches(self, item: Expr) -> Expr:
+        """How many elements of each list equal the row's value of item, as
+        UInt32; a null item counts null elements."""
+        return self._binary(item, LIST_COUNT_MATCHES)
+
+    def count_matches(self, value: String) -> Expr:
+        return self.count_matches(lit(value))
+
+    def _binary(self, item: Expr, op: Int) -> Expr:
+        var nodes = self._expr._nodes.copy()
+        var offset = len(nodes)
+        _append_shifted(nodes, item._nodes, offset)
+        nodes.append(_node(op, offset - 1, len(nodes) - 1))
+        return Expr(nodes^, self._expr._name)
 
     def unique(self, maintain_order: Bool = False) -> Expr:
         """The distinct elements of each list, one null at most. The order
