@@ -562,6 +562,10 @@ struct _TableData(Movable):
     # (`JoinBuildLayout.from_source`): a join reads its build columns
     # from here by row number. Empty otherwise.
     var source: List[Series]
+    # Whether two inserted rows have equal keys, known once the finalize
+    # tasks ran (`finalized`); every copy of the table reads it here.
+    var duplicate_keys: Bool
+    var finalized: Bool
 
     def __init__(
         out self, var keys: List[Series], layout: TupleDataLayout
@@ -580,6 +584,8 @@ struct _TableData(Movable):
         self.heaps = TupleDataHeaps()
         self.pending = List[_FinalizeJob]()
         self.source = List[Series]()
+        self.duplicate_keys = False
+        self.finalized = False
 
     def __deinit__(deinit self):
         # The pointer table is the table's largest scratch: keep its pages
@@ -1841,6 +1847,18 @@ struct JoinHashTable(Copyable, Movable):
             run_jobs(self.data[].pending)
         self.finish_finalize()
 
+    def has_duplicate_keys(self) -> Optional[Bool]:
+        """Whether two build rows with valid keys have equal keys, which
+        inserting the rows found for free: a row whose keys match a chain's
+        joins that chain. None while the finalize tasks have not run. A
+        table with no pointer table (no valid key, or keys indexed directly,
+        which a repeated key rules out) has no repeat."""
+        if self.data[].finalized:
+            return self.data[].duplicate_keys
+        if self.inserted == 0 or self.perfect:
+            return False
+        return None
+
     def key_bounds(self, k: Int) -> Optional[Tuple[Int64, Int64]]:
         """Key `k`'s least and greatest valid value, when it is an integer
         key with a valid value."""
@@ -1933,6 +1951,8 @@ struct JoinHashTable(Copyable, Movable):
             self.chains_longer_than_one = (
                 self.chains_longer_than_one or self.data[].pending[t].chained
             )
+        self.data[].duplicate_keys = self.chains_longer_than_one
+        self.data[].finalized = True
         self.data[].pending = List[_FinalizeJob]()
         if self._can_use_dictionary_emission(self.probe_estimate):
             self._build_dictionary_arrays()

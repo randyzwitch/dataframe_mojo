@@ -47,6 +47,8 @@ MAX_ROWS = 600_000
 # What a Polars run can fail with: a panic (raised for some invalid
 # requests, such as an unsorted time window index) is not an Exception.
 ORACLE_FAILURES = (Exception, pl.exceptions.PanicException)
+# The error both engines raise when a join's validate finds repeated keys.
+VALIDATION_ERROR = "join keys did not fulfill"
 ATOL = 1e-8
 
 # Our errors that are documented choices rather than bugs: integer
@@ -557,6 +559,8 @@ def to_pl_plan(p, srcs):
         kw = {}
         if how not in ("semi", "anti"):
             kw["coalesce"] = p[6]
+        if len(p) > 7 and p[7] != "m:m":
+            kw["validate"] = p[7]
         return lf.join(
             right, left_on=list(p[3][1:]), right_on=list(p[4][1:]), how=how, **kw
         )
@@ -1069,6 +1073,13 @@ class PlanGen:
                     used_r.add(b)
                 if len(chosen) >= r.choice([1, 1, 2, 3]):
                     break
+            # validate: Polars checks inner, left and full joins only, and
+            # counts repeated null keys of a full join as repeats.
+            validate = "m:m"
+            if how in ("inner", "left") and (
+                r.random() < 0.3 or "join_validate" in focus
+            ):
+                validate = r.choice(["1:1", "1:m", "m:1"])
             return (
                 "join",
                 plan,
@@ -1077,6 +1088,7 @@ class PlanGen:
                 ("list",) + tuple(b for _, b in chosen),
                 how,
                 r.random() < 0.8,
+                validate,
             ), False
         if kind == "sort":
             cand = [n for n in names if is_orderable(schema[n])]
@@ -1577,10 +1589,14 @@ def evaluate(case, work, threads_list=(1, 8)):
         shutil.rmtree(work)
     paths = write_inputs(case, work / "in")
     srcs = oracle_sources(case, paths)
+    expected_error = None
     try:
         expected = to_pl_plan(case["plan"], srcs).collect(engine=ORACLE_ENGINE)
     except ORACLE_FAILURES as exc:
-        return [("oracle-error", "-", 0, str(exc)[:300])], None
+        if VALIDATION_ERROR not in str(exc):
+            return [("oracle-error", "-", 0, str(exc)[:300])], None
+        # A join's validate found repeated keys: every mode must raise it.
+        expected, expected_error = None, str(exc)
     case_file = work / "case.sexp"
     case_file.write_text(case_sexp(case, paths))
     failures = []
@@ -1588,6 +1604,12 @@ def evaluate(case, work, threads_list=(1, 8)):
         results = run_driver(case_file, work / f"out{threads}", threads)
         for mode in MODES:
             kind, payload = results.get(mode, ("crash", "no result"))
+            if expected_error is not None:
+                if kind == "ok":
+                    failures.append(("mismatch", mode, threads, "no validate error: " + expected_error[:200]))
+                elif kind != "error" or VALIDATION_ERROR not in payload:
+                    failures.append((kind, mode, threads, payload.strip()[:500]))
+                continue
             if kind == "ok":
                 diff = compare(expected, payload, case["ordered"], final_sort_keys(case["plan"]))
                 if diff:
@@ -1718,6 +1740,8 @@ def plan_variants(p):
                         yield p[:pos] + (item[:j] + (v,) + item[j + 1 :],) + p[pos + 1 :]
     if op == "join" and p[5] != "inner":
         yield p[:5] + ("inner",) + p[6:]
+    if op == "join" and len(p) > 7 and p[7] != "m:m":
+        yield p[:7] + ("m:m",)
     if op in ("group_by",) and p[3]:
         yield p[:3] + (False,) + p[4:]
 

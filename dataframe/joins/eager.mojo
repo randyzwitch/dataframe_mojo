@@ -28,9 +28,11 @@ from dataframe.join_type import (
     JOIN_RIGHT_ANTI,
     JOIN_RIGHT_SEMI,
     JOIN_SEMI,
+    check_join_validate,
     join_emits_build_rows,
     shared_join_key_type,
 )
+from dataframe.joins.validate import check_side_unique, key_columns
 from dataframe.joins.hash_table import (
     JoinHashTable,
     keys_only_join,
@@ -61,9 +63,13 @@ def join_frames(
     suffix: String = "_right",
     coalesce: Bool = True,
     keep_order: Bool = True,
+    validate: Int = 0,
 ) raises -> DataFrame:
     """Execute a validated join. A RIGHT_SEMI or RIGHT_ANTI join (a semi or
-    anti join a plan flipped) is that join of `right` by `self`."""
+    anti join a plan flipped) is that join of `right` by `self`. `validate`:
+    the join's validate bits (see join_type), which inputs must have unique
+    keys; the build side's table finds repeats as it inserts its rows."""
+    check_join_validate(validate, how)
     if how == JOIN_RIGHT_SEMI or how == JOIN_RIGHT_ANTI:
         return right._join_impl(
             self,
@@ -114,6 +120,7 @@ def join_frames(
             suffix=suffix,
             coalesce=coalesce,
             keep_order=keep_order,
+            validate=validate,
         )
     var left_keys = List[Int]()
     var right_keys = List[Int]()
@@ -166,6 +173,9 @@ def join_frames(
     var left_rows = List[Int]()
     var right_rows = List[Int]()
     if self.height() == 0 and (how == JOIN_FULL or how == JOIN_RIGHT):
+        check_side_unique(
+            key_columns(right, right_on), right_on, validate, True
+        )
         # Emit unmatched build rows against null probe columns while retaining
         # original column types and output naming.
         var m = right.height()
@@ -233,6 +243,22 @@ def join_frames(
         keys_only=keys_only_join(physical),
         propagate=join_emits_build_rows(physical),
     )
+    if validate > 0:
+        # The build side's repeats come from its table; the probe side's
+        # from a table of its keys alone.
+        check_side_unique(
+            build_keys,
+            right_on if probe_left else left_on,
+            validate,
+            probe_left,
+            Optional(table.copy()),
+        )
+        check_side_unique(
+            probe_keys,
+            left_on if probe_left else right_on,
+            validate,
+            not probe_left,
+        )
     var pairs = Tuple[List[Int], List[Int]](List[Int](), List[Int]())
     if table.count == 0 and (
         physical == JOIN_INNER
