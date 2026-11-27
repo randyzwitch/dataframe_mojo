@@ -217,6 +217,15 @@ from .expr import (
     LIST_CONCAT,
     LIST_DIFF,
     LIST_N_UNIQUE,
+    LIST_MEDIAN,
+    LIST_STD,
+    LIST_VAR,
+    LIST_ANY,
+    LIST_ALL,
+    LIST_ARG_MIN,
+    LIST_ARG_MAX,
+    LIST_COUNT_MATCHES,
+    LIST_HAS,
     is_list_transform,
     is_conditional,
     is_logical,
@@ -258,6 +267,7 @@ from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import common_decimal, decimal_add_type, decimal_mul_type
 from .promotion import promoted_operands
+from dataframe.kernels.list_reductions import list_match_check
 from dataframe.kernels.list_transforms import (
     list_concat_inner,
     list_diff_inner,
@@ -2137,7 +2147,56 @@ def _bind(
                         + " requires a list expression, found "
                         + input.name()
                     )
-                if node.op == LIST_N_UNIQUE:
+                var inner = input.inner()
+                if node.op == LIST_COUNT_MATCHES or node.op == LIST_HAS:
+                    if node.right < 0 or node.right >= i:
+                        raise Error(
+                            "Invalid " + list_op_name(node.op) + " input"
+                        )
+                    # A bare literal takes the element type.
+                    _adopt(nodes, types, node.right, _target(inner))
+                    _default(nodes, types, node.right)
+                    list_match_check(node.op, inner, types[node.right])
+                    dtype = (
+                        DataType.BOOL if node.op
+                        == LIST_HAS else DataType.UINT32
+                    )
+                elif (
+                    node.op == LIST_MEDIAN
+                    or node.op == LIST_STD
+                    or node.op == LIST_VAR
+                ):
+                    if inner.is_categorical() or not inner.is_numeric():
+                        raise Error(
+                            list_op_name(node.op)
+                            + " needs a numeric list, found "
+                            + input.name()
+                        )
+                    if node.min_count < 0:
+                        raise Error("ddof must be nonnegative")
+                    dtype = DataType.FLOAT64
+                elif node.op == LIST_ANY or node.op == LIST_ALL:
+                    if inner != DataType.BOOL:
+                        raise Error(
+                            list_op_name(node.op)
+                            + " needs a Bool list, found "
+                            + input.name()
+                        )
+                    dtype = DataType.BOOL
+                elif node.op == LIST_ARG_MIN or node.op == LIST_ARG_MAX:
+                    if inner.is_categorical() or not (
+                        inner.is_numeric()
+                        or inner.is_temporal()
+                        or inner == DataType.STRING
+                        or inner == DataType.BINARY
+                    ):
+                        raise Error(
+                            list_op_name(node.op)
+                            + " needs a numeric, temporal or string list,"
+                            " found " + input.name()
+                        )
+                    dtype = DataType.UINT32
+                elif node.op == LIST_N_UNIQUE:
                     dtype = DataType.INT64
                 elif node.op == LIST_DIFF:
                     dtype = DataType.list(list_diff_inner(input.inner()))
@@ -2207,7 +2266,7 @@ def _bind(
                     dtype = inner.sum_type() if node.op == LIST_SUM else inner
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
-            if node.op == LIST_CONCAT and node.right >= 0:
+            if is_list_transform(node.op) and node.right >= 0:
                 has_aggregate = has_aggregate or aggregated[node.right]
                 if shapes[node.left] == ROWS or shapes[node.right] == ROWS:
                     shape = ROWS
