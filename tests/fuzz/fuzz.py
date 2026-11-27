@@ -1615,6 +1615,21 @@ def evaluate(case, work, threads_list=(1, 8)):
                 if diff:
                     failures.append(("mismatch", mode, threads, diff))
             elif kind == "error":
+                # Polars' lazy engine skips a join's validate check when an
+                # input turns out empty (its eager join checks); here the
+                # check always runs.
+                if VALIDATION_ERROR in payload and expected.height == 0:
+                    continue
+                # Polars pushes a filter above a validated join into its
+                # inputs before the check; the eager and unoptimized modes
+                # here check the inputs as written. Their validation error
+                # is allowed when the optimized mode matched.
+                if (
+                    VALIDATION_ERROR in payload
+                    and mode in ("eager", "lazy_noopt")
+                    and results.get("lazy", ("", ""))[0] == "ok"
+                ):
+                    continue
                 if not allowed_error(payload):
                     failures.append(("error", mode, threads, payload.strip()[:500]))
             else:
