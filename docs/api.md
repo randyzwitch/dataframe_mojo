@@ -1096,19 +1096,22 @@ A flat, topologically ordered tree; composition never evaluates data.
   Relative change from the value n rows earlier, as Float64.
 - `def rank(self, method: String = "average", descending: Bool = False) -> Self`
   Rank non-null values: average, min, max, dense, or ordinal.
-- `def rolling_sum(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
-  Sum over the current row and the window_size - 1 rows before it.
-- `def rolling_mean(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
-- `def rolling_min(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
-- `def rolling_max(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
-- `def rolling_std(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1)) -> Self`
-  Rolling std with stable sliding moments and count minus ddof.
-- `def rolling_var(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1)) -> Self`
-  Rolling var with stable sliding moments and count minus ddof.
-- `def rolling_median(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
+- `def rolling_sum(self, window_size: Int, min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Sum over the current row and the window_size - 1 rows before it (center=True: the window_size rows around it, the extra row of an even window before it).
+- `def rolling_mean(self, window_size: Int, min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Mean over the window (see rolling_sum), as Float64; with weights, the weighted sum over the sum of the weights.
+- `def rolling_min(self, window_size: Int, min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Least value of the window (see rolling_sum); with weights, the least weighted value, as Float64 (Float32 stays Float32).
+- `def rolling_max(self, window_size: Int, min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Greatest value of the window (see rolling_min).
+- `def rolling_std(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Rolling std with stable sliding moments and count minus ddof. With weights, the square root of the weighted mean squared deviation from the weighted mean (ddof does not apply).
+- `def rolling_var(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Rolling var with stable sliding moments and count minus ddof; weights as for rolling_std.
+- `def rolling_median(self, window_size: Int, min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
   Median of the current row and the window_size - 1 rows before it, as Float64 (Float32 stays Float32, a decimal keeps its type).
-- `def rolling_quantile(self, quantile: Float64, interpolation: String = "nearest", window_size: Int = Int(2), min_samples: Int = Int(-1)) -> Self`
-  Quantile of the current row and the window_size - 1 rows before it. Interpolation: nearest, lower, higher, midpoint, linear or equiprobable; types and nulls as in rolling_median.
+- `def rolling_quantile(self, quantile: Float64, interpolation: String = "nearest", window_size: Int = Int(2), min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Quantile of the current row and the window_size - 1 rows before it. Interpolation: nearest, lower, higher, midpoint, linear or equiprobable; types, nulls, center and weights as in rolling_median. A weighted quantile treats each value as spanning its weight.
 - `def rolling_sum_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
   Rolling sum over a Date/Datetime duration window (any row order).
 - `def rolling_sum_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`

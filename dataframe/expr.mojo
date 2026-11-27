@@ -447,6 +447,16 @@ def horizontal_inputs(nodes: List[Node], index: Int) -> List[Int]:
     return inputs^
 
 
+def is_fixed_rolling(op: Int) -> Bool:
+    """Whether op is a rolling window of a fixed number of rows."""
+    return (
+        (op >= ROLLING_SUM and op <= ROLLING_MAX)
+        or op == ROLLING_STD
+        or op == ROLLING_VAR
+        or op == ROLLING_QUANTILE
+    )
+
+
 def is_rolling_by(op: Int) -> Bool:
     return (
         op >= ROLLING_SUM_BY and op <= ROLLING_VAR_BY
@@ -455,30 +465,50 @@ def is_rolling_by(op: Int) -> Bool:
 
 struct RollingOptions(Copyable, Movable):
     """The options a rolling node keeps in `text2`: the closed side of a
-    duration window ("" for a fixed window), then `key=value` items
-    (`q`: the quantile as its Float64 bits, `m`: the interpolation)."""
+    duration window ("" for a fixed window), then `key=value` items for
+    the options set (`q`: the quantile as its Float64 bits, `m`: the
+    interpolation, `c`: a centered window, `w`: the weights as Float64
+    bits joined by commas). A fixed window with none of them keeps an
+    empty `text2`."""
 
     var closed: String
     var quantile: Float64
     var method: String
+    var center: Bool
+    var weights: List[Float64]
 
     def __init__(out self):
         self.closed = ""
         self.quantile = 0.5
-        self.method = "linear"
+        self.method = ""
+        self.center = False
+        self.weights = List[Float64]()
+
+
+def _float_bits(value: Float64) -> String:
+    return String(Int64(bitcast[DType.int64, 1](SIMD[DType.float64, 1](value))))
+
+
+def _bits_float(text: String) raises -> Float64:
+    return Float64(
+        bitcast[DType.float64, 1](SIMD[DType.int64, 1](Int64(atol(text))))
+    )
 
 
 def pack_rolling_options(options: RollingOptions) -> String:
-    var bits = bitcast[DType.int64, 1](SIMD[DType.float64, 1](options.quantile))
-    return (
-        options.closed
-        + SEP
-        + "q="
-        + String(Int64(bits))
-        + SEP
-        + "m="
-        + options.method
-    )
+    var text = options.closed
+    if options.method != "":
+        text += SEP + "q=" + _float_bits(options.quantile)
+        text += SEP + "m=" + options.method
+    if options.center:
+        text += SEP + "c=1"
+    if len(options.weights) > 0:
+        text += SEP + "w="
+        for k in range(len(options.weights)):
+            if k > 0:
+                text += ","
+            text += _float_bits(options.weights[k])
+    return text^
 
 
 def rolling_options(node: Node) raises -> RollingOptions:
@@ -489,12 +519,14 @@ def rolling_options(node: Node) raises -> RollingOptions:
     for k in range(1, len(parts)):
         var item = String(parts[k])
         if item.startswith("q="):
-            var bits = Int64(atol(String(item[byte=2:])))
-            options.quantile = Float64(
-                bitcast[DType.float64, 1](SIMD[DType.int64, 1](bits))
-            )
+            options.quantile = _bits_float(String(item[byte=2:]))
         elif item.startswith("m="):
             options.method = String(item[byte=2:])
+        elif item.startswith("c="):
+            options.center = True
+        elif item.startswith("w="):
+            for weight in String(item[byte=2:]).split(","):
+                options.weights.append(_bits_float(String(weight)))
     return options^
 
 
@@ -1951,59 +1983,147 @@ struct Expr(Copyable):
         """
         return self._window(RANK, reverse=descending, text=method)
 
-    def rolling_sum(self, window_size: Int, min_samples: Int = -1) -> Self:
-        """Sum over the current row and the window_size - 1 rows before it.
+    def _rolling(
+        self,
+        op: Int,
+        window_size: Int,
+        min_samples: Int,
+        center: Bool,
+        weights: List[Float64],
+        ddof: Int = 0,
+        quantile: Float64 = 0.5,
+        method: String = "",
+    ) -> Self:
+        var result = self._window(
+            op, Int64(window_size), floating=Float64(min_samples)
+        )
+        ref node = result._nodes[len(result._nodes) - 1]
+        node.min_count = ddof
+        var options = RollingOptions()
+        options.quantile = quantile
+        options.method = method
+        options.center = center
+        options.weights = weights.copy()
+        node.text2 = pack_rolling_options(options)
+        return result^
+
+    def rolling_sum(
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
+    ) -> Self:
+        """Sum over the current row and the window_size - 1 rows before it
+        (center=True: the window_size rows around it, the extra row of an
+        even window before it).
 
         Nulls are skipped; fewer than min_samples valid values (default
-        window_size) give null.
+        window_size) give null. `weights` (window_size of them) multiply
+        the values by their position in the window, and the result is
+        Float64 (Float32 stays Float32).
         """
-        return self._window(
-            ROLLING_SUM, Int64(window_size), floating=Float64(min_samples)
+        return self._rolling(
+            ROLLING_SUM, window_size, min_samples, center, weights
         )
 
-    def rolling_mean(self, window_size: Int, min_samples: Int = -1) -> Self:
-        return self._window(
-            ROLLING_MEAN, Int64(window_size), floating=Float64(min_samples)
+    def rolling_mean(
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
+    ) -> Self:
+        """Mean over the window (see rolling_sum), as Float64; with
+        weights, the weighted sum over the sum of the weights."""
+        return self._rolling(
+            ROLLING_MEAN, window_size, min_samples, center, weights
         )
 
-    def rolling_min(self, window_size: Int, min_samples: Int = -1) -> Self:
-        return self._window(
-            ROLLING_MIN, Int64(window_size), floating=Float64(min_samples)
+    def rolling_min(
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
+    ) -> Self:
+        """Least value of the window (see rolling_sum); with weights, the
+        least weighted value, as Float64 (Float32 stays Float32)."""
+        return self._rolling(
+            ROLLING_MIN, window_size, min_samples, center, weights
         )
 
-    def rolling_max(self, window_size: Int, min_samples: Int = -1) -> Self:
-        return self._window(
-            ROLLING_MAX, Int64(window_size), floating=Float64(min_samples)
+    def rolling_max(
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
+    ) -> Self:
+        """Greatest value of the window (see rolling_min)."""
+        return self._rolling(
+            ROLLING_MAX, window_size, min_samples, center, weights
         )
 
     def rolling_std(
-        self, window_size: Int, min_samples: Int = -1, ddof: Int = 1
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        ddof: Int = 1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
     ) -> Self:
-        """Rolling std with stable sliding moments and count minus ddof."""
-        var result = self._window(
-            ROLLING_STD, Int64(window_size), floating=Float64(min_samples)
+        """Rolling std with stable sliding moments and count minus ddof.
+        With weights, the square root of the weighted mean squared
+        deviation from the weighted mean (ddof does not apply)."""
+        return self._rolling(
+            ROLLING_STD, window_size, min_samples, center, weights, ddof
         )
-        result._nodes[len(result._nodes) - 1].min_count = ddof
-        return result^
 
     def rolling_var(
-        self, window_size: Int, min_samples: Int = -1, ddof: Int = 1
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        ddof: Int = 1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
     ) -> Self:
-        """Rolling var with stable sliding moments and count minus ddof."""
-        var result = self._window(
-            ROLLING_VAR, Int64(window_size), floating=Float64(min_samples)
+        """Rolling var with stable sliding moments and count minus ddof;
+        weights as for rolling_std."""
+        return self._rolling(
+            ROLLING_VAR, window_size, min_samples, center, weights, ddof
         )
-        result._nodes[len(result._nodes) - 1].min_count = ddof
-        return result^
 
-    def rolling_median(self, window_size: Int, min_samples: Int = -1) -> Self:
+    def rolling_median(
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
+    ) -> Self:
         """Median of the current row and the window_size - 1 rows before
         it, as Float64 (Float32 stays Float32, a decimal keeps its type).
 
         Nulls are skipped; fewer than min_samples valid values (default
-        window_size) give null. NaN sorts above every number.
+        window_size) give null. NaN sorts above every number. center and
+        weights as for rolling_sum; a weighted median is Float64 (Float32
+        stays Float32).
         """
-        return self.rolling_quantile(0.5, "linear", window_size, min_samples)
+        return self.rolling_quantile(
+            0.5,
+            "linear",
+            window_size,
+            min_samples,
+            center=center,
+            weights=weights,
+        )
 
     def rolling_quantile(
         self,
@@ -2011,21 +2131,26 @@ struct Expr(Copyable):
         interpolation: String = "nearest",
         window_size: Int = 2,
         min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
     ) -> Self:
         """Quantile of the current row and the window_size - 1 rows before
         it. Interpolation: nearest, lower, higher, midpoint, linear or
-        equiprobable; types and nulls as in rolling_median.
+        equiprobable; types, nulls, center and weights as in
+        rolling_median. A weighted quantile treats each value as spanning
+        its weight.
         """
-        var result = self._window(
-            ROLLING_QUANTILE, Int64(window_size), floating=Float64(min_samples)
+        return self._rolling(
+            ROLLING_QUANTILE,
+            window_size,
+            min_samples,
+            center,
+            weights,
+            0,
+            quantile,
+            interpolation,
         )
-        var options = RollingOptions()
-        options.quantile = quantile
-        options.method = interpolation
-        result._nodes[len(result._nodes) - 1].text2 = pack_rolling_options(
-            options
-        )
-        return result^
 
     def _rolling_by(
         self,

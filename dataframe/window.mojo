@@ -50,6 +50,8 @@ from .expr import (
     ROLLING_QUANTILE,
     ROLLING_QUANTILE_BY,
     rolling_options,
+    is_fixed_rolling,
+    RollingOptions,
     BACKWARD_FILL,
     INTERPOLATE,
     CUT,
@@ -67,6 +69,17 @@ from .series import Series, FixedElements
 from .window_segment_tree import frame_states_supported, window_segment_tree
 from .window_sort import rank_rows
 from .window_quantile import quantile_frames, fixed_quantiles
+from .window_weights import (
+    weighted_frames,
+    window_bounds,
+    W_SUM,
+    W_MEAN,
+    W_MIN,
+    W_MAX,
+    W_VAR,
+    W_STD,
+    W_QUANTILE,
+)
 from std.collections import Optional
 from std.math import isnan, floor, sqrt, isfinite
 
@@ -224,6 +237,10 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
     var op_code = node.op
     if is_distinct_flag(op_code):
         return _distinct_flags(op_code, input, ids)
+    if is_fixed_rolling(op_code):
+        var options = rolling_options(node)
+        if len(options.weights) > 0:
+            return _weighted_window(node, input, ids, options)
     if op_code == CUM_PROD:
         return _cum_prod(input, ids, node.min_count == 1)
     if op_code == CUM_SUM and input.dtype() == DataType.BOOL:
@@ -1261,23 +1278,72 @@ def _ranked_frames(
     return input.take_or_null(source)
 
 
+def _weighted_window(
+    node: Node, input: Series, ids: List[Int], options: RollingOptions
+) raises -> Series:
+    """A fixed-size rolling window with weights (`weighted_frames`), its
+    partitions laid out one after another and the result put back in row
+    order. Sums, extremes and quantiles of Float32 stay Float32."""
+    var kind = W_QUANTILE
+    if node.op == ROLLING_SUM:
+        kind = W_SUM
+    elif node.op == ROLLING_MEAN:
+        kind = W_MEAN
+    elif node.op == ROLLING_MIN:
+        kind = W_MIN
+    elif node.op == ROLLING_MAX:
+        kind = W_MAX
+    elif node.op == ROLLING_VAR:
+        kind = W_VAR
+    elif node.op == ROLLING_STD:
+        kind = W_STD
+    var window = Int(node.integer)
+    var needed = window if node.floating < 0 else Int(node.floating)
+    var floats = _as_float(input)
+    var parts = _contiguous(len(floats), ids)
+    var laid = floats.take(parts.order) if len(parts.order) > 0 else floats^
+    var result = weighted_frames(
+        laid,
+        parts.starts,
+        kind,
+        window,
+        needed,
+        options.center,
+        options.weights,
+        options.quantile,
+        options.method,
+    )
+    if len(parts.order) > 0:
+        var inverse = List[Int](unsafe_uninit_length=len(parts.order))
+        for k in range(len(parts.order)):
+            inverse[parts.order[k]] = k
+        result = result.take(inverse)
+    if input.dtype() == DataType.FLOAT32 and (
+        kind == W_SUM or kind == W_MIN or kind == W_MAX or kind == W_QUANTILE
+    ):
+        return result.cast(DataType.FLOAT32)
+    return result^
+
+
 def _rolling_frames(
     input: Series, starts: List[Int], node: Node
 ) raises -> Series:
     """Fixed-size rolling aggregates: each row's frame is the window_size
     rows ending at it within its partition (ROWS BETWEEN window_size - 1
-    PRECEDING AND CURRENT ROW). Fewer than min_samples valid values
-    (default window_size) give null."""
+    PRECEDING AND CURRENT ROW), or centered on it (the extra row of an
+    even window before it), cut short at the partition's edges. Fewer
+    than min_samples valid values (default window_size) give null."""
     var n = len(input)
     var window = Int(node.integer)
     var needed = window if node.floating < 0 else Int(node.floating)
+    var center = rolling_options(node).center
     if node.op == ROLLING_QUANTILE:
         var options = rolling_options(node)
         return fixed_quantiles(
             input,
             starts,
             window,
-            False,
+            center,
             needed,
             options.quantile,
             options.method,
@@ -1290,22 +1356,32 @@ def _rolling_frames(
         var mean = node.op == ROLLING_MEAN
         if input.null_count() > 0:
             return _sliding_int_frames[True](
-                input, starts, window, needed, mean
+                input, starts, window, needed, mean, center
             )
-        return _sliding_int_frames[False](input, starts, window, needed, mean)
+        return _sliding_int_frames[False](
+            input, starts, window, needed, mean, center
+        )
     var begins = List[Int](unsafe_uninit_length=n)
     var ends = List[Int](unsafe_uninit_length=n)
     for p in range(len(starts) - 1):
         for j in range(starts[p], starts[p + 1]):
-            begins[j] = max(starts[p], j - window + 1)
-            ends[j] = j + 1
+            var bounds = window_bounds(
+                j, starts[p], starts[p + 1], window, center
+            )
+            begins[j] = bounds[0]
+            ends[j] = bounds[1]
     return _frames(node, input, begins, ends, starts, needed)
 
 
 def _sliding_int_frames[
     nulls: Bool
 ](
-    input: Series, starts: List[Int], window: Int, needed: Int, mean: Bool
+    input: Series,
+    starts: List[Int],
+    window: Int,
+    needed: Int,
+    mean: Bool,
+    center: Bool,
 ) raises -> Series:
     """Fixed-size rolling sums (or means) of an Int64 column, partition by
     partition: one running 128-bit total adds the row entering the frame
@@ -1327,20 +1403,30 @@ def _sliding_int_frames[
     var lowest = Int64.MIN.cast[DType.int128]()
     var highest = Int64.MAX.cast[DType.int128]()
     var any_null = False
+    # Row j's frame is [j - before, j + after) inside its partition.
+    var after = (window + 1) // 2 if center else 1
+    var before = window - after
     for p in range(len(starts) - 1):
         var lo = starts[p]
+        var hi = starts[p + 1]
         var total = Int128(0)
         var count = 0
-        for j in range(lo, starts[p + 1]):
-            comptime if nulls:
-                if column._valid(j):
-                    total += values[unsafe_offset=j].cast[DType.int128]()
+        var entering = lo
+        var leaving = lo
+        for j in range(lo, hi):
+            var end = min(hi, j + after)
+            while entering < end:
+                comptime if nulls:
+                    if column._valid(entering):
+                        total += values[unsafe_offset=entering].cast[
+                            DType.int128
+                        ]()
+                        count += 1
+                else:
+                    total += values[unsafe_offset=entering].cast[DType.int128]()
                     count += 1
-            else:
-                total += values[unsafe_offset=j].cast[DType.int128]()
-                count += 1
-            var leaving = j - window
-            if leaving >= lo:
+                entering += 1
+            while leaving < j - before:
                 comptime if nulls:
                     if column._valid(leaving):
                         total -= values[unsafe_offset=leaving].cast[
@@ -1350,6 +1436,7 @@ def _sliding_int_frames[
                 else:
                     total -= values[unsafe_offset=leaving].cast[DType.int128]()
                     count -= 1
+                leaving += 1
             var good = count >= needed and count > 0
             ok_out[unsafe_offset=j] = good
             any_null = any_null or not good

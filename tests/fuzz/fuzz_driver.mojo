@@ -174,6 +174,13 @@ struct Tree(Movable):
             out.append(self.text(self.kid(i, k)))
         return out^
 
+    def floats(self, i: Int) -> List[Float64]:
+        """The float atoms of a `(list ...)` node."""
+        var out = List[Float64]()
+        for k in range(1, self.nkids(i)):
+            out.append(self.nodes[self.kid(i, k)].fval)
+        return out^
+
     def flags(self, i: Int) -> List[Bool]:
         var out = List[Bool]()
         for k in range(1, self.nkids(i)):
@@ -432,32 +439,39 @@ def build_expr(t: Tree, i: Int) raises -> Expr:
     if op == "interpolate_by":
         return ea(t, i, 1).interpolate_by(ea(t, i, 2))
     if op == "rolling_agg":
-        # (rolling_agg EXPR FN WINDOW MIN_SAMPLES)
+        # (rolling_agg EXPR FN WINDOW MIN_SAMPLES CENTER (list WEIGHTS))
         var kind = t.text(t.kid(i, 2))
         var w = t.int(t.kid(i, 3))
         var ms = t.int(t.kid(i, 4))
+        var center = t.flag(t.kid(i, 5))
+        var weights = t.floats(t.kid(i, 6))
         var x = ea(t, i, 1)
         if kind == "sum":
-            return x.rolling_sum(w, ms)
+            return x.rolling_sum(w, ms, center=center, weights=weights)
         if kind == "mean":
-            return x.rolling_mean(w, ms)
+            return x.rolling_mean(w, ms, center=center, weights=weights)
         if kind == "min":
-            return x.rolling_min(w, ms)
+            return x.rolling_min(w, ms, center=center, weights=weights)
         if kind == "max":
-            return x.rolling_max(w, ms)
+            return x.rolling_max(w, ms, center=center, weights=weights)
         if kind == "std":
-            return x.rolling_std(w, ms)
-        return x.rolling_var(w, ms)
+            return x.rolling_std(w, ms, center=center, weights=weights)
+        return x.rolling_var(w, ms, center=center, weights=weights)
     if op == "rolling_quantile":
         return ea(t, i, 1).rolling_quantile(
             t.nodes[t.kid(i, 2)].fval,
             t.text(t.kid(i, 3)),
             t.int(t.kid(i, 4)),
             t.int(t.kid(i, 5)),
+            center=t.flag(t.kid(i, 6)),
+            weights=t.floats(t.kid(i, 7)),
         )
     if op == "rolling_median":
         return ea(t, i, 1).rolling_median(
-            t.int(t.kid(i, 2)), t.int(t.kid(i, 3))
+            t.int(t.kid(i, 2)),
+            t.int(t.kid(i, 3)),
+            center=t.flag(t.kid(i, 4)),
+            weights=t.floats(t.kid(i, 5)),
         )
     if op == "rolling_agg_by":
         # (rolling_agg_by EXPR BY FN PERIOD CLOSED MIN_SAMPLES)
