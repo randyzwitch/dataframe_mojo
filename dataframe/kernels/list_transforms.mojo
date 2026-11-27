@@ -45,6 +45,8 @@ from dataframe.expr import (
     Node,
     split_names,
 )
+from dataframe.kernels.hashing import RowKeys, encode_rows
+from dataframe.kernels.partition import encode_partitioned
 from dataframe.parallel import Job, run_jobs, worker_count
 from dataframe.series import Series
 from dataframe.storage.boolean import BoolColumn
@@ -988,12 +990,20 @@ def _ordered[
     return _gathered(lists, _Chosen(offsets^, positions^, False))
 
 
+def row_keys(keys: List[Series]) raises -> RowKeys:
+    """Ids for the distinct rows of keys (nulls equal), each id's
+    representative its first row; bucketed across workers when the rows
+    warrant several."""
+    var workers = worker_count(len(keys[0]))
+    if workers > 1:
+        return encode_partitioned(keys, workers, nulls_equal=True)
+    return encode_rows(keys, nulls_equal=True)
+
+
 def _first_rows(values: Series) raises -> List[Int]:
     """Positions of the first occurrence of each distinct value (null
     counted once), in position order."""
-    from dataframe.frame import DataFrame
-
-    var keys = DataFrame([values.renamed("v")])._subset_row_keys(List[String]())
+    var keys = row_keys([values.copy()])
     var chosen = List[Bool](length=len(values), fill=False)
     for row in keys.representatives:
         chosen[row] = True
@@ -1007,7 +1017,6 @@ def _first_rows(values: Series) raises -> List[Int]:
 def _encoded(lists: ListColumn, op: Int, flag: Int) raises -> Series:
     """sort, unique, or n_unique for any element type, through the general
     encoders keyed by (row, element)."""
-    from dataframe.frame import DataFrame
     from dataframe.sorting.sort import sort_rows
 
     var n = len(lists)
@@ -1041,7 +1050,7 @@ def _encoded(lists: ListColumn, op: Int, flag: Int) raises -> Series:
         return _gathered(
             lists, _Chosen(every^.into_offsets(), positions^, False)
         )
-    var keys = DataFrame([owners^, elements^])._subset_row_keys(List[String]())
+    var keys = row_keys([owners^, elements^])
     var chosen = List[Bool](length=len(every.positions), fill=False)
     for row in keys.representatives:
         chosen[row] = True
