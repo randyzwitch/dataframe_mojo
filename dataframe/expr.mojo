@@ -1111,7 +1111,8 @@ struct Expr(Copyable):
         return self._unary(IS_INFINITE)
 
     def fill_null(self, value: Self) -> Self:
-        """Replace nulls with value; the dtypes must match."""
+        """Replace nulls with value. Numeric types of the two sides promote
+        to the type that holds both; other types must match."""
         return self._binary(value, FILL_NULL)
 
     def fill_nan(self, value: Self) -> Self:
@@ -2835,7 +2836,9 @@ def all_horizontal(exprs: List[Expr]) raises -> Expr:
 
 
 def coalesce(exprs: List[Expr]) raises -> Expr:
-    """First non-null value per row, left to right; dtypes must match."""
+    """First non-null value per row, left to right. Numeric inputs of
+    different types promote to the type that holds all of them; other types
+    must match."""
     if len(exprs) == 0:
         raise Error("coalesce requires at least one expression")
     var result = exprs[0].copy()

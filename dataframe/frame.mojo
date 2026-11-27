@@ -44,6 +44,7 @@ from .expr import (
     UNTYPED,
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
+from .promotion import promoted_operands
 from dataframe.execution import WindowLayouts, evaluate
 from dataframe.kernels.sampling import sample_size, sample_indices
 from dataframe.kernels.mask_filter import filter_columns
@@ -2946,10 +2947,11 @@ struct DataFrame(Copyable, Sized, Writable):
         """Fill nulls with a scalar value.
 
         Without subset, only columns whose dtype matches the value change.
-        Every listed subset column must match the value's dtype. A bare
-        number (`fill_null(0)`) is untyped: it fills every column it can
-        adopt (an integer: every numeric column; a float: every float
-        column), range-checked per column.
+        A listed subset column fills as `col(name).fill_null(value)` does:
+        numeric types promote to the type that holds both, and other types
+        must match. A bare number (`fill_null(0)`) is untyped: without a
+        subset it fills every column whose type it keeps (an integer that
+        fits: every numeric column; a float: every float column).
         """
         return self._with_columns(self._fill_null_exprs(value, subset))
 
@@ -3146,23 +3148,43 @@ struct DataFrame(Copyable, Sized, Writable):
             raise Error("fill_null on a dataframe requires a scalar value")
         var dtype = bound.dtypes[len(bound.dtypes) - 1]
         var names = List[String]()
+        # Columns whose fill would widen their type and is cast back to it:
+        # a decimal filled with an integer literal.
+        var narrowed = List[Bool]()
         if _is_untyped(value):
             for column in self._columns:
                 var name = column.name()
                 if len(subset) > 0 and name not in subset:
                     continue
                 if len(subset) > 0:
-                    names.append(name)  # binding reports a failed adoption
-                    continue
-                try:
-                    _ = bind(col(name).fill_null(value), self._columns)
+                    # A listed column promotes with the value, as in
+                    # `col(name).fill_null(value)`; binding reports a type
+                    # that does not promote.
                     names.append(name)
+                    narrowed.append(False)
+                    continue
+                # Without a subset, a bare number fills the columns whose
+                # type it keeps: every numeric column for an integer that
+                # fits, every float column for a float.
+                var fill: BoundExpr
+                try:
+                    fill = bind(col(name).fill_null(value), self._columns)
                 except:
-                    pass
+                    continue
+                var result = fill.dtypes[len(fill.dtypes) - 1]
+                if result == column.dtype():
+                    names.append(name)
+                    narrowed.append(False)
+                elif column.dtype().is_decimal() and not dtype.is_float():
+                    names.append(name)
+                    narrowed.append(True)
         elif len(subset) > 0:
             for name in subset:
                 var actual = self._columns[self._index(name)].dtype()
-                if actual != dtype:
+                var promotes = (
+                    actual.is_decimal() and dtype.is_decimal()
+                ) or Bool(promoted_operands(actual, dtype, False))
+                if actual != dtype and not promotes:
                     raise Error(
                         "fill_null value is "
                         + dtype.name()
@@ -3172,15 +3194,20 @@ struct DataFrame(Copyable, Sized, Writable):
                         + actual.name()
                     )
                 names.append(name)
+                narrowed.append(False)
         else:
             for column in self._columns:
                 if column.dtype() == dtype:
                     names.append(column.name())
+                    narrowed.append(False)
         for name in subset:
             _ = self._index(name)  # unknown subset names raise
         var fills = List[Expr]()
-        for name in names:
-            fills.append(col(name).fill_null(value))
+        for k in range(len(names)):
+            var fill = col(names[k]).fill_null(value)
+            if narrowed[k]:
+                fill = fill.cast(self._columns[self._index(names[k])].dtype())
+            fills.append(fill^)
         return fills^
 
     def group_by_dynamic(
