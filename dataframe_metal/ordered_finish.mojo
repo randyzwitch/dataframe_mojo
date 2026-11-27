@@ -1,79 +1,81 @@
-"""Result-sized native payload gathering and filtered/group-local indices."""
+"""Gather ordered payloads by absolute source row and return group-local ranks."""
 from dataframe import Column, DataFrame, DataType, Series
+from dataframe.storage.boolean import BoolColumn
 from dataframe.expr import ARG_MIN, ARG_MAX
 from .ordered_plan import OrderedPlan, ordered_side
 from .group_output import group_order
+from .group_gather import gather_group_keys
 from .accelerator.gpu.ordered_value import ordered_ticket_row
 
 
-struct OrderedColumn(Movable):
-    var name: String
-    var dtype: DataType
-    var narrow: List[Int32]
-    var wide: List[Int64]
-    var floating: List[Float32]
-    var boolean: List[Bool]
-    var indices: List[UInt32]
-    var valid: List[Bool]
-
-    def __init__(out self, name: String, dtype: DataType):
-        self.name = name.copy()
-        self.dtype = dtype
-        self.narrow = List[Int32]()
-        self.wide = List[Int64]()
-        self.floating = List[Float32]()
-        self.boolean = List[Bool]()
-        self.indices = List[UInt32]()
-        self.valid = List[Bool]()
-
-    def append(
-        mut self,
-        frame: DataFrame,
-        column: String,
-        row: UInt32,
-        rank: UInt32 = 0,
-    ) raises:
-        var present = row != UInt32.MAX
-        if present and row >= UInt32(frame.height()):
+def _payload[
+    D: DType
+](name: String, source: Series, tickets: List[UInt32]) raises -> Series:
+    """Gather arbitrary winning rows without coalescing the source arrays."""
+    var parts = source.chunks()
+    var ends = List[Int](capacity=len(parts))
+    var constants = List[Bool](capacity=len(parts))
+    var total = 0
+    for part in parts:
+        total += len(part)
+        ends.append(total)
+        constants.append(part.is_constant())
+    var n = len(tickets)
+    var bits = List[UInt8](length=(n + 7) // 8, fill=0)
+    var packed = List[UInt8]()
+    var values = List[Scalar[D]]()
+    comptime if D == DType.bool:
+        packed = List[UInt8](length=len(bits), fill=0)
+    else:
+        values = List[Scalar[D]](length=n, fill=0)
+    var chunk = 0
+    var start = 0
+    for i in range(n):
+        if tickets[i] == UInt32.MAX:
+            continue
+        var row = Int(tickets[i])
+        if row >= total:
             raise Error("Metal ordered ticket is outside its native input")
-        if self.dtype == DataType.UINT32:
-            self.indices.append(rank)
-            self.valid.append(present)
-            return
-        if present:
-            present = not frame.item(Int(row), column).is_null()
-        self.valid.append(present)
-        if self.dtype == DataType.INT32:
-            self.narrow.append(
-                frame.item(Int(row), column).int32() if present else Int32(0)
-            )
-        elif self.dtype == DataType.INT64:
-            self.wide.append(
-                frame.item(Int(row), column).int64() if present else Int64(0)
-            )
-        elif self.dtype == DataType.FLOAT32:
-            self.floating.append(
-                Float32(
-                    frame.item(Int(row), column).float32()
-                ) if present else Float32(0)
-            )
+        if row < start or row >= ends[chunk]:
+            var lo = 0
+            var hi = len(ends)
+            while lo < hi:
+                var mid = (lo + hi) // 2
+                if row < ends[mid]:
+                    hi = mid
+                else:
+                    lo = mid + 1
+            chunk = lo
+            start = 0 if chunk == 0 else ends[chunk - 1]
+        var local = row - start
+        var mask = UInt8(1) << UInt8(i % 8)
+        comptime if D == DType.bool:
+            ref column = parts[chunk]._data[BoolColumn]
+            if constants[chunk]:
+                if not column.constant_valid():
+                    continue
+                if column.constant_value():
+                    packed[i // 8] |= mask
+            else:
+                if not column._valid(local):
+                    continue
+                if column._get(local):
+                    packed[i // 8] |= mask
         else:
-            self.boolean.append(
-                frame.item(Int(row), column).bool() if present else False
-            )
-
-    def finish(deinit self) raises -> Series:
-        if self.dtype == DataType.INT32:
-            return Series(self.name, Column[Int32](self.narrow^, self.valid))
-        if self.dtype == DataType.INT64:
-            return Series(self.name, Column[Int64](self.wide^, self.valid))
-        if self.dtype == DataType.FLOAT32:
-            return Series(
-                self.name, Column[Float32](self.floating^, self.valid)
-            )
-        if self.dtype == DataType.UINT32:
-            return Series(self.name, Column[UInt32](self.indices^, self.valid))
-        return Series(self.name, Column[Bool](self.boolean^, self.valid))
+            ref column = parts[chunk]._data[Column[Scalar[D]]]
+            if constants[chunk]:
+                if not column.constant_valid():
+                    continue
+                values[i] = column.constant_value()
+            else:
+                if not column._valid(local):
+                    continue
+                values[i] = column._get(local)
+        bits[i // 8] |= mask
+    comptime if D == DType.bool:
+        return Series(name, BoolColumn(values=packed^, bits=bits^, length=n))
+    else:
+        return Series(name, Column[Scalar[D]](values=values^, bits=bits^))
 
 
 def finish_ordered(
@@ -83,32 +85,51 @@ def finish_ordered(
     final: List[UInt32],
 ) raises -> DataFrame:
     var slots = group_order(first) if plan.keys else List[Int]()
-    if not plan.keys:
-        slots.append(0)
     var columns = List[Series]()
     if plan.keys:
-        for key in range(len(plan.keys.value().names)):
-            var name = plan.keys.value().names[key].copy()
-            var output = OrderedColumn(name, plan.keys.value().dtypes[key])
-            for slot in slots:
-                output.append(frame, name, first[slot])
-            columns.append(output^.finish())
+        columns = gather_group_keys(frame, plan.keys.value(), first, slots)
+    else:
+        slots.append(0)
     for output in plan.outputs:
         ref field = plan.fields[output.field]
         var indexed = output.op == ARG_MIN or output.op == ARG_MAX
-        var column = OrderedColumn(
-            output.name, DataType.UINT32 if indexed else field.dtype
-        )
+        var tickets = List[UInt32](capacity=len(slots))
+        var valid = List[Bool]()
+        if indexed:
+            valid.reserve(len(slots))
         for slot in slots:
             var at = (slot * len(plan.fields) + output.field) * 8
             var ticket = UInt32.MAX
-            var rank = UInt32(0)
             if final:
                 ticket = ordered_ticket_row(
                     final[at + ordered_side(output.op)], output.op
                 )
-                if indexed:
-                    rank = final[at + 4 + Int(output.op == ARG_MAX)]
-            column.append(frame, field.column, ticket, rank)
-        columns.append(column^.finish())
+            if indexed:
+                if ticket != UInt32.MAX and Int(ticket) >= frame.height():
+                    raise Error(
+                        "Metal ordered ticket is outside its native input"
+                    )
+                valid.append(ticket != UInt32.MAX)
+                tickets.append(
+                    final[at + 4 + Int(output.op == ARG_MAX)] if ticket
+                    != UInt32.MAX else UInt32(0)
+                )
+            else:
+                tickets.append(ticket)
+        if indexed:
+            columns.append(
+                Series(output.name, Column[UInt32](tickets^, valid^))
+            )
+            continue
+        var source = frame.column(field.column)
+        if field.dtype == DataType.INT32:
+            columns.append(_payload[DType.int32](output.name, source, tickets))
+        elif field.dtype == DataType.INT64:
+            columns.append(_payload[DType.int64](output.name, source, tickets))
+        elif field.dtype == DataType.FLOAT32:
+            columns.append(
+                _payload[DType.float32](output.name, source, tickets)
+            )
+        else:
+            columns.append(_payload[DType.bool](output.name, source, tickets))
     return DataFrame(columns^)

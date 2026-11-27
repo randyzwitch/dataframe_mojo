@@ -1,7 +1,7 @@
 """Finish exact counts and both null policies from bounded GPU result state."""
 from dataframe import Column, DataFrame, Series
 from .distinct_plan import DistinctPlan
-from .ordered_finish import OrderedColumn
+from .group_gather import gather_group_keys
 from .group_output import group_order
 
 
@@ -17,14 +17,9 @@ def finish_distinct(
         slots.append(0)
     var columns = List[Series]()
     if plan.keys:
-        for key in range(len(plan.keys.value().names)):
-            var name = plan.keys.value().names[key].copy()
-            var output = OrderedColumn(name, plan.keys.value().dtypes[key])
-            for slot in slots:
-                output.append(frame, name, first[slot])
-            columns.append(output^.finish())
+        columns = gather_group_keys(frame, plan.keys.value(), first, slots)
     for output in plan.outputs:
-        var values = List[Int64]()
+        var values = List[Int64](capacity=len(slots))
         for slot in slots:
             var at = slot * len(plan.fields) + output.field
             var count = Int64(counts[at]) if counts else Int64(0)
