@@ -96,6 +96,7 @@ from .expr import (
     OVER_EXPLODE,
     OVER_MAPPING_MASK,
     INTERPOLATE_BY,
+    EWM_BY,
     is_rolling_by,
     is_dt_op,
     DT_OFFSET_BY,
@@ -142,7 +143,7 @@ from .categorical import (
     gather,
 )
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
-from .window import window_op, interpolate_by_op, rolling_by_op
+from .window import window_op, interpolate_by_op, rolling_by_op, ewm_by_op
 from dataframe.kernels.fusion import fused
 from dataframe.kernels.temporal import dt_op, temporal_binary
 from dataframe.storage.boolean import BoolColumn
@@ -5305,7 +5306,11 @@ def evaluate[
                 row_mode,
             )
             var window_groups = groups.copy() if grouped else List[Int]()
-            if node.op == INTERPOLATE_BY or is_rolling_by(node.op):
+            if (
+                node.op == INTERPOLATE_BY
+                or node.op == EWM_BY
+                or is_rolling_by(node.op)
+            ):
                 var by = _full[width](
                     bound,
                     prepared_columns,
@@ -5317,6 +5322,10 @@ def evaluate[
                 )
                 if is_rolling_by(node.op):
                     states[node_index] = rolling_by_op(
+                        node, input, by, window_groups
+                    )
+                elif node.op == EWM_BY:
+                    states[node_index] = ewm_by_op(
                         node, input, by, window_groups
                     )
                 else:

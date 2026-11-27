@@ -474,6 +474,41 @@ def build_expr(t: Tree, i: Int) raises -> Expr:
             center=t.flag(t.kid(i, 4)),
             weights=t.floats(t.kid(i, 5)),
         )
+    if op == "ewm":
+        # (ewm EXPR FN ALPHA ADJUST BIAS MIN_SAMPLES IGNORE_NULLS)
+        var kind = t.text(t.kid(i, 2))
+        var a = t.nodes[t.kid(i, 3)].fval
+        var adjust = t.flag(t.kid(i, 4))
+        var bias = t.flag(t.kid(i, 5))
+        var ms = t.int(t.kid(i, 6))
+        var ignore = t.flag(t.kid(i, 7))
+        var x = ea(t, i, 1)
+        if kind == "mean":
+            return x.ewm_mean(
+                alpha=a, adjust=adjust, min_samples=ms, ignore_nulls=ignore
+            )
+        if kind == "var":
+            return x.ewm_var(
+                alpha=a,
+                adjust=adjust,
+                bias=bias,
+                min_samples=ms,
+                ignore_nulls=ignore,
+            )
+        if kind == "std":
+            return x.ewm_std(
+                alpha=a,
+                adjust=adjust,
+                bias=bias,
+                min_samples=ms,
+                ignore_nulls=ignore,
+            )
+        return x.ewm_sum(alpha=a, min_samples=ms, ignore_nulls=ignore)
+    if op == "ewm_by":
+        # (ewm_by EXPR BY FN HALF_LIFE)
+        if t.text(t.kid(i, 3)) == "mean":
+            return ea(t, i, 1).ewm_mean_by(ea(t, i, 2), t.text(t.kid(i, 4)))
+        return ea(t, i, 1).ewm_sum_by(ea(t, i, 2), t.text(t.kid(i, 4)))
     if op == "rolling_agg_by":
         # (rolling_agg_by EXPR BY FN PERIOD CLOSED MIN_SAMPLES)
         var kind = t.text(t.kid(i, 3))

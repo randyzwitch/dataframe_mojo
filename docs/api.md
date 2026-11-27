@@ -1152,6 +1152,20 @@ A flat, topologically ordered tree; composition never evaluates data.
   Rolling quantile over a Date/Datetime duration window (any row order); interpolation and types as in rolling_quantile.
 - `def rolling_quantile_by(self, by: String, window_size: String, quantile: Float64, interpolation: String = "nearest", closed: String = "right", min_samples: Int = Int(1)) -> Self`
   Rolling quantile over a Date/Datetime duration window (any row order); interpolation and types as in rolling_quantile.
+- `def ewm_mean(self, *, com: Float64 = FloatLiteral[_].nan, span: Float64 = FloatLiteral[_].nan, half_life: Float64 = FloatLiteral[_].nan, alpha: Float64 = FloatLiteral[_].nan, adjust: Bool = True, min_samples: Int = Int(1), ignore_nulls: Bool = False) -> Self`
+  Exponentially weighted mean. Give exactly one of com (alpha = 1 / (1 + com)), span (2 / (span + 1)), half_life (1 - exp(-ln 2 / half_life)) or alpha. adjust weighs the values as an infinite series cut at the first one; without it each new value enters with weight alpha. A null row stays null and, unless ignore_nulls, ages the earlier values one step; rows before min_samples values are null. Float64 (Float32 stays Float32).
+- `def ewm_var(self, *, com: Float64 = FloatLiteral[_].nan, span: Float64 = FloatLiteral[_].nan, half_life: Float64 = FloatLiteral[_].nan, alpha: Float64 = FloatLiteral[_].nan, adjust: Bool = True, bias: Bool = False, min_samples: Int = Int(1), ignore_nulls: Bool = False) -> Self`
+  Exponentially weighted variance (see ewm_mean); without bias it is corrected by the weights' effective sample size, and null until that correction is defined.
+- `def ewm_std(self, *, com: Float64 = FloatLiteral[_].nan, span: Float64 = FloatLiteral[_].nan, half_life: Float64 = FloatLiteral[_].nan, alpha: Float64 = FloatLiteral[_].nan, adjust: Bool = True, bias: Bool = False, min_samples: Int = Int(1), ignore_nulls: Bool = False) -> Self`
+  Square root of ewm_var.
+- `def ewm_sum(self, *, com: Float64 = FloatLiteral[_].nan, span: Float64 = FloatLiteral[_].nan, half_life: Float64 = FloatLiteral[_].nan, alpha: Float64 = FloatLiteral[_].nan, min_samples: Int = Int(1), ignore_nulls: Bool = False) -> Self`
+  Exponentially weighted sum: each row adds its value to (1 - alpha) times the sum before it (see ewm_mean for the options).
+- `def ewm_mean_by(self, by: Self, half_life: String) -> Self`
+  Exponentially weighted mean over a Date/Datetime index (any row order): between consecutive rows in time order the earlier result decays by 0.5^(elapsed / half_life). half_life is a fixed duration (no months). A row with a null value or time stays null.
+- `def ewm_mean_by(self, by: String, half_life: String) -> Self`
+- `def ewm_sum_by(self, by: Self, half_life: String) -> Self`
+  Exponentially weighted sum over a Date/Datetime index: the earlier sum decays by 0.5^(elapsed / half_life) and each row adds its value (see ewm_mean_by).
+- `def ewm_sum_by(self, by: String, half_life: String) -> Self`
 - `def forward_fill(self, limit: Int = Int(-1)) -> Self`
   Fill nulls with the last valid value, at most limit rows ahead (-1 means unlimited).
 - `def backward_fill(self, limit: Int = Int(-1)) -> Self`

@@ -1,6 +1,7 @@
 """Immutable-by-convention expression IR. No data access or execution here."""
 from std.collections import Dict, Optional
 from std.memory import bitcast
+from std.math import isnan, exp, log
 from .dtype import DataType
 from .value import AnyValue
 
@@ -315,6 +316,17 @@ comptime ROLLING_VAR_BY = 180
 # linearly.
 comptime ROLLING_QUANTILE = 340
 comptime ROLLING_QUANTILE_BY = 341
+# Exponentially weighted functions. EWM: text is the function (mean, var,
+# std, sum), floating alpha (NaN when the smoothing options were not one
+# valid choice; text2 then holds the error), integer min_samples, and
+# min_count the flags EWM_ADJUST, EWM_BIAS and EWM_IGNORE_NULLS. EWM_BY:
+# left the values, right the time index, text the half-life, text2 the
+# function (mean or sum).
+comptime EWM = 342
+comptime EWM_BY = 343
+comptime EWM_ADJUST = 1
+comptime EWM_BIAS = 2
+comptime EWM_IGNORE_NULLS = 4
 
 # String functions that need no regular expressions (#798), unary on a
 # string input (text_functions.mojo). `text` holds a literal, or several
@@ -701,6 +713,8 @@ def is_window(op: Int) -> Bool:
         or (op >= ROLLING_STD and op <= ROLLING_VAR_BY)
         or op == ROLLING_QUANTILE
         or op == ROLLING_QUANTILE_BY
+        or op == EWM
+        or op == EWM_BY
         or is_distinct_flag(op)
         or is_sequence(op)
     )
@@ -2427,6 +2441,201 @@ struct Expr(Copyable):
             closed,
             min_samples,
         )
+
+    def _ewm(
+        self,
+        function: String,
+        com: Float64,
+        span: Float64,
+        half_life: Float64,
+        alpha: Float64,
+        adjust: Bool,
+        bias: Bool,
+        min_samples: Int,
+        ignore_nulls: Bool,
+    ) -> Self:
+        """An EWM node; alpha from the one smoothing option given (NaN and
+        the reason in text2 otherwise, raised when bound)."""
+        var given = 0
+        var smoothing = Float64(FloatLiteral.nan)
+        var problem = String("")
+        if not isnan(com):
+            given += 1
+            smoothing = 1 / (1 + com)
+            if not com >= 0:
+                problem = "ewm requires com >= 0"
+        if not isnan(span):
+            given += 1
+            smoothing = 2 / (span + 1)
+            if not span >= 1:
+                problem = "ewm requires span >= 1"
+        if not isnan(half_life):
+            given += 1
+            smoothing = 1 - exp(-log(Float64(2)) / half_life)
+            if not half_life > 0:
+                problem = "ewm requires half_life > 0"
+        if not isnan(alpha):
+            given += 1
+            smoothing = alpha
+            if not (alpha > 0 and alpha <= 1):
+                problem = "ewm requires 0 < alpha <= 1"
+        if given != 1:
+            problem = "ewm needs exactly one of com, span, half_life or alpha"
+        if problem != "":
+            smoothing = Float64(FloatLiteral.nan)
+        var flags = 0
+        if adjust:
+            flags |= EWM_ADJUST
+        if bias:
+            flags |= EWM_BIAS
+        if ignore_nulls:
+            flags |= EWM_IGNORE_NULLS
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(
+                EWM,
+                len(nodes) - 1,
+                text=function,
+                integer=Int64(min_samples),
+                floating=smoothing,
+                min_count=flags,
+                text2=problem,
+            )
+        )
+        return Self(nodes^, self._name)
+
+    def ewm_mean(
+        self,
+        *,
+        com: Float64 = Float64(FloatLiteral.nan),
+        span: Float64 = Float64(FloatLiteral.nan),
+        half_life: Float64 = Float64(FloatLiteral.nan),
+        alpha: Float64 = Float64(FloatLiteral.nan),
+        adjust: Bool = True,
+        min_samples: Int = 1,
+        ignore_nulls: Bool = False,
+    ) -> Self:
+        """Exponentially weighted mean. Give exactly one of com (alpha = 1 /
+        (1 + com)), span (2 / (span + 1)), half_life (1 - exp(-ln 2 /
+        half_life)) or alpha. adjust weighs the values as an infinite
+        series cut at the first one; without it each new value enters with
+        weight alpha. A null row stays null and, unless ignore_nulls, ages
+        the earlier values one step; rows before min_samples values are
+        null. Float64 (Float32 stays Float32)."""
+        return self._ewm(
+            "mean",
+            com,
+            span,
+            half_life,
+            alpha,
+            adjust,
+            False,
+            min_samples,
+            ignore_nulls,
+        )
+
+    def ewm_var(
+        self,
+        *,
+        com: Float64 = Float64(FloatLiteral.nan),
+        span: Float64 = Float64(FloatLiteral.nan),
+        half_life: Float64 = Float64(FloatLiteral.nan),
+        alpha: Float64 = Float64(FloatLiteral.nan),
+        adjust: Bool = True,
+        bias: Bool = False,
+        min_samples: Int = 1,
+        ignore_nulls: Bool = False,
+    ) -> Self:
+        """Exponentially weighted variance (see ewm_mean); without bias it
+        is corrected by the weights' effective sample size, and null until
+        that correction is defined."""
+        return self._ewm(
+            "var",
+            com,
+            span,
+            half_life,
+            alpha,
+            adjust,
+            bias,
+            min_samples,
+            ignore_nulls,
+        )
+
+    def ewm_std(
+        self,
+        *,
+        com: Float64 = Float64(FloatLiteral.nan),
+        span: Float64 = Float64(FloatLiteral.nan),
+        half_life: Float64 = Float64(FloatLiteral.nan),
+        alpha: Float64 = Float64(FloatLiteral.nan),
+        adjust: Bool = True,
+        bias: Bool = False,
+        min_samples: Int = 1,
+        ignore_nulls: Bool = False,
+    ) -> Self:
+        """Square root of ewm_var."""
+        return self._ewm(
+            "std",
+            com,
+            span,
+            half_life,
+            alpha,
+            adjust,
+            bias,
+            min_samples,
+            ignore_nulls,
+        )
+
+    def ewm_sum(
+        self,
+        *,
+        com: Float64 = Float64(FloatLiteral.nan),
+        span: Float64 = Float64(FloatLiteral.nan),
+        half_life: Float64 = Float64(FloatLiteral.nan),
+        alpha: Float64 = Float64(FloatLiteral.nan),
+        min_samples: Int = 1,
+        ignore_nulls: Bool = False,
+    ) -> Self:
+        """Exponentially weighted sum: each row adds its value to (1 -
+        alpha) times the sum before it (see ewm_mean for the options)."""
+        return self._ewm(
+            "sum",
+            com,
+            span,
+            half_life,
+            alpha,
+            True,
+            False,
+            min_samples,
+            ignore_nulls,
+        )
+
+    def ewm_mean_by(self, by: Self, half_life: String) -> Self:
+        """Exponentially weighted mean over a Date/Datetime index (any row
+        order): between consecutive rows in time order the earlier result
+        decays by 0.5^(elapsed / half_life). half_life is a fixed duration
+        (no months). A row with a null value or time stays null."""
+        var result = self._binary(by, EWM_BY)
+        ref node = result._nodes[len(result._nodes) - 1]
+        node.text = half_life
+        node.text2 = "mean"
+        return result^
+
+    def ewm_mean_by(self, by: String, half_life: String) -> Self:
+        return self.ewm_mean_by(col(by), half_life)
+
+    def ewm_sum_by(self, by: Self, half_life: String) -> Self:
+        """Exponentially weighted sum over a Date/Datetime index: the
+        earlier sum decays by 0.5^(elapsed / half_life) and each row adds
+        its value (see ewm_mean_by)."""
+        var result = self._binary(by, EWM_BY)
+        ref node = result._nodes[len(result._nodes) - 1]
+        node.text = half_life
+        node.text2 = "sum"
+        return result^
+
+    def ewm_sum_by(self, by: String, half_life: String) -> Self:
+        return self.ewm_sum_by(col(by), half_life)
 
     def forward_fill(self, limit: Int = -1) -> Self:
         """Fill nulls with the last valid value, at most limit rows ahead

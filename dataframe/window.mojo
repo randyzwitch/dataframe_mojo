@@ -52,6 +52,10 @@ from .expr import (
     rolling_options,
     is_fixed_rolling,
     RollingOptions,
+    EWM,
+    EWM_ADJUST,
+    EWM_BIAS,
+    EWM_IGNORE_NULLS,
     BACKWARD_FILL,
     INTERPOLATE,
     CUT,
@@ -69,6 +73,7 @@ from .series import Series, FixedElements
 from .window_segment_tree import frame_states_supported, window_segment_tree
 from .window_sort import rank_rows
 from .window_quantile import quantile_frames, fixed_quantiles
+from .window_ewm import ewm_frames, ewm_by_frames, ewm_kind
 from .window_weights import (
     weighted_frames,
     window_bounds,
@@ -241,6 +246,8 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
         var options = rolling_options(node)
         if len(options.weights) > 0:
             return _weighted_window(node, input, ids, options)
+    if op_code == EWM:
+        return _ewm_window(node, input, ids)
     if op_code == CUM_PROD:
         return _cum_prod(input, ids, node.min_count == 1)
     if op_code == CUM_SUM and input.dtype() == DataType.BOOL:
@@ -1276,6 +1283,84 @@ def _ranked_frames(
         if count >= needed and count > 0:
             source[j] = row_of[Int(best._get(j))]
     return input.take_or_null(source)
+
+
+def _ewm_window(node: Node, input: Series, ids: List[Int]) raises -> Series:
+    """An exponentially weighted function (`ewm_frames`) within each
+    partition, the partitions laid out one after another and the result
+    put back in row order."""
+    var values = (
+        input.copy() if input.dtype() == DataType.FLOAT32 else _as_float(input)
+    )
+    var parts = _contiguous(len(values), ids)
+    var laid = values.take(parts.order) if len(parts.order) > 0 else values^
+    var result = ewm_frames(
+        laid,
+        parts.starts,
+        ewm_kind(node.text),
+        node.floating,
+        (node.min_count & EWM_ADJUST) != 0,
+        (node.min_count & EWM_BIAS) != 0,
+        Int(node.integer),
+        (node.min_count & EWM_IGNORE_NULLS) != 0,
+    )
+    if len(parts.order) > 0:
+        var inverse = List[Int](unsafe_uninit_length=len(parts.order))
+        for k in range(len(parts.order)):
+            inverse[parts.order[k]] = k
+        result = result.take(inverse)
+    return result^
+
+
+def ewm_by_op(
+    node: Node, input: Series, index: Series, ids: List[Int]
+) raises -> Series:
+    """`ewm_mean_by` / `ewm_sum_by`: each partition's rows visited in
+    stable time order (rows with a null time stay null), the decay applied
+    between consecutive times. Rows already in time order within
+    contiguous partitions are read in place; otherwise only the visiting
+    order is sorted, and results are written back to their rows."""
+    from dataframe.time.windows import ewm_half_life
+
+    var values = input.rechunk()
+    if values.dtype() != DataType.FLOAT32:
+        values = _as_float(values)
+    var stamps = index.rechunk()
+    if not stamps._data.isa[Column[Int64]]():
+        stamps = stamps.cast(DataType.INT64)
+    ref times = stamps._data[Column[Int64]]
+    var half_life = ewm_half_life(node.text, index.dtype())
+    var n = len(values)
+    var parts = _contiguous(n, ids)
+    var tp = times._ptr()
+    var visit = parts.order.copy()
+    var sorted = True
+    for p in range(len(parts.starts) - 1):
+        for k in range(parts.starts[p] + 1, parts.starts[p + 1]):
+            var a = visit[k - 1] if len(visit) > 0 else k - 1
+            var b = visit[k] if len(visit) > 0 else k
+            if tp[unsafe_offset=b] < tp[unsafe_offset=a]:
+                sorted = False
+                break
+        if not sorted:
+            break
+    if not sorted:
+        if len(visit) == 0:
+            visit = List[Int](unsafe_uninit_length=n)
+            for k in range(n):
+                visit[k] = k
+        for p in range(len(parts.starts) - 1):
+            var lo = parts.starts[p]
+            var hi = parts.starts[p + 1]
+            var rows = List[Int](capacity=hi - lo)
+            for k in range(lo, hi):
+                rows.append(visit[k])
+            var by_time = stamps.take(rows).argsort()
+            for k in range(len(by_time)):
+                visit[lo + k] = rows[by_time[k]]
+    return ewm_by_frames(
+        values, times, parts.starts, visit, half_life, node.text2 == "mean"
+    )
 
 
 def _weighted_window(

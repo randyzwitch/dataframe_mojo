@@ -467,6 +467,17 @@ def to_pl_expr(e, types):
         ms = None if e[3] < 0 else e[3]
         ws = list(e[5][1:]) or None
         return E(1).rolling_median(e[2], ws, min_samples=ms, center=e[4])
+    if op == "ewm":
+        # (ewm EXPR FN ALPHA ADJUST BIAS MIN_SAMPLES IGNORE_NULLS)
+        kw = dict(alpha=e[3], min_samples=e[6], ignore_nulls=e[7])
+        if e[2] != "sum":
+            kw["adjust"] = e[4]
+        if e[2] in ("var", "std"):
+            kw["bias"] = e[5]
+        return getattr(E(1), "ewm_" + e[2])(**kw)
+    if op == "ewm_by":
+        # (ewm_by EXPR BY FN HALF_LIFE)
+        return getattr(E(1), "ewm_" + e[3] + "_by")(E(2), half_life=e[4])
     if op == "rolling_agg_by":
         # (rolling_agg_by EXPR BY FN PERIOD CLOSED MIN_SAMPLES)
         return getattr(E(1), "rolling_" + e[3] + "_by")(
@@ -551,7 +562,8 @@ def expr_type(e, types):
         if a in ("int_lit", "float_lit"):
             return b if b not in ("int_lit", "float_lit") else a
         return a
-    if op in ("rolling_quantile", "rolling_median", "rolling_quantile_by"):
+    if op in ("rolling_quantile", "rolling_median", "rolling_quantile_by",
+              "ewm", "ewm_by"):
         a = expr_type(e[1], types)
         return "float32" if a == "float32" else "float64"
     if op in ("truediv", "sqrt", "mean", "median", "std", "var", "quantile"):
@@ -1217,6 +1229,16 @@ class PlanGen:
                 # Polars (sums widen, float32 means are Float64 here).
                 fns += ["sum", "mean", "min", "max", "std", "var"]
             fn = r.choice(fns)
+            if r.random() < 0.2:
+                e = ("ewm", c, r.choice(["mean", "var", "std", "sum"]),
+                     r.choice([0.1, 0.5, 0.9, 1.0, r.uniform(0.01, 1.0)]),
+                     r.random() < 0.7, r.random() < 0.3,
+                     r.choice([0, 1, 2, 5]), r.random() < 0.3)
+                keys = g.cols(is_key)
+                if keys and r.random() < 0.3:
+                    e = ("over", e, ("list", r.choice(keys)), ("list",), False, False)
+                es.append(("alias", e, g.name("r")))
+                continue
             if not fresh or r.random() < 0.5:
                 w = r.choice([1, 2, 3, 4, 7, 16, 100])
                 ms = r.choice([-1, 1, min(2, w), w])
@@ -1255,7 +1277,9 @@ class PlanGen:
                 ms = r.choice([0, 1, 1, 2])
                 if fn == "median":
                     fn, q, method = "quantile", 0.5, "linear"
-                if fn == "quantile":
+                if r.random() < 0.15:
+                    e = ("ewm_by", c, axis, r.choice(["mean", "sum"]), period)
+                elif fn == "quantile":
                     e = ("rolling_quantile_by", c, axis, period, q, method,
                          closed, ms)
                 else:
@@ -1967,7 +1991,8 @@ def uses_order(node):
     if isinstance(node, tuple) and node:
         if node[0] in ("first", "last", "arg_min", "arg_max", "cum_sum", "cum_max",
                        "cum_min", "cum_count", "shift", "diff", "interpolate",
-                       "rolling_agg", "rolling_quantile", "rolling_median"):
+                       "rolling_agg", "rolling_quantile", "rolling_median",
+                       "ewm"):
             return True
         return any(uses_order(k) for k in node[1:] if isinstance(k, tuple))
     return False

@@ -122,6 +122,8 @@ from .expr import (
     ROLLING_QUANTILE_BY,
     rolling_options,
     is_fixed_rolling,
+    EWM,
+    EWM_BY,
     FORWARD_FILL,
     BACKWARD_FILL,
     INTERPOLATE,
@@ -611,6 +613,37 @@ def _weighted_rolling_type(
     if keeps and input == DataType.FLOAT32:
         return DataType.FLOAT32
     return DataType.FLOAT64
+
+
+def _ewm_type(
+    node: Node,
+    input: DataType,
+    types: List[DataType],
+    shapes: List[Int],
+    i: Int,
+) raises -> DataType:
+    """The type of an exponentially weighted function of `input`, after
+    checking its options: Float32 stays Float32, other numbers give
+    Float64."""
+    from dataframe.time.windows import ewm_half_life
+
+    if not _numeric(input):
+        raise Error(
+            "ewm functions require a numeric expression, found " + input.name()
+        )
+    if node.op == EWM:
+        if node.text2 != "":
+            raise Error(node.text2)
+        if node.integer < 0:
+            raise Error("min_samples must be nonnegative")
+    else:
+        if node.right < 0 or node.right >= i or shapes[node.right] != ROWS:
+            raise Error("ewm_*_by requires a row-valued by expression")
+        var index = types[node.right]
+        if not (index.is_date() or index.is_datetime()):
+            raise Error("ewm_*_by requires a Date or Datetime index")
+        _ = ewm_half_life(node.text, index)
+    return DataType.FLOAT32 if input == DataType.FLOAT32 else DataType.FLOAT64
 
 
 def _rolling_quantile_type(node: Node, input: DataType) raises -> DataType:
@@ -1792,6 +1825,8 @@ def bind(
                 dtype = DataType.FLOAT64
             elif node.op == ROLLING_QUANTILE:
                 dtype = _rolling_quantile_type(node, input)
+            elif node.op == EWM or node.op == EWM_BY:
+                dtype = _ewm_type(node, input, types, shapes, i)
             elif node.op == CUM_COUNT:
                 dtype = DataType.INT64
             elif node.op == RANK:
