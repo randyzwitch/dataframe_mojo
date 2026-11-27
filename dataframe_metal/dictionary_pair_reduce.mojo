@@ -6,7 +6,11 @@ from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.execution_observation import DeviceObservation
 from .accelerator.faults import data_fault
-from .accelerator.gpu.dictionary_pair import PAIR_WORDS, dictionary_pair_sum
+from .accelerator.gpu.dictionary_pair import (
+    PAIR_WORDS,
+    dictionary_pair_sum,
+    dictionary_fused,
+)
 from .accelerator.gpu.erased_input import numeric_views
 from .accelerator.gpu.numeric_view import NumericView, intersect_numeric_views
 from .accelerator.gpu.query_scope import Scope, shared_service
@@ -14,13 +18,29 @@ from .accelerator.gpu.reduction_inputs import HandoffTimings
 from .accelerator.gpu.shared_pages import SharedPages
 from .accelerator.gpu.target import METAL_TARGET
 from .accelerator.gpu.typed_storage import NativeColumnAny, _NativeReservation
+from .dictionary_projection import DictionaryProjection
 from .group_layout import GENERAL_GROUP_LIMIT
 from .group_output import GroupOutput, group_order
 from .multi_plan import ReductionOutput
 
 
+@always_inline
+def _read_sum(state: Span[UInt32, ImmutAnyOrigin], at: Int) -> Int128:
+    var low = UInt64(state[at]) | (UInt64(state[at + 1]) << 32)
+    return (Int128(bitcast[DType.int32](state[at + 2])) << 64) + Int128(low)
+
+
+def _descriptor(view: NumericView, flags: UInt64) -> UInt64:
+    return (
+        (UInt64(view.bit_offset) << 32)
+        | (UInt64(view.nullable) << 2)
+        | UInt64(view.tag)
+        | flags
+    )
+
+
 def _finish_dictionary[
-    single_key: Bool, sparse: Bool
+    single_key: Bool, sparse: Bool, fused: Bool
 ](
     frame: DataFrame,
     output: ReductionOutput,
@@ -28,10 +48,12 @@ def _finish_dictionary[
     right_labels: Int,
     slots: Int,
     state: Span[UInt32, ImmutAnyOrigin],
+    stride: Int,
+    projection: Optional[DictionaryProjection],
 ) raises -> DataFrame:
     var first = List[UInt32](capacity=slots)
     for slot in range(slots):
-        first.append(~state[slot * PAIR_WORDS])
+        first.append(~state[slot * stride])
     var left = List[Int32]()
     var right = List[Int32]()
     var left_valid = List[Bool]()
@@ -39,13 +61,20 @@ def _finish_dictionary[
     var sums = GroupOutput(
         output, frame._columns[frame.width() - 1].dtype(), False
     )
+    var fields = List[GroupOutput]()
+    comptime if fused:
+        for item in projection.value().outputs:
+            var dtype = DataType.INT64
+            if item.field >= 0:
+                dtype = frame._columns[
+                    (1 if single_key else 2) + item.field
+                ].dtype()
+            fields.append(GroupOutput(item, dtype, item.field == -1))
     for slot in group_order(first):
         var a = slot // (right_labels + 1)
         var b = slot % (right_labels + 1)
         comptime if sparse:
-            var code = state[slots * PAIR_WORDS + slot - 1] if slot else UInt32(
-                0
-            )
+            var code = state[slots * stride + slot - 1] if slot else UInt32(0)
             var ca = Int(code >> 16)
             var cb = Int(code & 0xFFFF)
             a = ca - 1 if ca else left_labels
@@ -55,12 +84,39 @@ def _finish_dictionary[
             right.append(Int32(b) if b < right_labels else Int32(0))
             right_valid.append(b < right_labels)
         left_valid.append(a < left_labels)
-        var offset = slot * PAIR_WORDS
-        var low = UInt64(state[offset + 2]) | (UInt64(state[offset + 3]) << 32)
-        var sum = (
-            Int128(bitcast[DType.int32](state[offset + 4])) << 64
-        ) + Int128(low)
-        sums.append(sum, 0, Int(state[offset + 1]), 0, 0, 0, 0, 0)
+        var offset = slot * stride
+        comptime if fused:
+            ref plan = projection.value()
+            var rows = Int(state[offset + 1]) if plan.needs_rows else 0
+            for i in range(len(fields)):
+                ref item = plan.outputs[i]
+                var count = rows
+                var total = Int128(0)
+                if item.field >= 0:
+                    var at = offset + plan.offsets[item.field]
+                    count = Int(state[at]) if plan.needs_count[
+                        item.field
+                    ] else 0
+                    if plan.needs_sum[item.field]:
+                        total = _read_sum(
+                            state, at + Int(plan.needs_count[item.field])
+                        )
+                elif item.field == -2 and a == left_labels:
+                    count = 0
+                elif item.field == -3 and b == right_labels:
+                    count = 0
+                fields[i].append(total, 0, count, 0, 0, 0, 0, rows)
+        else:
+            sums.append(
+                _read_sum(state, offset + 2),
+                0,
+                Int(state[offset + 1]),
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
     var columns = List[Series]()
     columns.append(
         Series(frame._columns[0].name(), Column[Int32](left^, left_valid^))
@@ -71,12 +127,16 @@ def _finish_dictionary[
                 frame._columns[1].name(), Column[Int32](right^, right_valid^)
             )
         )
-    columns.append(sums^.finish())
+    comptime if fused:
+        while fields:
+            columns.append(fields.pop(0).finish())
+    else:
+        columns.append(sums^.finish())
     return DataFrame(columns^)
 
 
 def execute_dictionary_sum[
-    single_key: Bool, sparse: Bool = False
+    single_key: Bool, sparse: Bool = False, fused: Bool = False
 ](
     frame: DataFrame,
     output: ReductionOutput,
@@ -84,6 +144,7 @@ def execute_dictionary_sum[
     left_labels: Int,
     right_labels: Int,
     zero_copy: Bool,
+    projection: Optional[DictionaryProjection] = None,
 ) raises -> Tuple[DataFrame, HandoffTimings]:
     comptime if not METAL_TARGET:
         raise Error(
@@ -116,8 +177,24 @@ def execute_dictionary_sum[
             while capacity < min(frame.height() * 2, GENERAL_GROUP_LIMIT * 2):
                 capacity *= 2
             slots = capacity + 1
-        var words = slots * PAIR_WORDS + (slots - 1 + 4 if sparse else 2)
-        var shared_output = sparse and zero_copy
+        var stride = PAIR_WORDS
+        var bindings = List[Int]()
+        var field_flags = List[UInt64]()
+        comptime if fused:
+            ref plan = projection.value()
+            stride = plan.stride
+            for field in range(len(plan.offsets)):
+                bindings.append((1 if single_key else 2) + field)
+                field_flags.append(
+                    (UInt64(plan.offsets[field]) << 8)
+                    | (UInt64(plan.needs_sum[field]) << 3)
+                    | (UInt64(plan.needs_count[field]) << 4)
+                )
+            while len(bindings) < 4:
+                bindings.append(0)
+                field_flags.append(0)
+        var words = slots * stride + (slots - 1 + 4 if sparse else 2)
+        var shared_output = (sparse or fused) and zero_copy
         var size = words * 4
         var page = 1
         if shared_output:
@@ -145,35 +222,71 @@ def execute_dictionary_sum[
             for segment in segments:
                 ref a = segment[0]
                 ref b = segment[0 if single_key else 1]
-                ref v = segment[1 if single_key else 2]
-                var flags = (
-                    UInt32(a.nullable)
-                    | (UInt32(b.nullable) << 1)
-                    | (UInt32(v.nullable) << 2)
-                )
-                ctx.enqueue_function[dictionary_pair_sum[single_key, sparse]](
-                    a.values,
-                    b.values,
-                    v.values,
-                    a.bits,
-                    b.bits,
-                    v.bits,
-                    UInt32(a.bit_offset),
-                    UInt32(b.bit_offset),
-                    UInt32(v.bit_offset),
-                    flags,
-                    UInt32(left_labels),
-                    UInt32(right_labels),
-                    UInt32(v.tag),
-                    UInt32(base),
-                    UInt32(v.rows),
-                    UInt32(slots),
-                    state,
-                    grid_dim=(v.rows + 255) // 256,
-                    block_dim=256,
-                )
+                var key_flags = UInt32(a.nullable) | (UInt32(b.nullable) << 1)
+                comptime if fused:
+                    ref v0 = segment[bindings[0]]
+                    ref v1 = segment[bindings[1]]
+                    ref v2 = segment[bindings[2]]
+                    ref v3 = segment[bindings[3]]
+                    ctx.enqueue_function[dictionary_fused[single_key, sparse]](
+                        a.values,
+                        b.values,
+                        a.bits,
+                        b.bits,
+                        v0.values,
+                        v1.values,
+                        v2.values,
+                        v3.values,
+                        v0.bits,
+                        v1.bits,
+                        v2.bits,
+                        v3.bits,
+                        _descriptor(v0, field_flags[0]),
+                        _descriptor(v1, field_flags[1]),
+                        _descriptor(v2, field_flags[2]),
+                        _descriptor(v3, field_flags[3]),
+                        UInt32(a.bit_offset),
+                        UInt32(b.bit_offset),
+                        key_flags
+                        | (UInt32(projection.value().needs_rows) << 2),
+                        UInt32(left_labels),
+                        UInt32(right_labels),
+                        UInt32(base),
+                        UInt32(a.rows),
+                        UInt32(slots),
+                        UInt32(stride),
+                        state,
+                        grid_dim=(a.rows + 255) // 256,
+                        block_dim=256,
+                    )
+                else:
+                    ref v = segment[1 if single_key else 2]
+                    var flags = key_flags | (UInt32(v.nullable) << 2)
+                    ctx.enqueue_function[
+                        dictionary_pair_sum[single_key, sparse]
+                    ](
+                        a.values,
+                        b.values,
+                        v.values,
+                        a.bits,
+                        b.bits,
+                        v.bits,
+                        UInt32(a.bit_offset),
+                        UInt32(b.bit_offset),
+                        UInt32(v.bit_offset),
+                        flags,
+                        UInt32(left_labels),
+                        UInt32(right_labels),
+                        UInt32(v.tag),
+                        UInt32(base),
+                        UInt32(v.rows),
+                        UInt32(slots),
+                        state,
+                        grid_dim=(v.rows + 255) // 256,
+                        block_dim=256,
+                    )
                 scope.record_launches(1)
-                base += v.rows
+                base += a.rows
             if not shared_output:
                 ctx.enqueue_copy(host.unsafe_ptr(), state)
             scope.synchronize()
@@ -207,8 +320,15 @@ def execute_dictionary_sum[
         if Int(result_words[control_at]) != launches:
             raise Error("Metal dictionary scan did not complete")
         started = Int(perf_counter_ns())
-        var result = _finish_dictionary[single_key, sparse](
-            frame, output, left_labels, right_labels, slots, result_words
+        var result = _finish_dictionary[single_key, sparse, fused](
+            frame,
+            output,
+            left_labels,
+            right_labels,
+            slots,
+            result_words,
+            stride,
+            projection,
         )
         timings.finish_ns = Int(perf_counter_ns()) - started
         _ = (host^, pages^, reservation^)

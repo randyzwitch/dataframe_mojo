@@ -15,7 +15,7 @@ from dataframe import DataType, LazyFrame, Series
 from dataframe.devices import CPUExecutorChoice
 from std.memory import ArcPointer
 from dataframe.storage.string import StringColumn
-from dataframe.expr import COL, LIT_INT, LIT_FLOAT
+from dataframe.expr import COL, LEN, LIT_INT, LIT_FLOAT
 from dataframe.lazy import AGG
 from dataframe.json.value import JsonValue, json_quote
 from dataframe.parallel import configured_workers
@@ -60,6 +60,13 @@ def shape_keys(
                 if name not in names:
                     names.append(name.copy())
         for expression in node.exprs:
+            if (
+                operator.startswith("dictionary_grouped:packed:v2:")
+                and len(expression._nodes) == 2
+                and expression._nodes[1].op == LEN
+            ):
+                # The fused dictionary scan takes row counts from the group.
+                continue
             for value in expression._nodes:
                 if value.op == COL and value.text not in names:
                     names.append(value.text.copy())
@@ -84,9 +91,11 @@ def shape_keys(
                     )
 
     var family = key.copy()
-    var use_code_spans = operator.startswith(
-        "dictionary_single_sum:dense:"
-    ) or operator.startswith("dictionary_pair_sum:sparse:")
+    var use_code_spans = (
+        operator.startswith("dictionary_single_sum:dense:")
+        or operator.startswith("dictionary_pair_sum:sparse:")
+        or operator.startswith("dictionary_grouped:packed:v2:")
+    )
     for name in names:
         var series = frame.column(name)
         key += (
