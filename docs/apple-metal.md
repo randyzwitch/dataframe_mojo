@@ -14,8 +14,8 @@ print(plan.explain(accelerator=MetalRuntime()))  # HANDOFF metal: ...
 ```
 
 Metal supports fused global reductions, bounded integer-key grouped
-reductions, and integer sums grouped by one or two dictionary-backed string
-keys. Numeric value programs read Int32, Int64 and Float32 inputs. Direct
+reductions, and counts and integer sums grouped by one or two dictionary-backed
+string keys. Numeric value programs read Int32, Int64 and Float32 inputs. Direct
 grouped means also read Float64 columns. Boolean, ordered and distinct
 reductions read packed Bool columns.
 Accepted expressions and predicates run within the reduction scan.
@@ -31,7 +31,7 @@ Accepted expressions and predicates run within the reduction scan.
 | Conditional values | Numeric `when/then/otherwise` chains feeding reductions |
 | Filters | Literal ranges, same-dtype column comparisons, null tests, AND/OR/NOT |
 | Grouping | Up to four native Int32/Int64 keys, at most 65,536 groups including null tuples |
-| String grouping | One or two dictionary-backed string keys and one direct Int32 or Int64 SUM |
+| String grouping | One or two dictionary-backed string keys with row counts, non-null counts of keys and Int32/Int64/Float32 columns, and multiple direct Int32/Int64 sums. Up to four distinct numeric value columns per scan. Key counts and row counts share the group’s row counter. |
 | Input layout | Native nullable columns, slices and chunked inputs |
 | CPU execution | Other input types, joins, sorting, windows, row deduplication and unsupported expressions |
 

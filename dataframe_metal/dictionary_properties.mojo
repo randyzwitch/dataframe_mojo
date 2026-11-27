@@ -8,6 +8,8 @@ from .group_properties import sample_group_tuples
 
 def dictionary_layout(source: Series) raises -> String:
     """Measure the same code and validity windows that wrapped execution uses."""
+    if not len(source):
+        return ":code_spans[]"
     var codes = _signed_group_codes(source)
     var spans = coalesced_native_chunks[DType.int32](codes)
     var layout = String(":code_spans[")

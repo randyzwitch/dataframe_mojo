@@ -206,6 +206,8 @@ def region_key(region: LazyFrame) raises -> String:
     var dictionary = plan_dictionary_group(region)
     if dictionary:
         ref frame = region._plan._frames[region._plan._nodes[0].source_slot()]
+        if not dictionary.value().single_sum:
+            return dictionary.value().grouped_key(region)
         var identity = String("dictionary_group_sum:v2:")
         if dictionary.value().dense_dictionary(frame.height()):
             identity = (
@@ -220,7 +222,7 @@ def region_key(region: LazyFrame) raises -> String:
             and len(dictionary.value().keys) == 2
         ):
             identity = "dictionary_pair_sum:sparse:v2:"
-        identity += frame.column(dictionary.value().value).dtype().name()
+        identity += frame.column(dictionary.value().inputs[0]).dtype().name()
         for labels in dictionary.value().dictionaries:
             identity += ":labels" + String(len(labels.dictionary()[]))
         identity += dictionary_properties(frame, dictionary.value())

@@ -333,3 +333,264 @@ def test_sparse_dictionary_sum_all_null_tuple_and_highest_packed_code() raises:
         assert_true(result[0].item(1, "a").is_null())
         assert_true(result[0].item(1, "b").is_null())
         assert_equal(result[0].item(1, "total").int64(), Int64(-1))
+
+
+def test_metal_dictionary_counts_and_fused_sums() raises:
+    from dataframe.execution_observation import DeviceObservation
+    from dataframe_metal.handoff import region_key
+    from dataframe_metal.calibration import shape_key
+
+    var k = _coded_key(
+        "key",
+        ["a", "b"],
+        [1, 1, 0, 1, 0, 0],
+        [True, False, True, True, False, True],
+    )
+    var other = _coded_key(
+        "other",
+        ["x", "y"],
+        [0, 1, 0, 0, 1, 0],
+        [True, True, False, True, True, False],
+    )
+    var a = Series(
+        "a",
+        Column[Int32](
+            [7, 1, 4, -2, 9, 4], [True, False, True, True, False, True]
+        ),
+    )
+    var b = Series(
+        "b",
+        Column[Int64](
+            [4, 8, -6, 9, 1, -3], [False, True, True, False, True, True]
+        ),
+    )
+    var nan = Float32(0) / Float32(0)
+    var frame = DataFrame(
+        [
+            Series._from_chunks([k.slice(1, 2), k.slice(0, 4)]),
+            Series._from_chunks([other.slice(1, 2), other.slice(0, 4)]),
+            Series._from_chunks([a.slice(0, 3), a.slice(3, 3)]),
+            b^,
+            Series(
+                "f",
+                Column[Float32](
+                    [nan, 0, 2, 3, 4, 5], [True, False, True, True, False, True]
+                ),
+            ),
+            Series("note", Column[String](["a", "b", "c", "d", "e", "f"])),
+        ]
+    )
+    var both: List[String] = ["key", "other"]
+    for n in [1, 2]:
+        var keys = List[String]()
+        for i in range(n):
+            keys.append(both[i].copy())
+        var plan = (
+            frame.lazy()
+            .group_by(keys, maintain_order=True)
+            .agg(
+                [
+                    col("a").len().alias("rows"),
+                    col("key").count().alias("nonnull_keys"),
+                    col("a").sum(min_count=2).alias("a_sum"),
+                    col("b").count().alias("nonnull_b"),
+                    col("b").sum(min_count=1).alias("b_sum"),
+                    col("f").count().alias("points"),
+                ]
+            )
+        )
+        if n == 2:
+            var key_counts = (
+                frame.lazy()
+                .group_by(keys, maintain_order=True)
+                .agg(
+                    [
+                        col("key").count().alias("l"),
+                        col("other").count().alias("r"),
+                        col("a").sum(),
+                        col("b").sum(),
+                        col("f").count(),
+                    ]
+                )
+            )
+            assert_true(Bool(plan_dictionary_group(key_counts)))
+            comptime if METAL_TARGET:
+                assert_true(
+                    key_counts.collect(accelerator=MetalRuntime()).equals(
+                        key_counts.collect(engine="cpu")
+                    )
+                )
+        var unsupported = frame.lazy().group_by(keys).agg([col("note").count()])
+        assert_false(Bool(plan_dictionary_group(unsupported)))
+        var length = (
+            frame.lazy()
+            .group_by(keys, maintain_order=True)
+            .agg(
+                [
+                    col("note").len().alias("rows"),
+                ]
+            )
+        )
+        var key_length = (
+            frame.lazy()
+            .group_by(keys, maintain_order=True)
+            .agg(
+                [
+                    col("key").len().alias("other_alias"),
+                ]
+            )
+        )
+        assert_equal(
+            shape_key(key_length, region_key(key_length)),
+            shape_key(length, region_key(length)),
+        )
+        for query in [plan.copy(), length.copy()]:
+            var matched = plan_dictionary_group(query)
+            assert_true(Bool(matched))
+            comptime if METAL_TARGET:
+                var expected = query.collect(engine="cpu")
+                var obs = ArcPointer(DeviceObservation())
+                var forced = query.copy()
+                forced._plan._device_observation = obs
+                var result = execute_dictionary_group(
+                    forced, matched.value(), True
+                )
+                assert_true(result[0].equals(expected))
+                assert_true(obs[].completed_launches.load() > 0)
+
+    comptime if METAL_TARGET:
+        from std.testing import assert_raises
+
+        var k2 = _coded_key("k", ["a"], [0, 0], [True, True])
+        var overflow = (
+            DataFrame(
+                [
+                    k2^,
+                    Series("v", Column[Int64]([Int64.MAX, 1])),
+                ]
+            )
+            .lazy()
+            .group_by("k")
+            .agg(
+                [
+                    col("v").count().alias("n"),
+                    col("v").sum().alias("total"),
+                ]
+            )
+        )
+        with assert_raises(contains="int64 expression sum overflow"):
+            _ = execute_dictionary_group(
+                overflow, plan_dictionary_group(overflow).value(), True
+            )
+        var empty = (
+            DataFrame(
+                [
+                    _coded_key("k", ["a"], List[UInt32](), List[Bool]()),
+                    Series("v", Column[Int32](List[Int32]())),
+                ]
+            )
+            .lazy()
+            .group_by("k")
+            .agg(
+                [
+                    col("v").len().alias("rows"),
+                    col("v").sum().alias("total"),
+                ]
+            )
+        )
+        var empty_match = plan_dictionary_group(empty)
+        assert_true(Bool(empty_match))
+        assert_true(
+            String(":code_spans[]") in shape_key(empty, region_key(empty))
+        )
+        var empty_result = execute_dictionary_group(
+            empty, empty_match.value(), True
+        )
+        assert_true(empty_result[0].equals(empty.collect(engine="cpu")))
+
+
+def test_dictionary_fused_sparse_state_projection() raises:
+    from dataframe.execution_observation import DeviceObservation
+
+    var labels = List[String]()
+    for i in range(300):
+        labels.append("label" + String(i))
+    var A = _coded_key(
+        "left",
+        labels,
+        [0, 1, 0, 0, 1, 0],
+        [True, True, False, True, True, False],
+    )
+    var B = _coded_key(
+        "right",
+        labels,
+        [1, 0, 0, 1, 0, 0],
+        [True, False, False, True, False, False],
+    )
+    var frame = DataFrame(
+        [
+            A^,
+            B^,
+            Series(
+                "v",
+                Column[Int64](
+                    [Int64.MAX, 2, 3, -Int64.MAX, -1, 9],
+                    [True, True, False, True, True, False],
+                ),
+            ),
+            Series(
+                "f",
+                Column[Float32](
+                    [0, 1, 2, 3, 4, 5], [True, True, False, False, False, False]
+                ),
+            ),
+            Series("w", Column[Int32]([1, 2, 3, 4, 5, 6])),
+            Series("x", Column[Int32]([2, 3, 4, 5, 6, 7])),
+            Series("y", Column[Int32]([0, 0, 1, 1, 2, 2])),
+        ]
+    )
+    var keys: List[String] = ["left", "right"]
+    var query = (
+        frame.lazy()
+        .group_by(keys, maintain_order=True)
+        .agg(
+            [
+                col("v").sum(min_count=1).alias("net"),
+                col("v").sum(min_count=3).alias("enough"),
+                col("w").sum().alias("w_sum"),
+                col("x").count().alias("x_n"),
+                col("f").count().alias("f_n"),
+                col("left").count().alias("a_n"),
+                col("right").count().alias("b_n"),
+                col("y").len().alias("rows"),
+            ]
+        )
+    )
+    var excess = (
+        frame.lazy()
+        .group_by(keys)
+        .agg(
+            [
+                col("v").sum(),
+                col("f").count(),
+                col("w").sum(),
+                col("x").count(),
+                col("y").sum(),
+            ]
+        )
+    )
+    assert_false(Bool(plan_dictionary_group(excess)))
+    var matched = plan_dictionary_group(query)
+    assert_true(Bool(matched))
+    assert_false(matched.value().dense_dictionary(frame.height()))
+    comptime if METAL_TARGET:
+        var expected = query.collect(engine="cpu")
+        for wrap in [False, True]:
+            var observation = ArcPointer(DeviceObservation())
+            query._plan._device_observation = observation
+            var result = execute_dictionary_group(query, matched.value(), wrap)
+            assert_true(result[0].equals(expected))
+            assert_equal(observation[].completed_launches.load(), Int64(1))
+            if wrap:
+                assert_equal(observation[].upload_bytes.load(), Int64(0))
+                assert_equal(observation[].download_bytes.load(), Int64(0))

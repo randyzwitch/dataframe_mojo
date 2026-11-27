@@ -1,21 +1,24 @@
 """Group dictionary-encoded string keys using the native integer group scan."""
 from std.time import perf_counter_ns
-from dataframe import Column, DataFrame, DataType, LazyFrame, Series
-from dataframe.expr import COL, SUM
+from dataframe import Column, DataFrame, DataType, LazyFrame, Series, col
+from dataframe.expr import COL, COUNT, LEN, SUM
 from dataframe.lazy import AGG, SCAN_FRAME
 from dataframe.storage.buffer import _Buffer
 from dataframe.storage.string import StringColumn
 from .accelerator.gpu.reduction_inputs import HandoffTimings
 from .group_layout import GENERAL_GROUP_LIMIT
 from .group_reduce import execute_grouped
-from .multi_plan import ReductionOutput
+from .group_properties import sample_group_tuples
+from .multi_plan import MAX_FIELDS, ReductionOutput
 from .dictionary_pair_reduce import execute_dictionary_sum
+from .dictionary_projection import project_dictionary
 
 
 @fieldwise_init
 struct DictionaryGroup(Copyable, Movable):
     var keys: List[String]
-    var value: String
+    var inputs: List[String]
+    var single_sum: Bool
     var dictionaries: List[DataType]
 
     def dense_dictionary(self, rows: Int) -> Bool:
@@ -26,6 +29,38 @@ struct DictionaryGroup(Copyable, Movable):
         var left = len(self.dictionaries[0].dictionary()[]) + 1
         var right = len(self.dictionaries[1].dictionary()[]) + 1
         return left * right <= GENERAL_GROUP_LIMIT
+
+    def grouped_key(self, region: LazyFrame) raises -> String:
+        # Aliases do not affect cost. Reused input bindings share GPU state.
+        ref frame = region._plan._frames[region._plan._nodes[0].source_slot()]
+        var identity = String("dictionary_grouped:packed:v2:")
+        var names = self.keys.copy()
+        for name in self.inputs:
+            if name not in self.keys:
+                names.append(name.copy())
+        for labels in self.dictionaries:
+            identity += ":labels" + String(len(labels.dictionary()[]))
+        for expr in region._plan._nodes[1].exprs:
+            ref leaf = expr._nodes[0]
+            ref aggregate = expr._nodes[1]
+            if aggregate.op == LEN:
+                identity += ":rows"
+                continue
+            identity += (
+                ":input"
+                + String(names.index(leaf.text))
+                + ":"
+                + frame.column(leaf.text).dtype().name()
+                + ":op"
+                + String(aggregate.op)
+                + ":min_count"
+                + String(aggregate.min_count)
+            )
+        var codes = List[Series]()
+        for key in self.keys:
+            codes.append(_signed_group_codes(frame.column(key)))
+        identity += sample_group_tuples(DataFrame(codes^), self.keys).key()
+        return identity^
 
 
 def _group_dictionary(source: Series) raises -> Optional[DataType]:
@@ -72,23 +107,41 @@ def plan_dictionary_group(
         or root.left != 0
         or len(keys) == 0
         or len(keys) > 2
-        or len(root.exprs) != 1
+        or not root.exprs
+        or (len(keys) == 2 and keys[0] == keys[1])
     ):
         return None
-    ref expression = root.exprs[0]
-    if len(expression._nodes) != 2:
-        return None
-    ref leaf = expression._nodes[0]
-    ref aggregate = expression._nodes[1]
-    if leaf.op != COL or aggregate.op != SUM or aggregate.left != 0:
-        return None
     ref frame = region._plan._frames[region._plan._nodes[0].source_slot()]
-    if leaf.text not in frame.columns() or frame.column(
-        leaf.text
-    ).dtype() not in [DataType.INT32, DataType.INT64]:
-        return None
-    if expression._name in keys or (len(keys) == 2 and keys[0] == keys[1]):
-        return None
+    var inputs = List[String]()
+    var names = List[String]()
+    for expression in root.exprs:
+        if (
+            len(expression._nodes) != 2
+            or expression._name in keys
+            or expression._name in names
+        ):
+            return None
+        ref leaf = expression._nodes[0]
+        ref aggregate = expression._nodes[1]
+        if (
+            leaf.op != COL
+            or aggregate.left != 0
+            or aggregate.op not in [COUNT, LEN, SUM]
+            or leaf.text not in frame.columns()
+        ):
+            return None
+        if aggregate.op != LEN:
+            var dtype = frame.column(leaf.text).dtype()
+            if dtype not in [DataType.INT32, DataType.INT64] and not (
+                aggregate.op == COUNT
+                and (dtype == DataType.FLOAT32 or leaf.text in keys)
+            ):
+                return None
+            if leaf.text not in keys and leaf.text not in inputs:
+                inputs.append(leaf.text.copy())
+                if len(inputs) > MAX_FIELDS:
+                    return None
+        names.append(expression._name.copy())
     var dictionaries = List[DataType]()
     for key in keys:
         if key not in frame.columns():
@@ -97,7 +150,12 @@ def plan_dictionary_group(
         if not dictionary:
             return None
         dictionaries.append(dictionary.take())
-    return DictionaryGroup(keys.copy(), leaf.text.copy(), dictionaries^)
+    return DictionaryGroup(
+        keys.copy(),
+        inputs^,
+        len(root.exprs) == 1 and root.exprs[0]._nodes[1].op == SUM,
+        dictionaries^,
+    )
 
 
 def _signed_group_codes(source: Series) raises -> Series:
@@ -130,7 +188,9 @@ def execute_dictionary_group(
     var inputs = List[Series]()
     for key in plan.keys:
         inputs.append(_signed_group_codes(source.column(key)))
-    inputs.append(source.column(plan.value))
+    for name in plan.inputs:
+        if name not in plan.keys:
+            inputs.append(source.column(name))
     var frame = DataFrame(inputs^)
     var reduced: Tuple[DataFrame, HandoffTimings]
     var preparation = Int(perf_counter_ns()) - started
@@ -138,7 +198,63 @@ def execute_dictionary_group(
     var output = ReductionOutput(
         0, expr._name.copy(), SUM, expr._nodes[1].min_count
     )
-    if plan.dense_dictionary(frame.height()) and len(plan.keys) == 1:
+    if frame.height() == 0 or frame.height() >= Int(Int32.MAX):
+        # The integer grouped reducer shares scans and state between outputs.
+        # Dictionary code views retain the original key validity and offsets.
+        var expressions = root.exprs.copy()
+        for i in range(len(expressions)):
+            if expressions[i]._nodes[1].op == LEN:
+                # Any existing column has the same row count. Keep LEN-only
+                # operands out of the lowered frame and its physical bindings.
+                expressions[i] = (
+                    col(plan.keys[0]).len().alias(root.exprs[i]._name)
+                )
+        var lowered = (
+            frame.lazy()
+            .group_by(plan.keys, maintain_order=root.maintain_order)
+            .agg(expressions)
+        )
+        lowered._plan._device_observation = region._plan._device_observation
+        preparation = Int(perf_counter_ns()) - started
+        reduced = execute_grouped(lowered, zero_copy)
+    elif not plan.single_sum:
+        var projection = project_dictionary(plan.keys, frame, root.exprs)
+        var left_labels = len(plan.dictionaries[0].dictionary()[])
+        var observation = region._plan._device_observation
+        preparation = Int(perf_counter_ns()) - started
+        if len(plan.keys) == 1:
+            reduced = execute_dictionary_sum[True, False, True](
+                frame,
+                output,
+                observation,
+                left_labels,
+                0,
+                zero_copy,
+                projection^,
+            )
+        else:
+            var right_labels = len(plan.dictionaries[1].dictionary()[])
+            if plan.dense_dictionary(frame.height()):
+                reduced = execute_dictionary_sum[False, False, True](
+                    frame,
+                    output,
+                    observation,
+                    left_labels,
+                    right_labels,
+                    zero_copy,
+                    projection^,
+                )
+            else:
+                reduced = execute_dictionary_sum[False, True, True](
+                    frame,
+                    output,
+                    observation,
+                    left_labels,
+                    right_labels,
+                    zero_copy,
+                    projection^,
+                )
+    elif plan.dense_dictionary(frame.height()) and len(plan.keys) == 1:
         reduced = execute_dictionary_sum[True](
             frame,
             output,
@@ -156,11 +272,7 @@ def execute_dictionary_group(
             len(plan.dictionaries[1].dictionary()[]),
             zero_copy,
         )
-    elif (
-        frame.height() > 0
-        and frame.height() < Int(Int32.MAX)
-        and len(plan.keys) == 2
-    ):
+    else:
         reduced = execute_dictionary_sum[False, True](
             frame,
             output,
@@ -169,15 +281,6 @@ def execute_dictionary_group(
             len(plan.dictionaries[1].dictionary()[]),
             zero_copy,
         )
-    else:
-        var lowered = (
-            frame.lazy()
-            .group_by(plan.keys, maintain_order=root.maintain_order)
-            .agg(root.exprs)
-        )
-        lowered._plan._device_observation = region._plan._device_observation
-        preparation = Int(perf_counter_ns()) - started
-        reduced = execute_grouped(lowered, zero_copy)
     started = Int(perf_counter_ns())
     var result = reduced[0].copy()
     for i in range(len(plan.keys)):
