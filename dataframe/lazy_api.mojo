@@ -1633,8 +1633,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var left_exprs = List[Expr]()
         var right_exprs = List[Expr]()
         for k in range(len(left_on)):
-            var l = _hidden_key_name("__join_left_key_" + String(k), taken)
-            var r = _hidden_key_name("__join_right_key_" + String(k), taken)
+            # Named after the key's own name, so an error about the key
+            # (validate's) reads naturally.
+            var l = _hidden_key_name(left_on[k]._name + " (key)", taken)
+            var r = _hidden_key_name(right_on[k]._name + " (right key)", taken)
             left_keys.append(l)
             right_keys.append(r)
             left_exprs.append(left_on[k].alias(l))
@@ -4044,7 +4046,8 @@ def _plain_key(key: Expr) -> Optional[String]:
 
 
 def _hidden_key_name(base: String, mut taken: Dict[String, Bool]) -> String:
-    """`base`, prefixed with underscores until no column has the name."""
+    """`base`, prefixed with underscores until no column or other hidden
+    key has the name."""
     var name = base
     while name in taken:
         name = "_" + name

@@ -114,7 +114,7 @@ def test_expression_keys_with_validate_filters_and_taken_names() raises:
     rows; an input column with a hidden key's name does not collide."""
     var a = DataFrame(
         [
-            Series("__join_left_key_0", Column[Int64]([1, 2, 3, 4])),
+            Series("s (key)", Column[Int64]([1, 2, 3, 4])),
             Series("s", StringColumn(["A", "a", "B", "c"])),
         ]
     )
@@ -134,9 +134,11 @@ def test_expression_keys_with_validate_filters_and_taken_names() raises:
                 b, left_on=lkey, right_on=rkey, validate="m:1"
             )
         )
-        assert_equal(out.columns(), ["__join_left_key_0", "s", "s_right", "y"])
+        assert_equal(out.columns(), ["s (key)", "s", "s_right", "y"])
         assert_equal(out.height(), 3)
-        with assert_raises(contains="1:m validation: the left input has key"):
+        with assert_raises(
+            contains="1:m validation: the left input has key (_s (key)=a)"
+        ):
             if lazy:
                 _ = (
                     a.lazy()
@@ -152,6 +154,6 @@ def test_expression_keys_with_validate_filters_and_taken_names() raises:
         .collect()
     )
     assert_equal(filtered.height(), 1)
-    assert_equal(filtered.column("__join_left_key_0").get(0).int64(), 3)
+    assert_equal(filtered.column("s (key)").get(0).int64(), 3)
     with assert_raises(contains="same nonzero number"):
         _ = a.join(b, left_on=lkey, right_on=[col("s"), col("y")])
