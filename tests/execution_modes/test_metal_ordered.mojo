@@ -295,7 +295,7 @@ def test_metal_ordered_payload_gather_packs_sliced_booleans_and_constant_chunks(
         "b", BoolColumn([True, False, True, False], [True, True, True, False])
     )
     var tail = Series("b", BoolColumn._repeated(True, 1_000_000, True))
-    var source = Series._from_chunks([head.slice(1, 3), tail])
+    var source = Series._from_chunks([head.slice(1, 3), tail^])
     var tickets: List[UInt32] = [500_000, 0, 1, UInt32.MAX, 2, 1, 0, 500_000, 1]
     var result = _payload[DType.bool]("winner", source, tickets)
     var expected = Series(
