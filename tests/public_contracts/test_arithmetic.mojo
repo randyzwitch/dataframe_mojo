@@ -935,7 +935,7 @@ def test_float_unary_math_clip_and_half_away_rounding() raises:
         _float_transforms[FLOAT_DTYPES[index]]()
 
 
-def test_numeric_binding_rejects_mixed_typed_widths_and_unrepresentable_adoption() raises:
+def test_numeric_binding_promotes_mixed_widths_and_rejects_other_types() raises:
     var frame = DataFrame(
         [
             Series("i", Column[Int8]([1])),
@@ -945,19 +945,39 @@ def test_numeric_binding_rejects_mixed_typed_widths_and_unrepresentable_adoption
             Series("s", Column[String](["1"])),
         ]
     )
+    # Mixed numeric operands promote (test_numeric_promotion has the full
+    # matrix); a literal that does not fit the column takes its own type.
+    var promoted: List[Expr] = [
+        col("i") + 128,
+        col("i") + -129,
+        col("u") - -1,
+        col("u") + 256,
+        col("i") + 1.0,
+        col("i") + lit(Int64(1)),
+        col("f") + lit(Float64(1)),
+        col("i") / col("f"),
+        col("i") == lit(UInt8(1)),
+    ]
+    var types: List[DataType] = [
+        DataType.INT32,
+        DataType.INT32,
+        DataType.INT32,
+        DataType.INT32,
+        DataType.FLOAT64,
+        DataType.INT64,
+        DataType.FLOAT64,
+        DataType.FLOAT32,
+        DataType.BOOL,
+    ]
     for source in [frame.copy(), frame.clear()]:
+        for k in range(len(promoted)):
+            var out = source.select(promoted[k].alias("x"))
+            assert_true(out.column("x").dtype() == types[k])
         for invalid in [
-            col("i") + 128,
-            col("i") + -129,
-            col("u") - -1,
-            col("u") + 256,
-            col("i") + 1.0,
-            col("i") + lit(Int64(1)),
-            col("f") + lit(Float64(1)),
             col("b") + col("b"),
+            col("i") + col("b"),
+            col("i") + col("s"),
             col("s").abs(),
-            col("i") / col("f"),
-            col("i") == lit(UInt8(1)),
             col("i").clip_min(lit(Int64(0))),
         ]:
             with assert_raises():

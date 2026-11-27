@@ -129,8 +129,13 @@ def test_series_numeric_operators_pair_positions_and_preserve_left_names() raise
         _numeric[INTEGER_DTYPES[i]]()
     comptime for i in range(len(FLOAT_DTYPES)):
         _numeric[FLOAT_DTYPES[i]]()
+    # Mixed numeric types promote; a bool beside a number does not.
+    var mixed = Series("x", Column[Int64]([1])) + Series(
+        "y", Column[Float64]([0.5])
+    )
+    assert_true(mixed.dtype() == DataType.FLOAT64)
     with assert_raises(contains="requires matching dtypes"):
-        _ = Series("x", Column[Int64]([1])) + Series("y", Column[Float64]([1]))
+        _ = Series("x", Column[Int64]([1])) + Series("y", Column[Bool]([True]))
 
 
 def test_series_reductions_return_correct_tagged_values_and_empty_identities() raises:
