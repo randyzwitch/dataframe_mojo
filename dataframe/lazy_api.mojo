@@ -814,8 +814,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         """This plan's rows followed by `other`'s (SQL UNION ALL), as one
         plan: both inputs are optimized with the rest of it, and a column
         selection above reaches both scans. The inputs must have the same
-        column names and types; `other`'s columns are taken in this plan's
-        order. SQL UNION is `concat` followed by `unique`."""
+        column names; a numeric column typed differently in the two takes
+        the type that holds both, as in `concat`, and other types must
+        match. `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`."""
         return self._binary(other, _concat_node())
 
     def _binary(self, other: Self, var node: PlanNode) -> Self:

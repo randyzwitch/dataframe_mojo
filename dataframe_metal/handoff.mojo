@@ -219,7 +219,7 @@ def region_key(region: LazyFrame) raises -> String:
             and frame.height() < Int(Int32.MAX)
             and len(dictionary.value().keys) == 2
         ):
-            identity = "dictionary_pair_sum:sparse:v1:"
+            identity = "dictionary_pair_sum:sparse:v2:"
         identity += frame.column(dictionary.value().value).dtype().name()
         for labels in dictionary.value().dictionaries:
             identity += ":labels" + String(len(labels.dictionary()[]))

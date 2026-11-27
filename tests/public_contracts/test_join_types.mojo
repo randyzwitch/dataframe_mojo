@@ -1,5 +1,6 @@
 """Typed equality joins preserve complete rows, multiplicity and key identity."""
 # contract-group: table.join
+from std.collections import Optional
 from std.memory import ArcPointer
 from std.testing import assert_equal, assert_true
 from dataframe import (
@@ -9,6 +10,7 @@ from dataframe import (
     Series,
     StringColumn,
     StructColumn,
+    col,
     concat,
 )
 from tests.support.coverage_generators import offset_layout, chunk_layout
@@ -28,6 +30,53 @@ def _layout(frame: DataFrame, layout: Int) raises -> DataFrame:
         == 0 else offset_layout(frame) if layout
         == 1 else chunk_layout(frame)
     )
+
+
+def test_categorical_key_brought_in_by_an_earlier_join_is_unified() raises:
+    """A join compares a categorical key with a string key, and the
+    categorical column reaches it through an earlier join of the same
+    pipeline (a semi join, run as a right semi join that emits the build
+    side's rows). Its keys are still moved onto one dictionary first, so
+    lazy plans give the eager result for every join kind, on one worker
+    and on eight. Found by the differential fuzzer (tests/fuzz): the right
+    and full joins failed with "cannot tag string storage as categorical"
+    and a vertical concat of mismatched types."""
+    var a = DataFrame(
+        [
+            Series("k", Column[Bool]([False, True])),
+            Series("c", StringColumn(["green", "red"])).cast(
+                DataType.CATEGORICAL
+            ),
+        ]
+    )
+    var b = DataFrame(
+        [
+            Series("k", Column[Bool]([True, False, True])),
+            Series("c", StringColumn(["red", "green", "blue"])),
+            Series("v", Column[Int64]([1, 2, 3])),
+        ]
+    )
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        for how in ["right", "full", "inner", "left"]:
+            var expected = (
+                a.join(b, on=["k"], how="semi")
+                .join(b, on=["c", "k"], how=how)
+                .with_columns([col("c").cast(DataType.STRING)])
+                .sort(["v"], nulls_last=True)
+            )
+            var lazy = (
+                a.lazy()
+                .join(b.lazy(), on=["k"], how="semi")
+                .join(b.lazy(), on=["c", "k"], how=how)
+                .collect()
+            )
+            var actual = lazy.with_columns(
+                [col("c").cast(DataType.STRING)]
+            ).sort(["v"], nulls_last=True)
+            assert_equal(actual.columns(), expected.columns(), how)
+            assert_true(actual.equals(expected), how)
+        _ = workers^
 
 
 def test_join_reference_has_literal_multiplicity_null_and_order_anchors() raises:
@@ -317,6 +366,79 @@ def test_unmatched_build_rows_keep_the_probe_side_field_metadata() raises:
                             how + " " + name,
                         )
         _ = workers^
+
+
+def _same_metadata(
+    column: Series, expected: Optional[ArcPointer[List[UInt8]]]
+) -> Bool:
+    if not column._field_metadata or not expected:
+        return Bool(column._field_metadata) == Bool(expected)
+    var a = column._field_metadata.value()
+    var b = expected.value()
+    if len(a[]) != len(b[]):
+        return False
+    for i in range(len(a[])):
+        if a[][i] != b[][i]:
+            return False
+    return True
+
+
+def test_coalesced_key_takes_the_left_key_field_metadata() raises:
+    """A coalesced key is the left key's field, as every left column of a
+    join result is: it keeps the left key's Arrow field metadata whatever
+    the right key carries, and the join does not fail when the two
+    differ. Found by the differential fuzzer (tests/fuzz): a full join of
+    a key read from Parquet (labelled with field metadata) with the same
+    key read from IPC (none) failed with conflicting field metadata."""
+    # Packed Arrow metadata: one entry, "tag" -> "raw" or "red".
+    var raw: List[UInt8] = [1, 0, 0, 0, 3, 0, 0, 0, 116, 97, 103]
+    raw += [3, 0, 0, 0, 114, 97, 119]
+    var red: List[UInt8] = [1, 0, 0, 0, 3, 0, 0, 0, 116, 97, 103]
+    red += [3, 0, 0, 0, 114, 101, 100]
+    var tags = List[Optional[ArcPointer[List[UInt8]]]]()
+    tags.append(None)
+    tags.append(ArcPointer(raw^))
+    tags.append(ArcPointer(red^))
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        for l in range(3):
+            for r in range(3):
+                var left_key = Series(
+                    "k", StringColumn(["a", "b", "c"], [True, True, False])
+                )
+                left_key._field_metadata = tags[l]
+                var right_key = Series(
+                    "k", StringColumn(["b", "c", "d"], [True, True, True])
+                )
+                right_key._field_metadata = tags[r]
+                var left = DataFrame(
+                    [left_key^, Series("x", Column[Int32]([1, 2, 3]))]
+                )
+                var right = DataFrame(
+                    [right_key^, Series("y", Column[Int32]([4, 5, 6]))]
+                )
+                for how in ["full", "left", "inner", "right"]:
+                    var eager = left.join(right, on="k", how=how)
+                    var lazy = (
+                        left.lazy()
+                        .join(right.lazy(), on="k", how=how)
+                        .collect()
+                    )
+                    var expected_rows = 5 if how == "full" else (
+                        3 if how == "left" or how == "right" else 1
+                    )
+                    assert_equal(eager.height(), expected_rows, how)
+                    assert_equal(lazy.height(), expected_rows, how)
+                    # A right join keeps the right keys as its key column.
+                    var want = tags[r] if how == "right" else tags[l]
+                    assert_true(
+                        _same_metadata(eager.column("k"), want),
+                        how + " eager " + String(l) + String(r),
+                    )
+                    assert_true(
+                        _same_metadata(lazy.column("k"), want),
+                        how + " lazy " + String(l) + String(r),
+                    )
 
 
 def test_join_with_an_empty_left_keeps_the_left_field_metadata() raises:

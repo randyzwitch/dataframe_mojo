@@ -1,5 +1,7 @@
 """Submit dictionary key and value chunks into one bounded table and decode its sums."""
-from std.memory import ArcPointer, bitcast
+from max.gpu.host import DeviceBuffer
+from std.ffi import external_call
+from std.memory import ArcPointer, Pointer, bitcast
 from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.execution_observation import DeviceObservation
@@ -9,6 +11,7 @@ from .accelerator.gpu.erased_input import numeric_views
 from .accelerator.gpu.numeric_view import NumericView, intersect_numeric_views
 from .accelerator.gpu.query_scope import Scope, shared_service
 from .accelerator.gpu.reduction_inputs import HandoffTimings
+from .accelerator.gpu.shared_pages import SharedPages
 from .accelerator.gpu.target import METAL_TARGET
 from .accelerator.gpu.typed_storage import NativeColumnAny, _NativeReservation
 from .group_layout import GENERAL_GROUP_LIMIT
@@ -24,7 +27,7 @@ def _finish_dictionary[
     left_labels: Int,
     right_labels: Int,
     slots: Int,
-    state: List[UInt32],
+    state: Span[UInt32, ImmutAnyOrigin],
 ) raises -> DataFrame:
     var first = List[UInt32](capacity=slots)
     for slot in range(slots):
@@ -114,9 +117,26 @@ def execute_dictionary_sum[
                 capacity *= 2
             slots = capacity + 1
         var words = slots * PAIR_WORDS + (slots - 1 + 4 if sparse else 2)
-        var reservation = _NativeReservation(scope, words * 4)
-        var state = ctx.enqueue_create_buffer[DType.uint32](words)
-        var host = List[UInt32](length=words, fill=0)
+        var shared_output = sparse and zero_copy
+        var size = words * 4
+        var page = 1
+        if shared_output:
+            page = Int(external_call["getpagesize", Int32]())
+            size = ((size + page - 1) // page) * page
+        var reservation = _NativeReservation(scope, size)
+        var pages = SharedPages(size if shared_output else 0, page)
+        var host = List[UInt32]()
+        var address = pages.address
+        var state: DeviceBuffer[DType.uint32]
+        if shared_output:
+            state = ctx.wrap_host_memory[DType.uint32](
+                Pointer[UInt32, MutAnyOrigin](unsafe_from_address=address),
+                size // 4,
+            )
+        else:
+            state = ctx.enqueue_create_buffer[DType.uint32](words)
+            host = List[UInt32](length=words, fill=0)
+            address = Int(host.unsafe_ptr())
         timings.upload_ns = Int(perf_counter_ns()) - started
         started = Int(perf_counter_ns())
         try:
@@ -154,34 +174,43 @@ def execute_dictionary_sum[
                 )
                 scope.record_launches(1)
                 base += v.rows
-            ctx.enqueue_copy(host.unsafe_ptr(), state)
+            if not shared_output:
+                ctx.enqueue_copy(host.unsafe_ptr(), state)
             scope.synchronize()
-            scope.record_download(words * 4)
+            if not shared_output:
+                scope.record_download(words * 4)
         except error:
             try:
                 scope.synchronize()
             except:
                 pass
-            _ = (host^, state^, segments^, owners^, reservation^)
+            _ = (state^, segments^, owners^, pages^, host^, reservation^)
             raise error^
-        _ = (state^, segments^, owners^, reservation^)
+        _ = (state^, segments^, owners^)
         timings.kernel_ns = Int(perf_counter_ns()) - started
+        var result_words = Span[UInt32, ImmutAnyOrigin](
+            unsafe_ptr=Pointer[UInt32, ImmutAnyOrigin](
+                unsafe_from_address=address
+            ),
+            length=words,
+        )
         var control_at = words - (4 if sparse else 2)
         comptime if sparse:
             if (
-                host[control_at + 3]
-                or Int(host[control_at + 2]) + Int(host[0] != 0)
+                result_words[control_at + 3]
+                or Int(result_words[control_at + 2]) + Int(result_words[0] != 0)
                 > GENERAL_GROUP_LIMIT
             ):
                 raise data_fault("grouped reduction exceeded 65536 groups")
-        if host[control_at + 1]:
+        if result_words[control_at + 1]:
             raise data_fault("dictionary code outside its key domain")
-        if Int(host[control_at]) != launches:
+        if Int(result_words[control_at]) != launches:
             raise Error("Metal dictionary scan did not complete")
         started = Int(perf_counter_ns())
         var result = _finish_dictionary[single_key, sparse](
-            frame, output, left_labels, right_labels, slots, host
+            frame, output, left_labels, right_labels, slots, result_words
         )
         timings.finish_ns = Int(perf_counter_ns()) - started
+        _ = (host^, pages^, reservation^)
         scope.mark_success()
         return (result^, timings^)

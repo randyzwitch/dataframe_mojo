@@ -41,7 +41,6 @@ from dataframe.io.csv import (
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
-    JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
     JOIN_MARK,
