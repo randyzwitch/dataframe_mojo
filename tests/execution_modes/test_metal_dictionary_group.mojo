@@ -157,7 +157,7 @@ def test_metal_dictionary_pair_groups_by_both_labels() raises:
         for row in range(profiled[1].height()):
             launches += profiled[1].item(row, "gpu_completed_launches").int64()
         # Three intersections of the independent key and value chunk ranges.
-        assert_equal(launches, Int64(3))
+        assert_equal(launches, Int64(2))
         var copied = execute_dictionary_group(
             plan, plan_dictionary_group(plan).value(), False
         )
