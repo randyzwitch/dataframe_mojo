@@ -128,7 +128,34 @@ def weighted_frames(
             var low = Float64(0)
             var high = Float64(0)
             var nan = False
+            var wp = weights.unsafe_ptr()
+            if not nulls and kind != W_MIN and kind != W_MAX:
+                # No nulls: the weighted sum is a dot product of the
+                # window's values with its weights, taken a vector at a
+                # time.
+                comptime width = 8
+                var length = e - b
+                var acc = SIMD[DType.float64, width](0)
+                var sums = SIMD[DType.float64, width](0)
+                var k = 0
+                while k + width <= length:
+                    var xs = values.unsafe_load[width=width](b + k)
+                    var ws = wp.unsafe_load[width=width](w0 + k)
+                    acc += xs * ws
+                    sums += ws
+                    k += width
+                total = acc.reduce_add()
+                weight = sums.reduce_add()
+                while k < length:
+                    total += (
+                        values[unsafe_offset=b + k] * wp[unsafe_offset=w0 + k]
+                    )
+                    weight += wp[unsafe_offset=w0 + k]
+                    k += 1
+                count = length
             for k in range(b, e):
+                if count > 0 and not nulls and kind != W_MIN and kind != W_MAX:
+                    break
                 if nulls and not column._valid(k):
                     continue
                 count += 1
@@ -159,11 +186,26 @@ def weighted_frames(
             elif kind == W_VAR or kind == W_STD:
                 var mean = total / weight
                 var squares = Float64(0)
-                for k in range(b, e):
-                    if nulls and not column._valid(k):
-                        continue
-                    var d = values[unsafe_offset=k] - mean
-                    squares += weights[w0 + k - b] * d * d
+                if not nulls:
+                    comptime width = 8
+                    var length = e - b
+                    var acc = SIMD[DType.float64, width](0)
+                    var k = 0
+                    while k + width <= length:
+                        var d = values.unsafe_load[width=width](b + k) - mean
+                        acc += wp.unsafe_load[width=width](w0 + k) * d * d
+                        k += width
+                    squares = acc.reduce_add()
+                    while k < length:
+                        var d = values[unsafe_offset=b + k] - mean
+                        squares += wp[unsafe_offset=w0 + k] * d * d
+                        k += 1
+                else:
+                    for k in range(b, e):
+                        if not column._valid(k):
+                            continue
+                        var d = values[unsafe_offset=k] - mean
+                        squares += weights[w0 + k - b] * d * d
                 var variance = max(squares / weight, 0)
                 out[j] = sqrt(variance) if kind == W_STD else variance
             else:
