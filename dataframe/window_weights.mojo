@@ -280,4 +280,7 @@ def _weighted_quantile(
         return vk if s > ceil(total * q) - 1 else v_old
     if method == "midpoint":
         return (vk + v_old) * 0.5
+    if vk == v_old:
+        # Equal values (an infinite one included) need no joining.
+        return vk
     return v_old + (h - s_old) / (s - s_old) * (vk - v_old)
