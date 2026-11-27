@@ -52,6 +52,10 @@ from .expr import (
     rolling_options,
     is_fixed_rolling,
     RollingOptions,
+    EWM,
+    EWM_ADJUST,
+    EWM_BIAS,
+    EWM_IGNORE_NULLS,
     BACKWARD_FILL,
     INTERPOLATE,
     CUT,
@@ -69,6 +73,7 @@ from .series import Series, FixedElements
 from .window_segment_tree import frame_states_supported, window_segment_tree
 from .window_sort import rank_rows
 from .window_quantile import quantile_frames, fixed_quantiles
+from .window_ewm import ewm_frames, ewm_by_frames, ewm_kind
 from .window_weights import (
     weighted_frames,
     window_bounds,
@@ -241,6 +246,8 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
         var options = rolling_options(node)
         if len(options.weights) > 0:
             return _weighted_window(node, input, ids, options)
+    if op_code == EWM:
+        return _ewm_window(node, input, ids)
     if op_code == CUM_PROD:
         return _cum_prod(input, ids, node.min_count == 1)
     if op_code == CUM_SUM and input.dtype() == DataType.BOOL:
@@ -1276,6 +1283,89 @@ def _ranked_frames(
         if count >= needed and count > 0:
             source[j] = row_of[Int(best._get(j))]
     return input.take_or_null(source)
+
+
+def _ewm_window(node: Node, input: Series, ids: List[Int]) raises -> Series:
+    """An exponentially weighted function (`ewm_frames`) within each
+    partition, the partitions laid out one after another and the result
+    put back in row order."""
+    var values = (
+        input.copy() if input.dtype() == DataType.FLOAT32 else _as_float(input)
+    )
+    var parts = _contiguous(len(values), ids)
+    var laid = values.take(parts.order) if len(parts.order) > 0 else values^
+    var result = ewm_frames(
+        laid,
+        parts.starts,
+        ewm_kind(node.text),
+        node.floating,
+        (node.min_count & EWM_ADJUST) != 0,
+        (node.min_count & EWM_BIAS) != 0,
+        Int(node.integer),
+        (node.min_count & EWM_IGNORE_NULLS) != 0,
+    )
+    if len(parts.order) > 0:
+        var inverse = List[Int](unsafe_uninit_length=len(parts.order))
+        for k in range(len(parts.order)):
+            inverse[parts.order[k]] = k
+        result = result.take(inverse)
+    return result^
+
+
+def ewm_by_op(
+    node: Node, input: Series, index: Series, ids: List[Int]
+) raises -> Series:
+    """`ewm_mean_by` / `ewm_sum_by`: each partition's rows in stable time
+    order (rows with a null time keep their place and stay null), the
+    decay applied between consecutive times, and the result put back in
+    row order."""
+    from dataframe.time.windows import ewm_half_life
+
+    var values = input.rechunk()
+    if values.dtype() != DataType.FLOAT32:
+        values = _as_float(values)
+    var times = index.rechunk().cast(DataType.INT64)
+    var half_life = ewm_half_life(node.text, index.dtype())
+    var groups = partitions(len(values), ids)
+    var n = len(values)
+    var order = List[Int](capacity=n)
+    var starts = List[Int](capacity=len(groups) + 1)
+    for rows in groups:
+        starts.append(len(order))
+        var sorted = True
+        for k in range(1, len(rows)):
+            if times._data[Column[Int64]]._get(rows[k]) < times._data[
+                Column[Int64]
+            ]._get(rows[k - 1]):
+                sorted = False
+                break
+        if sorted:
+            for row in rows:
+                order.append(row)
+        else:
+            var by_time = times.take(rows).argsort()
+            for k in by_time:
+                order.append(rows[k])
+    starts.append(len(order))
+    var laid_times = times.take(order)
+    ref stored = laid_times._data[Column[Int64]]
+    var stamps = List[Int64](capacity=n)
+    var present = List[Bool](capacity=n)
+    for k in range(n):
+        stamps.append(stored._get(k))
+        present.append(stored._valid(k))
+    var result = ewm_by_frames(
+        values.take(order),
+        stamps,
+        present,
+        starts,
+        half_life,
+        node.text2 == "mean",
+    )
+    var inverse = List[Int](unsafe_uninit_length=n)
+    for k in range(n):
+        inverse[order[k]] = k
+    return result.take(inverse)
 
 
 def _weighted_window(
