@@ -260,20 +260,49 @@ def test_metal_ordered_public_native_values_ties_nulls_and_filtered_positions() 
                     assert_true(query.collect(accelerator=runtime).equals(cpu))
 
 
-def test_metal_ordered_payload_gather_uses_native_float32_accessor() raises:
-    from dataframe_metal.ordered_finish import OrderedColumn
+def test_metal_ordered_payload_gather_preserves_bits_and_arbitrary_chunk_rows() raises:
+    from std.testing import assert_raises
+    from dataframe_metal.ordered_finish import _payload
 
     var nan = bitcast[DType.float32](UInt32(0x7FC12345))
     var zero = bitcast[DType.float32](UInt32(0x80000000))
-    var frame = DataFrame(
-        [
-            Series(
-                "f",
-                Column[Float32]([nan, zero, 0.5, 1], [True, True, True, False]),
-            )
-        ]
+    var left = Series("f", Column[Float32]([1, nan, 2], [True, True, False]))
+    var right = Series("f", Column[Float32]([9, 8, zero]))
+    var source = Series._from_chunks([left.slice(1, 2), right.slice(2, 1)])
+    var tickets: List[UInt32] = [2, 0, UInt32.MAX, 1, 2]
+    var result = _payload[DType.float32]("output", source, tickets)
+    assert_equal(result.name(), "output")
+    assert_equal(
+        bitcast[DType.uint32](result.get(0).float32()), UInt32(0x80000000)
     )
-    var output = OrderedColumn("f", DataType.FLOAT32)
-    for row in range(4):
-        output.append(frame, "f", UInt32(row))
-    assert_true(output^.finish().equals(frame.column("f")))
+    assert_equal(
+        bitcast[DType.uint32](result.get(1).float32()), UInt32(0x7FC12345)
+    )
+    assert_true(result.get(2).is_null())
+    assert_true(result.get(3).is_null())
+    assert_equal(
+        bitcast[DType.uint32](result.get(4).float32()), UInt32(0x80000000)
+    )
+    with assert_raises(contains="outside its native input"):
+        _ = _payload[DType.float32]("output", source, [UInt32(3)])
+
+
+def test_metal_ordered_payload_gather_packs_sliced_booleans_and_constant_chunks() raises:
+    from dataframe.storage.boolean import BoolColumn
+    from dataframe_metal.ordered_finish import _payload
+
+    var head = Series(
+        "b", BoolColumn([True, False, True, False], [True, True, True, False])
+    )
+    var tail = Series("b", BoolColumn._repeated(True, 1_000_000, True))
+    var source = Series._from_chunks([head.slice(1, 3), tail^])
+    var tickets: List[UInt32] = [500_000, 0, 1, UInt32.MAX, 2, 1, 0, 500_000, 1]
+    var result = _payload[DType.bool]("winner", source, tickets)
+    var expected = Series(
+        "winner",
+        BoolColumn(
+            [True, False, True, False, False, True, False, True, True],
+            [True, True, True, False, False, True, True, True, True],
+        ),
+    )
+    assert_true(result.equals(expected))
