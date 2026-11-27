@@ -23,6 +23,15 @@ from std.math import isnan
 from std.memory import Pointer, unsafe_memcmp
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
+    LIST_ALL,
+    LIST_ANY,
+    LIST_ARG_MAX,
+    LIST_ARG_MIN,
+    LIST_COUNT_MATCHES,
+    LIST_HAS,
+    LIST_MEDIAN,
+    LIST_STD,
+    LIST_VAR,
     LIST_CONCAT,
     LIST_DIFF,
     LIST_DROP_NULLS,
@@ -102,6 +111,24 @@ def list_op_name(op: Int) -> String:
         return "list.diff"
     if op == LIST_CONCAT:
         return "list.concat"
+    if op == LIST_MEDIAN:
+        return "list.median"
+    if op == LIST_STD:
+        return "list.std"
+    if op == LIST_VAR:
+        return "list.var"
+    if op == LIST_ANY:
+        return "list.any"
+    if op == LIST_ALL:
+        return "list.all"
+    if op == LIST_ARG_MIN:
+        return "list.arg_min"
+    if op == LIST_ARG_MAX:
+        return "list.arg_max"
+    if op == LIST_COUNT_MATCHES:
+        return "list.count_matches"
+    if op == LIST_HAS:
+        return "list.contains"
     return "list operation " + String(op)
 
 
@@ -572,6 +599,10 @@ trait _Order(Copyable, Deinitable, Movable):
     def same(self, a: Int, b: Int) -> Bool:
         ...
 
+    def nan(self, a: Int) -> Bool:
+        """Whether the element is a float NaN."""
+        ...
+
 
 struct _NumberOrder[D: DType](_Order):
     """Numeric order with NaN after every number and equal to itself."""
@@ -606,6 +637,16 @@ struct _NumberOrder[D: DType](_Order):
             if isnan(x):
                 return isnan(y)
         return x == y
+
+    @always_inline
+    def nan(self, a: Int) -> Bool:
+        comptime if Self.D.is_floating_point():
+            return isnan(
+                Pointer[Scalar[Self.D], MutAnyOrigin](
+                    unsafe_from_address=self.values
+                )[unsafe_offset=a]
+            )
+        return False
 
 
 struct _BytesOrder(_Order):
@@ -649,6 +690,10 @@ struct _BytesOrder(_Order):
             )
             == 0
         )
+
+    @always_inline
+    def nan(self, a: Int) -> Bool:
+        return False
 
 
 @always_inline

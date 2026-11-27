@@ -11,6 +11,7 @@ from dataframe.expr import (
     LIST_JOIN,
     LIST_LEN,
     LIST_MEAN,
+    LIST_MEDIAN,
     LIST_MIN,
     LIST_SUM,
     STR_EXTRACT_ALL,
@@ -21,6 +22,7 @@ from dataframe.expr import (
     is_list_transform,
 )
 from dataframe.kernels.list_transforms import list_transform
+from dataframe.kernels.list_reductions import list_reduce
 from dataframe.storage.nested import ListColumn, StructColumn
 from regex_mojo import Regex
 from dataframe.text.regex_adapter import (
@@ -84,6 +86,8 @@ def nested_op(
         return _struct_field(input, node.text)
     var lists = input.list_column()
     if is_list_transform(node.op):
+        if node.op >= LIST_MEDIAN:
+            return list_reduce(node, lists)
         return list_transform(node, lists)
     if node.op == LIST_LEN:
         var lengths = lists.lengths()
