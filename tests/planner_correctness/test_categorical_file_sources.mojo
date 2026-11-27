@@ -300,6 +300,36 @@ def test_categorical_dataset_files_with_their_own_dictionaries_run_in_the_pipeli
     _queries(scan_csv(pattern, _schema(), null_values=[""]), frame.lazy())
 
 
+def test_unordered_unique_keeps_categoricals_from_every_part() raises:
+    """An unordered unique finishes its groups in parts on several
+    workers, and each part encodes its kept categorical labels on its
+    own. The parts' rows join as one column holding every label, on one
+    worker and on eight, eager and lazy alike."""
+    var path = _one_file()
+    var frame = read_csv(path, _schema(), null_values=[""])
+    var scan = scan_csv(path, _schema(), null_values=[""])
+    var subsets: List[List[String]] = [["k"], ["v"], ["t"]]
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        for keep in ["first", "last", "any"]:
+            for subset in subsets:
+                var expected = frame.unique(subset, keep=keep)
+                if keep == "any":
+                    # Any row of a group may be kept: compare the keys.
+                    expected = expected.select(subset)
+                for optimize in [False, True]:
+                    var actual = scan.unique(subset, keep=keep).collect(
+                        engine="cpu",
+                        streaming=True,
+                        optimize=optimize,
+                        batch_size=_BATCH,
+                    )
+                    if keep == "any":
+                        actual = actual.select(subset)
+                    _same(actual, expected, subset)
+        _ = workers^
+
+
 def test_categorical_file_scan_routes_to_the_morsel_pipeline() raises:
     var path = _one_file()
     var threads = ScopedEnvironment("DATAFRAME_THREADS", "4")

@@ -55,6 +55,7 @@ from dataframe.optimizer.expressions import (
     outer_reductions,
     outer_windows,
     shared_partition_keys,
+    top_rows_filter,
     count_shared,
     _fold_casts,
     _fold_constants,
@@ -328,7 +329,8 @@ def plan_lower_whole_input_filters(mut self: QueryContext) raises:
     windows run in the operator that evaluates windows over a whole
     input, split by partition into tasks of the query's schedule, the
     reductions in an aggregate (`plan_lower_reductions`), and the filter
-    left reads one value per row."""
+    left reads one value per row. Plans collected without the optimizer
+    run this pass too, so such a filter takes the same route either way."""
     var count = len(self._nodes)
     var changed = False
     for i in range(count):
@@ -341,6 +343,9 @@ def plan_lower_whole_input_filters(mut self: QueryContext) raises:
                 has_window(self._nodes[i].exprs[0])
                 or _reduces_input(self._nodes[i].exprs[0])
             )
+            # Each partition's first k rows are found without a rank
+            # column: the filter reads its whole input in one operator.
+            or top_rows_filter(self._nodes[i].exprs[0])
         ):
             continue
         var left = self._nodes[i].left
@@ -1616,6 +1621,7 @@ def plan_push_projections(
     var all_needed = List[Bool](length=len(self._nodes), fill=False)
     all_needed[len(self._nodes) - 1] = True
     var owned = plan_remember_schemas(self)
+    var parents = plan_parents(self)
     # (join index, right side?, columns) for join inputs to narrow.
     var narrow_joins = List[Int]()
     var narrow_sides = List[Bool]()
@@ -1663,13 +1669,9 @@ def plan_push_projections(
                     len(keep) > 0 or node.kind == SCAN_IPC or node.has_dataset()
                 ) and len(keep) < len(columns):
                     self._nodes[i].set_scan_projection(keep^)
-                    # Only this scan's schema changes among the nodes
-                    # still to visit: they come before it, and none
-                    # reads it (children precede their parents).
-                    try:
-                        _ = self._schema_memo.value()[].pop(i)
-                    except:
-                        pass
+                    # The nodes above it may have remembered its wider
+                    # schema in an earlier pass; a union compares them.
+                    plan_forget_schemas_above(self, i, parents)
             continue
         # What this node reads from its input(s).
         var reads = List[String]()
@@ -1746,11 +1748,45 @@ def plan_push_projections(
             else:
                 needed[child] = reads.copy()
     if prune_outputs:
-        var aligned = plan_align_union_inputs(self, unions, union_columns)
-        plan_narrow_join_inputs(
-            self, narrow_joins, narrow_sides, narrow_columns
-        )
-        if aligned:
+        # Narrowing a join's input changes the join's output, and a union
+        # can only see whether its inputs agree once they have their final
+        # columns; a join over a union reads the union's columns. So each
+        # is done after everything below it: in node order, children
+        # first.
+        var order = List[Int]()
+        for k in range(len(narrow_joins)):
+            order.append(k)
+        for k in range(len(unions)):
+            order.append(len(narrow_joins) + k)
+        for a in range(1, len(order)):
+            var item = order[a]
+            var at = _narrow_or_align_node(item, narrow_joins, unions)
+            var b = a
+            while (
+                b > 0
+                and _narrow_or_align_node(order[b - 1], narrow_joins, unions)
+                > at
+            ):
+                order[b] = order[b - 1]
+                b -= 1
+            order[b] = item
+        var parents = plan_parents(self)
+        var added = False
+        for item in order:
+            if item < len(narrow_joins):
+                added |= _narrow_join_input(
+                    self,
+                    narrow_joins[item],
+                    narrow_sides[item],
+                    narrow_columns[item],
+                    parents,
+                )
+            else:
+                var k = item - len(narrow_joins)
+                added |= _align_union(
+                    self, unions[k], union_columns[k], parents
+                )
+        if added:
             plan_reorder(self)
     if owned:
         self._schema_memo = None
@@ -1773,34 +1809,46 @@ def plan_align_union_inputs(
     var parents = plan_parents(self)
     for r in range(len(unions)):
         var k = len(unions) - 1 - r
-        var union = unions[k]
-        # Inputs that already agree are left as they are.
-        if plan_columns_of(self, self._nodes[union].left) == plan_columns_of(
-            self, self._nodes[union].right
-        ):
+        added |= _align_union(self, unions[k], columns[k], parents)
+    return added
+
+
+def _align_union(
+    mut self: QueryContext,
+    union: Int,
+    columns: List[String],
+    parents: List[Int],
+) raises -> Bool:
+    """Align one union's inputs (`plan_align_union_inputs`). True when a
+    node was added."""
+    # Inputs that already agree are left as they are.
+    if plan_columns_of(self, self._nodes[union].left) == plan_columns_of(
+        self, self._nodes[union].right
+    ):
+        return False
+    # In its first input's order: the union's own schema would stack the
+    # inputs as they are, which is what fails.
+    var keep = List[String]()
+    for c in plan_columns_of(self, self._nodes[union].left):
+        if c in columns and c not in keep:
+            keep.append(c)
+    var added = False
+    for side in range(2):
+        var child = self._nodes[union].right if side == 1 else (
+            self._nodes[union].left
+        )
+        if plan_columns_of(self, child) == keep:
             continue
-        # In its first input's order: the union's own schema would
-        # stack the inputs as they are, which is what fails.
-        var keep = List[String]()
-        for c in plan_columns_of(self, self._nodes[union].left):
-            if c in columns[k] and c not in keep:
-                keep.append(c)
-        for side in range(2):
-            var child = self._nodes[union].right if side == 1 else (
-                self._nodes[union].left
-            )
-            if plan_columns_of(self, child) == keep:
-                continue
-            var exprs = List[Expr]()
-            for name in keep:
-                exprs.append(col(name))
-            self._nodes.append(_select_node(left=child, exprs=exprs))
-            if side == 1:
-                self._nodes[union].right = len(self._nodes) - 1
-            else:
-                self._nodes[union].left = len(self._nodes) - 1
-            plan_forget_schemas_above(self, union, parents)
-            added = True
+        var exprs = List[Expr]()
+        for name in keep:
+            exprs.append(col(name))
+        self._nodes.append(_select_node(left=child, exprs=exprs))
+        if side == 1:
+            self._nodes[union].right = len(self._nodes) - 1
+        else:
+            self._nodes[union].left = len(self._nodes) - 1
+        plan_forget_schemas_above(self, union, parents)
+        added = True
     return added
 
 
@@ -1908,39 +1956,61 @@ def plan_narrow_join_inputs(
     joins: List[Int],
     right_sides: List[Bool],
     columns: List[List[String]],
-) raises:
+) raises -> Bool:
     """Select only the kept columns above join inputs that are not scans.
 
     Scans already read only those columns. Other inputs (a filter, a
     computed column) would otherwise hand the join every column they
-    produce. The selection is only added when it drops a column.
+    produce. The selection is only added when it drops a column. True
+    when a node was added; the caller renumbers the plan.
     """
     var added = False
     var parents = plan_parents(self)
     for k in range(len(joins)):
-        var join = joins[k]
-        var child = self._nodes[join].left
-        if right_sides[k]:
-            child = self._nodes[join].right
-        if _is_scan(self._nodes[child].kind):
-            continue
-        var produced = plan_columns_of(self, child)
-        if len(columns[k]) >= len(produced):
-            continue
-        var exprs = List[Expr]()
-        for name in columns[k]:
-            exprs.append(col(name))
-        self._nodes.append(_select_node(left=child, exprs=exprs))
-        # The join and the nodes above it may now produce fewer
-        # columns.
-        plan_forget_schemas_above(self, join, parents)
-        if right_sides[k]:
-            self._nodes[join].right = len(self._nodes) - 1
-        else:
-            self._nodes[join].left = len(self._nodes) - 1
-        added = True
-    if added:
-        plan_reorder(self)
+        added |= _narrow_join_input(
+            self, joins[k], right_sides[k], columns[k], parents
+        )
+    return added
+
+
+def _narrow_join_input(
+    mut self: QueryContext,
+    join: Int,
+    right_side: Bool,
+    columns: List[String],
+    parents: List[Int],
+) raises -> Bool:
+    """Narrow one join input (`plan_narrow_join_inputs`). True when a node
+    was added."""
+    var child = self._nodes[join].right if right_side else (
+        self._nodes[join].left
+    )
+    if _is_scan(self._nodes[child].kind):
+        return False
+    var produced = plan_columns_of(self, child)
+    if len(columns) >= len(produced):
+        return False
+    var exprs = List[Expr]()
+    for name in columns:
+        exprs.append(col(name))
+    self._nodes.append(_select_node(left=child, exprs=exprs))
+    # The join and the nodes above it may now produce fewer columns.
+    plan_forget_schemas_above(self, join, parents)
+    if right_side:
+        self._nodes[join].right = len(self._nodes) - 1
+    else:
+        self._nodes[join].left = len(self._nodes) - 1
+    return True
+
+
+def _narrow_or_align_node(
+    item: Int, joins: List[Int], unions: List[Int]
+) -> Int:
+    """The plan node of a join input to narrow (items before
+    `len(joins)`) or of a union to align (the rest)."""
+    if item < len(joins):
+        return joins[item]
+    return unions[item - len(joins)]
 
 
 def plan_mask_only_union(self: QueryContext, index: Int) -> Bool:

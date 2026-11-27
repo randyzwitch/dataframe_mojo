@@ -1,8 +1,19 @@
 """Lazy group_by_dynamic and rolling against the eager methods and literals."""
 # contract-group: lazy.time_windows
+from std.collections import Optional
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, DataType, Expr, LazyFrame, Series, col
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    Expr,
+    LazyFrame,
+    Series,
+    col,
+    len as row_len,
+)
 from tests.support.coverage_compare import assert_frame
+from tests.support.group_strategy_reference import ScopedEnvironment
 
 comptime HOUR = 3600000
 
@@ -495,3 +506,405 @@ def test_lazy_time_windows_run_on_the_cpu_under_automatic_placement() raises:
         assert_true(
             plan.collect(engine="auto").equals(plan.collect(engine="cpu"))
         )
+
+
+def test_time_window_counts_read_from_window_bounds() raises:
+    """Counts come from each window's bounds: n rows at one time give n in
+    each of n rolling windows (#1380), with or without other aggregations
+    gathering rows, grouped or not, for sorted and unsorted input."""
+    var n = 300
+    var times = List[Int64](length=n, fill=7 * HOUR)
+    var x = List[Int64](length=n, fill=1)
+    var valid = List[Bool](length=n, fill=True)
+    var g = List[Int64](length=n, fill=0)
+    for i in range(n):
+        valid[i] = i % 3 != 0
+        g[i] = Int64(i % 2)
+    var frame = DataFrame(
+        [
+            _times("t", times),
+            Series("g", Column[Int64](g^)),
+            Series("x", Column[Int64](x^, valid)),
+        ]
+    )
+    var counts: List[Expr] = [
+        col("x").count().alias("count"),
+        col("x").null_count().alias("nulls"),
+        col("x").len().alias("len"),
+        row_len().alias("rows"),
+    ]
+    var mixed = counts.copy()
+    mixed.append(col("x").sum().alias("sum"))
+    for aggs in [counts.copy(), mixed.copy()]:
+        var out = frame.rolling("t", "1h").agg(aggs)
+        assert_equal(out.height(), n)
+        for row in [0, 1, n // 2, n - 1]:
+            assert_equal(out.item(row, "len").int64(), Int64(n))
+            assert_equal(out.item(row, "rows").int64(), Int64(n))
+            assert_equal(out.item(row, "count").int64(), Int64(n - n // 3))
+            assert_equal(out.item(row, "nulls").int64(), Int64(n // 3))
+        assert_true(out.column("count").dtype() == DataType.INT64)
+        var lazy = frame.lazy().rolling("t", "1h").agg(aggs).collect()
+        assert_frame(lazy, out)
+        var grouped = frame.rolling("t", "1h", group_by=["g"]).agg(aggs)
+        assert_equal(grouped.height(), n)
+        assert_equal(grouped.item(0, "len").int64(), Int64(n // 2))
+        assert_equal(grouped.item(0, "count").int64(), Int64(n // 2 - 50))
+        assert_equal(grouped.item(0, "nulls").int64(), Int64(50))
+        assert_equal(grouped.item(n - 1, "count").int64(), Int64(n // 2 - 50))
+    # Overlapping dynamic windows and unsorted input: windows [t, t + 3h)
+    # every hour over rows at hours 4, 0, 2, 1 with x null at hour 2.
+    var unsorted = DataFrame(
+        [
+            _times("t", [4 * HOUR, 0, 2 * HOUR, HOUR]),
+            Series("x", Column[Int64]([1, 1, 1, 1], [True, True, False, True])),
+        ]
+    )
+    for aggs in [counts.copy(), mixed.copy()]:
+        var out = unsorted.group_by_dynamic("t", "1h", period="3h").agg(aggs)
+        _assert_ints(out, "t", [0, HOUR, 2 * HOUR, 3 * HOUR, 4 * HOUR])
+        _assert_ints(out, "len", [3, 2, 2, 1, 1])
+        _assert_ints(out, "count", [2, 1, 1, 1, 1])
+        _assert_ints(out, "nulls", [1, 1, 1, 0, 0])
+        # Windows that do not overlap: counts read each window's rows.
+        var single = unsorted.group_by_dynamic("t", "1h").agg(aggs)
+        _assert_ints(single, "t", [0, HOUR, 2 * HOUR, 4 * HOUR])
+        _assert_ints(single, "len", [1, 1, 1, 1])
+        _assert_ints(single, "count", [1, 1, 0, 1])
+        _assert_ints(single, "nulls", [0, 0, 1, 0])
+        var rolled = unsorted.rolling("t", "2h").agg(aggs)
+        # Rows keep input order: windows (t - 2h, t].
+        _assert_ints(rolled, "t", [4 * HOUR, 0, 2 * HOUR, HOUR])
+        _assert_ints(rolled, "len", [1, 1, 2, 2])
+        _assert_ints(rolled, "count", [1, 1, 1, 2])
+
+
+def _assert_floats(
+    frame: DataFrame, name: String, values: List[Float64], valid: List[Bool]
+) raises:
+    assert_equal(frame.height(), len(values))
+    for row in range(len(values)):
+        var cell = frame.item(row, name)
+        assert_equal(cell.is_null(), not valid[row])
+        if not valid[row]:
+            continue
+        if values[row] != values[row]:
+            assert_true(cell.float64() != cell.float64())
+        else:
+            assert_equal(cell.float64(), values[row])
+
+
+def test_overlapping_windows_reduce_from_bounds() raises:
+    """Sums, means, minimums and maximums of overlapping windows, read
+    from window bounds: nulls skipped, NaN propagating through sums and
+    ignored by extremes, all-null windows null."""
+    var nan = Float64(0) / Float64(0)
+    var frame = DataFrame(
+        [
+            _times("t", [0, HOUR, 2 * HOUR, 3 * HOUR]),
+            Series(
+                "x",
+                Column[Float64]([1.5, 0, nan, -2.0], [True, False, True, True]),
+            ),
+            Series(
+                "y", Column[Int64]([5, 0, -3, 7], [True, False, True, True])
+            ),
+            Series(
+                "z", Column[Int64]([0, 0, 1, 2], [False, False, True, True])
+            ),
+        ]
+    )
+    var aggs: List[Expr] = [
+        col("x").sum().alias("xs"),
+        col("x").mean().alias("xm"),
+        col("x").min().alias("xmin"),
+        col("x").max().alias("xmax"),
+        col("y").sum().alias("ys"),
+        col("y").mean().alias("ym"),
+        col("y").min().alias("ymin"),
+        col("y").max().alias("ymax"),
+        col("z").min().alias("zmin"),
+        col("y").count().alias("yc"),
+        col("y").var().alias("yv"),
+        col("y").var(0).alias("yv0"),
+        col("y").std().alias("ysd"),
+    ]
+    # Windows [t - 2h, t]: {0}, {0, 1}, {0, 1, 2}, {1, 2, 3}.
+    var out = frame.rolling("t", "2h", closed="both").agg(aggs)
+    var all: List[Bool] = [True, True, True, True]
+    _assert_floats(out, "xs", [1.5, 1.5, nan, nan], all)
+    _assert_floats(out, "xm", [1.5, 1.5, nan, nan], all)
+    _assert_floats(out, "xmin", [1.5, 1.5, 1.5, -2.0], all)
+    _assert_floats(out, "xmax", [1.5, 1.5, 1.5, -2.0], all)
+    _assert_ints(out, "ys", [5, 5, 2, 4])
+    _assert_floats(out, "ym", [5.0, 5.0, 1.0, 2.0], all)
+    _assert_ints(out, "ymin", [5, 5, -3, -3])
+    _assert_ints(out, "ymax", [5, 5, 5, 7])
+    _assert_ints(out, "yc", [1, 1, 2, 2])
+    assert_true(out.item(0, "zmin").is_null())
+    assert_true(out.item(1, "zmin").is_null())
+    assert_equal(out.item(2, "zmin").int64(), 1)
+    assert_equal(out.item(3, "zmin").int64(), 1)
+    _assert_floats(out, "yv", [0, 0, 32.0, 50.0], [False, False, True, True])
+    _assert_floats(out, "yv0", [0.0, 0.0, 16.0, 25.0], all)
+    assert_true(out.item(2, "ysd").float64() > 5.6568542)
+    assert_true(out.item(2, "ysd").float64() < 5.6568543)
+    assert_true(out.column("ys").dtype() == DataType.INT64)
+    assert_true(out.column("xm").dtype() == DataType.FLOAT64)
+    assert_frame(
+        frame.lazy()
+        .rolling("t", "2h", closed="both")
+        .agg(aggs)
+        .collect(engine="cpu"),
+        out,
+    )
+
+
+def test_window_reductions_of_row_expressions_and_decimals() raises:
+    """A reduction of an expression of the row (`(a / b).null_count()`) is
+    the reduction of that expression computed once per row, and a
+    decimal's minimum and maximum are those of its values, on windows
+    that overlap heavily (read from the window bounds) and on windows
+    that do not, eager and lazy, on one worker and on eight."""
+    var times = List[Int64]()
+    var a = List[Int64]()
+    var b = List[Int64]()
+    var b_valid = List[Bool]()
+    var d = List[Int64]()
+    var g = List[Int64]()
+    var w = List[Int128]()
+    for row in range(60):
+        g.append(Int64(row % 2))
+        w.append(Int128((row * 53) % 97) * 1000003 - 40000000)
+        times.append(Int64(row // 3) * 600000)
+        a.append(Int64((row * 7) % 11) - 5)
+        b.append(Int64(row % 4))
+        b_valid.append(row % 5 != 2)
+        d.append(Int64((row * 37) % 101) * 13 - 600)
+    var frame = DataFrame(
+        [
+            _times("t", times),
+            Series("g", Column[Int64](g^)),
+            Series("a", Column[Int64](a^)),
+            Series("b", Column[Int64](b^, b_valid^)),
+            Series("d", Column[Int64](d^)).with_dtype(
+                DataType.decimal(10, 2, 64)
+            ),
+            Series("w", Column[Int128](w^)).with_dtype(
+                DataType.decimal(30, 2, 128)
+            ),
+        ]
+    )
+    var aggs: List[Expr] = [
+        (col("a") / col("b")).null_count().alias("q"),
+        (col("a") * 2).sum().alias("s"),
+        (col("a") + col("b")).min().alias("lo"),
+        (col("a") - col("b")).max().alias("hi"),
+        (col("a") * col("b")).count().alias("c"),
+        (col("a").cast(DataType.FLOAT64) * 0.5).std().alias("sd"),
+        col("d").min().alias("dmin"),
+        col("d").max().alias("dmax"),
+        col("w").min().alias("wmin"),
+        col("w").max().alias("wmax"),
+    ]
+    var computed = frame.with_columns(
+        [
+            (col("a") / col("b")).alias("q_in"),
+            (col("a") * 2).alias("s_in"),
+            (col("a") + col("b")).alias("lo_in"),
+            (col("a") - col("b")).alias("hi_in"),
+            (col("a") * col("b")).alias("c_in"),
+            (col("a").cast(DataType.FLOAT64) * 0.5).alias("sd_in"),
+            col("d").cast(DataType.FLOAT64).alias("d_in"),
+            col("w").cast(DataType.FLOAT64).alias("w_in"),
+        ]
+    )
+    var plain: List[Expr] = [
+        col("q_in").null_count().alias("q"),
+        col("s_in").sum().alias("s"),
+        col("lo_in").min().alias("lo"),
+        col("hi_in").max().alias("hi"),
+        col("c_in").count().alias("c"),
+        col("sd_in").std().alias("sd"),
+        col("d_in").min().alias("dmin"),
+        col("d_in").max().alias("dmax"),
+        col("w_in").min().alias("wmin"),
+        col("w_in").max().alias("wmax"),
+    ]
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        # Six hours over rows ten minutes apart overlap heavily; ten
+        # minutes hold one time's rows.
+        for period in ["6h", "10m"]:
+            var expected = computed.rolling("t", period, group_by=["g"]).agg(
+                plain
+            )
+            var eager = frame.rolling("t", period, group_by=["g"]).agg(aggs)
+            var lazy = (
+                frame.lazy()
+                .rolling("t", period, group_by=["g"])
+                .agg(aggs)
+                .collect()
+            )
+            var results = List[DataFrame]()
+            results.append(eager^)
+            results.append(lazy^)
+            for result in results:
+                assert_true(result.column("dmin").dtype().is_decimal())
+                var floats = result.with_columns(
+                    [
+                        col("dmin").cast(DataType.FLOAT64),
+                        col("dmax").cast(DataType.FLOAT64),
+                        col("wmin").cast(DataType.FLOAT64),
+                        col("wmax").cast(DataType.FLOAT64),
+                    ]
+                )
+                assert_frame(floats, expected)
+        _ = workers^
+
+
+def test_gathered_window_aggregations_run_in_batches() raises:
+    """Aggregations without a bounds form (median, n_unique, first) over
+    windows holding many times the input's rows in all run in batches of
+    windows and give each window's own answer."""
+    var n = 200
+    var times = List[Int64](length=n, fill=0)
+    var x = List[Int64](length=n, fill=0)
+    for i in range(n):
+        times[i] = Int64(i // 50) * HOUR
+        x[i] = Int64(i)
+    var frame = DataFrame([_times("t", times), Series("x", Column[Int64](x^))])
+    var aggs: List[Expr] = [
+        col("x").median().alias("med"),
+        col("x").n_unique().alias("nu"),
+        col("x").first().alias("first"),
+    ]
+    # Windows (t - 2h, t]: rows of the same and the previous hour.
+    var out = frame.rolling("t", "2h").agg(aggs)
+    assert_equal(out.height(), n)
+    for row in [0, 49, 50, 120, 199]:
+        var hour = row // 50
+        var lo = 0 if hour == 0 else (hour - 1) * 50
+        var hi = (hour + 1) * 50
+        assert_equal(out.item(row, "nu").int64(), Int64(hi - lo))
+        assert_equal(out.item(row, "first").int64(), Int64(lo))
+        assert_equal(out.item(row, "med").float64(), Float64(lo + hi - 1) / 2.0)
+    assert_frame(
+        frame.lazy().rolling("t", "2h").agg(aggs).collect(engine="cpu"), out
+    )
+
+
+def _check_dynamic(
+    frame: DataFrame,
+    every: String,
+    period: Optional[String],
+    offset: Optional[String],
+    closed: String,
+    labels: List[Int64],
+    sums: List[Int64],
+) raises:
+    var aggs: List[Expr] = [col("x").sum().alias("s")]
+    var eager = frame.group_by_dynamic(
+        "t", every, period=period, offset=offset, closed=closed
+    ).agg(aggs)
+    _assert_ints(eager, "t", labels)
+    _assert_ints(eager, "s", sums)
+    var lazy = (
+        frame.lazy()
+        .group_by_dynamic(
+            "t", every, period=period, offset=offset, closed=closed
+        )
+        .agg(aggs)
+        .collect(engine="cpu")
+    )
+    assert_frame(lazy, eager)
+
+
+def test_dynamic_windows_step_over_empty_intervals() raises:
+    """Two rows a day apart with one-microsecond windows: the windows that
+    hold a row come out without visiting the ~8.6e10 empty ones between
+    them (#1383), with boundaries, overlaps and offsets as before."""
+    var day = Int64(86400) * 1000000
+    var frame = DataFrame(
+        [
+            Series("t", Column[Int64]([0, day])).with_dtype(
+                DataType.datetime("us")
+            ),
+            Series("x", Column[Int64]([1, 2])),
+        ]
+    )
+    var aggs: List[Expr] = [col("x").sum().alias("s")]
+
+    _check_dynamic(frame, "1us", None, None, "left", [0, day], [1, 2])
+    _check_dynamic(
+        frame,
+        "1us",
+        String("3us"),
+        None,
+        "left",
+        [0, day - 2, day - 1, day],
+        [1, 2, 2, 2],
+    )
+    _check_dynamic(
+        frame,
+        "1us",
+        String("1us"),
+        None,
+        "both",
+        [0, day - 1, day],
+        [1, 2, 2],
+    )
+    _check_dynamic(frame, "1us", None, None, "right", [-1, day - 1], [1, 2])
+    _check_dynamic(
+        frame,
+        "2us",
+        String("5us"),
+        None,
+        "none",
+        [-2, day - 4, day - 2],
+        [1, 2, 2],
+    )
+    _check_dynamic(
+        frame,
+        "1us",
+        String("3us"),
+        String("-7us"),
+        "left",
+        [-2, -1, 0, day - 2, day - 1, day],
+        [1, 1, 1, 2, 2, 2],
+    )
+    _check_dynamic(frame, "3us", String("2us"), String("1us"), "left", [], [])
+    # Grouped: each group steps over its own gap.
+    var grouped = frame.vstack(frame).hstack(
+        DataFrame([Series("g", Column[Int64]([0, 0, 1, 1]))])
+    )
+    var out = grouped.group_by_dynamic("t", "1us", group_by=["g"]).agg(aggs)
+    _assert_ints(out, "t", [0, day, 0, day])
+    _assert_ints(out, "s", [1, 2, 1, 2])
+
+
+def test_calendar_window_starts_count_from_the_origin() raises:
+    """Monthly windows start whole months after the first window, not a
+    month after the previous one, so a month-end clamp is not carried on:
+    Jan 30, Feb 29, Mar 30, Apr 30 (not Mar 29, Apr 29)."""
+    var frame = DataFrame(
+        [
+            Series("t", Column[Int64]([18291, 18351, 18382])).with_dtype(
+                DataType.DATE
+            ),
+            Series("x", Column[Int64]([1, 2, 3])),
+        ]
+    )
+    var aggs: List[Expr] = [col("x").sum().alias("s")]
+    var eager = frame.group_by_dynamic(
+        "t", "1mo", period="1d", offset="29d"
+    ).agg(aggs)
+    _assert_ints(eager, "t", [18291, 18351, 18382])
+    _assert_ints(eager, "s", [1, 2, 3])
+    var lazy = (
+        frame.lazy()
+        .group_by_dynamic("t", "1mo", period="1d", offset="29d")
+        .agg(aggs)
+        .collect(engine="cpu")
+    )
+    assert_frame(lazy, eager)

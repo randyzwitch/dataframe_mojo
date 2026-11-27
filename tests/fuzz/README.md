@@ -53,7 +53,10 @@ the oracle is adjusted, or the error is allowed:
 - Integer overflow raises here and wraps in Polars; such errors are allowed.
 - Expressions on categoricals return String, and `len`/`n_unique` return
   Int64 where Polars returns UInt32: values are compared, and integer
-  widths and categorical-versus-string are not.
+  widths and categorical-versus-string are not. The oracle casts Polars'
+  `len`, `count`, `null_count` and `n_unique` to Int64, so the generator
+  types the expressions it builds on top of them as we do (a typed null
+  of UInt32 next to a count would otherwise be an error here).
 - String functions on a categorical read its labels; the oracle casts to
   String first.
 - Mean, median, std and var of Float32 are Float64 here; the generator does
@@ -95,4 +98,6 @@ Replay a saved case (after a fix, it should print PASS):
 pixi run -e oracle python3 tests/fuzz/fuzz.py replay build/fuzz/failures/seed123
 ```
 
-Set `FUZZ_DRIVER` to use a driver built elsewhere.
+Set `FUZZ_DRIVER` to use a driver built elsewhere. Set `FUZZ_FOCUS` to a
+comma-separated list of plan step kinds (for example
+`interpolate,time_window`) to make those steps 20 times as likely.

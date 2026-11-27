@@ -139,6 +139,7 @@ from dataframe.optimizer.passes import (
     plan_prepare_dataset_projections,
     plan_push_slices,
     plan_slice_over_ipc,
+    plan_lower_whole_input_filters,
     plan_unique_as_aggregate,
 )
 from dataframe.parallel import (
@@ -1674,6 +1675,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
+            plan_lower_whole_input_filters(plan._plan)
             plan_lower_right_joins(plan._plan)
             plan_align_join_keys(plan._plan)
         var shared = List[QueryContext]()
@@ -2084,6 +2086,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
+            plan_lower_whole_input_filters(plan._plan)
             plan_lower_right_joins(plan._plan)
             plan_align_join_keys(plan._plan)
         var out = String()
@@ -2164,6 +2167,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         if not optimize:
             plan_prepare_dataset_projections(plan._plan)
             plan_unique_as_aggregate(plan._plan)
+            plan_lower_whole_input_filters(plan._plan)
             plan_lower_right_joins(plan._plan)
             plan_align_join_keys(plan._plan)
         var shared = List[QueryContext]()
@@ -2480,8 +2484,8 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         joins: List[Int],
         right_sides: List[Bool],
         columns: List[List[String]],
-    ) raises:
-        plan_narrow_join_inputs(
+    ) raises -> Bool:
+        return plan_narrow_join_inputs(
             self._plan, joins=joins, right_sides=right_sides, columns=columns
         )
 
@@ -2965,6 +2969,7 @@ def _collect_placed[
     var plan = query._optimized() if optimize else query.copy()
     if not optimize:
         plan_unique_as_aggregate(plan._plan)
+        plan_lower_whole_input_filters(plan._plan)
         plan_lower_right_joins(plan._plan)
         plan_align_join_keys(plan._plan)
     var solved = _solve_devices(

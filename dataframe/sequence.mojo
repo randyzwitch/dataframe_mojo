@@ -54,7 +54,13 @@ def _order(
 
 
 def _by_keys(node: Node, by: Series) raises -> List[Series]:
-    if node.text != "keys":
+    return _by_columns(node.text, by)
+
+
+def _by_columns(text: String, by: Series) raises -> List[Series]:
+    """The key columns a sort_by, max_by or min_by orders by: `by` itself,
+    or with `text` "keys", the fields of the struct holding several."""
+    if text != "keys":
         return [by.copy()]
     var fields = by.struct_column()
     var keys = List[Series](capacity=fields.field_count())
@@ -74,6 +80,44 @@ def extreme_row(node: Node, input: Series, other: Series) raises -> Int:
         if valid[row]:
             return row
     return -1
+
+
+def extreme_rows(
+    op: Int, text: String, by: Series, groups: List[Int], count: Int
+) raises -> List[Int]:
+    """For each of `count` groups, the row of `by` a max_by (`op`
+    EXPR_MAX_BY) or min_by picks among the group's rows, `groups[r]` being
+    row r's group and each group's rows in input order: the one at the
+    group's largest (smallest) non-null key, the first such row on ties,
+    as `extreme_row` picks over one group's rows; -1 for a group with no
+    valid key. `text` is the reduction's (`_by_columns`). Each key column
+    is ranked once over every row, as `extreme_row`'s sort ranks it, and
+    a row beats the group's best so far only on strictly earlier ranks,
+    so one pass over the rows picks every group's row."""
+    var ranks = List[List[Int]]()
+    for key in _by_columns(text, by):
+        var normalized = categorical_sort_ranks(
+            key
+        ) if key.dtype().is_categorical() else key.copy()
+        ranks.append(normalized._sort_ranks(op == EXPR_MAX_BY, True))
+    var valid = validity(by)
+    var best = List[Int](length=count, fill=-1)
+    for r in range(len(by)):
+        if not valid[r]:
+            continue
+        var g = groups[r]
+        var held = best[g]
+        if held < 0:
+            best[g] = r
+            continue
+        for k in range(len(ranks)):
+            var mine = ranks[k][r]
+            var theirs = ranks[k][held]
+            if mine != theirs:
+                if mine < theirs:
+                    best[g] = r
+                break
+    return best^
 
 
 def select_sequence(node: Node, input: Series, other: Series) raises -> Series:

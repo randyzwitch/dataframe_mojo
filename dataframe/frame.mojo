@@ -2256,8 +2256,11 @@ struct DataFrame(Copyable, Sized, Writable):
         columns the result keeps and the predicate reads, executed through
         the same pipelines as `LazyFrame.collect`. A row-wise predicate
         narrows each morsel's selection, its table filters checked against
-        the buffers' statistics first; the plan's executor evaluates any
-        other over the whole frame. `batch_size` is the plan's batch size.
+        the buffers' statistics first. A predicate holding windows or
+        reductions over every row becomes a column computed below the
+        filter, in the rounds of a sink of the plan's schedule, which the
+        filter then reads row by row. `batch_size` is the plan's batch
+        size.
         """
         if batch_size <= 0:
             raise Error("batch_size must be positive")
@@ -3769,9 +3772,12 @@ def _percent_label(q: Float64) -> String:
 struct TimeGroupBy(Copyable):
     """A snapshot plus a duration grouping request, evaluated by agg.
 
-    Overlapping membership is gathered once, then existing grouped expression
-    reducers process all windows together. Empty rolling windows are retained;
-    empty dynamic windows are omitted.
+    Each window is a range of its group's time-ordered rows. Counts, and
+    sums, means, extremes, standard deviations and variances of numeric
+    columns, are read from those ranges, so their cost does not grow with
+    how much windows overlap; other aggregations gather each window's rows
+    and run the grouped reducers. Empty rolling windows are
+    retained; empty dynamic windows are omitted.
     """
 
     var _frame: DataFrame

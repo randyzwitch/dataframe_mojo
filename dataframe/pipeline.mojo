@@ -180,7 +180,7 @@ from dataframe.kernels.gather import (
     take_parallel,
     true_rows,
 )
-from dataframe.storage.allocation import huge_list
+from dataframe.storage.allocation import check_memory, huge_list
 from dataframe.kernels.mask_filter import filter_columns
 from .parallel import Job, Rounds, morsel_ranges, run_jobs, source_tasks
 from .series import Series
@@ -1401,20 +1401,18 @@ def join_keys_need_unifying(
     those values: a file scan's dictionary keeps growing until its last
     batch, and a join that emits build rows no probe row matched emits them
     once, not per morsel. The pipeline runs it as an eager join instead."""
+    # A quick look first: with no categorical column anywhere, no key can
+    # be one. A step's key may be a column an earlier step brought in from
+    # its build side (a right semi join emits the build's rows), so every
+    # column of every build counts, not only the build keys.
     var categorical = False
     for column in frame._columns:
         categorical = categorical or column.dtype().is_categorical()
     for s in range(len(steps)):
         if steps[s].kind != STEP_JOIN or _cross_step(steps[s]):
             continue
-        ref right = joins[steps[s].join]
-        for name in steps[s].right_keys:
-            try:
-                categorical = (
-                    categorical or right.column(name).dtype().is_categorical()
-                )
-            except:
-                pass
+        for column in joins[steps[s].join]._columns:
+            categorical = categorical or column.dtype().is_categorical()
     if not categorical:
         return False
     try:
@@ -1531,9 +1529,6 @@ struct _ChunkRunner(Movable):
     # rows (a morsel read in place); -1 otherwise. Errors that name a row
     # number it from there (`DataChunk.source_row`).
     var source_rows: Int
-    # The first row of the morsel running, when it is a range of an
-    # in-memory frame's rows; -1 otherwise.
-    var frame_offset: Int
     # Whether the sink's answer depends on the order its rows come in (a
     # first or last, the position of an extreme, groups in first-appearance
     # order): a cross product then makes its pairs in the join's order, each
@@ -1590,7 +1585,6 @@ struct _ChunkRunner(Movable):
         self.scan = None
         self.scan_offset = -1
         self.source_rows = -1
-        self.frame_offset = -1
         self.ordered_pairs = False
 
     def begin_morsel(mut self) raises:
@@ -1896,7 +1890,7 @@ struct _ChunkRunner(Movable):
                 if kind == STEP_JOIN:
                     columns = self._join(columns, at)
                 else:
-                    columns = self._reshape(columns, at)
+                    columns = self._reshape(columns, at, origin)
                 self.counts[2 * n + 1 + at] += Int(perf_counter_ns()) - began
                 self.counts[2 * at + 2] += columns.height
                 origin = -1
@@ -1941,19 +1935,19 @@ struct _ChunkRunner(Movable):
             columns = self._vector_steps(columns, n, n, origin)
         return columns^
 
-    def _reshape(mut self, columns: _Columns, s: Int) raises -> _Columns:
+    def _reshape(
+        mut self, columns: _Columns, s: Int, origin: Int
+    ) raises -> _Columns:
         """An explode or unnest step over a morsel's collected columns: the
         operator over them as a frame, its output the columns the next
-        steps read."""
+        steps read. `origin` is the first row of the frame they are, when
+        they are its rows in place (`source_rows`); -1 otherwise."""
         ref step = self.steps[][s]
         var frame = columns.whole(self.arena, self.schemas[][s])
         if step.kind == STEP_EXPLODE:
-            # The first step over a morsel of a frame's rows names rows
-            # of the frame in its errors.
-            var first_row = 0
-            if s == 0 and self.scan_offset >= 0 and self.frame_offset >= 0:
-                first_row = self.frame_offset
-            frame = frame._exploded(step.names, first_row)
+            # A step over a frame's rows in place names rows of the frame
+            # in its errors.
+            frame = frame._exploded(step.names, max(origin, 0))
         else:
             frame = frame._unnested(step.names[0])
         return _Columns.of_frame(self.arena, frame)
@@ -3009,6 +3003,9 @@ struct _PipelineJob(Job):
                 return
             var k = self.first_morsel + taken
             self.morsel = k
+            # A morsel's rows add to the sink's tables: the memory limit is
+            # checked before each, and crossing it fails the morsel.
+            check_memory()
             var offset = self.ranges[][2 * taken]
             var length = self.ranges[][2 * taken + 1]
             self.runner.begin_sink(k, offset, length)
@@ -3029,9 +3026,7 @@ struct _PipelineJob(Job):
                 var source = _Columns.of_frame(self.runner.arena, morsel)
                 self._sink_from(source^, k, offset)
                 continue
-            self.runner.frame_offset = offset
             self._morsel(morsel, k, offset, length)
-            self.runner.frame_offset = -1
 
     def _run_source(mut self) raises:
         """Batches from the file source until it is done: each is taken under
@@ -3047,6 +3042,7 @@ struct _PipelineJob(Job):
             var batch = next.take()
             var k = batch.number
             self.morsel = k
+            check_memory()
             var morsel = ScanSource.frame_at(source, batch^)
             var length = morsel.height()
             self.runner.begin_sink(k, 0, length)
@@ -3292,9 +3288,14 @@ struct _PipelineJob(Job):
                     gathered._field_metadata = column._field_metadata
                     columns.append(gathered^)
                 else:
-                    columns.append(
-                        Series.full_null(column.name(), column.dtype(), n)
+                    # The probe column's rows: null here, but the same
+                    # field as the probe's own output, so they stack with
+                    # it.
+                    var nulls = Series.full_null(
+                        column.name(), column.dtype(), n
                     )
+                    nulls._field_metadata = column._field_metadata
+                    columns.append(nulls^)
         var right_keys = List[Int]()
         for key in step.right_keys:
             right_keys.append(right._index(key))

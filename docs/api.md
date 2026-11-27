@@ -1733,6 +1733,22 @@ Mean of the inputs in each row: Float32 when their common type is Float32, other
 def mean_horizontal(exprs: List[Expr], ignore_nulls: Bool = True) -> Expr
 ```
 
+## `memory_limit`
+
+The memory limit in bytes (`Int64.MAX` when there is none): the last `set_memory_limit`, else `DATAFRAME_MEMORY_LIMIT`, else 80% of the memory available to the process: physical memory, or the memory limit of the control group it runs in when that is lower.
+
+```mojo
+def memory_limit() -> Int
+```
+
+## `memory_usage`
+
+Bytes the engine holds against the memory limit: column buffers, hash table and aggregate blocks, and freed blocks kept for reuse.
+
+```mojo
+def memory_usage() -> Int
+```
+
 ## `min_horizontal`
 
 Least input in each row, at the inputs' common type. Nulls and NaN are skipped; a row with no other value is null (NaN when only NaN).
@@ -2120,6 +2136,18 @@ A named column of one supported dtype, plus expression-backed methods.
   Return a new series with other's rows after this one's.
 - `def reverse(self) -> Self`
 
+## `set_memory_limit`
+
+Limit the memory the engine holds to `bytes`; 0 or less removes the limit. Work that would go over it raises an `out of memory` error. Tables already held count toward it, so a limit below what the program holds makes the next query fail.
+
+```mojo
+def set_memory_limit(bytes: Int)
+```
+
+```mojo
+def set_memory_limit(text: String)
+```
+
 ## `SliceIterator`
 
 Yield zero-copy frame slices lazily; retain buffers after iteration.
@@ -2331,9 +2359,12 @@ def time(hour: Expr = Int(0), minute: Expr = Int(0), second: Expr = Int(0), micr
 
 A snapshot plus a duration grouping request, evaluated by agg.
 
-Overlapping membership is gathered once, then existing grouped expression
-reducers process all windows together. Empty rolling windows are retained;
-empty dynamic windows are omitted.
+Each window is a range of its group's time-ordered rows. Counts, and
+sums, means, extremes, standard deviations and variances of numeric
+columns, are read from those ranges, so their cost does not grow with
+how much windows overlap; other aggregations gather each window's rows
+and run the grouped reducers. Empty rolling windows are
+retained; empty dynamic windows are omitted.
 
 - `def agg(self, expression: Expr, *, batch_size: Int = Int(1024)) -> DataFrame`
 - `def agg(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> DataFrame`

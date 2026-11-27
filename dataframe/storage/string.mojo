@@ -790,6 +790,10 @@ struct StringColumn(Copyable, Sized):
         var views = List[StringView](unsafe_uninit_length=n)
         var words = views.unsafe_ptr().unsafe_bitcast[UInt64]()
         var missing = False
+        # Whether any view points into the byte buffer: when every value is
+        # inline the result does not hold the buffer, whose bytes it never
+        # reads.
+        var external = False
         for k in range(n):
             var row = rows.unsafe_offset(k)[]
             if row != -1:
@@ -821,6 +825,7 @@ struct StringColumn(Copyable, Sized):
                         32 + 8 * b
                     )
                 high = UInt64(start) << 32
+                external = True
             words.unsafe_offset(2 * k)[] = low
             words.unsafe_offset(2 * k + 1)[] = high
         var bits = List[UInt8]()
@@ -834,10 +839,11 @@ struct StringColumn(Copyable, Sized):
                 ):
                     bits[at >> 3] |= UInt8(1) << UInt8(at & 7)
         var buffers = List[_Buffer[UInt8]]()
-        buffers.append(self._bytes.copy())
-        var result = Self(
-            StringViewStorage(views^, buffers^, bits^, n, len(self._bytes[]))
-        )
+        var held = 0
+        if external:
+            buffers.append(self._bytes.copy())
+            held = len(self._bytes[])
+        var result = Self(StringViewStorage(views^, buffers^, bits^, n, held))
         self._carry_codes(result, indices, first, last, base, shared)
         return result^
 

@@ -37,13 +37,24 @@ from std.collections import Optional
 from std.memory import ArcPointer, Pointer, unsafe_memcpy
 
 from dataframe.aggregation.expressions import _bind_all
-from dataframe.binding import ROWS
-from dataframe.execution import WindowLayouts, _used_columns, evaluate
+from dataframe.binding import ROWS, SCALAR, BoundExpr, bind
+from dataframe.execution import (
+    WindowLayouts,
+    _row_local_nodes,
+    _used_columns,
+    evaluate,
+)
 from dataframe.expr import (
     Expr,
     COL,
+    Node,
     OVER,
+    OVER_MAPPING_MASK,
+    _set_node_children,
+    col,
+    node_children,
     split_names,
+    subtree,
 )
 from dataframe.frame import DataFrame
 from dataframe.kernels.gather import (
@@ -59,6 +70,7 @@ from dataframe.selectors import expand_all
 from dataframe.series import Series
 from dataframe.sorting.sort_key import STANDARD_VECTOR_SIZE
 from dataframe.storage.allocation import huge_uninit, release_huge
+from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.column import Column
 from dataframe.window_sort import _integer_key, bin_partition_groups
 
@@ -69,9 +81,9 @@ comptime _MERGE = 2
 comptime _GATHER = 3
 comptime _DONE = 4
 
-# Bins are the top bits of the key hash. There are at least 16, so the
-# threads have bins to pick from when partitions differ in size, and at
-# most 256, so a bin fits in a byte a row and a task's per-bin cursors
+# Bins are the top bits of the key hash. There are at least 16, and at
+# least two a thread, so the threads have bins to pick from when
+# partitions differ in size, and at most 256, so a bin fits in a byte a row and a task's per-bin cursors
 # stay small. Between those, the bits grow two at a time while a bin
 # would average more rows than one row group (122,880 rows): a bin's rows
 # are evaluated by one thread, and bins of bounded size keep any one of
@@ -79,6 +91,10 @@ comptime _DONE = 4
 comptime _FIRST_BITS = 4
 comptime _MOST_BITS = 8
 comptime _BIN_ROWS = 122880
+# Rows a projection's evaluation reads at a time (the batch size of the bins'
+# evaluation and of the projection over every row): the sink tasks compute
+# the windows' arguments over ranges that start at its multiples.
+comptime _ARGUMENT_BATCH = 8192
 
 
 def _column_at(columns: List[Series], name: String) -> Int:
@@ -281,6 +297,138 @@ def _gather_values(
     raise Error("window result column has no fixed-width storage")
 
 
+def _boolean(series: Series) -> Bool:
+    """Whether the column's values are bits, one a row, that a task can
+    read at any row (a column of one repeated value aside)."""
+    return series._data.isa[BoolColumn]() and not (
+        series._data[BoolColumn].is_constant()
+    )
+
+
+def _gather_bits(
+    output: Int,
+    lo: Int,
+    hi: Int,
+    bins: Int,
+    inverse: Int,
+    before: Int,
+    values: List[Int],
+    valid: List[Int],
+    first_bit: List[Int],
+    out_bits: Int,
+):
+    """Output rows [lo, hi) of one sink task for a Boolean result: row r's
+    value is bit first_bit[bin] + before[bin] + inverse[r] of its bin's
+    value bits (at values[bin]), set in the output bits at `output`; its
+    validity, when `out_bits` holds an address, from the same bit of that
+    bin's validity bits (valid[bin], 0 for none). `lo` is a multiple of 8,
+    so the task writes whole bytes no other task writes."""
+    var bin_of = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bins)
+    var within = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=inverse)
+    var skip = Pointer[Int, MutAnyOrigin](unsafe_from_address=before)
+    var out = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=output)
+    for r in range(lo, hi):
+        var b = Int(bin_of[unsafe_offset=r])
+        var at = (
+            first_bit[b] + skip[unsafe_offset=b] + Int(within[unsafe_offset=r])
+        )
+        var bit = (
+            Pointer[UInt8, MutAnyOrigin](unsafe_from_address=values[b])[
+                unsafe_offset=at // 8
+            ]
+            >> UInt8(at % 8)
+        ) & 1
+        out[unsafe_offset=r // 8] |= bit << UInt8(r % 8)
+    if out_bits == 0:
+        return
+    var bits = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=out_bits)
+    for r in range(lo, hi):
+        var b = Int(bin_of[unsafe_offset=r])
+        var ok = True
+        if valid[b] != 0:
+            var at = (
+                first_bit[b]
+                + skip[unsafe_offset=b]
+                + Int(within[unsafe_offset=r])
+            )
+            ok = (
+                Pointer[UInt8, MutAnyOrigin](unsafe_from_address=valid[b])[
+                    unsafe_offset=at // 8
+                ]
+                >> UInt8(at % 8)
+            ) & 1 == 1
+        if ok:
+            bits[unsafe_offset=r // 8] |= UInt8(1) << UInt8(r % 8)
+
+
+def _argument_nodes(
+    inner: BoundExpr,
+    index: Int,
+    local: List[Bool],
+    mut nodes: List[Node],
+    mut arguments: List[Expr],
+    taken: List[String],
+) raises -> Int:
+    """Node `index` of a window's argument `inner` into `nodes`, each
+    largest row-local subexpression with a value per row (not a bare
+    column) replaced by a column of its own, added to `arguments` under
+    that column's name: the subexpressions, in the order, that the
+    window's evaluation computes over every row before it partitions
+    them (`_project_arguments` in dataframe.execution)."""
+    var node = inner.expr._nodes[index].copy()
+    if local[index] and inner.shapes[index] == ROWS and node.op != COL:
+        var name = String("\x1fwindow argument:") + String(len(arguments))
+        while name in taken:
+            name += ":"
+        arguments.append(subtree(inner.expr, index).alias(name))
+        nodes.append(col(name)._nodes[0].copy())
+        return len(nodes) - 1
+    var children = node_children(node)
+    for k in range(len(children)):
+        children[k] = _argument_nodes(
+            inner, children[k], local, nodes, arguments, taken
+        )
+    _set_node_children(node, children)
+    nodes.append(node^)
+    return len(nodes) - 1
+
+
+def _window_nodes(
+    expr: Expr,
+    index: Int,
+    columns: List[Series],
+    mut nodes: List[Node],
+    mut arguments: List[Expr],
+    taken: List[String],
+) raises -> Int:
+    """Node `index` of `expr` into `nodes`, the arguments of every over()
+    read from columns of their own (`_argument_nodes`), except where its
+    evaluation computes none: an over() that maps its values to rows
+    another way, or of a value that is one for every row."""
+    var node = expr._nodes[index].copy()
+    if node.op == OVER and (node.integer & OVER_MAPPING_MASK) == 0:
+        var inner = bind(subtree(expr, node.left), columns)
+        if inner.shape() != SCALAR:
+            node.left = _argument_nodes(
+                inner,
+                len(inner.expr._nodes) - 1,
+                _row_local_nodes(inner.expr),
+                nodes,
+                arguments,
+                taken,
+            )
+            nodes.append(node^)
+            return len(nodes) - 1
+    var children = node_children(node)
+    for k in range(len(children)):
+        children[k] = _window_nodes(
+            expr, children[k], columns, nodes, arguments, taken
+        )
+    _set_node_children(node, children)
+    nodes.append(node^)
+    return len(nodes) - 1
+
+
 struct WindowSink(Movable, Rounds):
     """A SELECT or WITH_COLUMNS of window functions over `input`, split by
     the windows' shared partition keys (`shared_partition_keys` in
@@ -306,6 +454,17 @@ struct WindowSink(Movable, Rounds):
     var expanded: List[Expr]
     var evaluated: List[Expr]
     var place: List[Int]
+    # The windows' row-local arguments (`_window_nodes`), each under the
+    # name of the column the evaluated expressions read it from; by
+    # argument, its place among the read columns; by argument and sink
+    # task, the task's rows of an argument that is not fixed-width; and by
+    # sink task, the first argument its rows failed on (-1 for none) and
+    # the error.
+    var arguments: List[Expr]
+    var argument_reads: List[Int]
+    var computed: List[List[Series]]
+    var argument_failed: List[Int]
+    var argument_errors: List[String]
     # By row: its bin, and its place among its sink task's rows in that
     # bin (32 bits: a taller input runs whole, see `_start`).
     var bin_of: List[UInt8]
@@ -348,6 +507,10 @@ struct WindowSink(Movable, Rounds):
     # and each gather task's piece, for the columns not filled by row.
     var outputs: List[Series]
     var fixed: List[Bool]
+    # By evaluated expression: whether it is filled by row from Boolean
+    # results' bits, then its output's value bits.
+    var bits_out: List[Bool]
+    var out_values: List[List[UInt8]]
     var values_at: List[List[Int]]
     var valid_at: List[List[Int]]
     var first_bit: List[List[Int]]
@@ -376,6 +539,11 @@ struct WindowSink(Movable, Rounds):
         self.expanded = List[Expr]()
         self.evaluated = List[Expr]()
         self.place = List[Int]()
+        self.arguments = List[Expr]()
+        self.argument_reads = List[Int]()
+        self.computed = List[List[Series]]()
+        self.argument_failed = List[Int]()
+        self.argument_errors = List[String]()
         self.bin_of = List[UInt8]()
         self.inverse = List[UInt32]()
         self.starts = List[List[Int]]()
@@ -395,6 +563,8 @@ struct WindowSink(Movable, Rounds):
         self.next = Atomic[Int64](0)
         self.outputs = List[Series]()
         self.fixed = List[Bool]()
+        self.bits_out = List[Bool]()
+        self.out_values = List[List[UInt8]]()
         self.values_at = List[List[Int]]()
         self.valid_at = List[List[Int]]()
         self.first_bit = List[List[Int]]()
@@ -446,7 +616,9 @@ struct WindowSink(Movable, Rounds):
             return 0
         self.expanded = expand_all(self.exprs, columns)
         var names = List[String]()
-        var used = List[Bool](length=len(columns), fill=False)
+        var taken = List[String]()
+        for column in columns:
+            taken.append(column.name())
         for expr in self.expanded:
             if expr._name in names:
                 raise Error("Duplicate expression output name: " + expr._name)
@@ -459,17 +631,48 @@ struct WindowSink(Movable, Rounds):
                 self.place.append(-1)
                 continue
             self.place.append(len(self.evaluated))
-            self.evaluated.append(expr.copy())
-            var reads = _used_columns(expr, columns)
-            for c in range(len(columns)):
+            # The windows' arguments are computed by the sink tasks, over
+            # the rows in input order (`_sink`), and read as columns.
+            var nodes = List[Node]()
+            _ = _window_nodes(
+                expr,
+                len(expr._nodes) - 1,
+                columns,
+                nodes,
+                self.arguments,
+                taken,
+            )
+            self.evaluated.append(Expr(nodes^, expr._name))
+        # The input columns, then each argument's (no rows: its type).
+        var typed = columns.copy()
+        if len(self.arguments) > 0:
+            var empty = List[Series](capacity=len(columns))
+            for column in columns:
+                empty.append(column.slice(0, 0))
+            for argument in self.arguments:
+                typed.append(
+                    evaluate(bind(argument, empty), empty, 0).renamed(
+                        argument._name
+                    )
+                )
+        var used = List[Bool](length=len(typed), fill=False)
+        for expr in self.evaluated:
+            var reads = _used_columns(expr, typed)
+            for c in range(len(typed)):
                 used[c] = used[c] or reads[c]
+        self.argument_reads = List[Int](length=len(self.arguments), fill=-1)
         var rows_needed = False
-        for c in range(len(columns)):
+        for c in range(len(typed)):
             if not used[c]:
                 continue
-            ref column = columns[c]
+            ref column = typed[c]
+            var computed = c >= len(columns)
+            if computed:
+                self.argument_reads[c - len(columns)] = len(self.reads)
             self.reads.append(column.copy())
-            var sample = _contiguous(column, 0, 1)
+            var sample = column.copy() if computed else _contiguous(
+                column, 0, 1
+            )
             var fixed = _fixed_width(sample)
             self.placed_fixed.append(fixed)
             rows_needed = rows_needed or not fixed
@@ -477,9 +680,10 @@ struct WindowSink(Movable, Rounds):
                 _allocate(sample, self.height) if fixed else sample.copy()
             )
             # Every place gets its byte from the sink task that owns it.
+            # An argument's nulls are known only once it is computed.
             self.placed_valid.append(
                 List[UInt8](unsafe_uninit_length=self.height) if fixed
-                and column.null_count() > 0 else List[UInt8]()
+                and (computed or column.null_count() > 0) else List[UInt8]()
             )
         if rows_needed:
             self.placed_rows = huge_uninit[Int](self.height)
@@ -503,15 +707,37 @@ struct WindowSink(Movable, Rounds):
             samples.append(_contiguous(key, 0, 1))
         if len(self.shared_texts) > 0 and not _integer_key(samples):
             self.placed_hashes = huge_uninit[UInt64](self.height)
+        # At least two bins a thread, so no thread waits for a bin while
+        # others still have two to take.
+        while (
+            self.bits < _MOST_BITS
+            and (1 << self.bits) < 2 * configured_workers()
+        ):
+            self.bits = min(self.bits + 2, _MOST_BITS)
         while self.bits < _MOST_BITS and (self.height >> self.bits) > _BIN_ROWS:
             self.bits = min(self.bits + 2, _MOST_BITS)
-        var blocks = (
-            self.height + STANDARD_VECTOR_SIZE - 1
-        ) // STANDARD_VECTOR_SIZE
-        var tasks = max(1, min(configured_workers(), blocks))
         # Ranges start at multiples of 8 rows, so the gather tasks that
-        # fill them again write disjoint bytes of validity bits.
-        self.bounds = partitions(self.height, tasks, 8)
+        # fill them again write disjoint bytes of validity bits; with
+        # arguments to compute, at multiples of the evaluation's batch, so
+        # each task's batches are those of an evaluation over every row.
+        var align = (
+            _ARGUMENT_BATCH if len(self.arguments) > 0 else STANDARD_VECTOR_SIZE
+        )
+        var blocks = (self.height + align - 1) // align
+        var tasks = max(1, min(configured_workers(), blocks))
+        self.bounds = partitions(
+            self.height,
+            tasks,
+            _ARGUMENT_BATCH if len(self.arguments) > 0 else 8,
+        )
+        self.computed = List[List[Series]](
+            length=len(self.arguments),
+            fill=List[Series](
+                length=tasks, fill=Series("", Column[Int64](List[Int64]()))
+            ),
+        )
+        self.argument_failed = List[Int](length=tasks, fill=-1)
+        self.argument_errors = List[String](length=tasks, fill=String())
         self.bin_of = huge_uninit[UInt8](self.height)
         self.inverse = huge_uninit[UInt32](self.height)
         self.starts = List[List[Int]](length=tasks, fill=List[Int]())
@@ -530,6 +756,32 @@ struct WindowSink(Movable, Rounds):
             self.counts[task] = counts^
             self.starts[task] = starts^
             return
+        # The windows' arguments over the range's rows, in the order an
+        # evaluation over every row computes them, each in batches from
+        # the range's first row (a multiple of the batch), so a task meets
+        # the faults of its rows in that evaluation's order. Rows are
+        # numbered as the input's.
+        var values = List[Series](capacity=len(self.arguments))
+        if len(self.arguments) > 0:
+            var slices = List[Series](capacity=len(self.input._columns))
+            for column in self.input._columns:
+                slices.append(column.slice(lo, n))
+            for a in range(len(self.arguments)):
+                try:
+                    var bound = bind(self.arguments[a], slices)
+                    bound.first_row = lo
+                    var value = evaluate(
+                        bound, slices, n, batch_size=_ARGUMENT_BATCH
+                    )
+                    values.append(
+                        value.rechunk() if value.is_chunked() else value^
+                    )
+                except e:
+                    self.argument_failed[task] = a
+                    self.argument_errors[task] = String(e)
+                    self.counts[task] = counts^
+                    self.starts[task] = starts^
+                    return
         # Every row is hashed: the first key column writes each.
         var hashes = List[UInt64](unsafe_uninit_length=n)
         var out = Int(hashes.unsafe_ptr())
@@ -569,16 +821,31 @@ struct WindowSink(Movable, Rounds):
                     unsafe_offset=starts[Int(bin_of[unsafe_offset=r])]
                     + Int(inverse[unsafe_offset=r])
                 ] = r
+        var argument_of = List[Int](length=len(self.reads), fill=-1)
+        for a in range(len(self.arguments)):
+            if self.argument_reads[a] >= 0:
+                argument_of[self.argument_reads[a]] = a
         for c in range(len(self.reads)):
+            var a = argument_of[c]
             if not self.placed_fixed[c]:
+                if a >= 0:
+                    self.computed[a][task] = values[a].copy()
                 continue
-            var source = _contiguous(self.reads[c], lo, hi)
+            var source: Series
+            var shift: Int
+            if a >= 0:
+                # The range's rows only: row r at r - lo.
+                source = values[a].copy()
+                shift = lo
+            else:
+                source = _contiguous(self.reads[c], lo, hi)
+                shift = lo if self.reads[c].is_chunked() else 0
             var valid = 0
             if len(self.placed_valid[c]) > 0:
                 valid = Int(self.placed_valid[c].unsafe_ptr())
             _place_values(
                 source,
-                lo if self.reads[c].is_chunked() else 0,
+                shift,
                 lo,
                 hi,
                 Int(bin_of),
@@ -593,6 +860,32 @@ struct WindowSink(Movable, Rounds):
     def _start_merge(mut self) raises -> Int:
         var bins = 1 << self.bits
         var tasks = len(self.counts)
+        # Each argument is computed over every row before the next: the
+        # fault raised is the earliest argument's, in the first range that
+        # meets one.
+        var failed = -1
+        for t in range(tasks):
+            var a = self.argument_failed[t]
+            if a >= 0 and (failed < 0 or a < self.argument_failed[failed]):
+                failed = t
+        if failed >= 0:
+            raise Error(self.argument_errors[failed])
+        # An argument that is not fixed-width as one column of every row,
+        # which the bins take their rows of.
+        for a in range(len(self.arguments)):
+            var c = self.argument_reads[a]
+            if c < 0 or self.placed_fixed[c]:
+                continue
+            var pieces = List[Series](capacity=tasks)
+            for t in range(tasks):
+                if self.bounds[t + 1] > self.bounds[t]:
+                    pieces.append(self.computed[a][t].copy())
+            var whole = (
+                pieces[0].copy() if len(pieces)
+                == 1 else Series._from_chunks(pieces).rechunk()
+            )
+            self.reads[c] = whole.renamed(self.arguments[a]._name)
+        self.computed = List[List[Series]]()
         self.sizes = List[Int](length=bins, fill=0)
         self.before = List[List[Int]](
             length=tasks, fill=List[Int](length=bins, fill=0)
@@ -695,17 +988,19 @@ struct WindowSink(Movable, Rounds):
             self.results[b] = columns^
 
     def _start_gather(mut self) raises -> Int:
+        # The arguments' faults were raised after the sink round. A bin
+        # can still fail in a window over its rows or in a step above the
+        # windows; bins run apart from one another, so the error raised is
+        # that of the failing bin holding the earliest row.
+        var any = False
         for b in range(len(self.failed)):
-            if self.failed[b]:
-                # A bin evaluates its rows node by node apart from the
-                # others, so the fault it meets first need not be the one
-                # an evaluation of every row meets first (each node over
-                # every row before the next), whose error is the
-                # projection's: it names the row as the input numbers it.
-                # That evaluation raises it; the bin's error is kept for
-                # an input it would not fail on.
-                _ = self._eager()
-                raise Error(self.failed[b].value())
+            any = any or Bool(self.failed[b])
+        if any:
+            var bin_of = self.bin_of.unsafe_ptr()
+            for r in range(self.height):
+                var b = Int(bin_of[unsafe_offset=r])
+                if self.failed[b]:
+                    raise Error(self.failed[b].value())
         # The placed columns are no longer read.
         self.placed = List[Series]()
         if len(self.placed_hashes) > 0:
@@ -730,11 +1025,29 @@ struct WindowSink(Movable, Rounds):
                 nulls = nulls or self.results[b][k].null_count() > 0
             ref sample = self.results[first][k]
             var fixed = _fixed_width(sample)
+            var boolean = not fixed
+            for b in self.order:
+                boolean = boolean and _boolean(self.results[b][k])
             self.fixed.append(fixed)
+            self.bits_out.append(boolean)
+            self.out_values.append(
+                List[UInt8](
+                    length=(self.height + 7) // 8, fill=0
+                ) if boolean else List[UInt8]()
+            )
             var values = List[Int](length=bins, fill=0)
             var valid = List[Int](length=bins, fill=0)
             var first_bit = List[Int](length=bins, fill=0)
-            if fixed:
+            if boolean:
+                for b in self.order:
+                    ref column = self.results[b][k]._data[BoolColumn]
+                    values[b] = Int(column.unsafe_values())
+                    if column.null_count() > 0:
+                        valid[b] = Int(column.unsafe_validity())
+                    first_bit[b] = column.validity_offset()
+                self.outputs.append(sample.copy())
+                self.combined.append(sample.copy())
+            elif fixed:
                 for b in self.order:
                     var parts = _value_parts(self.results[b][k])
                     values[b] = parts[0]
@@ -757,7 +1070,9 @@ struct WindowSink(Movable, Rounds):
             self.valid_at.append(valid^)
             self.first_bit.append(first_bit^)
             self.out_bits.append(
-                List[UInt8](length=(self.height + 7) // 8, fill=0) if fixed
+                List[UInt8](length=(self.height + 7) // 8, fill=0) if (
+                    fixed or boolean
+                )
                 and nulls else List[UInt8]()
             )
         var tasks = len(self.bounds) - 1
@@ -780,6 +1095,23 @@ struct WindowSink(Movable, Rounds):
                     bits = Int(self.out_bits[k].unsafe_ptr())
                 _gather_values(
                     self.outputs[k],
+                    lo,
+                    hi,
+                    Int(bin_of),
+                    Int(inverse),
+                    Int(before),
+                    self.values_at[k],
+                    self.valid_at[k],
+                    self.first_bit[k],
+                    bits,
+                )
+                continue
+            if self.bits_out[k]:
+                var bits = 0
+                if len(self.out_bits[k]) > 0:
+                    bits = Int(self.out_bits[k].unsafe_ptr())
+                _gather_bits(
+                    Int(self.out_values[k].unsafe_ptr()),
                     lo,
                     hi,
                     Int(bin_of),
@@ -815,6 +1147,18 @@ struct WindowSink(Movable, Rounds):
                     var bits = List[UInt8]()
                     swap(bits, self.out_bits[k])
                     _set_bits(self.outputs[k], bits^)
+                continue
+            if self.bits_out[k]:
+                var values = List[UInt8]()
+                swap(values, self.out_values[k])
+                var bits = List[UInt8]()
+                swap(bits, self.out_bits[k])
+                var output = Series(
+                    self.outputs[k].name(),
+                    BoolColumn(values=values^, bits=bits^, length=self.height),
+                )
+                output._field_metadata = self.outputs[k]._field_metadata
+                self.outputs[k] = output^
                 continue
             # Each gather task made one piece per column not filled by
             # row, in column order.
