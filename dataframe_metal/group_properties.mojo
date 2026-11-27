@@ -6,7 +6,7 @@ actual group, checks its cardinality limit, and computes the complete result.
 from std.bit import next_power_of_two
 from std.collections import Dict
 from std.random.philox import Random
-from dataframe import DataFrame, DataType, LazyFrame, Series
+from dataframe import Column, DataFrame, DataType, LazyFrame, Series
 
 
 def group_properties(region: LazyFrame, key: String) raises -> String:
@@ -94,44 +94,101 @@ struct GroupSample(Copyable, Movable):
         )
 
 
+def _extend_sample[
+    D: DType
+](
+    source: Series,
+    positions: List[Int],
+    mut codes: List[Int],
+    mut nulls: List[Bool],
+) raises -> Int:
+    # A pair of the previous tuple's code and the next signed integer identifies
+    # a new tuple exactly. Complementing the nonnegative prefix marks a null at
+    # this position, leaving every Int64 value available as a real key.
+    var seen = Dict[Tuple[Int, Int64], Int]()
+    var at = 0
+    while at < len(positions):
+        # Borrow only the next sampled array. A column may have more physical
+        # chunks than there are samples, so building views for all is unbounded.
+        var position = positions[at]
+        var window = source._chunk_at(position) if source.is_chunked() else (
+            source.copy(),
+            position,
+        )
+        var base = position - window[1]
+        ref column = window[0]._data[Column[Scalar[D]]]
+        var end = base + len(column)
+        var constant = column.is_constant()
+        while at < len(positions) and positions[at] < end:
+            var row = positions[at] - base
+            var present = (
+                column.constant_valid() if constant else column.is_valid(row)
+            )
+            var prefix = codes[at]
+            var value = Int64(0)
+            if present:
+                value = Int64(
+                    column.constant_value() if constant else column._get(row)
+                )
+            else:
+                prefix = ~prefix
+                nulls[at] = True
+            var key = (prefix, value)
+            var code = seen.get(key, -1)
+            if code < 0:
+                code = len(seen)
+                seen[key] = code
+            codes[at] = code
+            at += 1
+    return len(seen)
+
+
 def sample_group_tuples(
     frame: DataFrame, keys: List[String]
 ) raises -> GroupSample:
-    var columns = List[Series]()
+    var population = frame.height()
+    var samples = min(4096, population)
+    var columns = List[Series](capacity=len(keys))
+    var chunked = False
     for key in keys:
-        columns.append(frame.column(key))
-    var samples = min(4096, frame.height())
-    var counts = Dict[String, Int]()
-    var nulls = 0
-    var hottest = 0
+        var column = frame.column(key)
+        chunked = chunked or column.is_chunked()
+        columns.append(column^)
+    var positions = List[Int](capacity=samples)
     var random = Random(seed=0x9E3779B97F4A7C15)
     for i in range(samples):
         var row = i
-        if frame.height() > 4096:
+        if samples < population:
             var draw = random.step()
             var value = (UInt64(draw[0]) << 32) | UInt64(draw[1])
-            row = Int(value % UInt64(frame.height()))
-        var identity = String()
-        var has_null = False
-        for column in columns:
-            var item = column.get(row)
-            if item.is_null():
-                identity += ":null"
-                has_null = True
-            else:
-                var value = (
-                    Int64(item.int32()) if column.dtype()
-                    == DataType.INT32 else item.int64()
-                )
-                identity += ":v" + String(value)
-        if has_null:
-            nulls += 1
-        if identity in counts:
-            counts[identity] += 1
+            row = Int(value % UInt64(population))
+        positions.append(row)
+    # Counts are independent of visit order. Sorting the bounded sample lets
+    # each key walk its own physical chunks once, even at different boundaries.
+    if chunked and samples < population:
+        sort(positions)
+    var codes = List[Int](length=samples, fill=0)
+    var has_null = List[Bool](length=samples, fill=False)
+    var distinct = Int(samples > 0)
+    for column in columns:
+        if column.dtype() == DataType.INT32:
+            distinct = _extend_sample[DType.int32](
+                column, positions, codes, has_null
+            )
+        elif column.dtype() == DataType.INT64:
+            distinct = _extend_sample[DType.int64](
+                column, positions, codes, has_null
+            )
         else:
-            counts[identity] = 1
-        hottest = max(hottest, counts[identity])
-    return GroupSample(len(counts), hottest, nulls, samples, frame.height())
+            raise Error("Grouped Metal samples require integer keys")
+    var counts = List[Int](length=distinct, fill=0)
+    var hottest = 0
+    var nulls = 0
+    for i in range(samples):
+        counts[codes[i]] += 1
+        hottest = max(hottest, counts[codes[i]])
+        nulls += Int(has_null[i])
+    return GroupSample(distinct, hottest, nulls, samples, population)
 
 
 def sample_group_stride_reuse(

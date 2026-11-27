@@ -14,7 +14,7 @@ from .distinct_layout import DISTINCT_CAPACITY_FAULT, MAX_DISTINCT_CAPACITY
 from .distinct_metadata import distinct_descriptor
 from .distinct_plan import DistinctPlan
 from .group_layout import GENERAL_TABLE_LIMIT, GROUP_CAPACITY_FAULT
-from .group_properties import sample_group_tuples
+from .distinct_sizing import chunked_distinct_capacities
 
 
 def execute_chunked_distinct(
@@ -51,10 +51,9 @@ def execute_chunked_distinct(
                 )
             )
         var spans = intersect_numeric_views(columns, frame.height())
-        var groups = sample_group_tuples(
-            frame, plan.keys.value().names
-        ).capacity()
-        var values = 16384
+        var sizes = chunked_distinct_capacities(frame, key, field.column)
+        var groups = sizes[0]
+        var values = sizes[1]
         var record_words = 3 + Int(field.dtype == DataType.INT64)
         timings.upload_ns += Int(perf_counter_ns()) - started
 
@@ -135,7 +134,10 @@ def execute_chunked_distinct(
                     raise data_fault(
                         "exact distinct exceeded bounded group/value table capacity"
                     )
-                groups = GENERAL_TABLE_LIMIT
+                if control[1] & GROUP_CAPACITY_FAULT:
+                    # A missing group can hide unseen pairs. Reserve room for
+                    # both tables when group discovery itself was incomplete.
+                    groups = GENERAL_TABLE_LIMIT
                 values = MAX_DISTINCT_CAPACITY
                 continue
             if control[1] or control[2] != UInt32(len(spans)):

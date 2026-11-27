@@ -9,6 +9,7 @@ from .group_state import atomic_or
 from .multi_reduce import Bytes
 from .ordered_value import ordered_bits
 from .word_group import claim_word_group
+from ...group_layout import GROUP_CAPACITY_FAULT
 from ...distinct_layout import DISTINCT_CAPACITY_FAULT, MAX_DISTINCT_PROBES
 
 comptime Words = Pointer[UInt32, MutUntrackedOrigin]
@@ -43,14 +44,16 @@ def chunked_distinct_partials(
         return
     if row == 0:
         _ = Atomic[UInt32].fetch_add(scratch.unsafe_offset(2), UInt32(1))
-    if Atomic[UInt32].load(scratch.unsafe_offset(1)):
-        return
     var group_table = scratch.unsafe_offset(4 + 3 * Int(groups))
     var key_valid = distinct_valid(key_bits, key_descriptor, row)
     var key = keys.unsafe_bitcast[UInt32]()[
         unsafe_offset=row
     ] if key_valid else UInt32(0)
-    var group = claim_word_group(key, key_valid, group_table, groups, scratch)
+    # Finish discovering groups even if the value table filled earlier.
+    # The host can then retain the original group table on a value-only retry.
+    var group = claim_word_group[GROUP_CAPACITY_FAULT](
+        key, key_valid, group_table, groups, scratch
+    )
     if group == NO_GROUP:
         return
     var ticket = base + UInt32(row) + 1
