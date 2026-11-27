@@ -24,7 +24,7 @@ them with other types stays an error. Promotion happens before the operation,
 so integer overflow is still checked at the promoted width.
 """
 from .dtype import DataType
-from .decimal import decimal_width_for
+from .decimal import common_decimal, decimal_width_for
 
 
 def integer_digits(dtype: DataType) -> Int:
@@ -129,3 +129,26 @@ def promoted_operands(
         )
     var common = found.value()
     return Optional((common, common))
+
+
+def common_type(left: DataType, right: DataType) raises -> Optional[DataType]:
+    """The one type that holds every value of `left` and of `right`, for
+    columns stacked or matched across inputs: `left` when they are equal,
+    the common numeric type when both are numeric, and None otherwise
+    (including UInt64 beside a signed integer)."""
+    if left == right:
+        return left
+    if left.is_decimal() and right.is_decimal():
+        return common_decimal(left, right)
+    if not _promotable(left) or not _promotable(right):
+        return None
+    if (
+        left.is_integer()
+        and right.is_integer()
+        and not _integer_type(left, right, False)
+    ):
+        return None
+    var pair = promoted_operands(left, right, False).value()
+    if pair[0].is_decimal() and pair[1].is_decimal():
+        return common_decimal(pair[0], pair[1])
+    return pair[0]

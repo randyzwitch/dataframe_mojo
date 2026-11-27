@@ -44,7 +44,7 @@ from .expr import (
     UNTYPED,
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
-from .promotion import promoted_operands
+from .promotion import common_type, promoted_operands
 from dataframe.execution import WindowLayouts, evaluate
 from dataframe.kernels.sampling import sample_size, sample_indices
 from dataframe.kernels.mask_filter import filter_columns
@@ -3530,23 +3530,73 @@ def _shared_dictionaries(
     return out^
 
 
+def _concat_exact(frames: List[DataFrame]) raises -> DataFrame:
+    """A vertical concat whose frames must also share column types, for
+    reading several files as one table: a column typed differently in two
+    files is a schema mismatch to report, as a multi-file scan does, not
+    a reason to widen it."""
+    if len(frames) > 0:
+        var first = frames[0].schema()
+        for f in range(1, len(frames)):
+            var schema = frames[f].schema()
+            for c in range(min(len(schema), len(first))):
+                if (
+                    schema[c].name == first[c].name
+                    and schema[c].dtype != first[c].dtype
+                ):
+                    raise Error(
+                        "concat vertical: frame "
+                        + String(f)
+                        + " column "
+                        + String(c)
+                        + " is "
+                        + schema[c].name
+                        + ":"
+                        + schema[c].dtype.name()
+                        + ", expected "
+                        + first[c].name
+                        + ":"
+                        + first[c].dtype.name()
+                    )
+    return concat(frames)
+
+
 def concat(
     frames: List[DataFrame], how: String = "vertical"
 ) raises -> DataFrame:
     """Combine frames: 'vertical', 'diagonal', or 'horizontal'.
 
-    Vertical requires identical names, order, and dtypes. Diagonal unions
-    columns by name in first-seen order and fills missing columns with nulls;
-    shared names must share a dtype. Horizontal requires equal heights and
+    Vertical requires identical names and order. Diagonal unions columns by
+    name in first-seen order and fills missing columns with nulls. A column
+    whose numeric type differs between frames takes the type that holds
+    every frame's values (Int32 and UInt32 stack as Int64, Int64 and
+    Float32 as Float32, `decimal[10,2]` and Int64 as `decimal[21,2]`);
+    other types must match. 'vertical_relaxed' and 'diagonal_relaxed' are
+    the same as 'vertical' and 'diagonal'. Horizontal requires equal heights and
     unique names. All inputs are validated before any column is built.
     Categorical columns with different dictionaries are first moved onto
     the union of them.
     """
+    if how == "vertical_relaxed" or how == "diagonal_relaxed":
+        return concat(frames, String(how[byte = 0 : how.find("_")]))
     var shared = _shared_dictionaries(frames, how)
     if len(shared) == 0:
         raise Error("concat requires at least one dataframe")
     if how == "vertical":
         var first = shared[0].schema()
+        # The type each column stacks as: numeric types that differ
+        # between frames widen to one that holds them all.
+        var targets = List[DataType](capacity=len(first))
+        for field in first:
+            targets.append(field.dtype)
+        for f in range(1, len(shared)):
+            var schema = shared[f].schema()
+            for c in range(min(len(schema), len(first))):
+                if schema[c].name != first[c].name:
+                    continue
+                var found = common_type(targets[c], schema[c].dtype)
+                if found:
+                    targets[c] = found.value()
         var height = 0
         for f in range(len(shared)):
             var schema = shared[f].schema()
@@ -3560,9 +3610,8 @@ def concat(
                     + String(len(first))
                 )
             for c in range(len(first)):
-                if (
-                    schema[c].name != first[c].name
-                    or schema[c].dtype != first[c].dtype
+                if schema[c].name != first[c].name or not common_type(
+                    targets[c], schema[c].dtype
                 ):
                     raise Error(
                         "concat vertical: frame "
@@ -3585,7 +3634,10 @@ def concat(
         for c in range(len(first)):
             var parts = List[Series](capacity=len(shared))
             for frame in shared:
-                parts.append(frame._columns[c].copy())
+                if frame._columns[c].dtype() != targets[c]:
+                    parts.append(frame._columns[c].cast(targets[c]))
+                else:
+                    parts.append(frame._columns[c].copy())
             columns.append(Series._from_chunks(parts))
         return DataFrame(columns^, height=height)
     if how == "diagonal":
@@ -3596,7 +3648,11 @@ def concat(
                 if field.name not in dtypes:
                     dtypes[field.name] = field.dtype
                     names.append(field.name)
-                elif dtypes[field.name] != field.dtype:
+                    continue
+                var found = common_type(dtypes[field.name], field.dtype)
+                if found:
+                    dtypes[field.name] = found.value()
+                else:
                     raise Error(
                         "concat diagonal: column "
                         + field.name

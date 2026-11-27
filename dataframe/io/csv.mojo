@@ -19,7 +19,7 @@ from dataframe.storage.column import Column
 from dataframe.storage.string import StringColumn
 from ..dtype import DataType, NUMERIC_DTYPES
 from ..categorical import decode
-from ..frame import DataFrame, concat
+from ..frame import DataFrame, concat, _concat_exact
 from ..series import Series
 from dataframe.time.temporal import format_in, zone_of
 from dataframe.time.timezone import TimeZone
@@ -794,7 +794,7 @@ def read_csv(
         )
         total += frame.height()
         frames.append(frame^)
-    return concat(frames)._with_statistics()._with_storage_statistics()
+    return _concat_exact(frames)._with_statistics()._with_storage_statistics()
 
 
 def read_csv(
@@ -881,7 +881,7 @@ def read_csv(
         )
         total += frame.height()
         frames.append(frame^)
-    return concat(frames)._with_statistics()._with_storage_statistics()
+    return _concat_exact(frames)._with_statistics()._with_storage_statistics()
 
 
 def read_csv(
@@ -968,7 +968,7 @@ def read_csv(
         )
         total += frame.height()
         frames.append(frame^)
-    return concat(frames)._with_statistics()._with_storage_statistics()
+    return _concat_exact(frames)._with_statistics()._with_storage_statistics()
 
 
 def _dataset_csv_schema(

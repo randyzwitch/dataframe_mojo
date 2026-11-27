@@ -41,12 +41,17 @@ from dataframe.io.csv import (
 from dataframe.join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
+    JOIN_FULL,
     JOIN_INNER,
     JOIN_LEFT,
+    JOIN_MARK,
     JOIN_RIGHT,
+    JOIN_RIGHT_ANTI,
+    JOIN_RIGHT_SEMI,
     JOIN_SEMI,
     shared_join_key_type,
 )
+from dataframe.promotion import common_type
 from dataframe.optimizer.expressions import (
     _cannot_raise,
     _emit_replaced,
@@ -647,12 +652,12 @@ def _reads_files(self: QueryContext, index: Int) -> Bool:
     return False
 
 
-def _join_side_has_decimal_key(
+def _join_side_has_numeric_key(
     self: QueryContext, node: PlanNode
 ) raises -> Bool:
-    """Whether one input of join `node` holds a decimal key, so that key
+    """Whether one input of join `node` holds a numeric key, so that key
     alignment could apply. Only one input's schema is resolved: when no
-    key there is a decimal, no pair can be, and the other input is never
+    key there is numeric, no pair can promote, and the other input is never
     resolved by this pass. An input that reads no files is the one asked,
     so a file is opened only when its schema can change the plan; a fault
     in that file then surfaces where the query itself would reach it."""
@@ -664,7 +669,7 @@ def _join_side_has_decimal_key(
     for k in range(len(keys)):
         if (
             keys[k] in schema.columns()
-            and schema.column(keys[k]).dtype().is_decimal()
+            and schema.column(keys[k]).dtype().is_numeric()
         ):
             return True
     return False
@@ -674,7 +679,7 @@ def _join_input_schemas(
     self: QueryContext, left: Int, right: Int
 ) raises -> Tuple[DataFrame, DataFrame]:
     """The empty schemas of a join's two inputs, an input that reads no
-    files first (`_join_side_has_decimal_key`)."""
+    files first (`_join_side_has_numeric_key`)."""
     if _reads_files(self, left) and not _reads_files(self, right):
         var right_schema = self._execute(right, True)
         return (self._execute(left, True), right_schema^)
@@ -682,13 +687,48 @@ def _join_input_schemas(
     return (left_schema^, self._execute(right, True))
 
 
+def _key_output_casts(
+    node: PlanNode,
+    left_columns: List[String],
+    lname: String,
+    rname: String,
+    ltype: DataType,
+    rtype: DataType,
+) -> List[Tuple[String, DataType]]:
+    """The output columns of join `node` that hold a promoted key pair's
+    values, each with the type its side declared. A key column holds
+    values of one side only, so the cast back is exact; a full join's
+    coalesced key mixes both sides and keeps the promoted type."""
+    var out = List[Tuple[String, DataType]]()
+    var how = node.how
+    if how == JOIN_SEMI or how == JOIN_ANTI or how == JOIN_MARK:
+        out.append((lname, ltype))
+        return out^
+    if how == JOIN_RIGHT_SEMI or how == JOIN_RIGHT_ANTI:
+        out.append((rname, rtype))
+        return out^
+    if node.coalesce:
+        if how == JOIN_INNER or how == JOIN_LEFT:
+            out.append((lname, ltype))
+        elif how == JOIN_RIGHT:
+            out.append((rname, rtype))
+        return out^
+    out.append((lname, ltype))
+    var suffix = node.names2[0] if len(node.names2) > 0 else String("_right")
+    out.append((rname + suffix if rname in left_columns else rname, rtype))
+    return out^
+
+
 def plan_align_join_keys(mut self: QueryContext) raises:
-    """Give each join key pair that holds one decimal at two storage widths
-    a single type, by a cast below the join on the side that differs
-    (`shared_join_key_type`). The plan's schema, the hash table, the probe,
+    """Give each join key pair of two types a single type, by a cast below
+    the join on the side that differs. A decimal held at two storage widths
+    takes one width (`shared_join_key_type`), and numeric keys of different
+    types take the type that holds both (Int32 and UInt32 match as Int64),
+    so keys compare by value. The plan's schema, the hash table, the probe,
     a coalesced key and unmatched rows then all see the same type, as they
-    would for keys declared alike. Pairs of any other types are left for
-    the join to accept or reject.
+    would for keys declared alike. For promoted numeric keys, a cast above
+    the join gives each output key column its side's declared type again.
+    Pairs of any other types are left for the join to accept or reject.
 
     Run whether or not the plan is optimized: no join path compares keys
     of two types. Joins are visited children first, so a join's inputs
@@ -706,7 +746,7 @@ def plan_align_join_keys(mut self: QueryContext) raises:
         ):
             continue
         var node = self._nodes[i].copy()
-        if not _join_side_has_decimal_key(self, node):
+        if not _join_side_has_numeric_key(self, node):
             continue
         var schemas = _join_input_schemas(self, node.left, node.right)
         ref left = schemas[0]
@@ -715,6 +755,8 @@ def plan_align_join_keys(mut self: QueryContext) raises:
         var right_casts = List[Expr]()
         var left_cast = Dict[String, Bool]()
         var right_cast = Dict[String, Bool]()
+        var restore = List[Expr]()
+        var restored = Dict[String, Bool]()
         for k in range(len(node.names)):
             ref lname = node.names[k]
             ref rname = node.right_keys[k]
@@ -724,6 +766,24 @@ def plan_align_join_keys(mut self: QueryContext) raises:
             var ltype = left.column(lname).dtype()
             var rtype = right.column(rname).dtype()
             var shared = shared_join_key_type(ltype, rtype, node.how)
+            if not shared and ltype != rtype:
+                var promoted = common_type(ltype, rtype)
+                if (
+                    promoted
+                    and ltype.is_numeric()
+                    and rtype.is_numeric()
+                    and node.how != JOIN_CROSS
+                ):
+                    shared = promoted
+                    for found in _key_output_casts(
+                        node, left.columns(), lname, rname, ltype, rtype
+                    ):
+                        if (
+                            found[1] != promoted.value()
+                            and found[0] not in restored
+                        ):
+                            restored[found[0]] = True
+                            restore.append(col(found[0]).cast(found[1]))
             if not shared:
                 continue
             var target = shared.value()
@@ -745,6 +805,13 @@ def plan_align_join_keys(mut self: QueryContext) raises:
             )
             self._nodes[i].right = len(self._nodes) - 1
             changed = True
+        if len(restore) > 0:
+            # The join moves to a new node and its old place, which every
+            # parent reads, becomes the cast back above it.
+            self._nodes.append(self._nodes[i].copy())
+            self._nodes[i] = _with_columns_node(
+                left=len(self._nodes) - 1, exprs=restore
+            )
     if owned:
         self._schema_memo = None
     if changed:

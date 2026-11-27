@@ -3,14 +3,18 @@ widths or signedness, integers with floats, and decimals with integers or
 floats. Result types follow the matrix below, checked against duckdb 2.0.0
 (`typeof(1::L op 1::R)`), eager and lazy."""
 # contract-group: expr.arithmetic
+# contract-group: table.join
+# contract-group: table.sets_reshape
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     Column,
     DataFrame,
     DataType,
     Expr,
+    LazyFrame,
     Series,
     coalesce,
+    concat,
     col,
     lit,
     null,
@@ -186,7 +190,16 @@ def _column(
 
 def _dtype(short: String) raises -> DataType:
     var names: List[String] = [
-        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "f32",
+        "f64",
     ]
     var types: List[DataType] = [
         DataType.INT8,
@@ -502,9 +515,9 @@ def test_typed_null_branches_take_the_other_branch_type() raises:
     ]
     for lazy in [False, True]:
         var out = (
-            frame.lazy().select_exprs(exprs).collect() if lazy else (
-                frame.select_exprs(exprs)
-            )
+            frame.lazy()
+            .select_exprs(exprs)
+            .collect() if lazy else (frame.select_exprs(exprs))
         )
         assert_equal(_short(out.column("unsigned").dtype()), "i64")
         assert_equal(_short(out.column("narrow").dtype()), "i64")
@@ -535,9 +548,9 @@ def test_literals_in_branches_and_fills_promote_when_they_do_not_fit() raises:
     ]
     for lazy in [False, True]:
         var out = (
-            frame.lazy().select_exprs(exprs).collect() if lazy else (
-                frame.select_exprs(exprs)
-            )
+            frame.lazy()
+            .select_exprs(exprs)
+            .collect() if lazy else (frame.select_exprs(exprs))
         )
         assert_equal(_short(out.column("fits").dtype()), "u8")
         assert_equal(_short(out.column("wide").dtype()), "i32")
@@ -573,3 +586,156 @@ def test_is_in_compares_integers_of_other_widths_by_value() raises:
                 col("f").is_in([lit(Int64(1))]),
                 lazy,
             )
+
+
+def _stacked(
+    frames: List[DataFrame], how: String, lazy: Bool
+) raises -> DataFrame:
+    if not lazy:
+        return concat(frames, how)
+    var plans = List[LazyFrame]()
+    for frame in frames:
+        plans.append(frame.lazy())
+    return concat(plans, how).collect()
+
+
+def test_concat_stacks_numeric_columns_of_different_types() raises:
+    var top = DataFrame(
+        [
+            Series("k", Column[Int32]([-1, 2])),
+            Series("f", Column[Int64]([3, 4])),
+            Series("d", Column[Int128]([125, 250])).with_dtype(
+                DataType.decimal(10, 2)
+            ),
+            Series("s", Column[String](["a", "b"])),
+        ]
+    )
+    var bottom = DataFrame(
+        [
+            Series("k", Column[UInt32]([4000000000])),
+            Series("f", Column[Float32]([0.5])),
+            Series("d", Column[Int64]([7])),
+            Series("s", Column[String](["c"])),
+        ]
+    )
+    for how in ["vertical", "vertical_relaxed"]:
+        for lazy in [False, True]:
+            var out = _stacked([top.copy(), bottom.copy()], how, lazy)
+            assert_equal(out.height(), 3)
+            assert_equal(_short(out.column("k").dtype()), "i64")
+            assert_equal(out.item(0, "k").int64(), -1)
+            assert_equal(out.item(2, "k").int64(), 4000000000)
+            assert_equal(_short(out.column("f").dtype()), "f32")
+            assert_equal(out.item(2, "f").float32(), 0.5)
+            assert_equal(_short(out.column("d").dtype()), "d21.2")
+            assert_equal(out.column("d").rechunk()._decimal_raw(2), 700)
+    var text = DataFrame([Series("k", Column[String](["x"]))])
+    var numbers = DataFrame([Series("k", Column[Int64]([1]))])
+    for lazy in [False, True]:
+        with assert_raises(contains="concat"):
+            _ = _stacked([numbers.copy(), text.copy()], "vertical", lazy)
+
+
+def test_diagonal_concat_promotes_shared_columns() raises:
+    var left = DataFrame(
+        [
+            Series("a", Column[Int8]([-5])),
+            Series("b", Column[String](["x"])),
+        ]
+    )
+    var right = DataFrame([Series("a", Column[UInt8]([200]))])
+    for how in ["diagonal", "diagonal_relaxed"]:
+        for lazy in [False, True]:
+            var out = _stacked([left.copy(), right.copy()], how, lazy)
+            assert_equal(out.columns(), ["a", "b"])
+            # Int8 and UInt8 stack as Int16.
+            assert_equal(_short(out.column("a").dtype()), "i16")
+            assert_equal(out.item(0, "a").int16(), -5)
+            assert_equal(out.item(1, "a").int16(), 200)
+            assert_true(out.item(1, "b").is_null())
+
+
+def _joined(
+    left: DataFrame,
+    right: DataFrame,
+    how: String,
+    coalesce: Bool,
+    lazy: Bool,
+) raises -> DataFrame:
+    if lazy:
+        return (
+            left.lazy()
+            .join(right.lazy(), on=["k"], how=how, coalesce=coalesce)
+            .collect()
+        )
+    return left.join(right, on="k", how=how, coalesce=coalesce)
+
+
+def test_join_keys_of_different_numeric_types_match_by_value() raises:
+    var left = DataFrame(
+        [
+            Series("k", Column[Int32]([1, 2, 3])),
+            Series("a", Column[Int64]([10, 20, 30])),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[UInt32]([2, 3, 4])),
+            Series("b", Column[Int64]([200, 300, 400])),
+        ]
+    )
+    for lazy in [False, True]:
+        # Each output key column keeps its side's declared type.
+        var inner = _joined(left, right, "inner", True, lazy).sort("k")
+        assert_equal(inner.columns(), ["k", "a", "b"])
+        assert_equal(_short(inner.column("k").dtype()), "i32")
+        assert_equal(inner.height(), 2)
+        assert_equal(inner.item(0, "k").int32(), 2)
+        assert_equal(inner.item(1, "b").int64(), 300)
+        var kept = _joined(left, right, "left", True, lazy).sort("k")
+        assert_equal(_short(kept.column("k").dtype()), "i32")
+        assert_equal(kept.height(), 3)
+        assert_true(kept.item(0, "b").is_null())
+        var right_side = _joined(left, right, "right", True, lazy).sort("k")
+        assert_equal(_short(right_side.column("k").dtype()), "u32")
+        assert_equal(right_side.item(2, "k").uint32(), 4)
+        var both = _joined(left, right, "inner", False, lazy).sort("k")
+        assert_equal(_short(both.column("k").dtype()), "i32")
+        assert_equal(_short(both.column("k_right").dtype()), "u32")
+        var semi = _joined(left, right, "semi", True, lazy).sort("k")
+        assert_equal(_short(semi.column("k").dtype()), "i32")
+        assert_equal(semi.height(), 2)
+        var anti = _joined(left, right, "anti", True, lazy)
+        assert_equal(anti.height(), 1)
+        assert_equal(anti.item(0, "k").int32(), 1)
+        # A full join's coalesced key mixes both sides: the common type.
+        var full = _joined(left, right, "full", True, lazy).sort("k")
+        assert_equal(_short(full.column("k").dtype()), "i64")
+        assert_equal(full.height(), 4)
+        assert_equal(full.item(3, "k").int64(), 4)
+
+
+def test_join_keys_of_integer_and_float_and_unpromotable_types() raises:
+    var ints = DataFrame(
+        [
+            Series("k", Column[Int64]([1, 2])),
+            Series("a", Column[Int64]([10, 20])),
+        ]
+    )
+    var floats = DataFrame(
+        [
+            Series("k", Column[Float64]([2.0, 2.5])),
+            Series("b", Column[Int64]([200, 250])),
+        ]
+    )
+    var unsigned = DataFrame([Series("k", Column[UInt64]([1]))])
+    var text = DataFrame([Series("k", Column[String](["1"]))])
+    for lazy in [False, True]:
+        var out = _joined(ints, floats, "inner", True, lazy)
+        assert_equal(out.height(), 1)
+        assert_equal(_short(out.column("k").dtype()), "i64")
+        assert_equal(out.item(0, "b").int64(), 200)
+        with assert_raises():
+            _ = _joined(ints, unsigned, "inner", True, lazy)
+        with assert_raises():
+            _ = _joined(ints, text, "inner", True, lazy)
