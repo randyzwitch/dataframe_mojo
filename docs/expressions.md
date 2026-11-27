@@ -19,9 +19,11 @@ Bare values work wherever an expression is expected: `col("x") > 0`,
 `col("x") * 2.5`, `1 + col("x")`, `col("k") == "a"`, `col("k").is_in(["a",
 "b"])`, `col("x").fill_null(0)`, `when(c).then(1).otherwise(0)`. Bare numbers
 are *untyped*: an integer adopts the numeric dtype of the operand it meets
-(range-checked, so `col("u8") + 300` is a bind error), and becomes a float
-next to a float column; a float adopts Float32 or Float64 and is an error next
-to an integer column. Adoption follows arithmetic between untyped values
+when it fits, and becomes a float next to a float column; a float adopts
+Float32 or Float64. In arithmetic and comparisons, an integer that does not
+fit (`col("u8") + 300`), a float next to an integer column, and any number
+next to a decimal take their own type instead and promote (see Operators).
+Adoption follows arithmetic between untyped values
 (`col("x") * (2 + 3)`), and an untyped expression on its own is Int64 or
 Float64. `lit(...)` fixes a type and never adopts. Two Mojo limits: a string
 or number on the *left* of `==` does not compile (write `col("k") == "a"`),
