@@ -253,6 +253,14 @@ def concat(frames: List[DataFrame], how: String = "vertical") -> DataFrame
 def concat(frames: List[LazyFrame], how: String = "vertical") -> LazyFrame
 ```
 
+## `concat_list`
+
+One list per row: the elements of every expression's list, in order. A non-list expression adds its value as one element, and any null list makes the row null.
+
+```mojo
+def concat_list(exprs: List[Expr]) -> Expr
+```
+
 ## `concat_str`
 
 Join String expressions row-wise; any null input makes the row null. With ignore_nulls, null inputs are skipped along with their separator; a row whose inputs are all null is an empty string.
@@ -1652,6 +1660,34 @@ Expressions on list columns. A null list gives a null result.
 - `def min(self) -> Expr`
 - `def max(self) -> Expr`
 - `def mean(self) -> Expr`
+- `def unique(self, maintain_order: Bool = False) -> Expr`
+  The distinct elements of each list, one null at most. The order is unspecified unless maintain_order, which keeps each value's first position.
+- `def n_unique(self) -> Expr`
+  Distinct elements per list as Int64, a null element counting as one value.
+- `def sort(self, descending: Bool = False, nulls_last: Bool = False) -> Expr`
+  Sort each list's elements. NaN is the largest value; nulls go first unless nulls_last.
+- `def reverse(self) -> Expr`
+  Each list's elements in reverse order.
+- `def slice(self, offset: Int, length: Int = Int(-1)) -> Expr`
+  The elements from offset (negative counts from the end) for length elements, or to the end when length is -1. Ranges past either end are cut short.
+- `def head(self, n: Int = Int(5)) -> Expr`
+  The first n elements of each list.
+- `def tail(self, n: Int = Int(5)) -> Expr`
+  The last n elements of each list.
+- `def gather(self, indices: List[Int], null_on_oob: Bool = False) -> Expr`
+  The elements at the given positions of each list (negative counts from the end). A position outside a list raises, or gives a null element with null_on_oob.
+- `def gather_every(self, n: Int, offset: Int = Int(0)) -> Expr`
+  Every nth element of each list, starting at position offset.
+- `def drop_nulls(self) -> Expr`
+  Each list without its null elements.
+- `def shift(self, n: Int = Int(1)) -> Expr`
+  Move each list's elements n positions later (earlier when n is negative); vacated positions are null.
+- `def diff(self, n: Int = Int(1)) -> Expr`
+  Each element minus the one n positions earlier in its list (later when n is negative); null where there is none. Unsigned elements give the signed type of twice the width (Int64 for UInt64).
+- `def concat(self, other: Expr) -> Expr`
+  Each list followed by other's list in the same row. A non-list other adds its value as one element; a null list gives null.
+- `def concat(self, other: List[Expr]) -> Expr`
+  Each list followed by every expression's value, in order.
 
 ## `lit`
 
