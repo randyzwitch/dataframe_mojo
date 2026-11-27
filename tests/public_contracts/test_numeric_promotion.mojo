@@ -4,7 +4,18 @@ floats. Result types follow the matrix below, checked against duckdb 2.0.0
 (`typeof(1::L op 1::R)`), eager and lazy."""
 # contract-group: expr.arithmetic
 from std.testing import assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    Expr,
+    Series,
+    coalesce,
+    col,
+    lit,
+    null,
+    when,
+)
 
 
 # "left op right result" cells. "err" marks pairs that need 128-bit integers
@@ -91,6 +102,26 @@ comptime _ARITHMETIC = (
 )
 
 
+# The same for conditional branches, fill values and coalesce
+# (`typeof(CASE WHEN ... THEN 1::L ELSE 1::R END)`): the narrowest type that
+# holds both inputs.
+comptime _BRANCHES = (
+    "i8 case i16 i16;i8 case i32 i32;i8 case i64 i64;i8 case u8 i16;i8 case u16 i32;i8 case u32 i64;i8 case u64 err;i8 case f32 f32;i8 case f64 f64;i8 case d4.1 d4.1;i8 case d10.2 d10.2;i8 case d38.2 d38.2;"
+    "i16 case i8 i16;i16 case i32 i32;i16 case i64 i64;i16 case u8 i16;i16 case u16 i32;i16 case u32 i64;i16 case u64 err;i16 case f32 f32;i16 case f64 f64;i16 case d4.1 d6.1;i16 case d10.2 d10.2;i16 case d38.2 d38.2;"
+    "i32 case i8 i32;i32 case i16 i32;i32 case i64 i64;i32 case u8 i32;i32 case u16 i32;i32 case u32 i64;i32 case u64 err;i32 case f32 f32;i32 case f64 f64;i32 case d4.1 d11.1;i32 case d10.2 d12.2;i32 case d38.2 d38.2;"
+    "i64 case i8 i64;i64 case i16 i64;i64 case i32 i64;i64 case u8 i64;i64 case u16 i64;i64 case u32 i64;i64 case u64 err;i64 case f32 f32;i64 case f64 f64;i64 case d4.1 d20.1;i64 case d10.2 d21.2;i64 case d38.2 d38.2;"
+    "u8 case i8 i16;u8 case i16 i16;u8 case i32 i32;u8 case i64 i64;u8 case u16 u16;u8 case u32 u32;u8 case u64 u64;u8 case f32 f32;u8 case f64 f64;u8 case d4.1 d4.1;u8 case d10.2 d10.2;u8 case d38.2 d38.2;"
+    "u16 case i8 i32;u16 case i16 i32;u16 case i32 i32;u16 case i64 i64;u16 case u8 u16;u16 case u32 u32;u16 case u64 u64;u16 case f32 f32;u16 case f64 f64;u16 case d4.1 d6.1;u16 case d10.2 d10.2;u16 case d38.2 d38.2;"
+    "u32 case i8 i64;u32 case i16 i64;u32 case i32 i64;u32 case i64 i64;u32 case u8 u32;u32 case u16 u32;u32 case u64 u64;u32 case f32 f32;u32 case f64 f64;u32 case d4.1 d11.1;u32 case d10.2 d12.2;u32 case d38.2 d38.2;"
+    "u64 case i8 err;u64 case i16 err;u64 case i32 err;u64 case i64 err;u64 case u8 u64;u64 case u16 u64;u64 case u32 u64;u64 case f32 f32;u64 case f64 f64;u64 case d4.1 d21.1;u64 case d10.2 d22.2;u64 case d38.2 d38.2;"
+    "f32 case i8 f32;f32 case i16 f32;f32 case i32 f32;f32 case i64 f32;f32 case u8 f32;f32 case u16 f32;f32 case u32 f32;f32 case u64 f32;f32 case f64 f64;f32 case d4.1 f32;f32 case d10.2 f32;f32 case d38.2 f32;"
+    "f64 case i8 f64;f64 case i16 f64;f64 case i32 f64;f64 case i64 f64;f64 case u8 f64;f64 case u16 f64;f64 case u32 f64;f64 case u64 f64;f64 case f32 f64;f64 case d4.1 f64;f64 case d10.2 f64;f64 case d38.2 f64;"
+    "d4.1 case i8 d4.1;d4.1 case i16 d6.1;d4.1 case i32 d11.1;d4.1 case i64 d20.1;d4.1 case u8 d4.1;d4.1 case u16 d6.1;d4.1 case u32 d11.1;d4.1 case u64 d21.1;d4.1 case f32 f32;d4.1 case f64 f64;d4.1 case d10.2 d10.2;d4.1 case d38.2 d38.2;"
+    "d10.2 case i8 d10.2;d10.2 case i16 d10.2;d10.2 case i32 d12.2;d10.2 case i64 d21.2;d10.2 case u8 d10.2;d10.2 case u16 d10.2;d10.2 case u32 d12.2;d10.2 case u64 d22.2;d10.2 case f32 f32;d10.2 case f64 f64;d10.2 case d4.1 d10.2;d10.2 case d38.2 d38.2;"
+    "d38.2 case i8 d38.2;d38.2 case i16 d38.2;d38.2 case i32 d38.2;d38.2 case i64 d38.2;d38.2 case u8 d38.2;d38.2 case u16 d38.2;d38.2 case u32 d38.2;d38.2 case u64 d38.2;d38.2 case f32 f32;d38.2 case f64 f64;d38.2 case d4.1 d38.2;d38.2 case d10.2 d38.2;"
+)
+
+
 def _types() -> List[String]:
     return [
         "i8",
@@ -125,35 +156,54 @@ def _short(dtype: DataType) raises -> String:
 
 def _column(name: String, short: String, value: Int) raises -> Series:
     """A one-row column of the type `short` holding `value`."""
-    if short == "i8":
-        return Series(name, Column[Int8]([Int8(value)]))
-    if short == "i16":
-        return Series(name, Column[Int16]([Int16(value)]))
-    if short == "i32":
-        return Series(name, Column[Int32]([Int32(value)]))
-    if short == "i64":
-        return Series(name, Column[Int64]([Int64(value)]))
-    if short == "u8":
-        return Series(name, Column[UInt8]([UInt8(value)]))
-    if short == "u16":
-        return Series(name, Column[UInt16]([UInt16(value)]))
-    if short == "u32":
-        return Series(name, Column[UInt32]([UInt32(value)]))
-    if short == "u64":
-        return Series(name, Column[UInt64]([UInt64(value)]))
-    if short == "f32":
-        return Series(name, Column[Float32]([Float32(value)]))
-    if short == "f64":
-        return Series(name, Column[Float64]([Float64(value)]))
-    var parts = String(short[byte=1:]).split(".")
-    var precision = Int(parts[0])
-    var scale = Int(parts[1])
-    var raw = Int128(value)
-    for _ in range(scale):
-        raw *= 10
-    return Series(name, Column[Int128]([raw])).with_dtype(
-        DataType.decimal(precision, scale)
+    return _column(name, short, [value], [True])
+
+
+def _column(
+    name: String, short: String, values: List[Int], valid: List[Bool]
+) raises -> Series:
+    """A column of the type `short` holding `values`, null where not
+    `valid`."""
+    var rows = List[Int128]()
+    for value in values:
+        rows.append(Int128(value))
+    var scale = 0
+    var precision = 38
+    if short.startswith("d"):
+        var parts = String(short[byte=1:]).split(".")
+        precision = Int(parts[0])
+        scale = Int(parts[1])
+        for k in range(len(rows)):
+            for _ in range(scale):
+                rows[k] *= 10
+    var raw = Series(name, Column[Int128](rows^, valid.copy())).with_dtype(
+        DataType.decimal(38, scale)
     )
+    if short.startswith("d"):
+        return raw.cast(DataType.decimal(precision, scale))
+    return raw.cast(_dtype(short))
+
+
+def _dtype(short: String) raises -> DataType:
+    var names: List[String] = [
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"
+    ]
+    var types: List[DataType] = [
+        DataType.INT8,
+        DataType.INT16,
+        DataType.INT32,
+        DataType.INT64,
+        DataType.UINT8,
+        DataType.UINT16,
+        DataType.UINT32,
+        DataType.UINT64,
+        DataType.FLOAT32,
+        DataType.FLOAT64,
+    ]
+    for k in range(len(names)):
+        if names[k] == short:
+            return types[k]
+    raise Error("unknown type " + short)
 
 
 def _apply(op: String, left: Expr, right: Expr) raises -> Expr:
@@ -375,3 +425,151 @@ def test_series_operators_promote_like_expressions() raises:
         "y", Column[UInt16]([1, 1])
     )
     assert_true(flags.dtype() == DataType.BOOL)
+
+
+def test_branch_fill_and_coalesce_types_match_the_matrix_eager_and_lazy() raises:
+    var checked = 0
+    for cell in String(_BRANCHES).split(";"):
+        if cell.byte_length() == 0:
+            continue
+        var parts = String(cell).split(" ")
+        var left = String(parts[0])
+        var right = String(parts[2])
+        var expected = String(parts[3])
+        var frame = DataFrame(
+            [
+                _column("a", left, [7, 7], [False, True]),
+                _column("b", right, [2, 2], [True, True]),
+                Series("c", Column[Bool]([False, True])),
+            ]
+        )
+        var exprs: List[Expr] = [
+            when(col("c")).then(col("a")).otherwise(col("b")).alias("when"),
+            col("a").fill_null(col("b")).alias("fill"),
+            coalesce([col("a"), col("b")]).alias("coalesce"),
+        ]
+        for lazy in [False, True]:
+            for e in exprs:
+                if expected == "err":
+                    with assert_raises():
+                        _ = _result(frame, e, lazy)
+                    continue
+                var out = _result(frame, e, lazy)
+                var column = out.column(out.columns()[0])
+                var found = _short(column.dtype())
+                if found != expected:
+                    raise Error(
+                        left
+                        + " / "
+                        + right
+                        + " in "
+                        + out.columns()[0]
+                        + ": expected "
+                        + expected
+                        + ", found "
+                        + found
+                        + (" (lazy)" if lazy else " (eager)")
+                    )
+                var values = column.cast(DataType.FLOAT64)
+                assert_equal(values.item(0).float64(), 2.0)
+                assert_equal(values.item(1).float64(), 7.0)
+        checked += 1
+    assert_equal(checked, 13 * 12)
+
+
+def test_typed_null_branches_take_the_other_branch_type() raises:
+    # A typed null of a narrower or other-signed type no longer forces an
+    # error (#1480, #1498): the branches take the type that holds both.
+    var frame = DataFrame(
+        [
+            Series("n", Column[Int64]([5, 6])),
+            Series("u", Column[UInt16]([1, 0])),
+        ]
+    )
+    var exprs: List[Expr] = [
+        when(col("u") > 0)
+        .then(col("n"))
+        .otherwise(null(DataType.UINT32))
+        .alias("unsigned"),
+        when(col("u") > 0)
+        .then(col("n"))
+        .otherwise(null(DataType.INT8))
+        .alias("narrow"),
+        when(col("u") > 0)
+        .then(null(DataType.INT8))
+        .otherwise(col("u"))
+        .alias("first_null"),
+    ]
+    for lazy in [False, True]:
+        var out = (
+            frame.lazy().select_exprs(exprs).collect() if lazy else (
+                frame.select_exprs(exprs)
+            )
+        )
+        assert_equal(_short(out.column("unsigned").dtype()), "i64")
+        assert_equal(_short(out.column("narrow").dtype()), "i64")
+        assert_equal(out.item(0, "unsigned").int64(), 5)
+        assert_true(out.item(1, "narrow").is_null())
+        # Int8 and UInt16 meet in Int32.
+        assert_equal(_short(out.column("first_null").dtype()), "i32")
+        assert_true(out.item(0, "first_null").is_null())
+        assert_equal(out.item(1, "first_null").int32(), 0)
+
+
+def test_literals_in_branches_and_fills_promote_when_they_do_not_fit() raises:
+    var frame = DataFrame(
+        [
+            Series("u", Column[UInt8]([200], [False])),
+            Series("d", Column[Int128]([125], [False])).with_dtype(
+                DataType.decimal(10, 2)
+            ),
+            Series("c", Column[Bool]([False])),
+        ]
+    )
+    var exprs: List[Expr] = [
+        col("u").fill_null(1).alias("fits"),
+        col("u").fill_null(300).alias("wide"),
+        when(col("c")).then(col("u")).otherwise(0.5).alias("half"),
+        col("d").fill_null(2).alias("dec"),
+        when(col("c")).then(col("d")).otherwise(3).alias("dec_branch"),
+    ]
+    for lazy in [False, True]:
+        var out = (
+            frame.lazy().select_exprs(exprs).collect() if lazy else (
+                frame.select_exprs(exprs)
+            )
+        )
+        assert_equal(_short(out.column("fits").dtype()), "u8")
+        assert_equal(_short(out.column("wide").dtype()), "i32")
+        assert_equal(out.item(0, "wide").int32(), 300)
+        assert_equal(_short(out.column("half").dtype()), "f64")
+        assert_equal(out.item(0, "half").float64(), 0.5)
+        # A number beside a decimal is the number, not a scaled integer.
+        assert_equal(_short(out.column("dec").dtype()), "d12.2")
+        assert_equal(out.column("dec").rechunk()._decimal_raw(0), Int128(200))
+        assert_equal(_short(out.column("dec_branch").dtype()), "d12.2")
+        assert_equal(
+            out.column("dec_branch").rechunk()._decimal_raw(0), Int128(300)
+        )
+
+
+def test_is_in_compares_integers_of_other_widths_by_value() raises:
+    var frame = DataFrame(
+        [Series("x", Column[UInt8]([1, 200, 7], [True, True, False]))]
+    )
+    for lazy in [False, True]:
+        var listed: List[Expr] = [lit(Int64(200)), lit(Int64(-1))]
+        var out = _result(frame, col("x").is_in(listed).alias("x"), lazy)
+        assert_true(not out.item(0, "x").bool())
+        assert_true(out.item(1, "x").bool())
+        assert_true(out.item(2, "x").is_null())
+        var mixed: List[Expr] = [lit(Int16(1)), lit(Int64(200))]
+        var both = _result(frame, col("x").is_in(mixed).alias("x"), lazy)
+        assert_true(both.item(0, "x").bool())
+        assert_true(both.item(1, "x").bool())
+        with assert_raises(contains="needs values of its type"):
+            _ = _result(
+                DataFrame([Series("f", Column[Float64]([1.0]))]),
+                col("f").is_in([lit(Int64(1))]),
+                lazy,
+            )

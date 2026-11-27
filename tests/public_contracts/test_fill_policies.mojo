@@ -73,8 +73,12 @@ def test_dataframe_fill_null_resolves_untyped_values_per_column_and_subset() rai
             )
             assert_equal(actual.item(0, "s").string(), "a")
             assert_true(actual.item(0, "b").bool())
-        with assert_raises(contains="integer literal 300 does not fit uint8"):
-            _ = frame.fill_null(300, subset=["u"])
+        # A listed column promotes with the value: 300 does not fit UInt8,
+        # so it is an Int32 and the column fills as Int32.
+        var widened = frame.fill_null(300, subset=["u"])
+        assert_true(widened.column("u").dtype() == DataType.INT32)
+        assert_equal(widened.item(1, "u").int32(), Int32(300))
+        assert_equal(widened.item(0, "u").int32(), Int32(1))
 
 
 def test_float_class_predicates_and_fill_nan_distinguish_all_ieee_classes_from_null() raises:
