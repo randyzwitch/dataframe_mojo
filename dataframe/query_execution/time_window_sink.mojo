@@ -35,20 +35,23 @@ from std.math import isnan, sqrt
 
 from dataframe.aggregation.expressions import _bind_all
 from dataframe.aggregation.keys import _expand_struct_keys
-from dataframe.binding import AGGREGATE, BoundExpr
+from dataframe.binding import AGGREGATE, ROWS, BoundExpr
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
     COL,
     COUNT,
+    Expr,
     LEN,
     MAX,
     MEAN,
     MIN,
     NULL_COUNT,
+    Node,
     ROW_LEN,
     STD,
     SUM,
     VAR,
+    _node,
 )
 from dataframe.aggregation.scalar_states import VarState
 from dataframe.kernels.binary import validity
@@ -111,6 +114,37 @@ def _numeric_column(column: Series) -> Bool:
     return False
 
 
+def _integer_decimal(column: Series) -> Bool:
+    """Whether `column` is a decimal held as one of the integer types the
+    bounds' segment trees read."""
+    if not column.dtype().is_decimal():
+        return False
+    if column._data.isa[Column[Int128]]():
+        return True
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if D.is_integral():
+            if column._data.isa[Column[Scalar[D]]]():
+                return True
+    return False
+
+
+def _reads_a_value_per_row(op: Int) -> Bool:
+    """Whether reduction `op` reads one value per row of its argument, so
+    the argument can be computed once for every input row before the
+    windows are read."""
+    return (
+        op == COUNT
+        or op == NULL_COUNT
+        or op == SUM
+        or op == MEAN
+        or op == MIN
+        or op == MAX
+        or op == STD
+        or op == VAR
+    )
+
+
 def _window_reduction(
     expression: BoundExpr, columns: List[Series]
 ) -> Tuple[Int, Int]:
@@ -133,6 +167,9 @@ def _window_reduction(
         if op == LEN:
             return (_ROWS, -1)
         return (_VALUES if op == COUNT else _NULLS, source)
+    if (op == MIN or op == MAX) and _integer_decimal(columns[source]):
+        # A decimal's extreme is the extreme of its stored integers.
+        return (_MIN if op == MIN else _MAX, source)
     if not _numeric_column(columns[source]):
         return (_GATHER, -1)
     if op == SUM:
@@ -404,6 +441,7 @@ struct TimeWindowSink(Movable, Rounds):
         """The checks, each group's rows in time order, and the round that
         lists the windows."""
         self.bound = time_window_bound(self.input, self.node)
+        self._lift_row_arguments()
         # The aggregate tasks gather from whole arrays, none of them
         # rechunking a shared column.
         var columns = List[Series](capacity=self.input.width())
@@ -448,6 +486,54 @@ struct TimeWindowSink(Movable, Rounds):
         if self.width == 0:
             return self._cut()
         return self.width
+
+    def _lift_row_arguments(mut self) raises:
+        """Compute once over the input the argument of each reduction that
+        reads a value per row from an expression of the row (`(a /
+        b).null_count()`), as a column of its own, and reduce that column.
+        Windows overlap, so a row can be in many of them: the expression
+        then runs once per row, not once per window the row is in, and
+        the reduction of a plain column can be read from the window
+        bounds instead of gathering every window's rows."""
+        var lifted = List[Expr]()
+        var exprs = self.node.exprs.copy()
+        for e in range(len(self.bound)):
+            ref expression = self.bound[e]
+            ref nodes = expression.expr._nodes
+            var n = len(nodes)
+            if n < 3:
+                continue
+            ref top = nodes[n - 1]
+            if (
+                not _reads_a_value_per_row(top.op)
+                or top.left != n - 2
+                or top.right >= 0
+                or top.extra >= 0
+                or expression.shapes[n - 2] != ROWS
+                or expression.aggregated[n - 2]
+            ):
+                continue
+            var name = "__window_argument_" + String(len(lifted))
+            while name in self.input.columns():
+                name += "_"
+            var argument = List[Node](capacity=n - 1)
+            for k in range(n - 1):
+                argument.append(nodes[k].copy())
+            lifted.append(Expr(argument^, name))
+            var reduction = top.copy()
+            reduction.left = 0
+            exprs[e] = Expr(
+                [_node(COL, text=name), reduction^], expression.expr._name
+            )
+        if len(lifted) == 0:
+            return
+        var computed = self.input._select_exprs(lifted)
+        var columns = self.input._columns.copy()
+        for column in computed._columns:
+            columns.append(column.copy())
+        self.input = DataFrame(columns^, height=self.height)
+        self.node.exprs = exprs^
+        self.bound = time_window_bound(self.input, self.node)
 
     def _classify(mut self):
         """How each expression is computed."""
@@ -519,6 +605,20 @@ struct TimeWindowSink(Movable, Rounds):
                         state.add(values._get(row))
                     leaves.append(state^)
             self.moment_trees[e] = _moment_tree(leaves^)
+            return
+        if column._data.isa[Column[Int128]]():
+            # A wide decimal: its extremes are its stored integers'.
+            ref wide = column._data[Column[Int128]]
+            var low = kind == _MIN
+            var identity = Int128.MAX if low else Int128.MIN
+            var leaves = List[Int128](capacity=self.height)
+            for rows in self.groups:
+                for row in rows:
+                    leaves.append(wide._get(row) if valid[row] else identity)
+            if low:
+                self.int_trees[e] = _tree[_MIN, DType.int128](leaves^, identity)
+            else:
+                self.int_trees[e] = _tree[_MAX, DType.int128](leaves^, identity)
             return
         comptime for k in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[k]
@@ -1009,10 +1109,32 @@ struct TimeWindowSink(Movable, Rounds):
             ref tree = self.int_trees[e]
             var low = kind == _MIN
             var identity = Int128.MAX if low else Int128.MIN
+            ref source = self.input._columns[c]
+            if dtype.is_decimal() and source._data.isa[Column[Int128]]():
+                var wide = List[Int128](length=n, fill=0)
+                for w in range(n):
+                    if not valid[w]:
+                        continue
+                    if low:
+                        wide[w] = _tree_range[_MIN, DType.int128](
+                            tree, lows[w], highs[w], identity
+                        )
+                    else:
+                        wide[w] = _tree_range[_MAX, DType.int128](
+                            tree, lows[w], highs[w], identity
+                        )
+                return Series(name, Column[Int128](wide^, valid)).with_dtype(
+                    dtype
+                )
             comptime for k in range(len(NUMERIC_DTYPES)):
                 comptime D = NUMERIC_DTYPES[k]
                 comptime if D.is_integral():
-                    if dtype == DataType.of(D):
+                    # A decimal's extremes are its stored integers'.
+                    var stored = (
+                        dtype.is_decimal()
+                        and source._data.isa[Column[Scalar[D]]]()
+                    )
+                    if dtype == DataType.of(D) or stored:
                         var out = List[Scalar[D]](length=n, fill=0)
                         for w in range(n):
                             if not valid[w]:
@@ -1027,7 +1149,12 @@ struct TimeWindowSink(Movable, Rounds):
                                     tree, lows[w], highs[w], identity
                                 )
                             out[w] = value.cast[D]()
-                        return Series(name, Column[Scalar[D]](out^, valid))
+                        var extremes = Series(
+                            name, Column[Scalar[D]](out^, valid)
+                        )
+                        if stored:
+                            return extremes.with_dtype(dtype)
+                        return extremes^
             raise Error("Unsupported extreme type " + dtype.name())
         # A float column: its sums or extremes from the tree.
         ref tree = self.float_trees[e]
