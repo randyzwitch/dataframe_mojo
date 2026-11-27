@@ -186,7 +186,16 @@ def _column(
 
 def _dtype(short: String) raises -> DataType:
     var names: List[String] = [
-        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "f32",
+        "f64",
     ]
     var types: List[DataType] = [
         DataType.INT8,
@@ -502,9 +511,9 @@ def test_typed_null_branches_take_the_other_branch_type() raises:
     ]
     for lazy in [False, True]:
         var out = (
-            frame.lazy().select_exprs(exprs).collect() if lazy else (
-                frame.select_exprs(exprs)
-            )
+            frame.lazy()
+            .select_exprs(exprs)
+            .collect() if lazy else (frame.select_exprs(exprs))
         )
         assert_equal(_short(out.column("unsigned").dtype()), "i64")
         assert_equal(_short(out.column("narrow").dtype()), "i64")
@@ -535,9 +544,9 @@ def test_literals_in_branches_and_fills_promote_when_they_do_not_fit() raises:
     ]
     for lazy in [False, True]:
         var out = (
-            frame.lazy().select_exprs(exprs).collect() if lazy else (
-                frame.select_exprs(exprs)
-            )
+            frame.lazy()
+            .select_exprs(exprs)
+            .collect() if lazy else (frame.select_exprs(exprs))
         )
         assert_equal(_short(out.column("fits").dtype()), "u8")
         assert_equal(_short(out.column("wide").dtype()), "i32")

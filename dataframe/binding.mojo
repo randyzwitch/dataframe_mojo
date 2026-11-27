@@ -1721,10 +1721,7 @@ def _bind(
                 ):
                     raise Error(
                         "when/then/otherwise branches require matching dtypes,"
-                        " found "
-                        + dtype.name()
-                        + " and "
-                        + else_dtype.name()
+                        " found " + dtype.name() + " and " + else_dtype.name()
                     )
                 children.append(node.extra)
             for child in children:
