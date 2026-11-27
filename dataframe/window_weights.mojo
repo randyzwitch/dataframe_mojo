@@ -206,7 +206,11 @@ def weighted_frames(
                             continue
                         var d = values[unsafe_offset=k] - mean
                         squares += weights[w0 + k - b] * d * d
-                var variance = max(squares / weight, 0)
+                # Rounding can leave a tiny negative; NaN (from an infinite
+                # value) stays NaN.
+                var variance = squares / weight
+                if variance < 0:
+                    variance = 0
                 out[j] = sqrt(variance) if kind == W_STD else variance
             else:
                 pairs.clear()

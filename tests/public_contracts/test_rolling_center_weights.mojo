@@ -405,3 +405,21 @@ def test_weighted_windows_reject_bad_weights() raises:
     # A sum may have weights summing to zero.
     var diff = frame.select_exprs([col("x").rolling_sum(3, weights=zero)])
     assert_equal(diff.column("x").cast(DataType.FLOAT64).get(2).float64(), -1.0)
+
+
+def test_weighted_variance_of_an_infinite_value_is_nan() raises:
+    var frame = DataFrame(
+        [Series("x", Column[Float64]([FloatLiteral.infinity, 1, 2]))]
+    )
+    var w: List[Float64] = [2.0, 1.0]
+    var result = frame.select_exprs(
+        [
+            col("x").rolling_var(2, 1, weights=w).alias("var"),
+            col("x").rolling_std(2, 1, weights=w).alias("std"),
+        ]
+    )
+    for name in ["var", "std"]:
+        var column = result.column(name)
+        assert_true(isnan(column.get(0).float64()))
+        assert_true(isnan(column.get(1).float64()))
+        assert_true(column.get(2).float64() > 0)
