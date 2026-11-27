@@ -96,6 +96,7 @@ from .expr import (
     OVER_EXPLODE,
     OVER_MAPPING_MASK,
     INTERPOLATE_BY,
+    EWM_BY,
     is_rolling_by,
     is_dt_op,
     DT_OFFSET_BY,
@@ -118,6 +119,7 @@ from .expr import (
     LIST_CONCAT,
     LIST_COUNT_MATCHES,
     LIST_HAS,
+    is_list_set,
     STRUCT_PACK,
     STRUCT_FIELD,
     node_children,
@@ -134,6 +136,7 @@ from dataframe.kernels.replace import replace_values
 from dataframe.kernels.list import nested_op
 from dataframe.kernels.list_transforms import list_concat
 from dataframe.kernels.list_reductions import list_match
+from dataframe.kernels.list_sets import list_set
 from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.kernels.cast import cast_series
 from .categorical import (
@@ -142,7 +145,7 @@ from .categorical import (
     gather,
 )
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
-from .window import window_op, interpolate_by_op, rolling_by_op
+from .window import window_op, interpolate_by_op, rolling_by_op, ewm_by_op
 from dataframe.kernels.fusion import fused
 from dataframe.kernels.temporal import dt_op, temporal_binary
 from dataframe.storage.boolean import BoolColumn
@@ -615,7 +618,7 @@ def _eval[
         return string_op(node, left, bound._regex(index))
     if is_text_function(node.op):
         return text_function(node, left, bound._regex(index))
-    if node.op == LIST_CONCAT:
+    if node.op == LIST_CONCAT or is_list_set(node.op):
         var operands = List[Series]()
         operands.append(left^)
         if node.right >= 0:
@@ -631,6 +634,8 @@ def _eval[
                     mask,
                 )
             )
+        if is_list_set(node.op):
+            return list_set(operands, bound.dtypes[index], node.op)
         return list_concat(operands, bound.dtypes[index])
     if node.op == LIST_COUNT_MATCHES or node.op == LIST_HAS:
         var item = _eval[width](
@@ -5305,7 +5310,11 @@ def evaluate[
                 row_mode,
             )
             var window_groups = groups.copy() if grouped else List[Int]()
-            if node.op == INTERPOLATE_BY or is_rolling_by(node.op):
+            if (
+                node.op == INTERPOLATE_BY
+                or node.op == EWM_BY
+                or is_rolling_by(node.op)
+            ):
                 var by = _full[width](
                     bound,
                     prepared_columns,
@@ -5317,6 +5326,10 @@ def evaluate[
                 )
                 if is_rolling_by(node.op):
                     states[node_index] = rolling_by_op(
+                        node, input, by, window_groups
+                    )
+                elif node.op == EWM_BY:
+                    states[node_index] = ewm_by_op(
                         node, input, by, window_groups
                     )
                 else:
