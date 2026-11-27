@@ -458,6 +458,8 @@ def to_pl_expr(e, types):
         return E(1).list.count_matches(e[2])
     if op == "list.contains":
         return E(1).list.contains(e[2])
+    if op.startswith("list.set_"):
+        return getattr(E(1).list, op[5:])(E(2))
     if op == "list.unique":
         return E(1).list.unique(maintain_order=e[2])
     if op == "list.sort":
@@ -850,7 +852,7 @@ class Gen:
     def list_transform(self, e, t):
         """One list -> list transform of e, a list[int64] or list[string]."""
         r = self.rng
-        k = r.randrange(13)
+        k = r.randrange(14)
         if k == 0:
             maintain = r.random() < 0.5
             u = ("list.unique", e, maintain)
@@ -881,6 +883,12 @@ class Gen:
             ints = self.cols(lambda s: s == "int64")
             if ints:
                 return ("concat_list", e, ("col", r.choice(ints)))
+        if k == 12:
+            same = self.cols(lambda s: s == t)
+            op = r.choice(["list.set_union", "list.set_intersection", "list.set_difference", "list.set_symmetric_difference"])
+            s = (op, e, ("col", r.choice(same)))
+            # Polars orders a difference by hashing; compare it sorted.
+            return ("list.sort", s, False, False) if "difference" in op else s
         return ("list.reverse", e)
 
     def list_expr(self, c):

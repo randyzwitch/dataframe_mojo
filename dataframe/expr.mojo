@@ -427,6 +427,11 @@ comptime LIST_ARG_MIN = 326
 comptime LIST_ARG_MAX = 327
 comptime LIST_COUNT_MATCHES = 328
 comptime LIST_HAS = 329
+# Set operations between the list in `left` and the one in `right`.
+comptime LIST_SET_UNION = 330
+comptime LIST_SET_INTERSECTION = 331
+comptime LIST_SET_DIFFERENCE = 332
+comptime LIST_SET_SYMMETRIC_DIFFERENCE = 333
 
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
@@ -630,7 +635,12 @@ def is_nested_op(op: Int) -> Bool:
 def is_list_transform(op: Int) -> Bool:
     """Whether op builds each row's result from that row's list elements
     (list_transforms.mojo)."""
-    return op >= LIST_UNIQUE and op <= LIST_HAS
+    return op >= LIST_UNIQUE and op <= LIST_SET_SYMMETRIC_DIFFERENCE
+
+
+def is_list_set(op: Int) -> Bool:
+    """Whether op is a set operation between two lists."""
+    return op >= LIST_SET_UNION and op <= LIST_SET_SYMMETRIC_DIFFERENCE
 
 
 def is_conditional(op: Int) -> Bool:
@@ -3426,6 +3436,27 @@ struct ListNamespace(Copyable):
 
     def count_matches(self, value: String) -> Expr:
         return self.count_matches(lit(value))
+
+    def set_union(self, other: Expr) -> Expr:
+        """The distinct elements of each list and other's list in the same
+        row: this list's in order, then other's that it lacks. A null list
+        on either side gives null; a null element is one value."""
+        return self._binary(other, LIST_SET_UNION)
+
+    def set_intersection(self, other: Expr) -> Expr:
+        """The distinct elements of each list that other's list also holds,
+        in this list's order."""
+        return self._binary(other, LIST_SET_INTERSECTION)
+
+    def set_difference(self, other: Expr) -> Expr:
+        """The distinct elements of each list that other's list lacks, in
+        this list's order."""
+        return self._binary(other, LIST_SET_DIFFERENCE)
+
+    def set_symmetric_difference(self, other: Expr) -> Expr:
+        """The distinct elements in exactly one of the two lists: this
+        list's first, then other's."""
+        return self._binary(other, LIST_SET_SYMMETRIC_DIFFERENCE)
 
     def _binary(self, item: Expr, op: Int) -> Expr:
         var nodes = self._expr._nodes.copy()

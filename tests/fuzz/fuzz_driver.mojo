@@ -454,6 +454,14 @@ def build_expr(t: Tree, i: Int) raises -> Expr:
         if op == "list.count_matches":
             return ea(t, i, 1).list().count_matches(item)
         return ea(t, i, 1).list().contains(item)
+    if op == "list.set_union":
+        return ea(t, i, 1).list().set_union(ea(t, i, 2))
+    if op == "list.set_intersection":
+        return ea(t, i, 1).list().set_intersection(ea(t, i, 2))
+    if op == "list.set_difference":
+        return ea(t, i, 1).list().set_difference(ea(t, i, 2))
+    if op == "list.set_symmetric_difference":
+        return ea(t, i, 1).list().set_symmetric_difference(ea(t, i, 2))
     if op == "list.n_unique":
         return ea(t, i, 1).list().n_unique()
     if op == "list.unique":

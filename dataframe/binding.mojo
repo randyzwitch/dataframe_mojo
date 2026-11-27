@@ -225,6 +225,7 @@ from .expr import (
     LIST_COUNT_MATCHES,
     LIST_HAS,
     is_list_transform,
+    is_list_set,
     is_conditional,
     is_logical,
     is_binary,
@@ -1994,7 +1995,7 @@ def bind(
                 if regex:
                     regexes[i] = regex.take()
                 dtype = DataType.list(DataType.STRING)
-            elif node.op == LIST_CONCAT:
+            elif node.op == LIST_CONCAT or is_list_set(node.op):
                 # A bare literal takes its default type, as in a list
                 # literal, rather than the other side's element type.
                 var operands = List[Int]()

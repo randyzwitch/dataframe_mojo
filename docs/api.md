@@ -1683,6 +1683,14 @@ Expressions on list columns. A null list gives a null result.
 - `def count_matches(self, item: Expr) -> Expr`
   How many elements of each list equal the row's value of item, as UInt32; a null item counts null elements.
 - `def count_matches(self, value: String) -> Expr`
+- `def set_union(self, other: Expr) -> Expr`
+  The distinct elements of each list and other's list in the same row: this list's in order, then other's that it lacks. A null list on either side gives null; a null element is one value.
+- `def set_intersection(self, other: Expr) -> Expr`
+  The distinct elements of each list that other's list also holds, in this list's order.
+- `def set_difference(self, other: Expr) -> Expr`
+  The distinct elements of each list that other's list lacks, in this list's order.
+- `def set_symmetric_difference(self, other: Expr) -> Expr`
+  The distinct elements in exactly one of the two lists: this list's first, then other's.
 - `def unique(self, maintain_order: Bool = False) -> Expr`
   The distinct elements of each list, one null at most. The order is unspecified unless maintain_order, which keeps each value's first position.
 - `def n_unique(self) -> Expr`
