@@ -14,7 +14,11 @@ with `==` and print their canonical names (`int64`, `float64`, `bool`,
 `is_integer`, `is_float`, `is_signed`, and `bit_width` describe a type. APIs
 that name a dtype (`cast("int64")`, `by_dtype([...])`, `null("int64")`,
 `schema_overrides`) accept either form.
-There is no implicit numeric promotion. Typed extraction raises on a mismatch.
+Numeric types of different widths, signedness, floats and decimals promote
+when expressions, `concat` and join keys combine them (rules in
+[Expressions: Binding and shape](expressions.md#binding-and-shape)); strings,
+booleans, temporal types and categoricals stay strict. Typed extraction
+(`item(...).int64()` and the like) raises on a mismatch.
 `Column[T]` is more general, but `Series` accepts only the four listed types.
 
 ## Nulls and access
@@ -140,7 +144,7 @@ column must match it. NaN is a value and is never filled.
 `unpivot(on=[], index=[], variable_name="variable", value_name="value")` turns
 columns into rows: one output row per input row and `on` column, ordered by
 `on` column and then input row. `on` defaults to every non-index column, and all
-`on` columns must share one dtype because there is no promotion. The variable
+`on` columns must share one dtype: unpivot is strict and does not promote. The variable
 column holds the source column names as strings.
 
 `pivot(on, index=[...], values=..., aggregate_function="", sort_columns=False)`
@@ -198,8 +202,9 @@ output size.
 count from the end). `frame["name"]` returns a column as a Series.
 
 Every one of these evaluates the matching expression over a one-column frame,
-so it shares the expression kernels and contracts exactly: typed literals, no
-promotion, the same null, NaN, and overflow rules. A binary operation between
+so it shares the expression kernels and contracts exactly: the same numeric
+promotion (`Int64` series + `Float32` series is Float32), the same null, NaN,
+and overflow rules. A binary operation between
 two series pairs rows by position, requires equal lengths, and keeps the left
 name; the other operand may also be a scalar expression such as `lit(...)` or
 a bare number.
