@@ -1,6 +1,6 @@
-"""Internal dictionary joins retain matching private-key Arrow owners."""
+"""Internal dictionary joins retain the left key's Arrow field owner."""
 from std.memory import ArcPointer
-from std.testing import assert_raises
+from std.testing import assert_equal, assert_true
 from dataframe import Column, DataFrame, DataType, Series, StringColumn
 
 
@@ -16,10 +16,11 @@ def _labelled_source() raises -> DataFrame:
     return DataFrame([key^, text^])
 
 
-def test_dictionary_lookup_does_not_change_public_metadata_conflicts() raises:
-    # Both CAT sides preserve their field owners during dictionary unification,
-    # and a full join's coalesced key, which takes rows of both, requires
-    # their metadata to agree, as concatenation does.
+def test_dictionary_lookup_keeps_the_left_key_field_metadata() raises:
+    # Both CAT sides preserve their field owners during dictionary
+    # unification. A full join's coalesced key takes rows of both keys and
+    # is the left key's field: it keeps the left key's metadata whatever
+    # the right key carries (#1478).
     var original = _labelled_source()
     var fresh = DataFrame(
         [
@@ -28,6 +29,17 @@ def test_dictionary_lookup_does_not_change_public_metadata_conflicts() raises:
             )
         ]
     )
-    var invalid = original.lazy().join(fresh.lazy(), on="label", how="full")
-    with assert_raises(contains="Conflicting Arrow field metadata"):
-        _ = invalid.collect(engine="cpu", streaming=False, optimize=False)
+    var joined = (
+        original.lazy()
+        .join(fresh.lazy(), on="label", how="full")
+        .collect(engine="cpu", streaming=False, optimize=False)
+    )
+    var left = original.column("label")._field_metadata.value()
+    var kept = joined.column("label")._field_metadata
+    assert_true(Bool(kept))
+    assert_equal(len(kept.value()[]), len(left[]))
+    for i in range(len(left[])):
+        assert_equal(kept.value()[][i], left[][i])
+    # 2 "z" rows on the left times 4 on the right, plus the left's "a" and
+    # null rows.
+    assert_equal(joined.height(), 10)

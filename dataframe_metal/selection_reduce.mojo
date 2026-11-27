@@ -1,5 +1,6 @@
 """One queue of native reductions over the CPU schedule's retained batches."""
 from std.ffi import external_call
+from .accelerator.gpu.shared_pages import SharedPages
 from std.memory import bitcast, ArcPointer, Pointer
 from dataframe.execution_observation import DeviceObservation
 from std.time import perf_counter_ns
@@ -36,27 +37,6 @@ from .accelerator.gpu.query_scope import (
 )
 from .accelerator.gpu.typed_storage import _NativeReservation
 from .accelerator.gpu.target import METAL_TARGET
-
-
-struct _IndexPages(Movable):
-    # Metal borrows these pages until the queued reductions have finished.
-    var address: Int
-
-    def __init__(out self, size: Int, alignment: Int) raises:
-        var address = 0
-        if (
-            size
-            and external_call["posix_memalign", Int32](
-                Pointer(to=address), alignment, size
-            )
-            != 0
-        ):
-            raise Error("Could not allocate shared Metal selection indices")
-        self.address = address
-
-    def __deinit__(deinit self):
-        if self.address:
-            external_call["free", NoneType](self.address)
 
 
 struct _Total(Movable):
@@ -379,7 +359,7 @@ def _execute_selection_validated(
                             inputs.owners[o], scope, empty, reservations
                         )
                     )
-        var pages = _IndexPages(index_bytes, page)
+        var pages = SharedPages(index_bytes, page)
         var selections: DeviceBuffer[DType.uint32]
         if index_bytes:
             var dest = Pointer[UInt32, MutAnyOrigin](
