@@ -117,6 +117,9 @@ from .expr import (
     is_rolling_by,
     ROLLING_MEAN,
     ROLLING_MAX,
+    ROLLING_QUANTILE,
+    ROLLING_QUANTILE_BY,
+    rolling_options,
     FORWARD_FILL,
     BACKWARD_FILL,
     INTERPOLATE,
@@ -549,6 +552,37 @@ def op_name(op: Int) -> String:
 
 def _numeric(dtype: DataType) -> Bool:
     return dtype.is_numeric()
+
+
+def _rolling_quantile_type(node: Node, input: DataType) raises -> DataType:
+    """The type of a rolling quantile of `input`, after checking its
+    options: Float32 and decimals keep their type (a quantile lies among
+    the values, and interpolation stays at their precision), other numbers
+    give Float64."""
+    if not _numeric(input):
+        raise Error(
+            "rolling_quantile requires a numeric expression, found "
+            + input.name()
+        )
+    var options = rolling_options(node)
+    if not (options.quantile >= 0 and options.quantile <= 1):
+        raise Error("quantile must be between 0 and 1")
+    var method = options.method
+    if (
+        method != "linear"
+        and method != "nearest"
+        and method != "lower"
+        and method != "higher"
+        and method != "midpoint"
+        and method != "equiprobable"
+    ):
+        raise Error(
+            "interpolation must be nearest, lower, higher, midpoint, linear"
+            " or equiprobable"
+        )
+    if input == DataType.FLOAT32 or input.is_decimal():
+        return input
+    return DataType.FLOAT64
 
 
 def temporal_result(
@@ -1665,6 +1699,8 @@ def bind(
                     raise Error("min_samples and ddof must be nonnegative")
                 if node.op == ROLLING_SUM_BY:
                     dtype = input.sum_type()
+                elif node.op == ROLLING_QUANTILE_BY:
+                    dtype = _rolling_quantile_type(node, input)
                 elif node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY:
                     dtype = DataType.FLOAT64
             elif node.op == CUM_SUM and input == DataType.BOOL:
@@ -1695,6 +1731,8 @@ def bind(
                         + input.name()
                     )
                 dtype = DataType.FLOAT64
+            elif node.op == ROLLING_QUANTILE:
+                dtype = _rolling_quantile_type(node, input)
             elif node.op == CUM_COUNT:
                 dtype = DataType.INT64
             elif node.op == RANK:
@@ -1717,6 +1755,7 @@ def bind(
                 (node.op >= ROLLING_SUM and node.op <= ROLLING_MAX)
                 or node.op == ROLLING_STD
                 or node.op == ROLLING_VAR
+                or node.op == ROLLING_QUANTILE
             ):
                 if node.integer < 1:
                     raise Error("window_size must be at least 1")
@@ -1731,7 +1770,9 @@ def bind(
             ) and node.min_count < 0:
                 raise Error("ddof must be nonnegative")
             if (
-                node.op == ROLLING_STD or node.op == ROLLING_VAR
+                node.op == ROLLING_STD
+                or node.op == ROLLING_VAR
+                or node.op == ROLLING_QUANTILE
             ) and node.floating > Float64(node.integer):
                 raise Error("min_samples cannot exceed window_size")
             shape = ROWS

@@ -47,6 +47,9 @@ from .expr import (
     ROLLING_MEAN,
     ROLLING_MIN,
     ROLLING_MAX,
+    ROLLING_QUANTILE,
+    ROLLING_QUANTILE_BY,
+    rolling_options,
     BACKWARD_FILL,
     INTERPOLATE,
     CUT,
@@ -63,6 +66,7 @@ from dataframe.aggregation.function import ReducerSpec
 from .series import Series, FixedElements
 from .window_segment_tree import frame_states_supported, window_segment_tree
 from .window_sort import rank_rows
+from .window_quantile import quantile_frames, fixed_quantiles
 from std.collections import Optional
 from std.math import isnan, floor, sqrt, isfinite
 
@@ -405,6 +409,7 @@ def _window_ranges(
         or op == ROLLING_MEAN
         or op == ROLLING_MIN
         or op == ROLLING_MAX
+        or op == ROLLING_QUANTILE
     ):
         return _rolling_frames(input, starts, node)
     # The remaining operations gather a source row per output row.
@@ -1129,6 +1134,17 @@ def _frames(
     Fewer than `needed` valid values give null, and a frame without any
     gives null unless it is an empty sum. A minimum or maximum over a frame
     holding a NaN is NaN."""
+    if node.op == ROLLING_QUANTILE or node.op == ROLLING_QUANTILE_BY:
+        var options = rolling_options(node)
+        return quantile_frames(
+            input,
+            begins,
+            ends,
+            starts,
+            needed,
+            options.quantile,
+            options.method,
+        )
     var reduction = _reduction_of(node.op)
     var moments = reduction == STD or reduction == VAR
     var feed = _origin_shifted(input, starts) if moments else input.copy()
@@ -1255,6 +1271,17 @@ def _rolling_frames(
     var n = len(input)
     var window = Int(node.integer)
     var needed = window if node.floating < 0 else Int(node.floating)
+    if node.op == ROLLING_QUANTILE:
+        var options = rolling_options(node)
+        return fixed_quantiles(
+            input,
+            starts,
+            window,
+            False,
+            needed,
+            options.quantile,
+            options.method,
+        )
     if (
         (node.op == ROLLING_SUM or node.op == ROLLING_MEAN)
         and window >= 1
@@ -1352,12 +1379,20 @@ def rolling_by_op(
 
     if input.is_chunked() or index.is_chunked():
         return rolling_by_op(node, input.rechunk(), index.rechunk(), ids)
-    if input.dtype().is_decimal():
+    var closed = node.text2
+    if node.op == ROLLING_QUANTILE_BY:
+        # Quantiles read every numeric type as it is.
+        closed = rolling_options(node).closed
+    elif input.dtype().is_decimal():
         if node.op != ROLLING_SUM_BY and (
             node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY
         ):
             return rolling_by_op(node, _as_float(input), index, ids)
-    var numeric = node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY
+    var numeric = (
+        node.op != ROLLING_MIN_BY
+        and node.op != ROLLING_MAX_BY
+        and node.op != ROLLING_QUANTILE_BY
+    )
     if numeric and node.op != ROLLING_SUM_BY and _is_narrow(input.dtype()):
         return rolling_by_op(node, input.cast(DataType.FLOAT64), index, ids)
     if (
@@ -1372,7 +1407,7 @@ def rolling_by_op(
         )
     var groups = partitions(len(input), ids)
     var bounds = rolling_bounds(
-        index, groups, node.text, negate_period(node.text), node.text2
+        index, groups, node.text, negate_period(node.text), closed
     )
     # The partitions laid out one after another, frames at their positions
     # there, and the results put back in row order.
