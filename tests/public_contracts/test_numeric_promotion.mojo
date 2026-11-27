@@ -484,8 +484,8 @@ def test_branch_fill_and_coalesce_types_match_the_matrix_eager_and_lazy() raises
                         + (" (lazy)" if lazy else " (eager)")
                     )
                 var values = column.cast(DataType.FLOAT64)
-                assert_equal(values.item(0).float64(), 2.0)
-                assert_equal(values.item(1).float64(), 7.0)
+                assert_equal(values.get(0).float64(), 2.0)
+                assert_equal(values.get(1).float64(), 7.0)
         checked += 1
     assert_equal(checked, 13 * 12)
 
@@ -629,6 +629,24 @@ def test_concat_stacks_numeric_columns_of_different_types() raises:
             assert_equal(out.item(2, "f").float32(), 0.5)
             assert_equal(_short(out.column("d").dtype()), "d21.2")
             assert_equal(out.column("d").rechunk()._decimal_raw(2), 700)
+    # Operators above the union read the promoted column from every input.
+    var summed = (
+        concat([top.lazy(), bottom.lazy()], "vertical")
+        .group_by(["s"])
+        .agg([col("k").sum().alias("k"), col("f").max().alias("f")])
+        .sort("s")
+        .collect()
+    )
+    assert_equal(_short(summed.column("k").dtype()), "i64")
+    assert_equal(summed.item(2, "k").int64(), 4000000000)
+    var kept = (
+        concat([top.lazy(), bottom.lazy()], "vertical")
+        .filter(col("k") > 1)
+        .select(["k", "d"])
+        .collect()
+    )
+    assert_equal(kept.height(), 2)
+    assert_equal(_short(kept.column("k").dtype()), "i64")
     var text = DataFrame([Series("k", Column[String](["x"]))])
     var numbers = DataFrame([Series("k", Column[Int64]([1]))])
     for lazy in [False, True]:

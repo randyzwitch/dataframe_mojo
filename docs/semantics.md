@@ -163,12 +163,17 @@ skips null values and `len` counts rows.
 known. Every input is validated before any column is built, and errors name the
 frame position and column.
 
-- `vertical` requires identical names, order, and dtypes. Rows appear frame by
+- `vertical` requires identical names and order. Rows appear frame by
   frame in input order. Zero-column frames sum their heights. `vstack` is the
   two-frame form.
-- `diagonal` unions columns by name in first-seen order. A name shared by
-  several frames must have one dtype; there is no promotion. Frames lacking a
+- `diagonal` unions columns by name in first-seen order. Frames lacking a
   column contribute nulls.
+- In both, a numeric column whose type differs between frames takes the type
+  that holds every frame's values, as expression operands do (Int32 and
+  UInt32 stack as Int64, Int64 and Float32 as Float32, `decimal[10,2]` and
+  Int64 as `decimal[21,2]`). Other types must match. `vertical_relaxed` and
+  `diagonal_relaxed` are accepted as the same modes. Reading several files
+  as one table stays strict: a column typed differently in two files raises.
 - `horizontal` requires equal heights and globally unique names. `hstack`
   accepts a dataframe or a list of series; differing heights raise rather
   than inserting padding rows.
@@ -256,9 +261,14 @@ instead of sorting every row.
 
 `join(right, on, how="inner", suffix="_right", coalesce=True)` takes one key
 name or a list; `join(right, left_on=[...], right_on=[...], ...)` pairs keys
-with different names. Keys may be any dtype, but each pair must have the same
-dtype, key lists must be nonempty and equally long, and a left key may appear
-once. Null keys never match, including another null. Empty strings are ordinary
+with different names. Keys may be any dtype. A pair of numeric keys of
+different types matches by value: both are compared in the type that holds
+both (Int32 and UInt32 as Int64, Int64 and Float64 as Float64, decimals of two
+scales at a common decimal), and each output key column keeps its side's
+declared type, except the coalesced key of a `full` join, which mixes both
+sides and has the common type. UInt64 beside a signed key has no common type
+and raises. Other pairs must have the same dtype. Key lists must be nonempty
+and equally long, and a left key may appear once. Null keys never match, including another null. Empty strings are ordinary
 keys. Float64 keys match structurally: every NaN matches every NaN, and `-0.0`
 matches `0.0`. Duplicate keys emit every matching pair.
 
