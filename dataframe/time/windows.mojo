@@ -8,7 +8,7 @@ from dataframe.time.temporal import (
     to_local,
     relocalize,
 )
-from dataframe.kernels.temporal import _offset, _offset_in, _truncate
+from dataframe.kernels.temporal import Offset, _offset, _offset_in, _truncate
 from dataframe.time.timezone import TimeZone
 
 
@@ -138,17 +138,47 @@ def rolling_bounds(
     var dtype = index.dtype()
     var zone = zone_of(dtype)
     ref values = index._data[Column[Int64]]
+    var times = values._ptr()
     var default_offset = offset == negate_period(period)
+    # A naive index shifts by an interval parsed once; one in a time zone
+    # shifts in local time, row by row.
+    var naive = (
+        not (dtype.is_datetime() and dtype.time_zone() != "") and len(index) > 0
+    )
+    var shift_start = Offset(dtype, offset) if naive else Offset.unused(dtype)
+    var shift_end = Offset.unused(dtype)
+    if naive and not default_offset:
+        shift_end = Offset(dtype, period)
     for rows in groups:
+        # Rows are in time order and shifting a time never reverses that
+        # order, so both bounds only move forward: a sweep finds them, one
+        # step per row and bound, where a search per row would take
+        # O(log n) reads.
+        var lo = 0
+        var hi = 0
+        var m = len(rows)
         for row in rows:
-            var time = values._get(row)
-            var start = shift_time(time, dtype, offset, zone)
-            # Calendar month subtraction then addition need not round-trip.
-            var end = time if default_offset else shift_time(
-                start, dtype, period, zone
+            var time = times[unsafe_offset=row]
+            var start = shift_start.apply(time) if naive else shift_time(
+                time, dtype, offset, zone
             )
-            var lo = search_time(values, rows, start, not sides[0])
-            var hi = search_time(values, rows, end, sides[1])
+            # Calendar month subtraction then addition need not round-trip.
+            var end = time
+            if not default_offset:
+                end = shift_end.apply(start) if naive else shift_time(
+                    start, dtype, period, zone
+                )
+            while lo < m and (
+                times[unsafe_offset=rows[lo]] < start
+                or (not sides[0] and times[unsafe_offset=rows[lo]] == start)
+            ):
+                lo += 1
+            hi = max(hi, lo)
+            while hi < m and (
+                times[unsafe_offset=rows[hi]] < end
+                or (sides[1] and times[unsafe_offset=rows[hi]] == end)
+            ):
+                hi += 1
             lower[row] = lo
-            upper[row] = max(lo, hi)
+            upper[row] = hi
     return (lower^, upper^)
