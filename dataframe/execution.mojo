@@ -119,6 +119,7 @@ from .expr import (
     LIST_CONCAT,
     LIST_COUNT_MATCHES,
     LIST_HAS,
+    is_list_set,
     STRUCT_PACK,
     STRUCT_FIELD,
     node_children,
@@ -135,6 +136,7 @@ from dataframe.kernels.replace import replace_values
 from dataframe.kernels.list import nested_op
 from dataframe.kernels.list_transforms import list_concat
 from dataframe.kernels.list_reductions import list_match
+from dataframe.kernels.list_sets import list_set
 from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.kernels.cast import cast_series
 from .categorical import (
@@ -616,7 +618,7 @@ def _eval[
         return string_op(node, left, bound._regex(index))
     if is_text_function(node.op):
         return text_function(node, left, bound._regex(index))
-    if node.op == LIST_CONCAT:
+    if node.op == LIST_CONCAT or is_list_set(node.op):
         var operands = List[Series]()
         operands.append(left^)
         if node.right >= 0:
@@ -632,6 +634,8 @@ def _eval[
                     mask,
                 )
             )
+        if is_list_set(node.op):
+            return list_set(operands, bound.dtypes[index], node.op)
         return list_concat(operands, bound.dtypes[index])
     if node.op == LIST_COUNT_MATCHES or node.op == LIST_HAS:
         var item = _eval[width](
