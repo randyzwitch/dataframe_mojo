@@ -23,6 +23,10 @@ from std.math import isnan
 from std.memory import Pointer, unsafe_memcmp
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
+    LIST_SET_DIFFERENCE,
+    LIST_SET_INTERSECTION,
+    LIST_SET_SYMMETRIC_DIFFERENCE,
+    LIST_SET_UNION,
     LIST_ALL,
     LIST_ANY,
     LIST_ARG_MAX,
@@ -129,6 +133,14 @@ def list_op_name(op: Int) -> String:
         return "list.count_matches"
     if op == LIST_HAS:
         return "list.contains"
+    if op == LIST_SET_UNION:
+        return "list.set_union"
+    if op == LIST_SET_INTERSECTION:
+        return "list.set_intersection"
+    if op == LIST_SET_DIFFERENCE:
+        return "list.set_difference"
+    if op == LIST_SET_SYMMETRIC_DIFFERENCE:
+        return "list.set_symmetric_difference"
     return "list operation " + String(op)
 
 
