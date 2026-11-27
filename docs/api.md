@@ -1104,15 +1104,22 @@ A flat, topologically ordered tree; composition never evaluates data.
   Relative change from the value n rows earlier, as Float64.
 - `def rank(self, method: String = "average", descending: Bool = False) -> Self`
   Rank non-null values: average, min, max, dense, or ordinal.
-- `def rolling_sum(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
-  Sum over the current row and the window_size - 1 rows before it.
-- `def rolling_mean(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
-- `def rolling_min(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
-- `def rolling_max(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
-- `def rolling_std(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1)) -> Self`
-  Rolling std with stable sliding moments and count minus ddof.
-- `def rolling_var(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1)) -> Self`
-  Rolling var with stable sliding moments and count minus ddof.
+- `def rolling_sum(self, window_size: Int, min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Sum over the current row and the window_size - 1 rows before it (center=True: the window_size rows around it, the extra row of an even window before it).
+- `def rolling_mean(self, window_size: Int, min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Mean over the window (see rolling_sum), as Float64; with weights, the weighted sum over the sum of the weights.
+- `def rolling_min(self, window_size: Int, min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Least value of the window (see rolling_sum); with weights, the least weighted value, as Float64 (Float32 stays Float32).
+- `def rolling_max(self, window_size: Int, min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Greatest value of the window (see rolling_min).
+- `def rolling_std(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Rolling std with stable sliding moments and count minus ddof. With weights, the square root of the weighted mean squared deviation from the weighted mean (ddof does not apply).
+- `def rolling_var(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Rolling var with stable sliding moments and count minus ddof; weights as for rolling_std.
+- `def rolling_median(self, window_size: Int, min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Median of the current row and the window_size - 1 rows before it, as Float64 (Float32 stays Float32, a decimal keeps its type).
+- `def rolling_quantile(self, quantile: Float64, interpolation: String = "nearest", window_size: Int = Int(2), min_samples: Int = Int(-1), *, center: Bool = False, weights: List[Float64] = List()) -> Self`
+  Quantile of the current row and the window_size - 1 rows before it. Interpolation: nearest, lower, higher, midpoint, linear or equiprobable; types, nulls, center and weights as in rolling_median. A weighted quantile treats each value as spanning its weight.
 - `def rolling_sum_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
   Rolling sum over a Date/Datetime duration window (any row order).
 - `def rolling_sum_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
@@ -1137,6 +1144,28 @@ A flat, topologically ordered tree; composition never evaluates data.
   Rolling var over a Date/Datetime duration window (any row order).
 - `def rolling_var_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1), ddof: Int = Int(1)) -> Self`
   Rolling var over a Date/Datetime duration window (any row order).
+- `def rolling_median_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling median over a Date/Datetime duration window (any row order); types as in rolling_median.
+- `def rolling_median_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling median over a Date/Datetime duration window (any row order); types as in rolling_median.
+- `def rolling_quantile_by(self, by: Self, window_size: String, quantile: Float64, interpolation: String = "nearest", closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling quantile over a Date/Datetime duration window (any row order); interpolation and types as in rolling_quantile.
+- `def rolling_quantile_by(self, by: String, window_size: String, quantile: Float64, interpolation: String = "nearest", closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling quantile over a Date/Datetime duration window (any row order); interpolation and types as in rolling_quantile.
+- `def ewm_mean(self, *, com: Float64 = FloatLiteral[_].nan, span: Float64 = FloatLiteral[_].nan, half_life: Float64 = FloatLiteral[_].nan, alpha: Float64 = FloatLiteral[_].nan, adjust: Bool = True, min_samples: Int = Int(1), ignore_nulls: Bool = False) -> Self`
+  Exponentially weighted mean. Give exactly one of com (alpha = 1 / (1 + com)), span (2 / (span + 1)), half_life (1 - exp(-ln 2 / half_life)) or alpha. adjust weighs the values as an infinite series cut at the first one; without it each new value enters with weight alpha. A null row stays null and, unless ignore_nulls, ages the earlier values one step; rows before min_samples values are null. Float64 (Float32 stays Float32).
+- `def ewm_var(self, *, com: Float64 = FloatLiteral[_].nan, span: Float64 = FloatLiteral[_].nan, half_life: Float64 = FloatLiteral[_].nan, alpha: Float64 = FloatLiteral[_].nan, adjust: Bool = True, bias: Bool = False, min_samples: Int = Int(1), ignore_nulls: Bool = False) -> Self`
+  Exponentially weighted variance (see ewm_mean); without bias it is corrected by the weights' effective sample size, and null until that correction is defined.
+- `def ewm_std(self, *, com: Float64 = FloatLiteral[_].nan, span: Float64 = FloatLiteral[_].nan, half_life: Float64 = FloatLiteral[_].nan, alpha: Float64 = FloatLiteral[_].nan, adjust: Bool = True, bias: Bool = False, min_samples: Int = Int(1), ignore_nulls: Bool = False) -> Self`
+  Square root of ewm_var.
+- `def ewm_sum(self, *, com: Float64 = FloatLiteral[_].nan, span: Float64 = FloatLiteral[_].nan, half_life: Float64 = FloatLiteral[_].nan, alpha: Float64 = FloatLiteral[_].nan, min_samples: Int = Int(1), ignore_nulls: Bool = False) -> Self`
+  Exponentially weighted sum: each row adds its value to (1 - alpha) times the sum before it (see ewm_mean for the options).
+- `def ewm_mean_by(self, by: Self, half_life: String) -> Self`
+  Exponentially weighted mean over a Date/Datetime index (any row order): between consecutive rows in time order the earlier result decays by 0.5^(elapsed / half_life). half_life is a fixed duration (no months). A row with a null value or time stays null.
+- `def ewm_mean_by(self, by: String, half_life: String) -> Self`
+- `def ewm_sum_by(self, by: Self, half_life: String) -> Self`
+  Exponentially weighted sum over a Date/Datetime index: the earlier sum decays by 0.5^(elapsed / half_life) and each row adds its value (see ewm_mean_by).
+- `def ewm_sum_by(self, by: String, half_life: String) -> Self`
 - `def forward_fill(self, limit: Int = Int(-1)) -> Self`
   Fill nulls with the last valid value, at most limit rows ahead (-1 means unlimited).
 - `def backward_fill(self, limit: Int = Int(-1)) -> Self`
@@ -1683,6 +1712,14 @@ Expressions on list columns. A null list gives a null result.
 - `def count_matches(self, item: Expr) -> Expr`
   How many elements of each list equal the row's value of item, as UInt32; a null item counts null elements.
 - `def count_matches(self, value: String) -> Expr`
+- `def set_union(self, other: Expr) -> Expr`
+  The distinct elements of each list and other's list in the same row: this list's in order, then other's that it lacks. A null list on either side gives null; a null element is one value.
+- `def set_intersection(self, other: Expr) -> Expr`
+  The distinct elements of each list that other's list also holds, in this list's order.
+- `def set_difference(self, other: Expr) -> Expr`
+  The distinct elements of each list that other's list lacks, in this list's order.
+- `def set_symmetric_difference(self, other: Expr) -> Expr`
+  The distinct elements in exactly one of the two lists: this list's first, then other's.
 - `def unique(self, maintain_order: Bool = False) -> Expr`
   The distinct elements of each list, one null at most. The order is unspecified unless maintain_order, which keeps each value's first position.
 - `def n_unique(self) -> Expr`
