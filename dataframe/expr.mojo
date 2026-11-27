@@ -307,6 +307,14 @@ comptime ROLLING_MIN_BY = 177
 comptime ROLLING_MAX_BY = 178
 comptime ROLLING_STD_BY = 179
 comptime ROLLING_VAR_BY = 180
+# Order statistics of sliding windows. ROLLING_QUANTILE is a fixed window
+# (integer: window size, floating: min_samples); ROLLING_QUANTILE_BY a
+# duration window like the *_by ops above (text: duration). Both keep the
+# closed side, the quantile and its interpolation in `text2`
+# (`pack_rolling_options`). A median is the 0.5 quantile, interpolated
+# linearly.
+comptime ROLLING_QUANTILE = 340
+comptime ROLLING_QUANTILE_BY = 341
 
 # String functions that need no regular expressions (#798), unary on a
 # string input (text_functions.mojo). `text` holds a literal, or several
@@ -475,7 +483,54 @@ def horizontal_inputs(nodes: List[Node], index: Int) -> List[Int]:
 
 
 def is_rolling_by(op: Int) -> Bool:
-    return op >= ROLLING_SUM_BY and op <= ROLLING_VAR_BY
+    return (
+        op >= ROLLING_SUM_BY and op <= ROLLING_VAR_BY
+    ) or op == ROLLING_QUANTILE_BY
+
+
+struct RollingOptions(Copyable, Movable):
+    """The options a rolling node keeps in `text2`: the closed side of a
+    duration window ("" for a fixed window), then `key=value` items
+    (`q`: the quantile as its Float64 bits, `m`: the interpolation)."""
+
+    var closed: String
+    var quantile: Float64
+    var method: String
+
+    def __init__(out self):
+        self.closed = ""
+        self.quantile = 0.5
+        self.method = "linear"
+
+
+def pack_rolling_options(options: RollingOptions) -> String:
+    var bits = bitcast[DType.int64, 1](SIMD[DType.float64, 1](options.quantile))
+    return (
+        options.closed
+        + SEP
+        + "q="
+        + String(Int64(bits))
+        + SEP
+        + "m="
+        + options.method
+    )
+
+
+def rolling_options(node: Node) raises -> RollingOptions:
+    """The options `pack_rolling_options` stored in `node.text2`."""
+    var options = RollingOptions()
+    var parts = node.text2.split(SEP)
+    options.closed = String(parts[0])
+    for k in range(1, len(parts)):
+        var item = String(parts[k])
+        if item.startswith("q="):
+            var bits = Int64(atol(String(item[byte=2:])))
+            options.quantile = Float64(
+                bitcast[DType.float64, 1](SIMD[DType.int64, 1](bits))
+            )
+        elif item.startswith("m="):
+            options.method = String(item[byte=2:])
+    return options^
 
 
 def is_binary(op: Int) -> Bool:
@@ -612,6 +667,8 @@ def is_window(op: Int) -> Bool:
     return (
         (op >= CUM_SUM and op <= CUM_PROD and op != OVER)
         or (op >= ROLLING_STD and op <= ROLLING_VAR_BY)
+        or op == ROLLING_QUANTILE
+        or op == ROLLING_QUANTILE_BY
         or is_distinct_flag(op)
         or is_sequence(op)
     )
@@ -1981,6 +2038,37 @@ struct Expr(Copyable):
         result._nodes[len(result._nodes) - 1].min_count = ddof
         return result^
 
+    def rolling_median(self, window_size: Int, min_samples: Int = -1) -> Self:
+        """Median of the current row and the window_size - 1 rows before
+        it, as Float64 (Float32 stays Float32, a decimal keeps its type).
+
+        Nulls are skipped; fewer than min_samples valid values (default
+        window_size) give null. NaN sorts above every number.
+        """
+        return self.rolling_quantile(0.5, "linear", window_size, min_samples)
+
+    def rolling_quantile(
+        self,
+        quantile: Float64,
+        interpolation: String = "nearest",
+        window_size: Int = 2,
+        min_samples: Int = -1,
+    ) -> Self:
+        """Quantile of the current row and the window_size - 1 rows before
+        it. Interpolation: nearest, lower, higher, midpoint, linear or
+        equiprobable; types and nulls as in rolling_median.
+        """
+        var result = self._window(
+            ROLLING_QUANTILE, Int64(window_size), floating=Float64(min_samples)
+        )
+        var options = RollingOptions()
+        options.quantile = quantile
+        options.method = interpolation
+        result._nodes[len(result._nodes) - 1].text2 = pack_rolling_options(
+            options
+        )
+        return result^
+
     def _rolling_by(
         self,
         by: Self,
@@ -2144,6 +2232,75 @@ struct Expr(Copyable):
         """Rolling var over a Date/Datetime duration window (any row order)."""
         return self._rolling_by(
             col(by), ROLLING_VAR_BY, window_size, closed, min_samples, ddof
+        )
+
+    def rolling_median_by(
+        self,
+        by: Self,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling median over a Date/Datetime duration window (any row
+        order); types as in rolling_median."""
+        return self.rolling_quantile_by(
+            by, window_size, 0.5, "linear", closed, min_samples
+        )
+
+    def rolling_median_by(
+        self,
+        by: String,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling median over a Date/Datetime duration window (any row
+        order); types as in rolling_median."""
+        return self.rolling_quantile_by(
+            col(by), window_size, 0.5, "linear", closed, min_samples
+        )
+
+    def rolling_quantile_by(
+        self,
+        by: Self,
+        window_size: String,
+        quantile: Float64,
+        interpolation: String = "nearest",
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling quantile over a Date/Datetime duration window (any row
+        order); interpolation and types as in rolling_quantile."""
+        var result = self._rolling_by(
+            by, ROLLING_QUANTILE_BY, window_size, closed, min_samples, 0
+        )
+        var options = RollingOptions()
+        options.closed = closed
+        options.quantile = quantile
+        options.method = interpolation
+        result._nodes[len(result._nodes) - 1].text2 = pack_rolling_options(
+            options
+        )
+        return result^
+
+    def rolling_quantile_by(
+        self,
+        by: String,
+        window_size: String,
+        quantile: Float64,
+        interpolation: String = "nearest",
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling quantile over a Date/Datetime duration window (any row
+        order); interpolation and types as in rolling_quantile."""
+        return self.rolling_quantile_by(
+            col(by),
+            window_size,
+            quantile,
+            interpolation,
+            closed,
+            min_samples,
         )
 
     def forward_fill(self, limit: Int = -1) -> Self:

@@ -1113,6 +1113,10 @@ A flat, topologically ordered tree; composition never evaluates data.
   Rolling std with stable sliding moments and count minus ddof.
 - `def rolling_var(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1)) -> Self`
   Rolling var with stable sliding moments and count minus ddof.
+- `def rolling_median(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
+  Median of the current row and the window_size - 1 rows before it, as Float64 (Float32 stays Float32, a decimal keeps its type).
+- `def rolling_quantile(self, quantile: Float64, interpolation: String = "nearest", window_size: Int = Int(2), min_samples: Int = Int(-1)) -> Self`
+  Quantile of the current row and the window_size - 1 rows before it. Interpolation: nearest, lower, higher, midpoint, linear or equiprobable; types and nulls as in rolling_median.
 - `def rolling_sum_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
   Rolling sum over a Date/Datetime duration window (any row order).
 - `def rolling_sum_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
@@ -1137,6 +1141,14 @@ A flat, topologically ordered tree; composition never evaluates data.
   Rolling var over a Date/Datetime duration window (any row order).
 - `def rolling_var_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1), ddof: Int = Int(1)) -> Self`
   Rolling var over a Date/Datetime duration window (any row order).
+- `def rolling_median_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling median over a Date/Datetime duration window (any row order); types as in rolling_median.
+- `def rolling_median_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling median over a Date/Datetime duration window (any row order); types as in rolling_median.
+- `def rolling_quantile_by(self, by: Self, window_size: String, quantile: Float64, interpolation: String = "nearest", closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling quantile over a Date/Datetime duration window (any row order); interpolation and types as in rolling_quantile.
+- `def rolling_quantile_by(self, by: String, window_size: String, quantile: Float64, interpolation: String = "nearest", closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling quantile over a Date/Datetime duration window (any row order); interpolation and types as in rolling_quantile.
 - `def forward_fill(self, limit: Int = Int(-1)) -> Self`
   Fill nulls with the last valid value, at most limit rows ahead (-1 means unlimited).
 - `def backward_fill(self, limit: Int = Int(-1)) -> Self`

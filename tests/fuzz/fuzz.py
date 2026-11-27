@@ -448,6 +448,28 @@ def to_pl_expr(e, types):
         return E(1).interpolate(e[2])
     if op == "interpolate_by":
         return E(1).interpolate_by(E(2))
+    if op == "rolling_agg":
+        # (rolling_agg EXPR FN WINDOW MIN_SAMPLES), -1 for the default.
+        ms = None if e[4] < 0 else e[4]
+        return getattr(E(1), "rolling_" + e[2])(e[3], min_samples=ms)
+    if op == "rolling_quantile":
+        # (rolling_quantile EXPR Q METHOD WINDOW MIN_SAMPLES)
+        ms = None if e[5] < 0 else e[5]
+        return E(1).rolling_quantile(e[2], e[3], e[4], min_samples=ms)
+    if op == "rolling_median":
+        ms = None if e[3] < 0 else e[3]
+        return E(1).rolling_median(e[2], min_samples=ms)
+    if op == "rolling_agg_by":
+        # (rolling_agg_by EXPR BY FN PERIOD CLOSED MIN_SAMPLES)
+        return getattr(E(1), "rolling_" + e[3] + "_by")(
+            E(2), e[4], closed=e[5], min_samples=e[6]
+        )
+    if op == "rolling_quantile_by":
+        # (rolling_quantile_by EXPR BY PERIOD Q METHOD CLOSED MIN_SAMPLES)
+        return E(1).rolling_quantile_by(
+            E(2), e[3], quantile=e[4], interpolation=e[5], closed=e[6],
+            min_samples=e[7],
+        )
     if op == "list.get":
         return E(1).list.get(e[2], null_on_oob=True)
     if op in ("list.median", "list.arg_min", "list.arg_max"):
@@ -521,6 +543,9 @@ def expr_type(e, types):
         if a in ("int_lit", "float_lit"):
             return b if b not in ("int_lit", "float_lit") else a
         return a
+    if op in ("rolling_quantile", "rolling_median", "rolling_quantile_by"):
+        a = expr_type(e[1], types)
+        return "float32" if a == "float32" else "float64"
     if op in ("truediv", "sqrt", "mean", "median", "std", "var", "quantile"):
         a = expr_type(e[1], types)
         return "float32" if a == "float32" else "float64"
@@ -991,8 +1016,8 @@ class PlanGen:
         kinds = ["filter", "with_columns", "select", "group_by", "join", "sort",
                  "unique", "head", "explode", "concat", "drop_nulls", "agg_select",
                  "with_row_index", "reverse", "unnest", "drop", "interpolate",
-                 "time_window", "list_ops"]
-        weights = [14, 12, 6, 14, 12, 9, 6, 5, 3, 3, 2, 3, 1, 1, 2, 1, 3, 4, 2]
+                 "time_window", "list_ops", "rolling_expr"]
+        weights = [14, 12, 6, 14, 12, 9, 6, 5, 3, 3, 2, 3, 1, 1, 2, 1, 3, 4, 2, 3]
         # FUZZ_FOCUS=kind,kind makes those steps 20 times as likely.
         focus = os.environ.get("FUZZ_FOCUS", "").split(",")
         weights = [w * 20 if k in focus else w for k, w in zip(kinds, weights)]
@@ -1145,7 +1170,76 @@ class PlanGen:
             return self.interpolate_step(plan, schema, ordered)
         if kind == "time_window":
             return self.time_window_step(plan, schema, ordered)
+        if kind == "rolling_expr":
+            return self.rolling_expr_step(plan, schema, ordered)
         return None
+
+    def rolling_expr_step(self, plan, schema, ordered):
+        """with_columns of rolling expressions: fixed windows (which need a
+        defined row order) and duration windows over a Datetime axis made
+        from a row index, so its times are unique and stay defined after
+        later steps reorder rows (as in interpolate_step). Decimals are
+        left out (a rolling quantile of one keeps the decimal type here,
+        as DuckDB does, where Polars gives Float64)."""
+        r = self.rng
+        # Duration windows need an index without nulls: one added here
+        # (an index from an earlier step can be null after an outer join),
+        # which needs a defined row order, as fixed windows do.
+        if not ordered:
+            return None
+        fresh = "i_ri" not in schema
+        if fresh:
+            plan = ("with_row_index", plan, "i_ri")
+            schema = dict(schema, i_ri=None)
+        g = Gen(r, schema, ordered)
+        nums = g.cols(is_numeric)
+        if not nums:
+            return None
+        es = []
+        for _ in range(r.randint(1, 3)):
+            name = r.choice(nums)
+            c = ("col", name)
+            plain = schema[name] in ("int64", "float64")
+            q = r.choice([0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, r.random()])
+            method = r.choice(["nearest", "lower", "higher", "midpoint",
+                               "linear", "equiprobable"])
+            fns = ["median", "quantile"]
+            if plain:
+                # Other types type a rolling sum or mean differently from
+                # Polars (sums widen, float32 means are Float64 here).
+                fns += ["sum", "mean", "min", "max", "std", "var"]
+            fn = r.choice(fns)
+            if not fresh or r.random() < 0.5:
+                w = r.choice([1, 2, 3, 4, 7, 16, 100])
+                ms = r.choice([-1, 1, min(2, w), w])
+                if fn == "median":
+                    e = ("rolling_median", c, w, ms)
+                elif fn == "quantile":
+                    e = ("rolling_quantile", c, q, method, w, ms)
+                else:
+                    e = ("rolling_agg", c, fn, w, ms)
+                keys = g.cols(is_key)
+                if keys and r.random() < 0.3:
+                    e = ("over", e, ("list", r.choice(keys)), ("list",), False, False)
+            else:
+                axis = ("cast", ("col", "i_ri"), "int64", False)
+                if r.random() < 0.6:
+                    # A shuffled order of the rows.
+                    axis = ("mod", ("mul", axis, 7919), 1000003)
+                # Minutes, as microseconds.
+                axis = ("cast", ("mul", axis, 60000000), "datetime", False)
+                period = r.choice(["1m", "2m", "5m", "30m", "1h", "1d"])
+                closed = r.choice(["right", "left", "both", "none"])
+                ms = r.choice([0, 1, 1, 2])
+                if fn == "median":
+                    fn, q, method = "quantile", 0.5, "linear"
+                if fn == "quantile":
+                    e = ("rolling_quantile_by", c, axis, period, q, method,
+                         closed, ms)
+                else:
+                    e = ("rolling_agg_by", c, axis, fn, period, closed, ms)
+            es.append(("alias", e, g.name("r")))
+        return ("with_columns", plan, ("list",) + tuple(es)), ordered
 
     def interpolate_step(self, plan, schema, ordered):
         """with_columns of interpolate / interpolate_by. Row interpolation
@@ -1850,7 +1944,8 @@ def check_order(p, case):
 def uses_order(node):
     if isinstance(node, tuple) and node:
         if node[0] in ("first", "last", "arg_min", "arg_max", "cum_sum", "cum_max",
-                       "cum_min", "cum_count", "shift", "diff", "interpolate"):
+                       "cum_min", "cum_count", "shift", "diff", "interpolate",
+                       "rolling_agg", "rolling_quantile", "rolling_median"):
             return True
         return any(uses_order(k) for k in node[1:] if isinstance(k, tuple))
     return False

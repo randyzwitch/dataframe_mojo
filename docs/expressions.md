@@ -142,6 +142,7 @@ row-valued. See the Narwhals order-dependence notes cited above.
 | `diff(n=1)`, `pct_change(n=1)` | `x - x.shift(n)`; `pct_change` is Float64 | null when either side is null |
 | `rank(method="average", descending=False)` | `average` Float64; `min`, `max`, `dense`, `ordinal` Int64 | nulls get null; ranks start at 1; `ordinal` breaks ties by row order; NaN is the largest value, so it ranks after numbers ascending and before them descending |
 | `rolling_sum/mean/min/max(window_size, min_samples=window_size)` | sum/min/max same dtype, mean Float64 | the window is the current row and the `window_size - 1` before it; nulls are skipped; fewer than `min_samples` valid values give null; a window holding NaN gives NaN for `rolling_min` and `rolling_max` |
+| `rolling_median(window_size, min_samples=window_size)`, `rolling_quantile(quantile, interpolation="nearest", window_size=2, min_samples=window_size)` | Float64; Float32 stays Float32 and a decimal keeps its type (interpolated values truncate toward zero to its scale) | as `rolling_sum`; NaN sorts above every number. Interpolation: `nearest`, `lower`, `higher`, `midpoint`, `linear` or `equiprobable`; a median is the linear 0.5 quantile |
 | `forward_fill(limit=-1)`, `backward_fill(limit=-1)` | same dtype | fill from the nearest valid value at most `limit` rows away |
 | `interpolate(method="linear"|"nearest")` | Float64 for linear, input dtype for nearest | fills only interior nulls; nearest ties choose the following value |
 | `interpolate_by(by)` | Float64 | linear interpolation at the numeric `by` coordinates |
@@ -154,8 +155,12 @@ order: aggregates broadcast back to their partition's rows
 (`col("x").sum().over("k")`), and window operations restart in each partition
 (`col("x").cum_sum().over("k")`). Inside `group_by(...).agg(...)`, window
 operations likewise run per group, so `col("x").cum_sum().max()` is each
-group's running peak. Rolling min/max are O(n x window); other kernels are
-linear apart from `rank`, which sorts each partition.
+group's running peak. Rolling sums and means slide a running total; rolling
+min/max/std/var read each window from a segment tree (O(log n) a row); a
+rolling median or quantile sorts each partition once and keeps the window
+as a set of ranks, so a row entering or leaving it and each quantile cost
+O(log n). Other kernels are linear apart from `rank`, which sorts each
+partition.
 
 `over(partition_by, order_by="time", descending=False, nulls_last=False)`
 sorts within each partition before evaluating the expression, then scatters

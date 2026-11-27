@@ -432,6 +432,63 @@ def build_expr(t: Tree, i: Int) raises -> Expr:
         return ea(t, i, 1).interpolate(t.text(t.kid(i, 2)))
     if op == "interpolate_by":
         return ea(t, i, 1).interpolate_by(ea(t, i, 2))
+    if op == "rolling_agg":
+        # (rolling_agg EXPR FN WINDOW MIN_SAMPLES)
+        var kind = t.text(t.kid(i, 2))
+        var w = t.int(t.kid(i, 3))
+        var ms = t.int(t.kid(i, 4))
+        var x = ea(t, i, 1)
+        if kind == "sum":
+            return x.rolling_sum(w, ms)
+        if kind == "mean":
+            return x.rolling_mean(w, ms)
+        if kind == "min":
+            return x.rolling_min(w, ms)
+        if kind == "max":
+            return x.rolling_max(w, ms)
+        if kind == "std":
+            return x.rolling_std(w, ms)
+        return x.rolling_var(w, ms)
+    if op == "rolling_quantile":
+        return ea(t, i, 1).rolling_quantile(
+            t.nodes[t.kid(i, 2)].fval,
+            t.text(t.kid(i, 3)),
+            t.int(t.kid(i, 4)),
+            t.int(t.kid(i, 5)),
+        )
+    if op == "rolling_median":
+        return ea(t, i, 1).rolling_median(
+            t.int(t.kid(i, 2)), t.int(t.kid(i, 3))
+        )
+    if op == "rolling_agg_by":
+        # (rolling_agg_by EXPR BY FN PERIOD CLOSED MIN_SAMPLES)
+        var kind = t.text(t.kid(i, 3))
+        var by = ea(t, i, 2)
+        var period = t.text(t.kid(i, 4))
+        var closed = t.text(t.kid(i, 5))
+        var ms = t.int(t.kid(i, 6))
+        var x = ea(t, i, 1)
+        if kind == "sum":
+            return x.rolling_sum_by(by, period, closed, ms)
+        if kind == "mean":
+            return x.rolling_mean_by(by, period, closed, ms)
+        if kind == "min":
+            return x.rolling_min_by(by, period, closed, ms)
+        if kind == "max":
+            return x.rolling_max_by(by, period, closed, ms)
+        if kind == "std":
+            return x.rolling_std_by(by, period, closed, ms)
+        return x.rolling_var_by(by, period, closed, ms)
+    if op == "rolling_quantile_by":
+        # (rolling_quantile_by EXPR BY PERIOD Q METHOD CLOSED MIN_SAMPLES)
+        return ea(t, i, 1).rolling_quantile_by(
+            ea(t, i, 2),
+            t.text(t.kid(i, 3)),
+            t.nodes[t.kid(i, 4)].fval,
+            t.text(t.kid(i, 5)),
+            t.text(t.kid(i, 6)),
+            t.int(t.kid(i, 7)),
+        )
     if op == "list.get":
         return ea(t, i, 1).list().get(t.int(t.kid(i, 2)))
     if op == "list.median":

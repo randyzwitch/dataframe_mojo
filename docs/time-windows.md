@@ -13,7 +13,7 @@ col("price").rolling_var(20, ddof=0)
 `min_samples` defaults to the window size for row-count windows. A window with
 at most `ddof` non-null samples produces null. The result is Float64.
 
-For irregular sampling, the six `rolling_*_by` expressions use a Date or
+For irregular sampling, the `rolling_*_by` expressions use a Date or
 Datetime index, which need not be sorted. The `by` argument accepts a name or expression.
 
 ```mojo
@@ -22,7 +22,9 @@ col("price").rolling_std_by(col("time"), "7d", ddof=1)
 col("price").rolling_sum_by("time", "1mo").over("symbol")
 ```
 
-Available functions are sum, mean, min, max, std and var. `min_samples` defaults
+Available functions are sum, mean, min, max, std, var, median and quantile
+(`rolling_quantile_by(by, window_size, quantile, interpolation="nearest")`,
+types as for `rolling_quantile`). `min_samples` defaults
 to one; `closed="right"` means `(time - window_size, time]`. `left`, `both` and
 `none` select the other endpoint combinations. All rows with the same timestamp
 see the same window, including duplicate timestamps later in input order.
