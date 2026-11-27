@@ -44,6 +44,7 @@ from .expr import (
     columns,
     corr,
     cov,
+    concat_list,
     concat_str,
     arctan2,
     lit,
