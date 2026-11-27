@@ -4,7 +4,7 @@ from std.memory import bitcast
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.kernels.scalar_gather import gather_scalars
 from .group_plan import GroupedComposition
-from .group_output import GroupOutput, group_order
+from .group_output import GroupOutput, group_order_words
 from dataframe.expr import MIN, MAX
 from .accelerator.faults import data_fault
 from .accelerator.gpu.group_state import GROUP_STATE_WORDS
@@ -80,9 +80,23 @@ def finish_grouped(
     states: List[UInt32],
     resolved: List[Int64],
 ) raises -> DataFrame:
+    return finish_grouped_words(
+        plan, frame, blocks, first.span(), rows.span(), states.span(), resolved
+    )
+
+
+def finish_grouped_words(
+    plan: GroupedComposition,
+    frame: DataFrame,
+    blocks: Int,
+    first: Span[UInt32, ImmutAnyOrigin],
+    rows: Span[UInt32, ImmutAnyOrigin],
+    states: Span[UInt32, ImmutAnyOrigin],
+    resolved: List[Int64],
+) raises -> DataFrame:
     ref bundle = plan.selected.bundle
     var nf = len(bundle.fields)
-    var order = group_order(first)
+    var order = group_order_words(first)
     var indices = List[Int](capacity=len(order))
     for slot in order:
         indices.append(Int(first[slot]))

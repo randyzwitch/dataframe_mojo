@@ -8,10 +8,10 @@ from dataframe_metal.chunked_numeric_reduce import (
     NUMERIC_DEFAULT,
     NUMERIC_SEGMENTED,
     NUMERIC_SINGLE_SPAN,
+    finish_numeric_groups,
     native_numeric_layout,
     scan_chunked_numeric,
 )
-from dataframe_metal.group_finish import finish_grouped
 from dataframe_metal.group_plan import plan_grouped
 from dataframe_metal.group_reduce import execute_grouped
 from dataframe_metal.handoff import region_key
@@ -185,15 +185,7 @@ def test_chunked_numeric_groups_reuse_nullable_keys_and_accumulate_four_fields()
         var scope = Scope(service=shared_service(), observation=obs)
         var timings = HandoffTimings()
         var partials = scan_chunked_numeric(plan, frame, scope, wrap, timings)
-        var answer = finish_grouped(
-            plan,
-            frame,
-            partials.blocks,
-            partials.first,
-            partials.rows,
-            partials.states,
-            partials.extrema,
-        )
+        var answer = finish_numeric_groups(plan, frame, partials^)
         assert_true(answer.equals(expected))
         # One initialization and five independent input intersections (one
         # intersection in copy mode). The key also participates in COUNT.
@@ -235,6 +227,8 @@ def test_metal_single_span_numeric_groups_match_cpu_for_shared_slices() raises:
 
 # requires: metal
 def test_metal_numeric_shared_group_state_survives_capacity_retry() raises:
+    from std.ffi import external_call
+    from dataframe_metal.group_layout import GENERAL_TABLE_LIMIT, GroupLayout
     from dataframe_metal.group_properties import sample_group_tuples
     from tests.support.metal_outcomes import require_metal
 
@@ -287,9 +281,22 @@ def test_metal_numeric_shared_group_state_survives_capacity_retry() raises:
         assert_true(variant in region_key(query))
         for wrap in [True, False]:
             var observation = ArcPointer(DeviceObservation())
-            query._plan._device_observation = observation
-            var result = execute_grouped(query, wrap)
-            assert_true(result[0].equals(expected))
+            var scope = Scope(service=shared_service(), observation=observation)
+            var timings = HandoffTimings()
+            var matched = plan_grouped(query)
+            var plan = matched.take()
+            var partials = scan_chunked_numeric(
+                plan, frame, scope, wrap, timings
+            )
+            # Only the successful shared table remains reserved after a retry.
+            var layout = GroupLayout(GENERAL_TABLE_LIMIT, 2, 1, True)
+            var page = Int(external_call["getpagesize", Int32]())
+            var retained = (layout.words() * 4 + page - 1) // page * page
+            assert_equal(scope.info()[0], retained if wrap else 0)
+            var result = finish_numeric_groups(plan, frame, partials^)
+            assert_equal(scope.info()[0], 0)
+            scope.mark_success()
+            assert_true(result.equals(expected))
             assert_equal(observation[].completed_launches.load(), Int64(4))
             var copied = observation[].download_bytes.load()
             if not wrap:
