@@ -117,6 +117,13 @@ from .expr import (
     is_rolling_by,
     ROLLING_MEAN,
     ROLLING_MAX,
+    ROLLING_MIN,
+    ROLLING_QUANTILE,
+    ROLLING_QUANTILE_BY,
+    rolling_options,
+    is_fixed_rolling,
+    EWM,
+    EWM_BY,
     FORWARD_FILL,
     BACKWARD_FILL,
     INTERPOLATE,
@@ -227,6 +234,7 @@ from .expr import (
     LIST_COUNT_MATCHES,
     LIST_HAS,
     is_list_transform,
+    is_list_set,
     is_conditional,
     is_logical,
     is_binary,
@@ -573,6 +581,104 @@ def op_name(op: Int) -> String:
 
 def _numeric(dtype: DataType) -> Bool:
     return dtype.is_numeric()
+
+
+def _weighted_rolling_type(
+    node: Node, input: DataType
+) raises -> Optional[DataType]:
+    """The type of a fixed rolling window with weights, after checking
+    them (None without weights): Float64, Float32 for a sum, extreme or
+    quantile of Float32, as the products of values and weights are."""
+    var options = rolling_options(node)
+    if len(options.weights) == 0:
+        return None
+    if not _numeric(input):
+        raise Error(
+            "weighted rolling windows require a numeric expression, found "
+            + input.name()
+        )
+    if len(options.weights) != Int(node.integer):
+        raise Error("weights must hold window_size values")
+    var total = Float64(0)
+    for w in options.weights:
+        total += w
+    if (
+        total == 0
+        and node.op != ROLLING_SUM
+        and (node.op != ROLLING_MIN and node.op != ROLLING_MAX)
+    ):
+        raise Error("weights must not sum to zero")
+    var keeps = (
+        node.op == ROLLING_SUM
+        or node.op == ROLLING_MIN
+        or node.op == ROLLING_MAX
+        or node.op == ROLLING_QUANTILE
+    )
+    if keeps and input == DataType.FLOAT32:
+        return DataType.FLOAT32
+    return DataType.FLOAT64
+
+
+def _ewm_type(
+    node: Node,
+    input: DataType,
+    types: List[DataType],
+    shapes: List[Int],
+    i: Int,
+) raises -> DataType:
+    """The type of an exponentially weighted function of `input`, after
+    checking its options: Float32 stays Float32, other numbers give
+    Float64."""
+    from dataframe.time.windows import ewm_half_life
+
+    if not _numeric(input):
+        raise Error(
+            "ewm functions require a numeric expression, found " + input.name()
+        )
+    if node.op == EWM:
+        if node.text2 != "":
+            raise Error(node.text2)
+        if node.integer < 0:
+            raise Error("min_samples must be nonnegative")
+    else:
+        if node.right < 0 or node.right >= i or shapes[node.right] != ROWS:
+            raise Error("ewm_*_by requires a row-valued by expression")
+        var index = types[node.right]
+        if not (index.is_date() or index.is_datetime()):
+            raise Error("ewm_*_by requires a Date or Datetime index")
+        _ = ewm_half_life(node.text, index)
+    return DataType.FLOAT32 if input == DataType.FLOAT32 else DataType.FLOAT64
+
+
+def _rolling_quantile_type(node: Node, input: DataType) raises -> DataType:
+    """The type of a rolling quantile of `input`, after checking its
+    options: Float32 and decimals keep their type (a quantile lies among
+    the values, and interpolation stays at their precision), other numbers
+    give Float64."""
+    if not _numeric(input):
+        raise Error(
+            "rolling_quantile requires a numeric expression, found "
+            + input.name()
+        )
+    var options = rolling_options(node)
+    if not (options.quantile >= 0 and options.quantile <= 1):
+        raise Error("quantile must be between 0 and 1")
+    var method = options.method
+    if (
+        method != "linear"
+        and method != "nearest"
+        and method != "lower"
+        and method != "higher"
+        and method != "midpoint"
+        and method != "equiprobable"
+    ):
+        raise Error(
+            "interpolation must be nearest, lower, higher, midpoint, linear"
+            " or equiprobable"
+        )
+    if input == DataType.FLOAT32 or input.is_decimal():
+        return input
+    return DataType.FLOAT64
 
 
 def temporal_result(
@@ -1812,6 +1918,8 @@ def _bind(
                     raise Error("min_samples and ddof must be nonnegative")
                 if node.op == ROLLING_SUM_BY:
                     dtype = input.sum_type()
+                elif node.op == ROLLING_QUANTILE_BY:
+                    dtype = _rolling_quantile_type(node, input)
                 elif node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY:
                     dtype = DataType.FLOAT64
             elif node.op == CUM_SUM and input == DataType.BOOL:
@@ -1842,6 +1950,10 @@ def _bind(
                         + input.name()
                     )
                 dtype = DataType.FLOAT64
+            elif node.op == ROLLING_QUANTILE:
+                dtype = _rolling_quantile_type(node, input)
+            elif node.op == EWM or node.op == EWM_BY:
+                dtype = _ewm_type(node, input, types, shapes, i)
             elif node.op == CUM_COUNT:
                 dtype = DataType.INT64
             elif node.op == RANK:
@@ -1864,11 +1976,16 @@ def _bind(
                 (node.op >= ROLLING_SUM and node.op <= ROLLING_MAX)
                 or node.op == ROLLING_STD
                 or node.op == ROLLING_VAR
+                or node.op == ROLLING_QUANTILE
             ):
                 if node.integer < 1:
                     raise Error("window_size must be at least 1")
                 if node.floating < -1:
                     raise Error("min_samples must be nonnegative")
+            if is_fixed_rolling(node.op):
+                var weighted = _weighted_rolling_type(node, input)
+                if weighted:
+                    dtype = weighted.value()
             if (
                 node.op == FORWARD_FILL or node.op == BACKWARD_FILL
             ) and node.integer < -1:
@@ -1878,7 +1995,9 @@ def _bind(
             ) and node.min_count < 0:
                 raise Error("ddof must be nonnegative")
             if (
-                node.op == ROLLING_STD or node.op == ROLLING_VAR
+                node.op == ROLLING_STD
+                or node.op == ROLLING_VAR
+                or node.op == ROLLING_QUANTILE
             ) and node.floating > Float64(node.integer):
                 raise Error("min_samples cannot exceed window_size")
             shape = ROWS
@@ -2120,7 +2239,7 @@ def _bind(
                 if regex:
                     regexes[i] = regex.take()
                 dtype = DataType.list(DataType.STRING)
-            elif node.op == LIST_CONCAT:
+            elif node.op == LIST_CONCAT or is_list_set(node.op):
                 # A bare literal takes its default type, as in a list
                 # literal, rather than the other side's element type.
                 var operands = List[Int]()
