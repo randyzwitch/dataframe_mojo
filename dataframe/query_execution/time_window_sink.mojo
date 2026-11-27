@@ -25,7 +25,10 @@ parts:
   numeric column, are read from the bounds too: from running counts and
   integer sums in time order (one step) or a segment tree of float sums,
   extremes or running moments (O(log n) steps),
-  each built in one pass over the input. Other aggregations, and all of
+  each built in one pass over the input. A median or quantile slides one
+  frame over each of a task's windows in turn (`frame_quantiles`),
+  adding and removing the rows that enter and leave it, over the rows
+  those windows span. Other aggregations, and all of
   these when windows overlap little, gather the range's rows and reduce
   them with the grouped reducers, a window a group. A task's output
   columns are one chunk of the result's, in window order.
@@ -44,8 +47,10 @@ from dataframe.expr import (
     LEN,
     MAX,
     MEAN,
+    MEDIAN,
     MIN,
     NULL_COUNT,
+    QUANTILE,
     Node,
     ROW_LEN,
     STD,
@@ -81,6 +86,7 @@ from dataframe.time.windows import (
     truncate_time,
 )
 from dataframe.window import partitions as window_partitions
+from dataframe.window_quantile import frame_quantiles
 
 # The round that ran last.
 comptime _START = 0
@@ -102,6 +108,7 @@ comptime _MIN = 6
 comptime _MAX = 7
 comptime _STD = 8
 comptime _VAR = 9
+comptime _QUANTILE = 10
 
 
 def _numeric_column(column: Series) -> Bool:
@@ -142,6 +149,8 @@ def _reads_a_value_per_row(op: Int) -> Bool:
         or op == MAX
         or op == STD
         or op == VAR
+        or op == MEDIAN
+        or op == QUANTILE
     )
 
 
@@ -182,6 +191,8 @@ def _window_reduction(
         return (_MAX, source)
     if (op == STD or op == VAR) and dtype == DataType.FLOAT64:
         return (_STD if op == STD else _VAR, source)
+    if (op == MEDIAN or op == QUANTILE) and dtype == DataType.FLOAT64:
+        return (_QUANTILE, source)
     return (_GATHER, -1)
 
 
@@ -592,6 +603,9 @@ struct TimeWindowSink(Movable, Rounds):
         extreme; NaN is never an extreme either (a window's extreme is NaN
         only when all its values are NaN, from the NaN counts)."""
         var kind = self.counts[e][0]
+        if kind == _QUANTILE:
+            # Read by each aggregate task from its windows' rows.
+            return
         ref column = self.input._columns[self.counts[e][1]]
         var valid = validity(column)
         if kind == _STD or kind == _VAR:
@@ -693,6 +707,58 @@ struct TimeWindowSink(Movable, Rounds):
                     if extreme:
                         self.nans[e] = nans^
                 return
+
+    def _quantiles(
+        self,
+        e: Int,
+        groups: List[Int],
+        lows: List[Int],
+        highs: List[Int],
+    ) raises -> Series:
+        """Expression `e`'s median or quantile of a task's windows (by
+        window its group and positions in the group's time-ordered rows):
+        the rows each group's windows span, laid end to end, with the
+        windows as frames over them."""
+        ref top = self.bound[e].expr._nodes[1]
+        ref column = self.input._columns[self.counts[e][1]]
+        var rows = List[Int]()
+        var starts = List[Int]()
+        var begins = List[Int](capacity=len(lows))
+        var ends = List[Int](capacity=len(lows))
+        var frame_starts = List[Int]()
+        var w = 0
+        while w < len(lows):
+            # The windows of one group, and the rows they span.
+            var end = w
+            var first = lows[w]
+            var last = highs[w]
+            while end < len(lows) and groups[end] == groups[w]:
+                first = min(first, lows[end])
+                last = max(last, highs[end])
+                end += 1
+            var base = len(rows)
+            starts.append(base)
+            frame_starts.append(w)
+            ref group = self.groups[groups[w]]
+            for k in range(first, last):
+                rows.append(group[k])
+            for v in range(w, end):
+                begins.append(base + lows[v] - first)
+                ends.append(base + highs[v] - first)
+            w = end
+        starts.append(len(rows))
+        frame_starts.append(len(lows))
+        # A reduction's result is Float64 whatever the number type.
+        return frame_quantiles(
+            column.take(rows).cast(DataType.FLOAT64),
+            starts,
+            begins,
+            ends,
+            frame_starts,
+            1,
+            top.floating,
+            top.text,
+        ).renamed(self.bound[e].expr._name)
 
     def _rolling(mut self, p: Int) raises:
         """Piece `p`'s windows: one for each of its rows, from the row's
@@ -1007,6 +1073,9 @@ struct TimeWindowSink(Movable, Rounds):
             w = end
         for e in range(len(self.bound)):
             var count = self.counts[e]
+            if count[0] == _QUANTILE:
+                columns.append(self._quantiles(e, groups, lows, highs))
+                continue
             if count[0] == _GATHER:
                 if len(batches[e]) == 1:
                     columns.append(batches[e][0].copy())
