@@ -122,10 +122,10 @@ def finish_numeric_groups(
     ref shared = partials[_SharedNumericGroups]
     ref layout = shared.layout
     # The scan synchronized the GPU before transferring ownership to this result.
-    var words = Span[UInt32, origin_of(shared)](
+    var words = Span(
         unsafe_ptr=Pointer[UInt32, origin_of(shared)](
             unsafe_from_address=shared.pages.address
-        ),
+        ).unsafe_mut_cast[False](),
         length=layout.words(),
     )
     return finish_grouped_words(
