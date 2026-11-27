@@ -492,6 +492,14 @@ def to_pl_expr(e, types):
         return E(1).interpolate_by(E(2))
     if op == "list.get":
         return E(1).list.get(e[2], null_on_oob=True)
+    if op in ("list.median", "list.arg_min", "list.arg_max"):
+        return getattr(E(1).list, op[5:])()
+    if op in ("list.std", "list.var"):
+        return getattr(E(1).list, op[5:])(ddof=e[2])
+    if op == "list.count_matches":
+        return E(1).list.count_matches(e[2])
+    if op == "list.contains":
+        return E(1).list.contains(e[2])
     if op == "list.unique":
         return E(1).list.unique(maintain_order=e[2])
     if op == "list.sort":
@@ -934,8 +942,15 @@ class Gen:
         e = ("col", c)
         for _ in range(r.randint(1, 2)):
             e = self.list_transform(e, t)
-        if r.random() < 0.3:
-            return (r.choice(["list.len", "list.n_unique", "list.first"]), e), "int"
+        if r.random() < 0.4:
+            k = r.randrange(4)
+            if k == 0:
+                return (r.choice(["list.len", "list.n_unique", "list.first"]), e), "int"
+            if t == "list[int64]" and k == 1:
+                op = r.choice(["list.median", "list.std", "list.var", "list.arg_min", "list.arg_max"])
+                return ((op, e, r.choice([0, 1])) if op in ("list.std", "list.var") else (op, e)), None
+            value = r.randint(-3, 3) if t == "list[int64]" else r.choice(WORDS)
+            return (r.choice(["list.count_matches", "list.contains"]), e, value), None
         return e, t
 
     def agg(self, allow_order):
