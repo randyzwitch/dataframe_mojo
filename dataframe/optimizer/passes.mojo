@@ -747,7 +747,14 @@ def plan_align_join_keys(mut self: QueryContext) raises:
         var node = self._nodes[i].copy()
         if not _join_side_has_numeric_key(self, node):
             continue
-        var schemas = _join_input_schemas(self, node.left, node.right)
+        var schemas: Tuple[DataFrame, DataFrame]
+        try:
+            schemas = _join_input_schemas(self, node.left, node.right)
+        except:
+            # An input whose schema cannot be read here (a missing file)
+            # is left for the query to reach, so its error surfaces in
+            # the order it would without this pass.
+            continue
         ref left = schemas[0]
         ref right = schemas[1]
         var left_casts = List[Expr]()
