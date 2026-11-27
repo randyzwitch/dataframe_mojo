@@ -713,7 +713,7 @@ def _key_output_casts(
             out.append((rname, rtype))
         return out^
     out.append((lname, ltype))
-    var suffix = node.names2[0] if len(node.names2) > 0 else String("_right")
+    var suffix = node.join_suffix()
     out.append((rname + suffix if rname in left_columns else rname, rtype))
     return out^
 
