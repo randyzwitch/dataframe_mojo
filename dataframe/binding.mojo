@@ -233,6 +233,11 @@ from .expr import (
     LIST_HAS,
     is_list_transform,
     is_list_set,
+    LIST_EVAL,
+    LIST_EVAL_AGG,
+    LIST_EVAL_FILTER,
+    ELEMENT,
+    decode_nodes,
     is_conditional,
     is_logical,
     is_binary,
@@ -2141,7 +2146,28 @@ def bind(
                         + input.name()
                     )
                 var inner = input.inner()
-                if node.op == LIST_COUNT_MATCHES or node.op == LIST_HAS:
+                if node.op == LIST_EVAL:
+                    var body = bind(
+                        Expr(decode_nodes(node.text), ELEMENT),
+                        [Series.full_null(ELEMENT, inner, 0)],
+                    )
+                    var root = len(body.dtypes) - 1
+                    var result = body.dtypes[root]
+                    if node.integer == LIST_EVAL_FILTER:
+                        if result != DataType.BOOL:
+                            raise Error(
+                                "list.filter needs a Bool predicate, found "
+                                + result.name()
+                            )
+                        dtype = input
+                    elif (
+                        node.integer == LIST_EVAL_AGG
+                        and body.shapes[root] != ROWS
+                    ):
+                        dtype = result
+                    else:
+                        dtype = DataType.list(result)
+                elif node.op == LIST_COUNT_MATCHES or node.op == LIST_HAS:
                     if node.right < 0 or node.right >= i:
                         raise Error(
                             "Invalid " + list_op_name(node.op) + " input"
