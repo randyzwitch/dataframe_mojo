@@ -892,6 +892,7 @@ def _fixed_quantiles[
     var right = _Block(ranks_address)
     # Each block's valid elements in value order, block after block.
     var order = List[Int32](length=max(n, 1), fill=0)
+    var staged = List[Int32](length=max(n, 1), fill=0)
     var at = List[Int]()
     for p in range(len(starts) - 1):
         var lo = starts[p]
@@ -909,11 +910,28 @@ def _fixed_quantiles[
                 at[(row - lo) // k + 1] += 1
         for b in range(blocks):
             at[b + 1] += at[b]
-        var counts = at.copy()
+        # Rows in value order are dealt to their blocks in two passes,
+        # first to spans of about 65,536 rows and then to the blocks of
+        # each span, so each pass writes to few places at once and its
+        # counters stay in cache, rather than to every block at random.
+        var per_span = max(1, 65536 // k)
+        var spans = (blocks + per_span - 1) // per_span
+        var span_at = List[Int](length=spans + 1, fill=0)
+        for b in range(blocks):
+            span_at[b // per_span + 1] += at[b + 1] - at[b]
+        for g in range(spans):
+            span_at[g + 1] += span_at[g]
+        var filled = span_at.copy()
         for slot in range(lo, ranked.fill[p]):
             var row = ranked.row_at[slot]
-            var b = (row - lo) // k
-            order[lo + counts[b]] = Int32(row - lo - b * k)
+            var g = (row - lo) // k // per_span
+            staged[lo + filled[g]] = Int32(row - lo)
+            filled[g] += 1
+        var counts = at.copy()
+        for slot in range(span_at[0], span_at[spans]):
+            var offset = Int(staged[lo + slot])
+            var b = offset // k
+            order[lo + counts[b]] = Int32(offset - b * k)
             counts[b] += 1
         var base = Int(order.unsafe_ptr()) + 4 * lo
         left.reset(lo, k, _block_order(base, at, 0), at[1] - at[0])
@@ -967,6 +985,7 @@ def _fixed_quantiles[
             ):
                 any_null = True
     _ = order^
+    _ = staged^
     _ = values
     if any_null:
         return Series("", Column[Scalar[D]](out^, ok))
