@@ -22,7 +22,8 @@ are *untyped*: an integer adopts the numeric dtype of the operand it meets
 when it fits, and becomes a float next to a float column; a float adopts
 Float32 or Float64. In arithmetic and comparisons, an integer that does not
 fit (`col("u8") + 300`), a float next to an integer column, and any number
-next to a decimal take their own type instead and promote (see Operators).
+next to a decimal take their own type instead and promote (see the rules
+below the binding notes).
 Adoption follows arithmetic between untyped values
 (`col("x") * (2 + 3)`), and an untyped expression on its own is Int64 or
 Float64. `lit(...)` fixes a type and never adopts. Two Mojo limits: a string
