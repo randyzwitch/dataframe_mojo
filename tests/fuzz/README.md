@@ -41,8 +41,9 @@ run in CI.
   kind, with `ddof` for `std`/`var`). A smaller case that fails some other
   way, or in other modes or thread counts, is not taken.
 
-The generator follows our typing rules (no implicit numeric promotion), so
-an error from our side is a finding. Where we differ from Polars on purpose
+The generator follows our typing rules, so an error from our side is a
+finding. It mixes integer widths in arithmetic, comparisons and `when`
+branches (including typed nulls of another width), which promote. Where we differ from Polars on purpose
 the oracle is adjusted, or the error is allowed:
 
 - Float comparisons follow IEEE (NaN compares false, `NaN != NaN`); Polars
@@ -53,10 +54,9 @@ the oracle is adjusted, or the error is allowed:
 - Integer overflow raises here and wraps in Polars; such errors are allowed.
 - Expressions on categoricals return String, and `len`/`n_unique` return
   Int64 where Polars returns UInt32: values are compared, and integer
-  widths and categorical-versus-string are not. The oracle casts Polars'
-  `len`, `count`, `null_count` and `n_unique` to Int64, so the generator
-  types the expressions it builds on top of them as we do (a typed null
-  of UInt32 next to a count would otherwise be an error here).
+  widths and categorical-versus-string are not. Integer promotion can also
+  give a wider type here than in Polars (`Int8 + UInt8` is Int64 here,
+  Int16 there); values are compared, not widths.
 - String functions on a categorical read its labels; the oracle casts to
   String first.
 - Mean, median, std and var of Float32 are Float64 here; the generator does
