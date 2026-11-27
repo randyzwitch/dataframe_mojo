@@ -81,7 +81,7 @@ def finish_grouped(
     resolved: List[Int64],
 ) raises -> DataFrame:
     return finish_grouped_words(
-        plan, frame, blocks, first.span(), rows.span(), states.span(), resolved
+        plan, frame, blocks, Span(first), Span(rows), Span(states), resolved
     )
 
 
@@ -89,9 +89,9 @@ def finish_grouped_words(
     plan: GroupedComposition,
     frame: DataFrame,
     blocks: Int,
-    first: Span[UInt32, ImmutAnyOrigin],
-    rows: Span[UInt32, ImmutAnyOrigin],
-    states: Span[UInt32, ImmutAnyOrigin],
+    first: Span[UInt32, _],
+    rows: Span[UInt32, _],
+    states: Span[UInt32, _],
     resolved: List[Int64],
 ) raises -> DataFrame:
     ref bundle = plan.selected.bundle

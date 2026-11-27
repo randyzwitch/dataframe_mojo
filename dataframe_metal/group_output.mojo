@@ -113,10 +113,10 @@ struct GroupOutput(Movable):
 
 
 def group_order(first: List[UInt32]) -> List[Int]:
-    return group_order_words(first.span())
+    return group_order_words(Span(first))
 
 
-def group_order_words(first: Span[UInt32, ImmutAnyOrigin]) -> List[Int]:
+def group_order_words(first: Span[UInt32, _]) -> List[Int]:
     """Order only discovered slots; never inspect input key values."""
     var order = List[Int]()
     for slot in range(len(first)):
