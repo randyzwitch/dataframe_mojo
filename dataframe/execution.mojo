@@ -115,6 +115,7 @@ from .expr import (
     EXPR_MAX_BY,
     EXPR_MIN_BY,
     LIST_GET,
+    LIST_CONCAT,
     STRUCT_PACK,
     STRUCT_FIELD,
     node_children,
@@ -129,6 +130,7 @@ from dataframe.text.functions import text_function
 from dataframe.kernels.binary import integer_is_in
 from dataframe.kernels.replace import replace_values
 from dataframe.kernels.list import nested_op
+from dataframe.kernels.list_transforms import list_concat
 from dataframe.storage.nested import ListColumn, StructColumn
 from dataframe.kernels.cast import cast_series
 from .categorical import (
@@ -610,6 +612,23 @@ def _eval[
         return string_op(node, left, bound._regex(index))
     if is_text_function(node.op):
         return text_function(node, left, bound._regex(index))
+    if node.op == LIST_CONCAT:
+        var operands = List[Series]()
+        operands.append(left^)
+        if node.right >= 0:
+            operands.append(
+                _eval[width](
+                    bound,
+                    columns,
+                    aggregates,
+                    node.right,
+                    offset,
+                    length,
+                    grouped,
+                    mask,
+                )
+            )
+        return list_concat(operands, bound.dtypes[index])
     if is_nested_op(node.op):
         var value = nested_op(
             node, left, bound.dtypes[node.left], bound._regex(index)

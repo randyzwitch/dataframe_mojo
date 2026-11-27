@@ -214,6 +214,10 @@ from .expr import (
     LIST_JOIN,
     LIST_SUM,
     LIST_MEAN,
+    LIST_CONCAT,
+    LIST_DIFF,
+    LIST_N_UNIQUE,
+    is_list_transform,
     is_conditional,
     is_logical,
     is_binary,
@@ -254,6 +258,11 @@ from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import common_decimal, decimal_add_type, decimal_mul_type
 from .promotion import promoted_operands
+from dataframe.kernels.list_transforms import (
+    list_concat_inner,
+    list_diff_inner,
+    list_op_name,
+)
 from dataframe.kernels.horizontal import (
     horizontal_input,
     horizontal_result,
@@ -360,6 +369,8 @@ def _check_pattern(node: Node) raises -> Optional[Regex]:
 
 
 def op_name(op: Int) -> String:
+    if is_list_transform(op) or (op >= LIST_LEN and op <= LIST_MEAN):
+        return list_op_name(op)
     if op == IS_DUPLICATED:
         return "is_duplicated"
     if op == IS_UNIQUE:
@@ -2099,6 +2110,39 @@ def _bind(
                 if regex:
                     regexes[i] = regex.take()
                 dtype = DataType.list(DataType.STRING)
+            elif node.op == LIST_CONCAT:
+                # A bare literal takes its default type, as in a list
+                # literal, rather than the other side's element type.
+                var operands = List[Int]()
+                operands.append(node.left)
+                if node.right >= 0:
+                    if node.right >= i:
+                        raise Error("Invalid list.concat input")
+                    operands.append(node.right)
+                var inner = DataType.NULL
+                var first = True
+                for k in range(len(operands)):
+                    _default(nodes, types, operands[k])
+                    var item = types[operands[k]]
+                    var element = item.inner() if item.is_list() else item
+                    inner = element if first else list_concat_inner(
+                        inner, element
+                    )
+                    first = False
+                dtype = DataType.list(inner)
+            elif is_list_transform(node.op):
+                if not input.is_list():
+                    raise Error(
+                        list_op_name(node.op)
+                        + " requires a list expression, found "
+                        + input.name()
+                    )
+                if node.op == LIST_N_UNIQUE:
+                    dtype = DataType.INT64
+                elif node.op == LIST_DIFF:
+                    dtype = DataType.list(list_diff_inner(input.inner()))
+                else:
+                    dtype = input
             elif node.op == STRUCT_FIELD:
                 if not input.is_struct():
                     raise Error(
@@ -2163,6 +2207,12 @@ def _bind(
                     dtype = inner.sum_type() if node.op == LIST_SUM else inner
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
+            if node.op == LIST_CONCAT and node.right >= 0:
+                has_aggregate = has_aggregate or aggregated[node.right]
+                if shapes[node.left] == ROWS or shapes[node.right] == ROWS:
+                    shape = ROWS
+                elif has_aggregate:
+                    shape = AGGREGATE
         elif is_unary(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid unary expression input")
