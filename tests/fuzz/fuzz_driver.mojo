@@ -434,6 +434,26 @@ def build_expr(t: Tree, i: Int) raises -> Expr:
         return ea(t, i, 1).interpolate_by(ea(t, i, 2))
     if op == "list.get":
         return ea(t, i, 1).list().get(t.int(t.kid(i, 2)))
+    if op == "list.median":
+        return ea(t, i, 1).list().median()
+    if op == "list.std":
+        return ea(t, i, 1).list().std(t.int(t.kid(i, 2)))
+    if op == "list.var":
+        return ea(t, i, 1).list().var(t.int(t.kid(i, 2)))
+    if op == "list.arg_min":
+        return ea(t, i, 1).list().arg_min()
+    if op == "list.arg_max":
+        return ea(t, i, 1).list().arg_max()
+    if op == "list.count_matches" or op == "list.contains":
+        var item: Expr
+        var kid = t.kid(i, 2)
+        if t.nodes[kid].tag == STR:
+            item = lit(t.text(kid))
+        else:
+            item = lit(Int64(t.int(kid)))
+        if op == "list.count_matches":
+            return ea(t, i, 1).list().count_matches(item)
+        return ea(t, i, 1).list().contains(item)
     if op == "list.n_unique":
         return ea(t, i, 1).list().n_unique()
     if op == "list.unique":

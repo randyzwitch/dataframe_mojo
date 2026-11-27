@@ -2024,7 +2024,9 @@ def bind(
                 var inner = input.inner()
                 if node.op == LIST_COUNT_MATCHES or node.op == LIST_HAS:
                     if node.right < 0 or node.right >= i:
-                        raise Error("Invalid " + list_op_name(node.op) + " input")
+                        raise Error(
+                            "Invalid " + list_op_name(node.op) + " input"
+                        )
                     # A bare literal takes the element type.
                     _adopt(nodes, types, node.right, _target(inner))
                     _default(nodes, types, node.right)
@@ -2065,8 +2067,7 @@ def bind(
                         raise Error(
                             list_op_name(node.op)
                             + " needs a numeric, temporal or string list,"
-                            " found "
-                            + input.name()
+                            " found " + input.name()
                         )
                     dtype = DataType.UINT32
                 elif node.op == LIST_N_UNIQUE:

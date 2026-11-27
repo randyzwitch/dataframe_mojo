@@ -3343,7 +3343,7 @@ struct ListNamespace(Copyable):
 
     def contains(self, value: String) -> Expr:
         """Whether a string list holds the value."""
-        return self._op(LIST_CONTAINS, text=value, min_count=0)
+        return self.contains(lit(value))
 
     def contains(self, item: Expr) -> Expr:
         """Whether each list holds the row's value of item, for any element
@@ -3362,7 +3362,7 @@ struct ListNamespace(Copyable):
 
     def contains(self, value: Int64) -> Expr:
         """Whether an integer list holds the value."""
-        return self._op(LIST_CONTAINS, integer=value, min_count=1)
+        return self.contains(lit(value))
 
     def contains(self, value: Float64) -> Expr:
         """Whether a float list holds the value."""

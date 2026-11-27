@@ -634,7 +634,14 @@ def _eval[
         return list_concat(operands, bound.dtypes[index])
     if node.op == LIST_COUNT_MATCHES or node.op == LIST_HAS:
         var item = _eval[width](
-            bound, columns, aggregates, node.right, offset, length, grouped, mask
+            bound,
+            columns,
+            aggregates,
+            node.right,
+            offset,
+            length,
+            grouped,
+            mask,
         )
         return list_match(left, item, node.op)
     if is_nested_op(node.op):

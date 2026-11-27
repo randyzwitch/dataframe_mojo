@@ -411,7 +411,11 @@ def test_list_reductions() raises:
     var frame = fixture()
     var valid: List[Bool] = [True, False, True, True]
     # Rows: [3, 1, null, 1, 2], null, [], [5].
-    check(frame, col("a").list().median(), floats([1.5, 0, 0, 5], [True, False, False, True]))
+    check(
+        frame,
+        col("a").list().median(),
+        floats([1.5, 0, 0, 5], [True, False, False, True]),
+    )
     var var1 = 2.75 / 3.0
     check(
         frame,
@@ -472,7 +476,8 @@ def test_list_bool_and_string_reductions() raises:
                     Series(
                         "item",
                         BoolColumn(
-                            [True, False, False, False], [True, False, True, True]
+                            [True, False, False, False],
+                            [True, False, True, True],
                         ),
                     ),
                 ),
@@ -514,7 +519,9 @@ def test_list_bool_and_string_reductions() raises:
         Series("", BoolColumn([True, False, False], [True, True, False])),
     )
     var nan = std_nan[DType.float64]()
-    var withnan = DataFrame([float_lists("f", [[1.5, nan, Float64(N)]], [True])])
+    var withnan = DataFrame(
+        [float_lists("f", [[1.5, nan, Float64(N)]], [True])]
+    )
     check(
         withnan,
         col("f").list().arg_max(),

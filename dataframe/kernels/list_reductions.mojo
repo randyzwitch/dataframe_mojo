@@ -80,7 +80,7 @@ struct _MomentJob(Job):
     var values: Int
     var lo: Int
     var hi: Int
-    var out: Int
+    var dest: Int
     var ok: Int
 
     def __init__(
@@ -92,7 +92,7 @@ struct _MomentJob(Job):
         values: Int,
         lo: Int,
         hi: Int,
-        out: Int,
+        dest: Int,
         ok: Int,
     ):
         self.op = op
@@ -102,14 +102,14 @@ struct _MomentJob(Job):
         self.values = values
         self.lo = lo
         self.hi = hi
-        self.out = out
+        self.dest = dest
         self.ok = ok
 
     def run(mut self) raises:
         var values = Pointer[Float64, MutAnyOrigin](
             unsafe_from_address=self.values
         )
-        var out = Pointer[Float64, MutAnyOrigin](unsafe_from_address=self.out)
+        var out = Pointer[Float64, MutAnyOrigin](unsafe_from_address=self.dest)
         var ok = Pointer[Bool, MutAnyOrigin](unsafe_from_address=self.ok)
         var order = _NumberOrder[DType.float64](self.values)
         var scratch = List[Int]()
@@ -206,7 +206,7 @@ struct _TruthJob(Job):
     var bit0: Int
     var lo: Int
     var hi: Int
-    var out: Int
+    var dest: Int
     var ok: Int
 
     def __init__(
@@ -218,7 +218,7 @@ struct _TruthJob(Job):
         bit0: Int,
         lo: Int,
         hi: Int,
-        out: Int,
+        dest: Int,
         ok: Int,
     ):
         self.all = all
@@ -228,14 +228,14 @@ struct _TruthJob(Job):
         self.bit0 = bit0
         self.lo = lo
         self.hi = hi
-        self.out = out
+        self.dest = dest
         self.ok = ok
 
     def run(mut self) raises:
         var bytes = Pointer[UInt8, MutAnyOrigin](
             unsafe_from_address=self.values
         )
-        var out = Pointer[Bool, MutAnyOrigin](unsafe_from_address=self.out)
+        var out = Pointer[Bool, MutAnyOrigin](unsafe_from_address=self.dest)
         var ok = Pointer[Bool, MutAnyOrigin](unsafe_from_address=self.ok)
         for i in range(self.lo, self.hi):
             ok[unsafe_offset=i] = self.view.valid(i)
@@ -301,7 +301,7 @@ struct _ArgJob[O: _Order](Job):
     var present: _Present
     var lo: Int
     var hi: Int
-    var out: Int
+    var dest: Int
     var ok: Int
 
     def __init__(
@@ -312,7 +312,7 @@ struct _ArgJob[O: _Order](Job):
         present: _Present,
         lo: Int,
         hi: Int,
-        out: Int,
+        dest: Int,
         ok: Int,
     ):
         self.order = order.copy()
@@ -321,11 +321,11 @@ struct _ArgJob[O: _Order](Job):
         self.present = present.copy()
         self.lo = lo
         self.hi = hi
-        self.out = out
+        self.dest = dest
         self.ok = ok
 
     def run(mut self) raises:
-        var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=self.out)
+        var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=self.dest)
         var ok = Pointer[Bool, MutAnyOrigin](unsafe_from_address=self.ok)
         for i in range(self.lo, self.hi):
             var start = self.view.start(i)
@@ -352,7 +352,9 @@ struct _ArgJob[O: _Order](Job):
 
 def _argument[
     O: _Order
-](order: O, lists: ListColumn, elements: Series, largest: Bool) raises -> Series:
+](
+    order: O, lists: ListColumn, elements: Series, largest: Bool
+) raises -> Series:
     var n = len(lists)
     var view = _View(lists)
     var present = _Present(elements)
@@ -418,7 +420,7 @@ struct _MatchJob[D: DType](Job):
     var null: Bool
     var lo: Int
     var hi: Int
-    var out: Int
+    var dest: Int
 
     def __init__(
         out self,
@@ -429,7 +431,7 @@ struct _MatchJob[D: DType](Job):
         null: Bool,
         lo: Int,
         hi: Int,
-        out: Int,
+        dest: Int,
     ):
         self.view = view.copy()
         self.present = present.copy()
@@ -438,13 +440,13 @@ struct _MatchJob[D: DType](Job):
         self.null = null
         self.lo = lo
         self.hi = hi
-        self.out = out
+        self.dest = dest
 
     def run(mut self) raises:
         var values = Pointer[Scalar[Self.D], MutAnyOrigin](
             unsafe_from_address=self.values
         )
-        var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=self.out)
+        var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=self.dest)
         for i in range(self.lo, self.hi):
             var start = self.view.start(i)
             var found = 0
@@ -469,7 +471,7 @@ struct _TextMatchJob(Job):
     var target: String
     var lo: Int
     var hi: Int
-    var out: Int
+    var dest: Int
 
     def __init__(
         out self,
@@ -479,7 +481,7 @@ struct _TextMatchJob(Job):
         target: String,
         lo: Int,
         hi: Int,
-        out: Int,
+        dest: Int,
     ):
         self.view = view.copy()
         self.present = present.copy()
@@ -487,10 +489,10 @@ struct _TextMatchJob(Job):
         self.target = target
         self.lo = lo
         self.hi = hi
-        self.out = out
+        self.dest = dest
 
     def run(mut self) raises:
-        var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=self.out)
+        var out = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=self.dest)
         var wanted = self.target.as_bytes()
         var size = len(wanted)
         for i in range(self.lo, self.hi):
@@ -551,9 +553,10 @@ def _literal_counts(
         return counts^
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
-        if elements._data.isa[Column[Scalar[D]]]() and value._data.isa[
-            Column[Scalar[D]]
-        ]():
+        if (
+            elements._data.isa[Column[Scalar[D]]]()
+            and value._data.isa[Column[Scalar[D]]]()
+        ):
             ref column = elements._data[Column[Scalar[D]]]
             var target = Scalar[D](0)
             if not null:
