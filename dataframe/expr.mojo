@@ -401,6 +401,29 @@ comptime EXPR_REVERSE = 303
 comptime ROW_LEN = 304
 comptime INT_RANGE = 305
 
+# List element transforms (list_transforms.mojo). Each reads one list input
+# in `left`; LIST_CONCAT also reads `right`, where a non-list operand counts
+# as a one-element list per row.
+# LIST_UNIQUE: integer 1 keeps first-occurrence order.
+comptime LIST_UNIQUE = 310
+comptime LIST_N_UNIQUE = 311
+# LIST_SORT: integer bit 0 descending, bit 1 nulls last.
+comptime LIST_SORT = 312
+comptime LIST_REVERSE = 313
+# LIST_SLICE: integer the offset (negative counts from the end), min_count
+# the length (-1: to the end).
+comptime LIST_SLICE = 314
+# LIST_GATHER: text the SEP-joined positions, integer 1 makes an out of
+# range position null instead of an error.
+comptime LIST_GATHER = 315
+# LIST_GATHER_EVERY: integer the step, min_count the first position.
+comptime LIST_GATHER_EVERY = 316
+comptime LIST_DROP_NULLS = 317
+# LIST_SHIFT and LIST_DIFF: integer the number of positions.
+comptime LIST_SHIFT = 318
+comptime LIST_DIFF = 319
+comptime LIST_CONCAT = 320
+
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
 # whose leaves, read left to right, are the inputs; both keep the kind
@@ -675,9 +698,16 @@ def is_nested_op(op: Int) -> Bool:
     """Whether op is str.split, a .list operation, or struct field access."""
     return (
         (op >= STR_SPLIT and op <= STRUCT_FIELD)
+        or is_list_transform(op)
         or op == STR_EXTRACT_ALL
         or op == STR_EXTRACT_GROUPS
     )
+
+
+def is_list_transform(op: Int) -> Bool:
+    """Whether op builds each row's result from that row's list elements
+    (list_transforms.mojo)."""
+    return op >= LIST_UNIQUE and op <= LIST_CONCAT
 
 
 def is_conditional(op: Int) -> Bool:
@@ -3609,6 +3639,91 @@ struct ListNamespace(Copyable):
     def mean(self) -> Expr:
         return self._op(LIST_MEAN)
 
+    def unique(self, maintain_order: Bool = False) -> Expr:
+        """The distinct elements of each list, one null at most. The order
+        is unspecified unless maintain_order, which keeps each value's
+        first position."""
+        return self._op(LIST_UNIQUE, integer=Int64(maintain_order))
+
+    def n_unique(self) -> Expr:
+        """Distinct elements per list as Int64, a null element counting as
+        one value."""
+        return self._op(LIST_N_UNIQUE)
+
+    def sort(self, descending: Bool = False, nulls_last: Bool = False) -> Expr:
+        """Sort each list's elements. NaN is the largest value; nulls go
+        first unless nulls_last."""
+        return self._op(
+            LIST_SORT, integer=Int64(descending) | (Int64(nulls_last) << 1)
+        )
+
+    def reverse(self) -> Expr:
+        """Each list's elements in reverse order."""
+        return self._op(LIST_REVERSE)
+
+    def slice(self, offset: Int, length: Int = -1) -> Expr:
+        """The elements from offset (negative counts from the end) for
+        length elements, or to the end when length is -1. Ranges past
+        either end are cut short."""
+        return self._op(LIST_SLICE, integer=Int64(offset), min_count=length)
+
+    def head(self, n: Int = 5) -> Expr:
+        """The first n elements of each list."""
+        return self.slice(0, n)
+
+    def tail(self, n: Int = 5) -> Expr:
+        """The last n elements of each list."""
+        return self.slice(-n, n)
+
+    def gather(self, indices: List[Int], null_on_oob: Bool = False) -> Expr:
+        """The elements at the given positions of each list (negative counts
+        from the end). A position outside a list raises, or gives a null
+        element with null_on_oob."""
+        var encoded = List[String](capacity=len(indices))
+        for index in indices:
+            encoded.append(String(index))
+        return self._op(
+            LIST_GATHER,
+            text=_joined(encoded),
+            integer=Int64(null_on_oob),
+            min_count=len(indices),
+        )
+
+    def gather_every(self, n: Int, offset: Int = 0) -> Expr:
+        """Every nth element of each list, starting at position offset."""
+        return self._op(LIST_GATHER_EVERY, integer=Int64(n), min_count=offset)
+
+    def drop_nulls(self) -> Expr:
+        """Each list without its null elements."""
+        return self._op(LIST_DROP_NULLS)
+
+    def shift(self, n: Int = 1) -> Expr:
+        """Move each list's elements n positions later (earlier when n is
+        negative); vacated positions are null."""
+        return self._op(LIST_SHIFT, integer=Int64(n))
+
+    def diff(self, n: Int = 1) -> Expr:
+        """Each element minus the one n positions earlier in its list (later
+        when n is negative); null where there is none. Unsigned elements
+        give the signed type of twice the width (Int64 for UInt64)."""
+        return self._op(LIST_DIFF, integer=Int64(n))
+
+    def concat(self, other: Expr) -> Expr:
+        """Each list followed by other's list in the same row. A non-list
+        other adds its value as one element; a null list gives null."""
+        var nodes = self._expr._nodes.copy()
+        var offset = len(nodes)
+        _append_shifted(nodes, other._nodes, offset)
+        nodes.append(_node(LIST_CONCAT, offset - 1, len(nodes) - 1))
+        return Expr(nodes^, self._expr._name)
+
+    def concat(self, other: List[Expr]) raises -> Expr:
+        """Each list followed by every expression's value, in order."""
+        var result = self._expr.copy()
+        for item in other:
+            result = result.list().concat(item)
+        return result^
+
 
 def arctan2(y: Expr, x: Expr) -> Expr:
     """The angle of the point (x, y) in radians, in [-pi, pi], as Float64,
@@ -3645,6 +3760,23 @@ def concat_str(
         result = Expr(nodes^, result._name)
     if ignore_nulls:
         return result.fill_null(lit(""))
+    return result^
+
+
+def concat_list(exprs: List[Expr]) raises -> Expr:
+    """One list per row: the elements of every expression's list, in order.
+    A non-list expression adds its value as one element, and any null list
+    makes the row null."""
+    if len(exprs) == 0:
+        raise Error("concat_list requires at least one expression")
+    var result = exprs[0].copy()
+    if len(exprs) == 1:
+        # One operand still has to come out as a list.
+        var nodes = result._nodes.copy()
+        nodes.append(_node(LIST_CONCAT, len(nodes) - 1))
+        return Expr(nodes^, result._name)
+    for i in range(1, len(exprs)):
+        result = result.list().concat(exprs[i])
     return result^
 
 

@@ -397,6 +397,9 @@ def to_pl_expr(e, types):
         "list.min": lambda a: a.list.min(),
         "list.max": lambda a: a.list.max(),
         "list.first": lambda a: a.list.first(),
+        "list.n_unique": lambda a: a.list.n_unique(),
+        "list.reverse": lambda a: a.list.reverse(),
+        "list.drop_nulls": lambda a: a.list.drop_nulls(),
     }
     if op in unary:
         a = E(1)
@@ -477,6 +480,28 @@ def to_pl_expr(e, types):
         )
     if op == "list.get":
         return E(1).list.get(e[2], null_on_oob=True)
+    if op == "list.unique":
+        return E(1).list.unique(maintain_order=e[2])
+    if op == "list.sort":
+        return E(1).list.sort(descending=e[2], nulls_last=e[3])
+    if op == "list.slice":
+        return E(1).list.slice(e[2], None if e[3] < 0 else e[3])
+    if op == "list.head":
+        return E(1).list.head(e[2])
+    if op == "list.tail":
+        return E(1).list.tail(e[2])
+    if op == "list.gather":
+        return E(1).list.gather([e[2], e[3]], null_on_oob=True)
+    if op == "list.gather_every":
+        return E(1).list.gather_every(e[2], e[3])
+    if op == "list.shift":
+        return E(1).list.shift(e[2])
+    if op == "list.diff":
+        return E(1).list.diff(e[2])
+    if op == "list.concat":
+        return E(1).list.concat(E(2))
+    if op == "concat_list":
+        return pl.concat_list([E(1), E(2)])
     if op == "field":
         return E(1).struct.field(e[2])
     raise ValueError("unknown expression " + op)
@@ -837,6 +862,8 @@ class Gen:
             return (r.choice(["dt.year", "dt.month", "dt.day", "dt.weekday", "dt.ordinal_day"]), e), "int"
         if t == "datetime":
             return (r.choice(["dt.year", "dt.hour", "dt.date", "dt.day"]), e), "int"
+        if t in ("list[int64]", "list[string]") and r.random() < 0.5:
+            return self.list_expr(c)
         if t == "list[int64]":
             return (r.choice(["list.len", "list.sum", "list.min", "list.max", "list.first"]), e), "int"
         if t == "list[string]":
@@ -844,6 +871,54 @@ class Gen:
         if t == "struct":
             return ("field", e, r.choice(["x", "y"])), None
         return None
+
+    def list_transform(self, e, t):
+        """One list -> list transform of e, a list[int64] or list[string]."""
+        r = self.rng
+        k = r.randrange(13)
+        if k == 0:
+            maintain = r.random() < 0.5
+            u = ("list.unique", e, maintain)
+            # Unordered unique is compared after sorting each list.
+            return u if maintain else ("list.sort", u, False, False)
+        if k == 1:
+            return ("list.sort", e, r.random() < 0.5, r.random() < 0.5)
+        if k == 2:
+            return ("list.reverse", e)
+        if k == 3:
+            return ("list.slice", e, r.randint(-4, 4), r.choice([-1, 0, 1, 2, 5]))
+        if k == 4:
+            return (r.choice(["list.head", "list.tail"]), e, r.randint(0, 4))
+        if k == 5:
+            return ("list.gather", e, r.randint(-3, 3), r.randint(-3, 3))
+        if k == 6:
+            return ("list.gather_every", e, r.randint(1, 3), r.randint(0, 3))
+        if k == 7:
+            return ("list.drop_nulls", e)
+        if k == 8:
+            return ("list.shift", e, r.randint(-3, 3))
+        if k == 9 and t == "list[int64]":
+            return ("list.diff", e, r.choice([-2, -1, 1, 1, 2]))
+        if k == 10:
+            same = self.cols(lambda s: s == t)
+            return ("list.concat", e, ("col", r.choice(same)))
+        if k == 11 and t == "list[int64]":
+            ints = self.cols(lambda s: s == "int64")
+            if ints:
+                return ("concat_list", e, ("col", r.choice(ints)))
+        return ("list.reverse", e)
+
+    def list_expr(self, c):
+        """A chain of one or two list transforms on list column c, sometimes
+        reduced to one value per row."""
+        r = self.rng
+        t = self.schema[c]
+        e = ("col", c)
+        for _ in range(r.randint(1, 2)):
+            e = self.list_transform(e, t)
+        if r.random() < 0.3:
+            return (r.choice(["list.len", "list.n_unique", "list.first"]), e), "int"
+        return e, t
 
     def agg(self, allow_order):
         """An aggregation expression for group_by().agg or a scalar select."""
@@ -934,8 +1009,8 @@ class PlanGen:
         kinds = ["filter", "with_columns", "select", "group_by", "join", "sort",
                  "unique", "head", "explode", "concat", "drop_nulls", "agg_select",
                  "with_row_index", "reverse", "unnest", "drop", "interpolate",
-                 "time_window", "rolling_expr"]
-        weights = [14, 12, 6, 14, 12, 9, 6, 5, 3, 3, 2, 3, 1, 1, 2, 1, 3, 4, 3]
+                 "time_window", "list_ops", "rolling_expr"]
+        weights = [14, 12, 6, 14, 12, 9, 6, 5, 3, 3, 2, 3, 1, 1, 2, 1, 3, 4, 2, 3]
         # FUZZ_FOCUS=kind,kind makes those steps 20 times as likely.
         focus = os.environ.get("FUZZ_FOCUS", "").split(",")
         weights = [w * 20 if k in focus else w for k, w in zip(kinds, weights)]
@@ -950,6 +1025,12 @@ class PlanGen:
             es = [e for e in es if e is not None]
             if not es:
                 return None
+            return ("with_columns", plan, ("list",) + tuple(es)), ordered
+        if kind == "list_ops":
+            cs = g.cols(lambda s: s in ("list[int64]", "list[string]"))
+            if not cs:
+                return None
+            es = [("alias", g.list_expr(r.choice(cs))[0], g.name()) for _ in range(r.randint(1, 3))]
             return ("with_columns", plan, ("list",) + tuple(es)), ordered
         if kind == "select":
             keep = r.sample(names, k=r.randint(1, len(names)))
