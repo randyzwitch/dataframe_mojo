@@ -3540,9 +3540,15 @@ def _concat_exact(frames: List[DataFrame]) raises -> DataFrame:
         for f in range(1, len(frames)):
             var schema = frames[f].schema()
             for c in range(min(len(schema), len(first))):
+                # Categoricals with their own dictionaries are moved onto
+                # one by `concat`; any other type difference is a mismatch.
                 if (
                     schema[c].name == first[c].name
                     and schema[c].dtype != first[c].dtype
+                    and not (
+                        schema[c].dtype.is_categorical()
+                        and first[c].dtype.is_categorical()
+                    )
                 ):
                     raise Error(
                         "concat vertical: frame "
