@@ -1,6 +1,7 @@
 """Immutable-by-convention expression IR. No data access or execution here."""
 from std.collections import Dict, Optional
 from std.memory import bitcast
+from std.math import isnan, exp, log
 from .dtype import DataType
 from .value import AnyValue
 
@@ -307,6 +308,25 @@ comptime ROLLING_MIN_BY = 177
 comptime ROLLING_MAX_BY = 178
 comptime ROLLING_STD_BY = 179
 comptime ROLLING_VAR_BY = 180
+# Order statistics of sliding windows. ROLLING_QUANTILE is a fixed window
+# (integer: window size, floating: min_samples); ROLLING_QUANTILE_BY a
+# duration window like the *_by ops above (text: duration). Both keep the
+# closed side, the quantile and its interpolation in `text2`
+# (`pack_rolling_options`). A median is the 0.5 quantile, interpolated
+# linearly.
+comptime ROLLING_QUANTILE = 340
+comptime ROLLING_QUANTILE_BY = 341
+# Exponentially weighted functions. EWM: text is the function (mean, var,
+# std, sum), floating alpha (NaN when the smoothing options were not one
+# valid choice; text2 then holds the error), integer min_samples, and
+# min_count the flags EWM_ADJUST, EWM_BIAS and EWM_IGNORE_NULLS. EWM_BY:
+# left the values, right the time index, text the half-life, text2 the
+# function (mean or sum).
+comptime EWM = 342
+comptime EWM_BY = 343
+comptime EWM_ADJUST = 1
+comptime EWM_BIAS = 2
+comptime EWM_IGNORE_NULLS = 4
 
 # String functions that need no regular expressions (#798), unary on a
 # string input (text_functions.mojo). `text` holds a literal, or several
@@ -427,6 +447,11 @@ comptime LIST_ARG_MIN = 326
 comptime LIST_ARG_MAX = 327
 comptime LIST_COUNT_MATCHES = 328
 comptime LIST_HAS = 329
+# Set operations between the list in `left` and the one in `right`.
+comptime LIST_SET_UNION = 330
+comptime LIST_SET_INTERSECTION = 331
+comptime LIST_SET_DIFFERENCE = 332
+comptime LIST_SET_SYMMETRIC_DIFFERENCE = 333
 
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
@@ -474,8 +499,87 @@ def horizontal_inputs(nodes: List[Node], index: Int) -> List[Int]:
     return inputs^
 
 
+def is_fixed_rolling(op: Int) -> Bool:
+    """Whether op is a rolling window of a fixed number of rows."""
+    return (
+        (op >= ROLLING_SUM and op <= ROLLING_MAX)
+        or op == ROLLING_STD
+        or op == ROLLING_VAR
+        or op == ROLLING_QUANTILE
+    )
+
+
 def is_rolling_by(op: Int) -> Bool:
-    return op >= ROLLING_SUM_BY and op <= ROLLING_VAR_BY
+    return (
+        op >= ROLLING_SUM_BY and op <= ROLLING_VAR_BY
+    ) or op == ROLLING_QUANTILE_BY
+
+
+struct RollingOptions(Copyable, Movable):
+    """The options a rolling node keeps in `text2`: the closed side of a
+    duration window ("" for a fixed window), then `key=value` items for
+    the options set (`q`: the quantile as its Float64 bits, `m`: the
+    interpolation, `c`: a centered window, `w`: the weights as Float64
+    bits joined by commas). A fixed window with none of them keeps an
+    empty `text2`."""
+
+    var closed: String
+    var quantile: Float64
+    var method: String
+    var center: Bool
+    var weights: List[Float64]
+
+    def __init__(out self):
+        self.closed = ""
+        self.quantile = 0.5
+        self.method = ""
+        self.center = False
+        self.weights = List[Float64]()
+
+
+def _float_bits(value: Float64) -> String:
+    return String(Int64(bitcast[DType.int64, 1](SIMD[DType.float64, 1](value))))
+
+
+def _bits_float(text: String) raises -> Float64:
+    return Float64(
+        bitcast[DType.float64, 1](SIMD[DType.int64, 1](Int64(atol(text))))
+    )
+
+
+def pack_rolling_options(options: RollingOptions) -> String:
+    var text = options.closed
+    if options.method != "":
+        text += SEP + "q=" + _float_bits(options.quantile)
+        text += SEP + "m=" + options.method
+    if options.center:
+        text += SEP + "c=1"
+    if len(options.weights) > 0:
+        text += SEP + "w="
+        for k in range(len(options.weights)):
+            if k > 0:
+                text += ","
+            text += _float_bits(options.weights[k])
+    return text^
+
+
+def rolling_options(node: Node) raises -> RollingOptions:
+    """The options `pack_rolling_options` stored in `node.text2`."""
+    var options = RollingOptions()
+    var parts = node.text2.split(SEP)
+    options.closed = String(parts[0])
+    for k in range(1, len(parts)):
+        var item = String(parts[k])
+        if item.startswith("q="):
+            options.quantile = _bits_float(String(item[byte=2:]))
+        elif item.startswith("m="):
+            options.method = String(item[byte=2:])
+        elif item.startswith("c="):
+            options.center = True
+        elif item.startswith("w="):
+            for weight in String(item[byte=2:]).split(","):
+                options.weights.append(_bits_float(String(weight)))
+    return options^
 
 
 def is_binary(op: Int) -> Bool:
@@ -612,6 +716,10 @@ def is_window(op: Int) -> Bool:
     return (
         (op >= CUM_SUM and op <= CUM_PROD and op != OVER)
         or (op >= ROLLING_STD and op <= ROLLING_VAR_BY)
+        or op == ROLLING_QUANTILE
+        or op == ROLLING_QUANTILE_BY
+        or op == EWM
+        or op == EWM_BY
         or is_distinct_flag(op)
         or is_sequence(op)
     )
@@ -630,7 +738,12 @@ def is_nested_op(op: Int) -> Bool:
 def is_list_transform(op: Int) -> Bool:
     """Whether op builds each row's result from that row's list elements
     (list_transforms.mojo)."""
-    return op >= LIST_UNIQUE and op <= LIST_HAS
+    return op >= LIST_UNIQUE and op <= LIST_SET_SYMMETRIC_DIFFERENCE
+
+
+def is_list_set(op: Int) -> Bool:
+    """Whether op is a set operation between two lists."""
+    return op >= LIST_SET_UNION and op <= LIST_SET_SYMMETRIC_DIFFERENCE
 
 
 def is_conditional(op: Int) -> Bool:
@@ -1936,50 +2049,174 @@ struct Expr(Copyable):
         """
         return self._window(RANK, reverse=descending, text=method)
 
-    def rolling_sum(self, window_size: Int, min_samples: Int = -1) -> Self:
-        """Sum over the current row and the window_size - 1 rows before it.
+    def _rolling(
+        self,
+        op: Int,
+        window_size: Int,
+        min_samples: Int,
+        center: Bool,
+        weights: List[Float64],
+        ddof: Int = 0,
+        quantile: Float64 = 0.5,
+        method: String = "",
+    ) -> Self:
+        var result = self._window(
+            op, Int64(window_size), floating=Float64(min_samples)
+        )
+        ref node = result._nodes[len(result._nodes) - 1]
+        node.min_count = ddof
+        var options = RollingOptions()
+        options.quantile = quantile
+        options.method = method
+        options.center = center
+        options.weights = weights.copy()
+        node.text2 = pack_rolling_options(options)
+        return result^
+
+    def rolling_sum(
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
+    ) -> Self:
+        """Sum over the current row and the window_size - 1 rows before it
+        (center=True: the window_size rows around it, the extra row of an
+        even window before it).
 
         Nulls are skipped; fewer than min_samples valid values (default
-        window_size) give null.
+        window_size) give null. `weights` (window_size of them) multiply
+        the values by their position in the window, and the result is
+        Float64 (Float32 stays Float32).
         """
-        return self._window(
-            ROLLING_SUM, Int64(window_size), floating=Float64(min_samples)
+        return self._rolling(
+            ROLLING_SUM, window_size, min_samples, center, weights
         )
 
-    def rolling_mean(self, window_size: Int, min_samples: Int = -1) -> Self:
-        return self._window(
-            ROLLING_MEAN, Int64(window_size), floating=Float64(min_samples)
+    def rolling_mean(
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
+    ) -> Self:
+        """Mean over the window (see rolling_sum), as Float64; with
+        weights, the weighted sum over the sum of the weights."""
+        return self._rolling(
+            ROLLING_MEAN, window_size, min_samples, center, weights
         )
 
-    def rolling_min(self, window_size: Int, min_samples: Int = -1) -> Self:
-        return self._window(
-            ROLLING_MIN, Int64(window_size), floating=Float64(min_samples)
+    def rolling_min(
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
+    ) -> Self:
+        """Least value of the window (see rolling_sum); with weights, the
+        least weighted value, as Float64 (Float32 stays Float32)."""
+        return self._rolling(
+            ROLLING_MIN, window_size, min_samples, center, weights
         )
 
-    def rolling_max(self, window_size: Int, min_samples: Int = -1) -> Self:
-        return self._window(
-            ROLLING_MAX, Int64(window_size), floating=Float64(min_samples)
+    def rolling_max(
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
+    ) -> Self:
+        """Greatest value of the window (see rolling_min)."""
+        return self._rolling(
+            ROLLING_MAX, window_size, min_samples, center, weights
         )
 
     def rolling_std(
-        self, window_size: Int, min_samples: Int = -1, ddof: Int = 1
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        ddof: Int = 1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
     ) -> Self:
-        """Rolling std with stable sliding moments and count minus ddof."""
-        var result = self._window(
-            ROLLING_STD, Int64(window_size), floating=Float64(min_samples)
+        """Rolling std with stable sliding moments and count minus ddof.
+        With weights, the square root of the weighted mean squared
+        deviation from the weighted mean (ddof does not apply)."""
+        return self._rolling(
+            ROLLING_STD, window_size, min_samples, center, weights, ddof
         )
-        result._nodes[len(result._nodes) - 1].min_count = ddof
-        return result^
 
     def rolling_var(
-        self, window_size: Int, min_samples: Int = -1, ddof: Int = 1
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        ddof: Int = 1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
     ) -> Self:
-        """Rolling var with stable sliding moments and count minus ddof."""
-        var result = self._window(
-            ROLLING_VAR, Int64(window_size), floating=Float64(min_samples)
+        """Rolling var with stable sliding moments and count minus ddof;
+        weights as for rolling_std."""
+        return self._rolling(
+            ROLLING_VAR, window_size, min_samples, center, weights, ddof
         )
-        result._nodes[len(result._nodes) - 1].min_count = ddof
-        return result^
+
+    def rolling_median(
+        self,
+        window_size: Int,
+        min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
+    ) -> Self:
+        """Median of the current row and the window_size - 1 rows before
+        it, as Float64 (Float32 stays Float32, a decimal keeps its type).
+
+        Nulls are skipped; fewer than min_samples valid values (default
+        window_size) give null. NaN sorts above every number. center and
+        weights as for rolling_sum; a weighted median is Float64 (Float32
+        stays Float32).
+        """
+        return self.rolling_quantile(
+            0.5,
+            "linear",
+            window_size,
+            min_samples,
+            center=center,
+            weights=weights,
+        )
+
+    def rolling_quantile(
+        self,
+        quantile: Float64,
+        interpolation: String = "nearest",
+        window_size: Int = 2,
+        min_samples: Int = -1,
+        *,
+        center: Bool = False,
+        weights: List[Float64] = List[Float64](),
+    ) -> Self:
+        """Quantile of the current row and the window_size - 1 rows before
+        it. Interpolation: nearest, lower, higher, midpoint, linear or
+        equiprobable; types, nulls, center and weights as in
+        rolling_median. A weighted quantile treats each value as spanning
+        its weight.
+        """
+        return self._rolling(
+            ROLLING_QUANTILE,
+            window_size,
+            min_samples,
+            center,
+            weights,
+            0,
+            quantile,
+            interpolation,
+        )
 
     def _rolling_by(
         self,
@@ -2145,6 +2382,270 @@ struct Expr(Copyable):
         return self._rolling_by(
             col(by), ROLLING_VAR_BY, window_size, closed, min_samples, ddof
         )
+
+    def rolling_median_by(
+        self,
+        by: Self,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling median over a Date/Datetime duration window (any row
+        order); types as in rolling_median."""
+        return self.rolling_quantile_by(
+            by, window_size, 0.5, "linear", closed, min_samples
+        )
+
+    def rolling_median_by(
+        self,
+        by: String,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling median over a Date/Datetime duration window (any row
+        order); types as in rolling_median."""
+        return self.rolling_quantile_by(
+            col(by), window_size, 0.5, "linear", closed, min_samples
+        )
+
+    def rolling_quantile_by(
+        self,
+        by: Self,
+        window_size: String,
+        quantile: Float64,
+        interpolation: String = "nearest",
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling quantile over a Date/Datetime duration window (any row
+        order); interpolation and types as in rolling_quantile."""
+        var result = self._rolling_by(
+            by, ROLLING_QUANTILE_BY, window_size, closed, min_samples, 0
+        )
+        var options = RollingOptions()
+        options.closed = closed
+        options.quantile = quantile
+        options.method = interpolation
+        result._nodes[len(result._nodes) - 1].text2 = pack_rolling_options(
+            options
+        )
+        return result^
+
+    def rolling_quantile_by(
+        self,
+        by: String,
+        window_size: String,
+        quantile: Float64,
+        interpolation: String = "nearest",
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling quantile over a Date/Datetime duration window (any row
+        order); interpolation and types as in rolling_quantile."""
+        return self.rolling_quantile_by(
+            col(by),
+            window_size,
+            quantile,
+            interpolation,
+            closed,
+            min_samples,
+        )
+
+    def _ewm(
+        self,
+        function: String,
+        com: Float64,
+        span: Float64,
+        half_life: Float64,
+        alpha: Float64,
+        adjust: Bool,
+        bias: Bool,
+        min_samples: Int,
+        ignore_nulls: Bool,
+    ) -> Self:
+        """An EWM node; alpha from the one smoothing option given (NaN and
+        the reason in text2 otherwise, raised when bound)."""
+        var given = 0
+        var smoothing = Float64(FloatLiteral.nan)
+        var problem = String("")
+        if not isnan(com):
+            given += 1
+            smoothing = 1 / (1 + com)
+            if not com >= 0:
+                problem = "ewm requires com >= 0"
+        if not isnan(span):
+            given += 1
+            smoothing = 2 / (span + 1)
+            if not span >= 1:
+                problem = "ewm requires span >= 1"
+        if not isnan(half_life):
+            given += 1
+            smoothing = 1 - exp(-log(Float64(2)) / half_life)
+            if not half_life > 0:
+                problem = "ewm requires half_life > 0"
+        if not isnan(alpha):
+            given += 1
+            smoothing = alpha
+            if not (alpha > 0 and alpha <= 1):
+                problem = "ewm requires 0 < alpha <= 1"
+        if given != 1:
+            problem = "ewm needs exactly one of com, span, half_life or alpha"
+        if problem != "":
+            smoothing = Float64(FloatLiteral.nan)
+        var flags = 0
+        if adjust:
+            flags |= EWM_ADJUST
+        if bias:
+            flags |= EWM_BIAS
+        if ignore_nulls:
+            flags |= EWM_IGNORE_NULLS
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(
+                EWM,
+                len(nodes) - 1,
+                text=function,
+                integer=Int64(min_samples),
+                floating=smoothing,
+                min_count=flags,
+                text2=problem,
+            )
+        )
+        return Self(nodes^, self._name)
+
+    def ewm_mean(
+        self,
+        *,
+        com: Float64 = Float64(FloatLiteral.nan),
+        span: Float64 = Float64(FloatLiteral.nan),
+        half_life: Float64 = Float64(FloatLiteral.nan),
+        alpha: Float64 = Float64(FloatLiteral.nan),
+        adjust: Bool = True,
+        min_samples: Int = 1,
+        ignore_nulls: Bool = False,
+    ) -> Self:
+        """Exponentially weighted mean. Give exactly one of com (alpha = 1 /
+        (1 + com)), span (2 / (span + 1)), half_life (1 - exp(-ln 2 /
+        half_life)) or alpha. adjust weighs the values as an infinite
+        series cut at the first one; without it each new value enters with
+        weight alpha. A null row stays null and, unless ignore_nulls, ages
+        the earlier values one step; rows before min_samples values are
+        null. Float64 (Float32 stays Float32)."""
+        return self._ewm(
+            "mean",
+            com,
+            span,
+            half_life,
+            alpha,
+            adjust,
+            False,
+            min_samples,
+            ignore_nulls,
+        )
+
+    def ewm_var(
+        self,
+        *,
+        com: Float64 = Float64(FloatLiteral.nan),
+        span: Float64 = Float64(FloatLiteral.nan),
+        half_life: Float64 = Float64(FloatLiteral.nan),
+        alpha: Float64 = Float64(FloatLiteral.nan),
+        adjust: Bool = True,
+        bias: Bool = False,
+        min_samples: Int = 1,
+        ignore_nulls: Bool = False,
+    ) -> Self:
+        """Exponentially weighted variance (see ewm_mean); without bias it
+        is corrected by the weights' effective sample size, and null until
+        that correction is defined."""
+        return self._ewm(
+            "var",
+            com,
+            span,
+            half_life,
+            alpha,
+            adjust,
+            bias,
+            min_samples,
+            ignore_nulls,
+        )
+
+    def ewm_std(
+        self,
+        *,
+        com: Float64 = Float64(FloatLiteral.nan),
+        span: Float64 = Float64(FloatLiteral.nan),
+        half_life: Float64 = Float64(FloatLiteral.nan),
+        alpha: Float64 = Float64(FloatLiteral.nan),
+        adjust: Bool = True,
+        bias: Bool = False,
+        min_samples: Int = 1,
+        ignore_nulls: Bool = False,
+    ) -> Self:
+        """Square root of ewm_var."""
+        return self._ewm(
+            "std",
+            com,
+            span,
+            half_life,
+            alpha,
+            adjust,
+            bias,
+            min_samples,
+            ignore_nulls,
+        )
+
+    def ewm_sum(
+        self,
+        *,
+        com: Float64 = Float64(FloatLiteral.nan),
+        span: Float64 = Float64(FloatLiteral.nan),
+        half_life: Float64 = Float64(FloatLiteral.nan),
+        alpha: Float64 = Float64(FloatLiteral.nan),
+        min_samples: Int = 1,
+        ignore_nulls: Bool = False,
+    ) -> Self:
+        """Exponentially weighted sum: each row adds its value to (1 -
+        alpha) times the sum before it (see ewm_mean for the options)."""
+        return self._ewm(
+            "sum",
+            com,
+            span,
+            half_life,
+            alpha,
+            True,
+            False,
+            min_samples,
+            ignore_nulls,
+        )
+
+    def ewm_mean_by(self, by: Self, half_life: String) -> Self:
+        """Exponentially weighted mean over a Date/Datetime index (any row
+        order): between consecutive rows in time order the earlier result
+        decays by 0.5^(elapsed / half_life). half_life is a fixed duration
+        (no months). A row with a null value or time stays null."""
+        var result = self._binary(by, EWM_BY)
+        ref node = result._nodes[len(result._nodes) - 1]
+        node.text = half_life
+        node.text2 = "mean"
+        return result^
+
+    def ewm_mean_by(self, by: String, half_life: String) -> Self:
+        return self.ewm_mean_by(col(by), half_life)
+
+    def ewm_sum_by(self, by: Self, half_life: String) -> Self:
+        """Exponentially weighted sum over a Date/Datetime index: the
+        earlier sum decays by 0.5^(elapsed / half_life) and each row adds
+        its value (see ewm_mean_by)."""
+        var result = self._binary(by, EWM_BY)
+        ref node = result._nodes[len(result._nodes) - 1]
+        node.text = half_life
+        node.text2 = "sum"
+        return result^
+
+    def ewm_sum_by(self, by: String, half_life: String) -> Self:
+        return self.ewm_sum_by(col(by), half_life)
 
     def forward_fill(self, limit: Int = -1) -> Self:
         """Fill nulls with the last valid value, at most limit rows ahead
@@ -3426,6 +3927,27 @@ struct ListNamespace(Copyable):
 
     def count_matches(self, value: String) -> Expr:
         return self.count_matches(lit(value))
+
+    def set_union(self, other: Expr) -> Expr:
+        """The distinct elements of each list and other's list in the same
+        row: this list's in order, then other's that it lacks. A null list
+        on either side gives null; a null element is one value."""
+        return self._binary(other, LIST_SET_UNION)
+
+    def set_intersection(self, other: Expr) -> Expr:
+        """The distinct elements of each list that other's list also holds,
+        in this list's order."""
+        return self._binary(other, LIST_SET_INTERSECTION)
+
+    def set_difference(self, other: Expr) -> Expr:
+        """The distinct elements of each list that other's list lacks, in
+        this list's order."""
+        return self._binary(other, LIST_SET_DIFFERENCE)
+
+    def set_symmetric_difference(self, other: Expr) -> Expr:
+        """The distinct elements in exactly one of the two lists: this
+        list's first, then other's."""
+        return self._binary(other, LIST_SET_SYMMETRIC_DIFFERENCE)
 
     def _binary(self, item: Expr, op: Int) -> Expr:
         var nodes = self._expr._nodes.copy()
