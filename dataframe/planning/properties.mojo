@@ -8,6 +8,7 @@ from dataframe.planning.cost.eligibility import (
 )
 
 from dataframe.planning.expression_inputs import _references
+from dataframe.identity_metadata import identity_column_source
 from dataframe.planning.cost.sampling import (
     _keys_repeat,
 )
@@ -256,10 +257,20 @@ def _schema_of(node: PlanNode, input: DataFrame) -> Optional[DataFrame]:
         for b in bound:
             if node.kind == SELECT and b.shape() != ROWS:
                 return None
-            var dtype = b.dtypes[len(b.dtypes) - 1]
+            var top = len(b.dtypes) - 1
+            var dtype = b.dtypes[top]
             if dtype.is_nested() or dtype.is_categorical():
                 return None
-            produced.append(Series.full_null(b.expr._name, dtype, 0))
+            # A column passed through unchanged keeps its Arrow field
+            # metadata when the node runs, so its schema keeps it too:
+            # a union compares its inputs' schemas field by field.
+            var source = identity_column_source(b, top)
+            if source >= 0 and input._columns[source].dtype() == dtype:
+                produced.append(
+                    input._columns[source].slice(0, 0).renamed(b.expr._name)
+                )
+            else:
+                produced.append(Series.full_null(b.expr._name, dtype, 0))
         if node.kind == SELECT:
             if len(produced) == 0:
                 return None

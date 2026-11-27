@@ -65,7 +65,12 @@ from dataframe.parallel import (
     worker_count,
 )
 from dataframe.series import Series
-from dataframe.storage.allocation import huge_uninit, release_huge
+from dataframe.storage.allocation import (
+    counted_huge_uninit,
+    huge_uninit,
+    release_counted_huge,
+    release_huge,
+)
 from dataframe.storage.boolean import BoolColumn
 from dataframe.storage.buffer import _Buffer
 from dataframe.storage.column import Column, _validity_at
@@ -579,7 +584,7 @@ struct _TableData(Movable):
     def __deinit__(deinit self):
         # The pointer table is the table's largest scratch: keep its pages
         # for the next build rather than faulting fresh ones in.
-        release_huge(self.entries^)
+        release_counted_huge(self.entries^)
 
 
 def _integer_physical(physical: Int) -> Bool:
@@ -1794,7 +1799,7 @@ struct JoinHashTable(Copyable, Movable):
             self.data[].bases.append(UInt64(self.capacity))
             self.data[].masks.append(UInt64(size - 1))
             self.capacity += size
-        self.data[].entries = huge_uninit[UInt64](self.capacity)
+        self.data[].entries = counted_huge_uninit[UInt64](self.capacity)
         var entries = Int(self.data[].entries.unsafe_ptr())
         var inserts = List[_InsertJob](capacity=self.parts)
         for p in range(self.parts):

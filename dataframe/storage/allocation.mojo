@@ -24,6 +24,14 @@ A block left unused for `RETAIN_NANOSECONDS` is freed, so an idle process
 gives its memory back, and the pool never holds more than `_retain_limit`
 bytes. Storage that is never released is freed the ordinary way: the pool
 is an optimization that a caller can always skip.
+
+Retained blocks are still memory the process holds, so they count toward
+the memory limit (`memory_limit`), and the pool keeps at most a quarter of
+the limit. When the limit would be crossed, every retained block is freed
+before an `out of memory` error is raised (`check_memory`): memory kept
+only for speed never decides whether a query fits. The row blocks of hash
+tables and aggregates have a pool of their own here (`_RowBlockPool`),
+under the same rules.
 """
 from std.atomic import Atomic
 from std.collections import Dict
@@ -32,6 +40,16 @@ from std.math import align_down, align_up
 from std.memory import Allocation, Layout, Pointer, alloc, dealloc
 from std.sys import CompilationTarget, size_of
 from std.time import monotonic
+
+from dataframe.storage.memory_limit import (
+    charge,
+    memory_limit,
+    out_of_memory,
+    over_limit,
+    over_limit_reserved,
+    refresh_resident,
+    uncharge,
+)
 
 # Linux `MADV_HUGEPAGE`.
 comptime _MADV_HUGEPAGE = 14
@@ -76,7 +94,8 @@ struct _Retained(Copyable, ImplicitlyCopyable, Movable):
 
 def _retain_limit() -> Int:
     """The most bytes the pool keeps: a quarter of physical memory, so
-    retained blocks never crowd out the tables that are live."""
+    retained blocks never crowd out the tables that are live (and a
+    quarter of the memory limit, `_retain_budget`)."""
     comptime if not CompilationTarget.is_linux():
         return 0
     var pages = Int(external_call["sysconf", Int64](Int32(_SC_PHYS_PAGES)))
@@ -84,6 +103,13 @@ def _retain_limit() -> Int:
     if pages <= 0 or size <= 0:
         return 0
     return pages * size // 4
+
+
+def _retain_budget() -> Int:
+    """The most bytes a pool of freed blocks keeps under the memory limit:
+    a quarter of it, so memory held only for reuse is never most of what a
+    query may use."""
+    return memory_limit() // 4
 
 
 def _free_block(address: Int, bytes: Int):
@@ -155,6 +181,7 @@ struct _BlockPool(Movable):
         for i in range(count):
             out.append(self.blocks[i])
             self.retained -= self.blocks[i].bytes
+            uncharge(self.blocks[i].bytes)
         var kept = List[_Retained](capacity=len(self.blocks) - count)
         for i in range(count, len(self.blocks)):
             kept.append(self.blocks[i])
@@ -199,6 +226,7 @@ struct _BlockPool(Movable):
             return _Retained(0, 0, 0)
         var found = self.blocks.pop(best)
         self.retained -= found.bytes
+        uncharge(found.bytes)
         self.owned[found.address] = found.bytes
         return found
 
@@ -234,18 +262,31 @@ struct _BlockPool(Movable):
             return False
         var now = monotonic()
         self._expire(now, expired)
-        if bytes > self.limit:
+        var limit = min(self.limit, _retain_budget())
+        if bytes > limit:
             expired.append(_Retained(address, bytes, now))
         else:
             self.blocks.append(_Retained(address, bytes, now))
             self.retained += bytes
+            charge(bytes)
             var cut = 0
-            var over = self.retained - self.limit
+            var over = self.retained - limit
             while over > 0:
                 over -= self.blocks[cut].bytes
                 cut += 1
             self._drop_first(cut, expired)
         return True
+
+    @staticmethod
+    def drain():
+        """Free every retained block."""
+        var freed = List[_Retained]()
+        _BlockPool._acquire()
+        ref pool = _block_pool()
+        pool._drop_first(len(pool.blocks), freed)
+        _BlockPool._release()
+        for block in freed:
+            _free_block(block.address, block.bytes)
 
 
 def _pool_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
@@ -346,3 +387,228 @@ def huge_capacity[T: Copyable](length: Int) -> List[T]:
     var out = List[T](capacity=length)
     _fresh(Int(out.unsafe_ptr()), out.capacity() * size_of[T]())
     return out^
+
+
+# -- Row blocks ---------------------------------------------------------------
+
+# Freed row blocks the pool keeps per worker thread: one batch of blocks,
+# what a thread's cache of freed blocks holds before it passes them on.
+comptime ROW_BLOCKS_KEPT_PER_THREAD = 128
+
+
+struct _RowBlockPool(Movable):
+    """Freed row blocks (all one size, pages already touched) and a spin
+    lock over them. Taking or returning a block holds the lock for one list
+    push or pop.
+
+    Row blocks are all one size, so a freed one can serve the next request
+    as it is. Freed row blocks come here instead of going back to the
+    general allocator, which would return their pages to the system and
+    take a global lock for each block: many threads each starting a few
+    partitions would wait on that lock, then fault the pages in again. The
+    pool keeps at most ROW_BLOCKS_KEPT_PER_THREAD blocks for each worker
+    thread, the most freed memory a thread holds before handing it on, and
+    at most a quarter of the memory limit (`_retain_budget`); it frees the
+    rest. Kept blocks count toward the limit."""
+
+    var lock: Atomic[Int64]
+    var free: List[List[UInt8]]
+
+    def __init__(out self):
+        self.lock = Atomic[Int64](0)
+        self.free = List[List[UInt8]]()
+
+    # Every thread shares the one pool, so its methods reach it by address
+    # (`_row_block_pool`) rather than as a `mut self` argument: a `mut`
+    # argument promises the callee sole access to the value's memory, which
+    # lets the compiler move the list's reads and writes across the lock's
+    # atomics, and two threads could then change it at once. The list
+    # changes run under the lock in functions that are not inlined, so they
+    # are complete before it is released.
+
+    @staticmethod
+    def _acquire():
+        ref lock = _row_block_pool().lock
+        while True:
+            var expected = Int64(0)
+            if lock.compare_exchange(expected, 1):
+                return
+
+    @staticmethod
+    def _release():
+        _row_block_pool().lock.store(0)
+
+    @staticmethod
+    def take(bytes: Int) -> List[UInt8]:
+        """A free block of `bytes`, or a new one when the pool has none."""
+        _RowBlockPool._acquire()
+        var block = _row_block_pool()._pop_locked(bytes)
+        _RowBlockPool._release()
+        if block:
+            return block.take()
+        return List[UInt8](unsafe_uninit_length=bytes)
+
+    @no_inline
+    def _pop_locked(mut self, bytes: Int) -> Optional[List[UInt8]]:
+        if len(self.free) > 0 and len(self.free[len(self.free) - 1]) == bytes:
+            var block = self.free.pop()
+            uncharge(len(block))
+            return block^
+        return None
+
+    @staticmethod
+    def give(var block: List[UInt8], workers: Int):
+        """Keep a freed block for reuse, unless the pool is full (then it
+        is freed when `block` goes out of scope). `workers` is the worker
+        thread count the pool's size follows."""
+        var bytes = len(block)
+        if bytes == 0:
+            return
+        var most = min(
+            ROW_BLOCKS_KEPT_PER_THREAD * workers, _retain_budget() // bytes
+        )
+        _RowBlockPool._acquire()
+        _row_block_pool()._push_locked(block^, most)
+        _RowBlockPool._release()
+
+    @no_inline
+    def _push_locked(mut self, var block: List[UInt8], most: Int):
+        if len(self.free) < most and (
+            len(self.free) == 0 or len(self.free[0]) == len(block)
+        ):
+            charge(len(block))
+            self.free.append(block^)
+
+    @staticmethod
+    def drain():
+        """Free every kept block."""
+        _RowBlockPool._acquire()
+        var freed = _row_block_pool()._take_all_locked()
+        _RowBlockPool._release()
+        _ = freed^
+
+    @no_inline
+    def _take_all_locked(mut self) -> List[List[UInt8]]:
+        var freed = List[List[UInt8]]()
+        swap(freed, self.free)
+        for block in freed:
+            uncharge(len(block))
+        return freed^
+
+
+def _row_pool_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    var pointer = alloc(Layout[_RowBlockPool](length=1)).unsafe_leak()
+    pointer.unsafe_write(_RowBlockPool())
+    return pointer.unsafe_bitcast[NoneType]()
+
+
+def _row_block_pool() -> ref[MutAnyOrigin] _RowBlockPool:
+    var address = _get_global[
+        "DATAFRAME_ROW_BLOCK_POOL", _row_pool_init, _pool_keep
+    ]()
+    return Pointer[_RowBlockPool, MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+
+
+def take_row_block(bytes: Int) -> List[UInt8]:
+    """A row block of `bytes`: a freed one when the pool has one, else new
+    (uninitialized either way)."""
+    return _RowBlockPool.take(bytes)
+
+
+def give_row_block(var block: List[UInt8], workers: Int):
+    """Done with a row block nothing else references: keep it for the next
+    `take_row_block`, or free it."""
+    _RowBlockPool.give(block^, workers)
+
+
+# -- The memory limit ------------------------------------------------------------
+
+
+def release_retained():
+    """Free every block the pools keep for reuse."""
+    _BlockPool.drain()
+    _RowBlockPool.drain()
+
+
+@always_inline
+def check_memory(extra: Int = 0) raises:
+    """Raise an `out of memory` error when holding `extra` more bytes would
+    go over the memory limit, after freeing the blocks kept for reuse.
+    Call it before allocating `extra` bytes whose size is known, and with
+    no argument between pieces of work."""
+    if over_limit(extra):
+        _check_memory_slow(extra)
+
+
+@no_inline
+def _check_memory_slow(extra: Int) raises:
+    release_retained()
+    refresh_resident()
+    if over_limit(extra):
+        raise out_of_memory(extra)
+
+
+# -- Tables counted toward the memory limit -------------------------------------
+
+
+def counted_huge_list[T: Copyable](length: Int, fill: T) -> List[T]:
+    """`huge_list`, with the list's bytes counted toward the memory limit
+    until it is given to `release_counted_huge`, which must free it."""
+    var out = huge_list[T](length, fill)
+    charge(out.capacity() * size_of[T]())
+    return out^
+
+
+def counted_huge_uninit[T: Copyable](length: Int) -> List[T]:
+    """`huge_uninit`, with the list's bytes counted toward the memory
+    limit until it is given to `release_counted_huge`, which must free it.
+    """
+    var out = huge_uninit[T](length)
+    charge(out.capacity() * size_of[T]())
+    return out^
+
+
+def release_counted_huge[T: Copyable & Deinitable](var table: List[T]):
+    """`release_huge` for a list from `counted_huge_list` or
+    `counted_huge_uninit` (or an empty one): its bytes no longer count."""
+    uncharge(table.capacity() * size_of[T]())
+    release_huge(table^)
+
+
+def reserve_memory(bytes: Int) raises:
+    """Count `bytes` toward the memory limit before allocating them, or
+    raise an `out of memory` error when they do not fit (after freeing the
+    blocks kept for reuse). Unlike `check_memory`, the bytes are counted at
+    once, so threads reserving at the same time cannot all fit under the
+    limit by each seeing room for its own share. The caller allocates them
+    and gives them back with `uncharge` when freed."""
+    charge(bytes)
+    if not over_limit_reserved(bytes):
+        return
+    uncharge(bytes)
+    release_retained()
+    refresh_resident()
+    charge(bytes)
+    if over_limit_reserved(bytes):
+        uncharge(bytes)
+        raise out_of_memory(bytes)
+
+
+struct MemoryReservation(Movable):
+    """Bytes reserved against the memory limit for the life of this value
+    (`reserve_memory`), for work whose allocations count themselves once
+    made but are all made at once by several workers: the reservation
+    keeps the workers from each seeing room for its own share. Keep it
+    alive to the end of the work (`_ = reservation^`): a value is freed
+    after its last use."""
+
+    var bytes: Int
+
+    def __init__(out self, bytes: Int) raises:
+        reserve_memory(bytes)
+        self.bytes = bytes
+
+    def __deinit__(deinit self):
+        uncharge(self.bytes)

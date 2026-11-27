@@ -310,7 +310,9 @@ def to_pl_expr(e, types):
     if op == "null":
         return pl.lit(None, dtype=pl_dtype(e[1]))
     if op == "len":
-        return pl.len()
+        # Counts are Int64 here (README); typed alike, later steps that
+        # read them build the same types on both sides.
+        return pl.len().cast(pl.Int64)
     if op == "alias":
         return E(1).alias(e[2])
     if op == "cast":
@@ -364,12 +366,13 @@ def to_pl_expr(e, types):
         "min": lambda a: a.min(),
         "max": lambda a: a.max(),
         "median": lambda a: a.median(),
-        "count": lambda a: a.count(),
-        "null_count": lambda a: a.null_count(),
-        "n_unique": lambda a: a.n_unique(),
+        # Counts are Int64 here (README): cast so later steps type alike.
+        "count": lambda a: a.count().cast(pl.Int64),
+        "null_count": lambda a: a.null_count().cast(pl.Int64),
+        "n_unique": lambda a: a.n_unique().cast(pl.Int64),
         "first": lambda a: a.first(),
         "last": lambda a: a.last(),
-        "elen": lambda a: a.len(),
+        "elen": lambda a: a.len().cast(pl.Int64),
         "any": lambda a: a.any(),
         "all": lambda a: a.all(),
         # The first row holding the extreme. Polars' own arg_min/arg_max

@@ -61,6 +61,11 @@ from .expr import (
     when,
 )
 from .row_expressions import len, int_range
+from .storage.memory_limit import (
+    memory_limit,
+    memory_usage,
+    set_memory_limit,
+)
 from .io.arrow import (
     ArrowArray,
     ArrowSchema,

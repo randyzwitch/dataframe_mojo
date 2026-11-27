@@ -4,6 +4,7 @@ setting. Filters written above a gather stay above it, filters and column
 selections above a diagonal concat reach every input, and column
 selections above a horizontal concat reach both inputs."""
 # contract-group: lazy.frame_verbs
+from std.memory import ArcPointer
 from std.os import getenv, makedirs
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
@@ -344,6 +345,117 @@ def test_concat_of_joins_pruned_apart() raises:
                 .select(["k"])
                 .sort("k"),
                 narrowed,
+            )
+        _ = workers^
+
+
+def test_selected_columns_keep_field_metadata_in_a_union() raises:
+    """A column passed through a select keeps its Arrow field metadata,
+    both in the rows and in the schema the plan derives for the select,
+    so a union of a selected input and an unselected one stacks. Found by
+    the differential fuzzer (tests/fuzz): projection pushdown put a
+    selection on one input of a union over Parquet data, and the derived
+    schemas disagreed on a labelled column's metadata."""
+    # Packed Arrow metadata: one entry, "tag" -> "raw".
+    var metadata: List[UInt8] = [1, 0, 0, 0, 3, 0, 0, 0, 116, 97, 103]
+    metadata += [3, 0, 0, 0, 114, 97, 119]
+    var label = Series(
+        "s", Column[String](["a", "b", "c"], [True, False, True])
+    )
+    label._field_metadata = ArcPointer(metadata^)
+    var frame = DataFrame([label^, Series("u", Column[Int64]([1, 2, 3]))])
+    var expected = concat([frame.copy(), frame.copy()])
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        var plans = List[LazyFrame]()
+        plans.append(concat([frame.lazy(), frame.lazy().select(["s", "u"])]))
+        plans.append(
+            concat(
+                [
+                    frame.lazy().select_exprs([col("s"), col("u")]),
+                    frame.lazy().with_columns([col("u").alias("u")]),
+                ]
+            )
+        )
+        plans.append(
+            concat([frame.lazy(), frame.lazy().filter(col("u") > 0)]).select(
+                ["s"]
+            )
+        )
+        for k in range(len(plans)):
+            var result = plans[k].collect()
+            assert_true(Bool(result.column("s")._field_metadata), String(k))
+            if k < 2:
+                check(plans[k], expected)
+
+
+def test_join_over_a_union_of_joins_pruned_apart() raises:
+    """A join reads a union whose two inputs are joins narrowed to
+    different columns (a filter above the second reads a right column
+    that nothing above the union reads). The union is aligned before the
+    join above it reads the union's columns, over files and over frames,
+    on one worker and on eight."""
+    var directory = getenv("COVERAGE_TEST_TMP")
+    assert_true(Bool(directory))
+    directory += "/join-over-union-of-joins"
+    makedirs(directory, exist_ok=True)
+    var left_path = directory + "/left.csv"
+    var right_path = directory + "/right.csv"
+    var left_text = String("k,b,c\n")
+    var right_text = String("k,b,t\n")
+    for row in range(30):
+        left_text += String(row % 9) + "," + String(row % 2) + ","
+        left_text += String(row * 3) + "\n"
+        right_text += String(row % 11) + "," + String(row % 3 // 2) + ","
+        right_text += String(row % 9) + "\n"
+    with open(left_path, "w") as file:
+        file.write(left_text)
+    with open(right_path, "w") as file:
+        file.write(right_text)
+    var left_schema = CsvSchema(
+        [CsvField.int64("k"), CsvField.int64("b"), CsvField.int64("c")]
+    )
+    var right_schema = CsvSchema(
+        [CsvField.int64("k"), CsvField.int64("b"), CsvField.int64("t")]
+    )
+    var left = read_csv(left_path, left_schema)
+    var right = read_csv(right_path, right_schema)
+    var eager = left.filter(col("b") != lit(Int64(1))).join(
+        right, on=["k"], how="full", coalesce=True
+    )
+    var expected = (
+        concat([eager.copy(), eager.filter(col("k") == col("t"))])
+        .join(right, on=["b"], how="inner")
+        .group_by(["b_right"])
+        .agg([col("c").null_count().alias("n"), col("k").count().alias("m")])
+        .sort(["b_right"], nulls_last=True)
+    )
+    var lefts = List[LazyFrame]()
+    var rights = List[LazyFrame]()
+    lefts.append(scan_csv(left_path, left_schema))
+    rights.append(scan_csv(right_path, right_schema))
+    lefts.append(left.lazy())
+    rights.append(right.lazy())
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        for s in range(2):
+            var joined = (
+                lefts[s]
+                .filter(col("b") != lit(Int64(1)))
+                .join(rights[s], on=["k"], how="full", coalesce=True)
+            )
+            check(
+                concat([joined.copy(), joined.filter(col("k") == col("t"))])
+                .join(rights[s], on=["b"], how="inner")
+                .group_by(["b_right"])
+                .agg(
+                    [
+                        col("c").null_count().alias("n"),
+                        col("k").count().alias("m"),
+                    ]
+                )
+                .sort(["b_right"], nulls_last=True),
+                expected,
             )
         _ = workers^
 
