@@ -1424,7 +1424,7 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def cast(self, dtypes: Dict[String, String], *, strict: Bool = True) -> Self`
   Cast named columns in place, as DataFrame.cast: a with_columns of `col(name).cast(dtype, strict)` per entry, so filters on other columns move below it and a cast column nothing above reads is not computed. An unknown name raises when the plan runs.
 - `def concat(self, other: Self) -> Self`
-  This plan's rows followed by `other`'s (SQL UNION ALL), as one plan: both inputs are optimized with the rest of it, and a column selection above reaches both scans. The inputs must have the same column names and types; `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`.
+  This plan's rows followed by `other`'s (SQL UNION ALL), as one plan: both inputs are optimized with the rest of it, and a column selection above reaches both scans. The inputs must have the same column names; a numeric column typed differently in the two takes the type that holds both, as in `concat`, and other types must match. `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`.
 - `def sum(self) -> Self`
   Sum each numeric column; unsupported columns are null.
 - `def mean(self) -> Self`
