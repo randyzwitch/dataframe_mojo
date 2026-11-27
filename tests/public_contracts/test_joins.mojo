@@ -400,12 +400,17 @@ def test_decimal_join_keys_of_one_precision_and_scale_join_across_widths() raise
                 if how == "anti":
                     count = 1 if narrow_left else 2
                 assert_equal(out.height(), count, how)
-    # Other decimal pairs still raise.
+    # Decimals of other scales match by value at a common type, and the
+    # output key keeps the left side's declared type.
     var other_scale = wide.with_column(
         wide.column("d").cast(DataType.decimal(10, 3))
     )
+    var scaled = narrow.join(other_scale, on="d")
+    assert_equal(scaled.column("d").dtype(), narrow.column("d").dtype())
+    assert_equal(scaled.height(), narrow.join(wide, on="d").height())
+    var text = wide.with_column(wide.column("d").cast(DataType.STRING))
     with assert_raises(contains="Join key dtypes differ"):
-        _ = narrow.join(other_scale, on="d")
+        _ = narrow.join(text, on="d")
 
 
 def test_decimal_join_keys_across_widths_with_an_empty_side() raises:

@@ -44,6 +44,7 @@ from .expr import (
     UNTYPED,
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
+from .promotion import common_type, promoted_operands
 from dataframe.execution import WindowLayouts, evaluate
 from dataframe.kernels.sampling import sample_size, sample_indices
 from dataframe.kernels.mask_filter import filter_columns
@@ -2946,10 +2947,11 @@ struct DataFrame(Copyable, Sized, Writable):
         """Fill nulls with a scalar value.
 
         Without subset, only columns whose dtype matches the value change.
-        Every listed subset column must match the value's dtype. A bare
-        number (`fill_null(0)`) is untyped: it fills every column it can
-        adopt (an integer: every numeric column; a float: every float
-        column), range-checked per column.
+        A listed subset column fills as `col(name).fill_null(value)` does:
+        numeric types promote to the type that holds both, and other types
+        must match. A bare number (`fill_null(0)`) is untyped: without a
+        subset it fills every column whose type it keeps (an integer that
+        fits: every numeric column; a float: every float column).
         """
         return self._with_columns(self._fill_null_exprs(value, subset))
 
@@ -3146,23 +3148,43 @@ struct DataFrame(Copyable, Sized, Writable):
             raise Error("fill_null on a dataframe requires a scalar value")
         var dtype = bound.dtypes[len(bound.dtypes) - 1]
         var names = List[String]()
+        # Columns whose fill would widen their type and is cast back to it:
+        # a decimal filled with an integer literal.
+        var narrowed = List[Bool]()
         if _is_untyped(value):
             for column in self._columns:
                 var name = column.name()
                 if len(subset) > 0 and name not in subset:
                     continue
                 if len(subset) > 0:
-                    names.append(name)  # binding reports a failed adoption
-                    continue
-                try:
-                    _ = bind(col(name).fill_null(value), self._columns)
+                    # A listed column promotes with the value, as in
+                    # `col(name).fill_null(value)`; binding reports a type
+                    # that does not promote.
                     names.append(name)
+                    narrowed.append(False)
+                    continue
+                # Without a subset, a bare number fills the columns whose
+                # type it keeps: every numeric column for an integer that
+                # fits, every float column for a float.
+                var fill: BoundExpr
+                try:
+                    fill = bind(col(name).fill_null(value), self._columns)
                 except:
-                    pass
+                    continue
+                var result = fill.dtypes[len(fill.dtypes) - 1]
+                if result == column.dtype():
+                    names.append(name)
+                    narrowed.append(False)
+                elif column.dtype().is_decimal() and not dtype.is_float():
+                    names.append(name)
+                    narrowed.append(True)
         elif len(subset) > 0:
             for name in subset:
                 var actual = self._columns[self._index(name)].dtype()
-                if actual != dtype:
+                var promotes = (
+                    actual.is_decimal() and dtype.is_decimal()
+                ) or Bool(promoted_operands(actual, dtype, False))
+                if actual != dtype and not promotes:
                     raise Error(
                         "fill_null value is "
                         + dtype.name()
@@ -3172,15 +3194,20 @@ struct DataFrame(Copyable, Sized, Writable):
                         + actual.name()
                     )
                 names.append(name)
+                narrowed.append(False)
         else:
             for column in self._columns:
                 if column.dtype() == dtype:
                     names.append(column.name())
+                    narrowed.append(False)
         for name in subset:
             _ = self._index(name)  # unknown subset names raise
         var fills = List[Expr]()
-        for name in names:
-            fills.append(col(name).fill_null(value))
+        for k in range(len(names)):
+            var fill = col(names[k]).fill_null(value)
+            if narrowed[k]:
+                fill = fill.cast(self._columns[self._index(names[k])].dtype())
+            fills.append(fill^)
         return fills^
 
     def group_by_dynamic(
@@ -3503,23 +3530,79 @@ def _shared_dictionaries(
     return out^
 
 
+def _concat_exact(frames: List[DataFrame]) raises -> DataFrame:
+    """A vertical concat whose frames must also share column types, for
+    reading several files as one table: a column typed differently in two
+    files is a schema mismatch to report, as a multi-file scan does, not
+    a reason to widen it."""
+    if len(frames) > 0:
+        var first = frames[0].schema()
+        for f in range(1, len(frames)):
+            var schema = frames[f].schema()
+            for c in range(min(len(schema), len(first))):
+                # Categoricals with their own dictionaries are moved onto
+                # one by `concat`; any other type difference is a mismatch.
+                if (
+                    schema[c].name == first[c].name
+                    and schema[c].dtype != first[c].dtype
+                    and not (
+                        schema[c].dtype.is_categorical()
+                        and first[c].dtype.is_categorical()
+                    )
+                ):
+                    raise Error(
+                        "concat vertical: frame "
+                        + String(f)
+                        + " column "
+                        + String(c)
+                        + " is "
+                        + schema[c].name
+                        + ":"
+                        + schema[c].dtype.name()
+                        + ", expected "
+                        + first[c].name
+                        + ":"
+                        + first[c].dtype.name()
+                    )
+    return concat(frames)
+
+
 def concat(
     frames: List[DataFrame], how: String = "vertical"
 ) raises -> DataFrame:
     """Combine frames: 'vertical', 'diagonal', or 'horizontal'.
 
-    Vertical requires identical names, order, and dtypes. Diagonal unions
-    columns by name in first-seen order and fills missing columns with nulls;
-    shared names must share a dtype. Horizontal requires equal heights and
+    Vertical requires identical names and order. Diagonal unions columns by
+    name in first-seen order and fills missing columns with nulls. A column
+    whose numeric type differs between frames takes the type that holds
+    every frame's values (Int32 and UInt32 stack as Int64, Int64 and
+    Float32 as Float32, `decimal[10,2]` and Int64 as `decimal[21,2]`);
+    other types must match. 'vertical_relaxed' and 'diagonal_relaxed' are
+    the same as 'vertical' and 'diagonal'. Horizontal requires equal heights and
     unique names. All inputs are validated before any column is built.
     Categorical columns with different dictionaries are first moved onto
     the union of them.
     """
+    if how == "vertical_relaxed" or how == "diagonal_relaxed":
+        return concat(frames, String(how[byte = 0 : how.find("_")]))
     var shared = _shared_dictionaries(frames, how)
     if len(shared) == 0:
         raise Error("concat requires at least one dataframe")
     if how == "vertical":
         var first = shared[0].schema()
+        # The type each column stacks as: numeric types that differ
+        # between frames widen to one that holds them all.
+        var targets = List[DataType](capacity=len(first))
+        for field in first:
+            targets.append(field.dtype)
+        for f in range(1, len(shared)):
+            var schema = shared[f].schema()
+            for c in range(min(len(schema), len(first))):
+                if schema[c].name != first[c].name:
+                    continue
+                var found = common_type(targets[c], schema[c].dtype)
+                if found:
+                    targets[c] = found.value()
         var height = 0
         for f in range(len(shared)):
             var schema = shared[f].schema()
@@ -3533,9 +3616,8 @@ def concat(
                     + String(len(first))
                 )
             for c in range(len(first)):
-                if (
-                    schema[c].name != first[c].name
-                    or schema[c].dtype != first[c].dtype
+                if schema[c].name != first[c].name or not common_type(
+                    targets[c], schema[c].dtype
                 ):
                     raise Error(
                         "concat vertical: frame "
@@ -3558,7 +3640,10 @@ def concat(
         for c in range(len(first)):
             var parts = List[Series](capacity=len(shared))
             for frame in shared:
-                parts.append(frame._columns[c].copy())
+                if frame._columns[c].dtype() != targets[c]:
+                    parts.append(frame._columns[c].cast(targets[c]))
+                else:
+                    parts.append(frame._columns[c].copy())
             columns.append(Series._from_chunks(parts))
         return DataFrame(columns^, height=height)
     if how == "diagonal":
@@ -3569,7 +3654,11 @@ def concat(
                 if field.name not in dtypes:
                     dtypes[field.name] = field.dtype
                     names.append(field.name)
-                elif dtypes[field.name] != field.dtype:
+                    continue
+                var found = common_type(dtypes[field.name], field.dtype)
+                if found:
+                    dtypes[field.name] = found.value()
+                else:
                     raise Error(
                         "concat diagonal: column "
                         + field.name

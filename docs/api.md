@@ -169,7 +169,7 @@ def by_dtype(dtypes: List[String]) -> Expr
 
 ## `coalesce`
 
-First non-null value per row, left to right; dtypes must match.
+First non-null value per row, left to right. Numeric inputs of different types promote to the type that holds all of them; other types must match.
 
 ```mojo
 def coalesce(exprs: List[Expr]) -> Expr
@@ -888,7 +888,7 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def ne_missing(self, other: String) -> Self`
   Null-safe inequality with a string literal; see the Expr overload.
 - `def fill_null(self, value: Self) -> Self`
-  Replace nulls with value; the dtypes must match.
+  Replace nulls with value. Numeric types of the two sides promote to the type that holds both; other types must match.
 - `def fill_null(self, value: String) -> Self`
 - `def is_in(self, values: List[Self]) -> Self`
   True when equal to any value; null input stays null.
@@ -1461,7 +1461,7 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def cast(self, dtypes: Dict[String, String], *, strict: Bool = True) -> Self`
   Cast named columns in place, as DataFrame.cast: a with_columns of `col(name).cast(dtype, strict)` per entry, so filters on other columns move below it and a cast column nothing above reads is not computed. An unknown name raises when the plan runs.
 - `def concat(self, other: Self) -> Self`
-  This plan's rows followed by `other`'s (SQL UNION ALL), as one plan: both inputs are optimized with the rest of it, and a column selection above reaches both scans. The inputs must have the same column names and types; `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`.
+  This plan's rows followed by `other`'s (SQL UNION ALL), as one plan: both inputs are optimized with the rest of it, and a column selection above reaches both scans. The inputs must have the same column names; a numeric column typed differently in the two takes the type that holds both, as in `concat`, and other types must match. `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`.
 - `def sum(self) -> Self`
   Sum each numeric column; unsupported columns are null.
 - `def mean(self) -> Self`

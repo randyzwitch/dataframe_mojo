@@ -83,7 +83,7 @@ from ..expr import (
     Node,
     col,
 )
-from ..frame import DataFrame, concat
+from ..frame import DataFrame, concat, _concat_exact
 from dataframe.geo.metadata import geoparquet_metadata
 from ..categorical import decode_contiguous
 from dataframe.storage.column import Column
@@ -996,4 +996,4 @@ def read_parquet(
             glob=False,
         )
         frames.append(frame^)
-    return concat(frames)._with_statistics()._with_storage_statistics()
+    return _concat_exact(frames)._with_statistics()._with_storage_statistics()

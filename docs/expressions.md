@@ -20,8 +20,8 @@ Bare values work wherever an expression is expected: `col("x") > 0`,
 "b"])`, `col("x").fill_null(0)`, `when(c).then(1).otherwise(0)`. Bare numbers
 are *untyped*: an integer adopts the numeric dtype of the operand it meets
 when it fits, and becomes a float next to a float column; a float adopts
-Float32 or Float64. In arithmetic and comparisons, an integer that does not
-fit (`col("u8") + 300`), a float next to an integer column, and any number
+Float32 or Float64. In arithmetic, comparisons, `fill_null` and
+`then`/`otherwise` branches, an integer that does not fit (`col("u8") + 300`), a float next to an integer column, and any number
 next to a decimal take their own type instead and promote (see the rules
 below the binding notes).
 Adoption follows arithmetic between untyped values
@@ -437,10 +437,14 @@ propagate nulls. Mojo cannot overload `and`/`or`/`not`, so use the operators.
 `is_not_nan`, `is_finite`, and `is_infinite` require Float64 and propagate
 nulls.
 
-`fill_null(value)` replaces nulls with a matching-dtype value or column;
+`fill_null(value)` replaces nulls with a value or column; numeric types
+promote to the type that holds both (`Int8` filled from `UInt8` is Int16,
+`decimal[10,2]` filled from Int64 is `decimal[21,2]`), and other types must
+match;
 `fill_nan(value)` replaces valid NaNs in Float64 input. `coalesce([a, b, ...])`
-takes the first non-null value per row. `is_in([values])` is true when the input
-equals any candidate; a null candidate never matches, a null input stays null,
+takes the first non-null value per row, promoting the same way. `is_in([values])`
+is true when the input equals any candidate, comparing integers of different
+types by value; a null candidate never matches, a null input stays null,
 and an empty list yields false. `is_between(lower, upper, closed="both")`
 accepts `both`, `left`, `right`, or `none` and combines the two comparisons with
 Kleene AND, so a null bound yields null unless the other side is false.
@@ -715,8 +719,10 @@ on the CPU.
 first branch whose predicate is true. Predicates must be Bool; a null predicate
 is not true and falls through to the next branch. Without `otherwise`, unmatched
 rows are null. A chain without `otherwise` converts implicitly to `Expr`, and
-`.alias()` works at either stage. Every branch must have the same dtype: there
-is no promotion, so use typed literals or `null(dtype)`. The result is named
+`.alias()` works at either stage. Numeric branches of different types promote
+to the type that holds every branch (`Int64` with `null(DataType.UINT32)` is
+Int64, `Int8` with `UInt8` is Int16, `decimal[10,2]` with Int64 is
+`decimal[21,2]`); other branch types must match. The result is named
 after the first `then` value. Scalars and aggregates broadcast as elsewhere; an
 all-scalar chain is scalar, and conditions on aggregates work inside `agg`.
 
