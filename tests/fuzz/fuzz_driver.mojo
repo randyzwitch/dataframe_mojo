@@ -34,6 +34,7 @@ from dataframe import (
     LazyFrame,
     col,
     concat,
+    concat_list,
     len as row_len,
     lit,
     null,
@@ -490,6 +491,42 @@ def build_expr(t: Tree, i: Int) raises -> Expr:
         )
     if op == "list.get":
         return ea(t, i, 1).list().get(t.int(t.kid(i, 2)))
+    if op == "list.n_unique":
+        return ea(t, i, 1).list().n_unique()
+    if op == "list.unique":
+        return ea(t, i, 1).list().unique(t.flag(t.kid(i, 2)))
+    if op == "list.sort":
+        return ea(t, i, 1).list().sort(t.flag(t.kid(i, 2)), t.flag(t.kid(i, 3)))
+    if op == "list.reverse":
+        return ea(t, i, 1).list().reverse()
+    if op == "list.slice":
+        return ea(t, i, 1).list().slice(t.int(t.kid(i, 2)), t.int(t.kid(i, 3)))
+    if op == "list.head":
+        return ea(t, i, 1).list().head(t.int(t.kid(i, 2)))
+    if op == "list.tail":
+        return ea(t, i, 1).list().tail(t.int(t.kid(i, 2)))
+    if op == "list.gather":
+        return (
+            ea(t, i, 1)
+            .list()
+            .gather([t.int(t.kid(i, 2)), t.int(t.kid(i, 3))], null_on_oob=True)
+        )
+    if op == "list.gather_every":
+        return (
+            ea(t, i, 1)
+            .list()
+            .gather_every(t.int(t.kid(i, 2)), t.int(t.kid(i, 3)))
+        )
+    if op == "list.drop_nulls":
+        return ea(t, i, 1).list().drop_nulls()
+    if op == "list.shift":
+        return ea(t, i, 1).list().shift(t.int(t.kid(i, 2)))
+    if op == "list.diff":
+        return ea(t, i, 1).list().diff(t.int(t.kid(i, 2)))
+    if op == "list.concat":
+        return ea(t, i, 1).list().concat(ea(t, i, 2))
+    if op == "concat_list":
+        return concat_list([ea(t, i, 1), ea(t, i, 2)])
     if op == "field":
         return ea(t, i, 1).field(t.text(t.kid(i, 2)))
     raise Error("fuzz driver: unknown expression " + op)

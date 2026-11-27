@@ -18,7 +18,9 @@ from dataframe.expr import (
     STR_SPLIT,
     STRUCT_FIELD,
     Node,
+    is_list_transform,
 )
+from dataframe.kernels.list_transforms import list_transform
 from dataframe.storage.nested import ListColumn, StructColumn
 from regex_mojo import Regex
 from dataframe.text.regex_adapter import (
@@ -81,6 +83,8 @@ def nested_op(
     if node.op == STRUCT_FIELD:
         return _struct_field(input, node.text)
     var lists = input.list_column()
+    if is_list_transform(node.op):
+        return list_transform(node, lists)
     if node.op == LIST_LEN:
         var lengths = lists.lengths()
         return Series("", Column[Int64](lengths^, lists.validity()))
