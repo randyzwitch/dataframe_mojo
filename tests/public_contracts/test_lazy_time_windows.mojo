@@ -13,6 +13,7 @@ from dataframe import (
     len as row_len,
 )
 from tests.support.coverage_compare import assert_frame
+from tests.support.group_strategy_reference import ScopedEnvironment
 
 comptime HOUR = 3600000
 
@@ -657,6 +658,109 @@ def test_overlapping_windows_reduce_from_bounds() raises:
         .collect(engine="cpu"),
         out,
     )
+
+
+def test_window_reductions_of_row_expressions_and_decimals() raises:
+    """A reduction of an expression of the row (`(a / b).null_count()`) is
+    the reduction of that expression computed once per row, and a
+    decimal's minimum and maximum are those of its values, on windows
+    that overlap heavily (read from the window bounds) and on windows
+    that do not, eager and lazy, on one worker and on eight."""
+    var times = List[Int64]()
+    var a = List[Int64]()
+    var b = List[Int64]()
+    var b_valid = List[Bool]()
+    var d = List[Int64]()
+    var g = List[Int64]()
+    var w = List[Int128]()
+    for row in range(60):
+        g.append(Int64(row % 2))
+        w.append(Int128((row * 53) % 97) * 1000003 - 40000000)
+        times.append(Int64(row // 3) * 600000)
+        a.append(Int64((row * 7) % 11) - 5)
+        b.append(Int64(row % 4))
+        b_valid.append(row % 5 != 2)
+        d.append(Int64((row * 37) % 101) * 13 - 600)
+    var frame = DataFrame(
+        [
+            _times("t", times),
+            Series("g", Column[Int64](g^)),
+            Series("a", Column[Int64](a^)),
+            Series("b", Column[Int64](b^, b_valid^)),
+            Series("d", Column[Int64](d^)).with_dtype(
+                DataType.decimal(10, 2, 64)
+            ),
+            Series("w", Column[Int128](w^)).with_dtype(
+                DataType.decimal(30, 2, 128)
+            ),
+        ]
+    )
+    var aggs: List[Expr] = [
+        (col("a") / col("b")).null_count().alias("q"),
+        (col("a") * 2).sum().alias("s"),
+        (col("a") + col("b")).min().alias("lo"),
+        (col("a") - col("b")).max().alias("hi"),
+        (col("a") * col("b")).count().alias("c"),
+        (col("a").cast(DataType.FLOAT64) * 0.5).std().alias("sd"),
+        col("d").min().alias("dmin"),
+        col("d").max().alias("dmax"),
+        col("w").min().alias("wmin"),
+        col("w").max().alias("wmax"),
+    ]
+    var computed = frame.with_columns(
+        [
+            (col("a") / col("b")).alias("q_in"),
+            (col("a") * 2).alias("s_in"),
+            (col("a") + col("b")).alias("lo_in"),
+            (col("a") - col("b")).alias("hi_in"),
+            (col("a") * col("b")).alias("c_in"),
+            (col("a").cast(DataType.FLOAT64) * 0.5).alias("sd_in"),
+            col("d").cast(DataType.FLOAT64).alias("d_in"),
+            col("w").cast(DataType.FLOAT64).alias("w_in"),
+        ]
+    )
+    var plain: List[Expr] = [
+        col("q_in").null_count().alias("q"),
+        col("s_in").sum().alias("s"),
+        col("lo_in").min().alias("lo"),
+        col("hi_in").max().alias("hi"),
+        col("c_in").count().alias("c"),
+        col("sd_in").std().alias("sd"),
+        col("d_in").min().alias("dmin"),
+        col("d_in").max().alias("dmax"),
+        col("w_in").min().alias("wmin"),
+        col("w_in").max().alias("wmax"),
+    ]
+    for threads in ["1", "8"]:
+        var workers = ScopedEnvironment("DATAFRAME_THREADS", threads)
+        # Six hours over rows ten minutes apart overlap heavily; ten
+        # minutes hold one time's rows.
+        for period in ["6h", "10m"]:
+            var expected = computed.rolling("t", period, group_by=["g"]).agg(
+                plain
+            )
+            var eager = frame.rolling("t", period, group_by=["g"]).agg(aggs)
+            var lazy = (
+                frame.lazy()
+                .rolling("t", period, group_by=["g"])
+                .agg(aggs)
+                .collect()
+            )
+            var results = List[DataFrame]()
+            results.append(eager^)
+            results.append(lazy^)
+            for result in results:
+                assert_true(result.column("dmin").dtype().is_decimal())
+                var floats = result.with_columns(
+                    [
+                        col("dmin").cast(DataType.FLOAT64),
+                        col("dmax").cast(DataType.FLOAT64),
+                        col("wmin").cast(DataType.FLOAT64),
+                        col("wmax").cast(DataType.FLOAT64),
+                    ]
+                )
+                assert_frame(floats, expected)
+        _ = workers^
 
 
 def test_gathered_window_aggregations_run_in_batches() raises:
