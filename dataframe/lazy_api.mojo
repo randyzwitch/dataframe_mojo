@@ -126,6 +126,7 @@ from dataframe.optimizer.expressions import (
 from dataframe.optimizer.partial_aggregates import (
     plan_push_partial_aggregates,
 )
+from dataframe.optimizer.join_where import plan_lower_join_where
 from dataframe.optimizer.passes import (
     plan_align_join_keys,
     plan_align_union_inputs,
@@ -1633,8 +1634,10 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         var left_exprs = List[Expr]()
         var right_exprs = List[Expr]()
         for k in range(len(left_on)):
-            var l = _hidden_key_name("__join_left_key_" + String(k), taken)
-            var r = _hidden_key_name("__join_right_key_" + String(k), taken)
+            # Named after the key's own name, so an error about the key
+            # (validate's) reads naturally.
+            var l = _hidden_key_name(left_on[k]._name + " (key)", taken)
+            var r = _hidden_key_name(right_on[k]._name + " (right key)", taken)
             left_keys.append(l)
             right_keys.append(r)
             left_exprs.append(left_on[k].alias(l))
@@ -1680,6 +1683,31 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             how=how,
             suffix=suffix,
         )
+
+    def join_where(
+        self, other: Self, predicates: List[Expr], suffix: String = "_right"
+    ) raises -> Self:
+        """Inner join on arbitrary predicates over both inputs' columns, as
+        `events.join_where(sessions, [col("ts") >= col("start"),
+        col("ts") < col("end")])`: every pair of a left and a right row for
+        which all predicates hold. Predicates name right columns as the
+        output does: a right name the left side also has carries `suffix`.
+        The output is every left column, then every right column, in an
+        unspecified row order.
+
+        It plans as a cross join under a filter, which planning lowers:
+        equalities of a left and a right column become a hash join; failing
+        that, up to two inequalities (<, <=, >, >=) of number or temporal
+        expressions become an inequality join, which finds matches from
+        sorted keys (a range join when both bound one key of a side, else a
+        two-key join) instead of pairing every row; the other predicates
+        filter the joined rows."""
+        if len(predicates) == 0:
+            raise Error("join_where requires at least one predicate")
+        var predicate = predicates[0].copy()
+        for k in range(1, len(predicates)):
+            predicate = predicate & predicates[k]
+        return self.join(other, how="cross", suffix=suffix).filter(predicate)
 
     def sink_parquet(
         self,
@@ -1764,6 +1792,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             plan_lower_whole_input_filters(plan._plan)
             plan_lower_right_joins(plan._plan)
             plan_align_join_keys(plan._plan)
+            plan_lower_join_where(plan._plan)
         var shared = List[QueryContext]()
         if optimize:
             shared = plan._share_subplans(True, batch_size)
@@ -2175,6 +2204,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             plan_lower_whole_input_filters(plan._plan)
             plan_lower_right_joins(plan._plan)
             plan_align_join_keys(plan._plan)
+            plan_lower_join_where(plan._plan)
         var out = String()
         if engine != "cpu":
             out = backend.describe()
@@ -2256,6 +2286,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             plan_lower_whole_input_filters(plan._plan)
             plan_lower_right_joins(plan._plan)
             plan_align_join_keys(plan._plan)
+            plan_lower_join_where(plan._plan)
         var shared = List[QueryContext]()
         if optimize:
             shared = plan._share_subplans(streaming, batch_size)
@@ -3058,6 +3089,7 @@ def _collect_placed[
         plan_lower_whole_input_filters(plan._plan)
         plan_lower_right_joins(plan._plan)
         plan_align_join_keys(plan._plan)
+        plan_lower_join_where(plan._plan)
     var solved = _solve_devices(
         plan,
         backend,
@@ -4044,7 +4076,8 @@ def _plain_key(key: Expr) -> Optional[String]:
 
 
 def _hidden_key_name(base: String, mut taken: Dict[String, Bool]) -> String:
-    """`base`, prefixed with underscores until no column has the name."""
+    """`base`, prefixed with underscores until no column or other hidden
+    key has the name."""
     var name = base
     while name in taken:
         name = "_" + name

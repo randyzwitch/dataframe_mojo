@@ -506,6 +506,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Hash join on key columns of any dtype; null keys never match.
 - `def join(self, right: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True, validate: String = "m:m") -> Self`
 - `def join(self, right: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True, validate: String = "m:m") -> Self`
+- `def join_where(self, right: Self, predicates: List[Expr], suffix: String = "_right") -> Self`
+  Inner join on arbitrary predicates over both frames' columns: every pair of a left and a right row for which all predicates hold; see `LazyFrame.join_where`. Right columns whose names the left side has are named with `suffix`, in the predicates as in the output.
 - `def select_exprs(self, expressions: List[Expr], *, batch_size: Int = Int(8192)) -> Self`
   Evaluate against the original frame. Scalar-only output has one row.
 - `def with_columns(self, expression: Expr, *, batch_size: Int = Int(8192)) -> Self`
@@ -1533,6 +1535,8 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def join(self, other: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True, validate: String = "m:m") -> Self`
   Join with another lazy plan on keys named alike on both sides; see DataFrame.join.
 - `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True, validate: String = "m:m") -> Self`
+- `def join_where(self, other: Self, predicates: List[Expr], suffix: String = "_right") -> Self`
+  Inner join on arbitrary predicates over both inputs' columns, as `events.join_where(sessions, [col("ts") >= col("start"), col("ts") < col("end")])`: every pair of a left and a right row for which all predicates hold. Predicates name right columns as the output does: a right name the left side also has carries `suffix`. The output is every left column, then every right column, in an unspecified row order.
 - `def sink_parquet(self, path: String, *, compression: String = "zstd", row_group_size: Int = Int(1000000), batch_size: Int = Int(65536), optimize: Bool = True)`
   Execute the query into an atomic Parquet output, rows in the query's order.
 - `def sink_csv(self, path: String, *, has_header: Bool = True, separator: String = ",", quote_style: String = "necessary", null_value: String = "", line_terminator: String = "\n", buffer_size: Int = Int(65536), batch_size: Int = Int(65536), optimize: Bool = True)`

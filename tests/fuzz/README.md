@@ -51,6 +51,12 @@ the oracle is adjusted, or the error is allowed:
   `empty_as_null=True`.
 - `round` is half away from zero; the oracle asks Polars for that mode.
 - Integer overflow raises here and wraps in Polars; such errors are allowed.
+- A join's `validate` check always runs here; Polars' lazy engine skips it
+  when an input turns out empty. A validation error is allowed when Polars
+  returns no rows. Polars also checks after pushing filters into the join's
+  inputs, as the optimized mode here does; the eager and unoptimized modes
+  check the inputs as written, so their validation error is allowed when
+  the optimized mode matches.
 - Expressions on categoricals return String, and `len`/`n_unique` return
   Int64 where Polars returns UInt32: values are compared, and integer
   widths and categorical-versus-string are not. The oracle casts Polars'

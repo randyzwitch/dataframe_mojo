@@ -145,6 +145,7 @@ from dataframe.query_execution.top_rows_sink import (
     top_rows_projection,
 )
 from dataframe.query_execution.asof_sink import AsofSink
+from dataframe.query_execution.range_join_sink import RangeJoinSink
 from dataframe.query_execution.time_window_sink import TimeWindowSink
 from dataframe.query_execution.row_order_sink import (
     RowOrderSink,
@@ -181,6 +182,7 @@ from dataframe.planning.graph import (
 from dataframe.planning.model import (
     AGG,
     ASOF,
+    RANGE_JOIN,
     CONCAT,
     GATHER,
     HCONCAT,
@@ -309,6 +311,7 @@ def plan_stream_execute(
         or _filters_top_rows(self, index)
         or _windows_time(self, index)
         or _joins_asof(self, index)
+        or _joins_range(self, index)
     ):
         # A sort of every row reads its whole input, so no morsel
         # pipeline runs it: it is an operator pipeline whose finish sorts
@@ -975,6 +978,7 @@ def _operator_inputs(self: QueryContext, index: Int) -> List[Int]:
     elif (
         node.kind == JOIN
         or node.kind == ASOF
+        or node.kind == RANGE_JOIN
         or node.kind == HCONCAT
         or node.kind == GATHER
         or node.kind == INSERT_COLUMN
@@ -1612,6 +1616,14 @@ def _windows_time(plan: QueryContext, index: Int) -> Bool:
     )
 
 
+def _joins_range(plan: QueryContext, index: Int) -> Bool:
+    """Whether node `index` is an inequality join, which an operator
+    pipeline runs as a `RangeJoinSink` once both its inputs are complete."""
+    return (
+        plan._handoff == HANDOFF_OFF and plan._nodes[index].kind == RANGE_JOIN
+    )
+
+
 def _joins_asof(plan: QueryContext, index: Int) -> Bool:
     """Whether node `index` is an as-of join, which an operator pipeline
     runs as an `AsofSink` once both its inputs are complete."""
@@ -1854,6 +1866,10 @@ struct _OperatorPipeline(Movable):
     var timing: List[TimeWindowSink]
     var asof: Bool
     var matching: List[AsofSink]
+    # Whether it is an inequality join (`RangeJoinSink`), and the sink
+    # while its rounds run.
+    var ranges: Bool
+    var ranging: List[RangeJoinSink]
     var began: Int
 
     def __init__(
@@ -1905,6 +1921,8 @@ struct _OperatorPipeline(Movable):
         self.timing = List[TimeWindowSink]()
         self.asof = False
         self.matching = List[AsofSink]()
+        self.ranges = False
+        self.ranging = List[RangeJoinSink]()
         self.began = 0
         ref node = self.plan._nodes[index]
         if (
@@ -1926,6 +1944,7 @@ struct _OperatorPipeline(Movable):
         )
         self.times = streaming and _windows_time(self.plan, index)
         self.asof = streaming and _joins_asof(self.plan, index)
+        self.ranges = streaming and _joins_range(self.plan, index)
 
     def execute(mut self) raises:
         if len(self.wanted) > 0:
@@ -2088,6 +2107,18 @@ struct _OperatorPipeline(Movable):
             trace_path("asof.rounds")
             self.matching.append(AsofSink(left^, right^, node))
             return
+        if self.ranges:
+            ref node = self.plan._nodes[self.index]
+            self.began = Int(perf_counter_ns())
+            var left = self.plan._execute(
+                node.left, False, self.streaming, self.batch_size
+            )
+            var right = self.plan._execute(
+                node.right, False, self.streaming, self.batch_size
+            )
+            trace_path("range_join.rounds")
+            self.ranging.append(RangeJoinSink(left^, right^, node))
+            return
         self.result = self.plan._execute(
             self.index, False, self.streaming, self.batch_size
         )
@@ -2107,6 +2138,7 @@ struct _OperatorPipeline(Movable):
             or len(self.reshaping) > 0
             or len(self.timing) > 0
             or len(self.matching) > 0
+            or len(self.ranging) > 0
         ):
             return
         if len(self.build.keys) > 0:
@@ -2134,7 +2166,8 @@ struct _OperatorPipeline(Movable):
             or self.reshapes
             or self.top_filter
             or self.times
-            or self.asof else 0
+            or self.asof
+            or self.ranges else 0
         )
 
     def finalize_tasks(mut self) raises -> Int:
@@ -2293,6 +2326,22 @@ struct _OperatorPipeline(Movable):
                 wall_ns=Int(perf_counter_ns()) - self.began,
             )
             self.finalize()
+        if len(self.ranging) > 0:
+            var tasks = self.ranging[0].next_round()
+            if tasks > 0:
+                return tasks
+            var rows = self.ranging[0].left.height()
+            self.result = self.ranging[0].take_result()
+            _ = self.ranging.pop()
+            plan_record(
+                self.plan,
+                self.index,
+                "range_join",
+                rows,
+                self.result.height(),
+                wall_ns=Int(perf_counter_ns()) - self.began,
+            )
+            self.finalize()
         if len(self.building) > 0:
             var tasks = self.building[0].next_round()
             if tasks > 0:
@@ -2328,6 +2377,8 @@ struct _OperatorPipeline(Movable):
             self.timing[0].round_task(task)
         elif len(self.matching) > 0:
             self.matching[0].round_task(task)
+        elif len(self.ranging) > 0:
+            self.ranging[0].round_task(task)
         elif len(self.building) > 0:
             self.building[0].round_task(task)
         else:

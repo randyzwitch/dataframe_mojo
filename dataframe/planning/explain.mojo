@@ -15,6 +15,7 @@ from dataframe.planning.context import (
 from dataframe.planning.model import (
     AGG,
     ASOF,
+    RANGE_JOIN,
     CONCAT,
     EXPLODE,
     FILL_NULL_STRATEGY,
@@ -96,6 +97,14 @@ def plan_label(self: QueryContext, index: Int) -> String:
         )
     elif node.kind == ASOF:
         label = "ASOF " + node.text + " " + _joined(node.join_left_keys())
+    elif node.kind == RANGE_JOIN:
+        var ops = node.text.split(",")
+        var conditions = List[String]()
+        for k in range(len(node.names)):
+            conditions.append(
+                node.names[k] + " " + String(ops[k]) + " " + node.right_keys[k]
+            )
+        label = "RANGE_JOIN on " + _joined(conditions)
     elif node.kind == JOIN:
         label = "JOIN " + node.text + " on " + _key_pairs(node)
     elif node.kind == SORT and node.sort_limit() >= 0:
