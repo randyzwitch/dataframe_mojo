@@ -311,7 +311,27 @@ hash build (and runs that join on its whole inputs rather than streaming the
 left side). A validated join keeps its inputs: the planner does not reorder
 it with other joins.
 
-Both sides' keys are encoded together by the shared row-key layer
+`join_where(right, [predicates], suffix="_right")` is an inner join on any
+predicates over both inputs: every pair of a left and a right row for which
+all predicates hold, as a filtered cross join would give. Predicates name a
+right column that the left side also has by its suffixed name, as the output
+does. The output is every left column, then every right column, in an
+unspecified row order. Planning picks the join from the predicates:
+equalities of a left and a right column of one type run as a hash join (the
+rest filter its output); otherwise up to two inequalities (`<`, `<=`, `>`,
+`>=`) of integer, float or temporal operands (one type on both sides,
+integers of any width but UInt64) run as an inequality join that finds matches from
+sorted keys. Two comparisons bounding one key of a side (`ts >= start` and
+`ts < end`) make a range join: that side's keys are sorted and every row of
+the other side finds its run of matches by binary search. Two comparisons
+with different keys on both sides make a two-key join: both sides are sorted
+by the first key and cut into blocks, and each pair of blocks whose ranges
+can meet is scanned in the order of the second key. Operands may be
+expressions of one side (computed once, as hidden columns). Other predicates
+filter the joined rows; with no usable comparison the cross join is filtered.
+Null and NaN keys match nothing, as in the comparisons themselves.
+
+ by the shared row-key layer
 (`dataframe/kernels/hashing.mojo`) and right rows are bucketed by dense key id, so the
 probe does no dictionary lookup. Unsupported join modes or key dtype mismatches
 raise explicitly.

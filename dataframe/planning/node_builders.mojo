@@ -17,6 +17,7 @@ from dataframe.planning.model import (
     WITH_COLUMNS,
     AGG,
     JOIN,
+    RANGE_JOIN,
     SORT,
     SLICE,
     UNIQUE,
@@ -162,6 +163,33 @@ def _join_node(
         coalesce=coalesce,
     )
     node.join_validate = validate
+    debug_assert(node.payload_layout_valid(), "invalid plan payload layout")
+    return node^
+
+
+def _range_join_node(
+    left_keys: List[String],
+    right_keys: List[String],
+    comparisons: String,
+    suffix: String = "_right",
+    left: Int = -1,
+    right: Int = -1,
+) -> PlanNode:
+    """An inequality join (RANGE_JOIN): `left_keys[k] OP right_keys[k]`
+    for each comma-separated OP of `comparisons`. Both sides' columns are
+    kept, as by a hash join with coalesce=False, so projection pushdown
+    narrows its inputs the same way."""
+    var node = _plan_node(
+        RANGE_JOIN,
+        left=left,
+        right=right,
+        names=left_keys,
+        right_keys=right_keys,
+        text=comparisons,
+        how=0,
+        names2=[suffix],
+        coalesce=False,
+    )
     debug_assert(node.payload_layout_valid(), "invalid plan payload layout")
     return node^
 

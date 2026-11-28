@@ -38,6 +38,12 @@ comptime FILL_NULL_STRATEGY = 46
 comptime EXPLODE = 12
 comptime UNNEST = 13
 comptime ASOF = 14
+# An inner join on one or two inequalities, `names[k] OP right_keys[k]`
+# (left key column OP right key column), `text` holding the comparisons
+# ("<", "<=", ">", ">=") separated by commas and `names2[0]` the suffix of
+# right names the left side has. Its output is a cross join's columns: every
+# left column, then every right column. Both inputs are read whole.
+comptime RANGE_JOIN = 60
 # UNION ALL of two plans: the left input's rows, then the right's.
 comptime CONCAT = 15
 # Unpivot materializes the input and reshapes selected value columns into
@@ -437,6 +443,13 @@ struct PlanNode(Copyable, Deinitable, Movable):
             return len(self.names2) == 1
         if self.kind == ASOF:
             return len(self.names2) >= 1 and len(self.flags) == 1
+        if self.kind == RANGE_JOIN:
+            return (
+                len(self.names2) == 1
+                and len(self.names) == len(self.right_keys)
+                and len(self.names) >= 1
+                and len(self.names) <= 2
+            )
         if self.kind == GATHER:
             return len(self.flags) == 1
         if self.kind == ROW_INDEX:

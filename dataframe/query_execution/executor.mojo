@@ -53,6 +53,7 @@ from dataframe.planning.model import (
     AGG,
     PlanNode,
     ASOF,
+    RANGE_JOIN,
     CONCAT,
     EXPLODE,
     FILTER,
@@ -90,6 +91,10 @@ from dataframe.query_execution.operators import (
     _pivoted,
     _run_grouping_sets,
     plan_join_frames,
+)
+from dataframe.query_execution.range_join_sink import (
+    range_join,
+    range_join_schema,
 )
 from dataframe.query_execution.asof_sink import (
     asof_join,
@@ -483,6 +488,11 @@ def plan_execute_node(
     if node.kind == ASOF:
         var right = self._execute(node.right, empty, streaming, batch_size)
         return asof_join(input^, right^, node)
+    if node.kind == RANGE_JOIN:
+        var right = self._execute(node.right, empty, streaming, batch_size)
+        if empty:
+            return range_join_schema(input, right, node)
+        return range_join(input^, right^, node)
     if node.kind == JOIN:
         var right = self._execute(node.right, empty, streaming, batch_size)
         return plan_join_frames(self, index, input^, right^, empty)

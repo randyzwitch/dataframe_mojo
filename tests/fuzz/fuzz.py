@@ -631,6 +631,14 @@ def to_pl_plan(p, srcs):
         )
     if op == "cross":
         return lf.join(to_pl_plan(p[2], srcs), how="cross")
+    if op == "join_where":
+        # (join_where P Q (list PREDICATES)); right names that collide
+        # carry "_right", as the joined columns are named.
+        right = to_pl_plan(p[2], srcs)
+        merged = dict(types)
+        for k, v in right.collect_schema().items():
+            merged[k + "_right" if k in types else k] = spec_of(v)
+        return lf.join_where(right, *[to_pl_expr(e, merged) for e in p[3][1:]])
     if op == "sort":
         return lf.sort(
             list(p[2][1:]),
@@ -1127,9 +1135,13 @@ class PlanGen:
                 p = rg.predicate()
                 if p is not None:
                     right = ("filter", right, p)
-            how = r.choice(["inner", "inner", "left", "left", "full", "semi", "anti", "right", "cross"])
+            how = r.choice(["inner", "inner", "left", "left", "full", "semi", "anti", "right", "cross", "where"])
+            if "join_where" in focus and r.random() < 0.8:
+                how = "where"
             if how == "cross":
                 return ("cross", plan, right), False
+            if how == "where":
+                return self.join_where_step(plan, schema, right, rschema)
             pairs = [
                 (a, b)
                 for a in schema
@@ -1238,6 +1250,37 @@ class PlanGen:
         if kind == "rolling_expr":
             return self.rolling_expr_step(plan, schema, ordered)
         return None
+
+    def join_where_step(self, plan, schema, right, rschema):
+        """join_where with one to three comparisons of a left and a right
+        number or date column of one type, sometimes through arithmetic,
+        and sometimes a predicate of one side."""
+        r = self.rng
+        shown = {b: (b + "_right" if b in schema else b) for b in rschema}
+        pairs = [
+            (a, b)
+            for a in schema
+            for b in rschema
+            if schema[a] == rschema[b]
+            and (is_numeric(schema[a]) or schema[a] == "date")
+            and not schema[a].startswith("decimal")
+        ]
+        if not pairs:
+            return None
+        preds = []
+        for _ in range(r.choice([1, 2, 2, 3])):
+            a, b = r.choice(pairs)
+            left, right_e = ("col", a), ("col", shown[b])
+            if is_int(schema[a]) and is_signed(schema[a]) and r.random() < 0.25:
+                left = ("add", left, r.randint(-3, 3))
+            op = r.choice(["lt", "le", "gt", "ge", "lt", "ge", "eq", "ne"])
+            preds.append((op, left, right_e) if r.random() < 0.8 else (op, right_e, left))
+        if r.random() < 0.2:
+            g = Gen(r, schema, False)
+            p = g.predicate()
+            if p is not None:
+                preds.append(p)
+        return ("join_where", plan, right, ("list",) + tuple(preds)), False
 
     def rolling_expr_step(self, plan, schema, ordered):
         """with_columns of rolling expressions: fixed windows (which need a
@@ -1450,10 +1493,18 @@ def expr_key(name, spec):
 def join_rows(p, srcs):
     """The rows a join step would produce, counted from its inputs' key
     frequencies, so the generator never materializes a huge join."""
-    if p[0] not in ("join", "cross"):
+    if p[0] not in ("join", "cross", "join_where"):
         return 0
     left = to_pl_plan(p[1], srcs)
     right = to_pl_plan(p[2], srcs)
+    if p[0] == "join_where":
+        n = left.select(pl.len()).collect().item()
+        m = right.select(pl.len()).collect().item()
+        # Counted by running it only where pairing every row stays cheap
+        # for Polars (it may pair every row for some predicates).
+        if n * m <= MAX_ROWS or n * m > 50_000_000:
+            return n * m
+        return to_pl_plan(p, srcs).select(pl.len()).collect().item() + n + m
     if p[0] == "cross":
         n = left.select(pl.len()).collect().item()
         m = right.select(pl.len()).collect().item()
@@ -1914,7 +1965,7 @@ def plan_children(p):
         return []
     if op == "concat":
         return list(range(2, len(p)))
-    if op in ("join", "cross"):
+    if op in ("join", "cross", "join_where"):
         return [1, 2]
     return [1]
 
@@ -2031,7 +2082,7 @@ def plan_ordered(p, case):
     op = p[0]
     if op == "src":
         return True
-    if op in ("join", "cross", "rolling", "dynamic"):
+    if op in ("join", "cross", "join_where", "rolling", "dynamic"):
         return False
     if op == "concat":
         return all(plan_ordered(k, case) for k in p[2:])

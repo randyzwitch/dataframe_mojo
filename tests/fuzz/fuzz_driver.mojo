@@ -775,6 +775,10 @@ def run_eager(t: Tree, i: Int, mut inputs: Inputs) raises -> DataFrame:
     if op == "cross":
         var right = run_eager(t, t.kid(i, 2), inputs)
         return df.join(right, how="cross")
+    if op == "join_where":
+        # (join_where P Q (list PREDICATES))
+        var right = run_eager(t, t.kid(i, 2), inputs)
+        return df.join_where(right, build_exprs(t, t.kid(i, 3)))
     if op == "sort":
         # (sort P (list KEYS) (list DESC) (list NULLS_LAST) MAINTAIN)
         return df.sort(
@@ -878,6 +882,9 @@ def run_lazy(
     if op == "cross":
         var right = run_lazy(t, t.kid(i, 2), inputs, from_memory)
         return lf.join(right, how="cross")
+    if op == "join_where":
+        var right = run_lazy(t, t.kid(i, 2), inputs, from_memory)
+        return lf.join_where(right, build_exprs(t, t.kid(i, 3)))
     if op == "sort":
         return lf.sort(
             t.strings(t.kid(i, 2)),

@@ -2008,6 +2008,19 @@ struct DataFrame(Copyable, Sized, Writable):
             ._collect(optimize=False, streaming=True, batch_size=65536)
         )
 
+    def join_where(
+        self, right: Self, predicates: List[Expr], suffix: String = "_right"
+    ) raises -> Self:
+        """Inner join on arbitrary predicates over both frames' columns:
+        every pair of a left and a right row for which all predicates hold;
+        see `LazyFrame.join_where`. Right columns whose names the left side
+        has are named with `suffix`, in the predicates as in the output."""
+        return (
+            self.lazy()
+            .join_where(right.lazy(), predicates, suffix=suffix)
+            ._collect(optimize=False, streaming=True, batch_size=65536)
+        )
+
     def _join_impl(
         self,
         right: Self,

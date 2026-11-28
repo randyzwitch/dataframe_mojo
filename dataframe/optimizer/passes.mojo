@@ -47,6 +47,10 @@ from dataframe.join_type import (
     JOIN_SEMI,
     shared_join_key_type,
 )
+from dataframe.optimizer.join_where import (
+    plan_lower_join_where,
+    renamed_columns,
+)
 from dataframe.optimizer.expressions import (
     _cannot_raise,
     _emit_replaced,
@@ -90,6 +94,7 @@ from dataframe.planning.model import (
     INSERT_COLUMN,
     JOIN,
     PIVOT,
+    RANGE_JOIN,
     SCAN_CSV,
     SCAN_FRAME,
     SCAN_IPC,
@@ -146,6 +151,7 @@ def plan_optimized(self: QueryContext) raises -> QueryContext:
         plan_align_join_keys(plan)
         plan_filter_shared_subplans(plan)
         plan_push_predicates(plan)
+        plan_lower_join_where(plan)
         plan_push_slices(plan)
         plan_fuse_top_k(plan)
         plan_eliminate_common_subexpressions(plan)
@@ -1329,6 +1335,16 @@ def plan_pushdown_join(
             if plan_left_join_to_inner(self, f, index, left_cols, right_cols):
                 break
     var inner = self._nodes[index].how == JOIN_INNER
+    var cross = self._nodes[index].how == JOIN_CROSS
+    # A cross join's right output names, and the right input name of each.
+    var cross_right = List[String]()
+    var cross_names = Dict[String, String]()
+    if cross:
+        var suffix = self._nodes[index].join_suffix()
+        for c in right_cols:
+            var shown = c + suffix if c in left_cols else c
+            cross_right.append(shown)
+            cross_names[shown] = c
     var left_below = List[Expr]()
     var right_below = List[Expr]()
     var remain = List[Expr]()
@@ -1344,6 +1360,11 @@ def plan_pushdown_join(
             if copy:
                 _ = plan_add_conjunct(left_below, copy.value())
             right_below.append(f.copy())
+        elif cross and _covers(cross_right, reads.value()):
+            # Every pair of a cross join comes from one right row, so a
+            # filter of right columns alone (named as the join outputs
+            # them, a suffix on names the left has) filters that input.
+            right_below.append(renamed_columns(f, cross_names))
         else:
             remain.append(f.copy())
     var left = self._nodes[index].left
@@ -1642,7 +1663,11 @@ def plan_push_projections(
         if prune_outputs and not all_needed[i] and needed[i]:
             plan_prune_outputs(self, i, needed[i].value())
         ref node = self._nodes[i]
-        if node.kind == JOIN and not all_needed[i] and needed[i]:
+        if (
+            (node.kind == JOIN or node.kind == RANGE_JOIN)
+            and not all_needed[i]
+            and needed[i]
+        ):
             var sides = plan_join_input_columns(self, i, needed[i].value())
             if sides:
                 for side in range(2):
@@ -1683,6 +1708,7 @@ def plan_push_projections(
             or node.kind == WITH_COLUMNS
             or node.kind == DROP
             or node.kind == JOIN
+            or node.kind == RANGE_JOIN
             or node.kind == EXPLODE
             or node.kind == UNNEST
             or node.kind == CONCAT
@@ -1735,6 +1761,7 @@ def plan_push_projections(
             if (
                 reads_all
                 or node.kind == JOIN
+                or node.kind == RANGE_JOIN
                 or node.kind == ASOF
                 or node.kind == INSERT_COLUMN
                 or (node.kind == GATHER and child == node.right)
