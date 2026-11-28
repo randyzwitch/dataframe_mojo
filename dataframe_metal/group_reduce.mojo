@@ -2,7 +2,12 @@
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
 from .composition_plan import needs_general_values
-from .chunked_numeric_reduce import native_numeric_layout, scan_chunked_numeric
+from .chunked_numeric_reduce import (
+    NumericGroupPartials,
+    finish_numeric_groups,
+    native_numeric_layout,
+    scan_chunked_numeric,
+)
 from .group_partials import GroupedPartials
 from .group_properties import sample_group_tuples, sample_group_stride_reuse
 from .group_layout import GROUP_CAPACITY_FAULT, GROUP_CAPACITY_RETRY
@@ -321,39 +326,34 @@ def execute_grouped(
     var started = Int(perf_counter_ns())
     _ = scope.context()
     timings.context_ns = Int(perf_counter_ns()) - started
-    var partials: GroupedPartials
+    var partials: NumericGroupPartials
     var blocks = min(128, max(1, (frame.height() + 255) // 256))
     if native_numeric_layout(region, plan, frame):
         partials = scan_chunked_numeric(plan, frame, scope, zero_copy, timings)
-    elif sample_group_stride_reuse(frame, plan.keys.names, blocks * 256):
-        partials = general_partials(
-            plan, frame, scope, zero_copy, timings, cached=True
-        )
-    elif len(plan.keys.names) == 1 and not needs_general_values(
-        plan.selected.bundle
-    ):
-        try:
-            partials = _dispatch_grouped(plan, frame, scope, zero_copy, timings)
-        except error:
-            if String(error) != GROUP_CAPACITY_RETRY:
-                raise error^
-            partials = general_partials(
-                plan, frame, scope, zero_copy, timings, force_global=True
-            )
     else:
-        partials = general_partials(plan, frame, scope, zero_copy, timings)
+        var host: GroupedPartials
+        if sample_group_stride_reuse(frame, plan.keys.names, blocks * 256):
+            host = general_partials(
+                plan, frame, scope, zero_copy, timings, cached=True
+            )
+        elif len(plan.keys.names) == 1 and not needs_general_values(
+            plan.selected.bundle
+        ):
+            try:
+                host = _dispatch_grouped(plan, frame, scope, zero_copy, timings)
+            except error:
+                if String(error) != GROUP_CAPACITY_RETRY:
+                    raise error^
+                host = general_partials(
+                    plan, frame, scope, zero_copy, timings, force_global=True
+                )
+        else:
+            host = general_partials(plan, frame, scope, zero_copy, timings)
+        partials = NumericGroupPartials(host^)
     started = Int(perf_counter_ns())
     var result: DataFrame
     try:
-        result = finish_grouped(
-            plan,
-            frame,
-            partials.blocks,
-            partials.first,
-            partials.rows,
-            partials.states,
-            partials.extrema,
-        )
+        result = finish_numeric_groups(plan, frame, partials^)
         timings.finish_ns = Int(perf_counter_ns()) - started
     except error:
         if String(error) not in [

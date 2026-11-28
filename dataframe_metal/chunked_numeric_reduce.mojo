@@ -1,7 +1,8 @@
 """Submit unfiltered Int32-key aggregates over native numeric spans."""
 from max.gpu.host import DeviceBuffer
 from std.ffi import external_call
-from std.memory import unsafe_memcpy
+from std.memory import Pointer
+from std.utils import Variant
 from std.time import perf_counter_ns
 from dataframe import DataFrame, DataType, LazyFrame
 from dataframe.expr import COL, MIN, MAX
@@ -18,8 +19,10 @@ from .accelerator.gpu.group_state import initialize_group_states
 from .accelerator.gpu.numeric_view import NumericView, intersect_numeric_views
 from .accelerator.gpu.query_scope import Scope
 from .accelerator.gpu.reduction_inputs import HandoffTimings
+from .accelerator.gpu.shared_pages import SharedPages
 from .accelerator.gpu.target import METAL_TARGET
 from .accelerator.gpu.typed_storage import NativeColumnAny, _NativeReservation
+from .group_finish import finish_grouped, finish_grouped_words
 from .group_layout import (
     GENERAL_TABLE_LIMIT,
     GROUP_CAPACITY_FAULT,
@@ -90,15 +93,50 @@ def _descriptor(view: NumericView, flags: UInt64) -> UInt64:
     )
 
 
-def _read_words(storage: List[UInt32], start: Int, count: Int) -> List[UInt32]:
-    # The caller has synchronized all device writes to this owned allocation.
-    var result = List[UInt32](unsafe_uninit_length=count)
-    unsafe_memcpy(
-        dest=result.unsafe_ptr().unsafe_bitcast[UInt8](),
-        src=storage.unsafe_ptr().unsafe_offset(start).unsafe_bitcast[UInt8](),
-        count=count * 4,
+@fieldwise_init
+struct _SharedNumericGroups(Movable):
+    var pages: SharedPages
+    var reservation: _NativeReservation
+    var layout: GroupLayout
+
+
+comptime NumericGroupPartials = Variant[GroupedPartials, _SharedNumericGroups]
+
+
+def finish_numeric_groups(
+    plan: GroupedComposition,
+    frame: DataFrame,
+    var partials: NumericGroupPartials,
+) raises -> DataFrame:
+    if partials.isa[GroupedPartials]():
+        ref host = partials[GroupedPartials]
+        return finish_grouped(
+            plan,
+            frame,
+            host.blocks,
+            host.first,
+            host.rows,
+            host.states,
+            host.extrema,
+        )
+    ref shared = partials[_SharedNumericGroups]
+    ref layout = shared.layout
+    # The scan synchronized the GPU before transferring ownership to this result.
+    var words = Span(
+        unsafe_ptr=Pointer[UInt32, origin_of(shared)](
+            unsafe_from_address=shared.pages.address
+        ).unsafe_mut_cast[False](),
+        length=layout.words(),
     )
-    return result^
+    return finish_grouped_words(
+        plan,
+        frame,
+        layout.state_blocks(),
+        words[layout.first_offset() : layout.rows_offset()],
+        words[layout.rows_offset() : layout.states_offset()],
+        words[layout.states_offset() :],
+        List[Int64](),
+    )
 
 
 def _scan(
@@ -109,7 +147,7 @@ def _scan(
     scope: Scope,
     shared_output: Bool,
     mut timings: HandoffTimings,
-) raises -> GroupedPartials:
+) raises -> NumericGroupPartials:
     comptime if not METAL_TARGET:
         raise Error("Metal chunked numeric groups require an Apple GPU")
     else:
@@ -124,21 +162,15 @@ def _scan(
             (layout.words() + page_words - 1) // page_words
         ) * page_words
         var reservation = _NativeReservation(scope, mapped_words * 4)
-        var backing = List[UInt32]()
-        var offset = 0
+        var pages = SharedPages(
+            mapped_words * 4 if shared_output else 0, page_words * 4
+        )
         var scratch: DeviceBuffer[DType.uint32]
         if shared_output:
-            # Metal requires a page-aligned start and a page-multiple byte size.
-            # Reserve enough padding that the entire mapping is inside the List.
-            backing = List[UInt32](
-                unsafe_uninit_length=mapped_words + page_words - 1
-            )
-            var address_words = Int(backing.unsafe_ptr()) // 4
-            offset = (page_words - address_words % page_words) % page_words
             scratch = ctx.wrap_host_memory[DType.uint32](
-                backing.unsafe_ptr()
-                .unsafe_offset(offset)
-                .unsafe_origin_cast[MutAnyOrigin](),
+                Pointer[UInt32, MutAnyOrigin](
+                    unsafe_from_address=pages.address
+                ),
                 mapped_words,
             )
         else:
@@ -223,8 +255,11 @@ def _scan(
                 )
             scope.synchronize()
             if shared_output:
+                var header = Pointer[UInt32, ImmutAnyOrigin](
+                    unsafe_from_address=pages.address
+                )
                 for i in range(len(control)):
-                    control[i] = backing[offset + i]
+                    control[i] = header[unsafe_offset=i]
             else:
                 scope.record_download(
                     4 * (2 * layout.capacity + state_words + len(control))
@@ -235,7 +270,7 @@ def _scan(
             except:
                 pass
             _ = (
-                backing^,
+                pages^,
                 scratch^,
                 states^,
                 first^,
@@ -247,24 +282,20 @@ def _scan(
             )
             raise error^
         _ = (scratch^, states^, first^)
-        if shared_output and not (control[1] & GROUP_CAPACITY_FAULT):
-            host_first = _read_words(
-                backing, offset + layout.first_offset(), layout.capacity
-            )
-            host_rows = _read_words(
-                backing, offset + layout.rows_offset(), layout.capacity
-            )
-            host_states = _read_words(
-                backing, offset + layout.states_offset(), state_words
-            )
-        _ = (backing^, reservation^)
         timings.kernel_ns += Int(perf_counter_ns()) - started
         if control[1] & GROUP_CAPACITY_FAULT:
             raise Error(GROUP_CAPACITY_RETRY)
         if control[2] != UInt32(len(segments)):
             raise Error("Metal chunked numeric group scan did not complete")
-        return GroupedPartials(
-            host_first^, host_rows^, host_states^, List[Int64](), 1
+        if shared_output:
+            return NumericGroupPartials(
+                _SharedNumericGroups(pages^, reservation^, layout.copy())
+            )
+        _ = (pages^, reservation^)
+        return NumericGroupPartials(
+            GroupedPartials(
+                host_first^, host_rows^, host_states^, List[Int64](), 1
+            )
         )
 
 
@@ -274,7 +305,7 @@ def scan_chunked_numeric(
     scope: Scope,
     zero_copy: Bool,
     mut timings: HandoffTimings,
-) raises -> GroupedPartials:
+) raises -> NumericGroupPartials:
     comptime if not METAL_TARGET:
         raise Error("Metal chunked numeric groups require an Apple GPU")
     else:
@@ -311,7 +342,7 @@ def scan_chunked_numeric(
         var segments = intersect_numeric_views(inputs, frame.height())
         var capacity = sample_group_tuples(frame, plan.keys.names).capacity()
         timings.upload_ns += Int(perf_counter_ns()) - started
-        var answer: GroupedPartials
+        var answer: NumericGroupPartials
         for attempt in range(2):
             var layout = GroupLayout(capacity, len(fields), 1, True)
             try:
