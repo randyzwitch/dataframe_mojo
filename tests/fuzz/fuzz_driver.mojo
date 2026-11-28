@@ -35,6 +35,7 @@ from dataframe import (
     col,
     concat,
     concat_list,
+    element,
     len as row_len,
     lit,
     null,
@@ -583,6 +584,28 @@ def build_expr(t: Tree, i: Int) raises -> Expr:
         if op == "list.count_matches":
             return ea(t, i, 1).list().count_matches(item)
         return ea(t, i, 1).list().contains(item)
+    if op == "list.eval":
+        var body = t.text(t.kid(i, 2))
+        var el = element()
+        if body == "gt":
+            return ea(t, i, 1).list().filter(el > 0)
+        if body == "mul2":
+            return ea(t, i, 1).list().eval(el * 2)
+        if body == "cum_sum":
+            return ea(t, i, 1).list().eval(el.cum_sum())
+        if body == "rank":
+            return ea(t, i, 1).list().eval(el.rank("dense"))
+        return ea(t, i, 1).list().eval(el - el.min())
+    if op == "list.agg":
+        var body = t.text(t.kid(i, 2))
+        var el = element()
+        if body == "sum":
+            return ea(t, i, 1).list().agg(el.sum())
+        if body == "max":
+            return ea(t, i, 1).list().agg(el.max())
+        if body == "null_count":
+            return ea(t, i, 1).list().agg(el.null_count())
+        return ea(t, i, 1).list().agg(el.n_unique())
     if op == "list.set_union":
         return ea(t, i, 1).list().set_union(ea(t, i, 2))
     if op == "list.set_intersection":
