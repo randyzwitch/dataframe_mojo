@@ -596,3 +596,73 @@ def test_metal_distinct_rare_value_retry_keeps_small_group_result() raises:
 # requires: metal
 def test_metal_distinct_late_group_and_value_overflow_share_one_retry() raises:
     _late_distinct_capacity(True)
+
+
+# requires: metal
+def test_metal_distinct_run_heads_preserve_nulls_canonical_pairs_and_order() raises:
+    from std.memory import ArcPointer
+    from dataframe.execution_observation import DeviceObservation
+    from dataframe_metal.distinct_reduce import execute_distinct
+    from tests.support.metal_outcomes import require_metal
+
+    _ = require_metal()
+    var kparts = List[Series]()
+    var fparts = List[Series]()
+    var wparts = List[Series]()
+    var bparts = List[Series]()
+    var base = 0
+    for n in [31, 32, 33, 255, 256, 257, 1]:
+        var keys = List[Int32]()
+        var floats = List[Float32]()
+        var wide = List[Int64]()
+        var bools = List[Bool]()
+        var kvalid = List[Bool]()
+        var vvalid = List[Bool]()
+        for i in range(n + 3):
+            var row = max(0, base + i - 3)
+            var block = row // 19
+            keys.append(Int32((block // 4) % 3))
+            kvalid.append((block // 4) % 4 != 0)
+            vvalid.append(block % 7 != 0)
+            # Neighbors have different NaN payloads or zero signs but share
+            # one canonical class. Wide neighbors differ only above bit 31.
+            var bits = UInt32(0x7FC0_0000 + i % 17) if block % 2 else (
+                UInt32(0x8000_0000) if i % 2 else UInt32(0)
+            )
+            floats.append(bitcast[DType.float32](bits))
+            wide.append((Int64(block % 3) << 40) | Int64(11))
+            bools.append(block % 3 != 0)
+        var k = Series("k", Column[Int32](keys^, kvalid^))
+        var f = Series("f", Column[Float32](floats^, vvalid.copy()))
+        var w = Series("w", Column[Int64](wide^, vvalid.copy()))
+        var b = Series("b", Column[Bool](bools^, vvalid^))
+        kparts.append(k.slice(3, n))
+        fparts.append(f.slice(3, n))
+        wparts.append(w.slice(3, n))
+        bparts.append(b.slice(3, n))
+        base += n
+    var frame = DataFrame(
+        [
+            Series._from_chunks(kparts^),
+            Series._from_chunks(fparts^),
+            Series._from_chunks(wparts^),
+            Series._from_chunks(bparts^),
+        ]
+    )
+    for name in ["f", "w", "b"]:
+        var q = (
+            frame.lazy()
+            .group_by("k", maintain_order=True)
+            .agg(
+                [
+                    col(name).n_unique().alias("all"),
+                    col(name).n_unique(ignore_nulls=True).alias("nonnull"),
+                ]
+            )
+        )
+        var expected = q.collect(engine="cpu")
+        var obs = ArcPointer(DeviceObservation())
+        q._plan._device_observation = obs
+        assert_true(execute_distinct(q)[0].equals(expected))
+        assert_equal(obs[].upload_bytes.load(), Int64(0))
+        assert_equal(obs[].completed_launches.load(), Int64(7))

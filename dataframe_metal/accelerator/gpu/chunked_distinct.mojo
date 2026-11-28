@@ -49,6 +49,33 @@ def chunked_distinct_partials(
     var key = keys.unsafe_bitcast[UInt32]()[
         unsafe_offset=row
     ] if key_valid else UInt32(0)
+    var value_valid = distinct_valid(value_bits, value_descriptor, row)
+    var tag = UInt32(value_descriptor >> 33)
+    var value = distinct_canonical(
+        ordered_bits(values, tag, row), tag
+    ) if value_valid else UInt64(0)
+    # The first row of each equal (key, value) run publishes its exact pair.
+    # Row zero always represents its own span; owners can change there.
+    var same_key = False
+    if row > 0:
+        var prev = row - 1
+        same_key = distinct_valid(
+            key_bits, key_descriptor, prev
+        ) == key_valid and (
+            not key_valid
+            or keys.unsafe_bitcast[UInt32]()[unsafe_offset=prev] == key
+        )
+        if (
+            same_key
+            and distinct_valid(value_bits, value_descriptor, prev)
+            == value_valid
+        ):
+            if (
+                not value_valid
+                or distinct_canonical(ordered_bits(values, tag, prev), tag)
+                == value
+            ):
+                return
     # Finish discovering groups even if the value table filled earlier.
     # The host can then retain the original group table on a value-only retry.
     var group = claim_word_group[GROUP_CAPACITY_FAULT](
@@ -58,9 +85,12 @@ def chunked_distinct_partials(
         return
     var ticket = base + UInt32(row) + 1
     var first = scratch.unsafe_offset(4 + Int(group))
-    _ = Atomic[UInt32].max(first, ~(ticket - 1))
+    # Only the first row of a key run can establish an earlier group.
+    var first_ticket = ~(ticket - 1)
+    if not same_key and first_ticket > Atomic[UInt32].load(first):
+        _ = Atomic[UInt32].max(first, first_ticket)
     var count = first.unsafe_offset(Int(groups))
-    if not distinct_valid(value_bits, value_descriptor, row):
+    if not value_valid:
         # Null participates in the original table's load limit and in the
         # all-values count exactly once per group, even across dispatches.
         var flag = count.unsafe_offset(Int(groups))
@@ -73,8 +103,6 @@ def chunked_distinct_partials(
                 break
         return
 
-    var tag = UInt32(value_descriptor >> 33)
-    var value = distinct_canonical(ordered_bits(values, tag, row), tag)
     var wide = (tag & 3) == 1
     var record_words = 3 + Int(wide)
     var slot = distinct_hash(value, True, tag, group) & (capacity - 1)
