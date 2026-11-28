@@ -46,6 +46,7 @@ from dataframe.joins.range_join import (
     ie_less,
     ie_name,
     ie_swapped,
+    pairing_is_cheaper,
     range_key_type,
 )
 from dataframe.planning.context import QueryContext
@@ -58,6 +59,7 @@ from dataframe.planning.node_builders import (
     _with_columns_node,
 )
 from dataframe.planning.properties import _boolean_parts, _expr_signature
+from dataframe.planning.statistics import PlanStatistics, plan_cardinality
 from dataframe.trace import trace_path
 
 
@@ -291,6 +293,8 @@ def _lower(mut self: QueryContext, f: Int, c: Int) raises -> Bool:
         joined.coalesce = False
         trace_path("lazy.join_where_hash")
     else:
+        if _pairing_is_cheaper(self, join.left, join.right):
+            return False
         var chosen = _choose(unequal)
         var left_exprs = List[Expr]()
         var right_exprs = List[Expr]()
@@ -373,6 +377,23 @@ def _lower(mut self: QueryContext, f: Int, c: Int) raises -> Bool:
     else:
         self._nodes[f] = self._nodes[top].copy()
     return True
+
+
+def _pairing_is_cheaper(
+    self: QueryContext, left: Int, right: Int
+) raises -> Bool:
+    """Whether filtering every pair costs no more than an inequality join,
+    by the inputs' estimated rows n and m: the cross join streams n * m
+    comparisons, while the inequality join sorts a side, about
+    (n + m) * log2(n + m) steps, before it pairs anything. One input of a
+    handful of rows (a scalar subquery's single row) is the usual case.
+    False when an estimate is missing."""
+    var stats = PlanStatistics()
+    var n = plan_cardinality(self, stats, left)
+    var m = plan_cardinality(self, stats, right)
+    if n < 0 or m < 0:
+        return False
+    return pairing_is_cheaper(n, m)
 
 
 def _key_name(

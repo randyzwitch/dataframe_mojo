@@ -31,6 +31,8 @@ from dataframe.joins.range_join import (
     ie_less,
     ie_swapped,
     matchable_rows,
+    nested_pairs,
+    pairing_is_cheaper,
     range_fill,
     range_key_type,
     range_spans,
@@ -153,6 +155,9 @@ struct RangeJoinSink(Movable, Rounds):
     var pair_left: List[List[Int]]
     var pair_right: List[List[Int]]
     var scanned: Bool
+    # Whether the pairs round compares every pair of a range of left rows
+    # with every right row instead (one input has a handful of rows).
+    var nested: Bool
     var width: Int
     # The matched rows, the gather running, and the gathered left columns.
     var left_rows: List[Int]
@@ -192,6 +197,7 @@ struct RangeJoinSink(Movable, Rounds):
         self.pair_left = List[List[Int]]()
         self.pair_right = List[List[Int]]()
         self.scanned = False
+        self.nested = False
         self.width = 0
         self.left_rows = List[Int]()
         self.right_rows = List[Int]()
@@ -323,6 +329,12 @@ struct RangeJoinSink(Movable, Rounds):
                         self.left_rows,
                         self.right_rows,
                     )
+        elif self.stage == _PAIRS and self.nested:
+            for r in range(task, len(self.ranges) - 1, self.width):
+                if self.floats:
+                    self._nested_range[DType.float64](r)
+                else:
+                    self._nested_range[DType.int64](r)
         elif self.stage == _PAIRS:
             for p in range(task, len(self.block_pairs), self.width):
                 if self.floats:
@@ -375,6 +387,21 @@ struct RangeJoinSink(Movable, Rounds):
             self.right_keys.append(
                 _key_series(self.right.column(right_on[k]), target)
             )
+        # With one input of a handful of rows, comparing every pair is less
+        # work than any sort: tasks take ranges of left rows.
+        if pairing_is_cheaper(self.left.height(), self.right.height()):
+            self.nested = True
+            var n = self.left.height()
+            self.ranges = partitions(n, worker_count(n), 64)
+            self.pair_left = List[List[Int]](
+                length=len(self.ranges) - 1, fill=List[Int]()
+            )
+            self.pair_right = List[List[Int]](
+                length=len(self.ranges) - 1, fill=List[Int]()
+            )
+            self.stage = _PAIRS
+            self.width = round_width(len(self.ranges) - 1)
+            return
         # A range join when every comparison reads one key of a side; the
         # smaller side is sorted when either could be.
         var left_point = len(self.ops) == 1 or left_on[0] == left_on[1]
@@ -605,6 +632,29 @@ struct RangeJoinSink(Movable, Rounds):
             rows_right.append(self.sorted_rows[1][right_first + local_right[k]])
         self.pair_left[p] = rows_left^
         self.pair_right[p] = rows_right^
+
+    def _nested_range[D: DType](mut self, r: Int) raises:
+        """Pairs task: every pair of left rows in range `r` with the right
+        rows, compared directly."""
+        var left = List[Column[Scalar[D]]]()
+        var right = List[Column[Scalar[D]]]()
+        for k in range(len(self.ops)):
+            left.append(self.left_keys[k]._data[Column[Scalar[D]]].copy())
+            right.append(self.right_keys[k]._data[Column[Scalar[D]]].copy())
+        var rows_left = List[Int]()
+        var rows_right = List[Int]()
+        nested_pairs[D](
+            left,
+            right,
+            self.ops,
+            self.ranges[r],
+            self.ranges[r + 1],
+            self.right.height(),
+            rows_left,
+            rows_right,
+        )
+        self.pair_left[r] = rows_left^
+        self.pair_right[r] = rows_right^
 
     def _begin_gather(mut self) raises:
         self.gathering.append(

@@ -278,6 +278,12 @@ def test_lazy_filters_above_and_plan_shape() raises:
     )
     var explained = plan.explain()
     assert_true("RANGE_JOIN" in explained, explained)
+    # Against one row (a scalar's), filtering every pair is less work than
+    # sorting: the plan keeps the filtered cross join, with the same rows.
+    var one = sessions.head(1)
+    var scalar = events.lazy().join_where(one.lazy(), preds)
+    assert_true("RANGE_JOIN" not in scalar.explain(), scalar.explain())
+    _check(events, one, preds, "one row")
     var expected = (
         _expected(events, sessions, preds)
         .filter((col("e") % 2 == 0) & (col("s") < 50))

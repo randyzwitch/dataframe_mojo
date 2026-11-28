@@ -63,6 +63,66 @@ def ie_strict(op: Int) -> Bool:
     return op == IE_LT or op == IE_GT
 
 
+@always_inline
+def ie_holds[D: DType](op: Int, a: Scalar[D], b: Scalar[D]) -> Bool:
+    """Whether `a OP b`."""
+    if op == IE_LT:
+        return a < b
+    if op == IE_LE:
+        return a <= b
+    if op == IE_GT:
+        return a > b
+    return a >= b
+
+
+def pairing_is_cheaper(left_rows: Int, right_rows: Int) -> Bool:
+    """Whether comparing every pair of rows is no more work than sorting:
+    n * m comparisons against about (n + m) * log2(n + m) steps for a sort
+    of the inputs. It holds when one input has a handful of rows."""
+    var total = left_rows + right_rows
+    var steps = 1
+    while (1 << steps) < total + 1:
+        steps += 1
+    return Float64(left_rows) * Float64(right_rows) <= Float64(total) * Float64(
+        steps
+    )
+
+
+def nested_pairs[
+    D: DType
+](
+    left: List[Column[Scalar[D]]],
+    right: List[Column[Scalar[D]]],
+    ops: List[Int],
+    first: Int,
+    end: Int,
+    right_count: Int,
+    mut left_out: List[Int],
+    mut right_out: List[Int],
+):
+    """Append every pair of a left row in [first, end) and a right row whose
+    keys satisfy every `left[k] OP right[k]`, comparing each pair."""
+    for i in range(first, end):
+        var valid = True
+        for k in range(len(ops)):
+            if not _matchable(left[k], i):
+                valid = False
+                break
+        if not valid:
+            continue
+        for j in range(right_count):
+            var holds = True
+            for k in range(len(ops)):
+                if not _matchable(right[k], j) or not ie_holds[D](
+                    ops[k], left[k]._get(i), right[k]._get(j)
+                ):
+                    holds = False
+                    break
+            if holds:
+                left_out.append(i)
+                right_out.append(j)
+
+
 def ie_name(op: Int) -> String:
     if op == IE_LT:
         return "<"
