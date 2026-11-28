@@ -148,6 +148,7 @@ def _join_node(
     coalesce: Bool = True,
     left: Int = -1,
     right: Int = -1,
+    validate: Int = 0,
 ) -> PlanNode:
     var node = _plan_node(
         JOIN,
@@ -160,6 +161,7 @@ def _join_node(
         names2=[suffix],
         coalesce=coalesce,
     )
+    node.join_validate = validate
     debug_assert(node.payload_layout_valid(), "invalid plan payload layout")
     return node^
 

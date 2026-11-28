@@ -116,6 +116,9 @@ struct PlanNode(Copyable, Deinitable, Movable):
     # swap could reverse when actual heights become known, then reverse again
     # on later passes.
     var sides_fixed: Bool
+    # A JOIN's `validate` bits (see join_type): which inputs must have
+    # unique keys. Zero checks nothing.
+    var join_validate: Int
 
     def has_dataset(self) -> Bool:
         return Bool(self.dataset)
@@ -498,6 +501,7 @@ def _plan_node(
         dataset.copy(),
         dataset_projected,
         False,
+        0,
     )
 
 

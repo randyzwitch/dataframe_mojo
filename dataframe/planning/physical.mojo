@@ -39,6 +39,7 @@ from dataframe.join_type import (
     JOIN_LEFT,
     JOIN_RIGHT,
     JOIN_SEMI,
+    join_validate_swapped,
 )
 from dataframe.optimizer.passes import (
     plan_push_projections,
@@ -287,6 +288,7 @@ def _flip_inner_join(
     join.right = node.left
     join.names = node.right_keys.copy()
     join.right_keys = node.names.copy()
+    join.join_validate = join_validate_swapped(node.join_validate)
     join.sides_fixed = True
     plan._nodes.append(join^)
     plan._nodes[at] = _select_node(left=len(plan._nodes) - 1, exprs=exprs)
@@ -334,6 +336,7 @@ def _flip_left_join(
     join.right = node.left
     join.names = node.right_keys.copy()
     join.right_keys = node.names.copy()
+    join.join_validate = join_validate_swapped(node.join_validate)
     join.how = JOIN_RIGHT
     join.text = "right"
     join.coalesce = False
@@ -379,6 +382,7 @@ def _flip_right_join(
     join.right = node.left
     join.names = node.right_keys.copy()
     join.right_keys = node.names.copy()
+    join.join_validate = join_validate_swapped(node.join_validate)
     join.how = JOIN_LEFT
     join.text = "left"
     join.sides_fixed = True
@@ -407,6 +411,7 @@ def _flip_semi_join(
     join.right = node.left
     join.names = node.right_keys.copy()
     join.right_keys = node.names.copy()
+    join.join_validate = join_validate_swapped(node.join_validate)
     join.how = JOIN_RIGHT_SEMI if node.how == JOIN_SEMI else JOIN_RIGHT_ANTI
     join.sides_fixed = True
     plan._nodes[at] = join^

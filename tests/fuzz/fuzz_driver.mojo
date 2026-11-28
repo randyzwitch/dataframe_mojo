@@ -730,7 +730,7 @@ def run_eager(t: Tree, i: Int, mut inputs: Inputs) raises -> DataFrame:
             t.strings(t.kid(i, 2)), maintain_order=t.flag(t.kid(i, 3))
         ).agg(build_exprs(t, t.kid(i, 4)))
     if op == "join":
-        # (join P Q (list LEFT_ON) (list RIGHT_ON) HOW COALESCE)
+        # (join P Q (list LEFT_ON) (list RIGHT_ON) HOW COALESCE [VALIDATE])
         var right = run_eager(t, t.kid(i, 2), inputs)
         return df.join(
             right,
@@ -738,6 +738,7 @@ def run_eager(t: Tree, i: Int, mut inputs: Inputs) raises -> DataFrame:
             right_on=t.strings(t.kid(i, 4)),
             how=t.text(t.kid(i, 5)),
             coalesce=t.flag(t.kid(i, 6)),
+            validate=t.text(t.kid(i, 7)) if t.nkids(i) > 7 else "m:m",
         )
     if op == "cross":
         var right = run_eager(t, t.kid(i, 2), inputs)
@@ -831,6 +832,7 @@ def run_lazy(
             right_on=t.strings(t.kid(i, 4)),
             how=t.text(t.kid(i, 5)),
             coalesce=t.flag(t.kid(i, 6)),
+            validate=t.text(t.kid(i, 7)) if t.nkids(i) > 7 else "m:m",
         )
     if op == "cross":
         var right = run_lazy(t, t.kid(i, 2), inputs, from_memory)

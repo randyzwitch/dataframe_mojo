@@ -98,6 +98,7 @@ from dataframe.join_type import (
     JOIN_RIGHT,
     JOIN_SEMI,
     join_type,
+    join_validate_checks,
 )
 from dataframe.planning.model import (
     AGG,
@@ -498,8 +499,12 @@ def _stream_join(node: PlanNode) -> Bool:
     the stream will run is known before it starts. A RIGHT_SEMI or
     RIGHT_ANTI step (a semi or anti join flipped by the build side
     optimizer) probes the same way and emits the build rows it flagged
-    after the probe (`_emit_unmatched`)."""
+    after the probe (`_emit_unmatched`). A join that checks its left
+    input's keys are unique runs on its whole inputs instead: the probe
+    side streams, so no table of its keys exists to find a repeat."""
     if node.kind != JOIN:
+        return False
+    if join_validate_checks(node.join_validate, False):
         return False
     return (
         node.how
@@ -614,7 +619,13 @@ def _chain_member(node: PlanNode) -> Bool:
     """A step `_order_chain` can move: an inner join with coalesced keys, a
     row-local filter, or a selection of plain columns."""
     if node.kind == JOIN:
-        return node.how == JOIN_INNER and node.coalesce and len(node.names) > 0
+        # A join checking its inputs' keys are unique keeps its inputs.
+        return (
+            node.how == JOIN_INNER
+            and node.coalesce
+            and len(node.names) > 0
+            and node.join_validate == 0
+        )
     if node.kind == FILTER:
         return _row_local(node.exprs)
     if node.kind == SELECT:

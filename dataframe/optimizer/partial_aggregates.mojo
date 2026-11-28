@@ -265,6 +265,9 @@ def _push_partial_aggregate(
         or len(join.names) != len(join.right_keys)
         or join.left < 0
         or join.right < 0
+        # Aggregating an input first would hide the repeated keys the
+        # join checks for.
+        or join.join_validate != 0
     ):
         return False
     # The join must belong to this aggregate alone: it is replaced.

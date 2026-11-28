@@ -111,3 +111,104 @@ def shared_join_key_type(
         left.scale(),
         max(left.decimal_width(), right.decimal_width()),
     )
+
+
+# A join's `validate` option as bits: which inputs must have unique keys.
+# A plan that swaps a join's inputs swaps the two side bits and toggles
+# JOIN_VALIDATE_SWAPPED, so messages still name the sides as written.
+comptime JOIN_VALIDATE_LEFT = 1
+comptime JOIN_VALIDATE_RIGHT = 2
+comptime JOIN_VALIDATE_SWAPPED = 4
+# An unknown `validate` name, reported when the plan executes.
+comptime JOIN_VALIDATE_UNKNOWN = -1
+
+
+def join_validate_code(validate: String) -> Int:
+    """The bits for a `validate` name ("m:m", "1:m", "m:1" or "1:1"), or
+    JOIN_VALIDATE_UNKNOWN."""
+    if validate == "m:m":
+        return 0
+    if validate == "1:m":
+        return JOIN_VALIDATE_LEFT
+    if validate == "m:1":
+        return JOIN_VALIDATE_RIGHT
+    if validate == "1:1":
+        return JOIN_VALIDATE_LEFT | JOIN_VALIDATE_RIGHT
+    return JOIN_VALIDATE_UNKNOWN
+
+
+def join_validate_swapped(code: Int) -> Int:
+    """The bits of a join whose inputs trade places."""
+    if code <= 0:
+        return code
+    var swapped = code ^ JOIN_VALIDATE_SWAPPED
+    var left = code & JOIN_VALIDATE_LEFT
+    var right = code & JOIN_VALIDATE_RIGHT
+    swapped &= ~(JOIN_VALIDATE_LEFT | JOIN_VALIDATE_RIGHT)
+    if left != 0:
+        swapped |= JOIN_VALIDATE_RIGHT
+    if right != 0:
+        swapped |= JOIN_VALIDATE_LEFT
+    return swapped
+
+
+def join_validate_name(code: Int) -> String:
+    """The `validate` name of the bits, as the join was written."""
+    var written = code
+    if code > 0 and code & JOIN_VALIDATE_SWAPPED != 0:
+        written = join_validate_swapped(code)
+    var left = written > 0 and written & JOIN_VALIDATE_LEFT != 0
+    var right = written > 0 and written & JOIN_VALIDATE_RIGHT != 0
+    if left and right:
+        return "1:1"
+    if left:
+        return "1:m"
+    if right:
+        return "m:1"
+    return "m:m"
+
+
+def check_join_validate(code: Int, how: Int) raises:
+    """Raise when the bits are unknown, or ask for unique keys on a join
+    whose output cannot repeat rows of an input: a semi or anti join emits
+    each kept row once, and a cross join has no keys."""
+    if code == JOIN_VALIDATE_UNKNOWN:
+        raise Error("Join validate must be 'm:m', '1:m', 'm:1' or '1:1'")
+    if code == 0 or code == JOIN_VALIDATE_SWAPPED:
+        return
+    if how in [
+        JOIN_INNER,
+        JOIN_LEFT,
+        JOIN_RIGHT,
+        JOIN_FULL,
+    ]:
+        return
+    var name = (
+        "semi" if how
+        in [JOIN_SEMI, JOIN_RIGHT_SEMI] else "anti" if how
+        in [JOIN_ANTI, JOIN_RIGHT_ANTI] else join_name(how)
+    )
+    raise Error(
+        "Join validate='"
+        + join_validate_name(code)
+        + "' does not apply to a "
+        + name
+        + " join"
+    )
+
+
+def join_validate_checks(code: Int, right_side: Bool) -> Bool:
+    """Whether the bits ask for unique keys on the plan's right input
+    (`right_side`) or its left."""
+    if code <= 0:
+        return False
+    return (
+        code & (JOIN_VALIDATE_RIGHT if right_side else JOIN_VALIDATE_LEFT) != 0
+    )
+
+
+def join_validate_side_name(code: Int, right_side: Bool) -> String:
+    """The side, as the join was written, of the plan's right input
+    (`right_side`) or its left."""
+    var swapped = code > 0 and code & JOIN_VALIDATE_SWAPPED != 0
+    return "right" if right_side != swapped else "left"

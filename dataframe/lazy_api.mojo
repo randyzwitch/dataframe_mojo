@@ -115,6 +115,7 @@ from dataframe.join_order import (
 from dataframe.join_type import (
     JOIN_CROSS,
     join_code,
+    join_validate_code,
 )
 from dataframe.optimizer.expressions import (
     _fold_casts,
@@ -1517,6 +1518,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         how: String = "inner",
         suffix: String = "_right",
         coalesce: Bool = True,
+        validate: String = "m:m",
     ) -> Self:
         """Join with another lazy plan on keys named alike on both sides;
         see DataFrame.join."""
@@ -1527,6 +1529,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             how=how,
             suffix=suffix,
             coalesce=coalesce,
+            validate=validate,
         )
 
     def join(
@@ -1538,11 +1541,14 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         how: String = "inner",
         suffix: String = "_right",
         coalesce: Bool = True,
+        validate: String = "m:m",
     ) -> Self:
         """Join with another lazy plan on paired keys: left_on[i] matches
         right_on[i], as in DataFrame.join. Projection and predicate
         pushdown see both key lists, so each input reads only its own keys
-        and the columns used above the join."""
+        and the columns used above the join. `validate` ("m:m", "1:m",
+        "m:1" or "1:1") checks keys are unique as DataFrame.join does; an
+        unknown name raises when the plan runs."""
         var result = self.copy()
         var left_root = len(result._plan._nodes) - 1
         var shift = len(result._plan._nodes)
@@ -1565,6 +1571,7 @@ struct LazyFrame(Copyable, Deinitable, Movable):
             right_keys=right_on,
             coalesce=coalesce,
             suffix=suffix,
+            validate=join_validate_code(validate),
         )
         result._plan._nodes.append(join^)
         return result^
@@ -1576,8 +1583,9 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         how: String = "inner",
         suffix: String = "_right",
         coalesce: Bool = True,
+        validate: String = "m:m",
     ) -> Self:
-        return self.join(other, [on], how, suffix, coalesce)
+        return self.join(other, [on], how, suffix, coalesce, validate)
 
     def join(
         self, other: Self, *, how: String, suffix: String = "_right"

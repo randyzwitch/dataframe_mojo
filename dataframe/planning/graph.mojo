@@ -334,6 +334,7 @@ def plan_same_node(
         or x.how != y.how
         or x.right_keys != y.right_keys
         or x.coalesce != y.coalesce
+        or x.join_validate != y.join_validate
         or x.source_failure != y.source_failure
         or Bool(x.asof_tolerance) != Bool(y.asof_tolerance)
         or Bool(x.json_schema) != Bool(y.json_schema)
@@ -1022,8 +1023,9 @@ def plan_graph_join(node: PlanNode) -> Bool:
     """Whether an equi-join can participate in cost ordering: an inner join
     with coalesced equal keys, or a semi, anti or left join with equal keys
     and the required coalescing. Preserve joins whose output naming or key
-    semantics cannot be reconstructed safely."""
-    if node.kind != JOIN:
+    semantics cannot be reconstructed safely, and joins that check their
+    inputs' keys are unique: reordering would change those inputs."""
+    if node.kind != JOIN or node.join_validate != 0:
         return False
     if _chain_member(node):
         return True

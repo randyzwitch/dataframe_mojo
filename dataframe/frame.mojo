@@ -68,6 +68,8 @@ from .join_type import (
     JOIN_INNER,
     join_code,
     join_type,
+    check_join_validate,
+    join_validate_code,
 )
 from dataframe.storage.nested import ListColumn, StructColumn
 from .trace import trace_path
@@ -1870,6 +1872,7 @@ struct DataFrame(Copyable, Sized, Writable):
         how: String = "inner",
         suffix: String = "_right",
         coalesce: Bool = True,
+        validate: String = "m:m",
     ) raises -> Self:
         return self.join(
             right,
@@ -1878,6 +1881,7 @@ struct DataFrame(Copyable, Sized, Writable):
             how=how,
             suffix=suffix,
             coalesce=coalesce,
+            validate=validate,
         )
 
     def join(
@@ -1887,6 +1891,7 @@ struct DataFrame(Copyable, Sized, Writable):
         how: String = "inner",
         suffix: String = "_right",
         coalesce: Bool = True,
+        validate: String = "m:m",
     ) raises -> Self:
         return self.join(
             right,
@@ -1895,6 +1900,7 @@ struct DataFrame(Copyable, Sized, Writable):
             how=how,
             suffix=suffix,
             coalesce=coalesce,
+            validate=validate,
         )
 
     def join(
@@ -1906,6 +1912,7 @@ struct DataFrame(Copyable, Sized, Writable):
         how: String = "inner",
         suffix: String = "_right",
         coalesce: Bool = True,
+        validate: String = "m:m",
     ) raises -> Self:
         """Hash join on key columns of any dtype; null keys never match.
 
@@ -1923,6 +1930,14 @@ struct DataFrame(Copyable, Sized, Writable):
         Semi and anti joins output left columns only, so the flag does not
         apply to them.
 
+        validate checks that join keys are unique where the join expects
+        them to be: "1:m" the left input's, "m:1" the right input's, "1:1"
+        both, and the default "m:m" checks nothing. A repeated key raises an
+        error naming it. Rows with a null key never match, so they never
+        count as repeats. It applies to inner, left, right and full joins.
+        The right input's check comes free from the hash table the join
+        builds over it; checking the left input builds a table of its keys.
+
         Runs as the lazy plan's join does: a plan of one join over the two
         frames, executed through the same pipelines as `LazyFrame.collect`
         (the right frame built into a hash table, the left probing it a
@@ -1937,6 +1952,7 @@ struct DataFrame(Copyable, Sized, Writable):
             raise Error(
                 "Join requires the same nonzero number of left and right keys"
             )
+        check_join_validate(join_validate_code(validate), code)
         return (
             self.lazy()
             .join(
@@ -1946,6 +1962,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 how=how,
                 suffix=suffix,
                 coalesce=coalesce,
+                validate=validate,
             )
             ._collect(optimize=False, streaming=True, batch_size=65536)
         )
@@ -1960,10 +1977,12 @@ struct DataFrame(Copyable, Sized, Writable):
         suffix: String = "_right",
         coalesce: Bool = True,
         keep_order: Bool = True,
+        validate: Int = 0,
     ) raises -> Self:
         """`keep_order=False` lets an inner join emit its pairs in whatever
         order its probe produced them, for a caller whose consumers ignore
-        row order (a lazy plan feeding an aggregation)."""
+        row order (a lazy plan feeding an aggregation). `validate`: the
+        join's validate bits (see join_type)."""
         if how == JOIN_CROSS:
             raise Error(
                 "A cross join takes no keys; use join(right, how='cross')"
@@ -1981,6 +2000,7 @@ struct DataFrame(Copyable, Sized, Writable):
             suffix=suffix,
             coalesce=coalesce,
             keep_order=keep_order,
+            validate=validate,
         )
 
     def join(

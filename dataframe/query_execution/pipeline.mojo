@@ -85,7 +85,10 @@ from dataframe.join_type import (
     JOIN_RIGHT_ANTI,
     JOIN_RIGHT_SEMI,
     JOIN_SEMI,
+    check_join_validate,
+    join_validate_checks,
 )
+from dataframe.joins.validate import check_side_unique, key_columns
 from dataframe.joins.join_filter import (
     PushedJoinFilter,
     PushedJoinFilters,
@@ -2554,6 +2557,7 @@ def _probe_start(
             operations.append(node.copy())
             operation_nodes.append(cursor)
         elif _stream_join(node):
+            check_join_validate(node.join_validate, node.how)
             var prepared = Optional[JoinHashTable]()
             var operation = node.copy()
             operation.set_join_build_slot(len(joins))
@@ -2573,7 +2577,9 @@ def _probe_start(
                 # the build's columns, empty, which type the join's output.
                 built = self._prefetched.value()[].pop(node.right)
                 build_rows = ready.value().index.count
-            elif no_output:
+            elif no_output and not join_validate_checks(
+                node.join_validate, True
+            ):
                 # Rows below an empty build never reach the sink: a build
                 # not computed yet is only needed for its columns.
                 built = self._execute(node.right, True, True, batch_size)
@@ -2621,7 +2627,14 @@ def _probe_start(
                 build_rows = built.height()
             if no_output and not prepared and build_rows > 0:
                 # A join below an empty build never sees a row: an empty
-                # table of the same columns serves it.
+                # table of the same columns serves it. Its keys are still
+                # checked when the join asks for them to be unique.
+                check_side_unique(
+                    key_columns(built, node.right_keys),
+                    node.right_keys,
+                    node.join_validate,
+                    True,
+                )
                 built = built.clear()
                 build_rows = 0
             var known = head.probe_estimates.get(cursor)
@@ -2647,6 +2660,19 @@ def _probe_start(
                 var hash_index = prepared.take()
                 hash_index.build_filtered = build_filtered
                 prepared = hash_index^
+            if join_validate_checks(node.join_validate, True) and (
+                built.height() > 0 or prepared
+            ):
+                # The build's table found any repeated key as it inserted
+                # its rows; without one, a table of the keys alone.
+                check_side_unique(
+                    key_columns(built, node.right_keys) if built.height()
+                    > 0 else List[Series](),
+                    node.right_keys,
+                    node.join_validate,
+                    True,
+                    prepared,
+                )
             joins.append(built^)
             join_nodes.append(cursor)
             plan_record(

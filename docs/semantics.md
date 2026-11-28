@@ -291,6 +291,19 @@ right key columns are kept as ordinary right columns. `semi` and `anti` return
 only left columns. Empty inputs keep the joined schema; `cross` checks that the
 output row count does not overflow.
 
+`validate="1:m" | "m:1" | "1:1"` checks that join keys are unique where the
+join expects them to be: the left input's for `1:m`, the right input's for
+`m:1`, both for `1:1`. The default `m:m` checks nothing. A repeated key raises
+`join keys did not fulfill m:1 validation: the right input has key (k=1)
+more than once`, naming one repeated key. Rows with a null key never match,
+so they never count as repeats. It applies to inner, left, right and full
+joins; semi and anti joins reject it. The side the join builds its hash table
+on is checked by that table as its rows are inserted; the other side is
+checked with a table of its keys, so checking a left input costs one more
+hash build (and runs that join on its whole inputs rather than streaming the
+left side). A validated join keeps its inputs: the planner does not reorder
+it with other joins.
+
 Both sides' keys are encoded together by the shared row-key layer
 (`dataframe/kernels/hashing.mojo`) and right rows are bucketed by dense key id, so the
 probe does no dictionary lookup. Unsupported join modes or key dtype mismatches

@@ -212,4 +212,5 @@ def plan_join_frames(
         suffix=node.join_suffix(),
         coalesce=node.coalesce,
         keep_order=not free,
+        validate=node.join_validate,
     )
