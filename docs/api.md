@@ -789,6 +789,14 @@ Fixed elapsed duration; calendar days are exactly 24 hours.
 def duration(weeks: Expr = Int(0), days: Expr = Int(0), hours: Expr = Int(0), minutes: Expr = Int(0), seconds: Expr = Int(0), milliseconds: Expr = Int(0), microseconds: Expr = Int(0), nanoseconds: Expr = Int(0), time_unit: String = "us") -> Expr
 ```
 
+## `element`
+
+The current element inside `list().eval`, `filter` or `agg`.
+
+```mojo
+def element() -> Expr
+```
+
 ## `exclude`
 
 Every column except the listed ones, in schema order.
@@ -1716,6 +1724,12 @@ Expressions on list columns. A null list gives a null result.
 - `def count_matches(self, item: Expr) -> Expr`
   How many elements of each list equal the row's value of item, as UInt32; a null item counts null elements.
 - `def count_matches(self, value: String) -> Expr`
+- `def eval(self, expr: Expr) -> Expr`
+  Evaluate expr over each list's elements, named by `element()`, giving a list per row. An aggregation gives a one-element list; a window (rank, cum_sum, shift, ...) runs within each list.
+- `def filter(self, predicate: Expr) -> Expr`
+  The elements of each list for which predicate, written with `element()`, is true.
+- `def agg(self, expr: Expr) -> Expr`
+  Like eval, but an aggregation gives its value itself rather than a one-element list.
 - `def set_union(self, other: Expr) -> Expr`
   The distinct elements of each list and other's list in the same row: this list's in order, then other's that it lacks. A null list on either side gives null; a null element is one value.
 - `def set_intersection(self, other: Expr) -> Expr`

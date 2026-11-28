@@ -12,6 +12,7 @@ from dataframe import (
     Series,
     col,
     concat_list,
+    element,
     lit,
     null,
 )
@@ -608,3 +609,64 @@ def test_list_set_operations() raises:
     )
     assert_equal(result.item(0, "i").int64(), 2500)
     assert_equal(result.item(0, "u").int64(), 7500)
+
+
+def test_list_eval_filter_agg() raises:
+    var frame = DataFrame(
+        [int_lists("a", [[3, 1, N, 2], [], [], [5]], [True, False, True, True])]
+    )
+    var valid: List[Bool] = [True, False, True, True]
+    var e = element()
+    # Per element: one pass over the whole child.
+    check(
+        frame,
+        col("a").list().eval(e * 2),
+        int_lists("", [[6, 2, N, 4], [], [], [10]], valid),
+    )
+    check(
+        frame,
+        col("a").list().filter(e > 1),
+        int_lists("", [[3, 2], [], [], [5]], valid),
+    )
+    check(
+        frame,
+        col("a").list().agg(e * 2),
+        int_lists("", [[6, 2, N, 4], [], [], [10]], valid),
+    )
+    # Aggregations and windows run within each list; an empty list
+    # aggregates nothing (sum 0, max null).
+    check(
+        frame,
+        col("a").list().eval(e.sum()),
+        int_lists("", [[6], [], [0], [5]], valid),
+    )
+    check(
+        frame,
+        col("a").list().agg(e.sum()),
+        Series("", Column[Int64]([6, 0, 0, 5], valid)),
+    )
+    check(
+        frame,
+        col("a").list().agg(e.max()),
+        Series("", Column[Int64]([3, 0, 0, 5], [True, False, False, True])),
+    )
+    check(
+        frame,
+        col("a").list().eval(e.cum_sum()),
+        int_lists("", [[3, 4, N, 6], [], [], [5]], valid),
+    )
+    check(
+        frame,
+        col("a").list().filter(e.cast(DataType.FLOAT64) > e.mean()),
+        int_lists("", [[3], [], [], []], valid),
+    )
+    var strings = DataFrame(
+        [str_lists("s", [["Mojo", "py"], ["Rust"]], [True, True])]
+    )
+    check(
+        strings,
+        col("s").list().eval(e.str().to_lowercase()),
+        str_lists("", [["mojo", "py"], ["rust"]], [True, True]),
+    )
+    with assert_raises(contains="Bool predicate"):
+        _ = frame.select_exprs([col("a").list().filter(e + 1)])
