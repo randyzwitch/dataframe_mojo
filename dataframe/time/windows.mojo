@@ -1,4 +1,5 @@
 """Calendar-aware bounds shared by rolling expressions and time grouping."""
+from std.collections import Optional
 from dataframe.storage.column import Column
 from dataframe.dtype import DataType
 from dataframe.series import Series
@@ -8,8 +9,48 @@ from dataframe.time.temporal import (
     to_local,
     relocalize,
 )
-from dataframe.kernels.temporal import _offset, _offset_in, _truncate
+from dataframe.kernels.temporal import Offset, _offset, _offset_in, _truncate
 from dataframe.time.timezone import TimeZone
+
+
+@fieldwise_init
+struct _Shift(Copyable):
+    """An `Offset` applied to times in ascending order. A calendar month
+    moves the date and keeps the time of day, so times on the same day
+    shift by the same amount: the date arithmetic runs once per day, not
+    once per row."""
+
+    var offset: Offset
+    var per_day: Int64
+    var day: Int64
+    var moved: Int64
+
+    def __init__(out self, dtype: DataType, by: String) raises:
+        self.offset = Offset(dtype, by)
+        self.per_day = (
+            Int64(1) if dtype.is_date() else Int64(86400) * dtype.per_second()
+        )
+        self.day = Int64.MIN
+        self.moved = 0
+
+    @staticmethod
+    def unused(dtype: DataType) -> Self:
+        return Self(
+            offset=Offset.unused(dtype),
+            per_day=Int64(1),
+            day=Int64.MIN,
+            moved=0,
+        )
+
+    def apply(mut self, time: Int64) raises -> Int64:
+        if self.offset.months == 0:
+            return self.offset.apply(time)
+        var day = time // self.per_day
+        if day != self.day:
+            var start = day * self.per_day
+            self.day = day
+            self.moved = self.offset.apply(start) - start
+        return time + self.moved
 
 
 def positive_period(period: String) raises:
@@ -155,17 +196,110 @@ def rolling_bounds(
     var dtype = index.dtype()
     var zone = zone_of(dtype)
     ref values = index._data[Column[Int64]]
+    var times = values._ptr()
     var default_offset = offset == negate_period(period)
+    # A naive index shifts by an interval parsed once; one in a time zone
+    # shifts in local time, row by row.
+    var naive = (
+        not (dtype.is_datetime() and dtype.time_zone() != "") and len(index) > 0
+    )
+    var shift_start = _Shift(dtype, offset) if naive else _Shift.unused(dtype)
+    var shift_end = _Shift.unused(dtype)
+    if naive and not default_offset:
+        shift_end = _Shift(dtype, period)
     for rows in groups:
+        # Rows are in time order and shifting a time never reverses that
+        # order, so both bounds only move forward: a sweep finds them, one
+        # step per row and bound, where a search per row would take
+        # O(log n) reads.
+        var lo = 0
+        var hi = 0
+        var m = len(rows)
         for row in rows:
-            var time = values._get(row)
-            var start = shift_time(time, dtype, offset, zone)
-            # Calendar month subtraction then addition need not round-trip.
-            var end = time if default_offset else shift_time(
-                start, dtype, period, zone
+            var time = times[unsafe_offset=row]
+            var start = shift_start.apply(time) if naive else shift_time(
+                time, dtype, offset, zone
             )
-            var lo = search_time(values, rows, start, not sides[0])
-            var hi = search_time(values, rows, end, sides[1])
+            # Calendar month subtraction then addition need not round-trip.
+            var end = time
+            if not default_offset:
+                end = shift_end.apply(start) if naive else shift_time(
+                    start, dtype, period, zone
+                )
+            # Times are integers, so an open start (or a closed end) is a
+            # strict comparison with the next integer: one test a step.
+            var below = start + Int64(0 if sides[0] else 1)
+            var until = end + Int64(1 if sides[1] else 0)
+            while lo < m and times[unsafe_offset=rows[lo]] < below:
+                lo += 1
+            hi = max(hi, lo)
+            while hi < m and times[unsafe_offset=rows[hi]] < until:
+                hi += 1
             lower[row] = lo
-            upper[row] = max(lo, hi)
+            upper[row] = hi
     return (lower^, upper^)
+
+
+def sorted_range_bounds(
+    index: Series,
+    starts: List[Int],
+    period: String,
+    offset: String,
+    closed: String,
+) raises -> Optional[Tuple[List[Int], List[Int]]]:
+    """Each row's window as [begin, end) row positions when the partitions
+    are the row ranges at `starts` and each range's times already ascend
+    without nulls: the rows are then used where they are, with no layout
+    into time order and back. None otherwise (the caller lays the rows out
+    and uses `rolling_bounds`)."""
+    if not (index.dtype().is_date() or index.dtype().is_datetime()):
+        return None
+    ref values = index._data[Column[Int64]]
+    if values.null_count() > 0:
+        return None
+    var times = values._ptr()
+    for p in range(len(starts) - 1):
+        for k in range(starts[p] + 1, starts[p + 1]):
+            if times[unsafe_offset=k] < times[unsafe_offset=k - 1]:
+                return None
+    positive_period(period)
+    _ = parse_interval(offset)
+    var sides = closed_sides(closed)
+    var n = len(index)
+    var begins = List[Int](unsafe_uninit_length=n)
+    var ends = List[Int](unsafe_uninit_length=n)
+    var dtype = index.dtype()
+    var zone = zone_of(dtype)
+    var default_offset = offset == negate_period(period)
+    var naive = not (dtype.is_datetime() and dtype.time_zone() != "") and n > 0
+    var shift_start = _Shift(dtype, offset) if naive else _Shift.unused(dtype)
+    var shift_end = _Shift.unused(dtype)
+    if naive and not default_offset:
+        shift_end = _Shift(dtype, period)
+    for p in range(len(starts) - 1):
+        # As in `rolling_bounds`: both bounds only move forward.
+        var hi_end = starts[p + 1]
+        var lo = starts[p]
+        var hi = starts[p]
+        for row in range(starts[p], hi_end):
+            var time = times[unsafe_offset=row]
+            var start = shift_start.apply(time) if naive else shift_time(
+                time, dtype, offset, zone
+            )
+            var end = time
+            if not default_offset:
+                end = shift_end.apply(start) if naive else shift_time(
+                    start, dtype, period, zone
+                )
+            # Times are integers, so an open start (or a closed end) is a
+            # strict comparison with the next integer: one test a step.
+            var below = start + Int64(0 if sides[0] else 1)
+            var until = end + Int64(1 if sides[1] else 0)
+            while lo < hi_end and times[unsafe_offset=lo] < below:
+                lo += 1
+            hi = max(hi, lo)
+            while hi < hi_end and times[unsafe_offset=hi] < until:
+                hi += 1
+            begins[row] = lo
+            ends[row] = hi
+    return (begins^, ends^)

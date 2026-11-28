@@ -452,6 +452,15 @@ comptime LIST_SET_UNION = 330
 comptime LIST_SET_INTERSECTION = 331
 comptime LIST_SET_DIFFERENCE = 332
 comptime LIST_SET_SYMMETRIC_DIFFERENCE = 333
+# An expression over each list's elements, which `element()` names. text
+# holds the expression's nodes (`encode_nodes`); integer is the mode: 0
+# eval (a list per row), 1 filter (the elements meeting a predicate), 2
+# agg (a value per row when the expression aggregates).
+comptime LIST_EVAL = 334
+comptime LIST_EVAL_FILTER = 1
+comptime LIST_EVAL_AGG = 2
+# The column name `element()` refers to inside a list expression.
+comptime ELEMENT = ""
 
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
@@ -738,7 +747,7 @@ def is_nested_op(op: Int) -> Bool:
 def is_list_transform(op: Int) -> Bool:
     """Whether op builds each row's result from that row's list elements
     (list_transforms.mojo)."""
-    return op >= LIST_UNIQUE and op <= LIST_SET_SYMMETRIC_DIFFERENCE
+    return op >= LIST_UNIQUE and op <= LIST_EVAL
 
 
 def is_list_set(op: Int) -> Bool:
@@ -3929,6 +3938,62 @@ struct ListNamespace(Copyable):
     def count_matches(self, value: String) -> Expr:
         return self.count_matches(lit(value))
 
+    def eval(self, expr: Expr) -> Expr:
+        """Evaluate expr over each list's elements, named by `element()`,
+        giving a list per row. An aggregation gives a one-element list;
+        a window (rank, cum_sum, shift, ...) runs within each list."""
+        return self._op(LIST_EVAL, text=encode_nodes(expr._nodes))
+
+    def _element_reduction(self, expr: Expr) -> Optional[Expr]:
+        """The list reduction `element().<reduction>()` names, when there
+        is one, so it runs as that reduction rather than per row group."""
+        if len(expr._nodes) != 2:
+            return None
+        ref leaf = expr._nodes[0]
+        ref top = expr._nodes[1]
+        if leaf.op != COL or leaf.text != ELEMENT or top.left != 0:
+            return None
+        if top.right >= 0 or top.extra >= 0:
+            return None
+        if top.op == SUM and top.min_count == 0:
+            return self.sum()
+        if top.op == MEAN:
+            return self.mean()
+        if top.op == MIN:
+            return self.min()
+        if top.op == MAX:
+            return self.max()
+        if top.op == MEDIAN:
+            return self.median()
+        if top.op == STD:
+            return self.std(Int(top.integer))
+        if top.op == VAR:
+            return self.var(Int(top.integer))
+        if top.op == N_UNIQUE and top.integer == 0:
+            return self.n_unique()
+        if top.op == LEN:
+            return self.len()
+        return None
+
+    def filter(self, predicate: Expr) -> Expr:
+        """The elements of each list for which predicate, written with
+        `element()`, is true."""
+        return self._op(
+            LIST_EVAL,
+            text=encode_nodes(predicate._nodes),
+            integer=LIST_EVAL_FILTER,
+        )
+
+    def agg(self, expr: Expr) -> Expr:
+        """Like eval, but an aggregation gives its value itself rather than
+        a one-element list."""
+        var direct = self._element_reduction(expr)
+        if direct:
+            return direct.take()
+        return self._op(
+            LIST_EVAL, text=encode_nodes(expr._nodes), integer=LIST_EVAL_AGG
+        )
+
     def set_union(self, other: Expr) -> Expr:
         """The distinct elements of each list and other's list in the same
         row: this list's in order, then other's that it lacks. A null list
@@ -4079,6 +4144,65 @@ def concat_str(
     if ignore_nulls:
         return result.fill_null(lit(""))
     return result^
+
+
+def element() -> Expr:
+    """The current element inside `list().eval`, `filter` or `agg`."""
+    return col(ELEMENT)
+
+
+def encode_nodes(nodes: List[Node]) -> String:
+    """Nodes as one String, every field kept (floats by their bits), so an
+    expression can ride inside another node; `decode_nodes` reverses it."""
+    var items = List[String](capacity=len(nodes))
+    for node in nodes:
+        var fields = List[String]()
+        fields.append(String(node.op))
+        fields.append(String(node.left))
+        fields.append(String(node.right))
+        fields.append(node.text)
+        fields.append(String(node.integer))
+        fields.append(String(bitcast[DType.int64](node.floating)))
+        fields.append(String(node.min_count))
+        fields.append(String(node.extra))
+        fields.append(node.text2)
+        var dtypes = List[String]()
+        for dtype in node.dtypes:
+            # "!" marks a name that did not parse.
+            dtypes.append(dtype.value().name() if dtype else "!")
+        fields.append(join_names(dtypes))
+        items.append(join_names(fields))
+    return join_names(items)
+
+
+def decode_nodes(text: String) raises -> List[Node]:
+    var nodes = List[Node]()
+    for item in split_names(text):
+        var fields = split_names(item)
+        if len(fields) != 10:
+            raise Error("Malformed encoded expression")
+        var dtypes = List[Optional[DataType]]()
+        if fields[9].byte_length() > 0:
+            for name in split_names(fields[9]):
+                if name == "!":
+                    dtypes.append(None)
+                else:
+                    dtypes.append(DataType.parse(name))
+        nodes.append(
+            _node(
+                Int(fields[0]),
+                Int(fields[1]),
+                Int(fields[2]),
+                text=fields[3],
+                integer=Int64(Int(fields[4])),
+                floating=bitcast[DType.float64](Int64(Int(fields[5]))),
+                min_count=Int(fields[6]),
+                extra=Int(fields[7]),
+                text2=fields[8],
+                dtypes=dtypes,
+            )
+        )
+    return nodes^
 
 
 def concat_list(exprs: List[Expr]) raises -> Expr:

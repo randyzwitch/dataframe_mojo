@@ -501,6 +501,19 @@ def to_pl_expr(e, types):
         return E(1).list.count_matches(e[2])
     if op == "list.contains":
         return E(1).list.contains(e[2])
+    if op == "list.eval":
+        el = pl.element()
+        body = {
+            "mul2": el * 2,
+            "cum_sum": el.cum_sum(),
+            "rank": el.rank("dense"),
+            "centered": el - el.min(),
+        }
+        if e[2] == "gt":
+            return E(1).list.filter(el > 0)
+        return E(1).list.eval(body[e[2]])
+    if op == "list.agg":
+        return E(1).list.agg(getattr(pl.element(), e[2])())
     if op.startswith("list.set_"):
         return getattr(E(1).list, op[5:])(E(2))
     if op == "list.unique":
@@ -901,7 +914,7 @@ class Gen:
     def list_transform(self, e, t):
         """One list -> list transform of e, a list[int64] or list[string]."""
         r = self.rng
-        k = r.randrange(14)
+        k = r.randrange(15)
         if k == 0:
             maintain = r.random() < 0.5
             u = ("list.unique", e, maintain)
@@ -932,6 +945,8 @@ class Gen:
             ints = self.cols(lambda s: s == "int64")
             if ints:
                 return ("concat_list", e, ("col", r.choice(ints)))
+        if k == 13 and t == "list[int64]":
+            return ("list.eval", e, r.choice(["mul2", "cum_sum", "rank", "gt", "centered"]))
         if k == 12:
             same = self.cols(lambda s: s == t)
             op = r.choice(["list.set_union", "list.set_intersection", "list.set_difference", "list.set_symmetric_difference"])
@@ -955,6 +970,8 @@ class Gen:
             if t == "list[int64]" and k == 1:
                 op = r.choice(["list.median", "list.std", "list.var", "list.arg_min", "list.arg_max"])
                 return ((op, e, r.choice([0, 1])) if op in ("list.std", "list.var") else (op, e)), None
+            if t == "list[int64]" and k == 2:
+                return ("list.agg", e, r.choice(["sum", "max", "null_count", "n_unique"])), None
             value = r.randint(-3, 3) if t == "list[int64]" else r.choice(WORDS)
             return (r.choice(["list.count_matches", "list.contains"]), e, value), None
         return e, t
