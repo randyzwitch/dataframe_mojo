@@ -236,6 +236,8 @@ from .expr import (
     is_list_transform,
     is_list_set,
     LIST_EVAL,
+    LIST_TO_STRUCT,
+    EXPR_EXPLODE,
     LIST_EVAL_AGG,
     LIST_EVAL_FILTER,
     ELEMENT,
@@ -1695,6 +1697,13 @@ def _bind(
                 if not types[node.right].is_integer():
                     raise Error("Expression gather requires integer indices")
                 has_aggregate = has_aggregate or aggregated[node.right]
+            elif node.op == EXPR_EXPLODE:
+                if not dtype.is_list():
+                    raise Error(
+                        "explode requires a list expression, found "
+                        + dtype.name()
+                    )
+                dtype = dtype.inner()
             elif node.op == EXPR_SLICE:
                 if node.min_count < -1 or (
                     node.text != "" and node.min_count < 0
@@ -2272,7 +2281,14 @@ def _bind(
                         + input.name()
                     )
                 var inner = input.inner()
-                if node.op == LIST_EVAL:
+                if node.op == LIST_TO_STRUCT:
+                    var names = split_names(node.text)
+                    if node.text.byte_length() == 0:
+                        raise Error("list.to_struct needs field names")
+                    dtype = DataType.struct(
+                        names, List[DataType](length=len(names), fill=inner)
+                    )
+                elif node.op == LIST_EVAL:
                     var body = bind(
                         Expr(decode_nodes(node.text), ELEMENT),
                         [Series.full_null(ELEMENT, inner, 0)],

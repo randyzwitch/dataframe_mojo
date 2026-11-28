@@ -412,6 +412,9 @@ comptime EXPR_ARG_SORT = 302
 comptime EXPR_REVERSE = 303
 comptime ROW_LEN = 304
 comptime INT_RANGE = 305
+# One row per list element (a sequence); integer bit 0: an empty list gives
+# one null row, bit 1: a null list gives one null row.
+comptime EXPR_EXPLODE = 306
 
 # List element transforms (list_transforms.mojo). Each reads one list input
 # in `left`; LIST_CONCAT also reads `right`, where a non-list operand counts
@@ -461,6 +464,9 @@ comptime LIST_EVAL_FILTER = 1
 comptime LIST_EVAL_AGG = 2
 # The column name `element()` refers to inside a list expression.
 comptime ELEMENT = ""
+# A struct of the first elements of each list; text holds the SEP-joined
+# field names.
+comptime LIST_TO_STRUCT = 335
 
 # Row-wise reductions across expressions (#221): sum_horizontal and the
 # rest. HORIZONTAL's left is its one input, or a tree of HORIZONTAL_ARGS
@@ -681,6 +687,7 @@ def is_sequence(op: Int) -> Bool:
         is_drop(op)
         or (op >= EXPR_FILTER and op <= EXPR_REVERSE)
         or op == INT_RANGE
+        or op == EXPR_EXPLODE
     )
 
 
@@ -699,6 +706,7 @@ def changes_length(expr: Expr) -> Bool:
             EXPR_BOTTOM_K,
             EXPR_TOP_K_BY,
             EXPR_BOTTOM_K_BY,
+            EXPR_EXPLODE,
         ]
         if node.op == OVER and (node.integer & OVER_EXPLODE) != 0:
             changed = True
@@ -747,7 +755,7 @@ def is_nested_op(op: Int) -> Bool:
 def is_list_transform(op: Int) -> Bool:
     """Whether op builds each row's result from that row's list elements
     (list_transforms.mojo)."""
-    return op >= LIST_UNIQUE and op <= LIST_EVAL
+    return op >= LIST_UNIQUE and op <= LIST_TO_STRUCT
 
 
 def is_list_set(op: Int) -> Bool:
@@ -1727,6 +1735,16 @@ struct Expr(Copyable):
     def reverse(self) -> Self:
         """Reverse value order, independently within each aggregation group."""
         return self._window(EXPR_REVERSE)
+
+    def explode(
+        self, *, empty_as_null: Bool = False, keep_nulls: Bool = True
+    ) -> Self:
+        """One row per element of a list expression, in order. An empty
+        list gives no row (one null row with empty_as_null), and a null
+        list one null row (none without keep_nulls)."""
+        return self._window(
+            EXPR_EXPLODE, Int64(empty_as_null) | (Int64(keep_nulls) << 1)
+        )
 
     def unique(self, maintain_order: Bool = False) -> Self:
         """Distinct values, including one null; optionally keep first appearance."""
@@ -3992,6 +4010,20 @@ struct ListNamespace(Copyable):
             return direct.take()
         return self._op(
             LIST_EVAL, text=encode_nodes(expr._nodes), integer=LIST_EVAL_AGG
+        )
+
+    def to_struct(self, fields: List[String]) -> Expr:
+        """A struct with one field per name holding each list's element at
+        that position; null where the list is shorter, and a null struct
+        for a null list."""
+        return self._op(LIST_TO_STRUCT, text=_joined(fields))
+
+    def explode(
+        self, *, empty_as_null: Bool = False, keep_nulls: Bool = True
+    ) -> Expr:
+        """One row per element; see Expr.explode."""
+        return self._expr.explode(
+            empty_as_null=empty_as_null, keep_nulls=keep_nulls
         )
 
     def set_union(self, other: Expr) -> Expr:
