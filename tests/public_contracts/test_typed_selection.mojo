@@ -288,13 +288,27 @@ def test_membership_and_interval_endpoints_use_kleene_null_rules() raises:
         assert_true(not unknown.item(4, "x").bool())
     with assert_raises(contains="closed must be"):
         _ = col("x").is_between(1, 3, closed="invalid")
-    # Explicit typed literals retain their width inside membership, just
-    # as in scalar equality; an untyped literal adopts the column width.
-    with assert_raises(contains="eq requires matching dtypes"):
-        _ = raw.select(col("x").is_in([lit(Int32(1))]))
-    var narrow = DataFrame([Series("x", Column[Int32]([1]))])
-    with assert_raises(contains="eq requires matching dtypes"):
-        _ = narrow.select(col("x").is_in([lit(Int64(1))]))
+    # Typed literals of another integer width compare by value, as in
+    # scalar equality; values the column cannot hold never match.
+    var narrow = DataFrame([Series("x", Column[Int8]([1, -1, 100]))])
+    for lazy in [False, True]:
+        var listed: List[Expr] = [lit(Int64(1)), lit(Int64(300))]
+        var found = (
+            narrow.lazy()
+            .select(col("x").is_in(listed))
+            .collect() if lazy else narrow.select(col("x").is_in(listed))
+        )
+        assert_true(found.item(0, "x").bool())
+        assert_true(not found.item(1, "x").bool())
+        assert_true(not found.item(2, "x").bool())
+        var outside: List[Expr] = [lit(Int64(300)), lit(Int64(-1000))]
+        var none = (
+            narrow.lazy()
+            .select(col("x").is_in(outside))
+            .collect() if lazy else narrow.select(col("x").is_in(outside))
+        )
+        for row in range(3):
+            assert_true(not none.item(row, "x").bool())
 
 
 def test_standalone_untyped_expressions_default_once_and_keep_scalar_shapes() raises:

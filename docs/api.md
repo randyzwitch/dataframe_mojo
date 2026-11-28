@@ -169,7 +169,7 @@ def by_dtype(dtypes: List[String]) -> Expr
 
 ## `coalesce`
 
-First non-null value per row, left to right; dtypes must match.
+First non-null value per row, left to right. Numeric inputs of different types promote to the type that holds all of them; other types must match.
 
 ```mojo
 def coalesce(exprs: List[Expr]) -> Expr
@@ -896,7 +896,7 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def ne_missing(self, other: String) -> Self`
   Null-safe inequality with a string literal; see the Expr overload.
 - `def fill_null(self, value: Self) -> Self`
-  Replace nulls with value; the dtypes must match.
+  Replace nulls with value. Numeric types of the two sides promote to the type that holds both; other types must match.
 - `def fill_null(self, value: String) -> Self`
 - `def is_in(self, values: List[Self]) -> Self`
   True when equal to any value; null input stays null.

@@ -1496,7 +1496,8 @@ def _adopt_beside(
 
 def _promotes(op: Int) -> Int:
     """How a binary operation promotes mixed numeric operands: 1 for the
-    arithmetic type, 0 for the common type, -1 for no promotion."""
+    arithmetic type, 0 for the common type (comparisons, and fill values,
+    whose result is one of the two inputs), -1 for no promotion."""
     if (
         op == ADD
         or op == SUB
@@ -1507,9 +1508,42 @@ def _promotes(op: Int) -> Int:
         or op == POW
     ):
         return 1
-    if is_comparison(op) or op == EQ_MISSING or op == NE_MISSING:
+    if (
+        is_comparison(op)
+        or op == EQ_MISSING
+        or op == NE_MISSING
+        or op == FILL_NULL
+    ):
         return 0
     return -1
+
+
+def _values_within(text: String, dtype: DataType) -> Optional[String]:
+    """The comma-separated integers of `text` that integer type `dtype`
+    holds, or None when it holds none of them."""
+    var low = Int128(0)
+    var high = Int128(0)
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if D.is_integral():
+            if dtype == DataType.of(D):
+                low = Scalar[D].MIN.cast[DType.int128]()
+                high = Scalar[D].MAX.cast[DType.int128]()
+    var kept = String()
+    for part in text.split(","):
+        var value: Int128
+        try:
+            value = Int128(atol(part))
+        except:
+            continue
+        if value < low or value > high:
+            continue
+        if kept.byte_length() > 0:
+            kept += ","
+        kept += part
+    if kept.byte_length() == 0:
+        return None
+    return kept^
 
 
 @fieldwise_init
@@ -1779,9 +1813,9 @@ def _bind(
                     " branches yet"
                 )
             if then_type.is_untyped() and not else_type.is_untyped():
-                _adopt(nodes, types, node.right, _target(else_type))
+                _adopt_beside(nodes, types, node.right, else_type)
             elif else_type.is_untyped() and not then_type.is_untyped():
-                _adopt(nodes, types, node.extra, _target(then_type))
+                _adopt_beside(nodes, types, node.extra, then_type)
             else:
                 var joined = _join_untyped(
                     then_type, else_type
@@ -1795,25 +1829,31 @@ def _bind(
                     + types[node.left].name()
                 )
             dtype = types[node.right]
-            if (
-                node.extra >= 0
-                and dtype.is_decimal()
-                and types[node.extra].is_decimal()
-            ):
-                dtype = common_decimal(dtype, types[node.extra])
+            var else_dtype = types[node.extra] if node.extra >= 0 else dtype
+            if node.extra >= 0:
+                # Numeric branches of different types take the type that
+                # holds both, so every row's value is exact.
+                var operands = promoted_operands(dtype, else_dtype, False)
+                if operands:
+                    var pair = operands.value()
+                    if pair[0] != dtype:
+                        casts.append(_Cast(i, 1, pair[0]))
+                    if pair[1] != else_dtype:
+                        casts.append(_Cast(i, 2, pair[1]))
+                    dtype = pair[0]
+                    else_dtype = pair[1]
+            if dtype.is_decimal() and else_dtype.is_decimal():
+                dtype = common_decimal(dtype, else_dtype)
             var children = List[Int]()
             children.append(node.left)
             children.append(node.right)
             if node.extra >= 0:
-                if types[node.extra] != dtype and not (
-                    dtype.is_decimal() and types[node.extra].is_decimal()
+                if else_dtype != dtype and not (
+                    dtype.is_decimal() and else_dtype.is_decimal()
                 ):
                     raise Error(
                         "when/then/otherwise branches require matching dtypes,"
-                        " found "
-                        + dtype.name()
-                        + " and "
-                        + types[node.extra].name()
+                        " found " + dtype.name() + " and " + else_dtype.name()
                     )
                 children.append(node.extra)
             for child in children:
@@ -2078,15 +2118,40 @@ def _bind(
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid is_in input")
             var wanted = node.dtypes[0].value()
-            if types[node.left] != wanted:
-                # The same rule and message as the `==` it stands for.
-                raise Error(
-                    "eq requires matching dtypes, found "
-                    + types[node.left].name()
-                    + " and "
-                    + wanted.name()
-                    + "; use typed literals"
-                )
+            var input = types[node.left]
+            if input != wanted:
+                # The same rule as the `==` it stands for: integers of
+                # different types compare by value.
+                var operands = promoted_operands(input, wanted, False)
+                if not operands:
+                    raise Error(
+                        "eq requires matching dtypes, found "
+                        + input.name()
+                        + " and "
+                        + wanted.name()
+                        + "; use typed literals"
+                    )
+                if not input.is_integer():
+                    raise Error(
+                        "is_in with "
+                        + wanted.name()
+                        + " values on a "
+                        + input.name()
+                        + " expression needs values of its type"
+                    )
+                var kept = _values_within(node.text, input)
+                if kept:
+                    # A listed value outside the input's range can never
+                    # equal a row, so the rest are tested at the input's
+                    # own type and the input is read as it is.
+                    nodes[i].text = kept.value()
+                    nodes[i].dtypes = [Optional(input)]
+                else:
+                    # No listed value fits the input's type: widen the
+                    # input to the common type, which holds every value.
+                    var common = operands.value()[0]
+                    nodes[i].dtypes = [Optional(common)]
+                    casts.append(_Cast(i, 0, common))
             dtype = DataType.BOOL
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]

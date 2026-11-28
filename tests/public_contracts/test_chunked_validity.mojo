@@ -884,7 +884,7 @@ def test_public_schema_errors_precede_empty_and_inactive_evaluation() raises:
         with assert_raises(contains="float operands"):
             _ = frame.select_exprs([col("i").fill_nan(col("i"))])
         with assert_raises(contains="matching dtypes"):
-            _ = frame.select_exprs([col("i").fill_null(col("f"))])
+            _ = frame.select_exprs([col("i").fill_null(lit("x"))])
         with assert_raises(contains="float operand"):
             _ = frame.select_exprs(
                 [when(lit(False)).then(col("i").is_nan()).otherwise(lit(False))]

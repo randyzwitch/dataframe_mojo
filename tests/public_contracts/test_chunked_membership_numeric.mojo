@@ -583,12 +583,12 @@ def test_membership_public_empty_null_candidates_and_dtype_errors() raises:
         )
     for selected in [frame.copy(), frame.clear()]:
         with assert_raises(contains="matching dtypes"):
-            _ = selected.select_exprs([col("x").is_in([lit(Int32(1))])])
+            _ = selected.select_exprs([col("x").is_in([lit(True)])])
         with assert_raises(contains="matching dtypes"):
             _ = selected.select_exprs(
                 [
                     when(lit(False))
-                    .then(col("x").is_in([lit(Int32(1))]))
+                    .then(col("x").is_in([lit(True)]))
                     .otherwise(lit(False))
                 ]
             )
