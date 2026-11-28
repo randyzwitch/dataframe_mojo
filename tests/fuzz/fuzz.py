@@ -621,8 +621,13 @@ def to_pl_plan(p, srcs):
             kw["coalesce"] = p[6]
         if len(p) > 7 and p[7] != "m:m":
             kw["validate"] = p[7]
+        rtypes = {k: spec_of(v) for k, v in right.collect_schema().items()}
         return lf.join(
-            right, left_on=list(p[3][1:]), right_on=list(p[4][1:]), how=how, **kw
+            right,
+            left_on=[join_key(k, types) for k in p[3][1:]],
+            right_on=[join_key(k, rtypes) for k in p[4][1:]],
+            how=how,
+            **kw,
         )
     if op == "cross":
         return lf.join(to_pl_plan(p[2], srcs), how="cross")
@@ -1145,6 +1150,9 @@ class PlanGen:
                     break
             # validate: Polars checks inner, left and full joins only, and
             # counts repeated null keys of a full join as repeats.
+            if r.random() < 0.2 or "join_expr" in focus:
+                # Computed keys: the same expression of each side's key.
+                chosen = [(expr_key(a, schema[a]), expr_key(b, rschema[b])) for a, b in chosen]
             validate = "m:m"
             if how in ("inner", "left") and (
                 r.random() < 0.3 or "join_validate" in focus
@@ -1419,6 +1427,26 @@ def fix_unique_order(plan, ordered):
     return ordered
 
 
+def join_key(k, types):
+    """A join key: a column name, or an expression over one side."""
+    return k if isinstance(k, str) else to_pl_expr(k, types)
+
+
+def key_expr(k, types):
+    """A join key as a Polars expression."""
+    return pl.col(k) if isinstance(k, str) else to_pl_expr(k, types)
+
+
+def expr_key(name, spec):
+    """A computed join key over column `name` of type `spec`, or the name
+    when no expression of that type is generated."""
+    if is_int(spec):
+        return ("mod", ("col", name), 3)
+    if spec == "string":
+        return ("str.slice", ("col", name), 0, 1)
+    return name
+
+
 def join_rows(p, srcs):
     """The rows a join step would produce, counted from its inputs' key
     frequencies, so the generator never materializes a huge join."""
@@ -1430,7 +1458,16 @@ def join_rows(p, srcs):
         n = left.select(pl.len()).collect().item()
         m = right.select(pl.len()).collect().item()
         return n * m
-    lk, rk = list(p[3][1:]), list(p[4][1:])
+    ltypes = {k: spec_of(v) for k, v in left.collect_schema().items()}
+    rtypes = {k: spec_of(v) for k, v in right.collect_schema().items()}
+    left = left.select(
+        [key_expr(k, ltypes).alias(f"_lk{i}") for i, k in enumerate(p[3][1:])]
+    )
+    right = right.select(
+        [key_expr(k, rtypes).alias(f"_rk{i}") for i, k in enumerate(p[4][1:])]
+    )
+    lk = [f"_lk{i}" for i in range(len(p[3]) - 1)]
+    rk = [f"_rk{i}" for i in range(len(p[4]) - 1)]
     lc = left.group_by(lk).agg(pl.len().alias("_l"))
     rc = right.group_by(rk).agg(pl.len().alias("_r"))
     pairs = lc.join(rc, left_on=lk, right_on=rk, how="inner")

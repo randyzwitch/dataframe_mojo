@@ -83,6 +83,7 @@ from dataframe.execution_settings import (
     ExecutionSettings,
 )
 from dataframe.expr import (
+    COL,
     Expr,
     group_sequence_rows,
     col,
@@ -114,6 +115,8 @@ from dataframe.join_order import (
 )
 from dataframe.join_type import (
     JOIN_CROSS,
+    JOIN_ANTI,
+    JOIN_SEMI,
     join_code,
     join_validate_code,
 )
@@ -1575,6 +1578,83 @@ struct LazyFrame(Copyable, Deinitable, Movable):
         )
         result._plan._nodes.append(join^)
         return result^
+
+    def join(
+        self,
+        other: Self,
+        *,
+        left_on: List[Expr],
+        right_on: List[Expr],
+        how: String = "inner",
+        suffix: String = "_right",
+        coalesce: Bool = True,
+        validate: String = "m:m",
+    ) raises -> Self:
+        """Join on key expressions: left_on[i], computed over this plan's
+        rows, matches right_on[i], computed over `other`'s. Each key is
+        computed once per side, as a hidden column the output drops, so the
+        output has the inputs' columns and not the computed keys. When any
+        key is more than a plain column, both sides' columns are all kept
+        (coalesce does not apply: a computed key has no input column to
+        fill); keys that are all plain columns join as the key-name
+        overload does."""
+        if len(left_on) == 0 or len(left_on) != len(right_on):
+            raise Error(
+                "Join requires the same nonzero number of left and right keys"
+            )
+        var left_names = List[String]()
+        var right_names = List[String]()
+        var plain = True
+        for k in range(len(left_on)):
+            var l = _plain_key(left_on[k])
+            var r = _plain_key(right_on[k])
+            if not l or not r:
+                plain = False
+                break
+            left_names.append(l.value())
+            right_names.append(r.value())
+        if plain:
+            return self.join(
+                other,
+                left_on=left_names,
+                right_on=right_names,
+                how=how,
+                suffix=suffix,
+                coalesce=coalesce,
+                validate=validate,
+            )
+        var taken = Dict[String, Bool]()
+        for name in self._columns_of(len(self._plan._nodes) - 1):
+            taken[name] = True
+        for name in other._columns_of(len(other._plan._nodes) - 1):
+            taken[name] = True
+        var left_keys = List[String]()
+        var right_keys = List[String]()
+        var left_exprs = List[Expr]()
+        var right_exprs = List[Expr]()
+        for k in range(len(left_on)):
+            # Named after the key's own name, so an error about the key
+            # (validate's) reads naturally.
+            var l = _hidden_key_name(left_on[k]._name + " (key)", taken)
+            var r = _hidden_key_name(right_on[k]._name + " (right key)", taken)
+            left_keys.append(l)
+            right_keys.append(r)
+            left_exprs.append(left_on[k].alias(l))
+            right_exprs.append(right_on[k].alias(r))
+        var joined = self.with_columns(left_exprs).join(
+            other.with_columns(right_exprs),
+            left_on=left_keys,
+            right_on=right_keys,
+            how=how,
+            suffix=suffix,
+            coalesce=False,
+            validate=validate,
+        )
+        var code = join_code(how)
+        var hidden = left_keys.copy()
+        if code != JOIN_SEMI and code != JOIN_ANTI:
+            hidden.extend(right_keys.copy())
+        return joined.drop(hidden)
 
     def join(
         self,
@@ -3954,3 +4034,22 @@ def _scan_dataset_parquet(
     var node = _parquet_scan_node(path=spec.paths[0], slot=0)
     node.set_dataset(spec)
     return LazyFrame([node^], [DataFrame([])], [Optional[CsvSchema]()])
+
+
+def _plain_key(key: Expr) -> Optional[String]:
+    """The column a join key expression only reads, unchanged and with its
+    own name; None for a computed key."""
+    if len(key._nodes) == 1 and key._nodes[0].op == COL:
+        if key._nodes[0].text == key._name:
+            return key._nodes[0].text
+    return None
+
+
+def _hidden_key_name(base: String, mut taken: Dict[String, Bool]) -> String:
+    """`base`, prefixed with underscores until no column or other hidden
+    key has the name."""
+    var name = base
+    while name in taken:
+        name = "_" + name
+    taken[name] = True
+    return name

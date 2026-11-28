@@ -1967,6 +1967,47 @@ struct DataFrame(Copyable, Sized, Writable):
             ._collect(optimize=False, streaming=True, batch_size=65536)
         )
 
+    def join(
+        self,
+        right: Self,
+        *,
+        left_on: List[Expr],
+        right_on: List[Expr],
+        how: String = "inner",
+        suffix: String = "_right",
+        coalesce: Bool = True,
+        validate: String = "m:m",
+    ) raises -> Self:
+        """Join on key expressions, as
+        `left.join(right, left_on=[col("email").str().to_lowercase()],
+        right_on=[col("email").str().to_lowercase()])`: left_on[i],
+        computed over this frame's rows, matches right_on[i], computed over
+        `right`'s. Each key is computed once per side and the output keeps
+        the inputs' columns, not the computed keys. When any key is more
+        than a plain column, both sides' columns are all kept (the keys do
+        not coalesce, so `coalesce` applies only to keys that are all
+        plain columns); see `join` on key names for the rest.
+        """
+        var code = join_type(how)
+        if code == JOIN_CROSS:
+            raise Error(
+                "A cross join takes no keys; use join(right, how='cross')"
+            )
+        check_join_validate(join_validate_code(validate), code)
+        return (
+            self.lazy()
+            .join(
+                right.lazy(),
+                left_on=left_on,
+                right_on=right_on,
+                how=how,
+                suffix=suffix,
+                coalesce=coalesce,
+                validate=validate,
+            )
+            ._collect(optimize=False, streaming=True, batch_size=65536)
+        )
+
     def _join_impl(
         self,
         right: Self,

@@ -500,6 +500,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join(self, right: Self, *, how: String, suffix: String = "_right") -> Self`
   Cross join: every left row paired with every right row, in an unspecified order.
+- `def join(self, right: Self, *, left_on: List[Expr], right_on: List[Expr], how: String = "inner", suffix: String = "_right", coalesce: Bool = True, validate: String = "m:m") -> Self`
+  Join on key expressions, as `left.join(right, left_on=[col("email").str().to_lowercase()], right_on=[col("email").str().to_lowercase()])`: left_on[i], computed over this frame's rows, matches right_on[i], computed over `right`'s. Each key is computed once per side and the output keeps the inputs' columns, not the computed keys. When any key is more than a plain column, both sides' columns are all kept (the keys do not coalesce, so `coalesce` applies only to keys that are all plain columns); see `join` on key names for the rest.
 - `def join(self, right: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True, validate: String = "m:m") -> Self`
   Hash join on key columns of any dtype; null keys never match.
 - `def join(self, right: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True, validate: String = "m:m") -> Self`
@@ -1561,6 +1563,8 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join(self, other: Self, *, how: String, suffix: String = "_right") -> Self`
   Cross join: every row of this plan paired with every row of `other`, in an unspecified order; see DataFrame.join(right, how="cross").
+- `def join(self, other: Self, *, left_on: List[Expr], right_on: List[Expr], how: String = "inner", suffix: String = "_right", coalesce: Bool = True, validate: String = "m:m") -> Self`
+  Join on key expressions: left_on[i], computed over this plan's rows, matches right_on[i], computed over `other`'s. Each key is computed once per side, as a hidden column the output drops, so the output has the inputs' columns and not the computed keys. When any key is more than a plain column, both sides' columns are all kept (coalesce does not apply: a computed key has no input column to fill); keys that are all plain columns join as the key-name overload does.
 - `def join(self, other: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True, validate: String = "m:m") -> Self`
   Join with another lazy plan on paired keys: left_on[i] matches right_on[i], as in DataFrame.join. Projection and predicate pushdown see both key lists, so each input reads only its own keys and the columns used above the join. `validate` ("m:m", "1:m", "m:1" or "1:1") checks keys are unique as DataFrame.join does; an unknown name raises when the plan runs.
 - `def join(self, other: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True, validate: String = "m:m") -> Self`

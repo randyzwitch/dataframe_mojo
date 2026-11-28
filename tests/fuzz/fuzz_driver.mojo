@@ -190,6 +190,29 @@ struct Tree(Movable):
         return out^
 
 
+def computed_keys(t: Tree, i: Int) -> Bool:
+    """Whether join node i has a key that is an expression, not a name."""
+    for side in [3, 4]:
+        var keys = t.kid(i, side)
+        for k in range(1, t.nkids(keys)):
+            if t.nodes[t.kid(keys, k)].tag == LIST:
+                return True
+    return False
+
+
+def key_exprs(t: Tree, i: Int) raises -> List[Expr]:
+    """The keys of a `(list ...)` node: names as columns, expressions as
+    built."""
+    var out = List[Expr]()
+    for k in range(1, t.nkids(i)):
+        var key = t.kid(i, k)
+        if t.nodes[key].tag == LIST:
+            out.append(build_expr(t, key))
+        else:
+            out.append(col(t.text(key)))
+    return out^
+
+
 def ea(t: Tree, i: Int, k: Int) raises -> Expr:
     """The expression in child k of node i."""
     return build_expr(t, t.kid(i, k))
@@ -732,6 +755,15 @@ def run_eager(t: Tree, i: Int, mut inputs: Inputs) raises -> DataFrame:
     if op == "join":
         # (join P Q (list LEFT_ON) (list RIGHT_ON) HOW COALESCE [VALIDATE])
         var right = run_eager(t, t.kid(i, 2), inputs)
+        if computed_keys(t, i):
+            return df.join(
+                right,
+                left_on=key_exprs(t, t.kid(i, 3)),
+                right_on=key_exprs(t, t.kid(i, 4)),
+                how=t.text(t.kid(i, 5)),
+                coalesce=t.flag(t.kid(i, 6)),
+                validate=t.text(t.kid(i, 7)) if t.nkids(i) > 7 else "m:m",
+            )
         return df.join(
             right,
             left_on=t.strings(t.kid(i, 3)),
@@ -826,6 +858,15 @@ def run_lazy(
         ).agg(build_exprs(t, t.kid(i, 4)))
     if op == "join":
         var right = run_lazy(t, t.kid(i, 2), inputs, from_memory)
+        if computed_keys(t, i):
+            return lf.join(
+                right,
+                left_on=key_exprs(t, t.kid(i, 3)),
+                right_on=key_exprs(t, t.kid(i, 4)),
+                how=t.text(t.kid(i, 5)),
+                coalesce=t.flag(t.kid(i, 6)),
+                validate=t.text(t.kid(i, 7)) if t.nkids(i) > 7 else "m:m",
+            )
         return lf.join(
             right,
             left_on=t.strings(t.kid(i, 3)),
